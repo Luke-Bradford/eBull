@@ -7,10 +7,12 @@ spend. Anthropic remains available by configuration.
 
 ## Where the config lives
 
-- **Knobs** (`llm_provider` / `llm_base_url` / `llm_model`): DB-backed
-  `runtime_config` singleton — edit on the **Settings page → LLM
-  Provider**, or `PATCH /config` (audited per field in
-  `runtime_config_audit`).
+- **Knobs** (`llm_provider` / `llm_base_url` / `llm_model_writer` /
+  `llm_model_critic`): DB-backed `runtime_config` singleton — edit on
+  the **Settings page → LLM Provider**, or `PATCH /config` (audited per
+  field in `runtime_config_audit`). Writer and critic are SEPARATE
+  model knobs (#1995) — the bulk memo writer and the adversarial critic
+  may run different local models; provider and base URL stay shared.
 - **Keys** (env-only, never in the DB — the audit table is plaintext):
   - `ANTHROPIC_API_KEY` — required only when `llm_provider='anthropic'`.
   - `LLM_API_KEY` — optional bearer for OpenAI-compatible endpoints that
@@ -49,13 +51,22 @@ default always runs. Manual fire: Admin → Processes → Run now, or
   (`finish_reason=length`, empty content). The provider layer appends
   `/no_think` to the system prompt and strips any `<think>…</think>`
   block defensively — but pick models with the eval harness before
-  switching `llm_model`:
+  switching either model knob:
 
   ```bash
   # Replay the house-panel fixtures (AAPL/GME/MSFT/JPM/HD) against a
   # candidate model; go-live gate = >=9/10 writer passes with retry.
+  # --critic-model mirrors the production split (#1995): critic rounds
+  # run on the configured critic while writers are swept.
   PYTHONPATH=. uv run python scripts/llm_eval_thesis.py run \
-    --models qwen3:14b <candidate-model> --gate-model <candidate-model>
+    --models qwen3:14b <candidate-model> --critic-model qwen3:14b \
+    --gate-model <candidate-model> --json-out /tmp/llm_eval_results.json
+  # Content-grading judge (#1995): the structural gate above checks only
+  # schema validity; the judge compares two writers' memos on identical
+  # fixtures (blinded A/B, order-swapped ×2, ctx-overflow guarded):
+  PYTHONPATH=. uv run python scripts/llm_eval_thesis.py judge \
+    --results /tmp/llm_eval_results.json \
+    --model-a qwen3:14b --model-b <candidate-model> --judge-model qwen3:14b
   # Re-capture fixtures from the dev DB (dev-guarded):
   PYTHONPATH=. uv run python scripts/llm_eval_thesis.py capture
   ```

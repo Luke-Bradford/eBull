@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.llm_client import LLMCompletion
+from app.services.llm_client import LLMClientPair, LLMCompletion
 from app.services.thesis import (
     ThesisResult,
     _call_critic,
@@ -408,6 +408,8 @@ class TestCallCritic:
         result = _call_critic(client, memo_markdown="## memo", context={})
         assert result["verdict"] == "Moderate challenge"
         assert "key_risks" in result
+        # #1995: critic provenance stamped from the as-reported model.
+        assert result["model"] == "test-model-resolved"
 
     def test_returns_empty_dict_on_json_error(self) -> None:
         client = _FakeLLMClient([_completion("not json {"), _completion("not json {")])
@@ -440,6 +442,14 @@ class TestCallCritic:
 def _make_two_call_client(writer_json: dict, critic_json: dict) -> _FakeLLMClient:
     """Build a fake client whose first call returns writer_json and second returns critic_json."""
     return _FakeLLMClient([_completion(writer_json), _completion(critic_json)])
+
+
+def _pair(client: _FakeLLMClient, critic: _FakeLLMClient | None = None) -> LLMClientPair:
+    """Wrap fakes as the (writer, critic) pair generate_thesis consumes (#1995).
+
+    Default: the SAME scripted fake for both roles — writer pops the first
+    completion, critic the second, preserving the pre-split sequencing."""
+    return LLMClientPair(writer=client, critic=critic if critic is not None else client)
 
 
 class TestAssembleContextEnrichment:
@@ -482,7 +492,7 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+        result = generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         assert isinstance(result, ThesisResult)
         assert result.thesis_version == 1
@@ -497,7 +507,7 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=3)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+        result = generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         assert result.thesis_version == 3
 
@@ -526,7 +536,7 @@ class TestGenerateThesis:
         conn.commit = tracked_commit
         client.complete = tracked_complete  # type: ignore[method-assign]
 
-        generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+        generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         # First event must be the commit. Every LLM call must come
         # after it — guards both writer AND critic, not just the first
@@ -545,15 +555,38 @@ class TestGenerateThesis:
         # First call (writer) succeeds; second call (critic) raises
         client = _FakeLLMClient([_completion(_VALID_WRITER), RuntimeError("timeout")])
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+        result = generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         assert result.thesis_version == 1
         assert result.critic_json is None
 
+    def test_split_models_route_writer_and_critic_separately(self) -> None:
+        """#1995: each role's call goes to its OWN client, and the critic's
+        as-reported model lands in critic_json while the writer's is what
+        the thesis row records."""
+        conn = _make_conn(insert_returns_version=1)
+        writer = _FakeLLMClient([_completion(_VALID_WRITER)])
+        critic = _FakeLLMClient(
+            [
+                LLMCompletion(
+                    text=json.dumps(_VALID_CRITIC),
+                    finish_reason="stop",
+                    model="critic-model-resolved",
+                )
+            ]
+        )
+
+        result = generate_thesis(instrument_id=1, conn=conn, clients=_pair(writer, critic), trigger="manual")
+
+        assert len(writer.calls) == 1
+        assert len(critic.calls) == 1
+        assert result.critic_json is not None
+        assert result.critic_json["model"] == "critic-model-resolved"
+
     def test_last_reviewed_at_updated_on_success(self) -> None:
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
-        generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+        generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         update_calls = [s for s in conn.sql_log if s.startswith("update coverage")]
         assert len(update_calls) == 1
@@ -566,7 +599,7 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
-        generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+        generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         run_inserts = [s for s in conn.sql_log if "insert into thesis_runs" in s]
         assert len(run_inserts) == 1
@@ -596,7 +629,7 @@ class TestGenerateThesis:
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
         with pytest.raises(RuntimeError, match="unique constraint"):
-            generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+            generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         failed_updates = [s for s in conn.sql_log if s.startswith("update thesis_runs") and "'failed'" in s]
         assert len(failed_updates) == 1
@@ -608,7 +641,7 @@ class TestGenerateThesis:
         client = _FakeLLMClient([_completion("bad json {"), _completion("bad json {", finish_reason="length")])
 
         with pytest.raises(ValueError, match="unparseable JSON"):
-            generate_thesis(instrument_id=1, conn=conn, client=client, trigger="scheduled")
+            generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="scheduled")
 
         failed_updates = [s for s in conn.sql_log if s.startswith("update thesis_runs") and "'failed'" in s]
         assert len(failed_updates) == 1
@@ -624,7 +657,7 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(_VALID_WRITER, _VALID_CRITIC)
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+        result = generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         assert result.buy_zone_low == _to_float(_VALID_WRITER["buy_zone_low"])
         assert result.buy_zone_high == _to_float(_VALID_WRITER["buy_zone_high"])
@@ -645,7 +678,7 @@ class TestGenerateThesis:
         conn = _make_conn(insert_returns_version=1)
         client = _make_two_call_client(writer_no_targets, _VALID_CRITIC)
 
-        result = generate_thesis(instrument_id=1, conn=conn, client=client, trigger="manual")
+        result = generate_thesis(instrument_id=1, conn=conn, clients=_pair(client), trigger="manual")
 
         assert result.buy_zone_low is None
         assert result.buy_zone_high is None

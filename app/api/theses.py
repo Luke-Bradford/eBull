@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from app.api.auth import require_session_or_service_token
 from app.db import get_conn
-from app.services.llm_client import LLMClient, LLMProviderNotConfigured, make_llm_client
+from app.services.llm_client import LLMClientPair, LLMProviderNotConfigured, make_llm_clients
 from app.services.runtime_config import RuntimeConfigCorrupt
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.services.thesis import find_stale_instruments, generate_thesis
@@ -51,18 +51,19 @@ instrument_thesis_router = APIRouter(
 )
 
 
-def get_llm_client(conn: psycopg.Connection[object] = Depends(get_conn)) -> LLMClient:
-    """FastAPI dependency: resolves the configured LLM provider per request.
+def get_llm_clients(conn: psycopg.Connection[object] = Depends(get_conn)) -> LLMClientPair:
+    """FastAPI dependency: resolves the configured writer+critic pair per request.
 
-    All config resolution goes through ``make_llm_client`` (#1919 —
-    replaces the direct ``os.environ`` read this module used to do).
+    All config resolution goes through ``make_llm_clients`` (#1919 —
+    replaces the direct ``os.environ`` read this module used to do;
+    #1995 — one config snapshot constructs both role clients).
     503 when the provider cannot be constructed (anthropic configured
     without a key) or runtime_config is corrupt — the thesis endpoint is
     the only caller that needs an LLM, so failing here keeps the rest of
     the API unaffected.
     """
     try:
-        return make_llm_client(conn)
+        return make_llm_clients(conn)
     except LLMProviderNotConfigured as exc:
         # Fixed string — never echo internal exception text (#87).
         raise HTTPException(
@@ -622,7 +623,7 @@ def generate_instrument_thesis(
     symbol: str,
     force: bool = Query(default=False),
     conn: psycopg.Connection[object] = Depends(get_conn),
-    client: LLMClient = Depends(get_llm_client),
+    clients: LLMClientPair = Depends(get_llm_clients),
 ) -> GenerateThesisResponse:
     """Generate or return the cached thesis for a ticker.
 
@@ -683,7 +684,7 @@ def generate_instrument_thesis(
     # this in our own transaction (see generate_thesis caller contract).
     logger.info("POST /instruments/%s/thesis: %s, generating", symbol_clean, "forced" if force else "cache miss")
     try:
-        generate_thesis(instrument_id, conn, client, trigger="manual")
+        generate_thesis(instrument_id, conn, clients, trigger="manual")
     except Exception as exc:
         logger.exception("POST /instruments/%s/thesis: generation failed", symbol_clean)
         raise HTTPException(

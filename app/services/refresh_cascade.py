@@ -43,7 +43,7 @@ from typing import Any
 import psycopg
 
 from app.services.fundamentals import RefreshOutcome, RefreshPlan, finish_ingestion_run, start_ingestion_run
-from app.services.llm_client import LLMClient
+from app.services.llm_client import LLMClientPair
 from app.services.scoring import compute_rankings
 from app.services.thesis import find_stale_instruments, generate_thesis
 
@@ -361,7 +361,7 @@ def instrument_lock(
 
 def cascade_refresh(
     conn: psycopg.Connection[Any],
-    client: LLMClient,
+    clients: LLMClientPair,
     instrument_ids: list[int],
 ) -> CascadeOutcome:
     """Run the cascade.
@@ -452,7 +452,7 @@ def cascade_refresh(
                 locked_skipped += 1
                 continue
             try:
-                generate_thesis(iid, conn, client, trigger="cascade")
+                generate_thesis(iid, conn, clients, trigger="cascade")
                 thesis_refreshed += 1
                 processed_ok.append(iid)
                 logger.info("cascade_refresh: retry thesis refreshed for instrument_id=%d", iid)
@@ -498,7 +498,7 @@ def cascade_refresh(
                 locked_skipped += 1
                 continue
             try:
-                generate_thesis(iid, conn, client, trigger="cascade")
+                generate_thesis(iid, conn, clients, trigger="cascade")
                 thesis_refreshed += 1
                 processed_ok.append(iid)
                 logger.info(

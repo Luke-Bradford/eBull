@@ -36,7 +36,9 @@ function configResponse(): ConfigResponse {
       display_currency: "GBP",
       llm_provider: "openai_compatible",
       llm_base_url: "http://localhost:11434/v1",
-      llm_model: "qwen3:14b",
+      // Distinct values so getByDisplayValue targets one input each.
+      llm_model_writer: "qwen3:14b",
+      llm_model_critic: "qwen3:8b",
       updated_at: "2026-07-09T10:00:00Z",
       updated_by: "seed",
       reason: "seed",
@@ -72,6 +74,7 @@ describe("LlmProviderSection", () => {
   it("renders current knob values from config", () => {
     renderSection();
     expect(screen.getByDisplayValue("qwen3:14b")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("qwen3:8b")).toBeInTheDocument();
     expect(screen.getByDisplayValue("http://localhost:11434/v1")).toBeInTheDocument();
     expect(screen.getByRole("combobox")).toHaveValue("openai_compatible");
   });
@@ -89,17 +92,17 @@ describe("LlmProviderSection", () => {
     expect(save).toBeEnabled();
   });
 
-  it("sends only changed fields", async () => {
+  it("sends only changed fields (writer model only)", async () => {
     mockedPatchConfig.mockResolvedValue({
       ...configResponse().runtime,
-      llm_model: "deepseek-r1:14b",
+      llm_model_writer: "deepseek-r1:14b",
     });
     const user = userEvent.setup();
     renderSection();
 
-    const modelInput = screen.getByDisplayValue("qwen3:14b");
-    await user.clear(modelInput);
-    await user.type(modelInput, "deepseek-r1:14b");
+    const writerInput = screen.getByDisplayValue("qwen3:14b");
+    await user.clear(writerInput);
+    await user.type(writerInput, "deepseek-r1:14b");
     await user.type(screen.getByPlaceholderText("Why are you changing this?"), "benchmarking");
     await user.click(screen.getByRole("button", { name: /save llm config/i }));
 
@@ -109,7 +112,33 @@ describe("LlmProviderSection", () => {
       reason: "benchmarking",
       llm_provider: undefined,
       llm_base_url: undefined,
-      llm_model: "deepseek-r1:14b",
+      llm_model_writer: "deepseek-r1:14b",
+      llm_model_critic: undefined,
+    });
+  });
+
+  it("sends only changed fields (critic model only)", async () => {
+    mockedPatchConfig.mockResolvedValue({
+      ...configResponse().runtime,
+      llm_model_critic: "qwen3:14b",
+    });
+    const user = userEvent.setup();
+    renderSection();
+
+    const criticInput = screen.getByDisplayValue("qwen3:8b");
+    await user.clear(criticInput);
+    await user.type(criticInput, "qwen3:14b");
+    await user.type(screen.getByPlaceholderText("Why are you changing this?"), "stricter critic");
+    await user.click(screen.getByRole("button", { name: /save llm config/i }));
+
+    await waitFor(() => expect(mockedPatchConfig).toHaveBeenCalledOnce());
+    expect(mockedPatchConfig).toHaveBeenCalledWith({
+      updated_by: "operator",
+      reason: "stricter critic",
+      llm_provider: undefined,
+      llm_base_url: undefined,
+      llm_model_writer: undefined,
+      llm_model_critic: "qwen3:14b",
     });
   });
 
@@ -136,7 +165,8 @@ describe("LlmProviderSection", () => {
       reason: "flip to cloud",
       llm_provider: "anthropic",
       llm_base_url: undefined,
-      llm_model: undefined,
+      llm_model_writer: undefined,
+      llm_model_critic: undefined,
     });
   });
 

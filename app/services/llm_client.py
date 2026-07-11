@@ -240,8 +240,23 @@ class AnthropicProvider:
         )
 
 
-def make_llm_client(conn: psycopg.Connection[Any]) -> LLMClient:
-    """Resolve the configured LLM provider from ``runtime_config``.
+@dataclass(frozen=True)
+class LLMClientPair:
+    """Writer + critic clients resolved from ONE runtime_config read.
+
+    The two roles may run different models (#1995 — e.g. a faster bulk
+    writer with a stricter critic) but always share provider / base URL /
+    key. Constructing both from a single ``get_runtime_config`` snapshot
+    means a concurrent ``/config`` PATCH can never split one generation
+    across two half-applied configs (Codex ckpt-1, 2026-07-10).
+    """
+
+    writer: LLMClient
+    critic: LLMClient
+
+
+def make_llm_clients(conn: psycopg.Connection[Any]) -> LLMClientPair:
+    """Resolve the configured writer + critic clients from ``runtime_config``.
 
     Single construction chokepoint (spec §1): every thesis-path caller
     routes through here so provider resolution, bounded timeouts, and the
@@ -260,9 +275,18 @@ def make_llm_client(conn: psycopg.Connection[Any]) -> LLMClient:
         api_key = settings.anthropic_api_key
         if not api_key:
             raise LLMProviderNotConfigured("llm_provider='anthropic' but ANTHROPIC_API_KEY is not set")
-        return AnthropicProvider(make_anthropic_client(api_key), model=cfg.llm_model)
-    return OpenAICompatProvider(
-        base_url=cfg.llm_base_url,
-        model=cfg.llm_model,
-        api_key=settings.llm_api_key,
+        # One SDK client shared by both roles (review #2004 NITPICK) —
+        # the per-role split is the model string, not the transport.
+        sdk = make_anthropic_client(api_key)
+        return LLMClientPair(
+            writer=AnthropicProvider(sdk, model=cfg.llm_model_writer),
+            critic=AnthropicProvider(sdk, model=cfg.llm_model_critic),
+        )
+    return LLMClientPair(
+        writer=OpenAICompatProvider(
+            base_url=cfg.llm_base_url, model=cfg.llm_model_writer, api_key=settings.llm_api_key
+        ),
+        critic=OpenAICompatProvider(
+            base_url=cfg.llm_base_url, model=cfg.llm_model_critic, api_key=settings.llm_api_key
+        ),
     )

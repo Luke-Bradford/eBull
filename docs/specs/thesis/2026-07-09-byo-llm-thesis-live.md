@@ -114,6 +114,10 @@ columns, audited via `runtime_config_audit` (extend its field CHECK, `:55`), sur
 - New columns: `llm_provider TEXT NOT NULL DEFAULT 'openai_compatible'`
   (CHECK IN ('openai_compatible','anthropic')), `llm_base_url TEXT NOT NULL DEFAULT
   'http://localhost:11434/v1'`, `llm_model TEXT NOT NULL DEFAULT 'qwen3:14b'`.
+  **Amended by #1995 (sql/219):** `llm_model` split into `llm_model_writer` +
+  `llm_model_critic` (both `TEXT NOT NULL DEFAULT 'qwen3:14b'`) — writer and
+  critic may run different models; provider/base URL stay shared. One
+  `get_runtime_config` snapshot constructs both clients (`make_llm_clients`).
   Local-first default per operator mandate; anyone wanting cloud flips provider + sets the key.
 - **Keys stay env-only** (`Settings`): existing `anthropic_api_key`; new `llm_api_key: str | None`
   (sent as `Authorization: Bearer` when set; Ollama ignores it). Keys must NOT enter
@@ -184,7 +188,7 @@ Replayable fixtures: `_assemble_context` output captured from dev DB for the hou
 (AAPL, GME, MSFT, JPM, HD). The script runs writer+critic against the configured provider and
 reports: JSON-schema pass rate (with/without the retry), enum validity, `finish_reason` mix,
 tok/s + wall-clock per call. **Go-live gate:** ≥9/10 writer passes with retry on the chosen local
-model, recorded in the impl PR. Re-run whenever `llm_model` changes — this is the token-free heavy
+model, recorded in the impl PR. Re-run whenever either model knob changes (#1995 split) — this is the token-free heavy
 test loop the operator mandated.
 
 ### 8. Operator docs — external guide, linked not vendored

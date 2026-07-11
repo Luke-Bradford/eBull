@@ -42,7 +42,8 @@ AuditField = Literal[
     "display_currency",
     "llm_provider",
     "llm_base_url",
-    "llm_model",
+    "llm_model_writer",
+    "llm_model_critic",
 ]
 
 # Validated currency codes for display_currency. Must match the frontend
@@ -58,9 +59,13 @@ VALID_LLM_PROVIDERS: frozenset[str] = frozenset({"openai_compatible", "anthropic
 
 # Local-first defaults (operator mandate 2026-07-09, spec §2). Single
 # source for the migration seed, the boot-recovery guard, and tests.
+# Writer/critic split (#1995): both default to the same model — any
+# divergence (e.g. deepseek writer) is an operator PATCH, audited, never
+# a code default until content-judged.
 DEFAULT_LLM_PROVIDER = "openai_compatible"
 DEFAULT_LLM_BASE_URL = "http://localhost:11434/v1"
-DEFAULT_LLM_MODEL = "qwen3:14b"
+DEFAULT_LLM_MODEL_WRITER = "qwen3:14b"
+DEFAULT_LLM_MODEL_CRITIC = "qwen3:14b"
 
 # Boot-recovery audit attribution. Operators investigating the audit log can
 # search for this exact reason to find re-seed events caused by a vanished
@@ -93,7 +98,8 @@ class RuntimeConfig:
     display_currency: str
     llm_provider: str
     llm_base_url: str
-    llm_model: str
+    llm_model_writer: str
+    llm_model_critic: str
     updated_at: datetime
     updated_by: str
     reason: str
@@ -180,11 +186,12 @@ def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
                 INSERT INTO runtime_config
                     (id, enable_auto_trading, enable_live_trading,
                      updated_at, updated_by, reason, display_currency,
-                     llm_provider, llm_base_url, llm_model)
+                     llm_provider, llm_base_url, llm_model_writer, llm_model_critic)
                 VALUES
                     (TRUE, FALSE, FALSE,
                      %(at)s, %(by)s, %(reason)s, 'GBP',
-                     %(llm_provider)s, %(llm_base_url)s, %(llm_model)s)
+                     %(llm_provider)s, %(llm_base_url)s,
+                     %(llm_model_writer)s, %(llm_model_critic)s)
                 ON CONFLICT (id) DO NOTHING
                 RETURNING id
                 """,
@@ -194,7 +201,8 @@ def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
                     "reason": BOOT_RECOVERY_REASON,
                     "llm_provider": DEFAULT_LLM_PROVIDER,
                     "llm_base_url": DEFAULT_LLM_BASE_URL,
-                    "llm_model": DEFAULT_LLM_MODEL,
+                    "llm_model_writer": DEFAULT_LLM_MODEL_WRITER,
+                    "llm_model_critic": DEFAULT_LLM_MODEL_CRITIC,
                 },
             )
             inserted = cur.fetchone()
@@ -211,7 +219,8 @@ def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
             ("display_currency", "GBP"),
             ("llm_provider", DEFAULT_LLM_PROVIDER),
             ("llm_base_url", DEFAULT_LLM_BASE_URL),
-            ("llm_model", DEFAULT_LLM_MODEL),
+            ("llm_model_writer", DEFAULT_LLM_MODEL_WRITER),
+            ("llm_model_critic", DEFAULT_LLM_MODEL_CRITIC),
         ):
             insert_runtime_config_audit_row(
                 conn,
@@ -238,7 +247,8 @@ def get_runtime_config(conn: psycopg.Connection[Any]) -> RuntimeConfig:
                    display_currency,
                    llm_provider,
                    llm_base_url,
-                   llm_model,
+                   llm_model_writer,
+                   llm_model_critic,
                    updated_at,
                    updated_by,
                    reason
@@ -257,7 +267,8 @@ def get_runtime_config(conn: psycopg.Connection[Any]) -> RuntimeConfig:
         display_currency=str(row["display_currency"]),
         llm_provider=str(row["llm_provider"]),
         llm_base_url=str(row["llm_base_url"]),
-        llm_model=str(row["llm_model"]),
+        llm_model_writer=str(row["llm_model_writer"]),
+        llm_model_critic=str(row["llm_model_critic"]),
         updated_at=row["updated_at"],
         updated_by=str(row["updated_by"]),
         reason=str(row["reason"]),
@@ -274,7 +285,8 @@ def update_runtime_config(
     display_currency: str | None = None,
     llm_provider: str | None = None,
     llm_base_url: str | None = None,
-    llm_model: str | None = None,
+    llm_model_writer: str | None = None,
+    llm_model_critic: str | None = None,
     now: datetime | None = None,
 ) -> RuntimeConfig:
     """Atomically update the runtime_config singleton.
@@ -293,7 +305,15 @@ def update_runtime_config(
     Raises ValueError if all field arguments are None (caller passed an
     empty patch).
     """
-    provided = (enable_auto_trading, enable_live_trading, display_currency, llm_provider, llm_base_url, llm_model)
+    provided = (
+        enable_auto_trading,
+        enable_live_trading,
+        display_currency,
+        llm_provider,
+        llm_base_url,
+        llm_model_writer,
+        llm_model_critic,
+    )
     if all(v is None for v in provided):
         raise ValueError("update_runtime_config: at least one field must be provided")
 
@@ -306,8 +326,11 @@ def update_runtime_config(
     if llm_base_url is not None and not llm_base_url.startswith(("http://", "https://")):
         raise ValueError(f"llm_base_url must start with http:// or https://, got {llm_base_url!r}")
 
-    if llm_model is not None and not llm_model.strip():
-        raise ValueError("llm_model must be a non-empty string")
+    if llm_model_writer is not None and not llm_model_writer.strip():
+        raise ValueError("llm_model_writer must be a non-empty string")
+
+    if llm_model_critic is not None and not llm_model_critic.strip():
+        raise ValueError("llm_model_critic must be a non-empty string")
 
     now = now or _utcnow()
 
@@ -316,7 +339,7 @@ def update_runtime_config(
             cur.execute(
                 """
                 SELECT enable_auto_trading, enable_live_trading, display_currency,
-                       llm_provider, llm_base_url, llm_model
+                       llm_provider, llm_base_url, llm_model_writer, llm_model_critic
                 FROM runtime_config
                 WHERE id = TRUE
                 FOR UPDATE
@@ -333,7 +356,8 @@ def update_runtime_config(
         new_currency = display_currency if display_currency is not None else str(current["display_currency"])
         new_llm_provider = llm_provider if llm_provider is not None else str(current["llm_provider"])
         new_llm_base_url = llm_base_url if llm_base_url is not None else str(current["llm_base_url"])
-        new_llm_model = llm_model if llm_model is not None else str(current["llm_model"])
+        new_llm_model_writer = llm_model_writer if llm_model_writer is not None else str(current["llm_model_writer"])
+        new_llm_model_critic = llm_model_critic if llm_model_critic is not None else str(current["llm_model_critic"])
 
         # No-op patch detection: if every provided field already matches the
         # current row, refuse the patch.  Otherwise the UPDATE would silently
@@ -345,14 +369,20 @@ def update_runtime_config(
         currency_changed = display_currency is not None and str(current["display_currency"]) != new_currency
         llm_provider_changed = llm_provider is not None and str(current["llm_provider"]) != new_llm_provider
         llm_base_url_changed = llm_base_url is not None and str(current["llm_base_url"]) != new_llm_base_url
-        llm_model_changed = llm_model is not None and str(current["llm_model"]) != new_llm_model
+        llm_model_writer_changed = (
+            llm_model_writer is not None and str(current["llm_model_writer"]) != new_llm_model_writer
+        )
+        llm_model_critic_changed = (
+            llm_model_critic is not None and str(current["llm_model_critic"]) != new_llm_model_critic
+        )
         any_changed = (
             auto_changed
             or live_changed
             or currency_changed
             or llm_provider_changed
             or llm_base_url_changed
-            or llm_model_changed
+            or llm_model_writer_changed
+            or llm_model_critic_changed
         )
         if not any_changed:
             raise RuntimeConfigNoOp("patch would not change any field value")
@@ -369,7 +399,8 @@ def update_runtime_config(
                     display_currency    = %(currency)s,
                     llm_provider        = %(llm_provider)s,
                     llm_base_url        = %(llm_base_url)s,
-                    llm_model           = %(llm_model)s,
+                    llm_model_writer    = %(llm_model_writer)s,
+                    llm_model_critic    = %(llm_model_critic)s,
                     updated_at          = %(at)s,
                     updated_by          = %(by)s,
                     reason              = %(reason)s
@@ -382,7 +413,8 @@ def update_runtime_config(
                     "currency": new_currency,
                     "llm_provider": new_llm_provider,
                     "llm_base_url": new_llm_base_url,
-                    "llm_model": new_llm_model,
+                    "llm_model_writer": new_llm_model_writer,
+                    "llm_model_critic": new_llm_model_critic,
                     "at": now,
                     "by": updated_by,
                     "reason": reason,
@@ -447,26 +479,37 @@ def update_runtime_config(
                 old_value=str(current["llm_base_url"]),
                 new_value=new_llm_base_url,
             )
-        if llm_model_changed:
+        if llm_model_writer_changed:
             insert_runtime_config_audit_row(
                 conn,
                 changed_at=now,
                 changed_by=updated_by,
                 reason=reason,
-                field="llm_model",
-                old_value=str(current["llm_model"]),
-                new_value=new_llm_model,
+                field="llm_model_writer",
+                old_value=str(current["llm_model_writer"]),
+                new_value=new_llm_model_writer,
+            )
+        if llm_model_critic_changed:
+            insert_runtime_config_audit_row(
+                conn,
+                changed_at=now,
+                changed_by=updated_by,
+                reason=reason,
+                field="llm_model_critic",
+                old_value=str(current["llm_model_critic"]),
+                new_value=new_llm_model_critic,
             )
 
     logger.info(
-        "runtime_config updated by=%s reason=%s auto=%s live=%s currency=%s llm=%s/%s@%s",
+        "runtime_config updated by=%s reason=%s auto=%s live=%s currency=%s llm=%s writer=%s critic=%s @%s",
         updated_by,
         reason,
         new_auto,
         new_live,
         new_currency,
         new_llm_provider,
-        new_llm_model,
+        new_llm_model_writer,
+        new_llm_model_critic,
         new_llm_base_url,
     )
 
@@ -476,7 +519,8 @@ def update_runtime_config(
         display_currency=new_currency,
         llm_provider=new_llm_provider,
         llm_base_url=new_llm_base_url,
-        llm_model=new_llm_model,
+        llm_model_writer=new_llm_model_writer,
+        llm_model_critic=new_llm_model_critic,
         updated_at=committed_updated_at,
         updated_by=updated_by,
         reason=reason,

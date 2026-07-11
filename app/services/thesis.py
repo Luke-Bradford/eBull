@@ -25,11 +25,11 @@ Context caps (v2 — settled-decisions "Thesis prompt budget", amended #1987):
   - ta_state (#1987):     latest price_daily indicators + derived regime signals
 
 LLM provider: resolved from `runtime_config` via
-`app.services.llm_client.make_llm_client` (#1919 — local-first default;
-Anthropic by configuration). Both writer and critic go through the same
-`LLMClient` and get one retry on schema/parse failure, with
-`finish_reason` recorded so truncation is distinguishable from malformed
-output.
+`app.services.llm_client.make_llm_clients` (#1919 — local-first default;
+Anthropic by configuration). Writer and critic may run DIFFERENT models
+(#1995 split knobs) but share provider/base URL; both get one retry on
+schema/parse failure, with `finish_reason` recorded so truncation is
+distinguishable from malformed output.
 
 Versioning contract:
   thesis_version is computed atomically inside the INSERT via a subquery:
@@ -57,7 +57,7 @@ from psycopg.types.json import Jsonb
 # NOT re-enter the risk_metrics -> scheduler -> refresh_cascade cycle that
 # forces the lazy import inside _assemble_context.
 from app.services.instrument_analytics import SCHEMA_VERSION as _IAR_SCHEMA_VERSION
-from app.services.llm_client import LLMClient, LLMCompletion
+from app.services.llm_client import LLMClient, LLMClientPair, LLMCompletion
 
 logger = logging.getLogger(__name__)
 
@@ -1151,9 +1151,13 @@ def _call_critic(client: LLMClient, memo_markdown: str, context: dict[str, objec
     Call the LLM critic and parse the structured counter-thesis JSON.
     Returns an empty dict on any failure (after one schema/parse retry) —
     critic is best-effort and must never block the thesis insert.
+
+    The as-reported critic model is stamped into the returned dict
+    (``model`` key) — with split knobs (#1995) the critic may differ from
+    the writer, and ``theses.model`` records the writer only.
     """
     try:
-        parsed, _completion = _call_with_one_retry(
+        parsed, completion = _call_with_one_retry(
             client,
             label="Critic",
             system=_CRITIC_SYSTEM,
@@ -1161,6 +1165,7 @@ def _call_critic(client: LLMClient, memo_markdown: str, context: dict[str, objec
             max_tokens=_MAX_TOKENS_CRITIC,
             validate=_validate_critic_output,
         )
+        parsed["model"] = completion.model
         return parsed
     except Exception:
         logger.warning("Critic call failed; thesis will be stored without critic_json", exc_info=True)
@@ -1276,17 +1281,21 @@ def _insert_thesis_run(
     *,
     provider: str,
     model: str,
+    critic_model: str,
 ) -> int:
     """Insert a 'running' thesis_runs row and return its run_id.
 
-    ``model`` here is the CONFIGURED model (the run may fail before any
-    provider response exists); the stored thesis row carries the model as
-    reported by the response.
+    ``model`` (writer) and ``critic_model`` are the CONFIGURED models
+    (the run may fail before any provider response exists); the stored
+    thesis row carries the writer model as reported by the response, and
+    ``critic_json.model`` the critic's. Recording ``critic_model`` here
+    is what keeps critic provenance auditable when the best-effort critic
+    fails and no ``critic_json`` is stored (#1995).
     """
     row = conn.execute(
         """
-        INSERT INTO thesis_runs (instrument_id, trigger, provider, model)
-        VALUES (%(instrument_id)s, %(trigger)s, %(provider)s, %(model)s)
+        INSERT INTO thesis_runs (instrument_id, trigger, provider, model, critic_model)
+        VALUES (%(instrument_id)s, %(trigger)s, %(provider)s, %(model)s, %(critic_model)s)
         RETURNING run_id
         """,
         {
@@ -1294,6 +1303,7 @@ def _insert_thesis_run(
             "trigger": trigger,
             "provider": provider,
             "model": model,
+            "critic_model": critic_model,
         },
     ).fetchone()
     if row is None:
@@ -1360,7 +1370,7 @@ def _record_thesis_run_failure(
 def generate_thesis(
     instrument_id: int,
     conn: psycopg.Connection[Any],
-    client: LLMClient,
+    clients: LLMClientPair,
     *,
     trigger: RunTrigger,
 ) -> ThesisResult:
@@ -1399,7 +1409,14 @@ def generate_thesis(
     dedicated connection.
     """
     context = _assemble_context(conn, instrument_id)
-    run_id = _insert_thesis_run(conn, instrument_id, trigger, provider=client.provider_name, model=client.model)
+    run_id = _insert_thesis_run(
+        conn,
+        instrument_id,
+        trigger,
+        provider=clients.writer.provider_name,
+        model=clients.writer.model,
+        critic_model=clients.critic.model,
+    )
     # Close the implicit read tx opened by _assemble_context SELECTs
     # (and publish the 'running' run row) BEFORE the LLM calls below.
     # Without this, the connection stays ``idle in transaction`` for the
@@ -1409,8 +1426,8 @@ def generate_thesis(
     # LLM calls — outside any DB transaction; these can take seconds
     # (cloud) to minutes (local 14B).
     try:
-        writer_output, writer_completion = _call_writer(client, context)
-        critic_output = _call_critic(client, str(writer_output.get("memo_markdown", "")), context)
+        writer_output, writer_completion = _call_writer(clients.writer, context)
+        critic_output = _call_critic(clients.critic, str(writer_output.get("memo_markdown", "")), context)
     except Exception as exc:
         _record_thesis_run_failure(conn, run_id, exc)
         raise
@@ -1433,7 +1450,7 @@ def generate_thesis(
                 writer_output,
                 critic_output if critic_output else None,
                 model=writer_completion.model,
-                provider=client.provider_name,
+                provider=clients.writer.provider_name,
             )
             _update_last_reviewed(conn, instrument_id)
             _finish_thesis_run_ok(conn, run_id, thesis_id)
