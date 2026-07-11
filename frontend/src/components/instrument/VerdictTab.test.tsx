@@ -210,3 +210,59 @@ describe("VerdictTab", () => {
     expect(screen.getByText(/peer percentile pending/i)).toBeInTheDocument();
   });
 });
+
+describe("VerdictTab #2003 — thesis leads the tab", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockHistoryEmpty();
+  });
+
+  it("renders the thesis pane ABOVE the score headline", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({}, FULL_IAR),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={THESIS} />
+      </MemoryRouter>,
+    );
+    const memo = await screen.findByText(/bull case rests on services/i);
+    const totalScore = screen.getByText("0.82");
+    // DOM order pins the hierarchy: memo (thesis pane) precedes the score.
+    expect(
+      memo.compareDocumentPosition(totalScore) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("does not duplicate the stance in the score headline (dedupe)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({}, FULL_IAR),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={THESIS} />
+      </MemoryRouter>,
+    );
+    await screen.findByText("0.82");
+    // Exactly ONE stance element — the ThesisPane StanceBadge. The old
+    // headline chip is gone.
+    expect(screen.getAllByText("buy")).toHaveLength(1);
+  });
+
+  it("thesis pane still leads when the instrument is unscored", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue({
+      instrument_id: 1,
+      score: null,
+    });
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={THESIS} />
+      </MemoryRouter>,
+    );
+    const memo = await screen.findByText(/bull case rests on services/i);
+    const empty = screen.getByText(/not yet scored/i);
+    expect(
+      memo.compareDocumentPosition(empty) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});
