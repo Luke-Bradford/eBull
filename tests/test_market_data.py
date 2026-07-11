@@ -937,8 +937,9 @@ class TestComputeAndStoreFeaturesTA:
             assert params[col] is None, f"{col} should be None when dates misalign"
 
     def test_string_indicators_excluded_from_ta_params(self) -> None:
-        """compute_indicators returns price_vs_sma200 and trend_sma_cross as
-        strings — these must NOT appear in the numeric ta_params dict."""
+        """Regression guard: compute_indicators no longer emits the derived
+        trend-signal strings (#1989 — see derive_trend_signals); if they are
+        ever reintroduced they must still not reach the numeric UPDATE params."""
         n = 250
         price_rows = _generate_price_rows(n)
         close_rows = list(reversed(price_rows))

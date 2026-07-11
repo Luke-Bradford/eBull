@@ -58,6 +58,7 @@ from psycopg.types.json import Jsonb
 # forces the lazy import inside _assemble_context.
 from app.services.instrument_analytics import SCHEMA_VERSION as _IAR_SCHEMA_VERSION
 from app.services.llm_client import LLMClient, LLMClientPair, LLMCompletion
+from app.services.technical_analysis import derive_trend_signals
 
 logger = logging.getLogger(__name__)
 
@@ -598,28 +599,16 @@ def _shape_analytics_evidence(
 def _shape_ta_state(price_row: tuple[object, ...] | None) -> dict[str, object] | None:
     """Block D: latest persisted TA indicators + derived-at-read signals.
 
-    `sma_50_200_regime` is the CURRENT 50-vs-200 relation (golden/death), NOT
-    a crossover event — same comparison as technical_analysis.py
-    compute_indicators, but equal-or-missing SMAs yield None (missing
-    evidence, not a third regime; the internal "none" string is not
-    forwarded). #1989 will persist the derived signals; the context key stays.
+    The trend signals (`price_vs_sma200`, `sma_50_200_regime`) come from
+    ``technical_analysis.derive_trend_signals`` — the single source (#1989:
+    read-derive from stored SMAs, no extra price_daily columns). The context
+    keys are stable — the thesis prompt and eval fixtures depend on them.
     """
     if price_row is None:
         return None
     close = _to_float(price_row[0])
     sma_50 = _to_float(price_row[7])
     sma_200 = _to_float(price_row[8])
-
-    price_vs_sma200: str | None = None
-    if close is not None and sma_200 is not None:
-        # Tie (close == sma_200) is "below" by design — strict >, mirroring
-        # technical_analysis.py compute_indicators so the two derivations
-        # can never disagree on the same row.
-        price_vs_sma200 = "above" if close > sma_200 else "below"
-
-    regime: str | None = None
-    if sma_50 is not None and sma_200 is not None and sma_50 != sma_200:
-        regime = "golden" if sma_50 > sma_200 else "death"
 
     return {
         "sma_50": sma_50,
@@ -628,8 +617,7 @@ def _shape_ta_state(price_row: tuple[object, ...] | None) -> dict[str, object] |
         "macd_histogram": _to_float(price_row[10]),
         "atr_14": _to_float(price_row[11]),
         "volatility_30d": _to_float(price_row[12]),
-        "price_vs_sma200": price_vs_sma200,
-        "sma_50_200_regime": regime,
+        **derive_trend_signals(close, sma_50, sma_200),
     }
 
 

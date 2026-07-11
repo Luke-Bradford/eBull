@@ -12,6 +12,7 @@ from app.services.technical_analysis import (
     atr,
     bollinger_bands,
     compute_indicators,
+    derive_trend_signals,
     ema,
     macd,
     rsi,
@@ -315,23 +316,45 @@ class TestComputeIndicators:
     def test_empty_bars_returns_none(self) -> None:
         assert compute_indicators([]) is None
 
-    def test_price_above_sma200(self) -> None:
-        # Ascending bars — latest close well above SMA(200)
+    def test_no_derived_string_signals_emitted(self) -> None:
+        # #1989: trend signals moved to derive_trend_signals — the
+        # orchestrator emits price_daily column floats only.
         bars = self._make_ascending_bars(250)
         result = compute_indicators(bars)
         assert result is not None
-        assert result["price_vs_sma200"] == "above"
+        assert "price_vs_sma200" not in result
+        assert "trend_sma_cross" not in result
 
-    def test_trend_sma_cross_golden(self) -> None:
-        # Ascending data: SMA(50) > SMA(200) → golden cross
-        bars = self._make_ascending_bars(250)
-        result = compute_indicators(bars)
-        assert result is not None
-        assert result["trend_sma_cross"] == "golden"
 
-    def test_trend_sma_cross_none_when_insufficient(self) -> None:
-        # Not enough data for SMA(200) → cross signal should be "none"
-        bars = self._make_ascending_bars(100)
-        result = compute_indicators(bars)
-        assert result is not None
-        assert result["trend_sma_cross"] == "none"
+class TestDeriveTrendSignals:
+    """derive_trend_signals (#1989) — single source for read-time trend signals."""
+
+    @pytest.mark.parametrize(
+        ("close", "sma_50", "sma_200", "expected_pvs", "expected_regime"),
+        [
+            (24.5, 23.0, 21.0, "above", "golden"),
+            (18.0, 20.0, 22.0, "below", "death"),
+            # Tie close == sma_200 is "below" by design (strict >).
+            (21.0, 22.0, 21.0, "below", "golden"),
+            # Equal SMAs = missing evidence, not a third regime.
+            (25.0, 21.0, 21.0, "above", None),
+            # Missing inputs suppress only the signals they feed.
+            (None, 23.0, 21.0, None, "golden"),
+            (24.5, None, 21.0, "above", None),
+            (24.5, 23.0, None, None, None),
+            (None, None, None, None, None),
+        ],
+    )
+    def test_table(
+        self,
+        close: float | None,
+        sma_50: float | None,
+        sma_200: float | None,
+        expected_pvs: str | None,
+        expected_regime: str | None,
+    ) -> None:
+        out = derive_trend_signals(close, sma_50, sma_200)
+        assert out == {
+            "price_vs_sma200": expected_pvs,
+            "sma_50_200_regime": expected_regime,
+        }
