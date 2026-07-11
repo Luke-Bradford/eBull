@@ -50,8 +50,9 @@ valuation multiples, the #1823 IAR evidence block, and TA/trend state.
 - `_PROMPT_VERSION = "v1"` (thesis.py:89); `_MAX_TOKENS_CRITIC = 1024` (:84) — length-failed live
   on IEP 2026-07-10 (thesis stored without `critic_json`; harness fixtures never hit the limit).
 - TA indicators are persisted latest-row-only on `price_daily` (sql/025); `price_vs_sma200` /
-  `trend_sma_cross` are derived in `compute_indicators` (technical_analysis.py:279-294) and NOT
-  persisted (#1989 tracks persistence; this spec derives them read-side and does not depend on it).
+  `sma_50_200_regime` are derived at read time by `technical_analysis.derive_trend_signals`
+  (#1989 SETTLED read-derive over persistence: two stored floats derive them in O(1), a stored
+  copy could drift; the dead compute_indicators branch was removed).
 - `scores.analytics_json` (#1823, `iar_v1`) carries piotroski/altman/positioning/peer_grade;
   populated only by `compute_rankings` (GME sample: 1,561 chars).
 - `instrument_valuation` (sql/201) is quotes-gated: `priced` CTE reads `FROM quotes` only.
@@ -148,14 +149,13 @@ No scores row / NULL `analytics_json` → `None`. ⚠ `analytics_json` refreshes
 
 From the same latest `price_daily` row as Block A: `sma_50, sma_200, rsi_14, macd_histogram,
 atr_14, volatility_30d`, plus derived-at-read `price_vs_sma200` ("above"/"below"/null) and
-`sma_50_200_regime` ("golden"/"death"/null) — same comparison semantics as
-technical_analysis.py:279-294, but named honestly: the internal `trend_sma_cross` value is the
-CURRENT 50-vs-200 regime, not a recent crossover event, and the context key must not invite the
-writer to infer one (the prompt states this explicitly). Divergence from the internal column
-name is deliberate; when #1989 later persists the derived signals, the read-side derivation is
-replaced and the context key stays `sma_50_200_regime`. Where the internal fn emits "none"
-(either SMA null), the context uses `null` (missing evidence, not a third regime). NULL
-indicators stay null (<200d histories keep `sma_200 = None`).
+`sma_50_200_regime` ("golden"/"death"/null) — produced by
+`technical_analysis.derive_trend_signals`, the single source since #1989 (read-derive settled;
+the old compute_indicators `trend_sma_cross` branch is deleted). The value is the CURRENT
+50-vs-200 regime, not a recent crossover event, and the context key must not invite the writer
+to infer one (the prompt states this explicitly). The context key stays `sma_50_200_regime`.
+Equal-or-missing SMAs yield `null` (missing evidence, not a third regime). NULL indicators stay
+null (<200d histories keep `sma_200 = None`).
 
 ### Prompt changes (writer + critic) — `_PROMPT_VERSION` "v1" → "v2"
 
