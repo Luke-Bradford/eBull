@@ -74,17 +74,6 @@ function ErrorBox({ message }: { message: string }): JSX.Element {
   );
 }
 
-function stanceClass(stance: string): string {
-  const s = stance.toLowerCase();
-  if (s === "buy")
-    return "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300";
-  if (s === "avoid")
-    return "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300";
-  if (s === "watch")
-    return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
-  return "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
-}
-
 /** Evidence-only tag — peer percentile is weight 0 in the live score. */
 function EvidenceTag(): JSX.Element {
   return (
@@ -127,13 +116,23 @@ export function VerdictTab({
 
   const score = verdict.data?.score ?? null;
   if (score === null) {
+    // Thesis still leads even when unscored (#2003) — a generated memo
+    // must not vanish behind the "Not yet scored" empty state.
     return (
-      <Section title="Verdict">
-        <EmptyState
-          title="Not yet scored"
-          description="This instrument has no scoring run yet. The verdict appears once the deterministic engine has scored it."
+      <div className="space-y-4">
+        <ThesisPane
+          thesis={thesis}
+          errored={thesisErrored}
+          currentPrice={currentPrice}
+          currency={currency}
         />
-      </Section>
+        <Section title="Verdict">
+          <EmptyState
+            title="Not yet scored"
+            description="This instrument has no scoring run yet. The verdict appears once the deterministic engine has scored it."
+          />
+        </Section>
+      </div>
     );
   }
 
@@ -147,17 +146,24 @@ export function VerdictTab({
     .reverse();
 
   return (
-    <div className="space-y-5">
-      {/* 1. Headline */}
+    <div className="space-y-4">
+      {/* 1. Thesis narrative + valuation leads the tab (#2003) — the memo
+          is the page's payoff; the deterministic score block reads as
+          supporting evidence below it. Renders nothing when no thesis
+          exists (and no fetch error), so unthesised names degrade to the
+          score-first layout. */}
+      <ThesisPane
+        thesis={thesis}
+        errored={thesisErrored}
+        currentPrice={currentPrice}
+        currency={currency}
+      />
+
+      {/* 2. Score headline. The stance chip that used to sit here is
+          gone (#2003 dedupe) — the ThesisPane directly above already
+          leads with the StanceBadge. */}
       <Section title="Verdict">
         <div className="flex flex-wrap items-center gap-3">
-          {thesis !== null && (
-            <span
-              className={`rounded px-2 py-0.5 text-sm font-semibold uppercase tracking-wide ${stanceClass(thesis.stance)}`}
-            >
-              {thesis.stance}
-            </span>
-          )}
           <div className="flex items-baseline gap-1">
             <span className="text-2xl font-semibold tabular-nums text-slate-800 dark:text-slate-100">
               {fmt2(score.total_score)}
@@ -205,7 +211,7 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 2. Six graded families */}
+      {/* 3. Six graded families */}
       <Section title="Graded families">
         <table className="min-w-full text-sm">
           <thead>
@@ -260,7 +266,7 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 3. Quality signals */}
+      {/* 4. Quality signals */}
       <Section title="Quality signals">
         {iar === null ? (
           <EvidencePending />
@@ -272,7 +278,7 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 4. Positioning */}
+      {/* 5. Positioning */}
       <Section title="Positioning">
         {iar === null ? (
           <EvidencePending />
@@ -294,7 +300,7 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 5. Score history */}
+      {/* 6. Score history */}
       <Section title="Score history">
         {history.loading ? (
           <SectionSkeleton rows={1} />
@@ -319,13 +325,6 @@ export function VerdictTab({
         )}
       </Section>
 
-      {/* 6. Thesis narrative + valuation (reuses the existing pane) */}
-      <ThesisPane
-        thesis={thesis}
-        errored={thesisErrored}
-        currentPrice={currentPrice}
-        currency={currency}
-      />
     </div>
   );
 }
