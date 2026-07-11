@@ -502,7 +502,10 @@ JUDGE_DIMENSIONS = (
     "internal_consistency",  # stance/confidence/zone/targets agree with each other
     "specificity",
 )
-_MAX_TOKENS_JUDGE = 1024
+# 2048, not 1024 — empirical (first 14B judge run, 2026-07-11): 8/10 pairs
+# came back unparseable at 1024; the 12-score-plus-rationale object plus any
+# leading model chatter needs the same headroom the critic got (#1987).
+_MAX_TOKENS_JUDGE = 2048
 DEFAULT_CTX_LIMIT = 16384
 
 _JUDGE_SYSTEM = """You are grading two anonymous investment memos written from the SAME research context.
@@ -724,7 +727,11 @@ def _judge_call(
             _validate_judge_output(data)
             return data, None
         except (json.JSONDecodeError, ValueError) as exc:
-            last_error = f"invalid judge output: {exc}"
+            # Head + finish_reason mirror classify_attempt: "unparseable"
+            # alone cannot distinguish truncation from chatter (first 14B
+            # judge run failed 8/10 with no way to tell which).
+            head = completion.text[:160].replace("\n", "\\n")
+            last_error = f"invalid judge output (finish_reason={completion.finish_reason}): {exc}; head={head!r}"
     return None, last_error
 
 
