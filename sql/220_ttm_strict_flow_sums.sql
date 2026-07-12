@@ -35,16 +35,29 @@
 BEGIN;
 
 CREATE OR REPLACE VIEW financial_periods_ttm AS
-WITH ranked_quarters AS (
+WITH deduped_quarters AS (
+    -- Collapse fiscal-year-rekey duplicates (two period_type rows sharing
+    -- one period_end_date, #1914 class — 133 instruments on dev) to ONE
+    -- row per (instrument_id, period_end_date) BEFORE ranking. Without
+    -- this, ROW_NUMBER assigns both dup rows distinct rn, so a dup pair
+    -- can land inside rn<=4 and double-count that quarter while
+    -- under-spanning the true 4 distinct quarters — a WRONG (non-NULL)
+    -- TTM instead of the strict NULL intended. Latest-filed wins (same
+    -- tiebreak as the fundamentals_snapshot write-through).
+    SELECT DISTINCT ON (instrument_id, period_end_date) *
+    FROM financial_periods
+    WHERE period_type IN ('Q1','Q2','Q3','Q4')
+      AND superseded_at IS NULL
+      AND normalization_status = 'normalized'
+    ORDER BY instrument_id, period_end_date, filed_date DESC NULLS LAST
+),
+ranked_quarters AS (
     SELECT *,
            ROW_NUMBER() OVER (
                PARTITION BY instrument_id
                ORDER BY period_end_date DESC
            ) AS rn
-    FROM financial_periods
-    WHERE period_type IN ('Q1','Q2','Q3','Q4')
-      AND superseded_at IS NULL
-      AND normalization_status = 'normalized'
+    FROM deduped_quarters
 ),
 latest_4 AS (
     SELECT * FROM ranked_quarters WHERE rn <= 4

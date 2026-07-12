@@ -583,7 +583,6 @@ class SecFundamentalsProvider:
             gate=_gate,
             on_429=incr_sec_429,
         )
-        # symbol → CIK cache, populated by caller before bulk refresh
 
     def __enter__(self) -> SecFundamentalsProvider:
         return self

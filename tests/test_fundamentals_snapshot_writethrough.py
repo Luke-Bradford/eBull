@@ -156,6 +156,54 @@ def test_writethrough_rewash_purges_legacy_rows(_seed: psycopg.Connection[tuple]
 
 
 @pytest.mark.db
+def test_rekey_duplicate_period_end_not_double_counted(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    # Fiscal-year-rekey (#1914 class): two period_type rows share one
+    # period_end_date. The trailing-4 window must collapse them to the
+    # latest-filed row FIRST, else it double-counts that quarter and
+    # under-spans the true 4 distinct quarters (bot WARNING). Here the
+    # newest period_end (2026-03-31) carries a stale Q4 row (rev 999,
+    # filed earlier) AND the live Q1 row (rev 100, filed later); the
+    # window must use 100 once, yielding revenue_ttm = 100+100+100+100.
+    conn = ebull_test_conn
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (4,'REKEY','Rekey Co',TRUE)"
+    )
+    _insert_quarter(conn, 4, date(2025, 6, 30), "Q2", revenue=100.0)
+    _insert_quarter(conn, 4, date(2025, 9, 30), "Q3", revenue=100.0)
+    _insert_quarter(conn, 4, date(2025, 12, 31), "Q4", revenue=100.0)
+    _insert_quarter(conn, 4, date(2026, 3, 31), "Q1", revenue=100.0)
+    # Stale duplicate at the newest period_end, filed a year earlier.
+    conn.execute(
+        """
+        INSERT INTO financial_periods (
+            instrument_id, period_end_date, period_type, fiscal_year,
+            fiscal_quarter, revenue, operating_cf, eps_diluted,
+            filed_date, source, source_ref, reported_currency,
+            normalization_status
+        ) VALUES (
+            4, '2026-03-31', 'Q4', 2026, 4, 999, 999, 9.9,
+            '2025-01-01', 'sec_edgar', 'stale', 'USD', 'normalized'
+        )
+        """
+    )
+    conn.commit()
+
+    _write_snapshots_from_periods(conn, instrument_id=4)
+    snap = _latest_snapshot(conn, 4)
+    assert snap["as_of_date"] == date(2026, 3, 31)
+    assert snap["revenue_ttm"] == Decimal("400.0000")  # 4×100, NOT 999-polluted
+
+    cur = conn.cursor(row_factory=psycopg.rows.dict_row)
+    cur.execute("SELECT revenue_ttm, is_complete_ttm FROM financial_periods_ttm WHERE instrument_id = 4")
+    row = cur.fetchone()
+    assert row is not None
+    assert row["is_complete_ttm"] is True
+    assert row["revenue_ttm"] == Decimal("400.0000")
+
+
+@pytest.mark.db
 def test_ttm_view_strict_sums_and_adjacency(_seed: psycopg.Connection[tuple]) -> None:
     conn = _seed
     cur = conn.cursor(row_factory=psycopg.rows.dict_row)

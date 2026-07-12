@@ -87,7 +87,22 @@ logger = logging.getLogger(__name__)
 #     present members, NULL->0 at FCF composition (settled treatment).
 
 _SNAPSHOT_WRITE_THROUGH_SQL = """
-WITH q AS (
+WITH quarters AS (
+    -- Collapse fiscal-year-rekey duplicates (two period_type rows sharing
+    -- one period_end_date, #1914 class — 133 instruments on dev) to ONE
+    -- row per period_end BEFORE the trailing-4 window. Without this the
+    -- window double-counts that quarter and under-spans the true 4 distinct
+    -- quarters, producing a WRONG TTM instead of the strict NULL intended.
+    -- Latest-filed wins — same tiebreak as the canonical merge + the view.
+    SELECT DISTINCT ON (period_end_date) *
+    FROM financial_periods
+    WHERE instrument_id = %(instrument_id)s
+      AND period_type IN ('Q1','Q2','Q3','Q4')
+      AND superseded_at IS NULL
+      AND normalization_status = 'normalized'
+    ORDER BY period_end_date, filed_date DESC NULLS LAST
+),
+q AS (
     SELECT
         period_end_date,
         filed_date,
@@ -109,11 +124,7 @@ WITH q AS (
         short_term_debt,
         shares_outstanding,
         shareholders_equity
-    FROM financial_periods
-    WHERE instrument_id = %(instrument_id)s
-      AND period_type IN ('Q1','Q2','Q3','Q4')
-      AND superseded_at IS NULL
-      AND normalization_status = 'normalized'
+    FROM quarters
     WINDOW w AS (ORDER BY period_end_date ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)
 ),
 derived AS (
@@ -151,7 +162,9 @@ INSERT INTO fundamentals_snapshot (
     fcf, cash, debt, net_debt,
     shares_outstanding, book_value, eps
 )
-SELECT DISTINCT ON (period_end_date)
+-- One row per period_end already (deduped in the ``quarters`` CTE), so
+-- the PK (instrument_id, as_of_date) never collides.
+SELECT
     %(instrument_id)s,
     period_end_date,
     revenue_ttm,
@@ -167,10 +180,6 @@ SELECT DISTINCT ON (period_end_date)
          THEN shareholders_equity / shares_outstanding END,
     eps_ttm
 FROM derived
--- Two period_type rows can share one period_end_date during a
--- fiscal-year rekey (#1914 class); DISTINCT ON keeps the latest-filed
--- one so the PK (instrument_id, as_of_date) never collides.
-ORDER BY period_end_date, filed_date DESC NULLS LAST
 """
 
 
