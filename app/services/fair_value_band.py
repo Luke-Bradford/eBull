@@ -22,6 +22,13 @@ MIN_OWN_POINTS = 6
 PRICE_STALE_DAYS = 7
 PEER_STALE_DAYS = 7
 DIVERGENCE_THRESHOLD = 0.30  # consumed in PR-B (thesis divergence flag)
+# Upper sanity bound on a materialized multiple. mult_value is numeric(18,6)
+# (max ~1e12); a garbage tiny-denominator TTM row (e.g. revenue_ttm=$1) can
+# produce a value that overflows the column -> the whole INSERT..SELECT fails ->
+# the materialize tx aborts the ENTIRE batch, and it also inflates peer p75 into
+# absurd bulls. Cap in the pass-1 WHERE so only sane multiples materialize. A9
+# full-pop validation may tighten this.
+_MAX_SANE_MULTIPLE = 1_000_000.0
 
 _FINANCIAL_SIC_LO, _FINANCIAL_SIC_HI = 60, 67
 
@@ -375,6 +382,20 @@ def resolve_batch_as_of_date(conn: psycopg.Connection[Any]) -> _dt.date | None:
     return row[0] if row and row[0] is not None else None
 
 
+def resolve_cohort_members_as_of_date(conn: psycopg.Connection[Any]) -> _dt.date | None:
+    """Latest as_of_date actually present in fair_value_cohort_members — the anchor
+    for a SINGLE-NAME cascade run (I1). A single-name recompute (A8 cascade) must
+    read the freshest MATERIALIZED cohort set, NOT the price max: if new price bars
+    advanced max(price_date) since the last full materialize, the price-anchored
+    date carries ZERO cohort rows -> every peer_pct_for returns all-None ->
+    a peerless thin_cohort band silently overwrites a good one. None when nothing
+    has been materialized yet."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(as_of_date) FROM fair_value_cohort_members")
+        row = cur.fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
 # Pass-1: materialize the cohort-member working set for ONE as-of date. ONE
 # parameterized statement (no f-string/format of identifiers or values — global
 # CLAUDE.md non-negotiable). The dual_class CTE is copied verbatim from
@@ -449,7 +470,11 @@ per_multiple AS (
 SELECT %(as_of)s, instrument_id, multiple, mult_value, sic, sic3, sic2,
        total_assets, close_date, dual_class_suppressed
 FROM per_multiple
+-- mult_value > 0 gates junk; < %(max_mult)s prevents a tiny-denominator garbage
+-- multiple from overflowing numeric(18,6) and aborting the whole batch INSERT
+-- (and from inflating peer p75). Parameterized cap — see _MAX_SANE_MULTIPLE.
 WHERE mult_value > 0
+  AND mult_value < %(max_mult)s
 """
 
 
@@ -462,7 +487,7 @@ def materialize_cohort_members(conn: psycopg.Connection[Any], as_of_date: _dt.da
         "DELETE FROM fair_value_cohort_members WHERE as_of_date = %(as_of)s",
         {"as_of": as_of_date},
     )
-    conn.execute(_MATERIALIZE_SQL, {"as_of": as_of_date})
+    conn.execute(_MATERIALIZE_SQL, {"as_of": as_of_date, "max_mult": _MAX_SANE_MULTIPLE})
 
 
 # Pass-2 member read — three fully-static SQL strings keyed by SIC ladder level
@@ -846,15 +871,25 @@ def refresh_fair_value_band_batch(conn: psycopg.Connection[Any], instrument_ids:
 
     Returns {"written","statused","failed"}: written = real band (reason 'ok'),
     statused = persisted absence row, failed = per-row exception (rolled back)."""
-    as_of = resolve_batch_as_of_date(conn)
-    if as_of is None:
-        return {"written": 0, "statused": 0, "failed": 0}
-
     if instrument_ids is None:
+        # Full/bootstrap run: price-anchored as-of, materialize the cohort at it.
+        as_of = resolve_batch_as_of_date(conn)
+        if as_of is None:
+            return {"written": 0, "statused": 0, "failed": 0}
         with conn.transaction():
             materialize_cohort_members(conn, as_of)
         ids = _universe_ids(conn)
     else:
+        # Single-name cascade (A8, I1): anchor to the latest MATERIALIZED cohort
+        # as_of, never the price max — else a post-materialize price advance leaves
+        # the price-anchored date with zero cohort rows, every peer read comes back
+        # all-None, and a good band is clobbered by a peerless thin_cohort band.
+        # Fall back to the price-anchored date only when nothing was ever
+        # materialized (empty table): bands then compute peer-absent (own-only /
+        # thin_cohort) cleanly rather than crash.
+        as_of = resolve_cohort_members_as_of_date(conn) or resolve_batch_as_of_date(conn)
+        if as_of is None:
+            return {"written": 0, "statused": 0, "failed": 0}
         ids = instrument_ids
 
     written = statused = failed = 0
