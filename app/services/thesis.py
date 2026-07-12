@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -100,7 +101,9 @@ _MAX_TOKENS_CRITIC = 2048
 # Stamped onto every stored thesis row (theses.prompt_version). Bump
 # whenever _WRITER_SYSTEM / _CRITIC_SYSTEM or the _assemble_context shape
 # changes — memos from different prompt versions are not comparable.
-_PROMPT_VERSION = "v2"
+# v3 (#2007): _WRITER_SYSTEM gains the availability-claim mirror rule
+# (never disclaim a block the context marks available, then cite its figures).
+_PROMPT_VERSION = "v3"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -166,13 +169,20 @@ def _to_float(val: object) -> float | None:
     output dict before persisting to the DB and returning in ThesisResult.
     Both sites must use the same conversion so the DB row and the returned
     struct are always consistent.
+
+    Non-finite floats (NaN / ±inf) map to None: an LLM can emit ``"nan"`` /
+    ``"inf"`` for a target field, and NaN silently defeats the #2007 ordering
+    guard (every ``>`` comparison against NaN is False) while persisting as a
+    non-numeric garbage target. Treat them as missing, consistently, at the one
+    coercion chokepoint both the guard and the INSERT share.
     """
     if val is None:
         return None
     try:
-        return float(val)  # type: ignore[arg-type]
+        result = float(val)  # type: ignore[arg-type]
     except TypeError, ValueError:
         return None
+    return result if math.isfinite(result) else None
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +971,12 @@ Rules:
   stance (an entry band is meaningless without a market price), and emit
   base/bull/bear_value only if fundamentals give a defensible per-share
   basis.
+- Data-availability language MUST mirror the block status fields verbatim
+  (#1632 evidence discipline). Never state a block is unavailable, missing, or
+  absent when its `available`/status field marks it present. When a block IS
+  unavailable or its status is non-`ok`, do not cite figures drawn from it —
+  omit the number or name the gap explicitly. Cited figures and availability
+  claims must both agree with the block statuses, never with each other.
 - Separate facts from judgement. Be explicit about what must go right.
 - Respond with ONLY valid JSON. No explanation outside the JSON object.
 """
@@ -1132,6 +1148,27 @@ def _validate_writer_output(data: dict[str, object]) -> None:
     memo = data.get("memo_markdown")
     if not isinstance(memo, str) or not memo.strip():
         raise ValueError("Writer output memo_markdown must be a non-empty string")
+
+    # Valuation-band coherence (#2007): the stored band must satisfy
+    # bear <= base <= bull, and the buy zone low <= high. Local writers
+    # intermittently emit mechanical copies (AMSC v1: bear=52w-low,
+    # bull=52w-high, base=book/share, so base < bear). Coerce through the
+    # SAME _to_float used at INSERT so we validate the values that actually
+    # persist; a null/garbage field coerces to None and drops out of its
+    # comparison. Raising ValueError rides the existing retry-once machinery.
+    bear = _to_float(data.get("bear_value"))
+    base = _to_float(data.get("base_value"))
+    bull = _to_float(data.get("bull_value"))
+    if bear is not None and base is not None and bear > base:
+        raise ValueError(f"Writer output incoherent targets: bear_value {bear} > base_value {base}")
+    if base is not None and bull is not None and base > bull:
+        raise ValueError(f"Writer output incoherent targets: base_value {base} > bull_value {bull}")
+    if bear is not None and bull is not None and bear > bull:
+        raise ValueError(f"Writer output incoherent targets: bear_value {bear} > bull_value {bull}")
+    zone_low = _to_float(data.get("buy_zone_low"))
+    zone_high = _to_float(data.get("buy_zone_high"))
+    if zone_low is not None and zone_high is not None and zone_low > zone_high:
+        raise ValueError(f"Writer output inverted buy zone: buy_zone_low {zone_low} > buy_zone_high {zone_high}")
 
 
 def _call_critic(client: LLMClient, memo_markdown: str, context: dict[str, object]) -> dict[str, object]:

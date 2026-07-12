@@ -194,6 +194,12 @@ class TestToFloat:
     def test_zero_converts(self) -> None:
         assert _to_float(0) == 0.0
 
+    @pytest.mark.parametrize("val", ["nan", "inf", "-inf", float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_returns_none(self, val: object) -> None:
+        # #2007: NaN silently defeats the ordering guard (nan > x is False) and
+        # persists as a non-numeric target. Non-finite floats map to None here.
+        assert _to_float(val) is None
+
 
 # ---------------------------------------------------------------------------
 # Stale detection
@@ -329,6 +335,56 @@ class TestValidateWriterOutput:
     @pytest.mark.parametrize("st", ["buy", "hold", "watch", "avoid"])
     def test_all_valid_stances_pass(self, st: str) -> None:
         _validate_writer_output({**_VALID_WRITER, "stance": st})
+
+    # --- valuation-band coherence (#2007) ---
+
+    def test_bear_above_base_raises(self) -> None:
+        bad = {**_VALID_WRITER, "bear_value": 210.0}  # > base 200
+        with pytest.raises(ValueError, match="incoherent targets"):
+            _validate_writer_output(bad)
+
+    def test_base_above_bull_raises(self) -> None:
+        bad = {**_VALID_WRITER, "base_value": 260.0}  # > bull 250
+        with pytest.raises(ValueError, match="incoherent targets"):
+            _validate_writer_output(bad)
+
+    def test_bear_above_bull_with_null_base_raises(self) -> None:
+        # base null breaks the transitive chain; the outer bear>bull bound catches it.
+        bad = {**_VALID_WRITER, "base_value": None, "bear_value": 300.0}  # > bull 250
+        with pytest.raises(ValueError, match="incoherent targets"):
+            _validate_writer_output(bad)
+
+    def test_inverted_buy_zone_raises(self) -> None:
+        bad = {**_VALID_WRITER, "buy_zone_low": 180.0, "buy_zone_high": 160.0}
+        with pytest.raises(ValueError, match="inverted buy zone"):
+            _validate_writer_output(bad)
+
+    def test_amsc_v1_incoherent_band_raises(self) -> None:
+        # Live regression: bear=52w-low, bull=52w-high, base=book/share → base < bear.
+        bad = {**_VALID_WRITER, "bear_value": 24.96, "base_value": 11.66, "bull_value": 69.98}
+        with pytest.raises(ValueError, match="incoherent targets"):
+            _validate_writer_output(bad)
+
+    def test_equal_band_values_pass(self) -> None:
+        # Degenerate but coherent: bear == base == bull is allowed (strict > only).
+        _validate_writer_output({**_VALID_WRITER, "bear_value": 200.0, "base_value": 200.0, "bull_value": 200.0})
+
+    def test_nan_band_value_treated_as_missing(self) -> None:
+        # NaN coerces to None (via _to_float), so it drops out of the ordering
+        # comparison rather than silently passing an incoherent band.
+        _validate_writer_output({**_VALID_WRITER, "bear_value": float("nan")})
+
+    def test_all_null_band_passes(self) -> None:
+        _validate_writer_output(
+            {
+                **_VALID_WRITER,
+                "buy_zone_low": None,
+                "buy_zone_high": None,
+                "base_value": None,
+                "bull_value": None,
+                "bear_value": None,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
