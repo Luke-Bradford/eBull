@@ -175,3 +175,45 @@ def combine_across(triples: list[tuple[float, float, float]]) -> tuple[float, fl
     bull = max(t[2] for t in triples)
     assert bear <= base <= bull, f"band order violated: {bear} {base} {bull}"
     return (bear, base, bull)
+
+
+def own_range(multiple_values: list[float]) -> OwnPct:
+    """§4.4 own trailing range. Positive values only; MIN_OWN_POINTS floor."""
+    pos = [v for v in multiple_values if v > 0]
+    if len(pos) < MIN_OWN_POINTS:
+        return OwnPct(None, None, None)
+    p20, p50, p80 = percentiles(pos, (0.20, 0.50, 0.80))
+    return OwnPct(p20=p20, p50=p50, p80=p80)
+
+
+def filter_dual_class(rows: list[tuple[int, float]], dual_class_ids: set[int]) -> list[float]:
+    """Pure twin of the §4.3 curated-oracle anti-join. Drops dual-class members."""
+    return [mult for iid, mult in rows if iid not in dual_class_ids]
+
+
+@dataclass(frozen=True)
+class QualityInputs:
+    n_selected: int
+    n_comparator_sides: int
+    own_points: int
+    cohort_n: int
+    excluded_stale_n: int
+    sic_level: int
+    cross_multiple_spread: float
+
+
+def band_quality_status(q: QualityInputs) -> str:
+    """§4.7 deterministic quality tier. Points-based; conservative floors."""
+    score = 0
+    score += 2 if q.n_comparator_sides == 2 else 0
+    score += 2 if q.own_points >= 2 * MIN_OWN_POINTS else (1 if q.own_points >= MIN_OWN_POINTS else 0)
+    stale_frac = (q.excluded_stale_n / q.cohort_n) if q.cohort_n else 1.0
+    score += 2 if stale_frac == 0 else (1 if stale_frac < 0.25 else 0)
+    score += {4: 2, 3: 1}.get(q.sic_level, 0)
+    score += 1 if q.n_selected >= 2 else 0
+    score -= 1 if q.cross_multiple_spread > 0.5 else 0
+    if score >= 7:
+        return "high"
+    if score >= 4:
+        return "medium"
+    return "low"

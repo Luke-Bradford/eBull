@@ -1,11 +1,16 @@
 from typing import Any
 
 from app.services.fair_value_band import (
+    MIN_OWN_POINTS,
     OwnPct,
     PeerPct,
+    QualityInputs,
     TargetInputs,
+    band_quality_status,
     combine_across,
     currency_coherent,
+    filter_dual_class,
+    own_range,
     percentiles,
     select_multiples,
     synth_multiple,
@@ -146,3 +151,49 @@ def test_combine_across_median_and_envelope():
     assert base == 266.0  # median([272, 260]) = mean = 266
     assert bear == 240.0  # min lows
     assert bull == 300.0  # max highs
+
+
+def test_own_range_below_min_points_absent():
+    assert own_range([10.0] * (MIN_OWN_POINTS - 1)) == OwnPct(None, None, None)
+
+
+def test_own_range_drops_nonpositive():
+    # 6 positive, 3 non-positive -> uses the 6 positive
+    vals = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, -1.0, 0.0, -5.0]
+    r = own_range(vals)
+    assert r.p50 == 35.0
+
+
+def test_filter_dual_class_anti_join():
+    rows = [(1, 10.0), (2, 20.0), (3, 30.0)]
+    assert filter_dual_class(rows, {2}) == [10.0, 30.0]
+
+
+def test_filter_dual_class_all_dropped_empty():
+    assert filter_dual_class([(1, 10.0), (2, 20.0)], {1, 2}) == []
+
+
+def test_quality_high():
+    q = QualityInputs(
+        n_selected=2,
+        n_comparator_sides=2,
+        own_points=12,
+        cohort_n=20,
+        excluded_stale_n=0,
+        sic_level=4,
+        cross_multiple_spread=0.05,
+    )
+    assert band_quality_status(q) == "high"
+
+
+def test_quality_low_thin_and_stale():
+    q = QualityInputs(
+        n_selected=1,
+        n_comparator_sides=1,
+        own_points=0,
+        cohort_n=8,
+        excluded_stale_n=6,
+        sic_level=2,
+        cross_multiple_spread=0.0,
+    )
+    assert band_quality_status(q) == "low"
