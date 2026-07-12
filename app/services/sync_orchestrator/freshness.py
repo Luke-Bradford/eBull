@@ -171,29 +171,15 @@ def fundamentals_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     # can have a row in the current quarter — measured red on the FULL
     # population (5,349/5,349 "missing", 2026-07-12). Per-instrument
     # filing-cadence staleness is coverage's job, not this gate's.
-    row = conn.execute(
-        """
-        SELECT COUNT(*) AS missing
-        FROM (
-            SELECT DISTINCT fp.instrument_id
-            FROM financial_periods fp
-            WHERE fp.period_type IN ('Q1','Q2','Q3','Q4')
-              AND fp.superseded_at IS NULL
-              AND fp.normalization_status = 'normalized'
-        ) src
-        WHERE NOT EXISTS (
-            SELECT 1 FROM fundamentals_snapshot fs
-            WHERE fs.instrument_id = src.instrument_id
-        )
-        """,
-    ).fetchone()
-    missing = row[0] if row else 0
-    if missing > 0:
-        return (
-            False,
-            f"{missing} instruments have normalized quarter periods but no "
-            f"fundamentals_snapshot rows (write-through gap)",
-        )
+    #
+    # Delegate to fundamentals_content_ok so the write-through-gap query
+    # lives in exactly one place (review NITPICK — no drift between the
+    # two gates). Imported at call time to avoid a package import cycle.
+    from app.services.sync_orchestrator.content_predicates import fundamentals_content_ok
+
+    content_ok, content_detail = fundamentals_content_ok(conn)
+    if not content_ok:
+        return False, content_detail
     return True, audit_detail
 
 
