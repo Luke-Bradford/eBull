@@ -49,36 +49,37 @@ def candles_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
 
 
 def fundamentals_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    """Every SEC-CIK-mapped tradable instrument must have a fundamentals_snapshot
-    row in the current quarter. #540: scoped to SEC-CIK only — non-US
-    instruments have no fundamentals source today.
+    """Every instrument with normalized quarter periods must have
+    fundamentals_snapshot rows (#2008 write-through consistency).
+
+    The previous "snapshot row in the current calendar quarter" rule was
+    structurally unsatisfiable — as_of_date is a fiscal period end, so no
+    issuer can satisfy it for up to ~6 weeks after each calendar-quarter
+    boundary (Rule 13a-13 10-Q filing deadlines). Filing-cadence
+    staleness is coverage's concern; this gate checks only that the
+    snapshot write-through kept up with normalization.
     """
-    today = date.today()
-    quarter = (today.month - 1) // 3
-    quarter_start = date(today.year, quarter * 3 + 1, 1)
     row = conn.execute(
         """
         SELECT COUNT(*) AS missing
-        FROM instruments i
-        JOIN external_identifiers ei
-            ON ei.instrument_id = i.instrument_id
-           AND ei.provider = 'sec'
-           AND ei.identifier_type = 'cik'
-           AND ei.is_primary = TRUE
-        WHERE i.is_tradable = TRUE
-          AND NOT EXISTS (
-              SELECT 1 FROM fundamentals_snapshot fs
-              WHERE fs.instrument_id = i.instrument_id
-                AND fs.as_of_date >= %s
-          )
+        FROM (
+            SELECT DISTINCT fp.instrument_id
+            FROM financial_periods fp
+            WHERE fp.period_type IN ('Q1','Q2','Q3','Q4')
+              AND fp.superseded_at IS NULL
+              AND fp.normalization_status = 'normalized'
+        ) src
+        WHERE NOT EXISTS (
+            SELECT 1 FROM fundamentals_snapshot fs
+            WHERE fs.instrument_id = src.instrument_id
+        )
         """,
-        (quarter_start,),
     ).fetchone()
     missing = row[0] if row else 0
     if missing > 0:
         return (
             False,
-            f"{missing} SEC-CIK tradable instruments lack fundamentals snapshot "
-            f"for quarter starting {quarter_start.isoformat()}",
+            f"{missing} instruments have normalized quarter periods but no "
+            f"fundamentals_snapshot rows (write-through gap)",
         )
-    return True, "all tradable instruments have snapshot"
+    return True, "snapshot write-through consistent with normalized periods"

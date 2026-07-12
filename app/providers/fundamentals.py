@@ -1,36 +1,16 @@
 """
-Fundamentals provider interface.
+Fundamentals provider data shapes.
 
-Domain code imports this interface only — never the concrete provider.
+Raw XBRL fact + concept-catalogue containers shared between the SEC
+provider and the fundamentals service layer. Period selection / TTM
+assembly is NOT a provider concern: ``fundamentals_snapshot`` is a
+write-through from the normalized ``financial_periods`` rows (#2008),
+so there is no snapshot dataclass or provider interface here anymore.
 """
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-
-
-@dataclass(frozen=True)
-class FundamentalsSnapshot:
-    """
-    Normalised quarterly fundamentals for a single company.
-
-    All monetary fields are in the company's reporting currency.
-    None means the data was not available from the provider for this period.
-    """
-
-    symbol: str
-    as_of_date: date  # period end date
-    revenue_ttm: Decimal | None
-    gross_margin: Decimal | None  # 0–1 ratio
-    operating_margin: Decimal | None  # 0–1 ratio
-    fcf: Decimal | None  # free cash flow, TTM
-    cash: Decimal | None
-    debt: Decimal | None  # total debt
-    net_debt: Decimal | None
-    shares_outstanding: int | None  # DB column must be BIGINT — large-caps exceed 2^31 (e.g. AAPL ~15bn)
-    book_value: Decimal | None  # per share
-    eps: Decimal | None  # diluted EPS, TTM
 
 
 @dataclass(frozen=True)
@@ -72,36 +52,3 @@ class XbrlConceptCatalogEntry:
     # across every ingest pass so a concept reporting in multiple
     # units over time is represented truthfully.
     units_seen: tuple[str, ...]
-
-
-class FundamentalsProvider(ABC):
-    """
-    Interface for normalised company fundamentals: income, balance sheet, cash flow.
-
-    No active implementation in v1 — fundamentals are sourced directly
-    from SEC XBRL via ``app/services/fundamentals.py`` and stored in
-    ``financial_periods`` / ``financial_facts_raw``. The interface is
-    retained for a possible non-US (Companies House / EDINET) provider.
-    """
-
-    @abstractmethod
-    def get_latest_snapshot(self, symbol: str) -> FundamentalsSnapshot | None:
-        """
-        Return the most recent fundamentals snapshot for a symbol.
-        Returns None if the provider has no data for this symbol.
-        """
-
-    @abstractmethod
-    def get_snapshot_history(
-        self,
-        symbol: str,
-        from_date: date,
-        to_date: date,
-        limit: int = 40,
-    ) -> list[FundamentalsSnapshot]:
-        """
-        Return fundamentals snapshots for a symbol within the date range,
-        oldest first, up to limit entries.
-
-        limit defaults to 40 (10 years of quarterly data).
-        """

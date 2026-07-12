@@ -233,25 +233,10 @@ class Settings(BaseSettings):
     # → follow-up PR deletes the guarded SEC block.
     enable_filings_fetch_dedupe: bool = False
 
-    # When True, ``daily_research_refresh`` skips its SEC XBRL
-    # ``refresh_fundamentals`` call and ``fundamentals_sync`` phase 1b
-    # owns ``fundamentals_snapshot`` refresh for CIK-mapped tradable
-    # instruments. Collapses the dual SEC ``companyfacts`` fetch path
-    # identified in issue #414 so only one scheduled job hits
-    # ``data.sec.gov/api/xbrl/companyfacts/…`` each day. Companies
-    # House filings continue to run in ``daily_research_refresh``
-    # regardless of this flag.
-    # Flipped True 2026-07-01 (#649): daily_research_refresh's guarded
-    # SEC-fundamentals block and fundamentals_sync phase 1b are the
-    # same ``refresh_fundamentals`` call over the same CIK-primary
-    # tradable cohort (verified equal on the full population — 5343/5343,
-    # zero diff — docs/specs/etl/2026-07-01-sec-dedupe-flag-flip.md).
-    # True moves the fetch out of the 40-45min daily_research_refresh
-    # job (repeatedly interrupted by dev-server reload — "orphaned:
-    # reaped at boot") into the isolated ~3min fundamentals_sync job.
-    # Next step per the original lifecycle: observe, then a follow-up
-    # PR deletes the now-dead guarded block in daily_research_refresh.
-    enable_sec_fundamentals_dedupe: bool = True
+    # (enable_sec_fundamentals_dedupe removed by #2008: BOTH SEC snapshot
+    # sweeps it arbitrated are gone — ``fundamentals_snapshot`` is now a
+    # write-through from normalized financial_periods rows inside
+    # ``normalize_financial_periods``.)
 
 
 settings = Settings()

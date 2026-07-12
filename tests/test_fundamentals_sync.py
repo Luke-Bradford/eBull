@@ -84,10 +84,6 @@ def test_fundamentals_sync_runs_audit_backfill_then_review() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
-    # Phase 1b (SEC snapshot dedupe under #414) is default-off. Must set
-    # explicitly because MagicMock attribute access otherwise returns a
-    # truthy MagicMock and fires phase 1b with an unstubbed connection.
-    stub_settings.enable_sec_fundamentals_dedupe = False
 
     tracker = MagicMock()
     tracker.row_count = None
@@ -147,10 +143,6 @@ def test_fundamentals_sync_per_instrument_error_is_isolated() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
-    # Phase 1b (SEC snapshot dedupe under #414) is default-off. Must set
-    # explicitly because MagicMock attribute access otherwise returns a
-    # truthy MagicMock and fires phase 1b with an unstubbed connection.
-    stub_settings.enable_sec_fundamentals_dedupe = False
 
     tracker = MagicMock()
 
@@ -206,10 +198,6 @@ def test_fundamentals_sync_propagates_audit_failure_and_skips_review() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
-    # Phase 1b (SEC snapshot dedupe under #414) is default-off. Must set
-    # explicitly because MagicMock attribute access otherwise returns a
-    # truthy MagicMock and fires phase 1b with an unstubbed connection.
-    stub_settings.enable_sec_fundamentals_dedupe = False
 
     tracker = MagicMock()
 
@@ -271,10 +259,6 @@ def test_fundamentals_sync_phase2_failure_preserves_phase1_success() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
-    # Phase 1b (SEC snapshot dedupe under #414) is default-off. Must set
-    # explicitly because MagicMock attribute access otherwise returns a
-    # truthy MagicMock and fires phase 1b with an unstubbed connection.
-    stub_settings.enable_sec_fundamentals_dedupe = False
 
     tracker = MagicMock()
     tracker.row_count = None
@@ -343,10 +327,6 @@ def test_fundamentals_sync_phase0_cik_failure_isolated() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
-    # Phase 1b (SEC snapshot dedupe under #414) is default-off. Must set
-    # explicitly because MagicMock attribute access otherwise returns a
-    # truthy MagicMock and fires phase 1b with an unstubbed connection.
-    stub_settings.enable_sec_fundamentals_dedupe = False
 
     tracker = MagicMock()
 
@@ -401,10 +381,6 @@ def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
-    # Phase 1b (SEC snapshot dedupe under #414) is default-off. Must set
-    # explicitly because MagicMock attribute access otherwise returns a
-    # truthy MagicMock and fires phase 1b with an unstubbed connection.
-    stub_settings.enable_sec_fundamentals_dedupe = False
 
     tracker = MagicMock()
 
@@ -440,90 +416,6 @@ def test_fundamentals_sync_phase1_xbrl_failure_isolated() -> None:
     review_mock.assert_called_once_with(review_conn)
 
 
-def test_fundamentals_sync_phase1b_runs_when_dedupe_enabled() -> None:
-    """Phase 1b (SEC fundamentals snapshot refresh under #414) fires
-    between phase 1 (financial facts) and phase 2 (audit) when the
-    operator flips ``enable_sec_fundamentals_dedupe=True``.
-
-    The happy path pulls CIK-mapped tradable instruments, opens a
-    SecFundamentalsProvider, and calls
-    ``refresh_fundamentals(sec_fund, conn, symbols)``. Phase 1b is
-    isolated from phase 2/3 — a snapshot failure must not block the
-    audit.
-    """
-    from app.services.fundamentals import FundamentalsRefreshSummary
-
-    summary = AuditSummary(
-        analysable=0,
-        insufficient=0,
-        fpi=0,
-        no_primary_sec_cik=0,
-        total_updated=0,
-        null_anomalies=0,
-    )
-    review = _stub_review_result()
-
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test-agent@example.com"
-    stub_settings.enable_sec_fundamentals_dedupe = True
-
-    tracker = MagicMock()
-
-    # Four connect() contexts: phase 1b cik query, phase 1b snapshot
-    # refresh, phase 2 audit, phase 3 review.
-    cik_conn = MagicMock()
-    cik_conn.execute.return_value.fetchall.return_value = [
-        ("AAPL", "1", "0000320193"),
-        ("MSFT", "2", "0000789019"),
-    ]
-    snapshot_conn = MagicMock()
-    audit_conn = MagicMock()
-    audit_conn.execute.return_value.fetchall.return_value = []
-    review_conn = MagicMock()
-
-    def _ctx(c: MagicMock) -> MagicMock:
-        cm = MagicMock()
-        cm.__enter__.return_value = c
-        cm.__exit__.return_value = None
-        return cm
-
-    refresh_summary = FundamentalsRefreshSummary(symbols_attempted=2, snapshots_upserted=2, symbols_skipped=0)
-
-    with (
-        patch.object(scheduler, "settings", stub_settings),
-        patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "connect_job") as connect_job_mock,
-        patch.object(scheduler, "SecFilingsProvider") as filings_cls,
-        patch.object(scheduler, "SecFundamentalsProvider") as fund_cls,
-        patch.object(scheduler, "refresh_fundamentals", return_value=refresh_summary) as refresh_mock,
-        patch.object(scheduler, "review_coverage", return_value=review),
-        patch.object(scheduler, "daily_cik_refresh"),
-        patch.object(scheduler, "daily_financial_facts"),
-        patch(
-            "app.services.coverage.audit_all_instruments",
-            return_value=summary,
-        ),
-    ):
-        tracked_cm.return_value.__enter__.return_value = tracker
-        connect_job_mock.side_effect = [
-            _ctx(MagicMock()),  # ingest gate
-            _ctx(cik_conn),
-            _ctx(snapshot_conn),
-            _ctx(audit_conn),
-            _ctx(review_conn),
-        ]
-        filings_cls.return_value.__enter__.return_value = MagicMock()
-        fund_cls.return_value.__enter__.return_value = MagicMock()
-
-        scheduler.fundamentals_sync()
-
-    refresh_mock.assert_called_once()
-    args, _ = refresh_mock.call_args
-    assert args[1] is snapshot_conn
-    assert args[2] == [("AAPL", "1"), ("MSFT", "2")]
-
-
 def test_fundamentals_sync_short_circuits_when_ingest_disabled() -> None:
     """Operator pause (#414 design goal F). When
     ``layer_enabled[fundamentals_ingest]=False`` the whole job short-
@@ -535,7 +427,6 @@ def test_fundamentals_sync_short_circuits_when_ingest_disabled() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
-    stub_settings.enable_sec_fundamentals_dedupe = False
 
     gate_conn = MagicMock()
 
@@ -595,7 +486,6 @@ def test_fundamentals_sync_gate_read_failure_falls_open() -> None:
     stub_settings = MagicMock()
     stub_settings.database_url = "postgresql://test"
     stub_settings.sec_user_agent = "test-agent@example.com"
-    stub_settings.enable_sec_fundamentals_dedupe = False
 
     tracker = MagicMock()
 
@@ -647,272 +537,3 @@ def test_fundamentals_sync_gate_read_failure_falls_open() -> None:
     facts_mock.assert_called_once()
     audit_mock.assert_called_once_with(audit_conn)
     review_mock.assert_called_once_with(review_conn)
-
-
-def test_fundamentals_sync_phase1b_query_filters_primary_cik() -> None:
-    """Phase 1b CIK query must restrict to ``ei.is_primary = TRUE`` so
-    a symbol with a demoted historical SEC CIK row cannot appear twice
-    and non-deterministically pick the wrong CIK via dict-overwrite.
-    Matches the phase-2 audit query's filter, and is critical now that
-    phase 1b is the sole SEC companyfacts writer when the dedupe flag
-    is flipped on."""
-    summary = AuditSummary(
-        analysable=0,
-        insufficient=0,
-        fpi=0,
-        no_primary_sec_cik=0,
-        total_updated=0,
-        null_anomalies=0,
-    )
-    review = _stub_review_result()
-
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test-agent@example.com"
-    stub_settings.enable_sec_fundamentals_dedupe = True
-
-    tracker = MagicMock()
-
-    cik_cursor = MagicMock()
-    cik_cursor.fetchall.return_value = []
-    cik_conn = MagicMock()
-    cik_conn.execute.return_value = cik_cursor
-    audit_conn = MagicMock()
-    audit_conn.execute.return_value.fetchall.return_value = []
-    review_conn = MagicMock()
-
-    def _ctx(c: MagicMock) -> MagicMock:
-        cm = MagicMock()
-        cm.__enter__.return_value = c
-        cm.__exit__.return_value = None
-        return cm
-
-    with (
-        patch.object(scheduler, "settings", stub_settings),
-        patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "connect_job") as connect_job_mock,
-        patch.object(scheduler, "SecFilingsProvider") as filings_cls,
-        patch.object(scheduler, "review_coverage", return_value=review),
-        patch.object(scheduler, "daily_cik_refresh"),
-        patch.object(scheduler, "daily_financial_facts"),
-        patch(
-            "app.services.coverage.audit_all_instruments",
-            return_value=summary,
-        ),
-    ):
-        tracked_cm.return_value.__enter__.return_value = tracker
-        connect_job_mock.side_effect = [
-            _ctx(MagicMock()),  # ingest gate
-            _ctx(cik_conn),
-            _ctx(audit_conn),
-            _ctx(review_conn),
-        ]
-        filings_cls.return_value.__enter__.return_value = MagicMock()
-
-        scheduler.fundamentals_sync()
-
-    # Assert phase 1b SQL restricts to is_primary = TRUE.
-    query = cik_conn.execute.call_args.args[0]
-    normalised = " ".join(query.split()).lower()
-    assert "ei.is_primary = true" in normalised
-    assert "ei.identifier_type = 'cik'" in normalised
-
-
-def test_fundamentals_sync_phase1b_row_count_contributes_to_tracker() -> None:
-    """Row-count contract: once the dedupe flag flips, phase 1b
-    snapshots are the bulk write path. ``tracker.row_count`` must
-    include the snapshots_upserted count so a successful snapshot-only
-    run (no audit/review changes) does not report as zero-row work.
-    """
-    from app.services.fundamentals import FundamentalsRefreshSummary
-
-    summary = AuditSummary(
-        analysable=0,
-        insufficient=0,
-        fpi=0,
-        no_primary_sec_cik=0,
-        total_updated=0,
-        null_anomalies=0,
-    )
-    review = _stub_review_result()
-
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test-agent@example.com"
-    stub_settings.enable_sec_fundamentals_dedupe = True
-
-    tracker = MagicMock()
-    tracker.row_count = None
-
-    cik_conn = MagicMock()
-    cik_conn.execute.return_value.fetchall.return_value = [
-        ("AAPL", "1", "0000320193"),
-    ]
-    snapshot_conn = MagicMock()
-    audit_conn = MagicMock()
-    audit_conn.execute.return_value.fetchall.return_value = []
-    review_conn = MagicMock()
-
-    def _ctx(c: MagicMock) -> MagicMock:
-        cm = MagicMock()
-        cm.__enter__.return_value = c
-        cm.__exit__.return_value = None
-        return cm
-
-    refresh_summary = FundamentalsRefreshSummary(symbols_attempted=1, snapshots_upserted=37, symbols_skipped=0)
-
-    with (
-        patch.object(scheduler, "settings", stub_settings),
-        patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "connect_job") as connect_job_mock,
-        patch.object(scheduler, "SecFilingsProvider") as filings_cls,
-        patch.object(scheduler, "SecFundamentalsProvider") as fund_cls,
-        patch.object(scheduler, "refresh_fundamentals", return_value=refresh_summary),
-        patch.object(scheduler, "review_coverage", return_value=review),
-        patch.object(scheduler, "daily_cik_refresh"),
-        patch.object(scheduler, "daily_financial_facts"),
-        patch(
-            "app.services.coverage.audit_all_instruments",
-            return_value=summary,
-        ),
-    ):
-        tracked_cm.return_value.__enter__.return_value = tracker
-        connect_job_mock.side_effect = [
-            _ctx(MagicMock()),  # ingest gate
-            _ctx(cik_conn),
-            _ctx(snapshot_conn),
-            _ctx(audit_conn),
-            _ctx(review_conn),
-        ]
-        filings_cls.return_value.__enter__.return_value = MagicMock()
-        fund_cls.return_value.__enter__.return_value = MagicMock()
-
-        scheduler.fundamentals_sync()
-
-    # audit.total_updated (0) + review (0) + phase1b snapshots (37).
-    assert tracker.row_count == 37
-
-
-def test_fundamentals_sync_phase1b_failure_surfaces_at_end() -> None:
-    """Phase 1b snapshot refresh is isolated from phase 2/3 — a
-    transient failure must not block the audit or review, but must
-    still surface as a job-level failure at the end so health dashboards
-    see the outage. Mirrors the phase 0/1 isolation-with-surfacing
-    contract."""
-    from app.services.fundamentals import FundamentalsRefreshSummary  # noqa: F401
-
-    summary = AuditSummary(
-        analysable=0,
-        insufficient=0,
-        fpi=0,
-        no_primary_sec_cik=0,
-        total_updated=0,
-        null_anomalies=0,
-    )
-    review = _stub_review_result()
-
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test-agent@example.com"
-    stub_settings.enable_sec_fundamentals_dedupe = True
-
-    tracker = MagicMock()
-
-    cik_conn = MagicMock()
-    cik_conn.execute.return_value.fetchall.return_value = [("AAPL", "1", "0000320193")]
-    audit_conn = MagicMock()
-    audit_conn.execute.return_value.fetchall.return_value = []
-    review_conn = MagicMock()
-
-    def _ctx(c: MagicMock) -> MagicMock:
-        cm = MagicMock()
-        cm.__enter__.return_value = c
-        cm.__exit__.return_value = None
-        return cm
-
-    with (
-        patch.object(scheduler, "settings", stub_settings),
-        patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "connect_job") as connect_job_mock,
-        patch.object(scheduler, "SecFilingsProvider") as filings_cls,
-        patch.object(scheduler, "SecFundamentalsProvider") as fund_cls,
-        patch.object(
-            scheduler,
-            "refresh_fundamentals",
-            side_effect=RuntimeError("sec companyfacts 502"),
-        ),
-        patch.object(scheduler, "review_coverage", return_value=review) as review_mock,
-        patch.object(scheduler, "daily_cik_refresh"),
-        patch.object(scheduler, "daily_financial_facts"),
-        patch(
-            "app.services.coverage.audit_all_instruments",
-            return_value=summary,
-        ) as audit_mock,
-    ):
-        tracked_cm.return_value.__enter__.return_value = tracker
-        connect_job_mock.side_effect = [
-            _ctx(MagicMock()),  # ingest gate
-            _ctx(cik_conn),
-            _ctx(MagicMock()),  # phase 1b snapshot conn (refresh raises)
-            _ctx(audit_conn),
-            _ctx(review_conn),
-        ]
-        filings_cls.return_value.__enter__.return_value = MagicMock()
-        fund_cls.return_value.__enter__.return_value = MagicMock()
-
-        with pytest.raises(RuntimeError, match="phase 1b"):
-            scheduler.fundamentals_sync()
-
-    # Phase 2/3 still ran despite the phase-1b failure.
-    audit_mock.assert_called_once_with(audit_conn)
-    review_mock.assert_called_once_with(review_conn)
-
-
-def test_fundamentals_sync_phase1b_skipped_when_dedupe_disabled() -> None:
-    """When ``enable_sec_fundamentals_dedupe=False`` (default), phase 1b
-    must not run — ``daily_research_refresh`` still owns the SEC
-    snapshot path until the operator flips the flag."""
-    summary = AuditSummary(
-        analysable=0,
-        insufficient=0,
-        fpi=0,
-        no_primary_sec_cik=0,
-        total_updated=0,
-        null_anomalies=0,
-    )
-    review = _stub_review_result()
-
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test-agent@example.com"
-    stub_settings.enable_sec_fundamentals_dedupe = False
-
-    tracker = MagicMock()
-
-    audit_conn = MagicMock()
-    audit_conn.execute.return_value.fetchall.return_value = []
-    review_conn = MagicMock()
-
-    with (
-        patch.object(scheduler, "settings", stub_settings),
-        patch.object(scheduler, "_tracked_job") as tracked_cm,
-        patch.object(scheduler, "connect_job") as connect_job_mock,
-        patch.object(scheduler, "SecFilingsProvider") as filings_cls,
-        patch.object(scheduler, "SecFundamentalsProvider") as fund_cls,
-        patch.object(scheduler, "refresh_fundamentals") as refresh_mock,
-        patch.object(scheduler, "review_coverage", return_value=review),
-        patch.object(scheduler, "daily_cik_refresh"),
-        patch.object(scheduler, "daily_financial_facts"),
-        patch(
-            "app.services.coverage.audit_all_instruments",
-            return_value=summary,
-        ),
-    ):
-        tracked_cm.return_value.__enter__.return_value = tracker
-        _stub_two_connect_ctxes(connect_job_mock, audit_conn, review_conn)
-        filings_cls.return_value.__enter__.return_value = MagicMock()
-
-        scheduler.fundamentals_sync()
-
-    refresh_mock.assert_not_called()
-    fund_cls.assert_not_called()

@@ -3,11 +3,15 @@
 Flag default (False): daily_research_refresh runs SEC refresh_filings
 as before. Flag=True: skips the SEC filings block entirely and logs
 the reason. Companies House path unaffected either way.
+
+(The former #414 ``enable_sec_fundamentals_dedupe`` tests are gone with
+the flag itself — #2008 removed BOTH SEC snapshot sweeps; the
+fundamentals_snapshot write-through is covered in
+``tests/test_fundamentals_snapshot_writethrough.py``.)
 """
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock
 
 from app.workers import scheduler
@@ -18,15 +22,11 @@ def _stub_conn_fetchall() -> list[tuple[str, str]]:
     return [("AAPL", "1"), ("MSFT", "2")]
 
 
-def _stub_cik_rows() -> list[tuple[str, str]]:
-    return [("AAPL", "0000320193"), ("MSFT", "0000789019")]
-
-
-def _base_mocks(monkeypatch) -> tuple[MagicMock, MagicMock, MagicMock]:
+def _base_mocks(monkeypatch) -> tuple[MagicMock, MagicMock]:
     """Stub the global settings + _tracked_job + connect_job chain.
 
-    Returns the patched SEC filings provider, refresh_filings callable,
-    and refresh_fundamentals callable so each test can assert on them.
+    Returns the patched SEC filings provider and refresh_filings
+    callable so each test can assert on them.
     """
     tracker = MagicMock()
     tracker.row_count = None
@@ -36,11 +36,11 @@ def _base_mocks(monkeypatch) -> tuple[MagicMock, MagicMock, MagicMock]:
     monkeypatch.setattr(scheduler, "_tracked_job", MagicMock(return_value=cm))
 
     fake_conn = MagicMock()
-    # Two execute() calls in daily_research_refresh return
-    # (a) tradable rows (b) cik rows. Order matters.
+    # Single execute() call in daily_research_refresh returns the
+    # tradable rows (#2008 removed the symbol→CIK lookup along with the
+    # SEC fundamentals sweep).
     fake_conn.execute.return_value.fetchall.side_effect = [
         _stub_conn_fetchall(),
-        _stub_cik_rows(),
     ]
     conn_cm = MagicMock()
     conn_cm.__enter__.return_value = fake_conn
@@ -54,27 +54,18 @@ def _base_mocks(monkeypatch) -> tuple[MagicMock, MagicMock, MagicMock]:
     # bug this mock prevents.
     monkeypatch.setattr(scheduler, "connect_job", MagicMock(return_value=conn_cm))
 
-    # Stub provider factories — they're context managers.
-    sec_fund_cm = MagicMock()
-    sec_fund_cm.__enter__.return_value = MagicMock()
-    sec_fund_cm.__exit__.return_value = False
-    monkeypatch.setattr(scheduler, "SecFundamentalsProvider", MagicMock(return_value=sec_fund_cm))
-
     sec_fil_cm = MagicMock()
     sec_fil_cm.__enter__.return_value = MagicMock()
     sec_fil_cm.__exit__.return_value = False
     sec_fil_cls = MagicMock(return_value=sec_fil_cm)
     monkeypatch.setattr(scheduler, "SecFilingsProvider", sec_fil_cls)
 
-    # refresh_* helpers — canned summary mocks.
-    refresh_fund_mock = MagicMock(return_value=MagicMock(symbols_attempted=2, snapshots_upserted=2, symbols_skipped=0))
-    monkeypatch.setattr(scheduler, "refresh_fundamentals", refresh_fund_mock)
     refresh_filings_mock = MagicMock(
         return_value=MagicMock(instruments_attempted=2, filings_upserted=5, instruments_skipped=0)
     )
     monkeypatch.setattr(scheduler, "refresh_filings", refresh_filings_mock)
 
-    return sec_fil_cls, refresh_filings_mock, refresh_fund_mock
+    return sec_fil_cls, refresh_filings_mock
 
 
 def test_flag_false_calls_sec_refresh_filings(monkeypatch) -> None:
@@ -84,10 +75,9 @@ def test_flag_false_calls_sec_refresh_filings(monkeypatch) -> None:
     stub_settings.sec_user_agent = "test"
     stub_settings.companies_house_api_key = None
     stub_settings.enable_filings_fetch_dedupe = False
-    stub_settings.enable_sec_fundamentals_dedupe = False
     monkeypatch.setattr(scheduler, "settings", stub_settings)
 
-    sec_fil_cls, refresh_filings_mock, _ = _base_mocks(monkeypatch)
+    sec_fil_cls, refresh_filings_mock = _base_mocks(monkeypatch)
 
     scheduler.daily_research_refresh()
 
@@ -105,10 +95,9 @@ def test_flag_true_skips_sec_refresh_filings(monkeypatch) -> None:
     stub_settings.sec_user_agent = "test"
     stub_settings.companies_house_api_key = None
     stub_settings.enable_filings_fetch_dedupe = True
-    stub_settings.enable_sec_fundamentals_dedupe = False
     monkeypatch.setattr(scheduler, "settings", stub_settings)
 
-    sec_fil_cls, refresh_filings_mock, _ = _base_mocks(monkeypatch)
+    sec_fil_cls, refresh_filings_mock = _base_mocks(monkeypatch)
 
     scheduler.daily_research_refresh()
 
@@ -128,10 +117,9 @@ def test_flag_true_leaves_ch_filings_path_available(monkeypatch) -> None:
     stub_settings.sec_user_agent = "test"
     stub_settings.companies_house_api_key = "ch-key"
     stub_settings.enable_filings_fetch_dedupe = True
-    stub_settings.enable_sec_fundamentals_dedupe = False
     monkeypatch.setattr(scheduler, "settings", stub_settings)
 
-    sec_fil_cls, refresh_filings_mock, _ = _base_mocks(monkeypatch)
+    sec_fil_cls, refresh_filings_mock = _base_mocks(monkeypatch)
 
     # CH provider stub.
     ch_cm = MagicMock()
@@ -145,94 +133,3 @@ def test_flag_true_leaves_ch_filings_path_available(monkeypatch) -> None:
     sec_fil_cls.assert_not_called()
     ch_calls = [c for c in refresh_filings_mock.call_args_list if c.kwargs.get("provider_name") == "companies_house"]
     assert len(ch_calls) == 1
-
-
-# ---------------------------------------------------------------------------
-# enable_sec_fundamentals_dedupe (#414) — SEC XBRL fundamentals block
-# ---------------------------------------------------------------------------
-
-
-def test_sec_fundamentals_flag_false_calls_refresh_fundamentals(monkeypatch) -> None:
-    """Default behaviour — ``enable_sec_fundamentals_dedupe=False``,
-    daily_research_refresh runs the SEC XBRL ``refresh_fundamentals``
-    block as before. This is the pre-#414 path until the operator flips
-    the flag."""
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test"
-    stub_settings.companies_house_api_key = None
-    stub_settings.enable_filings_fetch_dedupe = True  # irrelevant to this test
-    stub_settings.enable_sec_fundamentals_dedupe = False
-    monkeypatch.setattr(scheduler, "settings", stub_settings)
-
-    _, _, refresh_fund_mock = _base_mocks(monkeypatch)
-
-    scheduler.daily_research_refresh()
-
-    # refresh_fundamentals fires once for the SEC-fundamentals block.
-    # FMP was retired in #532; no fallback path remains.
-    assert refresh_fund_mock.call_count == 1
-
-
-def test_sec_fundamentals_flag_true_skips_refresh_fundamentals(monkeypatch) -> None:
-    """#414 behaviour — flag on, SEC XBRL ``refresh_fundamentals`` block
-    skipped. ``fundamentals_sync`` phase 1b is now the single path that
-    hits ``data.sec.gov/api/xbrl/companyfacts/…``. Companies House
-    filings path is unaffected."""
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test"
-    stub_settings.companies_house_api_key = None
-    stub_settings.enable_filings_fetch_dedupe = True
-    stub_settings.enable_sec_fundamentals_dedupe = True
-    monkeypatch.setattr(scheduler, "settings", stub_settings)
-
-    _, _, refresh_fund_mock = _base_mocks(monkeypatch)
-
-    scheduler.daily_research_refresh()
-
-    # No SEC XBRL path means refresh_fundamentals is never called.
-    # FMP was retired in #532 — no fallback path remains.
-    refresh_fund_mock.assert_not_called()
-
-
-def test_cik_lookup_query_filters_to_primary_cik(monkeypatch) -> None:
-    """#540 producer-side cohort guard: the symbol→CIK lookup MUST
-    filter on ``ei.is_primary = TRUE`` so the SEC fundamentals
-    refresh runs against the same cohort the freshness reader
-    expects (``app/services/sync_orchestrator/freshness.py::
-    fundamentals_is_fresh``). Regressing this filter would let a
-    demoted historical CIK feed the refresh against the wrong
-    issuer while the freshness reader silently reports the
-    instrument as missing — issuer-mix corruption.
-    """
-    stub_settings = MagicMock()
-    stub_settings.database_url = "postgresql://test"
-    stub_settings.sec_user_agent = "test"
-    stub_settings.companies_house_api_key = None
-    stub_settings.enable_filings_fetch_dedupe = False
-    stub_settings.enable_sec_fundamentals_dedupe = False
-    monkeypatch.setattr(scheduler, "settings", stub_settings)
-
-    _base_mocks(monkeypatch)
-
-    scheduler.daily_research_refresh()
-
-    # ``scheduler.connect_job`` is monkeypatched with a MagicMock at the
-    # top of this test (via _base_mocks), but pyright sees the real
-    # function signature; cast through Any. ``connect_job()`` is
-    # keyword-only and takes no URL argument (it resolves
-    # ``app.config.settings.database_url`` internally) — unlike the old
-    # ``psycopg.connect(url)`` call this replaced, so there is no URL to
-    # sanity-check here.
-    connect_mock: Any = scheduler.connect_job
-    fake_conn = connect_mock.return_value.__enter__.return_value
-    # Content filter rather than positional index: a future refactor
-    # that inserts another conn.execute() earlier in the flow would
-    # otherwise silently assert on the wrong query (#639 WARNING).
-    cik_query_calls = [c for c in fake_conn.execute.call_args_list if c.args and "external_identifiers" in c.args[0]]
-    assert len(cik_query_calls) == 1, f"expected exactly one cik-lookup execute, got {len(cik_query_calls)}"
-    cik_query = cik_query_calls[0].args[0]
-    assert "ei.provider = 'sec'" in cik_query
-    assert "ei.identifier_type = 'cik'" in cik_query
-    assert "ei.is_primary = TRUE" in cik_query

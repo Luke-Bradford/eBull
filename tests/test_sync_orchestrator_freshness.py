@@ -265,20 +265,18 @@ class TestCandlesIsFresh:
 
 
 class TestFundamentalsIsFresh:
-    def test_stale_when_audit_fresh_but_instrument_missing_quarter_snapshot(
-        self,
-    ) -> None:
+    def test_stale_when_audit_fresh_but_writethrough_gap(self) -> None:
         now = datetime.now(UTC)
         conn = _mock_conn_with_rows(
             [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (5,)]
         )
         fresh, detail = fundamentals_is_fresh(conn)
         assert fresh is False
-        # #540: scoped to SEC-CIK only — non-US / crypto / commodity
-        # instruments cannot have a fundamentals_snapshot row today.
-        assert "5 SEC-CIK tradable instruments lack fundamentals snapshot" in detail
+        # #2008: consistency gate — instruments with normalized quarter
+        # periods but no snapshot rows mean the write-through broke.
+        assert "5 instruments have normalized quarter periods" in detail
 
-    def test_fresh_when_all_have_quarter_snapshot(self) -> None:
+    def test_fresh_when_writethrough_consistent(self) -> None:
         now = datetime.now(UTC)
         conn = _mock_conn_with_rows(
             [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (0,)]
@@ -286,29 +284,39 @@ class TestFundamentalsIsFresh:
         fresh, _ = fundamentals_is_fresh(conn)
         assert fresh is True
 
-    def test_query_filters_to_sec_cik_cohort(self) -> None:
-        # #540: pin the SEC-CIK JOIN so a future refactor cannot
-        # silently widen the cohort back to "every tradable
-        # instrument" and re-introduce noise on non-SEC instruments.
+    def test_query_shape_consistency_not_calendar(self) -> None:
+        # #2008: pin the consistency shape — the gate must compare
+        # normalized periods against snapshot presence and must NOT
+        # regress to the calendar-quarter as_of window (structurally
+        # unsatisfiable: as_of is a fiscal period end, red for ~6 weeks
+        # after every calendar quarter boundary), nor re-widen to the
+        # SEC-CIK cohort (names without any facts would alarm forever).
         now = datetime.now(UTC)
         conn = _mock_conn_with_rows(
             [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (0,)]
         )
         fundamentals_is_fresh(conn)
-        # Content filter rather than positional index — a future
-        # refactor inserting another conn.execute() before the
-        # snapshot query would otherwise silently assert on the
-        # wrong call (#639 WARNING).
-        snapshot_query_calls = [
-            c for c in conn.execute.call_args_list if c.args and "external_identifiers" in c.args[0]
-        ]
-        assert len(snapshot_query_calls) == 1, (
-            f"expected exactly one snapshot-cohort execute, got {len(snapshot_query_calls)}"
+        gap_query_calls = [c for c in conn.execute.call_args_list if c.args and "financial_periods" in c.args[0]]
+        assert len(gap_query_calls) == 1, f"expected exactly one consistency-gap execute, got {len(gap_query_calls)}"
+        gap_query = gap_query_calls[0].args[0]
+        assert "normalization_status = 'normalized'" in gap_query
+        assert "fundamentals_snapshot" in gap_query
+        assert "as_of_date >=" not in gap_query
+        assert "external_identifiers" not in gap_query
+
+    def test_audit_probe_aligned_with_refresh_adapter_job(self) -> None:
+        # Liveness audit stays on daily_research_refresh — the job the
+        # fundamentals-layer refresh adapter dispatches. Audit-job and
+        # refresh-job must stay aligned so a stale layer can clear its own
+        # liveness (Codex ckpt-2). Snapshot correctness rides the separate
+        # content probe, not this row.
+        now = datetime.now(UTC)
+        conn = _mock_conn_with_rows(
+            [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (0,)]
         )
-        snapshot_query = snapshot_query_calls[0].args[0]
-        assert "ei.provider = 'sec'" in snapshot_query
-        assert "ei.identifier_type = 'cik'" in snapshot_query
-        assert "ei.is_primary = TRUE" in snapshot_query
+        fundamentals_is_fresh(conn)
+        audit_call = conn.execute.call_args_list[0]
+        assert audit_call.args[1] == ("daily_research_refresh",)
 
 
 class TestScoringIsFresh:

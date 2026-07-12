@@ -98,11 +98,6 @@ def _format_age(delta: timedelta) -> str:
     return f"{minutes}m"
 
 
-def _current_quarter_start(today: date) -> date:
-    quarter = (today.month - 1) // 3
-    return date(today.year, quarter * 3 + 1, 1)
-
-
 # ---------------------------------------------------------------------------
 # Per-layer predicates
 # ---------------------------------------------------------------------------
@@ -152,51 +147,52 @@ def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
 
 
 def fundamentals_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    # Liveness audit stays on ``daily_research_refresh`` — the job the
+    # ``fundamentals`` DataLayer's refresh adapter dispatches
+    # (sync_orchestrator/adapters.py::refresh_fundamentals). Audit-job and
+    # refresh-job MUST stay aligned: if the orchestrator marks the layer
+    # stale it re-runs daily_research_refresh, which must be able to clear
+    # the liveness signal (Codex ckpt-2). The snapshot data itself is
+    # produced by the scheduled fundamentals_sync → daily_financial_facts
+    # write-through, and its correctness is checked by the content probe
+    # below (not by this liveness row) — same producer/consumer split as
+    # before #2008 (the snapshot was already made by fundamentals_sync
+    # phase-1b under the default dedupe flag, not by the layer refresh).
     audit_fresh, audit_detail = _fresh_by_audit(conn, "daily_research_refresh", timedelta(hours=24))
     if not audit_fresh:
         return False, audit_detail
-    # Content check: every SEC-CIK-mapped tradable instrument must
-    # have a fundamentals_snapshot row with as_of_date in the
-    # current quarter. #540: scoped to SEC-CIK only — non-US /
-    # crypto / commodity instruments have no public-source
-    # fundamentals path today and would otherwise alarm
-    # indefinitely (cosmetic noise on the operator dashboard).
-    #
-    # Cohort alignment with the producer: this reader scopes to
-    # ``is_primary = TRUE`` CIKs, and the SEC fundamentals producer
-    # in ``app/workers/scheduler.py::daily_research_refresh`` was
-    # tightened in this PR (#540) to filter on the same predicate.
-    # Either side regressing back to "every sec/cik row" would
-    # re-introduce silent issuer-mix corruption on instruments with
-    # demoted historical CIKs — the SQL-shape regression tests in
-    # ``tests/test_sync_orchestrator_freshness.py`` and
-    # ``tests/services/sync_orchestrator/test_content_predicates.py``
-    # pin both sides.
-    quarter_start = _current_quarter_start(date.today())
+    # Content check (#2008): pipeline CONSISTENCY, not filing cadence —
+    # every instrument with normalized quarter rows must have snapshot
+    # rows (the write-through guarantees it; missing > 0 means the
+    # write-through broke). The previous "as_of_date in the current
+    # calendar quarter" rule was structurally unsatisfiable: as_of is a
+    # fiscal period end, so for up to ~6 weeks after every calendar
+    # quarter boundary (Rule 13a-13 10-Q deadlines: 40-45d) NO issuer
+    # can have a row in the current quarter — measured red on the FULL
+    # population (5,349/5,349 "missing", 2026-07-12). Per-instrument
+    # filing-cadence staleness is coverage's job, not this gate's.
     row = conn.execute(
         """
         SELECT COUNT(*) AS missing
-        FROM instruments i
-        JOIN external_identifiers ei
-            ON ei.instrument_id = i.instrument_id
-           AND ei.provider = 'sec'
-           AND ei.identifier_type = 'cik'
-           AND ei.is_primary = TRUE
-        WHERE i.is_tradable = TRUE
-          AND NOT EXISTS (
-              SELECT 1 FROM fundamentals_snapshot fs
-              WHERE fs.instrument_id = i.instrument_id
-                AND fs.as_of_date >= %s
-          )
+        FROM (
+            SELECT DISTINCT fp.instrument_id
+            FROM financial_periods fp
+            WHERE fp.period_type IN ('Q1','Q2','Q3','Q4')
+              AND fp.superseded_at IS NULL
+              AND fp.normalization_status = 'normalized'
+        ) src
+        WHERE NOT EXISTS (
+            SELECT 1 FROM fundamentals_snapshot fs
+            WHERE fs.instrument_id = src.instrument_id
+        )
         """,
-        (quarter_start,),
     ).fetchone()
     missing = row[0] if row else 0
     if missing > 0:
         return (
             False,
-            f"{missing} SEC-CIK tradable instruments lack fundamentals snapshot "
-            f"for quarter starting {quarter_start.isoformat()}",
+            f"{missing} instruments have normalized quarter periods but no "
+            f"fundamentals_snapshot rows (write-through gap)",
         )
     return True, audit_detail
 

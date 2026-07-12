@@ -15,7 +15,7 @@ Data layers monitored:
   - universe   — instruments.last_seen_at
   - prices     — price_daily.price_date
   - quotes     — quotes.quoted_at
-  - fundamentals — fundamentals_snapshot.as_of_date
+  - fundamentals — financial_periods_raw.fetched_at (#2008)
   - filings    — filing_events.created_at
   - news       — news_events.created_at
   - theses     — theses.created_at
@@ -114,7 +114,11 @@ _LAYER_QUERIES: dict[LayerName, str] = {
     "universe": "SELECT MAX(last_seen_at) AS latest FROM instruments",
     "prices": "SELECT MAX(price_date)::timestamptz AS latest FROM price_daily",
     "quotes": "SELECT MAX(quoted_at) AS latest FROM quotes",
-    "fundamentals": "SELECT MAX(as_of_date)::timestamptz AS latest FROM fundamentals_snapshot",
+    # #2008: probe the ingest layer, not fundamentals_snapshot.as_of_date —
+    # as_of is a fiscal period end (always days-to-weeks behind wall clock,
+    # structurally >3d "stale"). financial_periods_raw.fetched_at advances
+    # on every daily normalize of touched CIKs = honest pipeline liveness.
+    "fundamentals": "SELECT MAX(fetched_at) AS latest FROM financial_periods_raw",
     "filings": "SELECT MAX(created_at) AS latest FROM filing_events",
     "news": "SELECT MAX(created_at) AS latest FROM news_events",
     "theses": "SELECT MAX(created_at) AS latest FROM theses",
