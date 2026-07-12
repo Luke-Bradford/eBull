@@ -85,6 +85,7 @@ from app.workers.scheduler import (
     JOB_ETORO_LOOKUPS_REFRESH,
     JOB_EXCHANGES_METADATA_REFRESH,
     JOB_EXECUTE_APPROVED_ORDERS,
+    JOB_FAIR_VALUE_BAND_REFRESH,
     JOB_FINANCIAL_FACTS_RETENTION_SWEEP,
     JOB_FUNDAMENTALS_SYNC,
     JOB_FX_HISTORY_BACKFILL,
@@ -142,6 +143,7 @@ from app.workers.scheduler import (
     etoro_lookups_refresh,
     exchanges_metadata_refresh,
     execute_approved_orders,
+    fair_value_band_refresh,
     financial_facts_retention_sweep,
     fundamentals_sync,
     fx_history_backfill_job,
@@ -310,6 +312,12 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # double-fire). Source-lock "risk_metrics" in MANUAL_TRIGGER_JOB_SOURCES;
     # empty params in MANUAL_TRIGGER_JOB_METADATA.
     JOB_RISK_METRICS_REFRESH: _adapt_zero_arg(risk_metrics_refresh),
+    # #2009 — fair-value band recompute. Orchestrator-driven (DAG layer
+    # "fair_value_band") + manual-trigger-only; NOT in SCHEDULED_JOBS (the
+    # layer's 24h cadence/freshness gate the DAG walk — a scheduled row would
+    # double-fire). Source-lock "fair_value_band" in MANUAL_TRIGGER_JOB_SOURCES;
+    # empty params in MANUAL_TRIGGER_JOB_METADATA.
+    JOB_FAIR_VALUE_BAND_REFRESH: _adapt_zero_arg(fair_value_band_refresh),
     JOB_ATTRIBUTION_SUMMARY: _adapt_zero_arg(attribution_summary_job),
     JOB_SEED_COST_MODELS: _adapt_zero_arg(seed_cost_models),
     JOB_WEEKLY_REPORT: _adapt_zero_arg(weekly_report),

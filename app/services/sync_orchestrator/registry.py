@@ -17,6 +17,7 @@ import psycopg
 from app.services.sync_orchestrator.adapters import (
     refresh_candles,
     refresh_cost_models,
+    refresh_fair_value_band,
     refresh_fundamentals,
     refresh_fx_rates,
     refresh_monthly_reports,
@@ -33,6 +34,7 @@ from app.services.sync_orchestrator.content_predicates import (
 from app.services.sync_orchestrator.freshness import (
     candles_is_fresh,
     cost_models_is_fresh,
+    fair_value_band_is_fresh,
     fundamentals_is_fresh,
     fx_rates_is_fresh,
     monthly_reports_is_fresh,
@@ -99,6 +101,12 @@ INIT_CHECKS: dict[str, str] = {
     # pre-flight gate raises if a named dep has no INIT_CHECKS entry, so the
     # candles initialization predicate must exist (#591 / Codex ckpt-1 HIGH).
     "candles": "SELECT EXISTS (SELECT 1 FROM price_daily)",
+    # fair_value_band declares ``requires_layer_initialized=("candles",
+    # "fundamentals")`` — the pre-flight gate raises on a named dep with no
+    # INIT_CHECKS entry (#591 / #2009), so the fundamentals initialization
+    # predicate must exist. ``fundamentals_snapshot`` is the strict-TTM
+    # write-through source (#2008) the band reads via financial_periods_ttm.
+    "fundamentals": "SELECT EXISTS (SELECT 1 FROM fundamentals_snapshot)",
 }
 
 
@@ -148,6 +156,22 @@ LAYERS: dict[str, DataLayer] = {
         refresh=refresh_scoring_and_recommendations,
         dependencies=("candles", "fundamentals"),
         plain_language_sla="Refreshed every morning pre-market.",
+    ),
+    "fair_value_band": DataLayer(
+        name="fair_value_band",
+        display_name="Fair-Value Bands",
+        tier=3,
+        cadence=Cadence(interval=timedelta(hours=24)),
+        is_fresh=fair_value_band_is_fresh,
+        refresh=refresh_fair_value_band,
+        dependencies=("candles", "fundamentals"),
+        # Stricter than per-tick ``dependencies``: the band reads
+        # price_daily (candles) + financial_periods_ttm (fundamentals
+        # snapshot) — INIT_CHECKS gate keeps it off a fresh install until
+        # both tables have content, so a first-morning run statuses absence
+        # (#1632) rather than computing on empty inputs.
+        requires_layer_initialized=("candles", "fundamentals"),
+        plain_language_sla="Refreshed every morning after fundamentals + candles.",
     ),
     "recommendations": DataLayer(
         name="recommendations",
@@ -264,6 +288,7 @@ JOB_TO_LAYERS: dict[str, tuple[str, ...]] = {
     "monthly_report": ("monthly_reports",),
     "fx_rates_refresh": ("fx_rates",),
     "risk_metrics_refresh": ("risk_metrics",),
+    "fair_value_band_refresh": ("fair_value_band",),
     # Outside-DAG (6 entries, empty tuples):
     "execute_approved_orders": (),
     "fundamentals_sync": (),

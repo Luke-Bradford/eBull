@@ -310,6 +310,27 @@ def refresh_risk_metrics(
     )
 
 
+def refresh_fair_value_band(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    # #2009 — full-universe deterministic fair-value band recompute (pass-1
+    # cohort materialize + pass-2 per-name synthesis). Mirrors
+    # refresh_risk_metrics: the legacy_fn (fair_value_band_refresh) runs
+    # refresh_fair_value_band_batch(conn, instrument_ids=None) under its own
+    # _tracked_job telemetry; _wrap_single adds the JobLock + outcome read.
+    from app.workers.scheduler import fair_value_band_refresh
+
+    return _wrap_single(
+        job_name="fair_value_band_refresh",
+        layer_name="fair_value_band",
+        legacy_fn=fair_value_band_refresh,
+        progress=progress,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Composite adapters (spec §2.3.1)
 # ---------------------------------------------------------------------------

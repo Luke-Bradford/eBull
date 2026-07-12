@@ -344,6 +344,10 @@ JOB_FX_HISTORY_BACKFILL = "fx_history_backfill"
 # SCHEDULED_JOBS (the layer's own weekly cadence + freshness gate the DAG
 # walk; a ScheduledJob row would double-fire alongside the orchestrator).
 JOB_RISK_METRICS_REFRESH = "risk_metrics_refresh"
+# #2009 — deterministic fair-value band recompute. Same orchestrator-driven +
+# manual-trigger-only shape as JOB_RISK_METRICS_REFRESH (NOT in SCHEDULED_JOBS;
+# the DAG layer's 24h cadence + freshness gate the walk).
+JOB_FAIR_VALUE_BAND_REFRESH = "fair_value_band_refresh"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 # JOB_WEEKLY_COVERAGE_AUDIT + JOB_WEEKLY_COVERAGE_REVIEW retired in Chunk 2 of
@@ -4361,6 +4365,31 @@ def risk_metrics_refresh() -> None:
     with _tracked_job(JOB_RISK_METRICS_REFRESH) as tracker:
         with connect_job() as conn:
             tracker.row_count = compute_and_store_risk_metrics(conn)
+
+
+def fair_value_band_refresh() -> None:
+    """Recompute + persist the deterministic fair-value band for the full
+    universe (#2009).
+
+    DB-only producer (no external I/O): resolves the single price-anchored
+    as-of date, materializes the SIC cohort percentiles (pass-1), then
+    per-instrument synthesises + write-throughs the two-layer
+    ``fair_value_band_observations`` / ``fair_value_band_current`` band.
+    Orchestrator-driven via the ``fair_value_band`` DAG layer (24h cadence,
+    depends on candles + fundamentals) and operator-triggerable via the
+    ``fair_value_band`` manual lane. Mirrors ``risk_metrics_refresh``'s
+    ``_tracked_job`` + own-connection + ``tracker.row_count`` shape.
+
+    ``row_count`` counts every persisted row (real bands + statused-absent
+    rows, #1632) so a universe that computes only absence rows still reports
+    SUCCESS (work done), not NO_WORK.
+    """
+    from app.services.fair_value_band import refresh_fair_value_band_batch
+
+    with _tracked_job(JOB_FAIR_VALUE_BAND_REFRESH) as tracker:
+        with connect_job() as conn:
+            result = refresh_fair_value_band_batch(conn, instrument_ids=None)
+            tracker.row_count = result["written"] + result["statused"]
 
 
 def exchanges_metadata_refresh() -> None:

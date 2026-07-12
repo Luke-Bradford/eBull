@@ -22,6 +22,9 @@ class TestLayerRegistry:
             "fx_rates",
             "cost_models",
             "risk_metrics",
+            # fair_value_band added #2009 (deterministic fair-value band DAG
+            # layer, tier 3, depends on candles + fundamentals).
+            "fair_value_band",
             "weekly_reports",
             "monthly_reports",
         }

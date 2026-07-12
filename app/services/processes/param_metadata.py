@@ -236,6 +236,12 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # metadata + invoker) so the manual API validator accepts a zero-param
     # trigger.
     "risk_metrics_refresh": (),
+    # fair_value_band_refresh — #2009 deterministic fair-value band recompute.
+    # No operator-tunable params (multiples set + calibration constants are
+    # fixed by the service). Empty tuple completes the manual-only triangle
+    # (source + metadata + invoker) so the manual API validator accepts a
+    # zero-param trigger.
+    "fair_value_band_refresh": (),
     # filing_events_skip_tier_cleanup — one-shot retroactive delete
     # (#1013). No operator-tunable params: ``batch_size`` is an
     # implementation knob (§6.5.7 item 2), kept internal. The explicit
