@@ -131,22 +131,33 @@ class OwnPct:
 
 
 def synth_multiple(peer: PeerPct, own: OwnPct) -> tuple[float, float, float] | None:
-    """§4.5 blend base, outer-envelope low/high; degrade to the surviving one."""
-    peer_ok = peer.p25 is not None and peer.p50 is not None and peer.p75 is not None
-    own_ok = own.p20 is not None and own.p50 is not None and own.p80 is not None
-    if peer_ok and own_ok:
-        assert peer.p25 is not None and peer.p50 is not None and peer.p75 is not None
-        assert own.p20 is not None and own.p50 is not None and own.p80 is not None
-        base = (peer.p50 + own.p50) / 2
-        low = min(peer.p25, own.p20)
-        high = max(peer.p75, own.p80)
+    """§4.5 blend base, outer-envelope low/high; degrade to the surviving one.
+
+    -O-safe: enforces the all-or-none partial-triple invariant with explicit
+    ``is not None`` guards (NOT bare ``assert``, which is stripped under
+    ``python -O``). A partial some-None triple falls through to the degraded
+    single-comparator / None path rather than crashing, and the local tuple
+    bindings narrow the members to ``float`` for pyright without asserts.
+    """
+    peer_full = (
+        (peer.p25, peer.p50, peer.p75)
+        if peer.p25 is not None and peer.p50 is not None and peer.p75 is not None
+        else None
+    )
+    own_full = (
+        (own.p20, own.p50, own.p80) if own.p20 is not None and own.p50 is not None and own.p80 is not None else None
+    )
+    if peer_full is not None and own_full is not None:
+        p25, p50, p75 = peer_full
+        o20, o50, o80 = own_full
+        base = (p50 + o50) / 2
+        low = min(p25, o20)
+        high = max(p75, o80)
         return (low, base, high)
-    if peer_ok:
-        assert peer.p25 is not None and peer.p50 is not None and peer.p75 is not None
-        return (peer.p25, peer.p50, peer.p75)
-    if own_ok:
-        assert own.p20 is not None and own.p50 is not None and own.p80 is not None
-        return (own.p20, own.p50, own.p80)
+    if peer_full is not None:
+        return peer_full
+    if own_full is not None:
+        return own_full
     return None
 
 
@@ -176,13 +187,20 @@ def to_per_share(
 
 
 def combine_across(triples: list[tuple[float, float, float]]) -> tuple[float, float, float]:
-    """§4.5 median-of-bases + outer envelope. Asserts bear <= base <= bull."""
+    """§4.5 median-of-bases + outer envelope.
+
+    Fail-closed on a band-order violation via an explicit ``raise ValueError``
+    (NOT ``assert`` — stripped under ``python -O``, and AssertionError is outside
+    the batch's per-row except clause). §4.5: an order violation must status to an
+    absence, not crash the run; the batch handler catches this ValueError.
+    """
     if not triples:
         raise ValueError("combine_across requires at least one triple")
     bear = min(t[0] for t in triples)
     base = median([t[1] for t in triples])
     bull = max(t[2] for t in triples)
-    assert bear <= base <= bull, f"band order violated: {bear} {base} {bull}"
+    if not (bear <= base <= bull):
+        raise ValueError(f"band order violated: bear={bear} base={base} bull={bull}")
     return (bear, base, bull)
 
 
@@ -683,19 +701,31 @@ _TARGET_PRICE_SQL = """
 """
 
 
-def _own_series(conn: psycopg.Connection[Any], instrument_id: int, as_of_date: _dt.date) -> dict[str, list[float]]:
+def _own_series(
+    conn: psycopg.Connection[Any], instrument_id: int, as_of_date: _dt.date
+) -> tuple[dict[str, list[float]], int]:
     """§4.4 own trailing multiples per quarter. book_value is PER SHARE and eps is
     TTM diluted (#2008 write-through, verified above), so P/E=close/eps,
-    P/B=close/book_value, P/S=close*shares/revenue."""
+    P/B=close/book_value, P/S=close*shares/revenue.
+
+    Returns (multiples_by_bucket, own_capped_total) — the second element is the
+    count of quarters dropped by the sanity cap, surfaced into basis so a name
+    whose own_points fell below MIN_OWN_POINTS via capping is auditable (review
+    NITPICK)."""
     out: dict[str, list[float]] = {"pe": [], "ps": [], "pb": []}
+    capped = 0
 
     def _push(bucket: str, value: float) -> None:
         # F2(a): cap symmetric to the pass-1 materialize WHERE
         # (0 < mult_value < _MAX_SANE_MULTIPLE). A tiny-positive eps/book_value
         # quarter must not push own p80 to a huge/inf multiple -> garbage band +
-        # numeric(18,6) overflow on write-through.
+        # numeric(18,6) overflow on write-through. Callers only pass value > 0,
+        # so a drop always means the cap fired -> count it for the audit trail.
+        nonlocal capped
         if 0.0 < value < _MAX_SANE_MULTIPLE:
             out[bucket].append(value)
+        elif value >= _MAX_SANE_MULTIPLE:
+            capped += 1
 
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_OWN_HISTORY_SQL, {"iid": instrument_id, "as_of": as_of_date})
@@ -714,7 +744,7 @@ def _own_series(conn: psycopg.Connection[Any], instrument_id: int, as_of_date: _
         bv = _f(r["book_value"])
         if bv is not None and bv > 0:
             _push("pb", close / bv)
-    return out
+    return out, capped
 
 
 def _stamp(result: BandResult, ttm_end: _dt.date | None, price_as_of: _dt.date | None) -> BandResult:
@@ -778,7 +808,7 @@ def compute_band_for_instrument(conn: psycopg.Connection[Any], instrument_id: in
         reason = "multiclass_unavailable" if target_basis == "multiclass_unavailable" else "no_multiple"
         return _stamp(_absent(t, reason), ttm_end, price_as_of)
 
-    own_all = _own_series(conn, instrument_id, as_of_date)
+    own_all, own_capped_total = _own_series(conn, instrument_id, as_of_date)
     own_by_multiple: dict[str, OwnPct] = {}
     own_points_by_multiple: dict[str, int] = {}
     peer_by_multiple: dict[str, PeerPct] = {}
@@ -800,6 +830,9 @@ def compute_band_for_instrument(conn: psycopg.Connection[Any], instrument_id: in
         cohort_meta=cohort_meta,
         sic_level=sic_level,
     )
+    # Surface own-history quarters dropped by the sanity cap so a name whose
+    # own_points fell below MIN_OWN_POINTS via capping is auditable (review NITPICK).
+    result.basis["own_capped_total"] = own_capped_total
     return _stamp(result, ttm_end, price_as_of)
 
 
@@ -918,14 +951,22 @@ def refresh_fair_value_band_batch(conn: psycopg.Connection[Any], instrument_ids:
                 written += 1
             else:
                 statused += 1
-        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn, psycopg.errors.DataError:
+        except (
+            psycopg.errors.UndefinedTable,
+            psycopg.errors.UndefinedColumn,
+            psycopg.errors.DataError,
+            ValueError,
+        ):
             # F2(b): UndefinedTable/UndefinedColumn guard a mid-migration window.
             # DataError (NumericValueOutOfRange is a subclass) is the targeted
             # backstop so one tiny-denominator multiple that overflows
             # numeric(18,6) skips that instrument instead of aborting the whole
-            # universe run. The `with conn.transaction()` above already rolled
-            # back this name's savepoint. NOT bare Exception — a genuine
-            # programming bug must still surface.
+            # universe run. ValueError isolates the pure compute path's
+            # fail-closed signals (combine_across band-order violation,
+            # to_per_share unavailable metric, percentiles empty) to this ONE row.
+            # The `with conn.transaction()` above already rolled back this name's
+            # savepoint. NOT bare Exception — a genuine programming bug must still
+            # surface.
             failed += 1
             continue
     return {"written": written, "statused": statused, "failed": failed}

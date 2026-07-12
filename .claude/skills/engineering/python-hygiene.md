@@ -88,6 +88,8 @@ if some_required_value is None:
 ```
 `assert` is for developer assumptions and can be optimized away; production invariants must remain enforced.
 
+**Batch loops must catch every per-row raise (#2019).** A per-row loop that advertises "one bad row never aborts the batch" (per-row savepoint + `except`) must list EVERY exception type its per-row compute path can raise — not just DB error classes. A pure-layer invariant guard that `raise ValueError(...)` (or asserts) will otherwise escape the handler and abort the whole run. Grep the entire per-row call path for `raise`/`assert` and confirm each type is in the `except` tuple; include `ValueError`/domain exceptions alongside the DB classes. Do NOT broaden to bare `except Exception` — a genuine bug (TypeError/AttributeError) must still surface loud. Self-review prompt: "for every reachable `raise`/`assert`, is its type in my `except`?"
+
 ## Sequential evaluation loops with shared resource limits
 
 Any loop evaluating candidates against a shared constraint (position count, sector cap, cash) must maintain a mutable accumulator updated after each approval:
