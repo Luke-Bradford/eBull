@@ -76,3 +76,31 @@ def select_multiples(t: TargetInputs) -> list[str]:
         selected = [m for m in selected if m == "pe"]
 
     return [m for m in selected if _computable(t, m)]
+
+
+def percentiles(values: list[float], ps: tuple[float, ...]) -> list[float]:
+    """Continuous percentiles matching Postgres percentile_cont.
+
+    For sorted v[0..n-1] and fraction p: rank = p*(n-1); interpolate linearly
+    between v[floor(rank)] and v[ceil(rank)].
+    """
+    if not values:
+        raise ValueError("percentiles requires a non-empty list")
+    s = sorted(values)
+    n = len(s)
+    out: list[float] = []
+    for p in ps:
+        if n == 1:
+            out.append(s[0])
+            continue
+        rank = p * (n - 1)
+        lo = int(rank)
+        hi = min(lo + 1, n - 1)
+        frac = rank - lo
+        out.append(s[lo] + (s[hi] - s[lo]) * frac)
+    return out
+
+
+def currency_coherent(reported: str | None, instrument: str | None) -> bool:
+    """Fail-closed: require reported_currency == instrument currency (§4.1)."""
+    return reported is not None and instrument is not None and reported == instrument

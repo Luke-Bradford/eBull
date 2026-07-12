@@ -1,6 +1,6 @@
 from typing import Any
 
-from app.services.fair_value_band import TargetInputs, select_multiples
+from app.services.fair_value_band import TargetInputs, currency_coherent, percentiles, select_multiples
 
 
 def _t(**kw: Any) -> TargetInputs:
@@ -54,3 +54,23 @@ def test_eligibility_gate_drops_multiple_with_nonpositive_denominator():
     # profitable but eps not positive -> pe dropped, ps kept
     t = _t(net_income_ttm=500.0, eps_diluted_ttm=0.0, revenue_ttm=9_000.0)
     assert select_multiples(t) == ["ps"]
+
+
+def test_percentiles_match_postgres_continuous():
+    # percentile_cont semantics: linear interpolation between closest ranks.
+    vals = [10.0, 20.0, 30.0, 40.0]
+    assert percentiles(vals, (0.25, 0.5, 0.75)) == [17.5, 25.0, 32.5]
+
+
+def test_percentiles_single_value():
+    assert percentiles([42.0], (0.2, 0.5, 0.8)) == [42.0, 42.0, 42.0]
+
+
+def test_percentiles_zero_variance():
+    assert percentiles([5.0, 5.0, 5.0], (0.25, 0.5, 0.75)) == [5.0, 5.0, 5.0]
+
+
+def test_currency_coherent():
+    assert currency_coherent("USD", "USD") is True
+    assert currency_coherent("EUR", "USD") is False
+    assert currency_coherent(None, "USD") is False
