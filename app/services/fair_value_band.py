@@ -10,8 +10,10 @@ Spec: docs/proposals/valuation/2026-07-12-deterministic-fair-value-band.md
 
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass
 from statistics import median
+from typing import Any, LiteralString
 
 METHOD_VERSION = "fvb_v1"
 MIN_PEERS = 8
@@ -314,3 +316,566 @@ def compute_band(
         )
     )
     return BandResult(bear, base, bull, quality, "ok", t.target_basis, len(selected), basis)
+
+
+# ---------------------------------------------------------------------------
+# --- IO wrapper (DB) ---
+# ---------------------------------------------------------------------------
+#
+# Resolves MarketCapResolution + curated-oracle membership + strict-TTM rows
+# into plain values, runs the two-pass compute (pass-1 materialize cohort
+# members universe-wide at ONE as-of date; pass-2 per-name pure synthesis),
+# and write-throughs into the two-layer observations/current pair.
+#
+# SQL correctness anchors (grepped 2026-07-12, not from memory):
+#   * resolve_market_cap_basis  — app/services/xbrl_derived_stats.py:538
+#   * _apply_market_cap_basis pattern — app/services/scoring.py:353
+#   * peer_comparison._rank_peers — app/services/peer_comparison.py:178
+#   * dual-class oracle CTE — sql/201_instrument_valuation_dual_class_suppress.sql:46-56
+#   * financial_periods_ttm VIEW — sql/220_ttm_strict_flow_sums.sql
+#   * fundamentals_snapshot columns — sql/001_init.sql:29-44
+#
+# #2008 (bb03f62e) column semantics — VERIFIED at code time against the
+# write-through in app/services/fundamentals/__init__.py:159-182 AND spec §4.4:
+#   * fundamentals_snapshot.eps       = SUM(eps_diluted) over 4 adjacent quarters
+#                                       => TTM diluted EPS, PER SHARE.
+#   * fundamentals_snapshot.book_value = shareholders_equity / shares_outstanding
+#                                       => book value PER SHARE.
+# Hence own P/E = close / eps ; own P/B = close / book_value (book_value already
+# per-share) ; own P/S = close * shares_outstanding / revenue_ttm. These mirror
+# sql/201's legacy CTE (pe_ratio = price/eps, pb_ratio = price/book_value) and
+# the cohort-member P/S = price*shares/revenue so target and cohort share one
+# multiple definition.
+
+import psycopg  # noqa: E402
+from psycopg.rows import dict_row  # noqa: E402
+from psycopg.types.json import Jsonb  # noqa: E402
+
+from app.services.peer_comparison import _rank_peers  # noqa: E402
+from app.services.xbrl_derived_stats import resolve_market_cap_basis  # noqa: E402
+
+
+def _f(x: object) -> float | None:
+    """Decimal/None -> float/None (psycopg returns numeric as Decimal)."""
+    if x is None:
+        return None
+    try:
+        return float(x)  # type: ignore[arg-type]
+    except TypeError, ValueError:
+        return None
+
+
+def resolve_batch_as_of_date(conn: psycopg.Connection[Any]) -> _dt.date | None:
+    """Newest closed market session — the single data-anchored as-of DATE for the
+    whole batch (§4.6: NOT now()::date). Every price read below is relative to it.
+    None when price_daily is empty (nothing to compute)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(price_date) FROM price_daily WHERE close IS NOT NULL AND close > 0")
+        row = cur.fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
+# Pass-1: materialize the cohort-member working set for ONE as-of date. ONE
+# parameterized statement (no f-string/format of identifiers or values — global
+# CLAUDE.md non-negotiable). The dual_class CTE is copied verbatim from
+# sql/201:46-56 (Codex ckpt-1 HIGH #2): the provider/identifier_type/is_primary
+# predicate lives on external_identifiers, joined to
+# instrument_class_shares_outstanding on source_cik = lpad(cik,10,'0').
+_MATERIALIZE_SQL = """
+INSERT INTO fair_value_cohort_members
+    (as_of_date, instrument_id, multiple, mult_value, sic, sic3, sic2,
+     total_assets, close_date, dual_class_suppressed)
+WITH asof_price AS (
+    SELECT DISTINCT ON (pd.instrument_id)
+           pd.instrument_id,
+           pd.close      AS close,
+           pd.price_date AS close_date
+    FROM price_daily pd
+    WHERE pd.price_date <= %(as_of)s
+      AND NULLIF(GREATEST(pd.close, 0), 0) IS NOT NULL
+    ORDER BY pd.instrument_id, pd.price_date DESC
+),
+dual_class AS (
+    -- verbatim from sql/201:46-56
+    SELECT DISTINCT ei.instrument_id
+    FROM external_identifiers ei
+    JOIN instrument_class_shares_outstanding c
+      ON c.source_cik = lpad(ei.identifier_value, 10, '0')
+    WHERE ei.provider = 'sec'
+      AND ei.identifier_type = 'cik'
+      AND ei.is_primary = TRUE
+),
+base AS (
+    SELECT
+        ap.instrument_id,
+        ap.close,
+        ap.close_date,
+        sp.sic,
+        sp.sic3,
+        sp.sic2,
+        ttm.total_assets,
+        ttm.eps_diluted_ttm,
+        ttm.revenue_ttm,
+        ttm.shareholders_equity,
+        ttm.shares_outstanding,
+        (dc.instrument_id IS NOT NULL) AS dual_class_suppressed
+    FROM asof_price ap
+    JOIN financial_periods_ttm ttm
+      ON ttm.instrument_id = ap.instrument_id AND ttm.is_complete_ttm = TRUE
+    JOIN instrument_sec_profile sp
+      ON sp.instrument_id = ap.instrument_id
+    LEFT JOIN dual_class dc
+      ON dc.instrument_id = ap.instrument_id
+),
+per_multiple AS (
+    SELECT instrument_id, 'pe'::text AS multiple,
+           (close / eps_diluted_ttm) AS mult_value,
+           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
+    FROM base WHERE eps_diluted_ttm > 0
+    UNION ALL
+    -- P/S = price*shares/revenue (mirrors sql/201 price_sales); target conversion
+    -- mult*(revenue/shares) recovers price => one shared multiple definition.
+    SELECT instrument_id, 'ps'::text,
+           ((close * shares_outstanding) / revenue_ttm),
+           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
+    FROM base WHERE revenue_ttm > 0 AND shares_outstanding > 0
+    UNION ALL
+    -- P/B = price*shares/equity (mirrors sql/201 pb_ratio = price/(equity/shares)).
+    SELECT instrument_id, 'pb'::text,
+           ((close * shares_outstanding) / shareholders_equity),
+           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
+    FROM base WHERE shareholders_equity > 0 AND shares_outstanding > 0
+)
+SELECT %(as_of)s, instrument_id, multiple, mult_value, sic, sic3, sic2,
+       total_assets, close_date, dual_class_suppressed
+FROM per_multiple
+WHERE mult_value > 0
+"""
+
+
+def materialize_cohort_members(conn: psycopg.Connection[Any], as_of_date: _dt.date) -> None:
+    """Pass-1 (§4.3): one row per (instrument_id, multiple) over the eligible
+    universe, each name's multiple from its close AS OF the batch date (nearest
+    at-or-before, NOT its own latest close). DELETE-then-INSERT for the as_of_date
+    (idempotent re-run). Does the expensive price-as-of join ONCE for every name."""
+    conn.execute(
+        "DELETE FROM fair_value_cohort_members WHERE as_of_date = %(as_of)s",
+        {"as_of": as_of_date},
+    )
+    conn.execute(_MATERIALIZE_SQL, {"as_of": as_of_date})
+
+
+# Pass-2 member read — three fully-static SQL strings keyed by SIC ladder level
+# (the column name is from a frozen 3-element whitelist, never interpolated from
+# input). keep_dual = TRUE for P/E (dual-class members keep their P/E, #1662);
+# FALSE for P/S & P/B (curated-oracle members drop out of those medians).
+_MEMBER_SQL: dict[int, LiteralString] = {
+    4: """
+        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed
+        FROM fair_value_cohort_members
+        WHERE as_of_date = %(as_of)s AND multiple = %(m)s AND sic = %(prefix)s
+          AND instrument_id <> %(target)s
+          AND (%(keep_dual)s OR NOT dual_class_suppressed)
+        """,
+    3: """
+        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed
+        FROM fair_value_cohort_members
+        WHERE as_of_date = %(as_of)s AND multiple = %(m)s AND sic3 = %(prefix)s
+          AND instrument_id <> %(target)s
+          AND (%(keep_dual)s OR NOT dual_class_suppressed)
+        """,
+    2: """
+        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed
+        FROM fair_value_cohort_members
+        WHERE as_of_date = %(as_of)s AND multiple = %(m)s AND sic2 = %(prefix)s
+          AND instrument_id <> %(target)s
+          AND (%(keep_dual)s OR NOT dual_class_suppressed)
+        """,
+}
+
+
+def _sic_prefix(sic: str | None, level: int) -> str | None:
+    if not sic:
+        return None
+    return sic[:level]
+
+
+def peer_pct_for(
+    conn: psycopg.Connection[Any],
+    target_id: int,
+    target_sic: str | None,
+    target_total_assets: float | None,
+    multiple: str,
+    as_of_date: _dt.date,
+) -> tuple[PeerPct, dict]:
+    """Pass-2 comparator (a) (§4.3): read the member set for ``multiple`` at
+    ``as_of_date``; walk SIC-4->3->2 to the first prefix with >= MIN_PEERS FRESH
+    eligible members; size-refine to nearest PEER_LIMIT by
+    |ln(total_assets) - ln(target_total_assets)| (reusing peer_comparison._rank_peers);
+    percentiles(mults, (0.25,0.5,0.75)) in PURE Python (the SAME percentiles() as
+    own-history -> guaranteed agreement).
+
+    INVARIANT (A4 review): never returns a partial some-None triple — percentiles()
+    yields all three, and the MIN_PEERS-unmet path returns PeerPct(None,None,None).
+    Returns (PeerPct, {"cohort_n","excluded_stale_n","sic_level"})."""
+    keep_dual = multiple == "pe"
+    cutoff = as_of_date - _dt.timedelta(days=PEER_STALE_DAYS)
+    fallback_meta = {"cohort_n": 0, "excluded_stale_n": 0, "sic_level": 0}
+
+    for level in (4, 3, 2):
+        prefix = _sic_prefix(target_sic, level)
+        if prefix is None:
+            continue
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _MEMBER_SQL[level],
+                {
+                    "as_of": as_of_date,
+                    "m": multiple,
+                    "prefix": prefix,
+                    "target": target_id,
+                    "keep_dual": keep_dual,
+                },
+            )
+            rows = cur.fetchall()
+        if not rows:
+            continue
+        fresh = [r for r in rows if r["close_date"] >= cutoff]
+        excluded_stale_n = len(rows) - len(fresh)
+        # Widest cohort we saw, in case no level clears MIN_PEERS.
+        fallback_meta = {
+            "cohort_n": len(rows),
+            "excluded_stale_n": excluded_stale_n,
+            "sic_level": 0,
+        }
+        if len(fresh) < MIN_PEERS:
+            continue
+
+        mult_by_id: dict[int, float] = {}
+        for r in fresh:
+            v = _f(r["mult_value"])
+            if v is not None and v > 0:
+                mult_by_id[int(r["instrument_id"])] = v
+
+        chosen: list[float]
+        if target_total_assets and target_total_assets > 0 and len(mult_by_id) > PEER_LIMIT:
+            rank_rows = [
+                {
+                    "instrument_id": int(r["instrument_id"]),
+                    "total_assets": _f(r["total_assets"]),
+                    "symbol": "",
+                    "company_name": None,
+                }
+                for r in fresh
+                if int(r["instrument_id"]) in mult_by_id
+            ]
+            ranked = _rank_peers(
+                rank_rows,
+                self_id=target_id,
+                self_total_assets=float(target_total_assets),
+                limit=PEER_LIMIT,
+            )
+            chosen = [mult_by_id[pr.instrument_id] for pr in ranked if pr.instrument_id in mult_by_id]
+            if not chosen:  # every fresh member lacked a positive total_assets
+                chosen = list(mult_by_id.values())
+        else:
+            chosen = list(mult_by_id.values())
+
+        if not chosen:
+            return PeerPct(None, None, None), {
+                "cohort_n": len(rows),
+                "excluded_stale_n": excluded_stale_n,
+                "sic_level": 0,
+            }
+        p25, p50, p75 = percentiles(chosen, (0.25, 0.5, 0.75))
+        return PeerPct(p25=p25, p50=p50, p75=p75), {
+            "cohort_n": len(rows),
+            "excluded_stale_n": excluded_stale_n,
+            "sic_level": level,
+        }
+
+    return PeerPct(None, None, None), fallback_meta
+
+
+# Target inputs: strict-TTM denominators + SIC + reporting/instrument currency.
+_TARGET_SQL = """
+    SELECT
+        ttm.eps_diluted_ttm,
+        ttm.revenue_ttm,
+        ttm.shareholders_equity,
+        ttm.net_income_ttm,
+        ttm.shares_outstanding,
+        ttm.reported_currency,
+        ttm.total_assets,
+        ttm.ttm_end,
+        sp.sic          AS sic,
+        i.currency      AS instrument_currency
+    FROM instruments i
+    LEFT JOIN financial_periods_ttm ttm
+      ON ttm.instrument_id = i.instrument_id AND ttm.is_complete_ttm = TRUE
+    LEFT JOIN instrument_sec_profile sp
+      ON sp.instrument_id = i.instrument_id
+    WHERE i.instrument_id = %(iid)s
+"""
+
+# Own trailing history (§4.4): one fundamentals_snapshot row per historical
+# quarter (as_of_date = period_end) x price_daily.close NEAREST-AT-OR-BEFORE that
+# quarter (price_date <= as_of_date — a post-quarter price is lookahead bias),
+# windowed to <= the batch as-of date.
+_OWN_HISTORY_SQL = """
+    SELECT fs.as_of_date, fs.eps, fs.book_value, fs.revenue_ttm, fs.shares_outstanding,
+           pj.close AS close
+    FROM fundamentals_snapshot fs
+    LEFT JOIN LATERAL (
+        SELECT pd.close
+        FROM price_daily pd
+        WHERE pd.instrument_id = fs.instrument_id
+          AND pd.price_date <= fs.as_of_date
+          AND NULLIF(GREATEST(pd.close, 0), 0) IS NOT NULL
+        ORDER BY pd.price_date DESC
+        LIMIT 1
+    ) pj ON TRUE
+    WHERE fs.instrument_id = %(iid)s
+      AND fs.as_of_date <= %(as_of)s
+    ORDER BY fs.as_of_date
+"""
+
+# Target's latest close at-or-before the batch as-of date (freshness gate + the
+# per-share own-history anchor share this one date policy).
+_TARGET_PRICE_SQL = """
+    SELECT pd.close, pd.price_date
+    FROM price_daily pd
+    WHERE pd.instrument_id = %(iid)s
+      AND pd.price_date <= %(as_of)s
+      AND NULLIF(GREATEST(pd.close, 0), 0) IS NOT NULL
+    ORDER BY pd.price_date DESC
+    LIMIT 1
+"""
+
+
+def _own_series(conn: psycopg.Connection[Any], instrument_id: int, as_of_date: _dt.date) -> dict[str, list[float]]:
+    """§4.4 own trailing multiples per quarter. book_value is PER SHARE and eps is
+    TTM diluted (#2008 write-through, verified above), so P/E=close/eps,
+    P/B=close/book_value, P/S=close*shares/revenue."""
+    out: dict[str, list[float]] = {"pe": [], "ps": [], "pb": []}
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_OWN_HISTORY_SQL, {"iid": instrument_id, "as_of": as_of_date})
+        rows = cur.fetchall()
+    for r in rows:
+        close = _f(r["close"])
+        if close is None or close <= 0:
+            continue
+        eps = _f(r["eps"])
+        if eps is not None and eps > 0:
+            out["pe"].append(close / eps)
+        rev = _f(r["revenue_ttm"])
+        sh = _f(r["shares_outstanding"])
+        if rev is not None and rev > 0 and sh is not None and sh > 0:
+            out["ps"].append(close * sh / rev)
+        bv = _f(r["book_value"])
+        if bv is not None and bv > 0:
+            out["pb"].append(close / bv)
+    return out
+
+
+def _stamp(result: BandResult, ttm_end: _dt.date | None, price_as_of: _dt.date | None) -> BandResult:
+    """Carry ttm_end/price_as_of on the result's basis dict so the batch
+    orchestrator can hand them to write_band (basis is a mutable dict on a frozen
+    dataclass — mutating its contents is allowed)."""
+    result.basis["ttm_end"] = ttm_end.isoformat() if ttm_end else None
+    result.basis["price_as_of"] = price_as_of.isoformat() if price_as_of else None
+    return result
+
+
+def compute_band_for_instrument(conn: psycopg.Connection[Any], instrument_id: int, as_of_date: _dt.date) -> BandResult:
+    """Pass-2 orchestration (§4): resolve basis, gather target inputs, apply the
+    currency + freshness gates, build own-history + peer comparators for the
+    selected multiples, call the pure compute_band. Does NOT write. ttm_end and
+    price_as_of are stamped onto the returned BandResult.basis for write_band."""
+    resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id)
+    target_basis = resolution.basis
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_TARGET_SQL, {"iid": instrument_id})
+        trow = cur.fetchone()
+    if trow is None:
+        # Unknown instrument_id — statused absence with the resolved basis.
+        return _stamp(BandResult(None, None, None, None, "no_multiple", target_basis, 0, {}), None, None)
+
+    ttm_end = trow["ttm_end"]
+    reported_currency = trow["reported_currency"]
+    instrument_currency = trow["instrument_currency"]
+    target_sic = trow["sic"]
+    target_total_assets = _f(trow["total_assets"])
+
+    t = TargetInputs(
+        eps_diluted_ttm=_f(trow["eps_diluted_ttm"]),
+        revenue_ttm=_f(trow["revenue_ttm"]),
+        shareholders_equity=_f(trow["shareholders_equity"]),
+        net_income_ttm=_f(trow["net_income_ttm"]),
+        shares_outstanding=_f(trow["shares_outstanding"]),
+        sic=target_sic,
+        reported_currency=reported_currency,
+        instrument_currency=instrument_currency,
+        target_basis=target_basis,
+    )
+
+    # Currency gate (§4.1) — only when the name actually has a reporting currency
+    # (a no-fundamentals name has reported_currency NULL; that is a no_multiple /
+    # stale_price case, not a currency mismatch).
+    if reported_currency is not None and not currency_coherent(reported_currency, instrument_currency):
+        return _stamp(_absent(t, "currency_mismatch"), ttm_end, None)
+
+    # Freshness gate (§4.6) — do not publish a band anchored on a stale target.
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_TARGET_PRICE_SQL, {"iid": instrument_id, "as_of": as_of_date})
+        prow = cur.fetchone()
+    price_as_of = prow["price_date"] if prow else None
+    if price_as_of is None or (as_of_date - price_as_of).days > PRICE_STALE_DAYS:
+        return _stamp(_absent(t, "stale_price"), ttm_end, price_as_of)
+
+    selected = select_multiples(t)
+    if not selected:
+        reason = "multiclass_unavailable" if target_basis == "multiclass_unavailable" else "no_multiple"
+        return _stamp(_absent(t, reason), ttm_end, price_as_of)
+
+    own_all = _own_series(conn, instrument_id, as_of_date)
+    own_by_multiple: dict[str, OwnPct] = {}
+    own_points_by_multiple: dict[str, int] = {}
+    peer_by_multiple: dict[str, PeerPct] = {}
+    cohort_meta: dict[str, dict] = {}
+    sic_level = 0
+    for m in selected:
+        own_by_multiple[m] = own_range(own_all[m])
+        own_points_by_multiple[m] = len(own_all[m])
+        peer, meta = peer_pct_for(conn, instrument_id, target_sic, target_total_assets, m, as_of_date)
+        peer_by_multiple[m] = peer
+        cohort_meta[m] = meta
+        sic_level = max(sic_level, int(meta.get("sic_level", 0)))
+
+    result = compute_band(
+        t,
+        peer_by_multiple=peer_by_multiple,
+        own_by_multiple=own_by_multiple,
+        own_points_by_multiple=own_points_by_multiple,
+        cohort_meta=cohort_meta,
+        sic_level=sic_level,
+    )
+    return _stamp(result, ttm_end, price_as_of)
+
+
+_OBS_INSERT_SQL = """
+    INSERT INTO fair_value_band_observations
+        (instrument_id, method_version, computed_at, as_of_date, ttm_end, price_as_of,
+         bear_value, base_value, bull_value, quality_status, reason, target_basis,
+         n_selected, basis_json)
+    VALUES
+        (%(iid)s, %(mv)s, %(now)s, %(as_of)s, %(ttm_end)s, %(price_as_of)s,
+         %(bear)s, %(base)s, %(bull)s, %(quality)s, %(reason)s, %(basis)s,
+         %(n)s, %(basis_json)s)
+"""
+
+_CURRENT_UPSERT_SQL = """
+    INSERT INTO fair_value_band_current
+        (instrument_id, method_version, computed_at, as_of_date, ttm_end, price_as_of,
+         bear_value, base_value, bull_value, quality_status, reason, target_basis,
+         n_selected, basis_json)
+    VALUES
+        (%(iid)s, %(mv)s, %(now)s, %(as_of)s, %(ttm_end)s, %(price_as_of)s,
+         %(bear)s, %(base)s, %(bull)s, %(quality)s, %(reason)s, %(basis)s,
+         %(n)s, %(basis_json)s)
+    ON CONFLICT (instrument_id, method_version) DO UPDATE SET
+        computed_at    = EXCLUDED.computed_at,
+        as_of_date     = EXCLUDED.as_of_date,
+        ttm_end        = EXCLUDED.ttm_end,
+        price_as_of    = EXCLUDED.price_as_of,
+        bear_value     = EXCLUDED.bear_value,
+        base_value     = EXCLUDED.base_value,
+        bull_value     = EXCLUDED.bull_value,
+        quality_status = EXCLUDED.quality_status,
+        reason         = EXCLUDED.reason,
+        target_basis   = EXCLUDED.target_basis,
+        n_selected     = EXCLUDED.n_selected,
+        basis_json     = EXCLUDED.basis_json
+"""
+
+
+def write_band(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    band: BandResult,
+    as_of_date: _dt.date,
+    ttm_end: _dt.date | None,
+    price_as_of: _dt.date | None,
+) -> None:
+    """Write-through (§5, #1632): APPEND an observation (the audit record — past
+    bands are not reconstructable from mutable price_daily) then upsert the
+    current row. Absence writes NULL band + reason + the resolved target_basis."""
+    params = {
+        "iid": instrument_id,
+        "mv": METHOD_VERSION,
+        "now": _dt.datetime.now(tz=_dt.UTC),
+        "as_of": as_of_date,
+        "ttm_end": ttm_end,
+        "price_as_of": price_as_of,
+        "bear": band.bear,
+        "base": band.base,
+        "bull": band.bull,
+        "quality": band.quality_status,
+        "reason": band.reason,
+        "basis": band.target_basis,
+        "n": band.n_selected,
+        "basis_json": Jsonb(band.basis),
+    }
+    conn.execute(_OBS_INSERT_SQL, params)
+    conn.execute(_CURRENT_UPSERT_SQL, params)
+
+
+def _universe_ids(conn: psycopg.Connection[Any]) -> list[int]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT instrument_id FROM instruments WHERE is_tradable = TRUE ORDER BY instrument_id")
+        return [int(r[0]) for r in cur.fetchall()]
+
+
+def refresh_fair_value_band_batch(conn: psycopg.Connection[Any], instrument_ids: list[int] | None) -> dict:
+    """Orchestration: resolve the single as-of date; on a full/bootstrap run
+    (instrument_ids is None) run pass-1 materialize once, then per-instrument
+    pass-2 + write-through under a SAVEPOINT (one bad row never aborts the batch —
+    catches missing-table/column during a mid-migration window). A single-name
+    cascade run (instrument_ids given) reads the existing member set.
+
+    Returns {"written","statused","failed"}: written = real band (reason 'ok'),
+    statused = persisted absence row, failed = per-row exception (rolled back)."""
+    as_of = resolve_batch_as_of_date(conn)
+    if as_of is None:
+        return {"written": 0, "statused": 0, "failed": 0}
+
+    if instrument_ids is None:
+        with conn.transaction():
+            materialize_cohort_members(conn, as_of)
+        ids = _universe_ids(conn)
+    else:
+        ids = instrument_ids
+
+    written = statused = failed = 0
+    for iid in ids:
+        try:
+            with conn.transaction():
+                band = compute_band_for_instrument(conn, iid, as_of)
+                ttm_end = _parse_iso(band.basis.get("ttm_end"))
+                price_as_of = _parse_iso(band.basis.get("price_as_of"))
+                write_band(conn, iid, band, as_of, ttm_end, price_as_of)
+            if band.reason == "ok":
+                written += 1
+            else:
+                statused += 1
+        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+            failed += 1
+            continue
+    return {"written": written, "statused": statused, "failed": failed}
+
+
+def _parse_iso(v: object) -> _dt.date | None:
+    if not isinstance(v, str):
+        return None
+    return _dt.date.fromisoformat(v)
