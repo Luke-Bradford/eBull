@@ -8,6 +8,7 @@ from app.services.fair_value_band import (
     TargetInputs,
     band_quality_status,
     combine_across,
+    compute_band,
     currency_coherent,
     filter_dual_class,
     own_range,
@@ -197,3 +198,75 @@ def test_quality_low_thin_and_stale():
         cross_multiple_spread=0.0,
     )
     assert band_quality_status(q) == "low"
+
+
+def _aapl() -> TargetInputs:
+    return TargetInputs(
+        eps_diluted_ttm=8.26,
+        revenue_ttm=None,
+        shareholders_equity=None,
+        net_income_ttm=100_000.0,
+        shares_outstanding=15_000.0,
+        sic="3571",
+        reported_currency="USD",
+        instrument_currency="USD",
+        target_basis="not_multiclass",
+    )
+
+
+def test_golden_aapl_pe_band():
+    # §3 worked fixture: own trailing P/E p20/p50/p80 = 31.2/34.5/36.9, peer absent.
+    # Band = 31.2*8.26 / 34.5*8.26 / 36.9*8.26 ~= 257.7 / 285.0 / 304.8.
+    res = compute_band(
+        _aapl(),
+        peer_by_multiple={"pe": PeerPct(None, None, None)},
+        own_by_multiple={"pe": OwnPct(p20=31.2, p50=34.5, p80=36.9)},
+        own_points_by_multiple={"pe": 7},
+        cohort_meta={"pe": {"cohort_n": 0, "excluded_stale_n": 0}},
+        sic_level=4,
+    )
+    assert res.reason == "ok"
+    assert res.target_basis == "not_multiclass"
+    assert res.base is not None and res.bear is not None and res.bull is not None
+    assert round(res.base, 1) == 285.0
+    assert round(res.bear, 1) == 257.7
+    assert round(res.bull, 1) == 304.8
+
+
+def test_compute_band_no_multiple_statused():
+    t = TargetInputs(
+        eps_diluted_ttm=0.0,
+        revenue_ttm=0.0,
+        shareholders_equity=0.0,
+        net_income_ttm=None,
+        shares_outstanding=1000.0,
+        sic="3571",
+        reported_currency="USD",
+        instrument_currency="USD",
+        target_basis="not_multiclass",
+    )
+    res = compute_band(
+        t,
+        peer_by_multiple={},
+        own_by_multiple={},
+        own_points_by_multiple={},
+        cohort_meta={},
+        sic_level=4,
+    )
+    assert res.reason == "no_multiple"
+    assert res.base is None
+    assert res.target_basis == "not_multiclass"
+
+
+def test_compute_band_thin_cohort_when_all_comparators_absent():
+    t = _aapl()
+    res = compute_band(
+        t,
+        peer_by_multiple={"pe": PeerPct(None, None, None)},
+        own_by_multiple={"pe": OwnPct(None, None, None)},
+        own_points_by_multiple={"pe": 0},
+        cohort_meta={"pe": {"cohort_n": 3, "excluded_stale_n": 0}},
+        sic_level=4,
+    )
+    assert res.reason == "thin_cohort"
+    assert res.base is None

@@ -217,3 +217,100 @@ def band_quality_status(q: QualityInputs) -> str:
     if score >= 4:
         return "medium"
     return "low"
+
+
+@dataclass(frozen=True)
+class BandResult:
+    bear: float | None
+    base: float | None
+    bull: float | None
+    quality_status: str | None
+    reason: str
+    target_basis: str
+    n_selected: int
+    basis: dict
+
+
+def _absent(t: TargetInputs, reason: str, n_selected: int = 0, basis: dict | None = None) -> BandResult:
+    return BandResult(None, None, None, None, reason, t.target_basis, n_selected, basis or {})
+
+
+def compute_band(
+    t: TargetInputs,
+    *,
+    peer_by_multiple: dict[str, PeerPct],
+    own_by_multiple: dict[str, OwnPct],
+    own_points_by_multiple: dict[str, int],
+    cohort_meta: dict[str, dict],
+    sic_level: int,
+) -> BandResult:
+    """Pure orchestration. Returns statused-absent BandResult, never raises for
+    the normal no-band paths. Currency + basis gates are applied by the caller
+    (IO wrapper) — this fn assumes t already passed currency_coherent.
+
+    Quality uses the TRUE own_points (per-multiple distinct-quarter counts the IO
+    computed) and the TRUE excluded_stale_n from cohort_meta — no proxy (Codex
+    ckpt-1 HIGH #4). band_quality_status is the single source of the tiering rule."""
+    selected = select_multiples(t)
+    if not selected:
+        return _absent(t, "no_multiple")
+
+    per_share_triples: list[tuple[float, float, float]] = []
+    basis: dict = {"selected": selected, "multiples": {}}
+    max_sides = 0
+    max_excluded_stale_n = 0
+    max_cohort_n = 0
+    contributing_own_points = 0
+    for m in selected:
+        peer = peer_by_multiple.get(m, PeerPct(None, None, None))
+        own = own_by_multiple.get(m, OwnPct(None, None, None))
+        synth = synth_multiple(peer, own)
+        if synth is None:
+            continue
+        low_mult, base_mult, high_mult = synth
+        triple = to_per_share(
+            m,
+            low_mult,
+            base_mult,
+            high_mult,
+            eps=t.eps_diluted_ttm,
+            revenue=t.revenue_ttm,
+            shareholders_equity=t.shareholders_equity,
+            shares=t.shares_outstanding,
+        )
+        per_share_triples.append(triple)
+        sides = (1 if peer.p50 is not None else 0) + (1 if own.p50 is not None else 0)
+        max_sides = max(max_sides, sides)
+        meta = cohort_meta.get(m, {})
+        cn, esn = meta.get("cohort_n", 0), meta.get("excluded_stale_n", 0)
+        max_cohort_n = max(max_cohort_n, cn)
+        max_excluded_stale_n = max(max_excluded_stale_n, esn)
+        if own.p50 is not None:
+            contributing_own_points = max(contributing_own_points, own_points_by_multiple.get(m, 0))
+        basis["multiples"][m] = {
+            "peer": {"p25": peer.p25, "p50": peer.p50, "p75": peer.p75},
+            "own": {"p20": own.p20, "p50": own.p50, "p80": own.p80},
+            "base_value": triple[1],
+            "cohort_n": cn,
+            "excluded_stale_n": esn,
+            "own_points": own_points_by_multiple.get(m, 0),
+        }
+
+    if not per_share_triples:
+        return _absent(t, "thin_cohort", n_selected=len(selected), basis=basis)
+
+    bear, base, bull = combine_across(per_share_triples)
+    bases = [tr[1] for tr in per_share_triples]
+    spread = ((max(bases) - min(bases)) / base) if base and len(bases) > 1 else 0.0
+    quality = band_quality_status(
+        QualityInputs(
+            n_selected=len(selected),
+            n_comparator_sides=max_sides,
+            own_points=contributing_own_points,
+            cohort_n=max_cohort_n,
+            excluded_stale_n=max_excluded_stale_n,
+            sic_level=sic_level,
+            cross_multiple_spread=spread,
+        )
+    )
+    return BandResult(bear, base, bull, quality, "ok", t.target_basis, len(selected), basis)
