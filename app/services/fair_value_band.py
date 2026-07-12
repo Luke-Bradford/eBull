@@ -606,12 +606,17 @@ def peer_pct_for(
         else:
             chosen = list(mult_by_id.values())
 
-        if not chosen:
-            return PeerPct(None, None, None), {
-                "cohort_n": len(rows),
-                "excluded_stale_n": excluded_stale_n,
-                "sic_level": 0,
-            }
+        # F1 (High): _rank_peers DROPS members with missing/non-positive
+        # total_assets, so a level with >= MIN_PEERS FRESH members can still
+        # size-refine to < MIN_PEERS asset-usable peers. Re-check the MIN_PEERS
+        # invariant AFTER size-ranking; if it fails, widen the SIC ladder (same
+        # as the pre-rank fresh check) and go comparator-absent (all-None,
+        # fallback_meta) if no wider level clears it. This also subsumes the
+        # empty-chosen case. Preserves the all-None-or-all-three partial-triple
+        # invariant (percentiles() below always yields all three).
+        if len(chosen) < MIN_PEERS:
+            continue
+
         p25, p50, p75 = percentiles(chosen, (0.25, 0.5, 0.75))
         return PeerPct(p25=p25, p50=p50, p75=p75), {
             "cohort_n": len(rows),
@@ -683,6 +688,15 @@ def _own_series(conn: psycopg.Connection[Any], instrument_id: int, as_of_date: _
     TTM diluted (#2008 write-through, verified above), so P/E=close/eps,
     P/B=close/book_value, P/S=close*shares/revenue."""
     out: dict[str, list[float]] = {"pe": [], "ps": [], "pb": []}
+
+    def _push(bucket: str, value: float) -> None:
+        # F2(a): cap symmetric to the pass-1 materialize WHERE
+        # (0 < mult_value < _MAX_SANE_MULTIPLE). A tiny-positive eps/book_value
+        # quarter must not push own p80 to a huge/inf multiple -> garbage band +
+        # numeric(18,6) overflow on write-through.
+        if 0.0 < value < _MAX_SANE_MULTIPLE:
+            out[bucket].append(value)
+
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_OWN_HISTORY_SQL, {"iid": instrument_id, "as_of": as_of_date})
         rows = cur.fetchall()
@@ -692,14 +706,14 @@ def _own_series(conn: psycopg.Connection[Any], instrument_id: int, as_of_date: _
             continue
         eps = _f(r["eps"])
         if eps is not None and eps > 0:
-            out["pe"].append(close / eps)
+            _push("pe", close / eps)
         rev = _f(r["revenue_ttm"])
         sh = _f(r["shares_outstanding"])
         if rev is not None and rev > 0 and sh is not None and sh > 0:
-            out["ps"].append(close * sh / rev)
+            _push("ps", close * sh / rev)
         bv = _f(r["book_value"])
         if bv is not None and bv > 0:
-            out["pb"].append(close / bv)
+            _push("pb", close / bv)
     return out
 
 
@@ -904,7 +918,14 @@ def refresh_fair_value_band_batch(conn: psycopg.Connection[Any], instrument_ids:
                 written += 1
             else:
                 statused += 1
-        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
+        except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn, psycopg.errors.DataError:
+            # F2(b): UndefinedTable/UndefinedColumn guard a mid-migration window.
+            # DataError (NumericValueOutOfRange is a subclass) is the targeted
+            # backstop so one tiny-denominator multiple that overflows
+            # numeric(18,6) skips that instrument instead of aborting the whole
+            # universe run. The `with conn.transaction()` above already rolled
+            # back this name's savepoint. NOT bare Exception — a genuine
+            # programming bug must still surface.
             failed += 1
             continue
     return {"written": written, "statused": statused, "failed": failed}

@@ -218,8 +218,11 @@ def fair_value_band_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     live method version) rather than a ``job_runs`` audit row — the presence
     of freshly-written band rows IS the freshness signal, and it stays honest
     even if a manual recompute wrote rows outside the orchestrator job path.
-    24h window matches the layer cadence. Age is computed in SQL (now() -
-    computed_at) so it uses the same clock the column was written with.
+    24h window matches the layer cadence. Age is computed in SQL as
+    now() - computed_at; note computed_at is written with the Python client
+    clock (``datetime.now(tz=UTC)`` in ``write_band``), NOT SQL now(), so this
+    compares the DB-server clock against the client write-clock — they are
+    co-located, so the skew is negligible.
     """
     from app.services.fair_value_band import METHOD_VERSION
 

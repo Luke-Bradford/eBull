@@ -57,12 +57,12 @@ def test_none_computable_empty():
 
 
 def test_dual_class_target_intersects_to_pe_only():
-    t = _t(net_income_ttm=500.0, eps_diluted_ttm=2.0, revenue_ttm=9_000.0, target_basis="dual_class_combined")
+    t = _t(net_income_ttm=500.0, eps_diluted_ttm=2.0, revenue_ttm=9_000.0, target_basis="total_company")
     assert select_multiples(t) == ["pe"]
 
 
 def test_dual_class_financial_keeps_pe_drops_pb():
-    t = _t(sic="6021", eps_diluted_ttm=2.0, shareholders_equity=5_000.0, target_basis="dual_class_combined")
+    t = _t(sic="6021", eps_diluted_ttm=2.0, shareholders_equity=5_000.0, target_basis="total_company")
     assert select_multiples(t) == ["pe"]
 
 
