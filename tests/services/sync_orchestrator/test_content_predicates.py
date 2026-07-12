@@ -49,16 +49,17 @@ def test_fundamentals_content_missing_reports_count() -> None:
     assert "5" in detail
 
 
-def test_fundamentals_content_query_filters_to_sec_cik_cohort() -> None:
-    # #540: pin the SEC-CIK JOIN so a future refactor cannot silently
-    # widen the cohort back to "every tradable instrument", which
-    # would re-introduce the cosmetic alarm storm on non-US / crypto
-    # / commodity instruments that have no public fundamentals source.
+def test_fundamentals_content_query_pins_writethrough_consistency() -> None:
+    # #2008: pin the consistency shape — normalized periods vs snapshot
+    # presence. Must NOT regress to the calendar-quarter as_of window
+    # (structurally unsatisfiable — as_of is a fiscal period end) nor to
+    # the SEC-CIK cohort (names with no facts would alarm forever).
     conn = MagicMock()
     conn.execute.return_value.fetchone.return_value = (0,)
     fundamentals_content_ok(conn)
     sql = conn.execute.call_args.args[0]
-    assert "external_identifiers" in sql
-    assert "ei.provider = 'sec'" in sql
-    assert "ei.identifier_type = 'cik'" in sql
-    assert "ei.is_primary = TRUE" in sql
+    assert "financial_periods" in sql
+    assert "normalization_status = 'normalized'" in sql
+    assert "fundamentals_snapshot" in sql
+    assert "as_of_date >=" not in sql
+    assert "external_identifiers" not in sql

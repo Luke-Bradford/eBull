@@ -55,9 +55,6 @@ class TestPackageConversionPreservesImports:
             # Public surface — chosen sample from the 45-import set
             # captured in spec §0.10. If any of these fails to resolve,
             # the package conversion broke the public API contract.
-            "refresh_fundamentals",
-            "refresh_fundamentals_history",
-            "FundamentalsRefreshSummary",
             "refresh_financial_facts",
             "FactsRefreshSummary",
             "normalize_financial_periods",

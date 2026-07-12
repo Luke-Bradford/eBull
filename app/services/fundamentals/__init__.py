@@ -2,7 +2,8 @@
 
 Per the 2026-04-19 research-tool refocus §1.1 (Chunk 4), this module merges:
 
-- fundamentals.py — fundamentals_snapshot upserts (kept as Section 1)
+- fundamentals.py — fundamentals_snapshot (Section 1; since #2008 a
+  write-through derived from ``financial_periods``, not a provider fetch)
 - financial_facts.py — XBRL fact storage + ingestion run tracking (Section 2)
 - financial_normalization.py — period derivation + canonical merge (Section 3)
 - sec_incremental.py — SEC change-driven planner/executor (Section 4)
@@ -27,8 +28,6 @@ import psycopg
 from psycopg import sql as pgsql
 
 from app.providers.fundamentals import (
-    FundamentalsProvider,
-    FundamentalsSnapshot,
     XbrlConceptCatalogEntry,
     XbrlFact,
 )
@@ -67,218 +66,138 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Section 1: Fundamentals snapshot (was fundamentals.py)
+# Section 1: Fundamentals snapshot — write-through from financial_periods
 # ============================================================================
+#
+# #2008: fundamentals_snapshot is DERIVED from the normalized
+# financial_periods rows, one row per quarter anchor with
+# as_of_date = period_end_date (settled-decisions §Fundamentals snapshot
+# semantics). The previous implementation re-selected periods from the raw
+# companyfacts JSON with first-tag-wins / no-dedup / annual-over-quarters
+# rules and rotted across issuer tag migrations (NVDA snapshot = FY2022
+# annual presented as current TTM). Spec:
+# docs/specs/fundamentals/2026-07-12-2008-ttm-reconciliation.md.
+#
+# TTM rules mirror financial_periods_ttm (sql/220) exactly and MUST stay
+# in sync with it and with fcf_yield.py::_QUARTERLY_SQL:
+#   - window = 4 trailing quarter rows, adjacency span <= 330 days;
+#   - statement-core flows (revenue, gross_profit, operating_income,
+#     operating_cf, eps_diluted) are strict: present in all 4 rows or NULL;
+#   - capex is sporadic (absence means "did not occur"): summed over
+#     present members, NULL->0 at FCF composition (settled treatment).
+
+_SNAPSHOT_WRITE_THROUGH_SQL = """
+WITH quarters AS (
+    -- Collapse fiscal-year-rekey duplicates (two period_type rows sharing
+    -- one period_end_date, #1914 class — 133 instruments on dev) to ONE
+    -- row per period_end BEFORE the trailing-4 window. Without this the
+    -- window double-counts that quarter and under-spans the true 4 distinct
+    -- quarters, producing a WRONG TTM instead of the strict NULL intended.
+    -- Latest-filed wins — same tiebreak as the canonical merge + the view.
+    SELECT DISTINCT ON (period_end_date) *
+    FROM financial_periods
+    WHERE instrument_id = %(instrument_id)s
+      AND period_type IN ('Q1','Q2','Q3','Q4')
+      AND superseded_at IS NULL
+      AND normalization_status = 'normalized'
+    ORDER BY period_end_date, filed_date DESC NULLS LAST
+),
+q AS (
+    SELECT
+        period_end_date,
+        filed_date,
+        COUNT(*)                 OVER w AS n_q,
+        MIN(period_end_date)     OVER w AS win_start,
+        SUM(revenue)             OVER w AS revenue_sum,
+        COUNT(revenue)           OVER w AS revenue_cnt,
+        SUM(gross_profit)        OVER w AS gross_profit_sum,
+        COUNT(gross_profit)      OVER w AS gross_profit_cnt,
+        SUM(operating_income)    OVER w AS operating_income_sum,
+        COUNT(operating_income)  OVER w AS operating_income_cnt,
+        SUM(operating_cf)        OVER w AS operating_cf_sum,
+        COUNT(operating_cf)      OVER w AS operating_cf_cnt,
+        SUM(capex)               OVER w AS capex_sum,
+        SUM(eps_diluted)         OVER w AS eps_sum,
+        COUNT(eps_diluted)       OVER w AS eps_cnt,
+        cash,
+        long_term_debt,
+        short_term_debt,
+        shares_outstanding,
+        shareholders_equity
+    FROM quarters
+    WINDOW w AS (ORDER BY period_end_date ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)
+),
+derived AS (
+    SELECT
+        period_end_date,
+        filed_date,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND revenue_cnt = 4
+             THEN revenue_sum END AS revenue_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND gross_profit_cnt = 4
+             THEN gross_profit_sum END AS gross_profit_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND operating_income_cnt = 4
+             THEN operating_income_sum END AS operating_income_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND operating_cf_cnt = 4
+             THEN operating_cf_sum END AS operating_cf_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+             THEN capex_sum END AS capex_ttm,
+        CASE WHEN n_q = 4 AND (period_end_date - win_start) <= 330
+                  AND eps_cnt = 4
+             THEN eps_sum END AS eps_ttm,
+        cash,
+        CASE WHEN long_term_debt IS NOT NULL OR short_term_debt IS NOT NULL
+             THEN COALESCE(long_term_debt, 0) + COALESCE(short_term_debt, 0)
+        END AS debt,
+        shares_outstanding,
+        shareholders_equity
+    FROM q
+)
+INSERT INTO fundamentals_snapshot (
+    instrument_id, as_of_date,
+    revenue_ttm, gross_margin, operating_margin,
+    fcf, cash, debt, net_debt,
+    shares_outstanding, book_value, eps
+)
+-- One row per period_end already (deduped in the ``quarters`` CTE), so
+-- the PK (instrument_id, as_of_date) never collides.
+SELECT
+    %(instrument_id)s,
+    period_end_date,
+    revenue_ttm,
+    CASE WHEN revenue_ttm <> 0 THEN gross_profit_ttm / revenue_ttm END,
+    CASE WHEN revenue_ttm <> 0 THEN operating_income_ttm / revenue_ttm END,
+    CASE WHEN operating_cf_ttm IS NOT NULL
+         THEN operating_cf_ttm - ABS(COALESCE(capex_ttm, 0)) END,
+    cash,
+    debt,
+    CASE WHEN debt IS NOT NULL AND cash IS NOT NULL THEN debt - cash END,
+    shares_outstanding,
+    CASE WHEN shares_outstanding > 0
+         THEN shareholders_equity / shares_outstanding END,
+    eps_ttm
+FROM derived
+"""
 
 
-@dataclass(frozen=True)
-class FundamentalsRefreshSummary:
-    symbols_attempted: int
-    snapshots_upserted: int
-    symbols_skipped: int  # no provider coverage or identifier missing
-
-
-def refresh_fundamentals(
-    provider: FundamentalsProvider,
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    symbols: list[tuple[str, str]],  # [(symbol, instrument_id), ...]
-) -> FundamentalsRefreshSummary:
-    """
-    For each symbol, fetch the latest fundamentals snapshot and upsert it.
-
-    symbols is a list of (symbol, instrument_id) tuples. Providers may
-    use the ticker symbol as their primary identifier or look up the
-    instrument's ``external_identifiers`` row themselves. If the
-    provider returns None for a symbol, that symbol is skipped and
-    counted.
-    """
-    upserted = 0
-    skipped_no_data = 0
-    skipped_provider_error = 0
-    fresh_skipped = 0
-    today = date.today()
-
-    for symbol, instrument_id in symbols:
-        if _fundamentals_are_fresh(conn, instrument_id, today):
-            fresh_skipped += 1
-            continue
-        try:
-            snap = provider.get_latest_snapshot(symbol)
-            if snap is None:
-                # Per-symbol "no data" is a known property of the
-                # universe (non-US issuers, deisted, IPO-recent), not
-                # a transient miss worth one log line per symbol per
-                # refresh tick. Aggregate at the end (#669).
-                skipped_no_data += 1
-                continue
-            _upsert_snapshot(conn, instrument_id, snap)
-            upserted += 1
-        except Exception:
-            logger.warning("Fundamentals: failed to refresh %s, skipping", symbol, exc_info=True)
-            skipped_provider_error += 1
-
-    if fresh_skipped:
-        logger.info(
-            "Fundamentals freshness skip: %d/%d instruments already current-quarter",
-            fresh_skipped,
-            len(symbols),
-        )
-    if skipped_no_data:
-        logger.info(
-            "Fundamentals: %d/%d instruments returned no data from provider",
-            skipped_no_data,
-            len(symbols),
-        )
-
-    return FundamentalsRefreshSummary(
-        symbols_attempted=len(symbols),
-        snapshots_upserted=upserted,
-        symbols_skipped=skipped_no_data + skipped_provider_error,
-    )
-
-
-def refresh_fundamentals_history(
-    provider: FundamentalsProvider,
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    symbols: list[tuple[str, str]],
-    from_date: date,
-    to_date: date,
-    limit: int = 40,
-) -> FundamentalsRefreshSummary:
-    """
-    Backfill historical fundamentals snapshots for each symbol.
-
-    Each snapshot is upserted idempotently. Useful for initial population
-    and for catching up after provider outages.
-    """
-    upserted = 0
-    skipped_no_data = 0
-    skipped_provider_error = 0
-
-    for symbol, instrument_id in symbols:
-        try:
-            snaps = provider.get_snapshot_history(symbol, from_date, to_date, limit=limit)
-            if not snaps:
-                skipped_no_data += 1
-                continue
-            with conn.transaction():
-                for snap in snaps:
-                    _upsert_snapshot(conn, instrument_id, snap)
-            # Count only after the transaction commits successfully
-            upserted += len(snaps)
-        except Exception:
-            logger.warning(
-                "Fundamentals history: failed to refresh %s, skipping",
-                symbol,
-                exc_info=True,
-            )
-            skipped_provider_error += 1
-
-    if skipped_no_data:
-        logger.info(
-            "Fundamentals history: %d/%d instruments returned no data in range",
-            skipped_no_data,
-            len(symbols),
-        )
-
-    return FundamentalsRefreshSummary(
-        symbols_attempted=len(symbols),
-        snapshots_upserted=upserted,
-        symbols_skipped=skipped_no_data + skipped_provider_error,
-    )
-
-
-def _current_quarter_start(today: date) -> date:
-    """Return the first day of the current calendar quarter."""
-    quarter_month = ((today.month - 1) // 3) * 3 + 1
-    return date(today.year, quarter_month, 1)
-
-
-def _fundamentals_are_fresh(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_id: str,
-    today: date,
-) -> bool:
-    """Return True if fundamentals_snapshot has a row with as_of_date in the
-    current calendar quarter.  Fundamentals update quarterly — daily re-fetch
-    for an instrument that already has current-quarter data is pure waste.
-    """
-    quarter_start = _current_quarter_start(today)
-    row = conn.execute(
-        """
-        SELECT 1
-        FROM fundamentals_snapshot
-        WHERE instrument_id = %(instrument_id)s
-          AND as_of_date >= %(quarter_start)s
-        LIMIT 1
-        """,
-        {"instrument_id": instrument_id, "quarter_start": quarter_start},
-    ).fetchone()
-    return row is not None
-
-
-def _upsert_snapshot(
-    conn: psycopg.Connection,  # type: ignore[type-arg]
-    instrument_id: str,
-    snap: FundamentalsSnapshot,
-) -> None:
-    """
-    Upsert a single fundamentals snapshot into fundamentals_snapshot.
-    Idempotent — keyed on (instrument_id, as_of_date).
+def _write_snapshots_from_periods(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+) -> int:
+    """Rewash fundamentals_snapshot for one instrument from its
+    normalized quarter rows (DELETE-then-INSERT, same idempotent
+    pattern as the periods_raw rewash above). Returns rows written.
     """
     conn.execute(
-        """
-        INSERT INTO fundamentals_snapshot (
-            instrument_id, as_of_date,
-            revenue_ttm, gross_margin, operating_margin,
-            fcf, cash, debt, net_debt,
-            shares_outstanding, book_value, eps
-        )
-        VALUES (
-            %(instrument_id)s, %(as_of_date)s,
-            %(revenue_ttm)s, %(gross_margin)s, %(operating_margin)s,
-            %(fcf)s, %(cash)s, %(debt)s, %(net_debt)s,
-            %(shares_outstanding)s, %(book_value)s, %(eps)s
-        )
-        ON CONFLICT (instrument_id, as_of_date) DO UPDATE SET
-            revenue_ttm       = EXCLUDED.revenue_ttm,
-            gross_margin      = EXCLUDED.gross_margin,
-            operating_margin  = EXCLUDED.operating_margin,
-            fcf               = EXCLUDED.fcf,
-            cash              = EXCLUDED.cash,
-            debt              = EXCLUDED.debt,
-            net_debt          = EXCLUDED.net_debt,
-            shares_outstanding = EXCLUDED.shares_outstanding,
-            book_value        = EXCLUDED.book_value,
-            eps               = EXCLUDED.eps
-        WHERE (
-            fundamentals_snapshot.revenue_ttm      IS DISTINCT FROM EXCLUDED.revenue_ttm      OR
-            fundamentals_snapshot.gross_margin     IS DISTINCT FROM EXCLUDED.gross_margin     OR
-            fundamentals_snapshot.operating_margin IS DISTINCT FROM EXCLUDED.operating_margin OR
-            fundamentals_snapshot.fcf              IS DISTINCT FROM EXCLUDED.fcf              OR
-            fundamentals_snapshot.cash             IS DISTINCT FROM EXCLUDED.cash             OR
-            fundamentals_snapshot.debt             IS DISTINCT FROM EXCLUDED.debt             OR
-            fundamentals_snapshot.net_debt         IS DISTINCT FROM EXCLUDED.net_debt         OR
-            fundamentals_snapshot.shares_outstanding IS DISTINCT FROM EXCLUDED.shares_outstanding OR
-            fundamentals_snapshot.book_value       IS DISTINCT FROM EXCLUDED.book_value       OR
-            fundamentals_snapshot.eps              IS DISTINCT FROM EXCLUDED.eps
-        )
-        """,
-        {
-            "instrument_id": instrument_id,
-            "as_of_date": snap.as_of_date,
-            "revenue_ttm": snap.revenue_ttm,
-            "gross_margin": snap.gross_margin,
-            "operating_margin": snap.operating_margin,
-            "fcf": snap.fcf,
-            "cash": snap.cash,
-            "debt": snap.debt,
-            "net_debt": snap.net_debt,
-            "shares_outstanding": snap.shares_outstanding,
-            "book_value": snap.book_value,
-            "eps": snap.eps,
-        },
+        "DELETE FROM fundamentals_snapshot WHERE instrument_id = %(instrument_id)s",
+        {"instrument_id": instrument_id},
     )
+    cur = conn.execute(_SNAPSHOT_WRITE_THROUGH_SQL, {"instrument_id": instrument_id})
+    return cur.rowcount
 
 
 # ============================================================================
@@ -1849,11 +1768,17 @@ def normalize_financial_periods(
                 # then refreshes ownership_treasury_current once.
                 _record_treasury_observations_for_instrument(conn, instrument_id=iid)
 
+                # Step 6: fundamentals_snapshot write-through (#2008).
+                # Same rewash discipline as steps 3-4: the snapshot is
+                # derived state; re-normalization replaces it wholesale.
+                snapshot_count = _write_snapshots_from_periods(conn, instrument_id=iid)
+
                 logger.info(
-                    "Normalized instrument %d: %d raw periods, %d canonical",
+                    "Normalized instrument %d: %d raw periods, %d canonical, %d snapshots",
                     iid,
                     raw_count,
                     canonical_count,
+                    snapshot_count,
                 )
         except Exception:
             logger.exception("Failed to normalize instrument %d", iid)

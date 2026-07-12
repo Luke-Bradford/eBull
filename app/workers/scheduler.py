@@ -49,7 +49,6 @@ from app.services.exchange_directory import refresh_exchange_directory
 from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
-from app.services.fundamentals import refresh_fundamentals
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients
 from app.services.market_data import refresh_market_data
 from app.services.mf_directory import refresh_mf_directory
@@ -2786,66 +2785,23 @@ def daily_research_refresh() -> None:
                 """
             ).fetchall()
 
-            # Build symbol→CIK mapping for SEC fundamentals.
-            # #540: scope to primary CIKs only so the producer cohort
-            # matches the reader's freshness check (which now also
-            # filters on is_primary=TRUE). Without this, a demoted
-            # historical CIK row could feed the refresh against the
-            # wrong issuer while the reader counted the instrument as
-            # missing — silent issuer-mix corruption.
-            cik_rows = conn.execute(
-                """
-                SELECT i.symbol, ei.identifier_value
-                FROM external_identifiers ei
-                JOIN instruments i ON i.instrument_id = ei.instrument_id
-                WHERE ei.provider = 'sec'
-                  AND ei.identifier_type = 'cik'
-                  AND ei.is_primary = TRUE
-                  AND i.is_tradable = TRUE
-                """
-            ).fetchall()
-
         if not rows:
             logger.info("daily_research_refresh: no tradable instruments found, skipping")
             tracker.row_count = 0
             return
 
-        symbols = [(row[0], row[1]) for row in rows]
         instrument_ids = [row[1] for row in rows]
-        cik_map = {row[0].upper(): row[1] for row in cik_rows}
         from_date = date.today() - timedelta(days=30)
         to_date = date.today()
 
         total_rows = 0
 
-        # Fundamentals — SEC XBRL (primary, free, US equities)
-        # Chunk #414: when ``enable_sec_fundamentals_dedupe`` is True,
-        # skip this call entirely. ``fundamentals_sync`` phase 1b already
-        # refreshes ``fundamentals_snapshot`` for every CIK-mapped
-        # tradable instrument daily at 02:30 UTC — same data, one HTTP
-        # path. Companies House filings below run regardless.
-        sec_symbols = [(sym, iid) for sym, iid in symbols if sym.upper() in cik_map]
-        if settings.enable_sec_fundamentals_dedupe:
-            logger.info(
-                "SEC fundamentals refresh: skipped (enable_sec_fundamentals_dedupe=True); "
-                "relying on fundamentals_sync phase 1b for fundamentals_snapshot"
-            )
-        elif sec_symbols:
-            with (
-                SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
-                connect_job() as conn,
-            ):
-                sec_fund.set_cik_cache(cik_map)
-                summary = refresh_fundamentals(sec_fund, conn, sec_symbols)
-            total_rows += summary.snapshots_upserted
-            logger.info(
-                "SEC fundamentals refresh: attempted=%d upserted=%d skipped=%d",
-                summary.symbols_attempted,
-                summary.snapshots_upserted,
-                summary.symbols_skipped,
-            )
-        else:
-            logger.info("daily_research_refresh: no CIK mappings, skipping SEC fundamentals")
+        # Fundamentals: no SEC snapshot sweep here anymore (#2008).
+        # ``fundamentals_snapshot`` is a write-through from the normalized
+        # financial_periods rows inside ``normalize_financial_periods``
+        # (driven by ``daily_financial_facts``); the former
+        # ``refresh_fundamentals`` companyfacts sweep re-selected periods
+        # JSON-side and rotted across issuer tag migrations.
 
         # Filings — SEC EDGAR
         # Chunk L: when ``enable_filings_fetch_dedupe`` is True, skip
@@ -4129,66 +4085,10 @@ def fundamentals_sync() -> None:
             )
             failed_phases.append("phase 1 (XBRL + normalization)")
 
-        # --- Phase 1b: SEC fundamentals snapshot refresh -----------------
-        # Collapses the dual SEC ``companyfacts`` fetch path identified
-        # in issue #414. Only runs when the operator has flipped
-        # ``enable_sec_fundamentals_dedupe=True`` in settings — the
-        # matching gate in ``daily_research_refresh`` skips its own SEC
-        # section when the flag is on, so exactly one job per day hits
-        # ``data.sec.gov/api/xbrl/companyfacts/…``.
-        #
-        # Isolated like phase 0/1: a transient snapshot failure must not
-        # block audit/review. Coverage reads ``fundamentals_snapshot`` so
-        # stale rows still beat a missed audit.
-        phase1b_rows = 0
-        if settings.enable_sec_fundamentals_dedupe:
-            try:
-                with connect_job() as conn:
-                    # ``ei.is_primary = TRUE`` matches the phase-2 audit
-                    # query. Without it, an instrument with a demoted
-                    # historical SEC CIK row would appear twice in the
-                    # result and the cik_map dict would non-deterministically
-                    # pick whichever row came last — critical now that
-                    # this query is the sole SEC snapshot driver under
-                    # the dedupe flag.
-                    cik_rows = conn.execute(
-                        """
-                        SELECT i.symbol, i.instrument_id::text, ei.identifier_value
-                        FROM instruments i
-                        JOIN external_identifiers ei
-                            ON ei.instrument_id = i.instrument_id
-                           AND ei.provider = 'sec'
-                           AND ei.identifier_type = 'cik'
-                           AND ei.is_primary = TRUE
-                        WHERE i.is_tradable = TRUE
-                        """
-                    ).fetchall()
-                    conn.commit()
-                if cik_rows:
-                    sec_symbols = [(str(row[0]), str(row[1])) for row in cik_rows]
-                    cik_map = {str(row[0]).upper(): str(row[2]) for row in cik_rows}
-                    with (
-                        SecFundamentalsProvider(user_agent=settings.sec_user_agent) as sec_fund,
-                        connect_job() as conn,
-                    ):
-                        sec_fund.set_cik_cache(cik_map)
-                        snap_summary = refresh_fundamentals(sec_fund, conn, sec_symbols)
-                    phase1b_rows = snap_summary.snapshots_upserted
-                    logger.info(
-                        "fundamentals_sync phase 1b (SEC snapshot) complete: attempted=%d upserted=%d skipped=%d",
-                        snap_summary.symbols_attempted,
-                        snap_summary.snapshots_upserted,
-                        snap_summary.symbols_skipped,
-                    )
-                else:
-                    logger.info("fundamentals_sync phase 1b (SEC snapshot) skipped: no CIK-mapped tradable instruments")
-            except Exception:
-                logger.error(
-                    "fundamentals_sync phase 1b (SEC snapshot) failed — "
-                    "continuing to audit/review on last-known snapshot",
-                    exc_info=True,
-                )
-                failed_phases.append("phase 1b (SEC snapshot)")
+        # (Former phase 1b — SEC snapshot sweep — removed by #2008.
+        # ``fundamentals_snapshot`` is written through from the normalized
+        # financial_periods rows inside phase 1's normalize step; the
+        # second daily companyfacts sweep it replaced is gone with it.)
 
         # --- Phase 2: coverage audit + eligibility-gated backfill --------
         outcomes: dict[BackfillOutcome, int] = {o: 0 for o in BackfillOutcome}
@@ -4284,11 +4184,7 @@ def fundamentals_sync() -> None:
             logger.error("fundamentals_sync phase 3 (review) failed", exc_info=True)
             failed_phases.append("phase 3 (review)")
 
-        # Phase 1b snapshots are counted separately from phase-2/3 rows
-        # so the row-count contract (tracker = rows written / audit-
-        # consistent) still holds when this job becomes the sole SEC
-        # companyfacts writer under #414.
-        tracker.row_count = audit_rows + review_rows + phase1b_rows
+        tracker.row_count = audit_rows + review_rows
 
         # Raise at the end so all phases ran first, but the outer
         # _tracked_job marks the job failed and the health surfaces
