@@ -1,0 +1,273 @@
+"""Fair-value band IO layer (#2009): DB integration.
+
+Two BLOCKING regression guards over the two-pass compute:
+
+1. ``test_two_pass_cohort_excludes_dual_class_member`` — the §4.3 curated-oracle
+   anti-join keeps a dual-class member's P/S and P/B OUT of the pass-2 medians
+   while keeping its P/E IN (spec §9, #1662). The oracle predicate lives on
+   ``external_identifiers`` joined to ``instrument_class_shares_outstanding`` on
+   ``source_cik = lpad(identifier_value,10,'0')`` (sql/201:46-56), NOT on the
+   class table directly.
+
+2. ``test_single_name_run_anchors_to_materialized_cohort`` — a single-name
+   cascade run anchors to ``max(as_of_date)`` in ``fair_value_cohort_members``
+   (``resolve_cohort_members_as_of_date``), NOT the price max, so a post-
+   materialize price advance does not silently drop every peer into a peerless
+   ``thin_cohort`` band (A7 fix I1).
+
+Pure-policy tests live in ``test_fair_value_band_policy.py`` (fast tier).
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from statistics import median
+
+import psycopg
+import pytest
+
+from app.services.fair_value_band import (
+    MIN_PEERS,
+    materialize_cohort_members,
+    peer_pct_for,
+    refresh_fair_value_band_batch,
+    resolve_batch_as_of_date,
+    resolve_cohort_members_as_of_date,
+)
+from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 (fixture re-export)
+
+__all__ = ["ebull_test_conn"]
+
+pytestmark = pytest.mark.db  # auto-applied via conftest; explicit for clarity
+
+_AS_OF = dt.date(2024, 12, 31)
+_Q_ENDS = ("2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31")
+_Q_TYPES = ("Q1", "Q2", "Q3", "Q4")
+_SIC = "3571"  # electronic computers — a single shared SIC-4 cohort
+_CLOSE = 100.0
+_SHARES = 1000.0
+
+
+def _clear_band_tables(conn: psycopg.Connection[tuple]) -> None:
+    """The fair_value_* tables carry no FK to instruments, so the fixture's
+    ``TRUNCATE instruments CASCADE`` never reaches them — clear explicitly for a
+    hermetic per-test state (test-local per-worker DB)."""
+    for t in ("fair_value_cohort_members", "fair_value_band_current", "fair_value_band_observations"):
+        conn.execute(f"DELETE FROM {t}")  # noqa: S608 — fixed identifier, no interpolation of input
+
+
+def _seed_member(
+    conn: psycopg.Connection[tuple],
+    iid: int,
+    *,
+    ps: float,
+    pb: float,
+    pe: float | None,
+    total_assets: float,
+    cik: str,
+) -> None:
+    """Seed one instrument so its as-of multiples are exactly (ps, pb, pe).
+
+    With close=100 and shares=1000: revenue_ttm = close*shares/ps ;
+    shareholders_equity = close*shares/pb ; eps_diluted_ttm = close/pe. Flow
+    items (revenue, net_income, eps_diluted) are present in all 4 quarters
+    (strict-TTM requires COUNT=4); stock items (equity, shares, total_assets)
+    are read from the latest quarter only. ``pe=None`` seeds a non-positive
+    eps_diluted_ttm so the name has NO P/E cohort row (still P/S + P/B).
+    """
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+        "VALUES (%s, %s, %s, 'USD', TRUE)",
+        (iid, f"FVB{iid}", f"FVB Co {iid}"),
+    )
+    conn.execute(
+        "INSERT INTO instrument_sec_profile (instrument_id, cik, sic) VALUES (%s, %s, %s)",
+        (iid, cik, _SIC),
+    )
+    conn.execute(
+        "INSERT INTO price_daily (instrument_id, price_date, close) VALUES (%s, %s, %s)",
+        (iid, _AS_OF, _CLOSE),
+    )
+
+    revenue_ttm = _CLOSE * _SHARES / ps
+    equity = _CLOSE * _SHARES / pb
+    eps_ttm = (_CLOSE / pe) if pe is not None else -4.0  # <=0 -> no P/E cohort row
+    revenue_q = revenue_ttm / 4.0
+    net_income_q = revenue_q * 0.1  # positive -> select_multiples sees profit
+    eps_q = eps_ttm / 4.0
+
+    for end, qt in zip(_Q_ENDS, _Q_TYPES, strict=True):
+        latest = end == "2024-12-31"
+        conn.execute(
+            """
+            INSERT INTO financial_periods
+              (instrument_id, period_end_date, period_type, fiscal_year, source, source_ref,
+               reported_currency, revenue, net_income, eps_diluted,
+               total_assets, shareholders_equity, shares_outstanding,
+               superseded_at, normalization_status)
+            VALUES (%s, %s, %s, 2024, 'test', %s, 'USD', %s, %s, %s, %s, %s, %s, NULL, 'normalized')
+            """,
+            (
+                iid,
+                end,
+                qt,
+                f"fvb{iid}{qt}",
+                revenue_q,
+                net_income_q,
+                eps_q,
+                total_assets if latest else None,
+                equity if latest else None,
+                _SHARES if latest else None,
+            ),
+        )
+
+
+def _seed_dual_class(conn: psycopg.Connection[tuple], iid: int, *, ps: float, pb: float, pe: float) -> None:
+    """A curated dual-class member: seed like a normal member, then attach the
+    §4.3 oracle — a primary SEC-CIK ``external_identifiers`` row whose
+    ``lpad(identifier_value,10,'0')`` matches an ``instrument_class_shares_
+    outstanding.source_cik`` (the predicate the materialize dual_class CTE runs)."""
+    _seed_member(conn, iid, ps=ps, pb=pb, pe=pe, total_assets=1.0e9, cik="9999999999")
+    cik10 = "0000320193"
+    conn.execute(
+        "INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary) "
+        "VALUES (%s, 'sec', 'cik', %s, TRUE)",
+        (iid, cik10),
+    )
+    conn.execute(
+        """
+        INSERT INTO instrument_class_shares_outstanding
+          (instrument_id, period_end, shares, class_member, source_cik, source_adsh,
+           source_form_type, source_fsds_qtr, source_filed_at, resolution_method, parser_version)
+        VALUES (%s, %s, %s, 'CommonClassA', %s, '0000320193-24-000001', '10-K', '2024q4',
+                %s, 'curated', 'fsds_class_shares_v1')
+        """,
+        (iid, _AS_OF, _SHARES, cik10, _AS_OF),
+    )
+
+
+# 8 single-class peers: P/S 10..17, P/B all 2.0; 8001-8007 profitable (P/E 20..26),
+# 8008 loss-making (no P/E cohort row). One dual-class member (8009) with rich
+# multiples that MUST be excluded from the P/S & P/B medians but kept for P/E.
+_TARGET = 8000
+_SINGLE = {
+    8001: (10.0, 2.0, 20.0),
+    8002: (11.0, 2.0, 21.0),
+    8003: (12.0, 2.0, 22.0),
+    8004: (13.0, 2.0, 23.0),
+    8005: (14.0, 2.0, 24.0),
+    8006: (15.0, 2.0, 25.0),
+    8007: (16.0, 2.0, 26.0),
+    8008: (17.0, 2.0, None),  # loss-maker: in P/S + P/B, not P/E
+}
+_DUAL = 8009
+_DUAL_MULTS = (100.0, 50.0, 100.0)  # ps, pb, pe — off-distribution so leakage is detectable
+
+
+def _seed_cohort(conn: psycopg.Connection[tuple]) -> None:
+    _clear_band_tables(conn)
+    # Target: profitable single-class name in the same SIC-4.
+    _seed_member(conn, _TARGET, ps=8.0, pb=1.5, pe=18.0, total_assets=5.0e9, cik="1000000000")
+    for iid, (ps, pb, pe) in _SINGLE.items():
+        _seed_member(conn, iid, ps=ps, pb=pb, pe=pe, total_assets=1.0e9, cik=str(1_000_000_000 + iid))
+    _seed_dual_class(conn, _DUAL, ps=_DUAL_MULTS[0], pb=_DUAL_MULTS[1], pe=_DUAL_MULTS[2])
+    conn.commit()
+
+
+def test_two_pass_cohort_excludes_dual_class_member(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
+    """BLOCKING (spec §9): the curated-oracle anti-join keeps the dual-class
+    member's P/S and P/B out of the pass-2 medians but keeps its P/E in."""
+    conn = ebull_test_conn
+    _seed_cohort(conn)
+
+    materialize_cohort_members(conn, _AS_OF)
+
+    # 1. The dual-class member is flagged suppressed on ALL of its cohort rows.
+    rows = conn.execute(
+        "SELECT multiple, dual_class_suppressed FROM fair_value_cohort_members "
+        "WHERE instrument_id = %s AND as_of_date = %s ORDER BY multiple",
+        (_DUAL, _AS_OF),
+    ).fetchall()
+    assert rows == [("pb", True), ("pe", True), ("ps", True)]
+
+    # No single-class peer is suppressed (LEFT JOIN dual_class -> NULL).
+    suppressed_row = conn.execute(
+        "SELECT count(*) FROM fair_value_cohort_members "
+        "WHERE as_of_date = %s AND dual_class_suppressed AND instrument_id <> %s",
+        (_AS_OF, _DUAL),
+    ).fetchone()
+    assert suppressed_row is not None and suppressed_row[0] == 0
+
+    # 2. P/S median: dual member (ps=100) excluded -> median over the 8
+    #    single-class members {10..17} = 13.5; cohort_n counts 8 (not 9).
+    #    (revenue/equity are full-precision numeric -> ps/pb are exact.)
+    ps_pct, ps_meta = peer_pct_for(conn, _TARGET, _SIC, 5.0e9, "ps", _AS_OF)
+    expected_ps = median([v[0] for v in _SINGLE.values()])
+    assert ps_pct.p50 is not None and ps_pct.p75 is not None
+    assert ps_meta["cohort_n"] == len(_SINGLE)  # 8, dual excluded from the member set
+    assert ps_pct.p50 == pytest.approx(expected_ps)
+    assert ps_pct.p50 == pytest.approx(13.5)
+    assert ps_pct.p75 < _DUAL_MULTS[0]  # the ps=100 dual value never reaches the tail
+
+    # 3. P/B median: dual member (pb=50) excluded -> all single-class pb=2.0.
+    pb_pct, pb_meta = peer_pct_for(conn, _TARGET, _SIC, 5.0e9, "pb", _AS_OF)
+    assert pb_pct.p50 is not None and pb_pct.p75 is not None
+    assert pb_meta["cohort_n"] == len(_SINGLE)
+    assert pb_pct.p50 == pytest.approx(2.0)
+    assert pb_pct.p75 < _DUAL_MULTS[1]
+
+    # 4. P/E: dual member (pe=100) IS included. Members = 8001..8007 (pe 20..26)
+    #    + dual (pe 100) = 8. median of [20,21,22,23,24,25,26,100] = 23.5, which
+    #    is STRICTLY ABOVE the 23.0 it would be if the dual member were dropped —
+    #    so ~23.5 proves inclusion, not just a coincidental match. (eps_diluted is
+    #    numeric(12,4) so the reconstructed P/E drifts ~1e-3; the 23.5-vs-23.0
+    #    discriminator is >> that drift, so a loose abs tolerance is exact enough.)
+    pe_pct, pe_meta = peer_pct_for(conn, _TARGET, _SIC, 5.0e9, "pe", _AS_OF)
+    assert pe_pct.p50 is not None
+    assert pe_meta["cohort_n"] == 8  # 7 profitable single-class + dual
+    assert pe_pct.p50 == pytest.approx(23.5, abs=0.05)  # dual (pe=100) pulls the p50 up
+    assert abs(pe_pct.p50 - 23.0) > 0.25  # NOT the 23.0 of the dual-excluded 7-member set
+
+
+def test_single_name_run_anchors_to_materialized_cohort(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
+    """A7 fix I1: a single-name cascade run anchors to the materialized cohort
+    ``max(as_of_date)``, NOT the price max — a post-materialize price advance
+    must not drop every peer into a peerless ``thin_cohort`` band."""
+    conn = ebull_test_conn
+    _seed_cohort(conn)
+
+    # Full materialize at D=_AS_OF, then advance price_daily past D so the price
+    # anchor and the cohort anchor DIVERGE.
+    materialize_cohort_members(conn, _AS_OF)
+    conn.commit()
+    newer = _AS_OF + dt.timedelta(days=3)
+    for iid in (_TARGET, *_SINGLE, _DUAL):
+        conn.execute(
+            "INSERT INTO price_daily (instrument_id, price_date, close) VALUES (%s, %s, %s)",
+            (iid, newer, _CLOSE),
+        )
+    conn.commit()
+
+    # Precondition: the two anchors now differ (guards the test itself).
+    assert resolve_batch_as_of_date(conn) == newer
+    assert resolve_cohort_members_as_of_date(conn) == _AS_OF
+
+    result = refresh_fair_value_band_batch(conn, [_TARGET])
+    conn.commit()
+    assert result == {"written": 1, "statused": 0, "failed": 0}
+
+    row = conn.execute(
+        "SELECT as_of_date, reason, base_value FROM fair_value_band_current WHERE instrument_id = %s",
+        (_TARGET,),
+    ).fetchone()
+    assert row is not None
+    as_of_date, reason, base_value = row
+    # Anchored to the materialized cohort date (D), NOT the advanced price date.
+    assert as_of_date == _AS_OF
+    # Peers were found (>= MIN_PEERS) -> a real band, not peerless thin_cohort.
+    assert reason == "ok"
+    assert base_value is not None
+
+    # Sanity: the peer read at the cohort anchor still clears MIN_PEERS.
+    _, ps_meta = peer_pct_for(conn, _TARGET, _SIC, 5.0e9, "ps", _AS_OF)
+    assert ps_meta["cohort_n"] >= MIN_PEERS
