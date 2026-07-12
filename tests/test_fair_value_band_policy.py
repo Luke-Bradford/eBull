@@ -1,6 +1,16 @@
 from typing import Any
 
-from app.services.fair_value_band import TargetInputs, currency_coherent, percentiles, select_multiples
+from app.services.fair_value_band import (
+    OwnPct,
+    PeerPct,
+    TargetInputs,
+    combine_across,
+    currency_coherent,
+    percentiles,
+    select_multiples,
+    synth_multiple,
+    to_per_share,
+)
 
 
 def _t(**kw: Any) -> TargetInputs:
@@ -74,3 +84,65 @@ def test_currency_coherent():
     assert currency_coherent("USD", "USD") is True
     assert currency_coherent("EUR", "USD") is False
     assert currency_coherent(None, "USD") is False
+
+
+def test_synth_blend_and_envelope_both_present():
+    peer = PeerPct(p25=10.0, p50=20.0, p75=30.0)
+    own = OwnPct(p20=12.0, p50=24.0, p80=28.0)
+    result = synth_multiple(peer, own)
+    assert result is not None
+    low, base, high = result
+    assert base == 22.0  # mean(20, 24)
+    assert low == 10.0  # min(peer_p25=10, own_p20=12)
+    assert high == 30.0  # max(peer_p75=30, own_p80=28)
+
+
+def test_synth_degrades_to_peer_only():
+    peer = PeerPct(p25=10.0, p50=20.0, p75=30.0)
+    own = OwnPct(p20=None, p50=None, p80=None)
+    assert synth_multiple(peer, own) == (10.0, 20.0, 30.0)
+
+
+def test_synth_degrades_to_own_only():
+    peer = PeerPct(p25=None, p50=None, p75=None)
+    own = OwnPct(p20=12.0, p50=24.0, p80=28.0)
+    assert synth_multiple(peer, own) == (12.0, 24.0, 28.0)
+
+
+def test_synth_none_when_neither():
+    assert synth_multiple(PeerPct(None, None, None), OwnPct(None, None, None)) is None
+
+
+def test_to_per_share_pe():
+    assert to_per_share("pe", 30.0, 34.0, 37.0, eps=8.0, revenue=None, shareholders_equity=None, shares=None) == (
+        240.0,
+        272.0,
+        296.0,
+    )
+
+
+def test_to_per_share_ps():
+    # revenue 9000 / shares 1000 = 9 rev/share
+    assert to_per_share("ps", 1.0, 2.0, 3.0, eps=None, revenue=9000.0, shareholders_equity=None, shares=1000.0) == (
+        9.0,
+        18.0,
+        27.0,
+    )
+
+
+def test_to_per_share_pb():
+    # equity 5000 / shares 1000 = 5 book/share
+    assert to_per_share("pb", 1.0, 2.0, 3.0, eps=None, revenue=None, shareholders_equity=5000.0, shares=1000.0) == (
+        5.0,
+        10.0,
+        15.0,
+    )
+
+
+def test_combine_across_median_and_envelope():
+    # two multiples' per-share triples
+    triples = [(240.0, 272.0, 296.0), (250.0, 260.0, 300.0)]
+    bear, base, bull = combine_across(triples)
+    assert base == 266.0  # median([272, 260]) = mean = 266
+    assert bear == 240.0  # min lows
+    assert bull == 300.0  # max highs

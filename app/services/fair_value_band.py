@@ -11,6 +11,7 @@ Spec: docs/proposals/valuation/2026-07-12-deterministic-fair-value-band.md
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 
 METHOD_VERSION = "fvb_v1"
 MIN_PEERS = 8
@@ -104,3 +105,73 @@ def percentiles(values: list[float], ps: tuple[float, ...]) -> list[float]:
 def currency_coherent(reported: str | None, instrument: str | None) -> bool:
     """Fail-closed: require reported_currency == instrument currency (§4.1)."""
     return reported is not None and instrument is not None and reported == instrument
+
+
+@dataclass(frozen=True)
+class PeerPct:
+    p25: float | None
+    p50: float | None
+    p75: float | None
+
+
+@dataclass(frozen=True)
+class OwnPct:
+    p20: float | None
+    p50: float | None
+    p80: float | None
+
+
+def synth_multiple(peer: PeerPct, own: OwnPct) -> tuple[float, float, float] | None:
+    """§4.5 blend base, outer-envelope low/high; degrade to the surviving one."""
+    peer_ok = peer.p25 is not None and peer.p50 is not None and peer.p75 is not None
+    own_ok = own.p20 is not None and own.p50 is not None and own.p80 is not None
+    if peer_ok and own_ok:
+        assert peer.p25 is not None and peer.p50 is not None and peer.p75 is not None
+        assert own.p20 is not None and own.p50 is not None and own.p80 is not None
+        base = (peer.p50 + own.p50) / 2
+        low = min(peer.p25, own.p20)
+        high = max(peer.p75, own.p80)
+        return (low, base, high)
+    if peer_ok:
+        assert peer.p25 is not None and peer.p50 is not None and peer.p75 is not None
+        return (peer.p25, peer.p50, peer.p75)
+    if own_ok:
+        assert own.p20 is not None and own.p50 is not None and own.p80 is not None
+        return (own.p20, own.p50, own.p80)
+    return None
+
+
+def to_per_share(
+    m: str,
+    low_mult: float,
+    base_mult: float,
+    high_mult: float,
+    *,
+    eps: float | None,
+    revenue: float | None,
+    shareholders_equity: float | None,
+    shares: float | None,
+) -> tuple[float, float, float]:
+    """Convert a (low, base, high) multiple triple to per-share values."""
+    if m == "pe":
+        per = eps
+    elif m == "ps":
+        per = None if not shares or revenue is None else revenue / shares
+    elif m == "pb":
+        per = None if not shares or shareholders_equity is None else shareholders_equity / shares
+    else:
+        raise ValueError(f"unknown multiple {m!r}")
+    if per is None:
+        raise ValueError(f"per-share metric unavailable for {m!r}")
+    return (low_mult * per, base_mult * per, high_mult * per)
+
+
+def combine_across(triples: list[tuple[float, float, float]]) -> tuple[float, float, float]:
+    """§4.5 median-of-bases + outer envelope. Asserts bear <= base <= bull."""
+    if not triples:
+        raise ValueError("combine_across requires at least one triple")
+    bear = min(t[0] for t in triples)
+    base = median([t[1] for t in triples])
+    bull = max(t[2] for t in triples)
+    assert bear <= base <= bull, f"band order violated: {bear} {base} {bull}"
+    return (bear, base, bull)
