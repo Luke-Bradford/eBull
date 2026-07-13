@@ -11,6 +11,7 @@ from app.services.fair_value_band import (
     TargetInputs,
     _shape_fair_value_band,
     band_quality_status,
+    cap_envelope,
     combine_across,
     compute_band,
     compute_divergence,
@@ -99,24 +100,24 @@ def test_currency_coherent():
 
 def test_synth_blend_and_envelope_both_present():
     peer = PeerPct(p25=10.0, p50=20.0, p75=30.0)
-    own = OwnPct(p20=12.0, p50=24.0, p80=28.0)
+    own = OwnPct(p25=12.0, p50=24.0, p75=28.0)
     result = synth_multiple(peer, own)
     assert result is not None
     low, base, high = result
     assert base == 22.0  # mean(20, 24)
-    assert low == 10.0  # min(peer_p25=10, own_p20=12)
-    assert high == 30.0  # max(peer_p75=30, own_p80=28)
+    assert low == 10.0  # min(peer_p25=10, own_p25=12)
+    assert high == 30.0  # max(peer_p75=30, own_p75=28)
 
 
 def test_synth_degrades_to_peer_only():
     peer = PeerPct(p25=10.0, p50=20.0, p75=30.0)
-    own = OwnPct(p20=None, p50=None, p80=None)
+    own = OwnPct(p25=None, p50=None, p75=None)
     assert synth_multiple(peer, own) == (10.0, 20.0, 30.0)
 
 
 def test_synth_degrades_to_own_only():
     peer = PeerPct(p25=None, p50=None, p75=None)
-    own = OwnPct(p20=12.0, p50=24.0, p80=28.0)
+    own = OwnPct(p25=12.0, p50=24.0, p75=28.0)
     assert synth_multiple(peer, own) == (12.0, 24.0, 28.0)
 
 
@@ -170,6 +171,126 @@ def test_own_range_drops_nonpositive():
     assert r.p50 == 35.0
 
 
+def test_own_range_interior_quantiles_v2():
+    # v2 (#2022): own_range emits p25/p50/p75 (interior), not p20/p80.
+    r = own_range([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])
+    assert r.p25 == 27.5  # continuous p25 of 8 points
+    assert r.p50 == 45.0
+    assert r.p75 == 62.5
+
+
+# --- v2 (#2022) envelope-ratio cap (cap_envelope) ---
+
+
+def test_cap_envelope_clamps_high():
+    # ps R_UP=3.1: high 40 > base 10 * 3.1 = 31 -> clamped; low 5 within -> untouched.
+    low, high, capped_low, capped_high = cap_envelope("ps", 5.0, 10.0, 40.0)
+    assert (low, high) == (5.0, 31.0)
+    assert capped_high is True and capped_low is False
+
+
+def test_cap_envelope_clamps_low():
+    # ps R_DN=4.3: low 1 < base 10 / 4.3 = 2.326 -> clamped; high 15 within -> untouched.
+    low, high, capped_low, capped_high = cap_envelope("ps", 1.0, 10.0, 15.0)
+    assert round(low, 3) == 2.326 and high == 15.0
+    assert capped_low is True and capped_high is False
+
+
+def test_cap_envelope_noop_within_bounds():
+    # pe R_UP=2.6 / R_DN=2.7: 8 and 20 both inside [10/2.7, 10*2.6] -> no-op, flags false.
+    assert cap_envelope("pe", 8.0, 10.0, 20.0) == (8.0, 20.0, False, False)
+
+
+def test_cap_envelope_preserves_order():
+    # Extreme peer-only wings still yield low <= base <= high after the clamp.
+    low, high, _, _ = cap_envelope("ps", 0.1, 10.0, 1000.0)
+    assert low <= 10.0 <= high
+
+
+def test_cap_envelope_unknown_multiple_is_noop():
+    # A multiple not in the cap table (e.g. future ev_ebitda) passes through unclamped.
+    assert cap_envelope("ev_ebitda", 1.0, 10.0, 1000.0) == (1.0, 1000.0, False, False)
+
+
+def test_cap_envelope_nonpositive_base_is_noop():
+    assert cap_envelope("ps", 1.0, 0.0, 100.0) == (1.0, 100.0, False, False)
+
+
+def test_compute_band_cap_bounds_peer_only_tail_base_neutral():
+    # Peer-only P/S leg with a fat peer.p75 (the widest-tail case). The cap bounds the
+    # BULL to base*_R_UP["ps"] while leaving the audited BASE untouched (base-neutral).
+    res = compute_band(
+        TargetInputs(
+            eps_diluted_ttm=None,
+            revenue_ttm=1000.0,
+            shareholders_equity=None,
+            net_income_ttm=None,
+            shares_outstanding=100.0,
+            sic="3571",
+            reported_currency="USD",
+            instrument_currency="USD",
+            target_basis="not_multiclass",
+        ),
+        peer_by_multiple={"ps": PeerPct(p25=5.0, p50=10.0, p75=100.0)},
+        own_by_multiple={"ps": OwnPct(None, None, None)},
+        own_points_by_multiple={"ps": 0},
+        cohort_meta={"ps": {"cohort_n": 40, "excluded_stale_n": 0}},
+        sic_level=3,
+    )
+    assert res.reason == "ok"
+    per_share = 1000.0 / 100.0  # revenue / shares
+    assert res.base == 10.0 * per_share  # 100.0 — UNCHANGED by the cap
+    assert res.bull is not None and round(res.bull, 6) == 310.0  # high 100 clamped to base*3.1=31
+    assert res.bear == 5.0 * per_share  # 50.0 — within bounds, uncapped
+    assert res.basis["multiples"]["ps"]["capped_high"] is True
+    assert res.basis["multiples"]["ps"]["capped_low"] is False
+    assert res.basis["multiples"]["ps"]["precap_high_mult"] == 100.0  # pre-cap audit
+
+
+def test_compute_band_cap_two_legs_base_unchanged_when_nonbase_leg_capped():
+    # Codex ckpt-1 #3: two selected legs (pe + ps); the ps leg's HIGH is capped, pe
+    # is not. The cross-multiple base = median([pe_base, ps_base]) must be UNCHANGED
+    # by the cap — the challenged non-base-determining-leg case.
+    res = compute_band(
+        TargetInputs(
+            eps_diluted_ttm=10.0,
+            revenue_ttm=1000.0,
+            shareholders_equity=None,
+            net_income_ttm=500.0,
+            shares_outstanding=100.0,
+            sic="3571",
+            reported_currency="USD",
+            instrument_currency="USD",
+            target_basis="not_multiclass",
+        ),
+        peer_by_multiple={
+            "pe": PeerPct(p25=6.0, p50=8.0, p75=12.0),  # base_mult 8 -> base 80, ratio 1.5 uncapped
+            "ps": PeerPct(p25=5.0, p50=10.0, p75=100.0),  # base_mult 10 -> base 100, high 100 capped to 31
+        },
+        own_by_multiple={"pe": OwnPct(None, None, None), "ps": OwnPct(None, None, None)},
+        own_points_by_multiple={"pe": 0, "ps": 0},
+        cohort_meta={
+            "pe": {"cohort_n": 40, "excluded_stale_n": 0},
+            "ps": {"cohort_n": 40, "excluded_stale_n": 0},
+        },
+        sic_level=3,
+    )
+    assert res.reason == "ok"
+    # pe per_share=eps=10 -> base 80; ps per_share=rev/shares=10 -> base 100.
+    assert res.base == 90.0  # median([80, 100]) — UNCHANGED though ps.high was capped
+    assert res.bull is not None and round(res.bull, 6) == 310.0  # ps 100 -> 31 -> 310
+    assert res.bear == 50.0  # min(pe low 60, ps low 50)
+    assert res.basis["multiples"]["ps"]["capped_high"] is True
+    assert res.basis["multiples"]["pe"]["capped_high"] is False
+
+
+def test_percentiles_deterministic_regression():
+    # Interpolation-convention lock (Hyndman & Fan 1996: 9 divergent definitions).
+    # Fixed input -> fixed output; guards the wing/own-history stability contract.
+    assert percentiles([1.0, 2.0, 3.0, 4.0, 5.0], (0.25, 0.5, 0.75)) == [2.0, 3.0, 4.0]
+    assert percentiles([10.0, 20.0, 30.0, 40.0], (0.25, 0.5, 0.75)) == [17.5, 25.0, 32.5]
+
+
 def test_filter_dual_class_anti_join():
     rows = [(1, 10.0), (2, 20.0), (3, 30.0)]
     assert filter_dual_class(rows, {2}) == [10.0, 30.0]
@@ -220,12 +341,13 @@ def _aapl() -> TargetInputs:
 
 
 def test_golden_aapl_pe_band():
-    # §3 worked fixture: own trailing P/E p20/p50/p80 = 31.2/34.5/36.9, peer absent.
-    # Band = 31.2*8.26 / 34.5*8.26 / 36.9*8.26 ~= 257.7 / 285.0 / 304.8.
+    # §3 worked fixture: own trailing P/E p25/p50/p75 = 31.2/34.5/36.9, peer absent.
+    # Band = 31.2*8.26 / 34.5*8.26 / 36.9*8.26 ~= 257.7 / 285.0 / 304.8
+    # (cap no-op: high 36.9 < base 34.5 * _R_UP["pe"] 2.6 = 89.7).
     res = compute_band(
         _aapl(),
         peer_by_multiple={"pe": PeerPct(None, None, None)},
-        own_by_multiple={"pe": OwnPct(p20=31.2, p50=34.5, p80=36.9)},
+        own_by_multiple={"pe": OwnPct(p25=31.2, p50=34.5, p75=36.9)},
         own_points_by_multiple={"pe": 7},
         cohort_meta={"pe": {"cohort_n": 0, "excluded_stale_n": 0}},
         sic_level=4,

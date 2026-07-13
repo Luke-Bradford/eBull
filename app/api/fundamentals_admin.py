@@ -168,7 +168,7 @@ def fair_value_band_rollup(
     """Count ``fair_value_band_current`` rows grouped by ``reason`` then
     ``quality_status`` for the live method version.
 
-    Scoped to the current ``fvb_v1`` method version so a stale prior-version
+    Scoped to the current ``fvb_v2`` method version so a stale prior-version
     row (left behind by a ``method_version`` bump before the operator runs
     the ``fair_value_band_refresh`` recompute) never inflates the counts.
     """
