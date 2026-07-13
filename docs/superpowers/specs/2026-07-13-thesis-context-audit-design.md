@@ -146,9 +146,10 @@ Fast-tier `tests/test_thesis_context_audit.py`:
   - malformed analytics (`{"reason": "malformed"}`) → `available:false` + `status:"malformed"` (Codex MED-2).
   - a synthetic unknown block → bare `available` entry (drift-safe fallback); `prompt_version` echoed.
 
-Db-tier `tests/test_thesis_context_audit_persist.py` (fake LLM), TWO cases:
-1. **Success:** after a successful generation, the `thesis_runs` row (joined via `thesis_id`) has non-null `context_sha256` and a `context_summary` whose `blocks` cover the assembled keys.
-2. **Failed/rejected run (the core requirement, Codex LOW):** a fake writer that fails `_validate_writer_output` (or raises) → the committed `thesis_runs` row has `status='failed'`, no `theses` row, **and non-null `context_sha256` + `context_summary`** — proving the audit is captured at run-start, before the LLM, for exactly the #2007 AMSC class of run.
+Db-tier `tests/test_thesis_context_audit_persist.py`. Drives the narrow insert/failure seams (`_insert_thesis_run`, `_record_thesis_run_failure`), not full `generate_thesis` — which needs live LLM clients unavailable in the test env (same rationale as `tests/test_thesis_valuation_audit.py`). Since `generate_thesis` calls `_insert_thesis_run` (with the audit) then commits *before* the LLM, and the failure path only UPDATEs `status`, proving the columns are written at insert and untouched by `_record_thesis_run_failure` proves the failed-run capture end-to-end. Cases:
+1. **Insert persists:** `_insert_thesis_run(..., context_sha256=…, context_summary=…)` → the row has both columns (JSONB round-trips).
+2. **Backward-compat:** omitting the params leaves both columns NULL (historical rows / audit-compute-failure path).
+3. **Failed run retains audit (the core requirement, Codex LOW):** after `_record_thesis_run_failure`, the row is `status='failed'` **and still carries non-null `context_sha256` + `context_summary`** — the #2007 AMSC class.
 
 ## Out of scope
 
