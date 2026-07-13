@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import pytest
+
 from app.services.thesis_context_audit import hash_context, summarize_context
 
 _PV = "v4"
@@ -41,7 +43,10 @@ def _full_context() -> dict[str, object]:
         "risk_metrics": {
             "metric_version": "risk_v1",
             "windows": [
-                {"window_key": "1y", "as_of_date": "2025-07-11", "cagr_status": "ok"},
+                # as_of_date deliberately DISTINCT, and the max is NOT the
+                # first element — discriminates max() from both min() and
+                # stamps[0], not just "some" as_of value is echoed.
+                {"window_key": "1y", "as_of_date": "2025-06-01", "cagr_status": "ok"},
                 {"window_key": "3y", "as_of_date": "2025-07-11", "cagr_status": "thin_history"},
             ],
         },
@@ -87,6 +92,13 @@ def test_hash_changes_on_nested_value_change() -> None:
 def test_hash_is_64_hex_chars() -> None:
     h = hash_context(_full_context())
     assert len(h) == 64 and all(c in "0123456789abcdef" for c in h)
+
+
+def test_hash_raises_on_non_json_serializable() -> None:
+    # Strict json.dumps (no default=) is deliberate — guards against a silent
+    # default=str regression that would stringify a bug instead of raising.
+    with pytest.raises(TypeError):
+        hash_context({"bad": {1, 2, 3}})
 
 
 # --- summarize_context ----------------------------------------------------
@@ -148,6 +160,8 @@ def test_unsupported_schema_analytics_is_unavailable() -> None:
 
 
 def test_risk_metrics_carries_version_and_max_window_asof() -> None:
+    # windows carry distinct as_of_date with the max NOT first in list order,
+    # so this fails if max(stamps) regressed to min(stamps) or stamps[0].
     blocks = _summary_blocks(_full_context())
     assert blocks["risk_metrics"] == {
         "available": True,

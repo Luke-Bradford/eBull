@@ -72,9 +72,13 @@ def summarize_context(context: Mapping[str, object], prompt_version: str) -> dic
 def _block_status(key: str, val: object) -> dict[str, object]:
     """Availability (+ optional status/as-of/count) for one context block.
 
-    Total by construction: ``.get()`` only, never raises, so the summary is
-    safe over any block shape. A block absent from the maps still gets an
-    ``available`` entry (drift-safe).
+    Total over the shapes ``_assemble_context`` actually produces (``.get()``
+    only — no bracket indexing, no attribute access): every as-of field it
+    emits is an ISO-8601 string, so ``max()`` over collected stamps is
+    well-defined there. Not a guarantee over arbitrary/malformed shapes —
+    heterogeneous non-orderable as-of values could make ``max()`` raise; the
+    caller wraps the compute defensively as the backstop. A block absent
+    from the maps still gets an ``available`` entry (drift-safe).
     """
     if val is None:
         return {"available": False}
@@ -116,5 +120,7 @@ def _block_status(key: str, val: object) -> dict[str, object]:
                 out["as_of"] = asof
         return out
 
-    # scalar / unexpected top-level type — defensive (not expected).
-    return {"available": val is not None}
+    # scalar / unexpected top-level type — defensive (not expected). The
+    # `val is None` branch above already returned, so val is always a
+    # non-None scalar here.
+    return {"available": True}
