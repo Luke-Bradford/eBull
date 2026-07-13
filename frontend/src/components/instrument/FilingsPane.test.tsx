@@ -121,6 +121,7 @@ describe("FilingsPane", () => {
         nt_notice: null,
         pre14a_signal: null,
         offering: null,
+        tender: null,
       })),
     });
     render(
@@ -175,6 +176,7 @@ describe("FilingsPane", () => {
           nt_notice: null,
           pre14a_signal: null,
           offering: null,
+          tender: null,
         },
         {
           filing_event_id: 2,
@@ -191,6 +193,7 @@ describe("FilingsPane", () => {
           nt_notice: null,
           pre14a_signal: null,
           offering: null,
+          tender: null,
         },
       ],
     });
@@ -244,6 +247,7 @@ describe("FilingsPane", () => {
           nt_notice: null,
           pre14a_signal: null,
           offering: null,
+          tender: null,
         },
         {
           filing_event_id: 2,
@@ -260,6 +264,7 @@ describe("FilingsPane", () => {
           nt_notice: null,
           pre14a_signal: null,
           offering: null,
+          tender: null,
         },
       ],
     });
