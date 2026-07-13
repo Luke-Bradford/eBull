@@ -1574,7 +1574,8 @@ def generate_thesis(
             # txn as the thesis insert (FK requires thesis_id to exist first).
             # Snapshot from the passive context block only — never re-read
             # the mutable band from the DB (Codex ckpt-1 PR-B LOW).
-            fvb: dict[str, Any] = context.get("fair_value_band") or {}  # type: ignore[assignment]
+            fvb_raw = context.get("fair_value_band")
+            fvb: dict[str, Any] = fvb_raw if isinstance(fvb_raw, dict) else {}
             band_available = fvb.get("available") is True
             band_base = fvb.get("base") if band_available else None
             band_quality_status = fvb.get("quality_status") if band_available else None

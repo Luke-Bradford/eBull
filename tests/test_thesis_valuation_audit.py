@@ -15,6 +15,8 @@ fields (Codex ckpt-1 PR-B MED).
 
 from __future__ import annotations
 
+import datetime
+
 import pytest
 
 from app.services.fair_value_band import DIVERGENCE_THRESHOLD, METHOD_VERSION, compute_divergence
@@ -95,6 +97,7 @@ def test_audit_row_present_band(conn) -> None:
     assert row[1] == METHOD_VERSION
     assert float(row[2]) == band_base
     assert row[3] == "high"
+    assert row[4] == datetime.date(2026, 7, 10)
     assert row[5] is not None and float(row[5]) == llm_base
     assert row[6] is not None  # divergence_pct
     assert row[7] is not None  # divergence_flag
@@ -136,7 +139,7 @@ def test_audit_row_absent_band_null_divergence(conn) -> None:
 
     rows = conn.execute(
         """
-        SELECT band_base, divergence_pct, divergence_flag
+        SELECT band_base, band_quality_status, price_as_of, divergence_pct, divergence_flag
         FROM thesis_valuation_audit
         WHERE thesis_id = %s
         """,
@@ -145,6 +148,8 @@ def test_audit_row_absent_band_null_divergence(conn) -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row[0] is None
-    assert row[1] is None
-    assert row[2] is None
+    assert row[0] is None  # band_base
+    assert row[1] is None  # band_quality_status
+    assert row[2] is None  # price_as_of
+    assert row[3] is None  # divergence_pct
+    assert row[4] is None  # divergence_flag
