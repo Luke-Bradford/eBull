@@ -44,9 +44,11 @@ def hash_context(context: Mapping[str, object]) -> str:
     Strict — no json ``default`` fallback. The thesis context is guaranteed
     JSON-shaped (shapers emit isoformat strings + float|None; ``_to_float``
     maps NaN/inf to None), so a non-serializable type is a bug to surface, not
-    silently stringify. The db-tier test hashes a real assembled context, and
-    the caller wraps this defensively so a raise degrades to NULL audit columns
-    rather than aborting a thesis.
+    silently stringify. The fast-tier test proves the strict raise against a
+    synthetic non-JSON input; ``tests/test_thesis.py::test_empty_surfaces_yield_honest_absences``
+    hashes a REAL ``_assemble_context`` output, so the helpers are exercised against the true shapes,
+    not just hand-built fixtures. At runtime the ``thesis.py`` call site wraps this so a raise degrades
+    to NULL audit columns + a WARNING — never silently stringified into the hash, never aborts a thesis.
 
     Note: this fingerprints the exact context bytes; it does NOT prove
     "sources unchanged" by later recomputation (``_assemble_context`` is

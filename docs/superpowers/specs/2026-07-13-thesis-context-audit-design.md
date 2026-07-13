@@ -74,10 +74,13 @@ def hash_context(context: Mapping[str, object]) -> str:
     Strict: NO json default fallback — context is guaranteed JSON-shaped
     (shapers emit isoformat strings + float|None; _to_float kills NaN/inf).
     A non-JSON type is a bug we want to surface, not silently stringify
-    (Codex ckpt-1 MED). The db-tier test hashes a REAL assembled context,
-    catching any future non-serializable block; the thesis.py call site
-    wraps this defensively so a raise degrades to NULL audit columns, never
-    aborts the thesis (prevention-log line 2127).
+    (Codex ckpt-1 MED). The fast-tier test proves the strict raise against a
+    synthetic non-JSON input; tests/test_thesis.py::
+    test_empty_surfaces_yield_honest_absences hashes a REAL assembled
+    context, so the helpers are exercised against the true shapes, not just
+    hand-built fixtures. The thesis.py call site wraps this so a raise
+    degrades to NULL audit columns + a WARNING, never aborts the thesis
+    (prevention-log line 2127).
     """
     blob = json.dumps(context, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
