@@ -910,8 +910,9 @@ def test_stage_orders_are_unique_and_ascending() -> None:
     assert len(set(orders)) == len(orders), f"duplicate stage_orders: {orders}"
     # Pin the post-collapse count (27 - 8 per-CIK HTTP stages + 1 master.idx
     # gap-close (#1415) + 1 terminal bootstrap_validation (#1419) + 1
-    # fsds_class_shares (#788) + 1 fsds_dimensional (#1590) = 23).
-    assert len(_BOOTSTRAP_STAGE_SPECS) == 23
+    # fsds_class_shares (#788) + 1 fsds_dimensional (#1590) + 1 terminal
+    # fair_value_band first-load (#2024) = 24).
+    assert len(_BOOTSTRAP_STAGE_SPECS) == 24
 
 
 def test_openfigi_lane_in_max_concurrency_map() -> None:
