@@ -114,7 +114,7 @@ Per-factor (`PeerFactor`, `app/api/instruments.py:328`):
 | `sector_median: float \| None` | `cohort_median: float \| None` |
 | `sector_n: int` | `cohort_n: int` |
 
-`is_factor_thin(key, cohort_n, member_count)` signature unchanged (rename the passed variables only).
+`is_factor_thin` gains a keyword-only `cohort_is_fallback: bool = False` (Codex ckpt-2 P2): when `cohort_sic_level == 0`, the medians rest on a below-`MIN_COHORT` ABSOLUTE base, so **every** factor greys regardless of its relative coverage ratio (a 4-member fallback cohort with 100% coverage would otherwise read not-thin). The API passes `cohort_is_fallback=(result.cohort_sic_level == 0)`.
 
 ### API (`app/api/instruments.py`)
 

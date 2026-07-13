@@ -55,29 +55,37 @@ def test_row_factors_maps_all_keys() -> None:
 
 def test_is_factor_thin_price_gated_always_thin() -> None:
     # pe_ratio is structurally dev-limited regardless of coverage.
-    assert is_factor_thin("pe_ratio", sector_n=1000, sector_member_count=1000) is True
+    assert is_factor_thin("pe_ratio", cohort_n=1000, cohort_member_count=1000) is True
 
 
 def test_is_factor_thin_low_coverage_flagged() -> None:
     # revenue_growth_yoy at ~5% coverage (dev DB: 3-12%) → thin.
-    assert is_factor_thin("revenue_growth_yoy", sector_n=40, sector_member_count=951) is True
+    assert is_factor_thin("revenue_growth_yoy", cohort_n=40, cohort_member_count=951) is True
 
 
 def test_is_factor_thin_healthy_coverage_not_flagged() -> None:
     # operating_margin floors at 24.6% on the dev DB — above the 20% cut.
-    assert is_factor_thin("operating_margin", sector_n=152, sector_member_count=617) is False
+    assert is_factor_thin("operating_margin", cohort_n=152, cohort_member_count=617) is False
 
 
 def test_is_factor_thin_threshold_boundary() -> None:
     # Exactly at the threshold is NOT thin (strict <); just below is thin.
     n = int(THIN_COVERAGE_RATIO * 100)
-    assert is_factor_thin("roe", sector_n=n, sector_member_count=100) is False
-    assert is_factor_thin("roe", sector_n=n - 1, sector_member_count=100) is True
+    assert is_factor_thin("roe", cohort_n=n, cohort_member_count=100) is False
+    assert is_factor_thin("roe", cohort_n=n - 1, cohort_member_count=100) is True
 
 
 def test_is_factor_thin_empty_base_is_thin() -> None:
     # No complete-TTM members → no signal → thin (avoids div-by-zero).
-    assert is_factor_thin("roe", sector_n=0, sector_member_count=0) is True
+    assert is_factor_thin("roe", 0, 0) is True
+
+
+def test_is_factor_thin_fallback_cohort_always_thin() -> None:
+    # cohort_sic_level==0 fallback: even a fully-covered factor is thin, because
+    # the ABSOLUTE base is below MIN_COHORT (coverage ratio would say otherwise).
+    assert is_factor_thin("roe", 100, 100, cohort_is_fallback=True) is True
+    # Non-fallback with the same full coverage is NOT thin.
+    assert is_factor_thin("roe", 100, 100, cohort_is_fallback=False) is False
 
 
 # --- SIC cohort walk (#2023) — resolve_sic_level ----------------------------

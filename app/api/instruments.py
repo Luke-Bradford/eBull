@@ -1032,7 +1032,12 @@ def get_instrument_peer_comparison(
                 instrument_value=result.self_factors.get(key),
                 cohort_median=result.medians[key].median,
                 cohort_n=result.medians[key].n,
-                dev_limited=is_factor_thin(key, result.medians[key].n, result.cohort_member_count),
+                dev_limited=is_factor_thin(
+                    key,
+                    result.medians[key].n,
+                    result.cohort_member_count,
+                    cohort_is_fallback=result.cohort_sic_level == 0,
+                ),
                 better_when=FACTOR_BETTER_WHEN[key],  # type: ignore[arg-type]
             )
             for key in FACTOR_KEYS

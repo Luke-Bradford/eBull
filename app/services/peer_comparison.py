@@ -114,20 +114,25 @@ DEV_LIMITED_FACTORS: frozenset[str] = frozenset({"pe_ratio"})
 THIN_COVERAGE_RATIO: float = 0.20
 
 
-def is_factor_thin(key: str, sector_n: int, sector_member_count: int) -> bool:
+def is_factor_thin(key: str, cohort_n: int, cohort_member_count: int, *, cohort_is_fallback: bool = False) -> bool:
     """
-    True when a factor should be disclosed as thin/unreliable for a sector.
+    True when a factor should be disclosed as thin/unreliable for a cohort.
 
-    Pure policy (no I/O) — table-tested. ``sector_n`` is the count of sector
-    members with a non-null value for the factor; ``sector_member_count`` is the
-    complete-TTM sector base (the median denominator). Structurally dev-limited
+    Pure policy (no I/O) — table-tested. ``cohort_n`` is the count of cohort
+    members with a non-null value for the factor; ``cohort_member_count`` is the
+    complete-TTM cohort base (the median denominator). Structurally dev-limited
     factors are always thin; an empty base is treated as thin (no signal).
+    ``cohort_is_fallback`` (``cohort_sic_level == 0``, #2023) marks the whole
+    cohort thin: no SIC level cleared ``MIN_COHORT`` peers, so the medians rest
+    on a below-threshold ABSOLUTE base regardless of the relative coverage ratio.
     """
     if key in DEV_LIMITED_FACTORS:
         return True
-    if sector_member_count <= 0:
+    if cohort_is_fallback:
         return True
-    return sector_n / sector_member_count < THIN_COVERAGE_RATIO
+    if cohort_member_count <= 0:
+        return True
+    return cohort_n / cohort_member_count < THIN_COVERAGE_RATIO
 
 
 # Per-instrument factor CTE template, parameterised by ``%(sic_prefix)s`` with the

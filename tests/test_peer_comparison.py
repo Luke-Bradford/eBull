@@ -171,16 +171,17 @@ def test_compute_peer_comparison_db(ebull_test_conn: psycopg.Connection[tuple]) 
     assert result.medians["revenue_growth_yoy"].n == 1
     assert result.medians["revenue_growth_yoy"].median == pytest.approx(0.1)
 
-    # Thin-factor policy applied to the REAL result coverage (#1836): the API
-    # serializer feeds these exact fields to is_factor_thin. pe_ratio has no
-    # price on dev → n=0 → thin; revenue_growth_yoy n=1/4 (25%) clears the 20%
-    # cut in this tiny fixture → NOT thin (it is only thin on the full pop where
-    # coverage is ~4%). Guards the mapping from regressing to a static set.
+    # Thin-factor policy (#1836; #2023). Coverage branch in isolation (flag off):
+    # pe_ratio n=0 → thin; revenue_growth_yoy n=1/4 (25%) clears the 20% cut →
+    # NOT thin; roe full coverage → NOT thin. Guards the mapping from regressing.
     mc = result.cohort_member_count
     assert result.medians["pe_ratio"].n == 0
     assert is_factor_thin("pe_ratio", result.medians["pe_ratio"].n, mc) is True
     assert is_factor_thin("revenue_growth_yoy", result.medians["revenue_growth_yoy"].n, mc) is False
     assert is_factor_thin("roe", result.medians["roe"].n, mc) is False
+    # But this fixture is a below-threshold fallback cohort (level 0): the API
+    # passes cohort_is_fallback → EVERY factor greys, coverage notwithstanding.
+    assert is_factor_thin("roe", result.medians["roe"].n, mc, cohort_is_fallback=True) is True
 
 
 @pytest.mark.db
