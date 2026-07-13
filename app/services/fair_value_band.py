@@ -11,6 +11,7 @@ Spec: docs/proposals/valuation/2026-07-12-deterministic-fair-value-band.md
 from __future__ import annotations
 
 import datetime as _dt
+import math
 from dataclasses import dataclass
 from statistics import median
 from typing import Any, LiteralString
@@ -244,6 +245,52 @@ def band_quality_status(q: QualityInputs) -> str:
     if score >= 4:
         return "medium"
     return "low"
+
+
+def compute_divergence(
+    llm_base: float | None, band_base: float | None, threshold: float,
+) -> tuple[float | None, bool | None]:
+    """NULL-safe (#1632). Non-finite/absent operand or band_base<=0 => (None, None).
+
+    Both operands checked with math.isfinite BEFORE the positivity test: nan<=0
+    is False, so a NaN band_base would otherwise slip through to (nan, False)
+    (Codex ckpt-1 PR-B MED). Never raises — divergence is measure-only and must
+    not gate the atomic thesis insert.
+    """
+    if band_base is None or llm_base is None:
+        return (None, None)
+    if not (math.isfinite(band_base) and math.isfinite(llm_base)):
+        return (None, None)
+    if band_base <= 0:
+        return (None, None)
+    pct = abs(llm_base - band_base) / band_base
+    return (pct, pct > threshold)
+
+
+def _shape_fair_value_band(
+    row: tuple[float | None, float | None, float | None, str, str | None, _dt.date | None, _dt.date | None, _dt.date | None, dict[str, Any]] | None,
+) -> dict[str, object]:
+    """Passive thesis context block. Absent => {available:false, reason}.
+
+    row cols (B3 SELECT order):
+      (bear, base, bull, quality_status, reason, as_of_date, ttm_end, price_as_of, basis_json)
+    available:true ONLY when bear+base+bull all non-null — the storage CHECK
+    permits a partial triple, so a partial row fails closed rather than crashing
+    float(None) (Codex ckpt-1 PR-B LOW).
+    """
+    if row is None:
+        return {"available": False, "reason": "no_band"}
+    bear, base, bull, quality, reason, as_of_date, ttm_end, price_as_of, basis = row
+    if bear is None or base is None or bull is None:
+        return {"available": False, "reason": reason or "no_band"}
+    return {
+        "available": True, "reason": reason, "quality_status": quality,
+        "bear": float(bear), "base": float(base), "bull": float(bull),
+        "as_of_date": as_of_date.isoformat() if as_of_date else None,
+        "ttm_end": ttm_end.isoformat() if ttm_end else None,
+        "price_as_of": price_as_of.isoformat() if price_as_of else None,
+        "basis": basis,
+    }
 
 
 @dataclass(frozen=True)
