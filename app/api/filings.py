@@ -15,6 +15,7 @@ provider's primary identifier — see #565). It does NOT expose
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 import psycopg
 import psycopg.rows
@@ -96,12 +97,13 @@ class TenderEventSummary(BaseModel):
     nullable: NULL means not resolvable from the cover/body — never guessed.
     """
 
-    role: str  # 'subject' | 'offeror'
+    role: Literal["subject", "offeror"]
     subject_company_name: str
     offeror_names: list[str] | None
     is_third_party_tender: bool | None
     is_issuer_tender: bool | None
     is_going_private: bool | None
+    amends_13d: bool | None
     is_final_amendment: bool | None
     amendment_no: int | None
     offer_price_per_unit: float | None
@@ -266,6 +268,7 @@ def _parse_tender(row: dict[str, object]) -> TenderEventSummary | None:
         is_third_party_tender=row.get("te_is_third_party_tender"),  # type: ignore[arg-type]
         is_issuer_tender=row.get("te_is_issuer_tender"),  # type: ignore[arg-type]
         is_going_private=row.get("te_is_going_private"),  # type: ignore[arg-type]
+        amends_13d=row.get("te_amends_13d"),  # type: ignore[arg-type]
         is_final_amendment=row.get("te_is_final_amendment"),  # type: ignore[arg-type]
         amendment_no=row.get("te_amendment_no"),  # type: ignore[arg-type]
         offer_price_per_unit=parse_optional_float(row, "te_offer_price_per_unit"),
@@ -388,6 +391,7 @@ def list_filings(
                        te.is_third_party_tender      AS te_is_third_party_tender,
                        te.is_issuer_tender           AS te_is_issuer_tender,
                        te.is_going_private           AS te_is_going_private,
+                       te.amends_13d                 AS te_amends_13d,
                        te.is_final_amendment         AS te_is_final_amendment,
                        te.amendment_no               AS te_amendment_no,
                        te.offer_price_per_unit       AS te_offer_price_per_unit,
