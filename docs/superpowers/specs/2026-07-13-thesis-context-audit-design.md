@@ -104,7 +104,7 @@ Maps + marker set (explicit, from the shaped-block keys in `_assemble_context`):
 ```python
 _LIST_ASOF = {"fundamentals": "as_of_date", "filings": "filing_date", "news": "event_time"}
 _DICT_ASOF = {"prior_thesis": "created_at", "price_anchor": "price_date",
-              "valuation": "price_as_of", "fair_value_band": "price_as_of",
+              "valuation": "price_as_of", "fair_value_band": "as_of_date",  # band's own vintage, not the price leg (Codex ckpt-2)
               "analytics_evidence": "as_of"}
 _MARKER_KEYS = frozenset({"available", "reason", "status", "quality_status", "schema"})
 ```

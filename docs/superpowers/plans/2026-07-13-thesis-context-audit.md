@@ -66,22 +66,15 @@ ALTER TABLE thesis_runs
 COMMIT;
 ```
 
-- [ ] **Step 2: Apply to the dev test DB and verify the columns exist**
+- [ ] **Step 2: Apply migrations and verify the columns exist**
 
-Run:
+`run_migrations()` (`app/db/migrations.py:115`) takes no args — it reads the configured DSN and applies every `sql/NNN_*.sql` in order. Apply against the dev DB and verify:
+
 ```bash
-docker compose --profile test up -d postgres-test
-uv run python -c "
-from app.db.migrations import run_migrations
-from tests.fixtures.db import test_dsn  # or the project's migration entrypoint
-"
-```
-If the repo has no scriptable single-migration apply, apply via the standard runner the smoke test uses, then verify:
-```bash
+uv run python -c "from app.db.migrations import run_migrations; print(run_migrations()[-3:])"
 uv run python - <<'PY'
-import psycopg, os
-dsn = os.environ.get("EBULL_TEST_DATABASE_URL") or os.environ["DATABASE_URL"]
-with psycopg.connect(dsn) as c:
+from app.db.pool import open_pool
+with open_pool() as pool, pool.connection() as c:
     cols = c.execute("""
         SELECT column_name, data_type, is_nullable FROM information_schema.columns
         WHERE table_name='thesis_runs' AND column_name IN ('context_sha256','context_summary')
@@ -90,9 +83,11 @@ with psycopg.connect(dsn) as c:
     print(cols)
 PY
 ```
-Expected: `[('context_sha256','text','YES'), ('context_summary','jsonb','YES')]`
+Expected: the migration list ends with `223_thesis_runs_context_audit.sql`, and the columns print as `[('context_sha256','text','YES'), ('context_summary','jsonb','YES')]`.
 
-> If migrations only apply via the FastAPI lifespan, running the smoke test in Task 3 applies sql/223; this step's manual apply is the verification path when iterating locally.
+> The db-tier tests (Task 3) apply sql/223 automatically: the `ebull_test_db` fixture rebuilds its template DB whenever `_migration_hash()` changes (`tests/fixtures/ebull_test_db.py`), and adding sql/223 changes that hash. No manual test-DB apply needed — this step is the dev-DB verification path.
+
+> If `open_pool()` is not the right dev entrypoint here, fall back to the smoke test (`uv run pytest tests/smoke`), which boots the FastAPI lifespan and runs migrations against dev — a green smoke run proves sql/223 applies cleanly.
 
 - [ ] **Step 3: Commit**
 
@@ -156,7 +151,14 @@ def _full_context() -> dict[str, object]:
         },
         "price_anchor": {"close": 210.0, "price_date": "2025-07-11", "currency": "USD"},
         "valuation": {"available": True, "current_price": 210.0, "price_as_of": "2025-07-11"},
-        "fair_value_band": {"available": True, "base": 200.0, "quality_status": "ok", "price_as_of": "2025-07-11"},
+        # representative _shape_fair_value_band output — as_of_date (band vintage)
+        # deliberately DISTINCT from price_as_of so the test proves we pick as_of_date.
+        "fair_value_band": {
+            "available": True, "reason": None, "quality_status": "ok",
+            "bear": 150.0, "base": 200.0, "bull": 250.0,
+            "as_of_date": "2025-06-30", "ttm_end": "2025-03-31", "price_as_of": "2025-07-11",
+            "basis": {},
+        },
         "analytics_evidence": {"schema": "iar_v1", "as_of": "2025-07-09T00:00:00+00:00", "piotroski": {"score": 7}},
         "ta_state": {"sma_50": 205.0, "sma_200": 190.0, "price_vs_sma200": "above"},
         "earnings_history": [],
@@ -209,7 +211,8 @@ def test_list_as_of_is_max_not_first_element() -> None:
 
 def test_explicit_available_blocks_mirror_flag_and_carry_status_asof() -> None:
     blocks = summarize_context(_full_context(), _PV)["blocks"]
-    assert blocks["fair_value_band"] == {"available": True, "status": "ok", "as_of": "2025-07-11"}
+    # fair_value_band as_of = the band's own as_of_date (2025-06-30), NOT price_as_of.
+    assert blocks["fair_value_band"] == {"available": True, "status": "ok", "as_of": "2025-06-30"}
     assert blocks["valuation"] == {"available": True, "as_of": "2025-07-11"}  # present → no status field
 
 
@@ -299,7 +302,9 @@ _DICT_ASOF: dict[str, str] = {
     "prior_thesis": "created_at",
     "price_anchor": "price_date",
     "valuation": "price_as_of",
-    "fair_value_band": "price_as_of",
+    # the band's OWN vintage (fair_value_band_current.as_of_date), NOT the
+    # price leg (price_as_of) — the band is fundamentals-anchored (Codex ckpt-2).
+    "fair_value_band": "as_of_date",
     "analytics_evidence": "as_of",
 }
 # A dict whose keys are ALL markers (no substantive payload) is "absent usable
