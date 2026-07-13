@@ -24,11 +24,13 @@ import type { CandleBar, PeerComparison } from "@/api/types";
 const PC: PeerComparison = {
   symbol: "AAA",
   instrument_id: 1,
-  sector: "3",
-  sector_member_count: 951,
+  cohort_sic: "3571",
+  cohort_sic_label: "Electronic Computers",
+  cohort_sic_level: 4,
+  cohort_member_count: 951,
   factors: [
-    { key: "roe", label: "ROE", instrument_value: 0.9, sector_median: 0.1, sector_n: 800, dev_limited: false, better_when: "higher" },
-    { key: "pe", label: "P/E", instrument_value: 40, sector_median: 50, sector_n: 2, dev_limited: true, better_when: "lower" },
+    { key: "roe", label: "ROE", instrument_value: 0.9, cohort_median: 0.1, cohort_n: 800, dev_limited: false, better_when: "higher" },
+    { key: "pe", label: "P/E", instrument_value: 40, cohort_median: 50, cohort_n: 2, dev_limited: true, better_when: "lower" },
   ],
   peers: [{ instrument_id: 2, symbol: "BBB", company_name: "BBB Inc", size_proxy: 1e9, factors: { roe: 0.5, pe: 60 } }],
 };
@@ -36,8 +38,10 @@ const PC: PeerComparison = {
 const EMPTY_PC: PeerComparison = {
   symbol: "ZZZ",
   instrument_id: 9,
-  sector: "0",
-  sector_member_count: 0,
+  cohort_sic: "9999",
+  cohort_sic_label: null,
+  cohort_sic_level: 0,
+  cohort_member_count: 0,
   factors: [],
   peers: [],
 };

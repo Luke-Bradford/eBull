@@ -2,7 +2,7 @@
  * /instrument/:symbol/peers — peer-comparison drill (#594).
  *
  * Three charts over `/instruments/{symbol}/peer-comparison` (#1751) + peer
- * candles: a multi-factor radar (instrument vs sector median), a sector heatmap
+ * candles: a multi-factor radar (instrument vs cohort median), a cohort heatmap
  * (instrument + peers × factors), and a same-day peer-return scatter. Mirrors
  * the #592/#593 drill shells.
  *
@@ -77,7 +77,7 @@ export function PeersPage(): JSX.Element {
           </h1>
         </div>
         <p className="mt-1 text-xs text-slate-500">
-          How {symbol} sits against its sector peers across valuation, profitability, and leverage
+          How {symbol} sits against its SIC-cohort peers across valuation, profitability, and leverage
           factors, plus daily return co-movement. Factor axes are normalized per factor for
           comparison (display only).
         </p>
@@ -90,7 +90,7 @@ export function PeersPage(): JSX.Element {
       ) : pc === null || isEmpty ? (
         <EmptyState
           title="No peer data"
-          description="No sector peer set for this instrument — likely a non-US issuer, an instrument without a sector classification, or one lacking complete-TTM fundamentals."
+          description="No peer set for this instrument — likely a non-US issuer, an instrument without a SIC classification, or one lacking complete-TTM fundamentals."
         >
           <Link to={backHref} className="text-sm text-sky-700 hover:underline">
             ← Back to {symbol}
@@ -117,22 +117,27 @@ function PeersBody({ data }: { data: PeersData }): JSX.Element {
   return (
     <>
       <p className="text-[11px] text-slate-500 dark:text-slate-400">
-        Sector {pc.sector} · {pc.sector_member_count.toLocaleString()} members · {pc.peers.length}{" "}
-        size-matched peers.
+        SIC {pc.cohort_sic}
+        {pc.cohort_sic_label ? ` · ${pc.cohort_sic_label}` : ""} ·{" "}
+        {pc.cohort_sic_level === 0 ? "broad SIC-2 cohort" : `SIC-${pc.cohort_sic_level} cohort`} ·{" "}
+        {pc.cohort_member_count.toLocaleString()} peers · {pc.peers.length} size-matched.
+        {pc.cohort_sic_level === 0
+          ? " Cohort widened to the 2-digit SIC (few same-industry peers) — read medians as noisy."
+          : ""}
         {coverage.devLimitedKeys.length > 0
           ? ` ${coverage.devLimitedKeys.length} factor${coverage.devLimitedKeys.length === 1 ? "" : "s"} thin-coverage (greyed; median noisy).`
           : ""}
-        {coverage.minSectorN < 50
-          ? ` Some sector medians rest on as few as ${coverage.minSectorN.toLocaleString()} members — read them as noisy.`
+        {coverage.minCohortN < 50
+          ? ` Some cohort medians rest on as few as ${coverage.minCohortN.toLocaleString()} members — read them as noisy.`
           : ""}
       </p>
-      <Section title={`Multi-factor radar — ${pc.symbol} vs sector median`}>
+      <Section title={`Multi-factor radar — ${pc.symbol} vs cohort median`}>
         <PeerRadarChart radar={radar} symbol={pc.symbol} />
       </Section>
-      <Section title={`Sector heatmap — ${pc.symbol} + peers × factors`}>
+      <Section title={`Cohort heatmap — ${pc.symbol} + peers × factors`}>
         <SectorHeatmap heatmap={heatmap} />
       </Section>
-      <Section title="Peer return scatter — daily returns vs sector">
+      <Section title="Peer return scatter — daily returns vs cohort">
         <PeerReturnScatter data={scatter} />
       </Section>
     </>

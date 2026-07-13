@@ -13,8 +13,8 @@ function factor(p: Partial<PeerFactor> & { key: string; better_when: "higher" | 
     key: p.key,
     label: p.label ?? p.key,
     instrument_value: p.instrument_value ?? null,
-    sector_median: p.sector_median ?? null,
-    sector_n: p.sector_n ?? 100,
+    cohort_median: p.cohort_median ?? null,
+    cohort_n: p.cohort_n ?? 100,
     dev_limited: p.dev_limited ?? false,
     better_when: p.better_when,
   };
@@ -28,8 +28,10 @@ function pc(factors: PeerFactor[], peers: PeerInstrument[]): PeerComparison {
   return {
     symbol: "AAA",
     instrument_id: 1,
-    sector: "3",
-    sector_member_count: 951,
+    cohort_sic: "3571",
+    cohort_sic_label: "Electronic Computers",
+    cohort_sic_level: 4,
+    cohort_member_count: 951,
     factors,
     peers,
   };
@@ -43,7 +45,7 @@ describe("buildRadar", () => {
   it("normalizes outward=better for higher-is-better factors", () => {
     const r = buildRadar(
       pc(
-        [factor({ key: "roe", better_when: "higher", instrument_value: 0.9, sector_median: 0.1 })],
+        [factor({ key: "roe", better_when: "higher", instrument_value: 0.9, cohort_median: 0.1 })],
         [peer("F", { roe: 0.5 })],
       ),
     );
@@ -56,7 +58,7 @@ describe("buildRadar", () => {
   it("inverts for lower-is-better factors (low P/E scores outward)", () => {
     const r = buildRadar(
       pc(
-        [factor({ key: "pe", better_when: "lower", instrument_value: 40, sector_median: 50 })],
+        [factor({ key: "pe", better_when: "lower", instrument_value: 40, cohort_median: 50 })],
         [peer("F", { pe: 60 })],
       ),
     );
@@ -67,18 +69,18 @@ describe("buildRadar", () => {
 
   it("degenerate cohort (all equal) → 0.5 neutral", () => {
     const r = buildRadar(
-      pc([factor({ key: "x", better_when: "higher", instrument_value: 5, sector_median: 5 })], [peer("F", { x: 5 })]),
+      pc([factor({ key: "x", better_when: "higher", instrument_value: 5, cohort_median: 5 })], [peer("F", { x: 5 })]),
     );
     expect(r[0]!.instrument).toBeCloseTo(0.5, 6);
     expect(r[0]!.median).toBeCloseTo(0.5, 6);
   });
 
-  it("gaps a null instrument_value AND a null sector_median", () => {
+  it("gaps a null instrument_value AND a null cohort_median", () => {
     const r = buildRadar(
       pc(
         [
-          factor({ key: "g", better_when: "higher", instrument_value: null, sector_median: 2.6 }),
-          factor({ key: "h", better_when: "higher", instrument_value: 0.3, sector_median: null }),
+          factor({ key: "g", better_when: "higher", instrument_value: null, cohort_median: 2.6 }),
+          factor({ key: "h", better_when: "higher", instrument_value: 0.3, cohort_median: null }),
         ],
         [peer("F", { g: 0.1, h: 0.2 })],
       ),
@@ -94,7 +96,7 @@ describe("buildHeatmap", () => {
   it("pins the instrument as the first row and scores cells", () => {
     const h = buildHeatmap(
       pc(
-        [factor({ key: "roe", better_when: "higher", instrument_value: 0.9, sector_median: 0.1 })],
+        [factor({ key: "roe", better_when: "higher", instrument_value: 0.9, cohort_median: 0.1 })],
         [peer("F", { roe: 0.5 }), peer("GM", { roe: null })],
       ),
     );
@@ -152,18 +154,18 @@ describe("buildScatter", () => {
 });
 
 describe("peerCoverage", () => {
-  it("collects dev_limited keys and the min sector_n", () => {
+  it("collects dev_limited keys and the min cohort_n", () => {
     const cov = peerCoverage(
       pc(
         [
-          factor({ key: "pe", better_when: "lower", dev_limited: true, sector_n: 2 }),
-          factor({ key: "roe", better_when: "higher", sector_n: 813 }),
-          factor({ key: "rev", better_when: "higher", sector_n: 39 }),
+          factor({ key: "pe", better_when: "lower", dev_limited: true, cohort_n: 2 }),
+          factor({ key: "roe", better_when: "higher", cohort_n: 813 }),
+          factor({ key: "rev", better_when: "higher", cohort_n: 39 }),
         ],
         [],
       ),
     );
     expect(cov.devLimitedKeys).toEqual(["pe"]);
-    expect(cov.minSectorN).toBe(2);
+    expect(cov.minCohortN).toBe(2);
   });
 });

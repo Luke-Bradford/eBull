@@ -75,10 +75,10 @@ function RadarTooltip({ active, payload, symbol }: RadarTooltipProps): JSX.Eleme
         {pt.devLimited ? " ⚠" : ""}
       </div>
       <div className="tabular-nums text-slate-600 dark:text-slate-300">
-        {symbol} {fmtRaw(pt.instrumentRaw)} · sector median {fmtRaw(pt.medianRaw)}
+        {symbol} {fmtRaw(pt.instrumentRaw)} · cohort median {fmtRaw(pt.medianRaw)}
       </div>
       <div className="text-slate-500 dark:text-slate-400">
-        better {pt.betterWhen} · n={pt.sectorN.toLocaleString()}
+        better {pt.betterWhen} · n={pt.cohortN.toLocaleString()}
         {pt.devLimited ? " · thin coverage" : ""}
       </div>
     </ChartTooltip>
@@ -151,8 +151,8 @@ export function PeerRadarChart({
         </RadarChart>
       </ResponsiveContainer>
       <p className="mt-1 px-2 text-[10px] text-slate-400">
-        Axes normalized per factor across the instrument + sector median + peers; outward = better
-        (orientation per factor). ⚠ = thin sector coverage (price-gated or &lt;20% of members) —
+        Axes normalized per factor across the instrument + cohort median + peers; outward = better
+        (orientation per factor). ⚠ = thin cohort coverage (price-gated or &lt;20% of members) —
         median is noisy; a missing vertex is a data gap, not worst-in-class. Hover for raw values.
       </p>
     </div>
@@ -191,7 +191,7 @@ export function SectorHeatmap({ heatmap }: { heatmap: Heatmap }): JSX.Element {
             className={`px-1 text-center leading-tight ${
               f.devLimited ? "text-slate-400" : "text-slate-600 dark:text-slate-300"
             }`}
-            title={`${f.label}${f.devLimited ? " (thin coverage)" : ""} · sector n=${f.sectorN}`}
+            title={`${f.label}${f.devLimited ? " (thin coverage)" : ""} · peer n=${f.cohortN}`}
           >
             {f.label}
             {f.devLimited ? " ⚠" : ""}
