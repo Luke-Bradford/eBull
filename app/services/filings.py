@@ -218,6 +218,24 @@ SEC_PARSE_AND_RAW: frozenset[str] = frozenset(
         "424B4",
         "424B5",
         "424B7",
+        # Tender offers + going-private. #1982 (#1015 item 4) — sec_tender
+        # parser extracts the Reg M-A cover disclosures (parties from the
+        # SGML header, Item 1004(a) price/expiration, Item 1012(a) board
+        # recommendation). SC TO-I(/A) / SC 13E3(/A) were previously in
+        # NEITHER tier despite existing in filing_events via the
+        # master-index path — a live cleanup-delete hazard
+        # (filing_events_cleanup deletes SEC rows off the keep-list union);
+        # they enter the union here for the first time. The dead
+        # ``DEF 13E-3`` string (0 rows ever; EDGAR emits SC 13E3) was
+        # removed from SEC_METADATA_ONLY in the same change.
+        "SC TO-T",
+        "SC TO-T/A",
+        "SC TO-I",
+        "SC TO-I/A",
+        "SC 14D9",
+        "SC 14D9/A",
+        "SC 13E3",
+        "SC 13E3/A",
     }
 )
 
@@ -270,12 +288,15 @@ SEC_METADATA_ONLY: frozenset[str] = frozenset(
         # under another 424(b) paragraph duplicates the underlying
         # paragraph's filing.
         "424B8",
-        # Tender offers + going-private — M&A / take-out signal.
-        "SC TO-T",
-        "SC TO-T/A",
-        "SC 14D9",
-        "SC 14D9/A",
-        "DEF 13E-3",
+        # SC TO-T(/A) / SC 14D9(/A) PROMOTED to PARSE+RAW (#1982 — sec_tender
+        # parser), alongside SC TO-I(/A) / SC 13E3(/A) which previously sat in
+        # neither tier (cleanup-delete hazard — see SEC_PARSE_AND_RAW above).
+        # The dead ``DEF 13E-3`` string was removed (0 rows ever; EDGAR emits
+        # ``SC 13E3``). PREM14C / DEFM14C stay metadata-only: Schedule 14C
+        # incorporates the Schedule 14A items and the merger consideration
+        # lives in Item 14 prose (no cover-page terms presentation — the
+        # #1659 free-text trap); the going-private signal for those
+        # transactions is carried by the companion SC 13E3, which IS parsed.
         "PREM14C",
         "DEFM14C",
         # Delisting / deregistration — terminal-state signal.

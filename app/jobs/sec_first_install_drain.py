@@ -279,7 +279,8 @@ def seed_manifest_from_filing_events(
                 # (#1816): prospectus bodies are 100 KB-12 MB, same weight
                 # class — the historical ~43.7k backfill is its own drive
                 # ticket. Other issuer sources stay 'pending' for the worker
-                # to fetch eagerly.
+                # to fetch eagerly — including sec_tender (#1982): ~1.8k
+                # bodies drain in minutes, like sec_nt.
                 initial_ingest_status=("deferred" if source in ("sec_10k", "sec_8k", "sec_424b") else "pending"),
             )
             upserted += 1

@@ -118,6 +118,9 @@ _CADENCE: dict[ManifestSource, timedelta] = {
     # file one, so a generous ceiling keeps a non-issuing name from ever
     # reading "stale". Mirrors sec_nt's rationale.
     "sec_424b": timedelta(days=400),
+    # Tender / going-private schedules (#1982) — episodic like NT/424B: a
+    # never-tendered name must never read "stale". Mirrors sec_nt's rationale.
+    "sec_tender": timedelta(days=400),
 }
 
 

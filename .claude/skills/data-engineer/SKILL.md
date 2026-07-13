@@ -136,6 +136,7 @@ Hard-rule corollaries:
 - Instrument = `BIGINT instrument_id` (eToro-derived).
 - CIK = 10-digit zero-padded TEXT (SEC).
 - Mapping: `external_identifiers.provider='sec', identifier_type='cik', is_primary=TRUE` is canonical resolver. Historical CIKs in `instrument_cik_history`.
+- **CIK→instrument is one-to-MANY.** One SEC CIK backs multiple in-universe instruments — share-class siblings (GOOG/GOOGL, BRK.A/B, ADR+ordinary) file under a single CIK yet are distinct `instruments` rows (full-pop: **69 CIKs map to >1 instrument**; see I18 for the rollup-denominator consequence). A resolver for a fact that belongs to the ENTITY (a filing / tender event / corporate action — every listing) must return ALL instruments (`dict[cik, list[instrument_id]]`, one output row per instrument), NEVER `DISTINCT ON (cik)` / `is_primary`-preferred / `LIMIT 1`, which silently drops the fact from the sibling classes' feeds (#1982 tender parser: prevention-log "CIK→instrument resolver must return EVERY in-universe instrument"). Reserve primary-only resolution for genuinely per-listing facts (a quote, a per-instrument metric).
 - 13F filer CIKs ≠ issuer CIKs. Live in `institutional_filers.cik` (sql/090).
 - N-PORT trust CIKs ≠ 13F manager CIKs. Live in `sec_nport_filer_directory.cik` (sql/126). Disjoint from `institutional_filers`. Codex finding on #919: walking `institutional_filers` for N-PORT was the root cause of empty fund holdings.
 - 13D/G primary filers in `blockholder_filers.cik` (sql/095). Per-row `reporter_cik` nullable (natural persons / family trusts).

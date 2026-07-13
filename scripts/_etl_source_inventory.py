@@ -128,6 +128,10 @@ MANIFEST_SOURCE_SINKS: dict[str, tuple[tuple[str, ...], str]] = {
         ("prospectus_offerings",),
         "prospectus_offering",
     ),
+    "sec_tender": (
+        ("tender_offer_events",),
+        "tender_offer_event",
+    ),
 }
 
 # Closure check enforced at import-time + by the smoke test.

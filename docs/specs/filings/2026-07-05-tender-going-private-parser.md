@@ -189,7 +189,7 @@ bumps, extensions, `is_final_amendment` results row) — readers wanting
 
 ## Schema
 
-- `sql/218_tender_offer_events.sql` — new table as above; composite PK
+- `sql/224_tender_offer_events.sql` — new table as above; composite PK
   `(accession_number, instrument_id)`, index on `instrument_id`. FK-free
   instrument_id (mirrors `nt_filing_notices`/`prospectus_offerings`). Same
   migration (each CHECK verified present on dev before widening — prevention

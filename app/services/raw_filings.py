@@ -82,6 +82,11 @@ DocumentKind = Literal[
     # (100 KB-12 MB; B4s bundle full financial statements) → swept
     # (born-compacted), NOT kept. sql/216.
     "prospectus_body",
+    # #1982 — tender / going-private schedule body (SC TO-T / TO-I / 14D9 /
+    # 13E3 + /A). Mixed-size (13 KB Schedule TOs - 518 KB 14D-9s), tiny
+    # population (~1.8k) → swept (born-compacted); a rewash re-fetches the
+    # full population in ~3 min at the shared 10 req/s. sql/224.
+    "tender_body",
 ]
 # submissions.json / companyfacts.json are keyed by CIK, not by SEC
 # accession number — they belong in their own per-CIK store, not in
@@ -96,7 +101,7 @@ DocumentKind = Literal[
 # disjoint from the rewash registry (a rewash parser reads stored bodies,
 # which a born-compacted row lacks). Canonical here (single source of
 # truth); ``raw_payload_retention`` imports it.
-SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset({"primary_doc", "prospectus_body"})
+SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset({"primary_doc", "prospectus_body", "tender_body"})
 # Future PR adds a sibling ``cik_raw_documents`` table for those.
 
 # Write-only kinds we deliberately KEEP uncompacted because they are

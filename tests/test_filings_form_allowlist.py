@@ -124,9 +124,12 @@ def test_metadata_only_forms_have_no_parser_today() -> None:
         "F-3",
         "F-4",
         "424B8",
-        "SC TO-T",
-        "SC 14D9",
-        "DEF 13E-3",
+        # SC TO-T(/A) / SC 14D9(/A) / SC TO-I(/A) / SC 13E3(/A) PROMOTED to
+        # SEC_PARSE_AND_RAW (#1982 — sec_tender). The dead ``DEF 13E-3``
+        # string was REMOVED entirely (0 rows ever; EDGAR emits SC 13E3).
+        # PREM14C / DEFM14C stay metadata-only (Schedule 14A Item 14 prose).
+        "PREM14C",
+        "DEFM14C",
         "25-NSE",
         "15F",
         "5",

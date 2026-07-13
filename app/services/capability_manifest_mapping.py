@@ -132,6 +132,16 @@ _UNMAPPED_MANIFEST_SOURCES: dict[ManifestSource, str] = {
         "capital actions, not a coverage capability — absence is the healthy "
         "default, so it has no per-instrument capability cell."
     ),
+    # Tender / going-private events (#1982) — episodic M&A / capital-return
+    # EVENTS, not a standing per-instrument coverage expectation: most
+    # instruments are never a tender party, so absence is the healthy
+    # default. Same scope as sec_nt / sec_424b above.
+    "sec_tender": (
+        "Tender / going-private schedule events (SC TO-T / TO-I / 14D9 / "
+        "13E3, #1982). Episodic M&A events, not a coverage capability — "
+        "absence is the healthy default, so it has no per-instrument "
+        "capability cell."
+    ),
 }
 
 
