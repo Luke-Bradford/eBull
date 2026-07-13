@@ -1345,6 +1345,30 @@ export interface OfferingSummary {
   security_type: string | null;
 }
 
+/** Parsed tender-offer / going-private event (Reg M-A: Schedule TO / 14D-9 / 13E-3) — #1982.
+ *  Mirrors app/api/filings.py TenderEventSummary. One row per (accession, instrument); only
+ *  `role` + `subject_company_name` are non-null. The four transaction-type checkboxes are
+ *  orthogonal tri-state flags (true/false/null) stored uncollapsed by design — null means the
+ *  cover box was unresolvable, never a guessed value. `board_recommendation` is the SEC Item
+ *  1012(a) position (accept/reject/neutral/unable); kept `string | null` to mirror the Pydantic
+ *  `str | None` exactly. */
+export interface TenderEventSummary {
+  role: "subject" | "offeror";
+  subject_company_name: string;
+  offeror_names: string[] | null;
+  is_third_party_tender: boolean | null;
+  is_issuer_tender: boolean | null;
+  is_going_private: boolean | null;
+  amends_13d: boolean | null;
+  is_final_amendment: boolean | null;
+  amendment_no: number | null;
+  offer_price_per_unit: number | null;
+  unit_label: string | null;
+  currency: string | null;
+  expiration_date: string | null;
+  board_recommendation: string | null;
+}
+
 export interface FilingItem {
   filing_event_id: number;
   instrument_id: number;
@@ -1370,6 +1394,9 @@ export interface FilingItem {
   pre14a_signal: Pre14aSignalSummary | null;
   /** Parsed 424B cover offering for tier-1 424B rows (#1816); null otherwise. */
   offering: OfferingSummary | null;
+  /** Parsed tender-offer / going-private event for Schedule TO / 14D-9 / 13E-3 rows (#1982);
+   *  null otherwise. */
+  tender: TenderEventSummary | null;
 }
 
 export interface FilingsListResponse {

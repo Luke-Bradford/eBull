@@ -81,6 +81,7 @@ function filingsWith(instrumentId: number): FilingsListResponse {
         nt_notice: null,
         pre14a_signal: null,
         offering: null,
+        tender: null,
       },
     ],
     total: 1,
