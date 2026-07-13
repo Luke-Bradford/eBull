@@ -517,7 +517,8 @@ class TestAssembleContextEnrichment:
     """
 
     def test_empty_surfaces_yield_honest_absences(self) -> None:
-        from app.services.thesis import _assemble_context
+        from app.services.thesis import _PROMPT_VERSION, _assemble_context
+        from app.services.thesis_context_audit import hash_context, summarize_context
 
         context = _assemble_context(_make_conn(), instrument_id=1)
 
@@ -526,6 +527,24 @@ class TestAssembleContextEnrichment:
         assert context["valuation"] == {"available": False, "reason": "no_live_quote"}
         assert context["fair_value_band"] == {"available": False, "reason": "no_band"}
         assert context["analytics_evidence"] is None
+
+        # #2017 final review (Important): this is the only place a REAL
+        # _assemble_context output flows into hash_context/summarize_context.
+        # Every other coverage either hashes a hand-built fixture
+        # (test_thesis_context_audit.py) or a literal dict (the db-tier
+        # persist test) — neither exercises the helpers against the true
+        # shapes _assemble_context actually produces.
+        digest = hash_context(context)
+        assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+
+        summary = summarize_context(context, _PROMPT_VERSION)
+        assert summary["prompt_version"] == _PROMPT_VERSION
+        blocks = summary["blocks"]
+        assert isinstance(blocks, dict)
+        for name in ("price_anchor", "ta_state", "valuation", "fair_value_band", "analytics_evidence"):
+            entry = blocks[name]
+            assert isinstance(entry, dict)
+            assert entry["available"] is False
 
 
 class TestGenerateThesis:

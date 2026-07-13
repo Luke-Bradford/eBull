@@ -73,6 +73,7 @@ from app.services.fair_value_band import (
 from app.services.instrument_analytics import SCHEMA_VERSION as _IAR_SCHEMA_VERSION
 from app.services.llm_client import LLMClient, LLMClientPair, LLMCompletion
 from app.services.technical_analysis import derive_trend_signals
+from app.services.thesis_context_audit import hash_context, summarize_context
 
 logger = logging.getLogger(__name__)
 
@@ -1400,6 +1401,8 @@ def _insert_thesis_run(
     provider: str,
     model: str,
     critic_model: str,
+    context_sha256: str | None = None,
+    context_summary: dict[str, object] | None = None,
 ) -> int:
     """Insert a 'running' thesis_runs row and return its run_id.
 
@@ -1409,11 +1412,19 @@ def _insert_thesis_run(
     ``critic_json.model`` the critic's. Recording ``critic_model`` here
     is what keeps critic provenance auditable when the best-effort critic
     fails and no ``critic_json`` is stored (#1995).
+
+    ``context_sha256`` / ``context_summary`` (#2017) fingerprint + summarize
+    the assembled writer context. Written HERE — before the LLM call and the
+    pre-LLM commit — so failed/guard-rejected runs retain the audit. Both
+    nullable: a caller that omits them (or an audit-compute failure upstream)
+    leaves the columns NULL.
     """
     row = conn.execute(
         """
-        INSERT INTO thesis_runs (instrument_id, trigger, provider, model, critic_model)
-        VALUES (%(instrument_id)s, %(trigger)s, %(provider)s, %(model)s, %(critic_model)s)
+        INSERT INTO thesis_runs (instrument_id, trigger, provider, model, critic_model,
+                                 context_sha256, context_summary)
+        VALUES (%(instrument_id)s, %(trigger)s, %(provider)s, %(model)s, %(critic_model)s,
+                %(context_sha256)s, %(context_summary)s)
         RETURNING run_id
         """,
         {
@@ -1422,6 +1433,8 @@ def _insert_thesis_run(
             "provider": provider,
             "model": model,
             "critic_model": critic_model,
+            "context_sha256": context_sha256,
+            "context_summary": Jsonb(context_summary) if context_summary is not None else None,
         },
     ).fetchone()
     if row is None:
@@ -1527,6 +1540,21 @@ def generate_thesis(
     dedicated connection.
     """
     context = _assemble_context(conn, instrument_id)
+    # #2017: fingerprint + summarize what the writer saw, persisted on the run
+    # row. Best-effort — this is forensic AUDIT metadata, not thesis data, so a
+    # compute bug must degrade (NULL columns + a WARNING), never abort a valid
+    # generation (mirrors #2009 divergence "measure-only, never gate"). The
+    # broad except is deliberate HERE precisely because prevention-log 2127
+    # forbids it for its case: 2127 is a per-row BATCH loop where a bug must
+    # fail loud; this is a single pre-LLM call site whose only failure mode is
+    # losing audit metadata. The pure module is fully fast-tier tested, and the
+    # WARNING + NULL columns surface the bug without sinking the thesis.
+    try:
+        context_sha256: str | None = hash_context(context)
+        context_summary: dict[str, object] | None = summarize_context(context, _PROMPT_VERSION)
+    except Exception:
+        logger.warning("thesis context audit compute failed for instrument_id=%d", instrument_id, exc_info=True)
+        context_sha256, context_summary = None, None
     run_id = _insert_thesis_run(
         conn,
         instrument_id,
@@ -1534,6 +1562,8 @@ def generate_thesis(
         provider=clients.writer.provider_name,
         model=clients.writer.model,
         critic_model=clients.critic.model,
+        context_sha256=context_sha256,
+        context_summary=context_summary,
     )
     # Close the implicit read tx opened by _assemble_context SELECTs
     # (and publish the 'running' run row) BEFORE the LLM calls below.
