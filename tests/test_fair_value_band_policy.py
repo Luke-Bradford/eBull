@@ -1,4 +1,7 @@
+import datetime as _d
 from typing import Any
+
+import pytest
 
 from app.services.fair_value_band import (
     MIN_OWN_POINTS,
@@ -6,9 +9,11 @@ from app.services.fair_value_band import (
     PeerPct,
     QualityInputs,
     TargetInputs,
+    _shape_fair_value_band,
     band_quality_status,
     combine_across,
     compute_band,
+    compute_divergence,
     currency_coherent,
     filter_dual_class,
     own_range,
@@ -270,3 +275,65 @@ def test_compute_band_thin_cohort_when_all_comparators_absent():
     )
     assert res.reason == "thin_cohort"
     assert res.base is None
+
+
+def test_divergence_normal():
+    pct, flag = compute_divergence(120.0, 100.0, 0.30)
+    assert pct == pytest.approx(0.20)
+    assert flag is False
+
+
+def test_divergence_flagged():
+    pct, flag = compute_divergence(150.0, 100.0, 0.30)
+    assert flag is True
+
+
+def test_divergence_band_base_none_is_null_not_zero():
+    assert compute_divergence(120.0, None, 0.30) == (None, None)
+
+
+def test_divergence_band_base_zero_is_null():
+    assert compute_divergence(120.0, 0.0, 0.30) == (None, None)
+
+
+def test_divergence_llm_nan_is_null():
+    assert compute_divergence(float("nan"), 100.0, 0.30) == (None, None)
+
+
+def test_divergence_band_base_nan_is_null():
+    # nan <= 0 is False — a NaN band_base must NOT slip past to (nan, False).
+    assert compute_divergence(120.0, float("nan"), 0.30) == (None, None)
+
+
+def test_divergence_llm_inf_is_null():
+    assert compute_divergence(float("inf"), 100.0, 0.30) == (None, None)
+
+
+def test_shape_absent_row():
+    out = _shape_fair_value_band(None)
+    assert out == {"available": False, "reason": "no_band"}
+
+
+def test_shape_partial_triple_fails_closed():
+    # base present but bull NULL (storage CHECK permits it) -> absent, no crash.
+    row = (100.0, 110.0, None, "medium", "ok", _d.date(2026, 7, 13), _d.date(2026, 6, 30), _d.date(2026, 7, 11), {})
+    out = _shape_fair_value_band(row)
+    assert out["available"] is False
+
+
+def test_shape_present_row_carries_price_as_of():
+    row = (
+        100.0,
+        110.0,
+        130.0,
+        "high",
+        "ok",
+        _d.date(2026, 7, 13),
+        _d.date(2026, 6, 30),
+        _d.date(2026, 7, 11),
+        {"selected": ["pe"]},
+    )
+    out = _shape_fair_value_band(row)
+    assert out["available"] is True
+    assert out["price_as_of"] == "2026-07-11"
+    assert out["base"] == 110.0

@@ -1155,7 +1155,13 @@ CREATE TABLE IF NOT EXISTS thesis_valuation_audit (
     band_quality_status  text,
     price_as_of          date,
     llm_base             numeric(18,6),
-    divergence_pct       numeric(10,6),   -- NULL when band_base NULL
+    divergence_pct       numeric,          -- NULL when band_base NULL. UNCONSTRAINED numeric
+                                           -- (NOT numeric(10,6)): a tiny positive band_base with a
+                                           -- large llm_base yields pct >> 9999, and a bounded type
+                                           -- would raise numeric_value_out_of_range INSIDE the
+                                           -- atomic thesis txn -> abort the whole thesis. Divergence
+                                           -- is MEASURE-ONLY and must never gate the insert
+                                           -- (Codex ckpt-1 PR-B HIGH).
     divergence_flag      boolean,          -- NULL when band_base NULL
     created_at           timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (thesis_id)
@@ -1182,8 +1188,8 @@ git commit -m "feat(#2009): thesis_valuation_audit divergence table"
 
 **Interfaces:**
 - Produces:
-  - `compute_divergence(llm_base: float | None, band_base: float | None, threshold: float) -> tuple[float | None, bool | None]` — returns `(divergence_pct, divergence_flag)`; `(None, None)` when `band_base` is None or non-positive, or `llm_base` is None/NaN (no ZeroDivisionError, #1632).
-  - `_shape_fair_value_band(row: tuple | None) -> dict` — the passive context block: `{available, reason, quality_status, bear, base, bull, as_of_date, ttm_end, basis}` or `{available: False, reason}` when absent (context reason enum distinct from storage enum).
+  - `compute_divergence(llm_base: float | None, band_base: float | None, threshold: float) -> tuple[float | None, bool | None]` — returns `(divergence_pct, divergence_flag)`; `(None, None)` when EITHER operand is None or non-finite (NaN/±inf via `math.isfinite`), or `band_base <= 0` (no ZeroDivisionError, no `(nan, False)` leak, #1632). **Codex ckpt-1 PR-B MED:** guard `band_base` for NaN too — `nan <= 0` is False, so a NaN `band_base` would otherwise slip past the positivity check and return `(nan, False)`.
+  - `_shape_fair_value_band(row: tuple | None) -> dict` — the passive context block: `{available, reason, quality_status, bear, base, bull, as_of_date, ttm_end, price_as_of, basis}` or `{available: False, reason}` when absent (context reason enum distinct from storage enum). **`available: True` ONLY when bear AND base AND bull are all non-null** — the storage CHECK permits a partial triple (`bear NULL OR base NULL OR bull NULL OR ordered`), so a base-present/bear-null row must fail closed to absent rather than crash `float(None)` (Codex ckpt-1 PR-B LOW). `price_as_of` is carried (parallel to `valuation.price_as_of`, `thesis.py:499`) so B4's audit row can snapshot it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1215,9 +1221,35 @@ def test_divergence_llm_nan_is_null():
     assert compute_divergence(float("nan"), 100.0, 0.30) == (None, None)
 
 
+def test_divergence_band_base_nan_is_null():
+    # nan <= 0 is False — a NaN band_base must NOT slip past to (nan, False).
+    assert compute_divergence(120.0, float("nan"), 0.30) == (None, None)
+
+
+def test_divergence_llm_inf_is_null():
+    assert compute_divergence(float("inf"), 100.0, 0.30) == (None, None)
+
+
 def test_shape_absent_row():
     out = _shape_fair_value_band(None)
     assert out == {"available": False, "reason": "no_band"}
+
+
+def test_shape_partial_triple_fails_closed():
+    # base present but bull NULL (storage CHECK permits it) -> absent, no crash.
+    import datetime as _d
+    row = (100.0, 110.0, None, "medium", "ok", _d.date(2026, 7, 13), _d.date(2026, 6, 30), _d.date(2026, 7, 11), {})
+    out = _shape_fair_value_band(row)
+    assert out["available"] is False
+
+
+def test_shape_present_row_carries_price_as_of():
+    import datetime as _d
+    row = (100.0, 110.0, 130.0, "high", "ok", _d.date(2026, 7, 13), _d.date(2026, 6, 30), _d.date(2026, 7, 11), {"selected": ["pe"]})
+    out = _shape_fair_value_band(row)
+    assert out["available"] is True
+    assert out["price_as_of"] == "2026-07-11"
+    assert out["base"] == 110.0
 ```
 
 Add `import pytest` at the top of the test module if not present.
@@ -1236,30 +1268,48 @@ import math
 def compute_divergence(
     llm_base: float | None, band_base: float | None, threshold: float,
 ) -> tuple[float | None, bool | None]:
-    """NULL-safe (#1632). Absent/zero band or NaN llm => (None, None)."""
-    if band_base is None or band_base <= 0:
+    """NULL-safe (#1632). Non-finite/absent operand or band_base<=0 => (None, None).
+
+    Both operands checked with math.isfinite BEFORE the positivity test: nan<=0
+    is False, so a NaN band_base would otherwise slip through to (nan, False)
+    (Codex ckpt-1 PR-B MED). Never raises — divergence is measure-only and must
+    not gate the atomic thesis insert.
+    """
+    if band_base is None or llm_base is None:
         return (None, None)
-    if llm_base is None or math.isnan(llm_base):
+    if not (math.isfinite(band_base) and math.isfinite(llm_base)):
+        return (None, None)
+    if band_base <= 0:
         return (None, None)
     pct = abs(llm_base - band_base) / band_base
     return (pct, pct > threshold)
 
 
 def _shape_fair_value_band(row: tuple[object, ...] | None) -> dict[str, object]:
-    """Passive thesis context block. Absent => {available:false, reason}."""
+    """Passive thesis context block. Absent => {available:false, reason}.
+
+    row cols (B3 SELECT order):
+      (bear, base, bull, quality_status, reason, as_of_date, ttm_end, price_as_of, basis_json)
+    available:true ONLY when bear+base+bull all non-null — the storage CHECK
+    permits a partial triple, so a partial row fails closed rather than crashing
+    float(None) (Codex ckpt-1 PR-B LOW).
+    """
     if row is None:
         return {"available": False, "reason": "no_band"}
-    # row cols: (bear, base, bull, quality_status, reason, as_of_date, ttm_end, basis_json)
-    bear, base, bull, quality, reason, as_of_date, ttm_end, basis = row
-    if base is None:
+    bear, base, bull, quality, reason, as_of_date, ttm_end, price_as_of, basis = row
+    if bear is None or base is None or bull is None:
         return {"available": False, "reason": reason or "no_band"}
     return {
         "available": True, "reason": reason, "quality_status": quality,
         "bear": float(bear), "base": float(base), "bull": float(bull),
         "as_of_date": as_of_date.isoformat() if as_of_date else None,
-        "ttm_end": ttm_end.isoformat() if ttm_end else None, "basis": basis,
+        "ttm_end": ttm_end.isoformat() if ttm_end else None,
+        "price_as_of": price_as_of.isoformat() if price_as_of else None,
+        "basis": basis,
     }
 ```
+
+> **Plan note:** `import math` goes at the MODULE TOP of `app/services/fair_value_band.py` (python-hygiene — no import inside the function body), alongside the existing `from __future__ import annotations` / dataclass imports.
 
 - [ ] **Step 4: Run to verify pass + commit**
 
@@ -1282,7 +1332,7 @@ git commit -m "feat(#2009): NULL-safe divergence + passive context-block shape"
 
 - [ ] **Step 1: Read the band in `_assemble_context`**
 
-Add a `SELECT bear_value, base_value, bull_value, quality_status, reason, as_of_date, ttm_end, basis_json FROM fair_value_band_current WHERE instrument_id = %s AND method_version = %s` (params `(instrument_id, "fvb_v1")`), shape it via `_shape_fair_value_band`, and add `context["fair_value_band"] = fair_value_band` alongside `context["price_anchor"]` (~`thesis.py:877`).
+Add a `SELECT bear_value, base_value, bull_value, quality_status, reason, as_of_date, ttm_end, price_as_of, basis_json FROM fair_value_band_current WHERE instrument_id = %s AND method_version = %s` (params `(instrument_id, METHOD_VERSION)` — import `METHOD_VERSION` from `app.services.fair_value_band`, do NOT hard-code the `"fvb_v1"` string; single-source per global CLAUDE.md "no magic strings for identifiers with a typed counterpart"), shape it via `_shape_fair_value_band`, and add `context["fair_value_band"] = fair_value_band` alongside `context["price_anchor"]` (~`thesis.py:877`). **Column order in the SELECT MUST match `_shape_fair_value_band`'s unpack order** (bear, base, bull, quality, reason, as_of_date, ttm_end, price_as_of, basis) — `price_as_of` sits between `ttm_end` and `basis_json`.
 
 - [ ] **Step 2: Add the passive writer rule**
 
@@ -1316,15 +1366,46 @@ git commit -m "feat(#2009): passive fair-value-band context block + prompt-versi
 
 - [ ] **Step 1: Insert the audit row in the same txn**
 
-In `generate_thesis`, after the validated writer output is inserted into `theses` and its `thesis_id` is available (write-once; no post-hoc UPDATE of the append-only row), compute `divergence_pct, divergence_flag = compute_divergence(llm_base, band_base, DIVERGENCE_THRESHOLD)` where `band_base` is the base pulled from `context["fair_value_band"]` (None when absent) and `llm_base` is the writer's `base_value`. INSERT one `thesis_valuation_audit` row snapshotting `band_method_version="fvb_v1"`, `band_base`, `band_quality_status`, `price_as_of`, `llm_base`, `divergence_pct`, `divergence_flag`. The band snapshot makes a past thesis's divergence reconstructable though the live band is mutable. `_validate_writer_output` stays a **coherence-only hard gate** — divergence does NOT raise (soft signal for QA + critic).
+In `generate_thesis`, INSIDE the existing `with conn.transaction():` block (`thesis.py:1470`), immediately AFTER `_insert_thesis_atomic(...)` returns `thesis_id` and BEFORE the `with` block closes (so the two writes commit atomically and the FK to `theses(thesis_id)` is valid), insert the audit row. Do NOT thread `context` into `_insert_thesis_atomic` — insert directly in `generate_thesis` where both `context` and `thesis_id` are in scope, and do NOT re-read the mutable band (snapshot from `context["fair_value_band"]`, Codex ckpt-1 PR-B LOW).
+
+Read the band block once: `fvb = context.get("fair_value_band") or {}`; `band_available = fvb.get("available") is True`. Then:
+- `band_base = fvb.get("base") if band_available else None`
+- `band_quality_status = fvb.get("quality_status") if band_available else None`
+- `price_as_of = fvb.get("price_as_of") if band_available else None` (an ISO string — the column is `date`; pass it through, psycopg casts, or `None`)
+- `llm_base = _to_float(writer_output.get("base_value"))`
+- `divergence_pct, divergence_flag = compute_divergence(llm_base, band_base, DIVERGENCE_THRESHOLD)`
+
+INSERT one `thesis_valuation_audit` row: `band_method_version=METHOD_VERSION` (imported, not the literal), `band_base`, `band_quality_status`, `price_as_of`, `llm_base`, `divergence_pct`, `divergence_flag`. The band snapshot makes a past thesis's divergence reconstructable though the live band is mutable. `_validate_writer_output` stays a **coherence-only hard gate** — divergence does NOT raise (soft signal for QA + critic).
 
 - [ ] **Step 2: Verify the block is conditioned on availability**
 
 `band_base` None (the common ~8,700 path) → `compute_divergence` returns `(None, None)` → the row stores NULL divergence, never 0/false. Confirm no branch writes 0/false on absence.
 
-- [ ] **Step 3: Smoke + a targeted test**
+- [ ] **Step 3: Smoke + a db-tier transaction test**
 
-Add a pure test asserting the audit values for (a) a present band and (b) an absent band via `compute_divergence` (already covered in B2 — extend if a `generate_thesis`-level pure helper is extracted). Run: `uv run pytest tests/smoke -q`.
+Pure `compute_divergence` tests (B2) do NOT prove the audit row is actually inserted, inserted in-txn, or that the snapshot fields are correct (Codex ckpt-1 PR-B MED). Add ONE db-tier integration test in `tests/test_thesis_valuation_audit.py` (auto-`db`-marked — DB fixture):
+
+```python
+# tests/test_thesis_valuation_audit.py — one db-tier test for the audit-row invariant.
+import pytest
+
+pytestmark = pytest.mark.db
+
+
+def test_audit_row_present_band(db_conn):
+    """Seed a fair_value_band_current row (base present) + a theses row in ONE
+    txn; assert exactly one thesis_valuation_audit row keyed on the returned
+    thesis_id with band_base snapshotted and divergence computed (non-NULL)."""
+    ...
+
+
+def test_audit_row_absent_band_null_divergence(db_conn):
+    """No band row (or base NULL) -> audit row still written, divergence_pct and
+    divergence_flag both NULL (never 0/false, #1632)."""
+    ...
+```
+
+Exercise the real `generate_thesis` atomic path if a seedable fixture exists (grep `tests/` for an existing thesis-insert helper / `_insert_thesis_atomic` usage in tests to reuse — do NOT hand-roll a parallel insert path that could drift from production). If `generate_thesis` needs live LLM clients that the test env can't provide, drive the narrower seam instead: call `_insert_thesis_atomic` + the new audit-insert helper inside one `with db_conn.transaction():`, then assert the row. Keep the pure module (`tests/test_fair_value_band_policy.py`) DB-free — this test lives in its own db-tier module. Run: `docker compose --profile test up -d postgres-test && uv run pytest tests/test_thesis_valuation_audit.py -m db -v` and `uv run pytest tests/smoke -q`.
 
 - [ ] **Step 4: Commit**
 
