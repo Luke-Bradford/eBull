@@ -1541,9 +1541,14 @@ def generate_thesis(
     """
     context = _assemble_context(conn, instrument_id)
     # #2017: fingerprint + summarize what the writer saw, persisted on the run
-    # row. Best-effort — audit compute must NEVER abort a valid generation
-    # (prevention-log line 2127; mirrors #2009 divergence "measure-only, never
-    # gate"). A failure degrades to NULL audit columns + a WARNING.
+    # row. Best-effort — this is forensic AUDIT metadata, not thesis data, so a
+    # compute bug must degrade (NULL columns + a WARNING), never abort a valid
+    # generation (mirrors #2009 divergence "measure-only, never gate"). The
+    # broad except is deliberate HERE precisely because prevention-log 2127
+    # forbids it for its case: 2127 is a per-row BATCH loop where a bug must
+    # fail loud; this is a single pre-LLM call site whose only failure mode is
+    # losing audit metadata. The pure module is fully fast-tier tested, and the
+    # WARNING + NULL columns surface the bug without sinking the thesis.
     try:
         context_sha256: str | None = hash_context(context)
         context_summary: dict[str, object] | None = summarize_context(context, _PROMPT_VERSION)
