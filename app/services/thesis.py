@@ -21,6 +21,8 @@ Context caps (v2 — settled-decisions "Thesis prompt budget", amended #1987):
   - risk metrics (#1632): instrument_risk_metrics_current scalars, statused
   - price anchor (#1987): latest price_daily close (native ccy) + 52w range + returns
   - valuation (#1987):    instrument_valuation row when present; statused absence
+  - fair_value_band (#2009): fair_value_band_current row (fvb_v1) when present;
+                          statused absence (passive evidence, not gating)
   - analytics (#1987):    latest scores.analytics_json, shaped compact, scored_at-stamped
   - ta_state (#1987):     latest price_daily indicators + derived regime signals
 
@@ -52,6 +54,12 @@ from typing import Any, Literal
 import psycopg
 from psycopg import sql as psql
 from psycopg.types.json import Jsonb
+
+# Safe at module scope (#2009 B3): fair_value_band's only app-internal deps are
+# peer_comparison and xbrl_derived_stats, neither of which imports thesis (or
+# anything that transitively reaches back here via scheduler/refresh_cascade) —
+# verified by grep, unlike risk_metrics below which genuinely cycles.
+from app.services.fair_value_band import METHOD_VERSION, _shape_fair_value_band
 
 # Safe at module scope: instrument_analytics has no app-module imports at
 # top level (its insider_transactions read is function-lazy), so this does
@@ -103,7 +111,12 @@ _MAX_TOKENS_CRITIC = 2048
 # changes — memos from different prompt versions are not comparable.
 # v3 (#2007): _WRITER_SYSTEM gains the availability-claim mirror rule
 # (never disclaim a block the context marks available, then cite its figures).
-_PROMPT_VERSION = "v3"
+# v4 (#2009 PR-B): _assemble_context gains the passive fair_value_band block
+# (deterministic bear/base/bull evidence); _WRITER_SYSTEM gains the matching
+# "You will be given" bullet + a passive grounding rule (band is the primary
+# valuation anchor when available+high quality; price_anchor/52w range remain
+# the fallback). Scoring and _validate_writer_output are untouched.
+_PROMPT_VERSION = "v4"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -847,6 +860,22 @@ def _assemble_context(
     ).fetchone()
     valuation = _shape_valuation(val_row)
 
+    # #2009 PR-B: passive fair-value-band evidence (fvb_v1). PR-A write-through
+    # only; this block is READ-ONLY here — no scoring/gating touch. Absence is
+    # structural for most of the universe (thin cohort, no fundamentals, stale
+    # price) and is statused, not errored — same discipline as `valuation`.
+    # Column order MUST match _shape_fair_value_band's unpack order exactly.
+    band_row = conn.execute(
+        """
+        SELECT bear_value, base_value, bull_value, quality_status, reason,
+               as_of_date, ttm_end, price_as_of, basis_json
+        FROM fair_value_band_current
+        WHERE instrument_id = %(id)s AND method_version = %(mv)s
+        """,
+        {"id": instrument_id, "mv": METHOD_VERSION},
+    ).fetchone()
+    fair_value_band = _shape_fair_value_band(band_row)
+
     # #1987 Block C: latest persisted IAR evidence (#1823). Refreshes only
     # on compute_rankings — staleness is allowed and stamped (scored_at),
     # mirroring risk_v1's as_of_date discipline.
@@ -876,6 +905,7 @@ def _assemble_context(
         "risk_metrics": risk_metrics,
         "price_anchor": price_anchor,
         "valuation": valuation,
+        "fair_value_band": fair_value_band,
         "analytics_evidence": analytics_evidence,
         "ta_state": ta_state,
         "earnings_history": [],
@@ -928,6 +958,12 @@ You will be given a research context including:
   `sma_50_200_regime`. The regime is the CURRENT 50d-vs-200d SMA relation
   ("golden" = 50d above 200d), NOT a recent crossover event. Null
   indicators mean insufficient history.
+- `fair_value_band`: deterministic valuation-band evidence — mechanically
+  synthesized bear/base/bull per-share values from peer + own-history
+  multiples, with a `quality_status` (high/medium/low) and `as_of_date`.
+  `available: false` with a `reason` (e.g. `thin_cohort`, `stale_price`,
+  `no_multiple`) means the surface is structurally absent for this
+  instrument — most of the universe — not a data error.
 
 Produce a JSON object with EXACTLY these fields:
 
@@ -971,6 +1007,14 @@ Rules:
   stance (an entry band is meaningless without a market price), and emit
   base/bull/bear_value only if fundamentals give a defensible per-share
   basis.
+- `fair_value_band` is deterministic valuation-band evidence — a mechanical
+  prior, not a constraint. When it is available AND `quality_status` is
+  `high`, it is your PRIMARY valuation anchor: ground bear/base/bull against
+  it and explain any large gap; `price_anchor.close` and the 52-week range
+  are the fallback grounding in that case, not a second "justify if outside"
+  test. When it is absent, or `quality_status` is `medium`/`low`, treat it as
+  weak or no evidence and rely on your own judgement grounded in
+  `price_anchor`/fundamentals instead.
 - Data-availability language MUST mirror the block status fields verbatim
   (#1632 evidence discipline). Never state a block is unavailable, missing, or
   absent when its `available`/status field marks it present. When a block IS
