@@ -509,11 +509,11 @@ def _pair(client: _FakeLLMClient, critic: _FakeLLMClient | None = None) -> LLMCl
 
 
 class TestAssembleContextEnrichment:
-    """#1987: the four new context keys must be present with honest defaults
+    """#1987 + #2009: the five new context keys must be present with honest defaults
     when the underlying surfaces are empty (the _make_conn mock returns no
-    rows for price_daily / instrument_valuation / scores). The populated
-    paths are covered by the shaper table-tests above; the real queries are
-    exercised on dev by the eval-harness fixture recapture (spec §Eval gate).
+    rows for price_daily / instrument_valuation / scores / fair_value_band_current).
+    The populated paths are covered by the shaper table-tests above; the real
+    queries are exercised on dev by the eval-harness fixture recapture (spec §Eval gate).
     """
 
     def test_empty_surfaces_yield_honest_absences(self) -> None:
@@ -524,6 +524,7 @@ class TestAssembleContextEnrichment:
         assert context["price_anchor"] is None
         assert context["ta_state"] is None
         assert context["valuation"] == {"available": False, "reason": "no_live_quote"}
+        assert context["fair_value_band"] == {"available": False, "reason": "no_band"}
         assert context["analytics_evidence"] is None
 
 
