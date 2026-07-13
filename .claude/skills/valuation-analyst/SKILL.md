@@ -22,6 +22,18 @@ surface* consumed downstream. Owning skills: `thesis-writer` (produces),
 `app/services/valuation.py` is unrelated — it is portfolio AUM
 (`compute_portfolio_valuation`), NOT bear/base/bull.
 
+Also distinct: **`fair_value_band`** (#2009, `app/services/fair_value_band.py`)
+is a *deterministic comps evidence band* (bear/base/bull per-share from P/E,
+P/S, P/B percentiles) that feeds the thesis writer as passive evidence + a
+**base-to-base** divergence audit — NOT the thesis bear/base/bull. Synthesis
+rules: peer + own percentiles, blend base, **outer-envelope wings clamped by a
+fixed per-leg cap** (`_R_UP`/`_R_DN`, v2 #2022), own history uses **interior
+quantiles p25/p75** (not p20/p80 — a near-max of ~6 quarters is unreproducible).
+**Winsorization is refuted** as a width fix (can't move a genuine peer quartile;
+question the model, not the case); the root width cause is cohort comparability —
+P/S needs **net-margin + growth** matching (Damodaran), Phase 2 #2032. Spec:
+`docs/proposals/valuation/2026-07-13-fair-value-band-v2-robustness.md`.
+
 ## What it is
 
 **Produced by the thesis writer.** The Claude thesis prompt

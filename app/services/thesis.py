@@ -21,7 +21,7 @@ Context caps (v2 — settled-decisions "Thesis prompt budget", amended #1987):
   - risk metrics (#1632): instrument_risk_metrics_current scalars, statused
   - price anchor (#1987): latest price_daily close (native ccy) + 52w range + returns
   - valuation (#1987):    instrument_valuation row when present; statused absence
-  - fair_value_band (#2009): fair_value_band_current row (fvb_v1) when present;
+  - fair_value_band (#2009): fair_value_band_current row (fvb_v2) when present;
                           statused absence (passive evidence, not gating)
   - analytics (#1987):    latest scores.analytics_json, shaped compact, scored_at-stamped
   - ta_state (#1987):     latest price_daily indicators + derived regime signals
@@ -866,7 +866,7 @@ def _assemble_context(
     ).fetchone()
     valuation = _shape_valuation(val_row)
 
-    # #2009 PR-B: passive fair-value-band evidence (fvb_v1). PR-A write-through
+    # #2009 PR-B: passive fair-value-band evidence (fvb_v2). PR-A write-through
     # only; this block is READ-ONLY here — no scoring/gating touch. Absence is
     # structural for most of the universe (thin cohort, no fundamentals, stale
     # price) and is statused, not errored — same discipline as `valuation`.

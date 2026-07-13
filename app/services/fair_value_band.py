@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any, LiteralString
 
-METHOD_VERSION = "fvb_v1"
+METHOD_VERSION = "fvb_v2"
 MIN_PEERS = 8
 PEER_LIMIT = 8
 MIN_OWN_POINTS = 6
@@ -32,6 +32,16 @@ DIVERGENCE_THRESHOLD = 0.30  # consumed in PR-B (thesis divergence flag)
 _MAX_SANE_MULTIPLE = 1_000_000.0
 
 _FINANCIAL_SIC_LO, _FINANCIAL_SIC_HI = 60, 67
+
+# v2 (#2022) per-leg envelope-ratio cap — the ONLY deterministic bound on the
+# peer-only tail (names with no own-history to discipline peer.p75). Clamps
+# high_mult <= base_mult * _R_UP[m] and low_mult >= base_mult / _R_DN[m] in
+# multiple-space, before per-share conversion. base-neutral (wings only).
+# Frozen, source-ruled from the full-pop p95 of the v1 leg envelope ratio
+# (docs/proposals/valuation/2026-07-13-fair-value-band-v2-robustness.md §3/§6.2).
+# Re-validate on the fvb_v2 distribution post-backfill (DoD clause 11).
+_R_UP: dict[str, float] = {"pe": 2.6, "ps": 3.1, "pb": 4.1}
+_R_DN: dict[str, float] = {"pe": 2.7, "ps": 4.3, "pb": 2.4}
 
 
 @dataclass(frozen=True)
@@ -126,9 +136,10 @@ class PeerPct:
 
 @dataclass(frozen=True)
 class OwnPct:
-    p20: float | None
+    # v2 (#2022): INTERIOR quantiles p25/p75 (was p20/p80). See own_range.
+    p25: float | None
     p50: float | None
-    p80: float | None
+    p75: float | None
 
 
 def synth_multiple(peer: PeerPct, own: OwnPct) -> tuple[float, float, float] | None:
@@ -146,20 +157,38 @@ def synth_multiple(peer: PeerPct, own: OwnPct) -> tuple[float, float, float] | N
         else None
     )
     own_full = (
-        (own.p20, own.p50, own.p80) if own.p20 is not None and own.p50 is not None and own.p80 is not None else None
+        (own.p25, own.p50, own.p75) if own.p25 is not None and own.p50 is not None and own.p75 is not None else None
     )
     if peer_full is not None and own_full is not None:
         p25, p50, p75 = peer_full
-        o20, o50, o80 = own_full
+        o25, o50, o75 = own_full
         base = (p50 + o50) / 2
-        low = min(p25, o20)
-        high = max(p75, o80)
+        low = min(p25, o25)
+        high = max(p75, o75)
         return (low, base, high)
     if peer_full is not None:
         return peer_full
     if own_full is not None:
         return own_full
     return None
+
+
+def cap_envelope(m: str, low: float, base: float, high: float) -> tuple[float, float, bool, bool]:
+    """v2 (#2022) §6.2: clamp the wing multiples to base*_R_UP[m] / base/_R_DN[m].
+
+    Returns (low, high, capped_low, capped_high). base > 0 always (positive-denominator
+    §4.1 gate + median of positive multiples), so base*R (R>=1) straddles base and the
+    low <= base <= high invariant is preserved. Peer-only / own-only / two-sided all pass
+    through the same clamp — the peer-only tail (no own-history to discipline peer.p75) is
+    the target. base-neutral: base is not touched. Unknown multiple or non-positive base =>
+    no-op (defensive; the batch handler would otherwise statuse the row)."""
+    r_up = _R_UP.get(m)
+    r_dn = _R_DN.get(m)
+    if r_up is None or r_dn is None or base <= 0:
+        return (low, high, False, False)
+    cap_lo = base / r_dn
+    cap_hi = base * r_up
+    return (max(low, cap_lo), min(high, cap_hi), low < cap_lo, high > cap_hi)
 
 
 def to_per_share(
@@ -206,12 +235,19 @@ def combine_across(triples: list[tuple[float, float, float]]) -> tuple[float, fl
 
 
 def own_range(multiple_values: list[float]) -> OwnPct:
-    """§4.4 own trailing range. Positive values only; MIN_OWN_POINTS floor."""
+    """§4.4 own trailing range. Positive values only; MIN_OWN_POINTS floor.
+
+    v2 (#2022): INTERIOR quantiles p25/p75, not p20/p80. own.p80 over the ~6-quarter
+    floor is a near-max order statistic of a tiny sample (76% of own-legs have <=6
+    points; Hyndman & Fan 1996) — it injected small-sample noise into the outer-envelope
+    wing and was the dominant reproducibility risk. p25/p75 match the peer side and are
+    markedly stabler across recomputes. base uses p50 only, so this is base-neutral.
+    See docs/proposals/valuation/2026-07-13-fair-value-band-v2-robustness.md §6.1."""
     pos = [v for v in multiple_values if v > 0]
     if len(pos) < MIN_OWN_POINTS:
         return OwnPct(None, None, None)
-    p20, p50, p80 = percentiles(pos, (0.20, 0.50, 0.80))
-    return OwnPct(p20=p20, p50=p50, p80=p80)
+    p25, p50, p75 = percentiles(pos, (0.25, 0.50, 0.75))
+    return OwnPct(p25=p25, p50=p50, p75=p75)
 
 
 def filter_dual_class(rows: list[tuple[int, float]], dual_class_ids: set[int]) -> list[float]:
@@ -359,6 +395,8 @@ def compute_band(
         if synth is None:
             continue
         low_mult, base_mult, high_mult = synth
+        precap_low, precap_high = low_mult, high_mult
+        low_mult, high_mult, capped_low, capped_high = cap_envelope(m, low_mult, base_mult, high_mult)
         triple = to_per_share(
             m,
             low_mult,
@@ -380,11 +418,17 @@ def compute_band(
             contributing_own_points = max(contributing_own_points, own_points_by_multiple.get(m, 0))
         basis["multiples"][m] = {
             "peer": {"p25": peer.p25, "p50": peer.p50, "p75": peer.p75},
-            "own": {"p20": own.p20, "p50": own.p50, "p80": own.p80},
+            "own": {"p25": own.p25, "p50": own.p50, "p75": own.p75},
             "base_value": triple[1],
             "cohort_n": cn,
             "excluded_stale_n": esn,
             "own_points": own_points_by_multiple.get(m, 0),
+            # v2 (#2022) cap audit: the pre-cap wing multiples + whether each was
+            # clamped, so the base*_R_UP/_R_DN clamp is reconstructable from the row.
+            "capped_low": capped_low,
+            "capped_high": capped_high,
+            "precap_low_mult": precap_low,
+            "precap_high_mult": precap_high,
         }
 
     if not per_share_triples:
