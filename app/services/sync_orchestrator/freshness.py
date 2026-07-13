@@ -209,6 +209,39 @@ def scoring_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     return True, audit_detail
 
 
+def fair_value_band_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    """Content-watermark freshness for the fair-value band layer (#2009).
+
+    Unlike the audit-watermark predicates above, the band is a pure
+    DB-derived layer with no external I/O, so freshness reads the actual
+    band rows (``MAX(computed_at)`` over ``fair_value_band_current`` for the
+    live method version) rather than a ``job_runs`` audit row — the presence
+    of freshly-written band rows IS the freshness signal, and it stays honest
+    even if a manual recompute wrote rows outside the orchestrator job path.
+    24h window matches the layer cadence. Age is computed in SQL as
+    now() - computed_at; note computed_at is written with the Python client
+    clock (``datetime.now(tz=UTC)`` in ``write_band``), NOT SQL now(), so this
+    compares the DB-server clock against the client write-clock — they are
+    co-located, so the skew is negligible.
+    """
+    from app.services.fair_value_band import METHOD_VERSION
+
+    row = conn.execute(
+        """
+        SELECT EXTRACT(EPOCH FROM now() - MAX(computed_at)) AS age_seconds
+        FROM fair_value_band_current
+        WHERE method_version = %s
+        """,
+        (METHOD_VERSION,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return False, "no fair_value_band_current rows for current method_version"
+    age = timedelta(seconds=float(row[0]))
+    if age > timedelta(hours=24):
+        return False, f"fair-value bands last computed {_format_age(age)} ago (window 24h)"
+    return True, f"fair-value bands last computed {_format_age(age)} ago"
+
+
 def recommendations_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     # Spec §1.3: fresh iff MAX(trade_recommendations.created_at) >
     # MAX(scores.scored_at) for default model OR latest successful

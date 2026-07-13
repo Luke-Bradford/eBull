@@ -31,11 +31,15 @@ from __future__ import annotations
 
 import logging
 
+import psycopg
+import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_session_or_service_token
+from app.db import get_conn
 from app.jobs.job_connection import connect_job
+from app.services.fair_value_band import METHOD_VERSION as FAIR_VALUE_BAND_METHOD_VERSION
 from app.services.fundamentals.force_refresh import run_force_refresh
 
 logger = logging.getLogger(__name__)
@@ -126,4 +130,64 @@ def force_refresh_fundamentals(req: ForceRefreshRequest) -> ForceRefreshResponse
         symbols_failed=result.facts.symbols_failed,
         periods_canonical_upserted=result.periods.periods_canonical_upserted,
         results=results,
+    )
+
+
+# ---------------------------------------------------------------------
+# Fair-value band reason-bucket rollup (#2009, Task A9)
+# ---------------------------------------------------------------------
+#
+# The band is an orchestrator DAG layer, not an admin ProcessRow, so it
+# does not auto-surface a health tile. This read lets the operator
+# distinguish an expected dev-stale distribution (mostly ``stale_price``
+# when dev market-data is weeks behind) from a real regression (a spike
+# in ``thin_cohort`` / ``no_multiple`` / ``currency_mismatch``) without
+# reading thousands of ``fair_value_band_current`` rows. ``reason`` and
+# ``quality_status`` are the two axes the operator triages on.
+
+
+class FairValueBandRollupBucket(BaseModel):
+    """One (reason, quality_status) count. ``quality_status`` is NULL for
+    every statused-absent reason (only ``reason='ok'`` carries a tier)."""
+
+    reason: str
+    quality_status: str | None
+    count: int
+
+
+class FairValueBandRollupResponse(BaseModel):
+    method_version: str
+    total: int
+    buckets: list[FairValueBandRollupBucket]
+
+
+@router.get("/fair-value-band/rollup", response_model=FairValueBandRollupResponse)
+def fair_value_band_rollup(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> FairValueBandRollupResponse:
+    """Count ``fair_value_band_current`` rows grouped by ``reason`` then
+    ``quality_status`` for the live method version.
+
+    Scoped to the current ``fvb_v1`` method version so a stale prior-version
+    row (left behind by a ``method_version`` bump before the operator runs
+    the ``fair_value_band_refresh`` recompute) never inflates the counts.
+    """
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(
+            """
+            SELECT reason, quality_status, count(*)
+            FROM fair_value_band_current
+            WHERE method_version = %(mv)s
+            GROUP BY reason, quality_status
+            ORDER BY reason, quality_status NULLS FIRST
+            """,
+            {"mv": FAIR_VALUE_BAND_METHOD_VERSION},
+        )
+        rows = cur.fetchall()
+
+    buckets = [FairValueBandRollupBucket(reason=str(r[0]), quality_status=r[1], count=int(r[2])) for r in rows]
+    return FairValueBandRollupResponse(
+        method_version=FAIR_VALUE_BAND_METHOD_VERSION,
+        total=sum(b.count for b in buckets),
+        buckets=buckets,
     )

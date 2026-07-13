@@ -42,6 +42,7 @@ from typing import Any
 
 import psycopg
 
+from app.services.fair_value_band import refresh_fair_value_band_batch
 from app.services.fundamentals import RefreshOutcome, RefreshPlan, finish_ingestion_run, start_ingestion_run
 from app.services.llm_client import LLMClientPair
 from app.services.scoring import compute_rankings
@@ -355,6 +356,52 @@ def instrument_lock(
 
 
 # ---------------------------------------------------------------------------
+# Fair-value band warm-hook (#2009 A8)
+# ---------------------------------------------------------------------------
+
+
+def _warm_fair_value_band(conn: psycopg.Connection[Any], instrument_id: int) -> None:
+    """Warm ``fair_value_band_current`` for one instrument immediately before
+    ``generate_thesis`` so PR-B's thesis reads a fresh band row.
+
+    Pass-2 only: ``refresh_fair_value_band_batch`` with a single-id list reads
+    the stored daily pass-1 cohort percentiles (never re-materializes pass-1).
+    A same-day cascade firing BEFORE the first daily ``fair_value_band`` layer
+    run reads yesterday's percentiles — acceptable, cohort medians move slowly.
+
+    TRANSACTION SAFETY (#293): the cascade connection is non-autocommit and is
+    already INTRANS here (``instrument_lock`` ran an advisory-lock SELECT), so
+    the batch's per-id ``with conn.transaction():`` opens a SAVEPOINT under that
+    outer tx rather than a top-level tx. The explicit ``conn.commit()`` below
+    then makes the band write durable AND leaves the connection idle (no open
+    tx) BEFORE ``generate_thesis`` starts — matching its caller contract (it
+    commits mid-flow and must not run inside an outer transaction block). The
+    session-level advisory lock survives the commit.
+
+    A band failure must NEVER block a thesis: any exception is logged and
+    swallowed, and ``conn.rollback()`` restores a usable connection (a
+    SAVEPOINT-scoped failure already rolled back to the savepoint; the rollback
+    here also clears an outer-tx error left by a non-savepoint failure such as
+    the pre-loop cohort-date SELECT).
+    """
+    try:
+        refresh_fair_value_band_batch(conn, instrument_ids=[instrument_id])
+        conn.commit()
+    except Exception:
+        logger.exception(
+            "cascade_refresh: fair-value band warm failed for instrument_id=%d — continuing to thesis",
+            instrument_id,
+        )
+        try:
+            conn.rollback()
+        except psycopg.Error:
+            logger.debug(
+                "cascade_refresh: rollback suppressed after band warm failure",
+                exc_info=True,
+            )
+
+
+# ---------------------------------------------------------------------------
 # cascade_refresh
 # ---------------------------------------------------------------------------
 
@@ -452,6 +499,9 @@ def cascade_refresh(
                 locked_skipped += 1
                 continue
             try:
+                # #2009 A8 — warm the fair-value band before the thesis (own
+                # try/except inside; never blocks the thesis on band failure).
+                _warm_fair_value_band(conn, iid)
                 generate_thesis(iid, conn, clients, trigger="cascade")
                 thesis_refreshed += 1
                 processed_ok.append(iid)
@@ -498,6 +548,9 @@ def cascade_refresh(
                 locked_skipped += 1
                 continue
             try:
+                # #2009 A8 — warm the fair-value band before the thesis (own
+                # try/except inside; never blocks the thesis on band failure).
+                _warm_fair_value_band(conn, iid)
                 generate_thesis(iid, conn, clients, trigger="cascade")
                 thesis_refreshed += 1
                 processed_ok.append(iid)

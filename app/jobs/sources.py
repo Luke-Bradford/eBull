@@ -86,6 +86,7 @@ Lane = Literal[
     "db_size_sample",
     "llm_thesis",
     "risk_metrics",
+    "fair_value_band",
     "bootstrap",
     "finra",
     "openfigi",
@@ -297,6 +298,19 @@ when one overruns). Scheduled-only, so NOT added to the
   scheduled row would double-fire), so NOT added to the
   ``bootstrap_stages.lane`` CHECK.
 
+* ``fair_value_band`` — ``fair_value_band_refresh`` (#2009) only. The
+  orchestrator-driven 24h deterministic fair-value band recompute. DB-only
+  producer (no external host), so the lane is purely a write-overlap bucket.
+  Own lane keeps it write-disjoint (sole writer of
+  ``fair_value_band_observations`` / ``fair_value_band_current`` /
+  ``fair_value_cohort_members``; reads ``financial_periods_ttm`` +
+  ``price_daily`` MVCC-safe) AND stops the minutes-long full-universe pass
+  from starving the catch-all ``db`` lane's every-5-min orchestrator sync
+  (#1526/#1527 class) — same rationale as ``risk_metrics``. Reachable via the
+  orchestrator adapter inner-JobLock AND the operator manual-trigger path. NOT
+  in SCHEDULED_JOBS (the DAG layer's cadence/freshness gate the run), so NOT
+  added to the ``bootstrap_stages.lane`` CHECK.
+
 The final lane is bootstrap-only:
 
 * ``bootstrap`` — ``bootstrap_orchestrator`` (G14). Deliberately
@@ -451,6 +465,17 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # params in MANUAL_TRIGGER_JOB_METADATA; invoker in
     # app/jobs/runtime.py::_INVOKERS.
     "risk_metrics_refresh": "risk_metrics",
+    # fair_value_band_refresh — #2009 deterministic fair-value band recompute.
+    # Own write-disjoint lane (sole writer of fair_value_band_observations /
+    # _current + fair_value_cohort_members; reads financial_periods_ttm +
+    # price_daily MVCC-safe). Orchestrator-driven (DAG layer "fair_value_band")
+    # + manual-trigger-only; NOT in SCHEDULED_JOBS (the layer's 24h
+    # cadence/freshness gate the DAG walk — a scheduled row would double-fire).
+    # Own lane (NOT catch-all "db") so the minutes-long full-universe recompute
+    # cannot starve the db-lane orchestrator sync (#1526/#1527 class), matching
+    # the risk_metrics_refresh rationale. Companion empty params in
+    # MANUAL_TRIGGER_JOB_METADATA; invoker in app/jobs/runtime.py::_INVOKERS.
+    "fair_value_band_refresh": "fair_value_band",
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.

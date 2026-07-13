@@ -548,6 +548,13 @@ class TestProductionInvokerRegistry:
             # double-fire). Source-lock "risk_metrics" + empty param
             # metadata complete the manual-only triangle.
             "risk_metrics_refresh",
+            # #2009 — fair_value_band_refresh. Orchestrator-driven (DAG
+            # layer "fair_value_band") + manual-trigger-only. Same rationale
+            # as risk_metrics_refresh: stays in _INVOKERS for the orchestrator
+            # adapter inner-JobLock + Admin "Run now"; NOT in SCHEDULED_JOBS
+            # (the layer cadence/freshness gate the DAG walk). Source-lock
+            # "fair_value_band" + empty param metadata complete the triangle.
+            "fair_value_band_refresh",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "
