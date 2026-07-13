@@ -1,8 +1,8 @@
 """
-Peer-comparison data layer (#1751) — unblocks #594.
+Peer-comparison data layer (#1751; SIC re-key #2023) — unblocks #594.
 
 Derives, per instrument, the radar factors (P/E, ROE, revenue growth YoY,
-operating margin, debt/equity, net margin), their sector medians, and a peer
+operating margin, debt/equity, net margin), their cohort medians, and a peer
 set — entirely from EXISTING tables (no new ingest):
 
   * price-free factors from ``financial_periods_ttm`` (is_complete_ttm),
@@ -10,9 +10,18 @@ set — entirely from EXISTING tables (no new ingest):
     dev; flagged ``dev_limited`` by the caller),
   * ``revenue_growth_yoy`` from the two most recent canonical FY rows in
     ``financial_periods``, with a consecutive-year day-gap guard,
-  * sector medians via ``percentile_cont`` over the sector's complete-TTM set,
-  * peer set = same sector, nearest by size proximity (``total_assets``;
+  * cohort medians via ``percentile_cont`` over the SIC cohort's complete-TTM set,
+  * peer set = same SIC cohort, nearest by size proximity (``total_assets``;
     market cap is price-gated so unusable broadly).
+
+Cohort key (#2023): SEC SIC walked 4->3->2 to the narrowest level with
+``MIN_COHORT`` peers — the SAME key + walk as ``fair_value_band.peer_pct_for``
+(``fair_value_band.py:604-707``), replacing the old eToro ``instruments.sector``
+exact-match (9 opaque codes, 26% missing). SIC lives in
+``instrument_sec_profile`` (``sic`` + generated ``sic3``/``sic2`` STORED cols,
+sql/221). Unlike the band (which goes comparator-absent under threshold),
+peer_comparison is a DISCLOSURE surface: under threshold it widens to SIC-2 and
+renders thin (``cohort_sic_level == 0``), never absent.
 
 Factor formulas MIRROR ``instrument_valuation`` (sql/201) — do not re-derive.
 The view's ~32-row ceiling is its live-price join; bypassed here by reading
@@ -23,11 +32,46 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import LiteralString, cast
 
 import psycopg
 from psycopg.rows import dict_row
 
 _PEER_LIMIT = 8
+
+# Narrowest SIC cohort must hold >= MIN_COHORT PEERS (self already excluded) to
+# resolve at that granularity; else the walk widens. Matches fair_value_band
+# MIN_PEERS=8 so the two keys agree on walk philosophy.
+MIN_COHORT = 8
+
+# SIC column per walk level — a FROZEN whitelist, never interpolated from input
+# (injection-safe, same pattern as fair_value_band._MEMBER_SQL). sic = full
+# 4-digit; sic3/sic2 = generated STORED prefixes (sql/221).
+_SIC_COL: dict[int, str] = {4: "sp.sic", 3: "sp.sic3", 2: "sp.sic2"}
+
+
+def resolve_sic_level(n4: int, n3: int, n2: int, min_cohort: int) -> tuple[int, int]:
+    """
+    Pick the cohort SIC granularity from the three self-excluded peer counts.
+
+    Pure policy (no I/O) — table-tested. ``n4``/``n3``/``n2`` are the peer counts
+    (self already excluded) at SIC-4 / SIC-3 / SIC-2. Returns
+    ``(column_level, disclosure_marker)``:
+
+      * ``column_level`` ∈ {4, 3, 2} — which ``_SIC_COL`` to filter the cohort on.
+      * ``disclosure_marker`` ∈ {4, 3, 2, 0} — the value surfaced as
+        ``cohort_sic_level``. 4/3/2 = that granularity cleared ``min_cohort``;
+        **0** = none cleared, widened to SIC-2 (render thin), mirroring
+        ``fair_value_band``'s ``sic_level=0``.
+    """
+    if n4 >= min_cohort:
+        return 4, 4
+    if n3 >= min_cohort:
+        return 3, 3
+    if n2 >= min_cohort:
+        return 2, 2
+    return 2, 0  # widened SIC-2 fallback, below threshold → thin
+
 
 # Factor keys in #594 radar order. Each: (key, label, better_when).
 FACTOR_KEYS: tuple[str, ...] = (
@@ -86,10 +130,11 @@ def is_factor_thin(key: str, sector_n: int, sector_member_count: int) -> bool:
     return sector_n / sector_member_count < THIN_COVERAGE_RATIO
 
 
-# Per-instrument factor CTE, parameterised by ``%(sector)s``. Mirrors the
-# instrument_valuation formulas (sql/201) for the price-free factors; LEFT JOINs
-# instrument_valuation for pe_ratio and the YoY CTE for revenue growth.
-_FACTORS_CTE = """
+# Per-instrument factor CTE template, parameterised by ``%(sic_prefix)s`` with the
+# SIC column filled from ``_SIC_COL`` (frozen whitelist) via ``_factors_cte``.
+# Mirrors the instrument_valuation formulas (sql/201) for the price-free factors;
+# LEFT JOINs instrument_valuation for pe_ratio and the YoY CTE for revenue growth.
+_FACTORS_CTE_TEMPLATE = """
 WITH yoy AS (
     SELECT instrument_id,
            (cur_rev - prev_rev) / prev_rev AS revenue_growth_yoy
@@ -133,12 +178,22 @@ factors AS (
         y.revenue_growth_yoy
     FROM financial_periods_ttm t
     JOIN instruments i USING (instrument_id)
+    JOIN instrument_sec_profile sp USING (instrument_id)
     LEFT JOIN instrument_valuation v USING (instrument_id)
     LEFT JOIN yoy y ON y.instrument_id = t.instrument_id
     WHERE t.is_complete_ttm = TRUE
-      AND i.sector = %(sector)s
+      AND {sic_col} = %(sic_prefix)s
 )
 """
+
+
+def _factors_cte(column_level: int) -> LiteralString:
+    """Build the factor CTE for a walk level. ``sic_col`` comes from the frozen
+    ``_SIC_COL`` whitelist (never input) → injection-safe; the prefix VALUE is
+    bound as ``%(sic_prefix)s``. The cast is sound because both the template and
+    every ``_SIC_COL`` value are literals (same pattern as
+    ``fair_value_band._MEMBER_SQL: dict[int, LiteralString]``)."""
+    return cast(LiteralString, _FACTORS_CTE_TEMPLATE.format(sic_col=_SIC_COL[column_level]))
 
 
 @dataclass(frozen=True)
@@ -160,8 +215,10 @@ class FactorMedian:
 class PeerComparisonResult:
     instrument_id: int
     symbol: str
-    sector: str
-    sector_member_count: int
+    cohort_sic: str  # the instrument's own full 4-digit SIC
+    cohort_sic_label: str | None  # sic_description of that SIC
+    cohort_sic_level: int  # 4/3/2 = cleared MIN_COHORT at that granularity; 0 = SIC-2 fallback (thin)
+    cohort_member_count: int  # cohort peer count incl. self row (median base)
     self_factors: dict[str, float | None]
     medians: dict[str, FactorMedian]
     peers: list[PeerRow]
@@ -183,7 +240,7 @@ def _rank_peers(
     limit: int,
 ) -> list[PeerRow]:
     """
-    Pick the ``limit`` nearest same-sector peers by log-size proximity.
+    Pick the ``limit`` nearest same-cohort peers by log-size proximity.
 
     Pure (no I/O): excludes self, drops rows with non-positive ``total_assets``,
     orders by ``|ln(peer.total_assets) - ln(self_total_assets)|``. Ties break on
@@ -218,25 +275,48 @@ def compute_peer_comparison(
 ) -> PeerComparisonResult | None:
     """
     Build the peer-comparison payload, or ``None`` when the instrument has no
-    sector classification or no complete-TTM fundamentals (caller 404s).
+    SIC classification or no complete-TTM fundamentals (caller 404s).
     """
     with conn.cursor(row_factory=dict_row) as cur:
-        # 1. sector (TEXT code "1".."9"); None → no classification.
+        # 1. target SIC + label + the three candidate PEER counts (self-excluded,
+        #    so MIN_COHORT means N peers). None / null SIC → no classification.
         cur.execute(
-            "SELECT sector FROM instruments WHERE instrument_id = %(id)s",
+            """
+            WITH tgt AS (
+                SELECT sic, sic3, sic2, sic_description
+                FROM instrument_sec_profile WHERE instrument_id = %(id)s
+            )
+            SELECT t.sic, t.sic3, t.sic2, t.sic_description,
+              (SELECT count(*) FROM financial_periods_ttm f
+                 JOIN instrument_sec_profile p USING (instrument_id)
+                 WHERE f.is_complete_ttm AND p.sic  = t.sic  AND f.instrument_id <> %(id)s) AS n4,
+              (SELECT count(*) FROM financial_periods_ttm f
+                 JOIN instrument_sec_profile p USING (instrument_id)
+                 WHERE f.is_complete_ttm AND p.sic3 = t.sic3 AND f.instrument_id <> %(id)s) AS n3,
+              (SELECT count(*) FROM financial_periods_ttm f
+                 JOIN instrument_sec_profile p USING (instrument_id)
+                 WHERE f.is_complete_ttm AND p.sic2 = t.sic2 AND f.instrument_id <> %(id)s) AS n2
+            FROM tgt t
+            """,
             {"id": instrument_id},
         )
         srow = cur.fetchone()
-        if srow is None or srow["sector"] is None:
+        if srow is None or srow["sic"] is None:
             return None
-        sector = str(srow["sector"])
+        cohort_sic = str(srow["sic"])
+        cohort_sic_label = str(srow["sic_description"]) if srow["sic_description"] is not None else None
+        column_level, cohort_sic_level = resolve_sic_level(
+            int(srow["n4"] or 0), int(srow["n3"] or 0), int(srow["n2"] or 0), MIN_COHORT
+        )
+        sic_prefix = {4: srow["sic"], 3: srow["sic3"], 2: srow["sic2"]}[column_level]
+        cte = _factors_cte(column_level)
 
-        # 2. all complete-TTM factor rows in the sector (self + candidates).
+        # 2. all complete-TTM factor rows in the cohort (self + candidates).
         cur.execute(
-            _FACTORS_CTE + "SELECT instrument_id, symbol, company_name, total_assets, "
+            cte + "SELECT instrument_id, symbol, company_name, total_assets, "
             "operating_margin, net_margin, roe, debt_equity_ratio, pe_ratio, revenue_growth_yoy "
             "FROM factors",
-            {"sector": sector},
+            {"sic_prefix": sic_prefix},
         )
         rows = cur.fetchall()
         by_id = {int(r["instrument_id"]): r for r in rows}
@@ -247,13 +327,13 @@ def compute_peer_comparison(
             return None
         self_ta = float(self_raw["total_assets"])
 
-        # 3. sector medians + non-null counts, one pass over the factors CTE.
+        # 3. cohort medians + non-null counts, one pass over the factors CTE.
         median_select = ", ".join(
             f"percentile_cont(0.5) WITHIN GROUP (ORDER BY {k}) AS {k}_med, count({k}) AS {k}_n" for k in FACTOR_KEYS
         )
         # median_select is built only from the frozen FACTOR_KEYS constant — no
         # user input — so the dynamic SELECT is injection-safe.
-        cur.execute(_FACTORS_CTE + f"SELECT {median_select} FROM factors", {"sector": sector})  # type: ignore[arg-type]
+        cur.execute(cte + f"SELECT {median_select} FROM factors", {"sic_prefix": sic_prefix})  # type: ignore[arg-type]
         mrow = cur.fetchone() or {}
 
     medians = {
@@ -264,16 +344,19 @@ def compute_peer_comparison(
         for k in FACTOR_KEYS
     }
 
-    # 4. peer set: same sector, exclude self, total_assets>0, nearest by
-    #    log-size proximity. Ranking in Python over the already-fetched sector
-    #    rows (hundreds at most) — no extra query.
+    # 4. peer set: same SIC cohort, exclude self, total_assets>0, nearest by
+    #    log-size proximity. Ranking in Python over the already-fetched cohort
+    #    rows (hundreds at most) — no extra query. Best-effort: may be <8 after
+    #    the total_assets filter (peer_comparison does not gate on peer count).
     peers = _rank_peers(list(by_id.values()), self_id=instrument_id, self_total_assets=self_ta, limit=_PEER_LIMIT)
 
     return PeerComparisonResult(
         instrument_id=instrument_id,
         symbol=str(self_raw["symbol"]),
-        sector=sector,
-        sector_member_count=len(rows),
+        cohort_sic=cohort_sic,
+        cohort_sic_label=cohort_sic_label,
+        cohort_sic_level=cohort_sic_level,
+        cohort_member_count=len(rows),
         self_factors=_row_factors(self_raw),
         medians=medians,
         peers=peers,

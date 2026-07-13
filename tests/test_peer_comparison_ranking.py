@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from app.services.peer_comparison import (
     FACTOR_KEYS,
+    MIN_COHORT,
     THIN_COVERAGE_RATIO,
     _rank_peers,
     _row_factors,
     is_factor_thin,
+    resolve_sic_level,
 )
 
 
@@ -76,3 +78,36 @@ def test_is_factor_thin_threshold_boundary() -> None:
 def test_is_factor_thin_empty_base_is_thin() -> None:
     # No complete-TTM members → no signal → thin (avoids div-by-zero).
     assert is_factor_thin("roe", sector_n=0, sector_member_count=0) is True
+
+
+# --- SIC cohort walk (#2023) — resolve_sic_level ----------------------------
+
+
+def test_resolve_sic_level_finest_wins() -> None:
+    # SIC-4 clears MIN_COHORT → level 4, marker 4 (narrowest granularity).
+    assert resolve_sic_level(n4=8, n3=50, n2=200, min_cohort=MIN_COHORT) == (4, 4)
+
+
+def test_resolve_sic_level_walks_to_sic3() -> None:
+    # SIC-4 short, SIC-3 clears → column level 3, marker 3.
+    assert resolve_sic_level(n4=7, n3=8, n2=200, min_cohort=MIN_COHORT) == (3, 3)
+
+
+def test_resolve_sic_level_walks_to_sic2() -> None:
+    # Only SIC-2 clears → column level 2, marker 2.
+    assert resolve_sic_level(n4=2, n3=5, n2=8, min_cohort=MIN_COHORT) == (2, 2)
+
+
+def test_resolve_sic_level_self_count_boundary() -> None:
+    # Counts are PEER counts (self already excluded upstream), so n4=8 = 8 real
+    # peers and clears. Regression guard against re-introducing self in the count
+    # (which would need 9 to clear). MIN_COHORT-1 does NOT clear at level 4.
+    assert resolve_sic_level(n4=MIN_COHORT, n3=0, n2=0, min_cohort=MIN_COHORT)[0] == 4
+    assert resolve_sic_level(n4=MIN_COHORT - 1, n3=MIN_COHORT - 1, n2=MIN_COHORT - 1, min_cohort=MIN_COHORT) == (2, 0)
+
+
+def test_resolve_sic_level_no_level_clears_falls_back_thin() -> None:
+    # No level reaches MIN_COHORT → widen to SIC-2 (column 2) but mark 0 (thin
+    # fallback), NOT a raise/None. peer_comparison must still render.
+    assert resolve_sic_level(n4=3, n3=3, n2=3, min_cohort=MIN_COHORT) == (2, 0)
+    assert resolve_sic_level(n4=0, n3=0, n2=0, min_cohort=MIN_COHORT) == (2, 0)

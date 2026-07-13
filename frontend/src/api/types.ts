@@ -482,20 +482,20 @@ export interface InstrumentCandles {
 // /instruments/{symbol}/peer-comparison (app/api/instruments.py:277-305, #1751)
 // ---------------------------------------------------------------------------
 
-/** One radar factor: the instrument's value vs its sector median. */
+/** One radar factor: the instrument's value vs its SIC-cohort median. */
 export interface PeerFactor {
   key: string;
   label: string;
   instrument_value: number | null;
-  sector_median: number | null;
-  /** # sector members with a non-null value (low n → noisy median). */
-  sector_n: number;
-  /** True when thin (greyed + ⚠): price-gated (P/E) OR sector coverage <20% (#1836). */
+  cohort_median: number | null;
+  /** # cohort members with a non-null value (low n → noisy median). */
+  cohort_n: number;
+  /** True when thin (greyed + ⚠): price-gated (P/E) OR cohort coverage <20% (#1836). */
   dev_limited: boolean;
   better_when: "higher" | "lower";
 }
 
-/** A sector peer with its factor row (for the heatmap). */
+/** A cohort peer with its factor row (for the heatmap). */
 export interface PeerInstrument {
   instrument_id: number;
   symbol: string;
@@ -507,9 +507,14 @@ export interface PeerInstrument {
 export interface PeerComparison {
   symbol: string;
   instrument_id: number;
-  /** Raw SIC division code "1".."9" — no name lookup table. */
-  sector: string;
-  sector_member_count: number;
+  /** The instrument's own 4-digit SEC SIC (#2023). */
+  cohort_sic: string;
+  /** Human-readable sic_description of that SIC (null if unmapped). */
+  cohort_sic_label: string | null;
+  /** SIC granularity the cohort walk resolved to: 4/3/2 cleared MIN_COHORT; 0 = SIC-2 fallback (thin). */
+  cohort_sic_level: number;
+  /** Complete-TTM peers in the cohort (median base). */
+  cohort_member_count: number;
   factors: PeerFactor[];
   peers: PeerInstrument[];
 }

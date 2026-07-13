@@ -1,6 +1,6 @@
 /**
  * Pure aggregation for the peer-comparison drill (#594). Consumes
- * `PeerComparison` (+ peer candles) and shapes the radar, sector heatmap, and
+ * `PeerComparison` (+ peer candles) and shapes the radar, cohort heatmap, and
  * return scatter. No DB, no render — table-tested in `peerComparison.test.ts`
  * (the "pure policy over real DB" prevention-log lesson).
  *
@@ -19,7 +19,7 @@ interface Cohort {
 }
 
 /**
- * Per-factor scale across the visible cohort: the instrument value, the sector
+ * Per-factor scale across the visible cohort: the instrument value, the cohort
  * median, and every peer's value (nulls excluded). Returns null when nothing is
  * available for that factor.
  */
@@ -27,11 +27,11 @@ function factorCohort(
   pc: PeerComparison,
   key: string,
   instrumentValue: number | null,
-  sectorMedian: number | null,
+  cohortMedian: number | null,
 ): Cohort | null {
   const vals: number[] = [];
   if (instrumentValue !== null) vals.push(instrumentValue);
-  if (sectorMedian !== null) vals.push(sectorMedian);
+  if (cohortMedian !== null) vals.push(cohortMedian);
   for (const p of pc.peers) {
     const v = p.factors[key];
     if (v !== null && v !== undefined) vals.push(v);
@@ -56,14 +56,14 @@ function orientedScore(
 }
 
 // ---------------------------------------------------------------------------
-// 1. Multi-factor radar — instrument vs sector median (2 overlays)
+// 1. Multi-factor radar — instrument vs cohort median (2 overlays)
 // ---------------------------------------------------------------------------
 
 export interface RadarPoint {
   readonly key: string;
   readonly label: string;
   readonly devLimited: boolean;
-  readonly sectorN: number;
+  readonly cohortN: number;
   readonly betterWhen: Orientation;
   /** Normalized scores [0,1], outward=better (recharts dataKeys). null = gap. */
   readonly instrument: number | null;
@@ -75,30 +75,30 @@ export interface RadarPoint {
 
 export function buildRadar(pc: PeerComparison): RadarPoint[] {
   return pc.factors.map((f) => {
-    const cohort = factorCohort(pc, f.key, f.instrument_value, f.sector_median);
+    const cohort = factorCohort(pc, f.key, f.instrument_value, f.cohort_median);
     return {
       key: f.key,
       label: f.label,
       devLimited: f.dev_limited,
-      sectorN: f.sector_n,
+      cohortN: f.cohort_n,
       betterWhen: f.better_when,
       instrument: orientedScore(f.instrument_value, cohort, f.better_when),
-      median: orientedScore(f.sector_median, cohort, f.better_when),
+      median: orientedScore(f.cohort_median, cohort, f.better_when),
       instrumentRaw: f.instrument_value,
-      medianRaw: f.sector_median,
+      medianRaw: f.cohort_median,
     };
   });
 }
 
 // ---------------------------------------------------------------------------
-// 2. Sector heatmap — (instrument + peers) rows × factor columns
+// 2. Cohort heatmap — (instrument + peers) rows × factor columns
 // ---------------------------------------------------------------------------
 
 export interface HeatFactor {
   readonly key: string;
   readonly label: string;
   readonly devLimited: boolean;
-  readonly sectorN: number;
+  readonly cohortN: number;
 }
 
 export interface HeatCell {
@@ -129,14 +129,14 @@ export function buildHeatmap(pc: PeerComparison): Heatmap {
     key: f.key,
     label: f.label,
     devLimited: f.dev_limited,
-    sectorN: f.sector_n,
+    cohortN: f.cohort_n,
   }));
 
   // Cohort + orientation per factor, computed once.
   const cohorts = new Map<string, { cohort: Cohort | null; betterWhen: Orientation }>();
   for (const f of pc.factors) {
     cohorts.set(f.key, {
-      cohort: factorCohort(pc, f.key, f.instrument_value, f.sector_median),
+      cohort: factorCohort(pc, f.key, f.instrument_value, f.cohort_median),
       betterWhen: f.better_when,
     });
   }
@@ -258,17 +258,17 @@ export function buildScatter(
 // ---------------------------------------------------------------------------
 
 export interface PeerCoverage {
-  /** Factors flagged thin (price-gated like P/E, or <20% sector coverage) — greyed in the UI. */
+  /** Factors flagged thin (price-gated like P/E, or <20% cohort coverage) — greyed in the UI. */
   readonly devLimitedKeys: string[];
-  /** Min sector_n across factors — low n means a noisy median. */
-  readonly minSectorN: number;
+  /** Min cohort_n across factors — low n means a noisy median. */
+  readonly minCohortN: number;
 }
 
 export function peerCoverage(pc: PeerComparison): PeerCoverage {
   const devLimitedKeys = pc.factors.filter((f) => f.dev_limited).map((f) => f.key);
-  const minSectorN = pc.factors.reduce(
-    (m, f) => Math.min(m, f.sector_n),
+  const minCohortN = pc.factors.reduce(
+    (m, f) => Math.min(m, f.cohort_n),
     pc.factors.length > 0 ? Infinity : 0,
   );
-  return { devLimitedKeys, minSectorN: Number.isFinite(minSectorN) ? minSectorN : 0 };
+  return { devLimitedKeys, minCohortN: Number.isFinite(minCohortN) ? minCohortN : 0 };
 }

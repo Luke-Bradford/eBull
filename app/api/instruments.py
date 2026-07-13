@@ -320,19 +320,19 @@ class FcfYieldSeries(BaseModel):
 
 
 class PeerFactor(BaseModel):
-    """One radar factor: the instrument's value vs its sector median (#1751)."""
+    """One radar factor: the instrument's value vs its SIC-cohort median (#1751; #2023)."""
 
     key: str
     label: str
     instrument_value: float | None
-    sector_median: float | None
-    sector_n: int  # # sector members with a non-null value for this factor
-    dev_limited: bool  # True when thin: price-gated (P/E) OR sector coverage <20% (#1836)
+    cohort_median: float | None
+    cohort_n: int  # # cohort members with a non-null value for this factor
+    dev_limited: bool  # True when thin: price-gated (P/E) OR cohort coverage <20% (#1836)
     better_when: Literal["higher", "lower"]
 
 
 class PeerInstrument(BaseModel):
-    """A sector peer with its factor row (for the #594 heatmap)."""
+    """A cohort peer with its factor row (for the #594 heatmap)."""
 
     instrument_id: int
     symbol: str
@@ -344,8 +344,10 @@ class PeerInstrument(BaseModel):
 class PeerComparison(BaseModel):
     symbol: str
     instrument_id: int
-    sector: str  # raw code "1".."9" (instruments.sector is TEXT; no lookup table)
-    sector_member_count: int  # complete-TTM members in the sector (median base)
+    cohort_sic: str  # the instrument's own 4-digit SEC SIC (#2023)
+    cohort_sic_label: str | None  # sic_description of that SIC (human-readable)
+    cohort_sic_level: int  # 4/3/2 = cleared MIN_COHORT at that granularity; 0 = SIC-2 fallback (thin)
+    cohort_member_count: int  # complete-TTM peers in the cohort (median base)
     factors: list[PeerFactor]
     peers: list[PeerInstrument]
 
@@ -978,15 +980,17 @@ def get_instrument_peer_comparison(
     symbol: str,
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> PeerComparison:
-    """Peer-comparison data for the #594 radar + sector heatmap (#1751).
+    """Peer-comparison data for the #594 radar + cohort heatmap (#1751; SIC #2023).
 
     Per instrument: the radar factors (P/E, ROE, revenue growth YoY, operating
-    margin, debt/equity, net margin), their sector medians, and a size-proximity
-    peer set — all derived server-side from existing fundamentals (no new
-    ingest). A factor is ``dev_limited`` (thin: greyed + ⚠) when price-gated
-    (P/E) OR its sector coverage is <20% (#1836). 404 when the instrument has no
-    sector classification or no complete-TTM fundamentals. Policy lives in
-    app/services/peer_comparison.py (``is_factor_thin``).
+    margin, debt/equity, net margin), their SIC-cohort medians, and a
+    size-proximity peer set — all derived server-side from existing fundamentals
+    (no new ingest). Cohort = SEC SIC walked 4→3→2 to the narrowest level with
+    ``MIN_COHORT`` peers (``cohort_sic_level``; 0 = SIC-2 fallback, thin). A
+    factor is ``dev_limited`` (thin: greyed + ⚠) when price-gated (P/E) OR its
+    cohort coverage is <20% (#1836). 404 when the instrument has no SIC
+    classification or no complete-TTM fundamentals. Policy lives in
+    app/services/peer_comparison.py (``resolve_sic_level``, ``is_factor_thin``).
     """
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
@@ -1011,22 +1015,24 @@ def get_instrument_peer_comparison(
     if result is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No peer-comparison data for {symbol} (no sector classification or no complete-TTM fundamentals)",
+            detail=f"No peer-comparison data for {symbol} (no SIC classification or no complete-TTM fundamentals)",
         )
 
     return PeerComparison(
         symbol=result.symbol,
         instrument_id=result.instrument_id,
-        sector=result.sector,
-        sector_member_count=result.sector_member_count,
+        cohort_sic=result.cohort_sic,
+        cohort_sic_label=result.cohort_sic_label,
+        cohort_sic_level=result.cohort_sic_level,
+        cohort_member_count=result.cohort_member_count,
         factors=[
             PeerFactor(
                 key=key,
                 label=FACTOR_LABELS[key],
                 instrument_value=result.self_factors.get(key),
-                sector_median=result.medians[key].median,
-                sector_n=result.medians[key].n,
-                dev_limited=is_factor_thin(key, result.medians[key].n, result.sector_member_count),
+                cohort_median=result.medians[key].median,
+                cohort_n=result.medians[key].n,
+                dev_limited=is_factor_thin(key, result.medians[key].n, result.cohort_member_count),
                 better_when=FACTOR_BETTER_WHEN[key],  # type: ignore[arg-type]
             )
             for key in FACTOR_KEYS
