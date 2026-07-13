@@ -400,16 +400,23 @@ def resolve_party_roles(parse: TenderOfferParse) -> dict[str, str]:
     return roles
 
 
-def map_ciks_to_instruments(conn: psycopg.Connection[Any], ciks: list[str]) -> dict[str, int]:
-    """CIK -> instrument_id via ``external_identifiers`` (values stored
-    zero-padded to 10). Primary-preferred to mirror the manifest seed's
-    LATERAL resolution. CIKs outside the universe are simply absent."""
+def map_ciks_to_instruments(conn: psycopg.Connection[Any], ciks: list[str]) -> dict[str, list[int]]:
+    """CIK -> [instrument_id, ...] via ``external_identifiers`` (values stored
+    zero-padded to 10). ONE SEC CIK can back MORE THAN ONE in-universe
+    instrument (share-class siblings file under a single CIK — 69 such CIKs in
+    the universe, 33 of them tender parties). A tender event on that CIK
+    applies to EVERY sibling — each sibling's ``filing_events`` row exists via
+    the master-index path — so every mapped instrument gets a typed row (NOT
+    ``DISTINCT ON``-collapsed to the primary, which would drop the tender from
+    the sibling classes' feeds). CIKs outside the universe are simply absent.
+    Primary-first ordering keeps the per-CIK list deterministic."""
     if not ciks:
         return {}
+    result: dict[str, list[int]] = {}
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT ON (identifier_value) identifier_value, instrument_id
+            SELECT identifier_value, instrument_id
             FROM external_identifiers
             WHERE provider = 'sec'
               AND identifier_type = 'cik'
@@ -418,7 +425,21 @@ def map_ciks_to_instruments(conn: psycopg.Connection[Any], ciks: list[str]) -> d
             """,
             {"ciks": ciks},
         )
-        return {str(value): int(instrument_id) for value, instrument_id in cur.fetchall()}
+        for value, instrument_id in cur.fetchall():
+            result.setdefault(str(value), []).append(int(instrument_id))
+    return result
+
+
+def delete_tender_offer_events(conn: psycopg.Connection[Any], accession_number: str) -> None:
+    """Remove ALL typed rows for an accession — the reparse-to-tombstone
+    reconcile. A prior parse's rows must not outlive a later parse that
+    resolves nothing (unusable header / no in-universe party): the manifest
+    row tombstones but the API join is on ``(accession, instrument_id)``, so
+    stale rows would keep rendering. Idempotent (no-op when none exist)."""
+    conn.execute(
+        "DELETE FROM tender_offer_events WHERE accession_number = %(accession)s",
+        {"accession": accession_number},
+    )
 
 
 def upsert_tender_offer_events(
@@ -428,7 +449,11 @@ def upsert_tender_offer_events(
     parse: TenderOfferParse,
     instrument_roles: list[tuple[int, str]],
 ) -> None:
-    """Upsert one typed row per (accession, matched instrument)."""
+    """Upsert one typed row per (accession, matched instrument), then delete
+    any row for the accession NOT in the current set. The delete keeps a
+    reparse idempotent: if an earlier parse wrote subject+offeror and a later
+    one resolves fewer parties (e.g. the offeror CIK left the universe), the
+    now-orphaned row is reconciled away rather than left API-visible."""
     offeror_names = [p.name for p in parse.filed_by if p.cik != parse.subject.cik]
     for instrument_id, role in instrument_roles:
         conn.execute(
@@ -496,3 +521,10 @@ def upsert_tender_offer_events(
                 "parser_version": PARSER_VERSION,
             },
         )
+    # Reconcile: drop any prior row for this accession no longer in the
+    # resolved party set (see docstring). ``instrument_roles`` is non-empty
+    # here (the caller tombstones on an empty set), so ``keep`` has ≥1 id.
+    conn.execute(
+        "DELETE FROM tender_offer_events WHERE accession_number = %(accession)s AND instrument_id <> ALL(%(keep)s)",
+        {"accession": accession_number, "keep": [iid for iid, _ in instrument_roles]},
+    )

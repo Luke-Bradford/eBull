@@ -35,6 +35,7 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.services.raw_filings import store_raw
 from app.services.tender_offers import (
     IN_SCOPE_FORMS,
+    delete_tender_offer_events,
     map_ciks_to_instruments,
     parse_tender_offer,
     resolve_party_roles,
@@ -63,6 +64,29 @@ def _failed_outcome(error: str, raw_status: Any = None) -> Any:
         raw_status=raw_status,
         error=error,
         next_retry_at=datetime.now(tz=UTC) + _FAILED_RETRY_DELAY,
+    )
+
+
+def _tombstone_after_store(conn: psycopg.Connection[Any], accession: str, error: str) -> Any:
+    """Tombstone a row whose raw is already stored (#938 ``raw_status='stored'``),
+    first reconciling away any typed rows a PRIOR parse wrote for the accession.
+    The API join is on ``(accession, instrument_id)``, so a later parse that
+    resolves nothing (unusable header / no in-universe party) must not leave
+    stale rows rendering. A cleanup failure fails(retry) rather than
+    tombstoning over stale data."""
+    from app.jobs.sec_manifest_worker import ParseOutcome
+
+    try:
+        with conn.transaction():
+            delete_tender_offer_events(conn, accession)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("sec_tender parser: tombstone cleanup failed accession=%s", accession)
+        return _failed_outcome(f"tombstone cleanup error: {exc}", raw_status="stored")
+    return ParseOutcome(
+        status="tombstoned",
+        parser_version=_PARSER_VERSION_TENDER,
+        raw_status="stored",
+        error=error,
     )
 
 
@@ -165,12 +189,7 @@ def _parse_tender(
         # The header is required for attribution; without it no role row can
         # be derived. Empty/non-200 header on a live accession is not
         # transient — tombstone rather than spin retries.
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_PARSER_VERSION_TENDER,
-            raw_status="stored",
-            error="empty or non-200 header fetch",
-        )
+        return _tombstone_after_store(conn, accession, "empty or non-200 header fetch")
 
     try:
         parse = parse_tender_offer(body, header, form)
@@ -180,25 +199,27 @@ def _parse_tender(
 
     if parse is None:
         # Unusable header blocks / body not a recognizable schedule.
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_PARSER_VERSION_TENDER,
-            raw_status="stored",
-            error="unusable header or unrecognizable schedule",
-        )
+        return _tombstone_after_store(conn, accession, "unusable header or unrecognizable schedule")
 
     roles = resolve_party_roles(parse)
-    cik_to_instrument = map_ciks_to_instruments(conn, list(roles))
-    instrument_roles = [(instrument_id, roles[cik]) for cik, instrument_id in cik_to_instrument.items()]
+    cik_to_instruments = map_ciks_to_instruments(conn, list(roles))
+    # One typed row per matched instrument. A share-class-sibling CIK maps to
+    # multiple instruments and EACH gets a row (the tender applies to every
+    # sibling class). An instrument reachable from BOTH a subject and an
+    # offeror CIK (pathological CIK-history overlap) prefers 'subject',
+    # mirroring the header-block collapse rule; the (accession, instrument_id)
+    # PK admits only one row per instrument regardless.
+    instrument_role: dict[int, str] = {}
+    for cik, instrument_ids in cik_to_instruments.items():
+        role = roles[cik]
+        for iid in instrument_ids:
+            if role == "subject" or iid not in instrument_role:
+                instrument_role[iid] = role
+    instrument_roles = sorted(instrument_role.items())
     if not instrument_roles:
         # Event concerns nothing in universe (identifiers churned after
-        # seeding) — tombstone.
-        return ParseOutcome(
-            status="tombstoned",
-            parser_version=_PARSER_VERSION_TENDER,
-            raw_status="stored",
-            error="no header party maps to an in-universe instrument",
-        )
+        # seeding) — tombstone, cleaning any rows a prior parse wrote.
+        return _tombstone_after_store(conn, accession, "no header party maps to an in-universe instrument")
 
     try:
         with conn.transaction():

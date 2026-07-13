@@ -51,6 +51,17 @@ offer to purchase all Shares for $42.00 per Share, net to the seller in cash.
 </body></html>
 """
 
+# Same subject, no FILED-BY block — a reparse resolving fewer parties than a
+# prior run (the offeror row must reconcile away).
+_FAKE_HDR_SUBJECT_ONLY = """<SEC-HEADER>0001000001-26-000001.hdr.sgml : 20260624
+<SUBJECT-COMPANY>
+<COMPANY-DATA>
+<CONFORMED-NAME>Target Test Corp
+<CIK>0009170001
+</COMPANY-DATA>
+</SUBJECT-COMPANY>
+</SEC-HEADER>"""
+
 
 def _seed_instrument(conn: psycopg.Connection[tuple], iid: int, symbol: str, cik: str) -> None:
     conn.execute(
@@ -184,6 +195,109 @@ def test_happy_path_dual_party_role_rows(
     assert raw is not None
     assert raw[0] is None
     assert raw[1] is not None
+
+
+def test_share_class_sibling_cik_yields_row_per_instrument(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subject CIK backing TWO in-universe instruments (share-class siblings
+    file under one CIK) yields a subject row for EACH — the tender applies to
+    every sibling class. Regression for the ``DISTINCT ON`` collapse that
+    dropped siblings' feeds (Codex ckpt-2 #1)."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    # Two instruments, same subject CIK (class A + class B); one offeror.
+    _seed_instrument(ebull_test_conn, iid=9170101, symbol="TGTA", cik="0009170101")
+    _seed_instrument(ebull_test_conn, iid=9170102, symbol="TGTB", cik="0009170101")
+    _seed_instrument(ebull_test_conn, iid=9170103, symbol="ACQZ", cik="0009170102")
+    record_manifest_entry(
+        ebull_test_conn,
+        "0001000001-26-000101",
+        cik="0009170101",
+        form="SC TO-T",
+        source="sec_tender",
+        subject_type="issuer",
+        subject_id="9170101",
+        instrument_id=9170101,
+        filed_at=datetime(2026, 6, 24, tzinfo=UTC),
+        primary_document_url=_BODY_URL,
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    hdr = _FAKE_HDR.replace("0009170001", "0009170101").replace("0009170002", "0009170102")
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        _fetch_dispatch(_FAKE_BODY, hdr),
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_tender", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.parsed == 1
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, role FROM tender_offer_events
+            WHERE accession_number = '0001000001-26-000101' ORDER BY instrument_id
+            """
+        )
+        rows = cur.fetchall()
+    # Both subject-class siblings + the offeror — three rows, not two.
+    assert rows == [(9170101, "subject"), (9170102, "subject"), (9170103, "offeror")]
+
+
+def test_reparse_fewer_parties_reconciles_stale_rows(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reparse that resolves fewer parties than a prior run deletes the
+    now-orphaned typed rows (Codex ckpt-2 #2 — the (accession, instrument_id)
+    API join would otherwise keep the stale offeror row rendering)."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    _seed_instrument(ebull_test_conn, iid=9170201, symbol="RTGT", cik="0009170001")
+    _seed_instrument(ebull_test_conn, iid=9170202, symbol="RACQ", cik="0009170002")
+    _seed_pending_tender(ebull_test_conn, accession="0001000001-26-000201", instrument_id=9170201)
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    # First parse: both parties present → subject + offeror rows.
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", _fetch_dispatch(_FAKE_BODY, _FAKE_HDR))
+    run_manifest_worker(ebull_test_conn, source="sec_tender", max_rows=10)
+    ebull_test_conn.commit()
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM tender_offer_events WHERE accession_number = '0001000001-26-000201'")
+        first = cur.fetchone()
+    assert first is not None and first[0] == 2
+
+    # Reset to pending and reparse with a subject-only header (offeror gone).
+    ebull_test_conn.execute(
+        "UPDATE sec_filing_manifest SET ingest_status = 'pending' WHERE accession_number = '0001000001-26-000201'"
+    )
+    ebull_test_conn.commit()
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        _fetch_dispatch(_FAKE_BODY, _FAKE_HDR_SUBJECT_ONLY),
+    )
+    run_manifest_worker(ebull_test_conn, source="sec_tender", max_rows=10)
+    ebull_test_conn.commit()
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, role FROM tender_offer_events
+            WHERE accession_number = '0001000001-26-000201' ORDER BY instrument_id
+            """
+        )
+        rows = cur.fetchall()
+    # Offeror row (9170202) reconciled away; only the subject remains.
+    assert rows == [(9170201, "subject")]
 
 
 def test_header_fetch_failure_fails_with_retry(
