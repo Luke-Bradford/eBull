@@ -284,6 +284,21 @@ def test_compute_band_cap_two_legs_base_unchanged_when_nonbase_leg_capped():
     assert res.basis["multiples"]["pe"]["capped_high"] is False
 
 
+def test_cap_constants_cover_all_multiples_and_are_valid():
+    # PR #2033 review NITPICK: lock the cap constants against a silent bad edit /
+    # doc drift. Guards the cap invariant — every synthesizable multiple {pe,ps,pb}
+    # has an R_UP AND R_DN, and each R >= 1 (R < 1 makes cap_hi < base / cap_lo > base,
+    # inverting low <= base <= high and tripping combine_across's fail-closed order
+    # check). A new multiple added without a cap entry (e.g. Phase-2 ev_ebitda) fails
+    # here, forcing a conscious calibration + spec §6.2 update.
+    from app.services.fair_value_band import _R_DN, _R_UP
+
+    multiples = {"pe", "ps", "pb"}
+    assert set(_R_UP) == multiples and set(_R_DN) == multiples
+    assert all(v >= 1.0 for v in _R_UP.values()), _R_UP
+    assert all(v >= 1.0 for v in _R_DN.values()), _R_DN
+
+
 def test_percentiles_deterministic_regression():
     # Interpolation-convention lock (Hyndman & Fan 1996: 9 divergent definitions).
     # Fixed input -> fixed output; guards the wing/own-history stability contract.
