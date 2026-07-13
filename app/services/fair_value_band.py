@@ -248,7 +248,9 @@ def band_quality_status(q: QualityInputs) -> str:
 
 
 def compute_divergence(
-    llm_base: float | None, band_base: float | None, threshold: float,
+    llm_base: float | None,
+    band_base: float | None,
+    threshold: float,
 ) -> tuple[float | None, bool | None]:
     """NULL-safe (#1632). Non-finite/absent operand or band_base<=0 => (None, None).
 
@@ -268,7 +270,18 @@ def compute_divergence(
 
 
 def _shape_fair_value_band(
-    row: tuple[float | None, float | None, float | None, str, str | None, _dt.date | None, _dt.date | None, _dt.date | None, dict[str, Any]] | None,
+    row: tuple[
+        float | None,
+        float | None,
+        float | None,
+        str,
+        str | None,
+        _dt.date | None,
+        _dt.date | None,
+        _dt.date | None,
+        dict[str, Any],
+    ]
+    | None,
 ) -> dict[str, object]:
     """Passive thesis context block. Absent => {available:false, reason}.
 
@@ -284,8 +297,12 @@ def _shape_fair_value_band(
     if bear is None or base is None or bull is None:
         return {"available": False, "reason": reason or "no_band"}
     return {
-        "available": True, "reason": reason, "quality_status": quality,
-        "bear": float(bear), "base": float(base), "bull": float(bull),
+        "available": True,
+        "reason": reason,
+        "quality_status": quality,
+        "bear": float(bear),
+        "base": float(base),
+        "bull": float(bull),
         "as_of_date": as_of_date.isoformat() if as_of_date else None,
         "ttm_end": ttm_end.isoformat() if ttm_end else None,
         "price_as_of": price_as_of.isoformat() if price_as_of else None,

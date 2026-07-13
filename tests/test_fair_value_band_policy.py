@@ -323,8 +323,15 @@ def test_shape_partial_triple_fails_closed():
 
 def test_shape_present_row_carries_price_as_of():
     row = (
-        100.0, 110.0, 130.0, "high", "ok", _d.date(2026, 7, 13),
-        _d.date(2026, 6, 30), _d.date(2026, 7, 11), {"selected": ["pe"]},
+        100.0,
+        110.0,
+        130.0,
+        "high",
+        "ok",
+        _d.date(2026, 7, 13),
+        _d.date(2026, 6, 30),
+        _d.date(2026, 7, 11),
+        {"selected": ["pe"]},
     )
     out = _shape_fair_value_band(row)
     assert out["available"] is True
