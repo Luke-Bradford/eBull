@@ -59,7 +59,12 @@ from psycopg.types.json import Jsonb
 # peer_comparison and xbrl_derived_stats, neither of which imports thesis (or
 # anything that transitively reaches back here via scheduler/refresh_cascade) —
 # verified by grep, unlike risk_metrics below which genuinely cycles.
-from app.services.fair_value_band import METHOD_VERSION, _shape_fair_value_band
+from app.services.fair_value_band import (
+    DIVERGENCE_THRESHOLD,
+    METHOD_VERSION,
+    _shape_fair_value_band,
+    compute_divergence,
+)
 
 # Safe at module scope: instrument_analytics has no app-module imports at
 # top level (its insider_transactions read is function-lazy), so this does
@@ -1328,6 +1333,50 @@ def _insert_thesis_atomic(
     return int(row[0]), int(row[1])
 
 
+def _insert_thesis_valuation_audit(
+    conn: psycopg.Connection[Any],
+    thesis_id: int,
+    *,
+    band_base: float | None,
+    band_quality_status: str | None,
+    price_as_of: str | None,
+    llm_base: float | None,
+    divergence_pct: float | None,
+    divergence_flag: bool | None,
+) -> None:
+    """Insert-once band-vs-LLM divergence snapshot (#2009 PR-B, sql/222).
+
+    Best-effort-correct but runs INSIDE the atomic thesis-insert transaction
+    (must be called after the ``theses`` row exists, so the FK is valid).
+    ``band_base``/``divergence_pct``/``divergence_flag`` are all nullable —
+    the no-band path (and any ``available:false``) writes NULL, never
+    0/false (#1632). Never raises on the absent-band path: all params are
+    plain scalars or None, all target columns nullable.
+    """
+    conn.execute(
+        """
+        INSERT INTO thesis_valuation_audit (
+            thesis_id, band_method_version, band_base, band_quality_status,
+            price_as_of, llm_base, divergence_pct, divergence_flag
+        )
+        VALUES (
+            %(thesis_id)s, %(band_method_version)s, %(band_base)s, %(band_quality_status)s,
+            %(price_as_of)s, %(llm_base)s, %(divergence_pct)s, %(divergence_flag)s
+        )
+        """,
+        {
+            "thesis_id": thesis_id,
+            "band_method_version": METHOD_VERSION,
+            "band_base": band_base,
+            "band_quality_status": band_quality_status,
+            "price_as_of": price_as_of,
+            "llm_base": llm_base,
+            "divergence_pct": divergence_pct,
+            "divergence_flag": divergence_flag,
+        },
+    )
+
+
 def _update_last_reviewed(
     conn: psycopg.Connection[Any],
     instrument_id: int,
@@ -1520,6 +1569,27 @@ def generate_thesis(
                 critic_output if critic_output else None,
                 model=writer_completion.model,
                 provider=clients.writer.provider_name,
+            )
+            # #2009 PR-B: snapshot band-vs-LLM divergence in the same atomic
+            # txn as the thesis insert (FK requires thesis_id to exist first).
+            # Snapshot from the passive context block only — never re-read
+            # the mutable band from the DB (Codex ckpt-1 PR-B LOW).
+            fvb: dict[str, Any] = context.get("fair_value_band") or {}  # type: ignore[assignment]
+            band_available = fvb.get("available") is True
+            band_base = fvb.get("base") if band_available else None
+            band_quality_status = fvb.get("quality_status") if band_available else None
+            price_as_of = fvb.get("price_as_of") if band_available else None
+            llm_base = _to_float(writer_output.get("base_value"))
+            divergence_pct, divergence_flag = compute_divergence(llm_base, band_base, DIVERGENCE_THRESHOLD)
+            _insert_thesis_valuation_audit(
+                conn,
+                thesis_id,
+                band_base=band_base,
+                band_quality_status=band_quality_status,
+                price_as_of=price_as_of,
+                llm_base=llm_base,
+                divergence_pct=divergence_pct,
+                divergence_flag=divergence_flag,
             )
             _update_last_reviewed(conn, instrument_id)
             _finish_thesis_run_ok(conn, run_id, thesis_id)
