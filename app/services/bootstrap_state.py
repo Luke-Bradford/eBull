@@ -62,6 +62,9 @@ Lane = Literal[
     "db_ownership_insider",
     "db_ownership_funds",
     "openfigi",
+    # #2024 — terminal fair-value-band first-load lane (S28). Mirrored
+    # from ``app/jobs/sources.py::Lane`` + sql/225's CHECK extension.
+    "fair_value_band",
 ]
 """Row-shape Literal for ``bootstrap_stages.lane`` reads. Mirrors
 ``app/jobs/sources.py::Lane`` plus the legacy ``"sec"`` catch-all

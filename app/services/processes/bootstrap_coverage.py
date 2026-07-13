@@ -81,6 +81,10 @@ _BOOTSTRAP_STAGE_FRESHNESS_SOURCES: Final[dict[str, frozenset[ManifestSource]]] 
     # is deliberately NOT covered (steady-state manifest-worker discovers it).
     "mf_directory_sync": frozenset(),
     "bootstrap_validation": frozenset(),
+    # #2024 — terminal fair-value-band first-load. Derived read layer (writes
+    # fair_value_band_observations/_current from financial_periods_ttm + price_daily),
+    # NOT a manifest source → no freshness sink (like fundamentals_sync above).
+    "fair_value_band": frozenset(),
 }
 
 # Union of every covered source. Excluded by construction (NOT bootstrap-

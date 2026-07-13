@@ -116,13 +116,14 @@ def test_stage_catalogue_cardinality() -> None:
     #1415 (P3) added the master.idx gap-close → 20; #1419 (P4) added the
     terminal bootstrap_validation stage → 21; #788 added
     sec_fsds_class_shares_ingest → 22; #1590 added
-    sec_fsds_dimensional_ingest → 23.
+    sec_fsds_dimensional_ingest → 23; #2024 added the terminal
+    fair_value_band first-load derivation → 24.
 
-    23 = 1 init + 1 etoro + 9 sec_rate + 1 sec_bulk_download + 9 db
-    + 1 db_fundamentals_raw + 1 openfigi.
+    24 = 1 init + 1 etoro + 9 sec_rate + 1 sec_bulk_download + 9 db
+    + 1 db_fundamentals_raw + 1 openfigi + 1 fair_value_band.
     """
     specs = get_bootstrap_stage_specs()
-    assert len(specs) == 23
+    assert len(specs) == 24
 
 
 def test_stage_catalogue_lane_composition() -> None:
@@ -134,12 +135,14 @@ def test_stage_catalogue_lane_composition() -> None:
     # drain) = 8; #1415 + 1 master.idx gap-close = 9. #1419 (P4) + 1 db stage
     # (bootstrap_validation); #788 + 1 db stage (sec_fsds_class_shares_ingest);
     # #1590 + 1 db stage (sec_fsds_dimensional_ingest) → db = 9.
-    # Total 1 + 1 + 9 + 1 + 9 + 1 + 1 = 23.
+    # #2024 + 1 fair_value_band stage (own lane) → total 24.
+    # Total 1 + 1 + 9 + 1 + 9 + 1 + 1 + 1 = 24.
     # ``db`` = 9 (5 bulk ingesters + sec_fsds_class_shares_ingest +
     # sec_fsds_dimensional_ingest + ownership_observations_backfill +
     # bootstrap_validation);
     # ``db_fundamentals_raw`` = 1 (S25 fundamentals_sync);
-    # ``openfigi`` = 1 (S13 cusip_resolver_post_bulk_sweep).
+    # ``openfigi`` = 1 (S13 cusip_resolver_post_bulk_sweep);
+    # ``fair_value_band`` = 1 (S28 fair_value_band terminal first-load).
     assert by_lane == {
         "init": 1,
         "etoro": 1,
@@ -148,6 +151,7 @@ def test_stage_catalogue_lane_composition() -> None:
         "db": 9,
         "db_fundamentals_raw": 1,
         "openfigi": 1,
+        "fair_value_band": 1,
     }
 
 

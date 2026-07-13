@@ -83,6 +83,9 @@ LaneApi = Literal[
     # Mirrored from ``app/jobs/sources.py::Lane`` + sql/165's
     # ``bootstrap_stages.lane`` CHECK constraint extension.
     "openfigi",
+    # #2024 — terminal fair-value-band first-load lane (S28). Mirrored
+    # from ``app/jobs/sources.py::Lane`` + sql/225's CHECK extension.
+    "fair_value_band",
 ]
 StageApiStatus = Literal["pending", "running", "success", "error", "skipped", "blocked", "cancelled"]
 
