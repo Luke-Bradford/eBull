@@ -29,6 +29,9 @@ const SEVERITY_ORDER = { low: 0, moderate: 1, high: 2, critical: 3 };
 // documented registry limit; if a future tree trips a 413, lower this.
 const CHUNK_SIZE = 100;
 const RETRY_DELAY_MS = 2000;
+// Fail fast into the documented exit(2) instead of hanging the CI job on a
+// stalled TCP connection (PR #2037 review WARNING).
+const FETCH_TIMEOUT_MS = 30_000;
 
 function parseArgs(argv) {
   const i = argv.indexOf("--audit-level");
@@ -69,14 +72,27 @@ function collectPackages(projects) {
 }
 
 async function postChunk(chunk, attempt = 1) {
-  const res = await fetch(BULK_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(chunk),
-  });
+  let res;
+  try {
+    res = await fetch(BULK_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(chunk),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (err) {
+    // Network-level failure (DNS blip, connection reset, timeout abort):
+    // one retry with backoff, then fail closed via the caller's exit(2).
+    if (attempt === 1) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      return postChunk(chunk, 2);
+    }
+    throw new Error(`bulk advisory request failed at network level: ${err.message}`);
+  }
   if (!res.ok) {
-    if (res.status >= 500 && attempt === 1) {
-      // One retry with a short backoff — don't hammer a flaky registry.
+    // Retry 5xx and 429 (rate limit) once with a short backoff — don't
+    // hammer a flaky registry, don't fail the audit on one transient.
+    if ((res.status >= 500 || res.status === 429) && attempt === 1) {
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
       return postChunk(chunk, 2);
     }
