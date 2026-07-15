@@ -19,6 +19,7 @@ from app.services.fair_value_band import (
     compute_band,
     compute_divergence,
     currency_coherent,
+    earnings_nonrepresentative,
     filter_dual_class,
     own_range,
     percentiles,
@@ -983,3 +984,176 @@ def test_compute_band_synth_none_leg_keeps_screen_provenance():
     assert entry["cohort_screened"] is False
     assert entry["screen"] == {"reason": "no_screened_cohort"}
     assert "base_value" not in entry and "capped_high" not in entry
+
+
+# --- v5 (#2043) earnings-representativeness gate ---
+
+
+def test_earnings_nonrep_g1_never_profitable():
+    # >= half the FY window unprofitable (median_low <= 0) — DCTH shape.
+    assert earnings_nonrepresentative([-19.0, -102.0, -3.0, 0.4], [], 5.0, 100.0) == "G1_never_profitable"
+
+
+def test_earnings_nonrep_g1_knife_edge_even_window():
+    # MRAM shape: 2 of 4 FYs <= 0 -> median_low is the lower middle -> gated,
+    # even though the plain median is (just) positive.
+    assert earnings_nonrepresentative([2.0, -1.0, 1.5, -0.5], [], 1.0, 100.0) == "G1_never_profitable"
+
+
+def test_earnings_nonrep_g2_depressed_vs_own_history():
+    # EIG shape: healthy history, current NI collapsed below median_low/3.
+    assert earnings_nonrepresentative([119.0, 117.0, 11.0], [0.14, 0.13, 0.01], 3.0, 400.0) == "G2_depressed"
+
+
+def test_earnings_nonrep_g2_gain_year_cannot_fake_depression():
+    # VVV shape: divestiture-gain years inflate the PLAIN median; median_low
+    # (2nd smallest of 4) keeps a normal current year ungated.
+    assert earnings_nonrepresentative([200.0, 208.0, 1400.0, 2400.0], [], 210.0, 1000.0) is None
+
+
+def test_earnings_nonrep_structural_thin_margin_kept():
+    # SNEX/USFD shape: razor-thin but STABLE margins + stable NI — representative.
+    assert earnings_nonrepresentative([50.0, 55.0, 60.0], [0.003, 0.004, 0.003], 58.0, 20000.0) is None
+
+
+def test_earnings_nonrep_g3_spiked_with_margin_conjunction():
+    # TRS shape: NI > 3x median_high AND margin > 3x historical median margin.
+    assert earnings_nonrepresentative([40.0, 26.0, 30.0], [0.045, 0.03, 0.04], 900.0, 570.0) == "G3_spiked"
+
+
+def test_earnings_nonrep_g3_grower_protected_by_margin_conjunction():
+    # PTC/APP shape: NI compounds past 3x history but margin is flat -> kept.
+    assert earnings_nonrepresentative([10.0, 20.0, 40.0], [0.20, 0.20, 0.20], 150.0, 750.0) is None
+
+
+def test_earnings_nonrep_g3_needs_margin_series():
+    # Revenue-artifact guard: without >=3 usable FY margins the conjunction
+    # cannot confirm, so a bare NI spike does NOT gate (fail-open).
+    assert earnings_nonrepresentative([10.0, 20.0, 40.0], [0.2, 0.2], 500.0, 1000.0) is None
+
+
+def test_earnings_nonrep_fail_open_short_history():
+    # <3 usable FYs (STRW/ONC/LOAR class) -> unjudgeable -> None.
+    assert earnings_nonrepresentative([-5.0, -10.0], [], 1.0, 100.0) is None
+
+
+def test_earnings_nonrep_none_ni_ttm_fail_open_after_g1():
+    # Profitable history + no strict TTM NI -> G2/G3 unjudgeable -> None.
+    assert earnings_nonrepresentative([10.0, 12.0, 14.0], [0.1, 0.1, 0.1], None, None) is None
+
+
+def test_compute_band_pe_gate_drops_leg_keeps_audit():
+    # Gated pe leg never contributes: base comes from ps alone, the pe entry
+    # keeps its peer stats + gains earnings_nonrep, and quality inputs see a
+    # single-sided ps leg (not the pe leg's two sides).
+    res = compute_band(
+        _t(eps_diluted_ttm=10.0, revenue_ttm=1000.0, net_income_ttm=500.0),
+        peer_by_multiple={
+            "pe": PeerPct(p25=6.0, p50=8.0, p75=12.0),
+            "ps": PeerPct(p25=5.0, p50=10.0, p75=12.0),
+        },
+        own_by_multiple={"pe": OwnPct(None, None, None), "ps": OwnPct(None, None, None)},
+        own_points_by_multiple={"pe": 0, "ps": 0},
+        cohort_meta={
+            "pe": {"cohort_n": 40, "excluded_stale_n": 0},
+            "ps": {"cohort_n": 40, "excluded_stale_n": 0},
+        },
+        sic_level=3,
+        pe_earnings_gate="G1_never_profitable",
+    )
+    assert res.reason == "ok"
+    assert res.base == 10.0  # ps alone: mult 10.0 * rev/shares (1000/1000) = 10.0
+    entry = res.basis["multiples"]["pe"]
+    assert entry["earnings_nonrep"] == "G1_never_profitable"
+    assert "base_value" not in entry
+    assert res.basis["multiples"]["ps"]["base_value"] == res.base
+    assert "cross_leg_base_ratio" not in res.basis  # single contributing leg
+
+
+def test_compute_band_pe_gate_last_synthesizable_leg_statuses_absent():
+    # pe is the ONLY leg that would have synthesized; gate removes it ->
+    # earnings_nonrepresentative absence (NOT thin_cohort).
+    res = compute_band(
+        _t(eps_diluted_ttm=10.0, revenue_ttm=1000.0, net_income_ttm=500.0),
+        peer_by_multiple={"pe": PeerPct(p25=6.0, p50=8.0, p75=12.0), "ps": PeerPct(None, None, None)},
+        own_by_multiple={"pe": OwnPct(None, None, None), "ps": OwnPct(None, None, None)},
+        own_points_by_multiple={"pe": 0, "ps": 0},
+        cohort_meta={
+            "pe": {"cohort_n": 40, "excluded_stale_n": 0},
+            "ps": {"cohort_n": 0, "excluded_stale_n": 0},
+        },
+        sic_level=3,
+        pe_earnings_gate="G2_depressed",
+    )
+    assert res.reason == "earnings_nonrepresentative"
+    assert res.bear is None and res.base is None and res.bull is None
+    assert res.basis["multiples"]["pe"]["earnings_nonrep"] == "G2_depressed"
+
+
+def test_compute_band_pe_gate_no_synth_stays_thin_cohort():
+    # Gated pe leg that could NOT have synthesized anyway (no comparator side)
+    # must not claim the earnings_nonrepresentative reason.
+    res = compute_band(
+        _t(eps_diluted_ttm=10.0, revenue_ttm=1000.0, net_income_ttm=500.0),
+        peer_by_multiple={"pe": PeerPct(None, None, None), "ps": PeerPct(None, None, None)},
+        own_by_multiple={"pe": OwnPct(None, None, None), "ps": OwnPct(None, None, None)},
+        own_points_by_multiple={"pe": 0, "ps": 0},
+        cohort_meta={
+            "pe": {"cohort_n": 0, "excluded_stale_n": 0},
+            "ps": {"cohort_n": 0, "excluded_stale_n": 0},
+        },
+        sic_level=0,
+        pe_earnings_gate="G1_never_profitable",
+    )
+    assert res.reason == "thin_cohort"
+
+
+def test_compute_band_cross_leg_ratio_stored_and_knocks_quality():
+    # Two agreeing-ish legs vs two >3x-disagreeing legs: ratio stored in basis;
+    # the disagreeing band's quality is one tier below the agreeing one.
+    def run(ps_p50: float) -> tuple[str | None, float | None]:
+        res = compute_band(
+            _t(eps_diluted_ttm=10.0, revenue_ttm=1000.0, net_income_ttm=500.0),
+            peer_by_multiple={
+                "pe": PeerPct(p25=7.0, p50=8.0, p75=9.0),
+                "ps": PeerPct(p25=ps_p50 * 0.9, p50=ps_p50, p75=ps_p50 * 1.1),
+            },
+            own_by_multiple={"pe": OwnPct(None, None, None), "ps": OwnPct(None, None, None)},
+            own_points_by_multiple={"pe": 0, "ps": 0},
+            cohort_meta={
+                "pe": {"cohort_n": 40, "excluded_stale_n": 0},
+                "ps": {"cohort_n": 40, "excluded_stale_n": 0},
+            },
+            sic_level=4,
+        )
+        assert res.reason == "ok"
+        return res.quality_status, res.basis.get("cross_leg_base_ratio")
+
+    # pe base 80 (8*10); ps base = ps_p50 * 1.0 per-share (rev/shares = 1).
+    q_ok, r_ok = run(70.0)  # ratio 80/70 = 1.14
+    q_bad, r_bad = run(400.0)  # ratio 400/80 = 5.0 > 3.0
+    assert r_ok is not None and round(r_ok, 3) == round(80.0 / 70.0, 3)
+    assert r_bad == 5.0
+    tiers = ["low", "medium", "high"]
+    assert q_ok is not None and q_bad is not None
+    assert tiers.index(q_bad) == tiers.index(q_ok) - 1
+
+
+def _quality_inputs_score7(cross_leg_base_ratio: float) -> QualityInputs:
+    # score exactly 7 (the high floor) before the ratio knock: sides +2,
+    # own_points +2, stale +2, sic_level 0, n_selected +1.
+    return QualityInputs(
+        n_selected=2,
+        n_comparator_sides=2,
+        own_points=2 * MIN_OWN_POINTS,
+        cohort_n=40,
+        excluded_stale_n=0,
+        sic_level=0,
+        cross_multiple_spread=0.0,
+        cross_leg_base_ratio=cross_leg_base_ratio,
+    )
+
+
+def test_quality_cross_leg_ratio_knock_boundary():
+    assert band_quality_status(_quality_inputs_score7(3.0)) == "high"
+    assert band_quality_status(_quality_inputs_score7(3.01)) == "medium"

@@ -13,10 +13,10 @@ from __future__ import annotations
 import datetime as _dt
 import math
 from dataclasses import dataclass
-from statistics import median
+from statistics import median, median_high, median_low
 from typing import Any, LiteralString
 
-METHOD_VERSION = "fvb_v4"
+METHOD_VERSION = "fvb_v5"
 MIN_PEERS = 8
 PEER_LIMIT = 8
 MIN_OWN_POINTS = 6
@@ -48,6 +48,20 @@ _FINANCIAL_SIC_LO, _FINANCIAL_SIC_HI = 60, 67
 # Re-validate via the acceptance gate on the post-backfill fvb_v3 population.
 _R_UP: dict[str, float] = {"pe": 2.6, "ps": 3.1, "pb": 4.1, "ev_ebitda": 2.8}
 _R_DN: dict[str, float] = {"pe": 2.7, "ps": 4.3, "pb": 2.4, "ev_ebitda": 1.9}
+
+# v5 (#2043) earnings-representativeness gate on the pe leg. Source rule:
+# Damodaran ch.22 (abnormal earnings are defined vs the firm's OWN history;
+# estimates derived from them are meaningless), ch.10/Table 35.1 (thin/negative
+# earnings firms -> revenue multiples, not PE), ch.35 (equal-weight combination
+# of disagreeing multiples is the documented anti-pattern; drop the unsuited
+# multiple). Tested on FY NET INCOME, not margin (financial_periods.revenue is
+# under-captured for banks/REITs) and not EPS (XBRL FY EPS is as-reported, not
+# split-adjusted; dilution-depressed EPS is genuine per-share earning power).
+# K and the 4-FY window are frozen calibrated constants (same discipline as
+# _R_UP/_R_DN), full-pop verified on the live fvb_v4 population (spec
+# docs/proposals/valuation/2026-07-15-fvb-v5-earnings-representativeness-gate.md §3).
+_EARNINGS_HIST_MIN_FY = 3
+_EARNINGS_REP_K = 3.0
 
 
 @dataclass(frozen=True)
@@ -167,6 +181,46 @@ def target_screenable(multiple: str, target: CompanionVars | None) -> bool:
         if width is not None and tv is None:
             return False
     return True
+
+
+def earnings_nonrepresentative(
+    fy_net_income: list[float],
+    fy_margins: list[float],
+    ni_ttm: float | None,
+    revenue_ttm: float | None,
+) -> str | None:
+    """v5 (#2043) §3: is the pe leg's earnings denominator representative of
+    earning power? None = representative (or unjudgeable — <3 usable FYs is
+    fail-open: young listings stay ungated rather than gated on no evidence).
+
+    - G1 never-profitable: >= half the last-4-FY window unprofitable
+      (median_low <= 0) — the Damodaran ch.10 / Table 35.1 life-cycle class.
+    - G2 depressed: NI_ttm < median_low(FY NI)/K (ch.22 "much lower than ...
+      historically"; median_low reference so a one-time-GAIN year in history
+      cannot fake depression — the VVV divestiture shape).
+    - G3 spiked: NI_ttm > K*median_high(FY NI) AND margin conjunction
+      m_ttm > K*median(FY margins). The conjunction protects compounding
+      growers (margin flat while NI compounds) and only ever SUPPRESSES a
+      drop, so the known revenue under-capture artifact cannot cause one.
+    """
+    if len(fy_net_income) < _EARNINGS_HIST_MIN_FY:
+        return None
+    if median_low(fy_net_income) <= 0:
+        return "G1_never_profitable"
+    if ni_ttm is None:
+        return None
+    if ni_ttm < median_low(fy_net_income) / _EARNINGS_REP_K:
+        return "G2_depressed"
+    if ni_ttm > median_high(fy_net_income) * _EARNINGS_REP_K:
+        m_ttm = (ni_ttm / revenue_ttm) if revenue_ttm is not None and revenue_ttm > 0 else None
+        if (
+            m_ttm is not None
+            and len(fy_margins) >= _EARNINGS_HIST_MIN_FY
+            and median(fy_margins) > 0
+            and m_ttm > median(fy_margins) * _EARNINGS_REP_K
+        ):
+            return "G3_spiked"
+    return None
 
 
 @dataclass(frozen=True)
@@ -458,6 +512,11 @@ class QualityInputs:
     # back to the unscreened cohort (spec §4.3). Defaulted so pre-v4
     # constructors are untouched.
     screen_fallback: bool = False
+    # v5 (#2043): max/min ratio of contributing per-share bases. NOT the
+    # (max-min)/base spread above — the median damps that scale (DCTH at
+    # 36.8x ratio has spread 1.89, a spread-keyed knock misses the canonical
+    # case). Defaulted so pre-v5 constructors are untouched; 1.0 = single leg.
+    cross_leg_base_ratio: float = 1.0
 
 
 def band_quality_status(q: QualityInputs) -> str:
@@ -473,6 +532,10 @@ def band_quality_status(q: QualityInputs) -> str:
     # v4 (#2032) §4.3 knock: an unscreened comparability cohort carries less
     # confidence than a companion-matched one.
     score -= 1 if q.screen_fallback else 0
+    # v5 (#2043) §4.5 knock: legs disagreeing >3x on base = the band's anchor
+    # is materially contested (census: 21 bands >5x sat at "medium" under the
+    # spread knock alone).
+    score -= 1 if q.cross_leg_base_ratio > 3.0 else 0
     if score >= 7:
         return "high"
     if score >= 4:
@@ -567,6 +630,7 @@ def compute_band(
     own_points_by_multiple: dict[str, int],
     cohort_meta: dict[str, dict],
     sic_level: int,
+    pe_earnings_gate: str | None = None,
 ) -> BandResult:
     """Pure orchestration. Returns statused-absent BandResult, never raises for
     the normal no-band paths. Currency + basis gates are applied by the caller
@@ -589,6 +653,7 @@ def compute_band(
     max_cohort_n = 0
     contributing_own_points = 0
     screen_fallback = False
+    gated_pe_would_synth = False
     for m in selected:
         peer = peer_by_multiple.get(m, PeerPct(None, None, None))
         own = own_by_multiple.get(m, OwnPct(None, None, None))
@@ -619,6 +684,16 @@ def compute_band(
         if "peer_ids" in meta:
             entry["peer_ids"] = meta["peer_ids"]
         synth = synth_multiple(peer, own)
+        # v5 (#2043) §4.3 earnings-representativeness gate: a pe leg with a
+        # non-representative denominator never contributes (peer stats + screen
+        # provenance stay auditable — the dropped_nonpositive precedent). It
+        # sets no quality inputs; n_selected stays len(selected).
+        if m == "pe" and pe_earnings_gate is not None:
+            entry["earnings_nonrep"] = pe_earnings_gate
+            if synth is not None:
+                gated_pe_would_synth = True
+            basis["multiples"][m] = entry
+            continue
         if synth is None:
             basis["multiples"][m] = entry
             continue
@@ -675,11 +750,20 @@ def compute_band(
             contributing_own_points = max(contributing_own_points, own_points_by_multiple.get(m, 0))
 
     if not per_share_triples:
-        return _absent(t, "thin_cohort", n_selected=len(selected), basis=basis)
+        # v5 (#2043) §4.4: distinguish "the gate removed the only leg that
+        # would have synthesized" from a genuinely thin cohort.
+        reason = "earnings_nonrepresentative" if gated_pe_would_synth else "thin_cohort"
+        return _absent(t, reason, n_selected=len(selected), basis=basis)
 
     bear, base, bull = combine_across(per_share_triples)
     bases = [tr[1] for tr in per_share_triples]
     spread = ((max(bases) - min(bases)) / base) if base and len(bases) > 1 else 0.0
+    # v5 (#2043) §4.5/§4.6: max/min of contributing bases (all > 0 — pe/ps/pb
+    # by construction, ev via the leg-drop guard). Stored so future coherence
+    # censuses read rows instead of recomputing.
+    cross_leg_ratio = (max(bases) / min(bases)) if len(bases) > 1 else 1.0
+    if len(bases) > 1:
+        basis["cross_leg_base_ratio"] = cross_leg_ratio
     quality = band_quality_status(
         QualityInputs(
             n_selected=len(selected),
@@ -690,6 +774,7 @@ def compute_band(
             sic_level=sic_level,
             cross_multiple_spread=spread,
             screen_fallback=screen_fallback,
+            cross_leg_base_ratio=cross_leg_ratio,
         )
     )
     return BandResult(bear, base, bull, quality, "ok", t.target_basis, len(selected), basis)
@@ -1275,6 +1360,28 @@ _OWN_HISTORY_SQL = """
     ORDER BY fs.as_of_date
 """
 
+# v5 (#2043) §4.2: last 4 FY rows for the earnings-representativeness gate.
+# Dedup/tie-break verbatim from the settled repo shape (_TARGET_SQL prior-TTM
+# CTE / sql/220): DISTINCT ON (period_end_date) + filed_date DESC NULLS LAST —
+# latest-filed row wins per period_end (the restatement rule; period_end
+# ordering per #1823). revenue rides along for the G3 margin series (margins
+# computed in Python only where revenue > 0).
+_FY_HISTORY_SQL = """
+    SELECT period_end_date, net_income, revenue
+    FROM (
+        SELECT DISTINCT ON (period_end_date) period_end_date, net_income, revenue
+        FROM financial_periods
+        WHERE instrument_id = %(iid)s
+          AND period_type = 'FY'
+          AND superseded_at IS NULL
+          AND normalization_status = 'normalized'
+          AND net_income IS NOT NULL
+        ORDER BY period_end_date, filed_date DESC NULLS LAST
+    ) fy
+    ORDER BY period_end_date DESC
+    LIMIT 4
+"""
+
 # Target's latest close at-or-before the batch as-of date (freshness gate + the
 # per-share own-history anchor share this one date policy).
 _TARGET_PRICE_SQL = """
@@ -1416,6 +1523,22 @@ def compute_band_for_instrument(conn: psycopg.Connection[Any], instrument_id: in
         prior_end=trow["prior_end"],
     )
 
+    # v5 (#2043): earnings-representativeness gate on the pe leg, judged on the
+    # FY net-income history (only fetched when a pe leg is actually selected).
+    pe_earnings_gate: str | None = None
+    if "pe" in selected:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_FY_HISTORY_SQL, {"iid": instrument_id})
+            fy_rows = cur.fetchall()
+        fy_ni = [_f(r["net_income"]) for r in fy_rows]
+        fy_ni_vals = [v for v in fy_ni if v is not None]
+        fy_margins = [
+            ni / rev
+            for ni, rev in ((_f(r["net_income"]), _f(r["revenue"])) for r in fy_rows)
+            if ni is not None and rev is not None and rev > 0
+        ]
+        pe_earnings_gate = earnings_nonrepresentative(fy_ni_vals, fy_margins, t.net_income_ttm, t.revenue_ttm)
+
     own_all, own_capped_total = _own_series(conn, instrument_id, as_of_date)
     own_by_multiple: dict[str, OwnPct] = {}
     own_points_by_multiple: dict[str, int] = {}
@@ -1445,6 +1568,7 @@ def compute_band_for_instrument(conn: psycopg.Connection[Any], instrument_id: in
         own_points_by_multiple=own_points_by_multiple,
         cohort_meta=cohort_meta,
         sic_level=sic_level,
+        pe_earnings_gate=pe_earnings_gate,
     )
     # Surface own-history quarters dropped by the sanity cap so a name whose
     # own_points fell below MIN_OWN_POINTS via capping is auditable (review NITPICK).
