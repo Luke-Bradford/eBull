@@ -24,8 +24,8 @@ surface* consumed downstream. Owning skills: `thesis-writer` (produces),
 
 Also distinct: **`fair_value_band`** (#2009, `app/services/fair_value_band.py`)
 is a *deterministic comps evidence band* (bear/base/bull per-share from P/E,
-P/S, P/B + EV/EBITDA percentiles, fvb_v3 #2021) that feeds the thesis writer as
-passive evidence + a **base-to-base** divergence audit — NOT the thesis
+P/S, P/B + EV/EBITDA percentiles, **fvb_v4** #2032) that feeds the thesis writer
+as passive evidence + a **base-to-base** divergence audit — NOT the thesis
 bear/base/bull. Synthesis rules: peer + own percentiles, blend base,
 **outer-envelope wings clamped by a fixed per-leg cap** (`_R_UP`/`_R_DN`, v2
 #2022), own history uses **interior quantiles p25/p75** (not p20/p80 — a
@@ -34,10 +34,18 @@ own-history EBITDA exists; snapshot lacks it) with strict D&A + cash-present +
 debt/interest coherence gates and a fail-closed leg drop when the net-debt
 back-out turns any converted value ≤ 0 — the cap is that leg's sole wing bound.
 **Winsorization is refuted** as a width fix (can't move a genuine peer quartile;
-question the model, not the case); the root width cause is cohort comparability —
-P/S needs **net-margin + growth** matching (Damodaran), Phase 2 #2032. Specs:
+question the model, not the case); the root width cause was cohort
+comparability — fixed by the **fvb_v4 companion-variable peer screen** (#2032):
+ps/ev_ebitda cohorts matched on net margin + revenue-growth-YoY, pb on ROE,
+frozen absolute width tiers, width-major walk, unscreened fallback +
+`cohort_screened:false` + quality knock; **pe is EXCLUDED** (wrong companion —
+canonical is forward EARNINGS growth, no source; revenue-YoY full-pop refuted
+as churn-only) and a **margin-only degrade stage is refuted** (acceptance-gate
+variant: ~40-45% median leg-p50 churn, no consistent tail win). Residual
+DCTH-class cross-leg base disagreement is #2043, NOT a screen defect. Specs:
 `docs/proposals/valuation/2026-07-13-fair-value-band-v2-robustness.md`,
-`docs/proposals/valuation/2026-07-15-fair-value-band-ev-ebitda.md`.
+`docs/proposals/valuation/2026-07-15-fair-value-band-ev-ebitda.md`,
+`docs/proposals/valuation/2026-07-15-fvb-v4-companion-screen.md`.
 
 ## What it is
 
