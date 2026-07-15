@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any, LiteralString
 
-METHOD_VERSION = "fvb_v3"
+METHOD_VERSION = "fvb_v4"
 MIN_PEERS = 8
 PEER_LIMIT = 8
 MIN_OWN_POINTS = 6
@@ -48,6 +48,125 @@ _FINANCIAL_SIC_LO, _FINANCIAL_SIC_HI = 60, 67
 # Re-validate via the acceptance gate on the post-backfill fvb_v3 population.
 _R_UP: dict[str, float] = {"pe": 2.6, "ps": 3.1, "pb": 4.1, "ev_ebitda": 2.8}
 _R_DN: dict[str, float] = {"pe": 2.7, "ps": 4.3, "pb": 2.4, "ev_ebitda": 1.9}
+
+
+@dataclass(frozen=True)
+class CompanionVars:
+    """#2032 (fvb_v4) companion variables — the fundamentals a multiple is a
+    function of (Damodaran: P/S = f(net margin, growth); P/B = f(ROE))."""
+
+    net_margin: float | None
+    rev_growth_yoy: float | None
+    roe: float | None
+
+
+@dataclass(frozen=True)
+class ScreenTier:
+    """One width tier of the companion screen: a peer passes iff, for every
+    non-None width here, BOTH sides have the companion and |peer - target| <=
+    width. None = companion not screened at this tier."""
+
+    net_margin: float | None = None
+    rev_growth_yoy: float | None = None
+    roe: float | None = None
+
+
+# v4 (#2032) companion-screen width tiers, tight -> wide. FROZEN ABSOLUTES —
+# never cohort-relative percentiles (settled no-cohort-relative-normalization
+# invariant; same freeze discipline as _R_UP/_R_DN). Calibrated by the #2032
+# full-population sim (issue comments, 2026-07-15; spec
+# docs/proposals/valuation/2026-07-15-fvb-v4-companion-screen.md §3/§4.1).
+# pe is EXCLUDED: its canonical companion is (forward) EARNINGS growth — no
+# usable source exists, and revenue-YoY as proxy was full-pop tested and
+# refuted (nil tail compression, 505/908 live legs re-anchored = churn without
+# calibration benefit; spec §4.2). Revisit trigger: a forward/normalized
+# earnings-growth source landing in the fundamentals layer.
+_SCREEN_TIERS: dict[str, tuple[ScreenTier, ...]] = {
+    "ps": (
+        ScreenTier(net_margin=0.05, rev_growth_yoy=0.10),
+        ScreenTier(net_margin=0.10, rev_growth_yoy=0.20),
+        ScreenTier(net_margin=0.20, rev_growth_yoy=0.40),
+    ),
+    "ev_ebitda": (
+        ScreenTier(net_margin=0.05, rev_growth_yoy=0.10),
+        ScreenTier(net_margin=0.10, rev_growth_yoy=0.20),
+        ScreenTier(net_margin=0.20, rev_growth_yoy=0.40),
+    ),
+    "pb": (
+        ScreenTier(roe=0.05),
+        ScreenTier(roe=0.10),
+        ScreenTier(roe=0.20),
+    ),
+}
+
+
+def companion_vars(
+    *,
+    revenue_ttm: float | None,
+    net_income_ttm: float | None,
+    shareholders_equity: float | None,
+    rev_prior_ttm: float | None,
+    ttm_start: _dt.date | None,
+    prior_end: _dt.date | None,
+) -> CompanionVars:
+    """§4.5 target-side companion derivation — mirrors the member-side SQL and
+    the validated #2032 sim exactly. Growth requires the prior strict TTM window
+    ADJACENT to the current one: ttm_start - prior_end in [1, 120] days
+    (consecutive quarter-ends sit ~90d apart; >=1 excludes overlap, <=120
+    tolerates a 53-week calendar while excluding a skipped quarter)."""
+    net_margin = None
+    if revenue_ttm is not None and revenue_ttm > 0 and net_income_ttm is not None:
+        net_margin = net_income_ttm / revenue_ttm
+    growth = None
+    if (
+        revenue_ttm is not None
+        and rev_prior_ttm is not None
+        and rev_prior_ttm != 0
+        and ttm_start is not None
+        and prior_end is not None
+        and 1 <= (ttm_start - prior_end).days <= 120
+    ):
+        growth = (revenue_ttm - rev_prior_ttm) / abs(rev_prior_ttm)
+    roe = None
+    if net_income_ttm is not None and shareholders_equity is not None and shareholders_equity > 0:
+        roe = net_income_ttm / shareholders_equity
+    return CompanionVars(net_margin=net_margin, rev_growth_yoy=growth, roe=roe)
+
+
+def screen_passes(tier: ScreenTier, target: CompanionVars, peer: CompanionVars) -> bool:
+    """§4.1 predicate. A NULL companion on EITHER side fails the peer — absence
+    is a data gap, never imputed (two degenerate values must not accidentally
+    match each other; the materialize side additionally NULLs |value| >=
+    _MAX_SANE_MULTIPLE). Boundary |delta| == width passes (the sim used <=)."""
+    for width, tv, pv in (
+        (tier.net_margin, target.net_margin, peer.net_margin),
+        (tier.rev_growth_yoy, target.rev_growth_yoy, peer.rev_growth_yoy),
+        (tier.roe, target.roe, peer.roe),
+    ):
+        if width is None:
+            continue
+        if tv is None or pv is None or abs(pv - tv) > width:
+            return False
+    return True
+
+
+def target_screenable(multiple: str, target: CompanionVars | None) -> bool:
+    """True iff the screen applies to ``multiple`` AND the given side carries
+    every companion the tightest tier screens on (tiers screen the same field
+    set at every width, so tier 0 is representative). Used for the target gate
+    AND the member-side companions-present check (deploy-window guard)."""
+    tiers = _SCREEN_TIERS.get(multiple)
+    if tiers is None or target is None:
+        return False
+    t0 = tiers[0]
+    for width, tv in (
+        (t0.net_margin, target.net_margin),
+        (t0.rev_growth_yoy, target.rev_growth_yoy),
+        (t0.roe, target.roe),
+    ):
+        if width is not None and tv is None:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -335,6 +454,10 @@ class QualityInputs:
     excluded_stale_n: int
     sic_level: int
     cross_multiple_spread: float
+    # v4 (#2032): true iff any CONTRIBUTING peer-backed screenable leg fell
+    # back to the unscreened cohort (spec §4.3). Defaulted so pre-v4
+    # constructors are untouched.
+    screen_fallback: bool = False
 
 
 def band_quality_status(q: QualityInputs) -> str:
@@ -347,6 +470,9 @@ def band_quality_status(q: QualityInputs) -> str:
     score += {4: 2, 3: 1}.get(q.sic_level, 0)
     score += 1 if q.n_selected >= 2 else 0
     score -= 1 if q.cross_multiple_spread > 0.5 else 0
+    # v4 (#2032) §4.3 knock: an unscreened comparability cohort carries less
+    # confidence than a companion-matched one.
+    score -= 1 if q.screen_fallback else 0
     if score >= 7:
         return "high"
     if score >= 4:
@@ -462,11 +588,33 @@ def compute_band(
     max_excluded_stale_n = 0
     max_cohort_n = 0
     contributing_own_points = 0
+    screen_fallback = False
     for m in selected:
         peer = peer_by_multiple.get(m, PeerPct(None, None, None))
         own = own_by_multiple.get(m, OwnPct(None, None, None))
+        meta = cohort_meta.get(m, {})
+        cn, esn = meta.get("cohort_n", 0), meta.get("excluded_stale_n", 0)
+        # Basis entry built BEFORE the synth-None / leg-drop decisions (spec
+        # #2021 §3.4 + v4 spec §4.4): a non-contributing leg's peer stats AND
+        # screen provenance stay auditable on the stored row.
+        entry: dict = {
+            "peer": {"p25": peer.p25, "p50": peer.p50, "p75": peer.p75},
+            "own": {"p25": own.p25, "p50": own.p50, "p75": own.p75},
+            "cohort_n": cn,
+            "excluded_stale_n": esn,
+            "own_points": own_points_by_multiple.get(m, 0),
+            # v4 (#2032) §4.4: per-leg cohort level — the band-level
+            # sic_level=max(...) quality input is not per-leg reconstructable.
+            "sic_level": meta.get("sic_level", 0),
+        }
+        # v4 (#2032) §4.4 screen provenance, present iff the leg is screenable:
+        # held -> {sic_level, width_tier, survivors_n}; fallback -> {reason}.
+        if "cohort_screened" in meta:
+            entry["cohort_screened"] = meta["cohort_screened"]
+            entry["screen"] = meta.get("screen", {})
         synth = synth_multiple(peer, own)
         if synth is None:
+            basis["multiples"][m] = entry
             continue
         low_mult, base_mult, high_mult = synth
         precap_low, precap_high = low_mult, high_mult
@@ -483,23 +631,12 @@ def compute_band(
             ebitda=ev_ebitda_value,
             net_debt_value=ev_net_debt,
         )
-        meta = cohort_meta.get(m, {})
-        cn, esn = meta.get("cohort_n", 0), meta.get("excluded_stale_n", 0)
-        # Basis entry built BEFORE the leg-drop decision (spec #2021 §3.4) so a
-        # dropped leg's peer stats stay auditable on the stored row.
-        entry: dict = {
-            "peer": {"p25": peer.p25, "p50": peer.p50, "p75": peer.p75},
-            "own": {"p25": own.p25, "p50": own.p50, "p75": own.p75},
-            "cohort_n": cn,
-            "excluded_stale_n": esn,
-            "own_points": own_points_by_multiple.get(m, 0),
-            # v2 (#2022) cap audit: the pre-cap wing multiples + whether each was
-            # clamped, so the base*_R_UP/_R_DN clamp is reconstructable from the row.
-            "capped_low": capped_low,
-            "capped_high": capped_high,
-            "precap_low_mult": precap_low,
-            "precap_high_mult": precap_high,
-        }
+        # v2 (#2022) cap audit: the pre-cap wing multiples + whether each was
+        # clamped, so the base*_R_UP/_R_DN clamp is reconstructable from the row.
+        entry["capped_low"] = capped_low
+        entry["capped_high"] = capped_high
+        entry["precap_low_mult"] = precap_low
+        entry["precap_high_mult"] = precap_high
         if m == "ev_ebitda":
             # Conversion inputs — the affine transform is reconstructable from
             # the stored row (mult * ebitda_ttm - net_debt) / shares.
@@ -519,6 +656,11 @@ def compute_band(
         entry["base_value"] = triple[1]
         basis["multiples"][m] = entry
         per_share_triples.append(triple)
+        # v4 (#2032) §4.3: only a CONTRIBUTING peer-backed screenable leg that
+        # fell back unscreened knocks quality (own-only legs have no peer cohort
+        # to screen; dropped/synth-None legs never reach this line).
+        if meta.get("cohort_screened") is False and peer.p50 is not None:
+            screen_fallback = True
         sides = (1 if peer.p50 is not None else 0) + (1 if own.p50 is not None else 0)
         max_sides = max(max_sides, sides)
         max_cohort_n = max(max_cohort_n, cn)
@@ -541,6 +683,7 @@ def compute_band(
             excluded_stale_n=max_excluded_stale_n,
             sic_level=sic_level,
             cross_multiple_spread=spread,
+            screen_fallback=screen_fallback,
         )
     )
     return BandResult(bear, base, bull, quality, "ok", t.target_basis, len(selected), basis)
@@ -626,7 +769,8 @@ def resolve_cohort_members_as_of_date(conn: psycopg.Connection[Any]) -> _dt.date
 _MATERIALIZE_SQL = """
 INSERT INTO fair_value_cohort_members
     (as_of_date, instrument_id, multiple, mult_value, sic, sic3, sic2,
-     total_assets, close_date, dual_class_suppressed)
+     total_assets, close_date, dual_class_suppressed,
+     net_margin, rev_growth_yoy, roe)
 WITH asof_price AS (
     SELECT DISTINCT ON (pd.instrument_id)
            pd.instrument_id,
@@ -647,6 +791,36 @@ dual_class AS (
       AND ei.identifier_type = 'cik'
       AND ei.is_primary = TRUE
 ),
+prior_ttm AS (
+    -- v4 (#2032) §4.5 growth denominator: the PRIOR strict TTM window (quarters
+    -- rn 5-8 of the same deduped/ranked series sql/220 builds its rn 1-4 from).
+    -- Same strictness: 4 rows, span <= 330d, revenue present in all 4.
+    SELECT instrument_id,
+           CASE WHEN count(*) = 4
+                     AND (max(period_end_date) - min(period_end_date)) <= 330
+                     AND count(revenue) = 4
+                THEN sum(revenue) END AS rev_prior_ttm,
+           max(period_end_date) AS prior_end
+    FROM (
+        SELECT instrument_id, period_end_date, revenue,
+               ROW_NUMBER() OVER (
+                   PARTITION BY instrument_id
+                   ORDER BY period_end_date DESC
+               ) AS rn
+        FROM (
+            -- dedup mirror of sql/220 deduped_quarters (latest-filed wins).
+            SELECT DISTINCT ON (instrument_id, period_end_date)
+                   instrument_id, period_end_date, revenue
+            FROM financial_periods
+            WHERE period_type IN ('Q1','Q2','Q3','Q4')
+              AND superseded_at IS NULL
+              AND normalization_status = 'normalized'
+            ORDER BY instrument_id, period_end_date, filed_date DESC NULLS LAST
+        ) dq
+    ) rq
+    WHERE rq.rn BETWEEN 5 AND 8
+    GROUP BY instrument_id
+),
 base AS (
     SELECT
         ap.instrument_id,
@@ -658,6 +832,8 @@ base AS (
         ttm.total_assets,
         ttm.eps_diluted_ttm,
         ttm.revenue_ttm,
+        ttm.net_income_ttm,
+        ttm.ttm_start,
         ttm.shareholders_equity,
         ttm.shares_outstanding,
         ttm.operating_income_ttm,
@@ -666,6 +842,8 @@ base AS (
         ttm.short_term_debt,
         ttm.cash,
         ttm.interest_expense_ttm,
+        pt.rev_prior_ttm,
+        pt.prior_end,
         (dc.instrument_id IS NOT NULL) AS dual_class_suppressed
     FROM asof_price ap
     JOIN financial_periods_ttm ttm
@@ -674,25 +852,53 @@ base AS (
       ON sp.instrument_id = ap.instrument_id
     LEFT JOIN dual_class dc
       ON dc.instrument_id = ap.instrument_id
+    LEFT JOIN prior_ttm pt
+      ON pt.instrument_id = ap.instrument_id
+),
+-- v4 (#2032) §4.5 member companions, identical derivation to the Python-side
+-- companion_vars(). Each NULLed when |value| >= %(max_mult)s: a tiny-denominator
+-- ratio is a degenerate artifact — NULLing guarantees degenerate PAIRS cannot
+-- accidentally screen-match, and keeps numeric(18,6) unreachable by overflow.
+companions AS (
+    SELECT b.*,
+        CASE WHEN b.revenue_ttm > 0 AND b.net_income_ttm IS NOT NULL
+                  AND abs(b.net_income_ttm / b.revenue_ttm) < %(max_mult)s
+             THEN b.net_income_ttm / b.revenue_ttm END AS net_margin,
+        CASE WHEN b.revenue_ttm IS NOT NULL
+                  AND b.rev_prior_ttm IS NOT NULL AND b.rev_prior_ttm <> 0
+                  AND b.ttm_start IS NOT NULL AND b.prior_end IS NOT NULL
+                  -- cross-window adjacency (§4.5): consecutive quarter-ends sit
+                  -- ~90d apart; >=1 excludes overlap, <=120 tolerates a 53-week
+                  -- calendar while excluding a skipped quarter.
+                  AND (b.ttm_start - b.prior_end) BETWEEN 1 AND 120
+                  AND abs((b.revenue_ttm - b.rev_prior_ttm) / abs(b.rev_prior_ttm)) < %(max_mult)s
+             THEN (b.revenue_ttm - b.rev_prior_ttm) / abs(b.rev_prior_ttm) END AS rev_growth_yoy,
+        CASE WHEN b.net_income_ttm IS NOT NULL AND b.shareholders_equity > 0
+                  AND abs(b.net_income_ttm / b.shareholders_equity) < %(max_mult)s
+             THEN b.net_income_ttm / b.shareholders_equity END AS roe
+    FROM base b
 ),
 per_multiple AS (
     SELECT instrument_id, 'pe'::text AS multiple,
            (close / eps_diluted_ttm) AS mult_value,
-           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
-    FROM base WHERE eps_diluted_ttm > 0
+           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed,
+           net_margin, rev_growth_yoy, roe
+    FROM companions WHERE eps_diluted_ttm > 0
     UNION ALL
     -- P/S = price*shares/revenue (mirrors sql/201 price_sales); target conversion
     -- mult*(revenue/shares) recovers price => one shared multiple definition.
     SELECT instrument_id, 'ps'::text,
            ((close * shares_outstanding) / revenue_ttm),
-           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
-    FROM base WHERE revenue_ttm > 0 AND shares_outstanding > 0
+           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed,
+           net_margin, rev_growth_yoy, roe
+    FROM companions WHERE revenue_ttm > 0 AND shares_outstanding > 0
     UNION ALL
     -- P/B = price*shares/equity (mirrors sql/201 pb_ratio = price/(equity/shares)).
     SELECT instrument_id, 'pb'::text,
            ((close * shares_outstanding) / shareholders_equity),
-           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
-    FROM base WHERE shareholders_equity > 0 AND shares_outstanding > 0
+           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed,
+           net_margin, rev_growth_yoy, roe
+    FROM companions WHERE shareholders_equity > 0 AND shares_outstanding > 0
     UNION ALL
     -- EV/EBITDA (#2021) = (close*shares + debt - cash) / (OpInc + D&A) —
     -- mirrors sql/201:128-135. Strict EBITDA: a NULL op/d&a propagates and the
@@ -705,8 +911,9 @@ per_multiple AS (
            ((close * shares_outstanding)
             + COALESCE(long_term_debt, 0) + COALESCE(short_term_debt, 0) - cash)
            / (operating_income_ttm + depreciation_amort_ttm),
-           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
-    FROM base
+           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed,
+           net_margin, rev_growth_yoy, roe
+    FROM companions
     WHERE (operating_income_ttm + depreciation_amort_ttm) > 0
       AND shares_outstanding > 0
       AND cash IS NOT NULL
@@ -714,7 +921,8 @@ per_multiple AS (
                AND COALESCE(interest_expense_ttm, 0) > 0)
 )
 SELECT %(as_of)s, instrument_id, multiple, mult_value, sic, sic3, sic2,
-       total_assets, close_date, dual_class_suppressed
+       total_assets, close_date, dual_class_suppressed,
+       net_margin, rev_growth_yoy, roe
 FROM per_multiple
 -- mult_value > 0 gates junk; < %(max_mult)s prevents a tiny-denominator garbage
 -- multiple from overflowing numeric(18,6) and aborting the whole batch INSERT
@@ -743,21 +951,24 @@ def materialize_cohort_members(conn: psycopg.Connection[Any], as_of_date: _dt.da
 # curated-oracle members drop out of those medians, mirroring sql/201:254).
 _MEMBER_SQL: dict[int, LiteralString] = {
     4: """
-        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed
+        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed,
+               net_margin, rev_growth_yoy, roe
         FROM fair_value_cohort_members
         WHERE as_of_date = %(as_of)s AND multiple = %(m)s AND sic = %(prefix)s
           AND instrument_id <> %(target)s
           AND (%(keep_dual)s OR NOT dual_class_suppressed)
         """,
     3: """
-        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed
+        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed,
+               net_margin, rev_growth_yoy, roe
         FROM fair_value_cohort_members
         WHERE as_of_date = %(as_of)s AND multiple = %(m)s AND sic3 = %(prefix)s
           AND instrument_id <> %(target)s
           AND (%(keep_dual)s OR NOT dual_class_suppressed)
         """,
     2: """
-        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed
+        SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed,
+               net_margin, rev_growth_yoy, roe
         FROM fair_value_cohort_members
         WHERE as_of_date = %(as_of)s AND multiple = %(m)s AND sic2 = %(prefix)s
           AND instrument_id <> %(target)s
@@ -772,6 +983,15 @@ def _sic_prefix(sic: str | None, level: int) -> str | None:
     return sic[:level]
 
 
+def _member_companions(r: dict[str, Any]) -> CompanionVars:
+    """Member-row companion view (Decimal -> float)."""
+    return CompanionVars(
+        net_margin=_f(r["net_margin"]),
+        rev_growth_yoy=_f(r["rev_growth_yoy"]),
+        roe=_f(r["roe"]),
+    )
+
+
 def peer_pct_for(
     conn: psycopg.Connection[Any],
     target_id: int,
@@ -779,6 +999,7 @@ def peer_pct_for(
     target_total_assets: float | None,
     multiple: str,
     as_of_date: _dt.date,
+    target_companions: CompanionVars | None = None,
 ) -> tuple[PeerPct, dict]:
     """Pass-2 comparator (a) (§4.3): read the member set for ``multiple`` at
     ``as_of_date``; walk SIC-4->3->2 to the first prefix with >= MIN_PEERS FRESH
@@ -787,49 +1008,64 @@ def peer_pct_for(
     percentiles(mults, (0.25,0.5,0.75)) in PURE Python (the SAME percentiles() as
     own-history -> guaranteed agreement).
 
+    v4 (#2032): when ``multiple`` is screenable AND the target carries its
+    companions, a SCREENED pass runs first — width-major (the validated sim's
+    frozen semantics, v4 spec §4.1): for each width tier tight->wide, walk the
+    full SIC ladder 4->3->2 filtering fresh members by the companion predicate;
+    the first (width, level) whose screened survivors clear MIN_PEERS both
+    pre- and post-size-refine wins, with screen provenance in the meta. Screen
+    exhausted (or target companion missing) -> the UNSCREENED walk below runs
+    unchanged, with ``cohort_screened: False`` + the reason in the meta.
+    Non-screenable multiples (pe) skip the screened pass and carry no screen keys.
+
     INVARIANT (A4 review): never returns a partial some-None triple — percentiles()
     yields all three, and the MIN_PEERS-unmet path returns PeerPct(None,None,None).
-    Returns (PeerPct, {"cohort_n","excluded_stale_n","sic_level"})."""
+    Returns (PeerPct, {"cohort_n","excluded_stale_n","sic_level"[,"cohort_screened","screen"]})."""
     keep_dual = multiple == "pe"
     cutoff = as_of_date - _dt.timedelta(days=PEER_STALE_DAYS)
-    fallback_meta = {"cohort_n": 0, "excluded_stale_n": 0, "sic_level": 0}
 
-    for level in (4, 3, 2):
-        prefix = _sic_prefix(target_sic, level)
-        if prefix is None:
-            continue
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                _MEMBER_SQL[level],
-                {
-                    "as_of": as_of_date,
-                    "m": multiple,
-                    "prefix": prefix,
-                    "target": target_id,
-                    "keep_dual": keep_dual,
-                },
-            )
-            rows = cur.fetchall()
-        if not rows:
-            continue
-        fresh = [r for r in rows if r["close_date"] >= cutoff]
-        excluded_stale_n = len(rows) - len(fresh)
-        # Widest cohort we saw, in case no level clears MIN_PEERS.
-        fallback_meta = {
-            "cohort_n": len(rows),
-            "excluded_stale_n": excluded_stale_n,
-            "sic_level": 0,
-        }
-        if len(fresh) < MIN_PEERS:
-            continue
+    # One member fetch per SIC level, shared by the screened pass (which may
+    # touch every level per width tier) and the unscreened fallback walk.
+    # Keyed by level ONLY: every other query param (multiple, keep_dual,
+    # as_of_date, target) is fixed for the lifetime of this call — the cache
+    # must not outlive it (review NITPICK, PR #2045).
+    rows_cache: dict[int, list[dict[str, Any]] | None] = {}
 
+    def _rows(level: int) -> list[dict[str, Any]] | None:
+        if level not in rows_cache:
+            prefix = _sic_prefix(target_sic, level)
+            if prefix is None:
+                rows_cache[level] = None
+            else:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        _MEMBER_SQL[level],
+                        {
+                            "as_of": as_of_date,
+                            "m": multiple,
+                            "prefix": prefix,
+                            "target": target_id,
+                            "keep_dual": keep_dual,
+                        },
+                    )
+                    rows_cache[level] = cur.fetchall()
+        return rows_cache[level]
+
+    def _refine(fresh: list[dict[str, Any]]) -> list[float]:
+        """Size-refine fresh rows to the nearest PEER_LIMIT positive multiples.
+
+        F1 (High): _rank_peers DROPS members with missing/non-positive
+        total_assets, so a set with >= MIN_PEERS FRESH members can still
+        size-refine to < MIN_PEERS asset-usable peers. Callers re-check the
+        MIN_PEERS invariant AFTER size-ranking; if it fails they widen (same as
+        the pre-rank check) and go comparator-absent (all-None, fallback_meta)
+        if nothing clears it. This also subsumes the empty-chosen case and
+        preserves the all-None-or-all-three partial-triple invariant."""
         mult_by_id: dict[int, float] = {}
         for r in fresh:
             v = _f(r["mult_value"])
             if v is not None and v > 0:
                 mult_by_id[int(r["instrument_id"])] = v
-
-        chosen: list[float]
         if target_total_assets and target_total_assets > 0 and len(mult_by_id) > PEER_LIMIT:
             rank_rows = [
                 {
@@ -852,29 +1088,101 @@ def peer_pct_for(
                 chosen = list(mult_by_id.values())
         else:
             chosen = list(mult_by_id.values())
+        return chosen
 
-        # F1 (High): _rank_peers DROPS members with missing/non-positive
-        # total_assets, so a level with >= MIN_PEERS FRESH members can still
-        # size-refine to < MIN_PEERS asset-usable peers. Re-check the MIN_PEERS
-        # invariant AFTER size-ranking; if it fails, widen the SIC ladder (same
-        # as the pre-rank fresh check) and go comparator-absent (all-None,
-        # fallback_meta) if no wider level clears it. This also subsumes the
-        # empty-chosen case. Preserves the all-None-or-all-three partial-triple
-        # invariant (percentiles() below always yields all three).
-        if len(chosen) < MIN_PEERS:
+    # --- v4 screened pass (width-major, spec §4.1) ---
+    tiers = _SCREEN_TIERS.get(multiple)
+    screen_reason: str | None = None
+    if tiers is not None:
+        tc = target_companions
+        if tc is None or not target_screenable(multiple, tc):
+            screen_reason = "target_companion_missing"
+        else:
+            for width_tier, tier in enumerate(tiers):
+                for level in (4, 3, 2):
+                    rows = _rows(level)
+                    if not rows:
+                        continue
+                    fresh = [r for r in rows if r["close_date"] >= cutoff]
+                    survivors = [r for r in fresh if screen_passes(tier, tc, _member_companions(r))]
+                    if len(survivors) < MIN_PEERS:
+                        continue
+                    chosen = _refine(survivors)
+                    if len(chosen) < MIN_PEERS:
+                        continue
+                    p25, p50, p75 = percentiles(chosen, (0.25, 0.5, 0.75))
+                    return PeerPct(p25=p25, p50=p50, p75=p75), {
+                        "cohort_n": len(rows),
+                        "excluded_stale_n": len(rows) - len(fresh),
+                        "sic_level": level,
+                        "cohort_screened": True,
+                        "screen": {
+                            "sic_level": level,
+                            "width_tier": width_tier,
+                            "survivors_n": len(survivors),
+                        },
+                    }
+            screen_reason = "no_screened_cohort"
+            # Deploy-window guard (Codex ckpt-2 P2): a single-name cascade may
+            # anchor to a cohort materialized BEFORE the sql/228 backfill, whose
+            # companion columns are all NULL — that is "the cohort carries no
+            # companion data", not "no comparable peers exist at any width".
+            # Annotate distinctly so the stored provenance never claims a screen
+            # that had no inputs. (Values are unaffected either way: the
+            # unscreened fallback below IS the pre-v4 walk.) The screened pass
+            # visits every ladder level before landing here, so rows_cache holds
+            # the full member set this walk can ever see; empty-but-valid
+            # cohorts ([] or unresolved-SIC None levels) contribute no rows, so
+            # the override requires member rows to EXIST — a zero-member cohort
+            # keeps no_screened_cohort (PR #2045 review WARNING).
+            cached_rows = [r for cached in rows_cache.values() if cached for r in cached]
+            if cached_rows and not any(target_screenable(multiple, _member_companions(r)) for r in cached_rows):
+                screen_reason = "cohort_companions_missing"
+
+    # --- unscreened walk (pre-v4 semantics, unchanged) ---
+    fallback_meta: dict[str, Any] = {"cohort_n": 0, "excluded_stale_n": 0, "sic_level": 0}
+    result: tuple[PeerPct, dict] | None = None
+    for level in (4, 3, 2):
+        rows = _rows(level)
+        if not rows:
             continue
-
-        p25, p50, p75 = percentiles(chosen, (0.25, 0.5, 0.75))
-        return PeerPct(p25=p25, p50=p50, p75=p75), {
+        fresh = [r for r in rows if r["close_date"] >= cutoff]
+        excluded_stale_n = len(rows) - len(fresh)
+        # Widest cohort we saw, in case no level clears MIN_PEERS.
+        fallback_meta = {
             "cohort_n": len(rows),
             "excluded_stale_n": excluded_stale_n,
-            "sic_level": level,
+            "sic_level": 0,
         }
+        if len(fresh) < MIN_PEERS:
+            continue
+        chosen = _refine(fresh)
+        if len(chosen) < MIN_PEERS:
+            continue
+        p25, p50, p75 = percentiles(chosen, (0.25, 0.5, 0.75))
+        result = (
+            PeerPct(p25=p25, p50=p50, p75=p75),
+            {
+                "cohort_n": len(rows),
+                "excluded_stale_n": excluded_stale_n,
+                "sic_level": level,
+            },
+        )
+        break
 
-    return PeerPct(None, None, None), fallback_meta
+    pct, meta = result if result is not None else (PeerPct(None, None, None), fallback_meta)
+    if screen_reason is not None:
+        # v4 §4.4: an attempted-but-unheld screen leaves its audit trail even
+        # when the unscreened walk is also peer-absent.
+        meta["cohort_screened"] = False
+        meta["screen"] = {"reason": screen_reason}
+    return pct, meta
 
 
 # Target inputs: strict-TTM denominators + SIC + reporting/instrument currency.
+# v4 (#2032): + ttm_start and the prior strict-TTM revenue window (LATERAL,
+# sql/220 dedup/strictness mirror — same shape as _MATERIALIZE_SQL's prior_ttm
+# CTE) so companion_vars() can derive the target-side growth companion.
 _TARGET_SQL = """
     SELECT
         ttm.eps_diluted_ttm,
@@ -891,6 +1199,9 @@ _TARGET_SQL = """
         ttm.reported_currency,
         ttm.total_assets,
         ttm.ttm_end,
+        ttm.ttm_start,
+        prior.rev_prior_ttm,
+        prior.prior_end,
         sp.sic          AS sic,
         i.currency      AS instrument_currency
     FROM instruments i
@@ -898,6 +1209,28 @@ _TARGET_SQL = """
       ON ttm.instrument_id = i.instrument_id AND ttm.is_complete_ttm = TRUE
     LEFT JOIN instrument_sec_profile sp
       ON sp.instrument_id = i.instrument_id
+    LEFT JOIN LATERAL (
+        SELECT
+            CASE WHEN count(*) = 4
+                      AND (max(period_end_date) - min(period_end_date)) <= 330
+                      AND count(revenue) = 4
+                 THEN sum(revenue) END AS rev_prior_ttm,
+            max(period_end_date) AS prior_end
+        FROM (
+            SELECT period_end_date, revenue,
+                   ROW_NUMBER() OVER (ORDER BY period_end_date DESC) AS rn
+            FROM (
+                SELECT DISTINCT ON (period_end_date) period_end_date, revenue
+                FROM financial_periods
+                WHERE instrument_id = i.instrument_id
+                  AND period_type IN ('Q1','Q2','Q3','Q4')
+                  AND superseded_at IS NULL
+                  AND normalization_status = 'normalized'
+                ORDER BY period_end_date, filed_date DESC NULLS LAST
+            ) dq
+        ) rq
+        WHERE rq.rn BETWEEN 5 AND 8
+    ) prior ON TRUE
     WHERE i.instrument_id = %(iid)s
 """
 
@@ -1053,6 +1386,17 @@ def compute_band_for_instrument(conn: psycopg.Connection[Any], instrument_id: in
         reason = "multiclass_unavailable" if target_basis == "multiclass_unavailable" else "no_multiple"
         return _stamp(_absent(t, reason), ttm_end, price_as_of)
 
+    # v4 (#2032): target-side companions, derived from the SAME strict-TTM row +
+    # prior-TTM lateral the members use (spec §4.5) — one shared definition.
+    target_cv = companion_vars(
+        revenue_ttm=t.revenue_ttm,
+        net_income_ttm=t.net_income_ttm,
+        shareholders_equity=t.shareholders_equity,
+        rev_prior_ttm=_f(trow["rev_prior_ttm"]),
+        ttm_start=trow["ttm_start"],
+        prior_end=trow["prior_end"],
+    )
+
     own_all, own_capped_total = _own_series(conn, instrument_id, as_of_date)
     own_by_multiple: dict[str, OwnPct] = {}
     own_points_by_multiple: dict[str, int] = {}
@@ -1062,7 +1406,15 @@ def compute_band_for_instrument(conn: psycopg.Connection[Any], instrument_id: in
     for m in selected:
         own_by_multiple[m] = own_range(own_all[m])
         own_points_by_multiple[m] = len(own_all[m])
-        peer, meta = peer_pct_for(conn, instrument_id, target_sic, target_total_assets, m, as_of_date)
+        peer, meta = peer_pct_for(
+            conn,
+            instrument_id,
+            target_sic,
+            target_total_assets,
+            m,
+            as_of_date,
+            target_companions=target_cv,
+        )
         peer_by_multiple[m] = peer
         cohort_meta[m] = meta
         sic_level = max(sic_level, int(meta.get("sic_level", 0)))
