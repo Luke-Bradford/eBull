@@ -1232,6 +1232,46 @@ export interface VerdictResponse {
 // /theses/{instrument_id} (app/api/theses.py)
 // ---------------------------------------------------------------------------
 
+// #2013 — structured what-changed vs the prior thesis version. Mirrors
+// app/services/thesis_diff.ThesisDiff via ThesisDiffModel (app/api/theses.py);
+// computed on read from the two append-only rows, never stored.
+export interface ThesisFieldChange {
+  from_value: string | null;
+  to_value: string | null;
+}
+
+export interface ThesisConfidenceChange {
+  from_value: number | null;
+  to_value: number | null;
+  delta: number | null;
+}
+
+export interface ThesisTargetChange {
+  field: string;
+  from_value: number | null;
+  to_value: number | null;
+  kind: string; // 'added' | 'removed' | 'moved'
+  rel_move: number | null;
+}
+
+export interface ThesisDiff {
+  prev_version: number;
+  curr_version: number;
+  stance: ThesisFieldChange | null;
+  thesis_type: ThesisFieldChange | null;
+  confidence: ThesisConfidenceChange | null;
+  targets: ThesisTargetChange[];
+  break_conditions_added: string[];
+  break_conditions_removed: string[];
+  memo_sections_added: string[];
+  memo_sections_removed: string[];
+  memo_sections_changed: string[];
+  prompt_version: ThesisFieldChange | null;
+  model: ThesisFieldChange | null;
+  material: boolean;
+  summary: string;
+}
+
 export interface ThesisDetail {
   thesis_id: number;
   instrument_id: number;
@@ -1258,6 +1298,8 @@ export interface ThesisDetail {
    *  Populated only on the latest-thesis GET; null on history/POST payloads. */
   is_stale?: boolean | null;
   stale_reason?: string | null;
+  /** #2013 — diff vs the version-1 predecessor; null on v1 rows. */
+  diff?: ThesisDiff | null;
 }
 
 export interface ThesisHistoryResponse {
@@ -1293,6 +1335,10 @@ export interface ThesisLibraryItem {
   run_error: string | null;
   run_trigger: string | null;
   run_started_at: string | null;
+  /** #2013 — compact field-level what-changed vs the predecessor version;
+   *  null/false on v1 rows, gap rows, or an unchanged regen. */
+  last_change_summary: string | null;
+  last_change_material: boolean;
 }
 
 export interface ThesisLibraryResponse {
@@ -1850,6 +1896,27 @@ export interface RankMovesResponse {
   alerts_last_seen_rank_event_id: number | null;
   unseen_count: number;
   moves: RankMove[];
+}
+
+// ---------------------------------------------------------------------------
+// #2013 thesis-change alert feed (app/api/alerts.py)
+// ---------------------------------------------------------------------------
+
+export interface ThesisChange {
+  thesis_id: number;
+  instrument_id: number;
+  symbol: string;
+  thesis_version: number;
+  created_at: string;
+  summary: string; // deterministic one-liner from thesis_diff (stance/type/targets)
+  stance_from: string | null;
+  stance_to: string | null;
+}
+
+export interface ThesisChangesResponse {
+  alerts_last_seen_thesis_change_id: number | null;
+  unseen_count: number;
+  changes: ThesisChange[];
 }
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import type {
   GuardRejection,
   PositionAlert,
   RankMove,
+  ThesisChange,
   ThesisStalenessItem,
 } from "@/api/types";
 
@@ -37,6 +38,7 @@ export type Cursors = {
   position: number | null;
   coverage: number | null;
   rank: number | null;
+  thesisChange: number | null;
 };
 
 export interface GuardReasonMeta {
@@ -245,11 +247,35 @@ export interface ThesisStaleItem {
   unseen: boolean; // always false — excluded from unseen/dismiss accounting
 }
 
+/**
+ * Thesis change (#2013) — one card per instrument whose thesis regenerated
+ * with a MATERIAL change (stance/type change, target added/removed, or a
+ * target move ≥5% — predicate: app/services/thesis_diff.py). Event feed
+ * cursored on theses.thesis_id; an instrument regenerated several times
+ * in-window shows the latest change and counts the rest, like rank moves.
+ */
+export interface ThesisChangeItem {
+  kind: "thesisChange";
+  tier: Tier;
+  id: string;
+  symbol: string;
+  instrumentId: number;
+  summary: string;
+  stanceFrom: string | null;
+  stanceTo: string | null;
+  count: number;
+  latestTs: string;
+  sortKey: number;
+  maxId: number;
+  unseen: boolean;
+}
+
 export type AlertItem =
   | GuardGroupItem
   | PositionItem
   | CoverageGroupItem
   | RankMoveItem
+  | ThesisChangeItem
   | ThesisStaleItem;
 
 function uniqueSorted(values: (string | null)[]): string[] {
@@ -267,6 +293,7 @@ export function buildAlertModel(
   moves: RankMove[],
   cursors: Cursors,
   staleTheses: ThesisStalenessItem[] = [],
+  thesisChanges: ThesisChange[] = [],
 ): AlertItem[] {
   const items: AlertItem[] = [];
 
@@ -367,6 +394,35 @@ export function buildAlertModel(
       sortKey: Date.parse(latest.scored_at),
       maxId,
       unseen: cursors.rank === null || maxId > cursors.rank,
+    });
+  }
+
+  // Thesis changes (#2013) → one card per instrument (informational tier).
+  // Multiple in-window material regens on one instrument show the latest
+  // (highest thesis_id) and count the rest — same shape as rank moves.
+  const thesisChangeGroups = new Map<number, ThesisChange[]>();
+  for (const c of thesisChanges) {
+    const arr = thesisChangeGroups.get(c.instrument_id);
+    if (arr) arr.push(c);
+    else thesisChangeGroups.set(c.instrument_id, [c]);
+  }
+  for (const [instrumentId, members] of thesisChangeGroups) {
+    const maxId = Math.max(...members.map((m) => m.thesis_id));
+    const latest = members.reduce((a, b) => (b.thesis_id > a.thesis_id ? b : a));
+    items.push({
+      kind: "thesisChange",
+      tier: "informational",
+      id: `thesisChange:${instrumentId}`,
+      symbol: latest.symbol,
+      instrumentId,
+      summary: latest.summary,
+      stanceFrom: latest.stance_from,
+      stanceTo: latest.stance_to,
+      count: members.length,
+      latestTs: latest.created_at,
+      sortKey: Date.parse(latest.created_at),
+      maxId,
+      unseen: cursors.thesisChange === null || maxId > cursors.thesisChange,
     });
   }
 

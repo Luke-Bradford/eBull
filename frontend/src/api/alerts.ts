@@ -4,6 +4,7 @@ import type {
   GuardRejectionsResponse,
   PositionAlertsResponse,
   RankMovesResponse,
+  ThesisChangesResponse,
   ThesisStalenessResponse,
 } from "@/api/types";
 
@@ -101,6 +102,21 @@ export function markRankMovesSeen(
 
 export function dismissAllRankMoves(): Promise<void> {
   return apiFetch<void>("/alerts/rank-moves/dismiss-all", { method: "POST" });
+}
+
+// --- #2013 thesis-change endpoints -------------------------------------------
+// Cursor feed on theses.thesis_id; a dismiss with the newest listed id clears
+// everything older, so there is no separate dismiss-all endpoint.
+
+export function fetchThesisChanges(): Promise<ThesisChangesResponse> {
+  return apiFetch<ThesisChangesResponse>("/alerts/thesis-changes");
+}
+
+export function markThesisChangesSeen(seenThroughThesisId: number): Promise<void> {
+  return apiFetch<void>("/alerts/thesis-changes/seen", {
+    method: "POST",
+    body: JSON.stringify({ seen_through_thesis_id: seenThroughThesisId }),
+  });
 }
 
 // --- #1902 thesis-staleness snapshot ----------------------------------------

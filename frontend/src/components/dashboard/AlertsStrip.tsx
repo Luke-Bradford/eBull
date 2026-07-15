@@ -29,11 +29,13 @@ import {
   fetchGuardRejections,
   fetchPositionAlerts,
   fetchRankMoves,
+  fetchThesisChanges,
   fetchThesisStaleness,
   markAlertsSeen,
   markCoverageStatusDropsSeen,
   markPositionAlertsSeen,
   markRankMovesSeen,
+  markThesisChangesSeen,
 } from "@/api/alerts";
 import type {
   CoverageStatusDropsResponse,
@@ -41,6 +43,7 @@ import type {
   PositionAlert,
   PositionAlertsResponse,
   RankMovesResponse,
+  ThesisChangesResponse,
   ThesisStalenessResponse,
 } from "@/api/types";
 import { formatRelativeTime } from "@/lib/format";
@@ -52,6 +55,7 @@ import {
   type GuardGroupItem,
   type CoverageGroupItem,
   type RankMoveItem,
+  type ThesisChangeItem,
   type ThesisStaleItem,
   type Tier,
 } from "./alertModel";
@@ -278,6 +282,41 @@ function RankMoveCard({ item }: { item: RankMoveItem }) {
   );
 }
 
+function ThesisChangeCard({ item }: { item: ThesisChangeItem }) {
+  // Material re-thesis (#2013): deterministic summary from thesis_diff —
+  // stance/type changes, targets added/removed, moves ≥5%.
+  return (
+    <Link
+      to={`/instruments/${item.instrumentId}`}
+      className="block hover:bg-slate-50 dark:hover:bg-slate-800/40"
+    >
+      <CardShell tier={item.tier} unseen={item.unseen} label="RE-THESIS">
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex items-baseline gap-2">
+            <span className="font-semibold text-slate-800 dark:text-slate-100">
+              {item.symbol}
+            </span>
+            {item.count > 1 ? (
+              <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+                ×{item.count}
+              </span>
+            ) : null}
+          </div>
+          <span
+            className="truncate text-xs text-slate-600 dark:text-slate-300"
+            title={item.summary}
+          >
+            {item.summary}
+          </span>
+        </div>
+        <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
+          {formatRelativeTime(item.latestTs)}
+        </span>
+      </CardShell>
+    </Link>
+  );
+}
+
 function ThesisStaleCard({ item }: { item: ThesisStaleItem }) {
   // Standing condition (#1902): no unseen highlight, no dismiss — the card
   // clears when the theses regenerate. Links to the pre-filtered library.
@@ -312,6 +351,8 @@ function ItemView({ item }: { item: AlertItem }) {
       return <CoverageGroupCard item={item} />;
     case "rankMove":
       return <RankMoveCard item={item} />;
+    case "thesisChange":
+      return <ThesisChangeCard item={item} />;
     case "thesisStale":
       return <ThesisStaleCard item={item} />;
   }
@@ -335,6 +376,11 @@ export function AlertsStrip(): JSX.Element | null {
   >({
     status: "loading",
   });
+  const [thesisChange, setThesisChange] = useState<
+    FeedState<ThesisChangesResponse>
+  >({
+    status: "loading",
+  });
   const [refetchKey, setRefetchKey] = useState(0);
 
   useEffect(() => {
@@ -344,6 +390,7 @@ export function AlertsStrip(): JSX.Element | null {
     setCoverage({ status: "loading" });
     setRank({ status: "loading" });
     setThesisStale({ status: "loading" });
+    setThesisChange({ status: "loading" });
 
     fetchGuardRejections()
       .then((d) => {
@@ -395,6 +442,16 @@ export function AlertsStrip(): JSX.Element | null {
           setThesisStale({ status: "err" });
         }
       });
+    fetchThesisChanges()
+      .then((d) => {
+        if (!cancelled) setThesisChange({ status: "ok", data: d });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error("[AlertsStrip] fetchThesisChanges failed", err);
+          setThesisChange({ status: "err" });
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -408,7 +465,8 @@ export function AlertsStrip(): JSX.Element | null {
     position.status === "loading" ||
     coverage.status === "loading" ||
     rank.status === "loading" ||
-    thesisStale.status === "loading"
+    thesisStale.status === "loading" ||
+    thesisChange.status === "loading"
   ) {
     return null;
   }
@@ -417,7 +475,8 @@ export function AlertsStrip(): JSX.Element | null {
     position.status === "err" &&
     coverage.status === "err" &&
     rank.status === "err" &&
-    thesisStale.status === "err"
+    thesisStale.status === "err" &&
+    thesisChange.status === "err"
   ) {
     return null;
   }
@@ -432,6 +491,8 @@ export function AlertsStrip(): JSX.Element | null {
   // the grouped body only — never in unseen/overflow/dismiss accounting.
   const staleTheses =
     thesisStale.status === "ok" ? thesisStale.data.items : [];
+  const thesisChanges =
+    thesisChange.status === "ok" ? thesisChange.data.changes : [];
 
   const cursors: Cursors = {
     guard: guard.status === "ok" ? guard.data.alerts_last_seen_decision_id : null,
@@ -444,6 +505,10 @@ export function AlertsStrip(): JSX.Element | null {
         ? coverage.data.alerts_last_seen_coverage_event_id
         : null,
     rank: rank.status === "ok" ? rank.data.alerts_last_seen_rank_event_id : null,
+    thesisChange:
+      thesisChange.status === "ok"
+        ? thesisChange.data.alerts_last_seen_thesis_change_id
+        : null,
   };
 
   const items = buildAlertModel(
@@ -453,6 +518,7 @@ export function AlertsStrip(): JSX.Element | null {
     moves,
     cursors,
     staleTheses,
+    thesisChanges,
   );
 
   if (items.length === 0) {
@@ -463,21 +529,26 @@ export function AlertsStrip(): JSX.Element | null {
   const unseenPosition = position.status === "ok" ? position.data.unseen_count : 0;
   const unseenCoverage = coverage.status === "ok" ? coverage.data.unseen_count : 0;
   const unseenRank = rank.status === "ok" ? rank.data.unseen_count : 0;
+  const unseenThesisChange =
+    thesisChange.status === "ok" ? thesisChange.data.unseen_count : 0;
 
   // Overflow math compares backend unseen counts to RAW fetched row counts (each feed caps
-  // at LIMIT 500) — NOT to the grouped card count.
+  // at LIMIT 500; thesis changes at 50) — NOT to the grouped card count.
   const renderedGuard = rejections.length;
   const renderedPosition = positionAlerts.length;
   const renderedCoverage = drops.length;
   const renderedRank = moves.length;
+  const renderedThesisChange = thesisChanges.length;
 
-  const totalUnseen = unseenGuard + unseenPosition + unseenCoverage + unseenRank;
+  const totalUnseen =
+    unseenGuard + unseenPosition + unseenCoverage + unseenRank + unseenThesisChange;
 
   const anyOverflow =
     unseenGuard > renderedGuard ||
     unseenPosition > renderedPosition ||
     unseenCoverage > renderedCoverage ||
-    unseenRank > renderedRank;
+    unseenRank > renderedRank ||
+    unseenThesisChange > renderedThesisChange;
 
   const overflowAck = anyOverflow;
   const normalAck = totalUnseen > 0 && !anyOverflow;
@@ -488,12 +559,14 @@ export function AlertsStrip(): JSX.Element | null {
     const positionMax = Math.max(0, ...positionAlerts.map((r) => r.alert_id));
     const coverageMax = Math.max(0, ...drops.map((r) => r.event_id));
     const rankMax = Math.max(0, ...moves.map((r) => r.score_id));
+    const thesisChangeMax = Math.max(0, ...thesisChanges.map((r) => r.thesis_id));
 
     const promises: Promise<void>[] = [];
     if (guardMax > 0) promises.push(markAlertsSeen(guardMax));
     if (positionMax > 0) promises.push(markPositionAlertsSeen(positionMax));
     if (coverageMax > 0) promises.push(markCoverageStatusDropsSeen(coverageMax));
     if (rankMax > 0) promises.push(markRankMovesSeen(rankMax));
+    if (thesisChangeMax > 0) promises.push(markThesisChangesSeen(thesisChangeMax));
 
     const results = await Promise.allSettled(promises);
     for (const r of results) {
@@ -509,7 +582,8 @@ export function AlertsStrip(): JSX.Element | null {
       Math.max(0, unseenGuard - renderedGuard) +
       Math.max(0, unseenPosition - renderedPosition) +
       Math.max(0, unseenCoverage - renderedCoverage) +
-      Math.max(0, unseenRank - renderedRank);
+      Math.max(0, unseenRank - renderedRank) +
+      Math.max(0, unseenThesisChange - renderedThesisChange);
     const msg = `Dismiss all ${totalUnseen} unseen alerts? ${hiddenCount} are not shown above. Review them at /recommendations before dismissing if they might matter.`;
     if (!window.confirm(msg)) return;
 
@@ -518,6 +592,12 @@ export function AlertsStrip(): JSX.Element | null {
     if (position.status === "ok") promises.push(dismissAllPositionAlerts());
     if (coverage.status === "ok") promises.push(dismissAllCoverageStatusDrops());
     if (rank.status === "ok") promises.push(dismissAllRankMoves());
+    // No dismiss-all endpoint (#2013): the DESC list always contains the
+    // newest material change, so seen-through-the-max-listed-id clears all.
+    {
+      const thesisChangeMax = Math.max(0, ...thesisChanges.map((r) => r.thesis_id));
+      if (thesisChangeMax > 0) promises.push(markThesisChangesSeen(thesisChangeMax));
+    }
 
     const results = await Promise.allSettled(promises);
     for (const r of results) {
