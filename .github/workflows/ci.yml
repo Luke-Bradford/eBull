@@ -225,14 +225,29 @@ jobs:
         # to catch).
         run: pnpm --dir frontend install --frozen-lockfile
 
-      - name: pnpm audit (frontend, all deps)
+      - name: npm bulk advisory audit (frontend, all deps)
         # Audit dev + prod deps. The frontend toolchain (vite,
         # vitest, typescript) executes during builds and tests, so
         # advisories there are still in the supply chain we ship
         # through CI. ``high`` floor matches what we'd accept as a
         # merge gate; ``moderate`` produced too many false alarms in
         # tooling chains we don't deploy.
-        run: pnpm --dir frontend audit --audit-level high
+        #
+        # #2038: was ``pnpm --dir frontend audit --audit-level high``.
+        # npm retired the classic audit endpoints on 2026-07-15 (410
+        # Gone) and pnpm (<=11.13.0) has not migrated to the bulk
+        # advisory endpoint, so ``pnpm audit`` fails on every run.
+        # scripts/audit_frontend_bulk.mjs POSTs the resolved package
+        # set to the bulk endpoint directly (server-side version
+        # filtering) with the same ``high`` floor, and fails CLOSED
+        # (exit 2) on an empty package set or endpoint error. Revert
+        # to ``pnpm audit`` once pnpm ships bulk-endpoint support.
+        # set -o pipefail: the default Actions shell is ``bash -e`` WITHOUT
+        # pipefail — a failing ``pnpm list`` would otherwise be masked by a
+        # passing audit script reading truncated-but-parseable JSON.
+        run: |
+          set -o pipefail
+          pnpm --dir frontend list --depth Infinity --json | node scripts/audit_frontend_bulk.mjs --audit-level high
 
       - name: Set up Python
         uses: actions/setup-python@v5
