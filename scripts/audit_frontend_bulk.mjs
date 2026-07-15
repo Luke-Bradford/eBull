@@ -23,7 +23,12 @@
 
 const BULK_URL = "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk";
 const SEVERITY_ORDER = { low: 0, moderate: 1, high: 2, critical: 3 };
+// Observed constraint, not an assumption: the endpoint accepted 100-name
+// chunks for the real 327-package frontend tree (4 POSTs, all 2xx) — and
+// npm's own audit client batches its bulk requests similarly. Not a
+// documented registry limit; if a future tree trips a 413, lower this.
 const CHUNK_SIZE = 100;
+const RETRY_DELAY_MS = 2000;
 
 function parseArgs(argv) {
   const i = argv.indexOf("--audit-level");
@@ -70,7 +75,11 @@ async function postChunk(chunk, attempt = 1) {
     body: JSON.stringify(chunk),
   });
   if (!res.ok) {
-    if (res.status >= 500 && attempt === 1) return postChunk(chunk, 2);
+    if (res.status >= 500 && attempt === 1) {
+      // One retry with a short backoff — don't hammer a flaky registry.
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      return postChunk(chunk, 2);
+    }
     throw new Error(`bulk advisory endpoint returned ${res.status}`);
   }
   return res.json();
