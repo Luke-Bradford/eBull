@@ -203,9 +203,19 @@ TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     "eps_diluted": ("EarningsPerShareDiluted",),
     "research_and_dev": ("ResearchAndDevelopmentExpense",),
     "sga_expense": ("SellingGeneralAndAdministrativeExpense",),
+    # #2036: ``DepreciationAmortizationAndAccretionNet`` is a TOTAL-semantics
+    # concept ("the aggregate net amount of depreciation, amortization, and
+    # accretion … added back to net income" — us-gaap element documentation),
+    # so it is alias-safe at lowest priority. The COMPONENT concepts
+    # (``Depreciation``, ``AmortizationOfIntangibleAssets``) must NOT appear
+    # here — a component winning the priority pick would understate D&A.
+    # ``Depreciation`` is stored raw-only via RAW_ONLY_CONCEPTS below and
+    # summed with intangible_amortization at derive time
+    # (docs/proposals/etl/2026-07-15-fundamentals-dna-ytd-decumulation.md §3.3).
     "depreciation_amort": (
         "DepreciationDepletionAndAmortization",
         "DepreciationAndAmortization",
+        "DepreciationAmortizationAndAccretionNet",
     ),
     "interest_expense": ("InterestExpense", "InterestExpenseDebt"),
     "income_tax": ("IncomeTaxExpenseBenefit",),
@@ -351,7 +361,19 @@ DEI_TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     "dei_employees": ("EntityNumberOfEmployees",),
 }
 
-_ALL_TRACKED_TAGS: frozenset[str] = frozenset(tag for tags in TRACKED_CONCEPTS.values() for tag in tags)
+# #2036: concepts captured into ``financial_facts_raw`` WITHOUT a canonical
+# column. ``_TAG_TO_COLUMN`` (app/services/fundamentals) is mechanically built
+# from ``TRACKED_CONCEPTS``, so a component concept listed there would enter
+# the ``depreciation_amort`` priority pick and win alone; the raw-only split
+# keeps components out of the pick while still landing their facts. Consumed
+# by the derive-time component-sum fallback
+# (``_derive_periods_from_facts``: D&A = Depreciation + intangible_amortization
+# when no total-semantics concept is tagged).
+RAW_ONLY_CONCEPTS: frozenset[str] = frozenset({"Depreciation"})
+
+_ALL_TRACKED_TAGS: frozenset[str] = (
+    frozenset(tag for tags in TRACKED_CONCEPTS.values() for tag in tags) | RAW_ONLY_CONCEPTS
+)
 _ALL_TRACKED_DEI_TAGS: frozenset[str] = frozenset(tag for tags in DEI_TRACKED_CONCEPTS.values() for tag in tags)
 
 
@@ -374,12 +396,14 @@ def _extract_facts_from_section(
     ``taxonomy`` names the XBRL namespace (``us-gaap`` or ``dei``) and
     is stamped onto every emitted fact so downstream consumers can
     partition without string-prefix guessing. ``allowed_tags`` is an
-    optional allowlist: when ``None`` (default, #451 Phase A) every
-    concept in the section is emitted; when a frozenset is provided
-    only listed tags survive. The default is now "emit all" so
-    ``financial_facts_raw`` captures the full richness of each
-    filing instead of the narrow ``TRACKED_CONCEPTS`` editorial
-    subset.
+    optional allowlist: when ``None`` every concept in the section is
+    emitted; when a frozenset is provided only listed tags survive.
+    NOTE (#2036): despite the #451 Phase A intent, EVERY production
+    caller passes ``_ALL_TRACKED_TAGS`` / ``_ALL_TRACKED_DEI_TAGS``,
+    so ``financial_facts_raw`` holds only the tracked subset (~78
+    concepts on dev) — raw-store absence of a concept says nothing
+    about issuer tagging. Widening coverage means widening
+    ``TRACKED_CONCEPTS`` / ``RAW_ONLY_CONCEPTS`` + re-fetching.
 
     ``retention_cutoff`` (#1233) — when set, rejects facts whose
     ``period_end`` is strictly before the cutoff with a per-(accession,

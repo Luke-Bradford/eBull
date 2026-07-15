@@ -36,7 +36,7 @@ from app.providers.implementations.sec_edgar import (
     SecFilingsProvider,
     parse_master_index,
 )
-from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
+from app.providers.implementations.sec_fundamentals import RAW_ONLY_CONCEPTS, TRACKED_CONCEPTS
 from app.services.bootstrap_state import (
     resolve_progress_context,
     set_stage_processed,
@@ -893,6 +893,108 @@ def _months_between(start: date | None, end: date) -> int | None:
     return round(delta_days / 30.44)
 
 
+# #2036 — the D&A component concept captured raw-only (see
+# RAW_ONLY_CONCEPTS in sec_fundamentals.py). Resolved at derive time and
+# summed with ``intangible_amortization``; never a PeriodRow column.
+_DA_COMPONENT_CONCEPT = "Depreciation"
+
+# Sanity bounds for cumulative candidates in the YTD pool: one quarter
+# (60d) up to a mislabeled-annual (400d) span.
+_YTD_POOL_DAYS = (60, 400)
+
+
+def _build_ytd_pools(
+    facts: Sequence[FactRow],
+) -> dict[str, list[FactRow]]:
+    """Collect duration facts usable as YTD cumulatives, keyed by canonical
+    column name (for ``_TAG_TO_COLUMN`` flow concepts) or by the raw-only
+    concept name itself.
+
+    Source rule (#2036): interim cash-flow statements are YTD-only
+    (17 CFR 210.10-01(c)(3)), so a 10-Q's cash-flow duration facts span
+    FY-start → quarter-end (Q2 ≈ 182d, Q3 ≈ 273d) and are rejected by the
+    #1835 per-period duration guard. They are not junk — they are the
+    cumulatives ``_fill_from_ytd`` subtracts. Keyed purely by concept →
+    pool; (fy, fp) labels are ignored here because comparative re-stamps
+    (#682) make them unreliable — date arithmetic below is the truth.
+    """
+    pools: dict[str, list[FactRow]] = defaultdict(list)
+    lo, hi = _YTD_POOL_DAYS
+    for fact in facts:
+        if fact.period_start is None:
+            continue
+        days = (fact.period_end - fact.period_start).days
+        if not (lo <= days <= hi):
+            continue
+        if fact.concept in RAW_ONLY_CONCEPTS:
+            pools[fact.concept].append(fact)
+            continue
+        mapping = _TAG_TO_COLUMN.get(fact.concept)
+        if mapping is not None and mapping[0] in _FLOW_COLUMNS:
+            pools[mapping[0]].append(fact)
+    return pools
+
+
+def _resolve_flow_value(
+    candidates: list[FactRow] | None,
+    *,
+    period_type: str,
+    period_end: date,
+) -> Decimal | None:
+    """Resolve a flow value for one period from a cumulative pool.
+
+    Two branches, both anchored on facts whose ``period_end`` equals the
+    row's canonical end:
+
+    1. direct — a fact whose span matches the period's own
+       ``_FLOW_DURATION_DAYS`` window (used by the component fallback,
+       where no column pick ran);
+    2. de-cumulated — ``cur − prev`` where prev shares concept, unit and
+       ``period_start`` (the FY anchor) with cur and ends one quarter
+       (60–120d) before it. Same-concept + same-unit is load-bearing:
+       mixing alias concepts or units across the subtraction fabricates
+       values (Codex ckpt-1 Medium).
+
+    Candidate preference mirrors the canonical-facts rule: concept
+    priority (``_TAG_TO_COLUMN`` index, raw-only concepts rank equal),
+    then ``filed_date DESC`` so amendments win.
+    """
+    if not candidates:
+        return None
+
+    def _prio(fact: FactRow) -> int:
+        mapping = _TAG_TO_COLUMN.get(fact.concept)
+        return mapping[1] if mapping is not None else 0
+
+    ending_here = sorted(
+        (f for f in candidates if f.period_end == period_end),
+        key=lambda f: (_prio(f), -f.filed_date.toordinal(), f.accession_number),
+    )
+    lo, hi = _FLOW_DURATION_DAYS[period_type]
+    for cur in ending_here:
+        days = (cur.period_end - cur.period_start).days  # type: ignore[operator]
+        if lo <= days <= hi:
+            return cur.val
+    if period_type == "FY":
+        return None
+    for cur in ending_here:
+        prevs = sorted(
+            (
+                p
+                for p in candidates
+                if p.concept == cur.concept
+                and p.unit == cur.unit
+                and p.period_start == cur.period_start
+                and 60 <= (cur.period_end - p.period_end).days <= 120
+            ),
+            key=lambda p: (p.filed_date, p.accession_number),
+            reverse=True,
+        )
+        if prevs:
+            return cur.val - prevs[0].val
+    return None
+
+
 def _derive_periods_from_facts(
     facts: Sequence[FactRow],
     reported_currency: str = "USD",
@@ -1047,6 +1149,46 @@ def _derive_periods_from_facts(
                 row.public_float_usd = chosen.val
 
         periods.append(row)
+
+    # #2036 — YTD de-cumulation fill. Interim cash-flow statements are
+    # YTD-only (17 CFR 210.10-01(c)(3)); their Q2/Q3 duration facts were
+    # dropped by the #1835 guard above, so cash-flow columns (D&A,
+    # operating_cf, capex, …) are None on Q2/Q3 rows for issuers that
+    # report them nowhere else. Recover the discrete quarter as
+    # YTD_n − YTD_{n−1} (same identity as the settled Q4 = FY − ΣQ
+    # treatment, #682). Fill-only: a column with a reported discrete
+    # fact is never touched. The component-sum fallback then covers
+    # issuers that tag no total-semantics D&A concept at all:
+    # D&A = Depreciation (raw-only concept) + intangible_amortization,
+    # rule calibrated full-pop in the #2036 spec §2.3 (FLROU excluded —
+    # degrades fit; Depreciation required — AmI-only would omit all
+    # depreciation).
+    ytd_pools = _build_ytd_pools(facts)
+    if ytd_pools:
+        for row in periods:
+            if row.period_type in ("Q1", "Q2", "Q3", "Q4"):
+                for col in _FLOW_COLUMNS:
+                    if getattr(row, col) is not None:
+                        continue
+                    filled = _resolve_flow_value(
+                        ytd_pools.get(col),
+                        period_type=row.period_type,
+                        period_end=row.period_end_date,
+                    )
+                    if filled is not None:
+                        setattr(row, col, filled)
+            # Deliberately ALL period types incl. FY: the Q4 = FY − ΣQ
+            # derivation below needs the FY row's depreciation_amort, so a
+            # component-sum name whose FY D&A stayed None would never get a
+            # derived Q4 and strict TTM (sql/220) would keep failing.
+            if row.depreciation_amort is None:
+                dep = _resolve_flow_value(
+                    ytd_pools.get(_DA_COMPONENT_CONCEPT),
+                    period_type=row.period_type,
+                    period_end=row.period_end_date,
+                )
+                if dep is not None:
+                    row.depreciation_amort = dep + (row.intangible_amortization or Decimal(0))
 
     # Q4 derivation: if FY exists but Q4 does not, derive Q4 = FY - Q1 - Q2 - Q3
     fy_periods = {p.fiscal_year: p for p in periods if p.period_type == "FY"}
