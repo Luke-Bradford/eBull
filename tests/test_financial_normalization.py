@@ -1609,3 +1609,312 @@ class TestPublicFloatOverlay735:
         periods = _derive_periods_from_facts([self._fy_gaap(), self._float(unit="shares")], reported_currency="USD")
         fy = next(p for p in periods if p.period_type == "FY")
         assert fy.public_float_usd is None
+
+
+class TestYtdDecumulation2036:
+    """#2036 — YTD de-cumulation + D&A component-sum fallback.
+
+    Interim cash-flow statements are YTD-only (17 CFR 210.10-01(c)(3));
+    the discrete quarter is recovered as YTD_n - YTD_{n-1}. Spec:
+    docs/proposals/etl/2026-07-15-fundamentals-dna-ytd-decumulation.md.
+    """
+
+    @staticmethod
+    def _year_facts() -> list[FactRow]:
+        """AAPL-shaped calendar year: discrete op income anchors Q1-Q3 + FY;
+        D&A and operating_cf exist ONLY as Q1-discrete + Q2/Q3 YTD + FY."""
+        rows: list[FactRow] = []
+        anchors = [
+            ("Q1", "2024-01-01", "2024-03-31"),
+            ("Q2", "2024-04-01", "2024-06-30"),
+            ("Q3", "2024-07-01", "2024-09-30"),
+            ("FY", "2024-01-01", "2024-12-31"),
+        ]
+        for fp, start, end in anchors:
+            rows.append(
+                _fact(
+                    concept="OperatingIncomeLoss",
+                    val=Decimal("1000"),
+                    period_start=start,
+                    period_end=end,
+                    fiscal_period=fp,
+                    accession_number=f"op-{fp}",
+                    filed_date="2025-02-01",
+                )
+            )
+        cumulative = [
+            ("Q1", "2024-03-31", "3080", "2024-05-01"),
+            ("Q2", "2024-06-30", "5741", "2024-08-01"),
+            ("Q3", "2024-09-30", "8571", "2024-11-01"),
+            ("FY", "2024-12-31", "11698", "2025-02-01"),
+        ]
+        for fp, end, val, filed in cumulative:
+            rows.append(
+                _fact(
+                    concept="DepreciationDepletionAndAmortization",
+                    val=Decimal(val),
+                    period_start="2024-01-01",
+                    period_end=end,
+                    fiscal_period=fp,
+                    accession_number=f"da-{fp}",
+                    filed_date=filed,
+                )
+            )
+        for fp, end, val, filed in [
+            ("Q1", "2024-03-31", "1000", "2024-05-01"),
+            ("Q2", "2024-06-30", "2500", "2024-08-01"),
+            ("Q3", "2024-09-30", "4500", "2024-11-01"),
+            ("FY", "2024-12-31", "7000", "2025-02-01"),
+        ]:
+            rows.append(
+                _fact(
+                    concept="NetCashProvidedByUsedInOperatingActivities",
+                    val=Decimal(val),
+                    period_start="2024-01-01",
+                    period_end=end,
+                    fiscal_period=fp,
+                    accession_number=f"ocf-{fp}",
+                    filed_date=filed,
+                )
+            )
+        return rows
+
+    def test_decumulates_q2_q3_and_derives_q4(self) -> None:
+        periods = _derive_periods_from_facts(self._year_facts(), reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["Q1"].depreciation_amort == Decimal("3080")
+        assert by_type["Q2"].depreciation_amort == Decimal("2661")
+        assert by_type["Q3"].depreciation_amort == Decimal("2830")
+        assert by_type["Q4"].depreciation_amort == Decimal("3127")
+        assert by_type["Q4"].is_derived
+        assert by_type["Q2"].operating_cf == Decimal("1500")
+        assert by_type["Q3"].operating_cf == Decimal("2000")
+        assert by_type["Q4"].operating_cf == Decimal("2500")
+        assert by_type["FY"].depreciation_amort == Decimal("11698")
+
+    def test_broken_chain_no_fill(self) -> None:
+        """Q3 YTD present but no Q2 cumulative -> Q3 stays None (no fabrication)."""
+        facts = [f for f in self._year_facts() if f.accession_number not in ("da-Q2",)]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["Q2"].depreciation_amort is None
+        assert by_type["Q3"].depreciation_amort is None
+
+    def test_anchor_mismatch_no_fill(self) -> None:
+        """A prior cumulative with a different period_start (not the same FY
+        anchor) must not participate in the subtraction."""
+        facts = [f for f in self._year_facts() if not f.accession_number.startswith("da-")]
+        facts.append(
+            _fact(
+                concept="DepreciationDepletionAndAmortization",
+                val=Decimal("5741"),
+                period_start="2024-01-01",
+                period_end="2024-06-30",
+                fiscal_period="Q2",
+                accession_number="da-ytd2",
+            )
+        )
+        facts.append(
+            _fact(
+                concept="DepreciationDepletionAndAmortization",
+                val=Decimal("3080"),
+                period_start="2023-12-15",  # mismatched anchor
+                period_end="2024-03-31",
+                fiscal_period="Q1",
+                accession_number="da-q1-off",
+            )
+        )
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["Q2"].depreciation_amort is None
+
+    def test_discrete_fact_not_overwritten(self) -> None:
+        """Fill-only: a reported discrete Q2 fact wins over de-cumulation."""
+        facts = self._year_facts()
+        facts.append(
+            _fact(
+                concept="DepreciationDepletionAndAmortization",
+                val=Decimal("9999"),
+                period_start="2024-04-01",
+                period_end="2024-06-30",
+                fiscal_period="Q2",
+                accession_number="da-q2-discrete",
+            )
+        )
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["Q2"].depreciation_amort == Decimal("9999")
+
+    def test_unit_mismatch_no_fill(self) -> None:
+        facts = [f for f in self._year_facts() if not f.accession_number.startswith("da-")]
+        facts.append(
+            _fact(
+                concept="DepreciationDepletionAndAmortization",
+                val=Decimal("5741"),
+                period_start="2024-01-01",
+                period_end="2024-06-30",
+                fiscal_period="Q2",
+                accession_number="da-ytd2",
+                unit="USD",
+            )
+        )
+        facts.append(
+            _fact(
+                concept="DepreciationDepletionAndAmortization",
+                val=Decimal("3080"),
+                period_start="2024-01-01",
+                period_end="2024-03-31",
+                fiscal_period="Q1",
+                accession_number="da-q1-eur",
+                unit="EUR",
+            )
+        )
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["Q2"].depreciation_amort is None
+
+    def test_comparative_restamp_uses_canonical_end(self) -> None:
+        """#682 class — a prior-year comparative YTD fact re-stamped under the
+        current (fy, fp) context must not feed the fill; only the fact ending
+        at the row's canonical period_end does."""
+        facts = self._year_facts()
+        facts.append(
+            _fact(
+                concept="DepreciationDepletionAndAmortization",
+                val=Decimal("4444"),
+                period_start="2023-01-01",
+                period_end="2023-06-30",  # prior-year comparative span
+                fiscal_period="Q2",
+                fiscal_year=2024,
+                accession_number="da-q2-comparative",
+            )
+        )
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        by_type = {p.period_type: p for p in periods if p.fiscal_year == 2024}
+        assert by_type["Q2"].depreciation_amort == Decimal("2661")
+
+
+class TestDaComponentSum2036:
+    """#2036 §3.3 — D&A = Depreciation + intangible_amortization when no
+    total-semantics concept is tagged (rule calibrated full-pop, spec §2.3)."""
+
+    @staticmethod
+    def _component_facts(*, with_ami: bool = True, with_dep: bool = True) -> list[FactRow]:
+        rows: list[FactRow] = []
+        for fp, start, end in [
+            ("Q1", "2024-01-01", "2024-03-31"),
+            ("Q2", "2024-04-01", "2024-06-30"),
+        ]:
+            rows.append(
+                _fact(
+                    concept="OperatingIncomeLoss",
+                    val=Decimal("1000"),
+                    period_start=start,
+                    period_end=end,
+                    fiscal_period=fp,
+                    accession_number=f"op-{fp}",
+                )
+            )
+        if with_dep:
+            for fp, end, val in [("Q1", "2024-03-31", "100"), ("Q2", "2024-06-30", "230")]:
+                rows.append(
+                    _fact(
+                        concept="Depreciation",
+                        val=Decimal(val),
+                        period_start="2024-01-01",  # cash-flow YTD anchor
+                        period_end=end,
+                        fiscal_period=fp,
+                        accession_number=f"dep-{fp}",
+                    )
+                )
+        if with_ami:
+            for fp, start, end, val in [
+                ("Q1", "2024-01-01", "2024-03-31", "40"),
+                ("Q2", "2024-04-01", "2024-06-30", "45"),
+            ]:
+                rows.append(
+                    _fact(
+                        concept="AmortizationOfIntangibleAssets",
+                        val=Decimal(val),
+                        period_start=start,
+                        period_end=end,
+                        fiscal_period=fp,
+                        accession_number=f"ami-{fp}",
+                    )
+                )
+        return rows
+
+    def test_component_sum_with_ytd_depreciation(self) -> None:
+        periods = _derive_periods_from_facts(self._component_facts(), reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        # Q1: dep 100 direct + ami 40; Q2: dep de-cumulated 130 + ami 45.
+        assert by_type["Q1"].depreciation_amort == Decimal("140")
+        assert by_type["Q2"].depreciation_amort == Decimal("175")
+
+    def test_depreciation_only(self) -> None:
+        periods = _derive_periods_from_facts(self._component_facts(with_ami=False), reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["Q1"].depreciation_amort == Decimal("100")
+        assert by_type["Q2"].depreciation_amort == Decimal("130")
+
+    def test_ami_only_no_sum(self) -> None:
+        """AmI without Depreciation would omit ALL depreciation -> no fill."""
+        periods = _derive_periods_from_facts(self._component_facts(with_dep=False), reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["Q1"].depreciation_amort is None
+        assert by_type["Q1"].intangible_amortization == Decimal("40")
+
+    def test_total_concept_beats_component_sum(self) -> None:
+        facts = self._component_facts()
+        facts.append(
+            _fact(
+                concept="DepreciationDepletionAndAmortization",
+                val=Decimal("150"),
+                period_start="2024-01-01",
+                period_end="2024-03-31",
+                fiscal_period="Q1",
+                accession_number="dda-q1",
+            )
+        )
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["Q1"].depreciation_amort == Decimal("150")
+
+    def test_accretion_net_alias_maps(self) -> None:
+        facts = [
+            _fact(
+                concept="DepreciationAmortizationAndAccretionNet",
+                val=Decimal("77"),
+                accession_number="daan-q1",
+            )
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert periods[0].depreciation_amort == Decimal("77")
+
+    def test_depreciation_alone_does_not_anchor_row(self) -> None:
+        """Raw-only component facts must never anchor a PeriodRow."""
+        facts = [
+            _fact(
+                concept="Depreciation",
+                val=Decimal("100"),
+                fiscal_period="Q3",
+                period_start="2024-01-01",
+                period_end="2024-09-30",
+                accession_number="dep-only",
+            )
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        assert periods == []
+
+    def test_depreciation_is_raw_only(self) -> None:
+        """The load-bearing split (spec §3.3): Depreciation is captured into
+        financial_facts_raw but must never enter the column priority pick."""
+        from app.providers.implementations.sec_fundamentals import (
+            _ALL_TRACKED_TAGS,
+            RAW_ONLY_CONCEPTS,
+        )
+        from app.services.fundamentals import _TAG_TO_COLUMN
+
+        assert "Depreciation" in RAW_ONLY_CONCEPTS
+        assert "Depreciation" in _ALL_TRACKED_TAGS
+        assert "Depreciation" not in _TAG_TO_COLUMN
