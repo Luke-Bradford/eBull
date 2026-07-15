@@ -66,6 +66,8 @@ def _seed_member(
     total_assets: float,
     cik: str,
     ev: dict[str, float | None] | None = None,
+    margin: float = 0.1,
+    prior_revenue_ttm: float | None = None,
 ) -> None:
     """Seed one instrument so its as-of multiples are exactly (ps, pb, pe).
 
@@ -81,6 +83,13 @@ def _seed_member(
     ``ltd``/``std``/``cash`` in the latest quarter only. None keys stay NULL —
     letting a test exercise the strict/coherence gates. Omitted entirely ->
     every EV column NULL -> no ev_ebitda cohort row (the pre-#2021 shape).
+
+    v4 (#2032): ``margin`` fixes net_income_q = revenue_q * margin (the
+    net-margin companion); ``prior_revenue_ttm`` seeds 4 ADDITIONAL 2023
+    quarters (rn 5-8) carrying prior_revenue_ttm/4 each, so rev_growth_yoy =
+    (revenue_ttm - prior_revenue_ttm)/prior_revenue_ttm with the adjacent
+    2023-12-31 -> 2024-03-31 window gap (91d, inside [1,120]). Omitted ->
+    growth companion NULL (the pre-v4 shape).
     """
     conn.execute(
         "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
@@ -100,9 +109,21 @@ def _seed_member(
     equity = _CLOSE * _SHARES / pb
     eps_ttm = (_CLOSE / pe) if pe is not None else -4.0  # <=0 -> no P/E cohort row
     revenue_q = revenue_ttm / 4.0
-    net_income_q = revenue_q * 0.1  # positive -> select_multiples sees profit
+    net_income_q = revenue_q * margin  # positive -> select_multiples sees profit
     eps_q = eps_ttm / 4.0
     ev = ev or {}
+
+    if prior_revenue_ttm is not None:
+        for end, qt in zip(("2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31"), _Q_TYPES, strict=True):
+            conn.execute(
+                """
+                INSERT INTO financial_periods
+                  (instrument_id, period_end_date, period_type, fiscal_year, source, source_ref,
+                   reported_currency, revenue, superseded_at, normalization_status)
+                VALUES (%s, %s, %s, 2023, 'test', %s, 'USD', %s, NULL, 'normalized')
+                """,
+                (iid, end, qt, f"fvb{iid}{qt}p", prior_revenue_ttm / 4.0),
+            )
 
     def _q(key: str) -> float | None:
         v = ev.get(key)
@@ -400,3 +421,162 @@ def test_two_pass_ev_ebitda_arm_gates_and_anti_join(ebull_test_conn: psycopg.Con
     assert ev_meta["cohort_n"] == len(_EV_SINGLE)  # dual + gated never in the member set
     assert ev_pct.p50 is not None and ev_pct.p50 == pytest.approx(22.5)
     assert ev_pct.p75 is not None and ev_pct.p75 < 100.0  # dual's 100x never reaches the tail
+
+
+# --- #2032 (fvb_v4): companion-variable peer screen, end-to-end ---
+# One integration test for the genuinely-new SQL mechanism (test-quality skill):
+# the pass-1 companion columns + the pass-2 screened walk + the real _TARGET_SQL
+# prior-TTM lateral (dict-row key + projection in the same diff — prevention
+# log #2021), covering the held path, the target-companion-missing fallback,
+# and the no-screened-cohort fallback.
+
+_SCR_TARGET = 8300  # margin 0.10, growth 0.25 — screen holds at tier 0 / SIC-4
+_SCR_NO_COMP = 8320  # no prior quarters -> growth NULL -> target_companion_missing
+_SCR_UNMATCHED = 8330  # margin 0.60 vs near peers' 0.10 -> no_screened_cohort
+# 8 near peers (margin 0.10, growth 0.25) + 4 far peers (margin 0.60, growth
+# 3.0, off-distribution ps=100) the screen must exclude at every tier.
+_SCR_NEAR = {8301: 10.0, 8302: 11.0, 8303: 12.0, 8304: 13.0, 8305: 14.0, 8306: 15.0, 8307: 16.0, 8308: 17.0}
+_SCR_FAR = (8311, 8312, 8313, 8314)
+
+
+def _seed_screen_cohort(conn: psycopg.Connection[tuple]) -> None:
+    _clear_band_tables(conn)
+    _seed_member(
+        conn,
+        _SCR_TARGET,
+        ps=8.0,
+        pb=1.5,
+        pe=18.0,
+        total_assets=5.0e9,
+        cik=str(1_000_000_000 + _SCR_TARGET),
+        margin=0.10,
+        prior_revenue_ttm=(_CLOSE * _SHARES / 8.0) / 1.25,
+    )
+    _seed_member(
+        conn,
+        _SCR_NO_COMP,
+        ps=8.0,
+        pb=1.5,
+        pe=18.0,
+        total_assets=5.0e9,
+        cik=str(1_000_000_000 + _SCR_NO_COMP),
+        margin=0.10,
+    )
+    _seed_member(
+        conn,
+        _SCR_UNMATCHED,
+        ps=8.0,
+        pb=1.5,
+        pe=18.0,
+        total_assets=5.0e9,
+        cik=str(1_000_000_000 + _SCR_UNMATCHED),
+        margin=0.60,
+        prior_revenue_ttm=(_CLOSE * _SHARES / 8.0) / 1.25,
+    )
+    for iid, ps in _SCR_NEAR.items():
+        _seed_member(
+            conn,
+            iid,
+            ps=ps,
+            pb=2.0,
+            pe=20.0,
+            total_assets=1.0e9,
+            cik=str(1_000_000_000 + iid),
+            margin=0.10,
+            prior_revenue_ttm=(_CLOSE * _SHARES / ps) / 1.25,
+        )
+    for iid in _SCR_FAR:
+        # total_assets matches the targets' 5e9 so the UNSCREENED size-refine
+        # keeps the far peers (nearest-8 by |ln assets|) — the screened/held
+        # path must exclude them by COMPANION distance, not by size.
+        _seed_member(
+            conn,
+            iid,
+            ps=100.0,
+            pb=2.0,
+            pe=20.0,
+            total_assets=5.0e9,
+            cik=str(1_000_000_000 + iid),
+            margin=0.60,
+            prior_revenue_ttm=(_CLOSE * _SHARES / 100.0) / 4.0,
+        )
+    conn.commit()
+
+
+def test_companion_screen_end_to_end(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
+    conn = ebull_test_conn
+    _seed_screen_cohort(conn)
+
+    materialize_cohort_members(conn, _AS_OF)
+    conn.commit()
+
+    # 1. Pass-1 wrote the companion columns (near peer: margin .1, growth .25).
+    row = conn.execute(
+        "SELECT net_margin, rev_growth_yoy, roe FROM fair_value_cohort_members "
+        "WHERE as_of_date = %s AND multiple = 'ps' AND instrument_id = %s",
+        (_AS_OF, 8301),
+    ).fetchone()
+    assert row is not None
+    assert float(row[0]) == pytest.approx(0.10, abs=1e-6)
+    assert float(row[1]) == pytest.approx(0.25, abs=1e-6)
+    assert row[2] is not None  # roe = ni_ttm/equity, positive here
+    # No-prior name: growth NULL, margin still present.
+    row = conn.execute(
+        "SELECT net_margin, rev_growth_yoy FROM fair_value_cohort_members "
+        "WHERE as_of_date = %s AND multiple = 'ps' AND instrument_id = %s",
+        (_AS_OF, _SCR_NO_COMP),
+    ).fetchone()
+    assert row is not None and row[0] is not None and row[1] is None
+
+    # 2. HELD: the batch path (real _TARGET_SQL incl. the prior-TTM lateral ->
+    #    companion_vars -> screened peer walk) screens the 4 far peers out at
+    #    tier 0 / SIC-4 with full provenance in basis_json.
+    result = refresh_fair_value_band_batch(conn, [_SCR_TARGET])
+    conn.commit()
+    assert result == {"written": 1, "statused": 0, "failed": 0}
+    basis = conn.execute(
+        "SELECT basis_json FROM fair_value_band_current WHERE instrument_id = %s",
+        (_SCR_TARGET,),
+    ).fetchone()
+    assert basis is not None
+    ps_entry = basis[0]["multiples"]["ps"]
+    assert ps_entry["cohort_screened"] is True
+    assert ps_entry["screen"] == {"sic_level": 4, "width_tier": 0, "survivors_n": len(_SCR_NEAR)}
+    assert ps_entry["sic_level"] == 4
+    # Screened p50 = median of the 8 near multiples {10..17} = 13.5; the far
+    # 100x members never reach the percentiles.
+    assert ps_entry["peer"]["p50"] == pytest.approx(13.5, abs=0.01)
+    assert ps_entry["peer"]["p75"] < 100.0
+    # pe leg is never screened — no screen keys (spec §4.2).
+    pe_entry = basis[0]["multiples"]["pe"]
+    assert "cohort_screened" not in pe_entry and "screen" not in pe_entry
+
+    # 3. FALLBACK target_companion_missing: growth NULL on the target -> the
+    #    unscreened cohort (far peers INCLUDED: 12 members, p75 pulled above the
+    #    near-only tail) + the flag.
+    result = refresh_fair_value_band_batch(conn, [_SCR_NO_COMP])
+    conn.commit()
+    assert result == {"written": 1, "statused": 0, "failed": 0}
+    basis = conn.execute(
+        "SELECT basis_json FROM fair_value_band_current WHERE instrument_id = %s",
+        (_SCR_NO_COMP,),
+    ).fetchone()
+    assert basis is not None
+    ps_entry = basis[0]["multiples"]["ps"]
+    assert ps_entry["cohort_screened"] is False
+    assert ps_entry["screen"] == {"reason": "target_companion_missing"}
+    assert ps_entry["peer"]["p75"] > 17.0  # far 100x members present unscreened
+
+    # 4. FALLBACK no_screened_cohort: companions present but margin 0.60 matches
+    #    neither the 8 near (0.10) nor enough far peers at any tier.
+    result = refresh_fair_value_band_batch(conn, [_SCR_UNMATCHED])
+    conn.commit()
+    assert result == {"written": 1, "statused": 0, "failed": 0}
+    basis = conn.execute(
+        "SELECT basis_json FROM fair_value_band_current WHERE instrument_id = %s",
+        (_SCR_UNMATCHED,),
+    ).fetchone()
+    assert basis is not None
+    ps_entry = basis[0]["multiples"]["ps"]
+    assert ps_entry["cohort_screened"] is False
+    assert ps_entry["screen"] == {"reason": "no_screened_cohort"}

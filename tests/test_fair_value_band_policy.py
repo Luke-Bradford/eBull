@@ -4,7 +4,9 @@ from typing import Any
 import pytest
 
 from app.services.fair_value_band import (
+    _SCREEN_TIERS,
     MIN_OWN_POINTS,
+    CompanionVars,
     OwnPct,
     PeerPct,
     QualityInputs,
@@ -13,14 +15,17 @@ from app.services.fair_value_band import (
     band_quality_status,
     cap_envelope,
     combine_across,
+    companion_vars,
     compute_band,
     compute_divergence,
     currency_coherent,
     filter_dual_class,
     own_range,
     percentiles,
+    screen_passes,
     select_multiples,
     synth_multiple,
+    target_screenable,
     to_per_share,
 )
 
@@ -727,3 +732,227 @@ def test_golden_hd_ev_leg():
     assert round(res.bull, 1) == 388.2  # (16*24.307e9 - 1.902e9) / 997e6
     assert res.basis["multiples"]["ev_ebitda"]["ebitda_ttm"] == 24_307e6
     assert res.basis["multiples"]["ev_ebitda"]["net_debt"] == 1_902e6
+
+
+# --- #2032 (fvb_v4) companion-variable peer screen — pure policy ---
+
+
+def test_companion_vars_derivations():
+    cv = companion_vars(
+        revenue_ttm=10_000.0,
+        net_income_ttm=1_000.0,
+        shareholders_equity=50_000.0,
+        rev_prior_ttm=8_000.0,
+        ttm_start=_d.date(2024, 3, 31),
+        prior_end=_d.date(2023, 12, 31),  # 91d — the normal adjacent-quarter gap
+    )
+    assert cv.net_margin == pytest.approx(0.10)
+    assert cv.rev_growth_yoy == pytest.approx(0.25)
+    assert cv.roe == pytest.approx(0.02)
+
+
+def test_companion_vars_growth_adjacency_boundaries():
+    # Spec §4.5: ttm_start - prior_end in [1, 120] days. 0d (overlap) and 121d
+    # (skipped quarter) fail; the 1d and 120d boundaries pass.
+    def growth(days: int) -> float | None:
+        return companion_vars(
+            revenue_ttm=10.0,
+            net_income_ttm=None,
+            shareholders_equity=None,
+            rev_prior_ttm=8.0,
+            ttm_start=_d.date(2024, 1, 1) + _d.timedelta(days=days),
+            prior_end=_d.date(2024, 1, 1),
+        ).rev_growth_yoy
+
+    assert growth(0) is None
+    assert growth(1) is not None
+    assert growth(120) is not None
+    assert growth(121) is None
+
+
+def test_companion_vars_growth_gates():
+    # rev_prior == 0 -> None (no denominator); negative prior uses abs() so a
+    # contra-revenue prior still yields a signed, finite growth.
+    base: dict[str, Any] = dict(
+        revenue_ttm=10.0,
+        net_income_ttm=None,
+        shareholders_equity=None,
+        ttm_start=_d.date(2024, 3, 31),
+        prior_end=_d.date(2023, 12, 31),
+    )
+    assert companion_vars(rev_prior_ttm=0.0, **base).rev_growth_yoy is None
+    assert companion_vars(rev_prior_ttm=None, **base).rev_growth_yoy is None
+    assert companion_vars(rev_prior_ttm=-5.0, **base).rev_growth_yoy == pytest.approx(3.0)
+
+
+def test_companion_vars_margin_and_roe_gates():
+    # margin requires revenue > 0 AND net income present; roe requires equity > 0.
+    cv = companion_vars(
+        revenue_ttm=0.0,
+        net_income_ttm=1.0,
+        shareholders_equity=-5.0,
+        rev_prior_ttm=None,
+        ttm_start=None,
+        prior_end=None,
+    )
+    assert cv.net_margin is None and cv.roe is None
+    cv = companion_vars(
+        revenue_ttm=10.0,
+        net_income_ttm=None,
+        shareholders_equity=5.0,
+        rev_prior_ttm=None,
+        ttm_start=None,
+        prior_end=None,
+    )
+    assert cv.net_margin is None and cv.roe is None  # ni absent gates BOTH
+
+
+def test_screen_tiers_frozen_shape():
+    # pe EXCLUDED (wrong companion — spec §4.2); ps/ev share the margin+growth
+    # tiers; pb is ROE-only; every schedule widens monotonically.
+    assert set(_SCREEN_TIERS) == {"ps", "pb", "ev_ebitda"}
+    assert _SCREEN_TIERS["ps"] == _SCREEN_TIERS["ev_ebitda"]
+    for tiers in _SCREEN_TIERS.values():
+        for field in ("net_margin", "rev_growth_yoy", "roe"):
+            widths = [getattr(t, field) for t in tiers]
+            assert all(w is None for w in widths) or all(w is not None for w in widths)
+            present = [w for w in widths if w is not None]
+            assert present == sorted(present)  # monotone widening
+    assert _SCREEN_TIERS["pb"][0].roe == 0.05 and _SCREEN_TIERS["pb"][0].net_margin is None
+
+
+def test_screen_passes_boundary_and_nulls():
+    tier = _SCREEN_TIERS["ps"][0]  # margin +/-0.05, growth +/-0.10
+    tgt = CompanionVars(net_margin=0.10, rev_growth_yoy=0.20, roe=None)
+    # Boundary |delta| == width passes (sim used <=).
+    assert screen_passes(tier, tgt, CompanionVars(0.15, 0.30, None)) is True
+    assert screen_passes(tier, tgt, CompanionVars(0.151, 0.30, None)) is False
+    assert screen_passes(tier, tgt, CompanionVars(0.15, 0.301, None)) is False
+    # NULL companion on the peer side fails (never imputed).
+    assert screen_passes(tier, tgt, CompanionVars(None, 0.20, None)) is False
+    assert screen_passes(tier, tgt, CompanionVars(0.10, None, None)) is False
+    # roe irrelevant for ps (width None) — a peer without roe still passes.
+    pb_tier = _SCREEN_TIERS["pb"][2]  # roe +/-0.20
+    tgt_fin = CompanionVars(net_margin=None, rev_growth_yoy=None, roe=0.10)
+    assert screen_passes(pb_tier, tgt_fin, CompanionVars(None, None, 0.30)) is True
+    assert screen_passes(pb_tier, tgt_fin, CompanionVars(None, None, 0.31)) is False
+
+
+def test_target_screenable():
+    both = CompanionVars(net_margin=0.1, rev_growth_yoy=0.2, roe=0.05)
+    no_growth = CompanionVars(net_margin=0.1, rev_growth_yoy=None, roe=0.05)
+    assert target_screenable("ps", both) is True
+    assert target_screenable("ps", no_growth) is False  # ps needs margin AND growth
+    assert target_screenable("pb", no_growth) is True  # pb needs roe only
+    assert target_screenable("pb", CompanionVars(0.1, 0.2, None)) is False
+    assert target_screenable("pe", both) is False  # pe excluded
+    assert target_screenable("ps", None) is False
+
+
+def test_quality_screen_fallback_knock():
+    # Boundary case: score 7 (sides 2 + own 12 + stale 0 + sic3 1) = high;
+    # the v4 screen-fallback knock drops it to 6 = medium.
+    kw: dict[str, Any] = dict(
+        n_selected=1,
+        n_comparator_sides=2,
+        own_points=12,
+        cohort_n=20,
+        excluded_stale_n=0,
+        sic_level=3,
+        cross_multiple_spread=0.0,
+    )
+    assert band_quality_status(QualityInputs(**kw)) == "high"
+    assert band_quality_status(QualityInputs(**kw, screen_fallback=True)) == "medium"
+
+
+def _screen_meta(*, screened: bool, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    meta: dict[str, Any] = {"cohort_n": 40, "excluded_stale_n": 0, "sic_level": 4}
+    meta["cohort_screened"] = screened
+    meta["screen"] = extra if extra is not None else {"reason": "no_screened_cohort"}
+    return meta
+
+
+def test_compute_band_screen_provenance_and_knock():
+    # A contributing peer-backed ps leg that fell back unscreened: provenance
+    # lands in the basis entry AND the quality knock fires.
+    t = _t(revenue_ttm=1000.0, net_income_ttm=100.0, eps_diluted_ttm=10.0)
+    res = compute_band(
+        t,
+        peer_by_multiple={
+            "pe": PeerPct(p25=6.0, p50=8.0, p75=12.0),
+            "ps": PeerPct(p25=5.0, p50=10.0, p75=20.0),
+        },
+        own_by_multiple={"pe": OwnPct(None, None, None), "ps": OwnPct(None, None, None)},
+        own_points_by_multiple={"pe": 0, "ps": 0},
+        cohort_meta={
+            "pe": {"cohort_n": 40, "excluded_stale_n": 0, "sic_level": 4},
+            "ps": _screen_meta(screened=False),
+        },
+        sic_level=4,
+    )
+    assert res.reason == "ok"
+    ps_entry = res.basis["multiples"]["ps"]
+    assert ps_entry["cohort_screened"] is False
+    assert ps_entry["screen"] == {"reason": "no_screened_cohort"}
+    assert ps_entry["sic_level"] == 4  # per-leg cohort level (v4 §4.4)
+    pe_entry = res.basis["multiples"]["pe"]
+    assert "cohort_screened" not in pe_entry and "screen" not in pe_entry  # pe: N/A
+    # Knock: identical shape with the ps leg SCREENED must score one tier higher
+    # or equal — assert via the explicit flag path instead of tier arithmetic.
+    res_screened = compute_band(
+        t,
+        peer_by_multiple={
+            "pe": PeerPct(p25=6.0, p50=8.0, p75=12.0),
+            "ps": PeerPct(p25=5.0, p50=10.0, p75=20.0),
+        },
+        own_by_multiple={"pe": OwnPct(None, None, None), "ps": OwnPct(None, None, None)},
+        own_points_by_multiple={"pe": 0, "ps": 0},
+        cohort_meta={
+            "pe": {"cohort_n": 40, "excluded_stale_n": 0, "sic_level": 4},
+            "ps": _screen_meta(screened=True, extra={"sic_level": 4, "width_tier": 1, "survivors_n": 11}),
+        },
+        sic_level=4,
+    )
+    held_entry = res_screened.basis["multiples"]["ps"]
+    assert held_entry["cohort_screened"] is True
+    assert held_entry["screen"] == {"sic_level": 4, "width_tier": 1, "survivors_n": 11}
+
+
+def test_compute_band_own_only_screenable_leg_does_not_knock():
+    # ps leg with NO peer side (own-only) marked cohort_screened=False: the knock
+    # must NOT fire — there is no peer cohort to screen (spec §4.3). Quality here
+    # equals the identical no-screen-keys case.
+    def run(meta_ps: dict[str, Any]) -> str | None:
+        res = compute_band(
+            _t(revenue_ttm=1000.0),
+            peer_by_multiple={"ps": PeerPct(None, None, None)},
+            own_by_multiple={"ps": OwnPct(p25=4.0, p50=5.0, p75=6.0)},
+            own_points_by_multiple={"ps": 12},
+            cohort_meta={"ps": meta_ps},
+            sic_level=0,
+        )
+        assert res.reason == "ok"
+        return res.quality_status
+
+    knocked = run(_screen_meta(screened=False))
+    plain = run({"cohort_n": 40, "excluded_stale_n": 0, "sic_level": 4})  # same meta, no screen keys
+    assert knocked == plain
+
+
+def test_compute_band_synth_none_leg_keeps_screen_provenance():
+    # v4 §4.4 (Codex ckpt-1 MED-3): a selected screenable leg with BOTH
+    # comparator sides absent still records its basis entry (screen audit trail
+    # survives non-contribution); the band statuses thin_cohort.
+    res = compute_band(
+        _t(revenue_ttm=1000.0),
+        peer_by_multiple={"ps": PeerPct(None, None, None)},
+        own_by_multiple={"ps": OwnPct(None, None, None)},
+        own_points_by_multiple={"ps": 0},
+        cohort_meta={"ps": _screen_meta(screened=False)},
+        sic_level=0,
+    )
+    assert res.reason == "thin_cohort"
+    entry = res.basis["multiples"]["ps"]
+    assert entry["cohort_screened"] is False
+    assert entry["screen"] == {"reason": "no_screened_cohort"}
+    assert "base_value" not in entry and "capped_high" not in entry
