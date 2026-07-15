@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any, LiteralString
 
-METHOD_VERSION = "fvb_v2"
+METHOD_VERSION = "fvb_v3"
 MIN_PEERS = 8
 PEER_LIMIT = 8
 MIN_OWN_POINTS = 6
@@ -40,8 +40,14 @@ _FINANCIAL_SIC_LO, _FINANCIAL_SIC_HI = 60, 67
 # Frozen, source-ruled from the full-pop p95 of the v1 leg envelope ratio
 # (docs/proposals/valuation/2026-07-13-fair-value-band-v2-robustness.md §3/§6.2).
 # Re-validate on the fvb_v2 distribution post-backfill (DoD clause 11).
-_R_UP: dict[str, float] = {"pe": 2.6, "ps": 3.1, "pb": 4.1}
-_R_DN: dict[str, float] = {"pe": 2.7, "ps": 4.3, "pb": 2.4}
+# ev_ebitda (#2021, fvb_v3): peer-only leg (no own-history EBITDA exists), so
+# this cap is its ONLY wing bound. Provisional — calibrated from the SIC-ladder
+# cohort approximation (no nearest-8 refinement; pre-backfill there are no
+# stored ev legs to calibrate from): p95(p75/p50)=2.77, p95(p50/p25)=1.87
+# (docs/proposals/valuation/2026-07-15-fair-value-band-ev-ebitda.md §2/§3.5).
+# Re-validate via the acceptance gate on the post-backfill fvb_v3 population.
+_R_UP: dict[str, float] = {"pe": 2.6, "ps": 3.1, "pb": 4.1, "ev_ebitda": 2.8}
+_R_DN: dict[str, float] = {"pe": 2.7, "ps": 4.3, "pb": 2.4, "ev_ebitda": 1.9}
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,15 @@ class TargetInputs:
     reported_currency: str | None
     instrument_currency: str | None
     target_basis: str  # resolve_market_cap_basis result; "not_multiclass" when single-class
+    # ev_ebitda leg inputs (#2021, fvb_v3) — defaulted None so pre-#2021
+    # constructors are untouched; a None EBITDA input simply fails the
+    # _computable gate and the name keeps its pe/ps legs.
+    operating_income_ttm: float | None = None
+    depreciation_amort_ttm: float | None = None
+    long_term_debt: float | None = None
+    short_term_debt: float | None = None
+    cash: float | None = None
+    interest_expense_ttm: float | None = None
 
 
 def _pos(x: float | None) -> bool:
@@ -67,6 +82,32 @@ def _is_financial(sic: str | None) -> bool:
     return _FINANCIAL_SIC_LO <= int(sic[:2]) <= _FINANCIAL_SIC_HI
 
 
+def ebitda_ttm(op: float | None, da: float | None) -> float | None:
+    """Strict EBITDA = OpInc + D&A (formula shape: sql/201:128/154). None if
+    EITHER input is None — sql/220 makes each *_ttm NULL unless all 4 quarters
+    are present, so strictness composes; no COALESCE(d&a,0) (a cohort median
+    over mixed true-EBITDA / OpInc-only members is silent median poisoning —
+    spec #2021 §1)."""
+    if op is None or da is None:
+        return None
+    return op + da
+
+
+def net_debt(
+    long_term_debt: float | None,
+    short_term_debt: float | None,
+    cash: float | None,
+) -> float | None:
+    """EV debt/cash back-out per sql/201:92-97, with the #2021 §1 cash gate:
+    None iff cash is None (a going concern with zero cash is implausible —
+    NULL cash is a data gap that would overstate EV). Debt COALESCE-0
+    (full-pop falsified via interest expense: 90/103 debt-null names show no
+    positive interest; the incoherent 13 are gated in _computable)."""
+    if cash is None:
+        return None
+    return (long_term_debt or 0.0) + (short_term_debt or 0.0) - cash
+
+
 def _computable(t: TargetInputs, m: str) -> bool:
     """§4.1 denominator gate for a single multiple."""
     if m == "pe":
@@ -75,6 +116,14 @@ def _computable(t: TargetInputs, m: str) -> bool:
         return _pos(t.revenue_ttm) and _pos(t.shares_outstanding)
     if m == "pb":
         return _pos(t.shareholders_equity) and _pos(t.shares_outstanding)
+    if m == "ev_ebitda":
+        # Strict EBITDA>0 + shares + cash present + debt/interest coherence
+        # (debt-both-NULL with positive interest = unrecorded debt; spec §3.1).
+        if not _pos(ebitda_ttm(t.operating_income_ttm, t.depreciation_amort_ttm)):
+            return False
+        if not _pos(t.shares_outstanding) or t.cash is None:
+            return False
+        return not (t.long_term_debt is None and t.short_term_debt is None and _pos(t.interest_expense_ttm))
     raise ValueError(f"unknown multiple {m!r}")
 
 
@@ -87,7 +136,11 @@ def select_multiples(t: TargetInputs) -> list[str]:
     if _is_financial(t.sic):
         selected = ["pb", "pe"]
     elif _pos(t.net_income_ttm):
-        selected = ["pe", "ps"]
+        # #2021 (fvb_v3): profitable non-financials gain the EV/EBITDA leg —
+        # add, not replace (v1 spec §11 item 2, "is P/S right for profitable?",
+        # stays open for #2032). Median-of-3 bases is more outlier-robust than
+        # mean-of-2. Financials never get EV (deposit-funded balance sheets).
+        selected = ["pe", "ps", "ev_ebitda"]
     elif _pos(t.revenue_ttm):
         selected = ["ps"]
     else:
@@ -201,8 +254,26 @@ def to_per_share(
     revenue: float | None,
     shareholders_equity: float | None,
     shares: float | None,
+    ebitda: float | None = None,
+    net_debt_value: float | None = None,
 ) -> tuple[float, float, float]:
-    """Convert a (low, base, high) multiple triple to per-share values."""
+    """Convert a (low, base, high) multiple triple to per-share values.
+
+    ev_ebitda (#2021) is an AFFINE transform, not a scalar product:
+    implied = (mult * EBITDA - net_debt) / shares. Monotonic increasing in
+    mult (EBITDA>0, shares>0 by §4.1) => low<=base<=high survives conversion.
+    Negative net debt (net cash) raises implied value — correct, no special
+    case. The result CAN be <= 0 (mult*EBITDA < net_debt); compute_band's
+    leg-drop guard handles that (spec §3.4) — this fn stays a pure transform.
+    """
+    if m == "ev_ebitda":
+        if ebitda is None or net_debt_value is None or not shares:
+            raise ValueError(f"per-share metric unavailable for {m!r}")
+        return (
+            (low_mult * ebitda - net_debt_value) / shares,
+            (base_mult * ebitda - net_debt_value) / shares,
+            (high_mult * ebitda - net_debt_value) / shares,
+        )
     if m == "pe":
         per = eps
     elif m == "ps":
@@ -382,6 +453,9 @@ def compute_band(
     if not selected:
         return _absent(t, "no_multiple")
 
+    ev_ebitda_value = ebitda_ttm(t.operating_income_ttm, t.depreciation_amort_ttm)
+    ev_net_debt = net_debt(t.long_term_debt, t.short_term_debt, t.cash)
+
     per_share_triples: list[tuple[float, float, float]] = []
     basis: dict = {"selected": selected, "multiples": {}}
     max_sides = 0
@@ -406,20 +480,16 @@ def compute_band(
             revenue=t.revenue_ttm,
             shareholders_equity=t.shareholders_equity,
             shares=t.shares_outstanding,
+            ebitda=ev_ebitda_value,
+            net_debt_value=ev_net_debt,
         )
-        per_share_triples.append(triple)
-        sides = (1 if peer.p50 is not None else 0) + (1 if own.p50 is not None else 0)
-        max_sides = max(max_sides, sides)
         meta = cohort_meta.get(m, {})
         cn, esn = meta.get("cohort_n", 0), meta.get("excluded_stale_n", 0)
-        max_cohort_n = max(max_cohort_n, cn)
-        max_excluded_stale_n = max(max_excluded_stale_n, esn)
-        if own.p50 is not None:
-            contributing_own_points = max(contributing_own_points, own_points_by_multiple.get(m, 0))
-        basis["multiples"][m] = {
+        # Basis entry built BEFORE the leg-drop decision (spec #2021 §3.4) so a
+        # dropped leg's peer stats stay auditable on the stored row.
+        entry: dict = {
             "peer": {"p25": peer.p25, "p50": peer.p50, "p75": peer.p75},
             "own": {"p25": own.p25, "p50": own.p50, "p75": own.p75},
-            "base_value": triple[1],
             "cohort_n": cn,
             "excluded_stale_n": esn,
             "own_points": own_points_by_multiple.get(m, 0),
@@ -430,6 +500,31 @@ def compute_band(
             "precap_low_mult": precap_low,
             "precap_high_mult": precap_high,
         }
+        if m == "ev_ebitda":
+            # Conversion inputs — the affine transform is reconstructable from
+            # the stored row (mult * ebitda_ttm - net_debt) / shares.
+            entry["ebitda_ttm"] = ev_ebitda_value
+            entry["net_debt"] = ev_net_debt
+        if any(v <= 0 for v in triple):
+            # Leg-drop guard (spec #2021 §3.4, fail-closed): a converted value
+            # <= 0 (mult*EBITDA < net debt — equity is an option, not a price
+            # target) must never enter combine_across, where a <=0 bear would
+            # poison the combined min(). Impossible for pe/ps/pb (positive
+            # mult x positive per-share metric); real for ~6% of ev legs.
+            # n_selected stays len(selected) — the shipped synth-None precedent
+            # for non-contributing legs; contribution is visible right here.
+            entry["dropped_nonpositive"] = True
+            basis["multiples"][m] = entry
+            continue
+        entry["base_value"] = triple[1]
+        basis["multiples"][m] = entry
+        per_share_triples.append(triple)
+        sides = (1 if peer.p50 is not None else 0) + (1 if own.p50 is not None else 0)
+        max_sides = max(max_sides, sides)
+        max_cohort_n = max(max_cohort_n, cn)
+        max_excluded_stale_n = max(max_excluded_stale_n, esn)
+        if own.p50 is not None:
+            contributing_own_points = max(contributing_own_points, own_points_by_multiple.get(m, 0))
 
     if not per_share_triples:
         return _absent(t, "thin_cohort", n_selected=len(selected), basis=basis)
@@ -565,6 +660,12 @@ base AS (
         ttm.revenue_ttm,
         ttm.shareholders_equity,
         ttm.shares_outstanding,
+        ttm.operating_income_ttm,
+        ttm.depreciation_amort_ttm,
+        ttm.long_term_debt,
+        ttm.short_term_debt,
+        ttm.cash,
+        ttm.interest_expense_ttm,
         (dc.instrument_id IS NOT NULL) AS dual_class_suppressed
     FROM asof_price ap
     JOIN financial_periods_ttm ttm
@@ -592,6 +693,25 @@ per_multiple AS (
            ((close * shares_outstanding) / shareholders_equity),
            sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
     FROM base WHERE shareholders_equity > 0 AND shares_outstanding > 0
+    UNION ALL
+    -- EV/EBITDA (#2021) = (close*shares + debt - cash) / (OpInc + D&A) —
+    -- mirrors sql/201:128-135. Strict EBITDA: a NULL op/d&a propagates and the
+    -- row drops (sql/220 already NULLs any *_ttm without 4 quarters). cash must
+    -- be PRESENT (NULL cash = data gap; COALESCE-0 would overstate EV);
+    -- debt-both-NULL with positive interest = unrecorded debt, incoherent ->
+    -- dropped (spec 2026-07-15 §3.1). The outer mult_value > 0 also excludes
+    -- negative-EV members (net cash > cap: meaningless multiple, 2/532 full-pop).
+    SELECT instrument_id, 'ev_ebitda'::text,
+           ((close * shares_outstanding)
+            + COALESCE(long_term_debt, 0) + COALESCE(short_term_debt, 0) - cash)
+           / (operating_income_ttm + depreciation_amort_ttm),
+           sic, sic3, sic2, total_assets, close_date, dual_class_suppressed
+    FROM base
+    WHERE (operating_income_ttm + depreciation_amort_ttm) > 0
+      AND shares_outstanding > 0
+      AND cash IS NOT NULL
+      AND NOT (long_term_debt IS NULL AND short_term_debt IS NULL
+               AND COALESCE(interest_expense_ttm, 0) > 0)
 )
 SELECT %(as_of)s, instrument_id, multiple, mult_value, sic, sic3, sic2,
        total_assets, close_date, dual_class_suppressed
@@ -619,7 +739,8 @@ def materialize_cohort_members(conn: psycopg.Connection[Any], as_of_date: _dt.da
 # Pass-2 member read — three fully-static SQL strings keyed by SIC ladder level
 # (the column name is from a frozen 3-element whitelist, never interpolated from
 # input). keep_dual = TRUE for P/E (dual-class members keep their P/E, #1662);
-# FALSE for P/S & P/B (curated-oracle members drop out of those medians).
+# FALSE for every cap-/share-based multiple (P/S, P/B, EV/EBITDA #2021 —
+# curated-oracle members drop out of those medians, mirroring sql/201:254).
 _MEMBER_SQL: dict[int, LiteralString] = {
     4: """
         SELECT instrument_id, mult_value, total_assets, close_date, dual_class_suppressed
@@ -761,6 +882,12 @@ _TARGET_SQL = """
         ttm.shareholders_equity,
         ttm.net_income_ttm,
         ttm.shares_outstanding,
+        ttm.operating_income_ttm,
+        ttm.depreciation_amort_ttm,
+        ttm.long_term_debt,
+        ttm.short_term_debt,
+        ttm.cash,
+        ttm.interest_expense_ttm,
         ttm.reported_currency,
         ttm.total_assets,
         ttm.ttm_end,
@@ -820,7 +947,11 @@ def _own_series(
     count of quarters dropped by the sanity cap, surfaced into basis so a name
     whose own_points fell below MIN_OWN_POINTS via capping is auditable (review
     NITPICK)."""
-    out: dict[str, list[float]] = {"pe": [], "ps": [], "pb": []}
+    # ev_ebitda stays an EMPTY series by construction: fundamentals_snapshot has
+    # no historical EBITDA/debt/cash (sql/201 legacy CTE NULLs ev_ebitda), and a
+    # 4th strict-TTM copy is banned (#2008). own_range([]) -> all-None -> the
+    # ev leg is peer-only; the fixed cap is its sole wing bound (#2021).
+    out: dict[str, list[float]] = {"pe": [], "ps": [], "pb": [], "ev_ebitda": []}
     capped = 0
 
     def _push(bucket: str, value: float) -> None:
@@ -895,6 +1026,12 @@ def compute_band_for_instrument(conn: psycopg.Connection[Any], instrument_id: in
         reported_currency=reported_currency,
         instrument_currency=instrument_currency,
         target_basis=target_basis,
+        operating_income_ttm=_f(trow["operating_income_ttm"]),
+        depreciation_amort_ttm=_f(trow["depreciation_amort_ttm"]),
+        long_term_debt=_f(trow["long_term_debt"]),
+        short_term_debt=_f(trow["short_term_debt"]),
+        cash=_f(trow["cash"]),
+        interest_expense_ttm=_f(trow["interest_expense_ttm"]),
     )
 
     # Currency gate (§4.1) — only when the name actually has a reporting currency

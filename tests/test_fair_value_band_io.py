@@ -65,6 +65,7 @@ def _seed_member(
     pe: float | None,
     total_assets: float,
     cik: str,
+    ev: dict[str, float | None] | None = None,
 ) -> None:
     """Seed one instrument so its as-of multiples are exactly (ps, pb, pe).
 
@@ -74,6 +75,12 @@ def _seed_member(
     (strict-TTM requires COUNT=4); stock items (equity, shares, total_assets)
     are read from the latest quarter only. ``pe=None`` seeds a non-positive
     eps_diluted_ttm so the name has NO P/E cohort row (still P/S + P/B).
+
+    ``ev`` (#2021) optionally seeds the EV/EBITDA inputs: flow keys
+    ``op``/``da``/``interest`` land in all 4 quarters (strict-TTM), stock keys
+    ``ltd``/``std``/``cash`` in the latest quarter only. None keys stay NULL —
+    letting a test exercise the strict/coherence gates. Omitted entirely ->
+    every EV column NULL -> no ev_ebitda cohort row (the pre-#2021 shape).
     """
     conn.execute(
         "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
@@ -95,6 +102,11 @@ def _seed_member(
     revenue_q = revenue_ttm / 4.0
     net_income_q = revenue_q * 0.1  # positive -> select_multiples sees profit
     eps_q = eps_ttm / 4.0
+    ev = ev or {}
+
+    def _q(key: str) -> float | None:
+        v = ev.get(key)
+        return None if v is None else v / 4.0
 
     for end, qt in zip(_Q_ENDS, _Q_TYPES, strict=True):
         latest = end == "2024-12-31"
@@ -103,9 +115,12 @@ def _seed_member(
             INSERT INTO financial_periods
               (instrument_id, period_end_date, period_type, fiscal_year, source, source_ref,
                reported_currency, revenue, net_income, eps_diluted,
+               operating_income, depreciation_amort, interest_expense,
                total_assets, shareholders_equity, shares_outstanding,
+               long_term_debt, short_term_debt, cash,
                superseded_at, normalization_status)
-            VALUES (%s, %s, %s, 2024, 'test', %s, 'USD', %s, %s, %s, %s, %s, %s, NULL, 'normalized')
+            VALUES (%s, %s, %s, 2024, 'test', %s, 'USD', %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, NULL, 'normalized')
             """,
             (
                 iid,
@@ -115,19 +130,33 @@ def _seed_member(
                 revenue_q,
                 net_income_q,
                 eps_q,
+                _q("op"),
+                _q("da"),
+                _q("interest"),
                 total_assets if latest else None,
                 equity if latest else None,
                 _SHARES if latest else None,
+                ev.get("ltd") if latest else None,
+                ev.get("std") if latest else None,
+                ev.get("cash") if latest else None,
             ),
         )
 
 
-def _seed_dual_class(conn: psycopg.Connection[tuple], iid: int, *, ps: float, pb: float, pe: float) -> None:
+def _seed_dual_class(
+    conn: psycopg.Connection[tuple],
+    iid: int,
+    *,
+    ps: float,
+    pb: float,
+    pe: float,
+    ev: dict[str, float | None] | None = None,
+) -> None:
     """A curated dual-class member: seed like a normal member, then attach the
     §4.3 oracle — a primary SEC-CIK ``external_identifiers`` row whose
     ``lpad(identifier_value,10,'0')`` matches an ``instrument_class_shares_
     outstanding.source_cik`` (the predicate the materialize dual_class CTE runs)."""
-    _seed_member(conn, iid, ps=ps, pb=pb, pe=pe, total_assets=1.0e9, cik="9999999999")
+    _seed_member(conn, iid, ps=ps, pb=pb, pe=pe, total_assets=1.0e9, cik="9999999999", ev=ev)
     cik10 = "0000320193"
     conn.execute(
         "INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary) "
@@ -271,3 +300,103 @@ def test_single_name_run_anchors_to_materialized_cohort(ebull_test_conn: psycopg
     # Sanity: the peer read at the cohort anchor still clears MIN_PEERS.
     _, ps_meta = peer_pct_for(conn, _TARGET, _SIC, 5.0e9, "ps", _AS_OF)
     assert ps_meta["cohort_n"] >= MIN_PEERS
+
+
+# --- #2021 EV/EBITDA (fvb_v3): pass-1 arm + gates + anti-join ---
+# One integration test for the genuinely-new SQL mechanism (test-quality skill):
+# the ev_ebitda materialize arm with its strict/coherence gates, plus the
+# keep_dual=False routing through the existing anti-join.
+
+_EV_TARGET_ID = 8199  # never seeded — peer_pct_for just needs a non-member id
+_EV_BASE = {"ltd": 0.0, "std": 0.0, "cash": 0.0}  # EV == close*shares == 100_000
+# ebitda = 100_000 / mult, all divisible by 4 so quarterly flows are exact.
+_EV_SINGLE = {
+    8101: 8.0,
+    8102: 10.0,
+    8103: 16.0,
+    8104: 20.0,
+    8105: 25.0,
+    8106: 40.0,
+    8107: 50.0,
+    8108: 80.0,
+}
+_EV_DUAL = 8109  # ev mult 100 — off-distribution so leakage is detectable
+_EV_GATED_CASH = 8110  # cash NULL -> ev row must not materialize
+_EV_GATED_DEBT = 8111  # debt-both-NULL + positive interest -> incoherent, no ev row
+
+
+def _ev_inputs(mult: float, **overrides: float | None) -> dict[str, float | None]:
+    ebitda = _CLOSE * _SHARES / mult
+    out: dict[str, float | None] = {"op": ebitda * 0.8, "da": ebitda * 0.2, **_EV_BASE}
+    out.update(overrides)
+    return out
+
+
+def test_two_pass_ev_ebitda_arm_gates_and_anti_join(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
+    """BLOCKING (#2021 spec §3.6): the ev_ebitda pass-1 arm materializes exact
+    multiples for gate-passing members only (strict D&A + cash-present +
+    debt/interest coherence), and the dual-class member's ev row is excluded
+    from the pass-2 median via the existing keep_dual=False anti-join."""
+    conn = ebull_test_conn
+    _clear_band_tables(conn)
+    for iid, mult in _EV_SINGLE.items():
+        _seed_member(
+            conn, iid, ps=10.0, pb=2.0, pe=20.0, total_assets=1.0e9, cik=str(1_000_000_000 + iid), ev=_ev_inputs(mult)
+        )
+    _seed_dual_class(conn, _EV_DUAL, ps=10.0, pb=2.0, pe=20.0, ev=_ev_inputs(100.0))
+    _seed_member(
+        conn,
+        _EV_GATED_CASH,
+        ps=10.0,
+        pb=2.0,
+        pe=20.0,
+        total_assets=1.0e9,
+        cik=str(1_000_000_000 + _EV_GATED_CASH),
+        ev=_ev_inputs(10.0, cash=None),
+    )
+    _seed_member(
+        conn,
+        _EV_GATED_DEBT,
+        ps=10.0,
+        pb=2.0,
+        pe=20.0,
+        total_assets=1.0e9,
+        cik=str(1_000_000_000 + _EV_GATED_DEBT),
+        ev=_ev_inputs(10.0, ltd=None, std=None, interest=4_000.0),
+    )
+    conn.commit()
+
+    materialize_cohort_members(conn, _AS_OF)
+
+    # 1. Gate-passing members materialize with the EXACT multiple (EV=100_000).
+    row = conn.execute(
+        "SELECT mult_value FROM fair_value_cohort_members "
+        "WHERE as_of_date = %s AND multiple = 'ev_ebitda' AND instrument_id = %s",
+        (_AS_OF, 8101),
+    ).fetchone()
+    assert row is not None and float(row[0]) == pytest.approx(8.0)
+
+    # 2. Gated members have NO ev row but DO have their ps row — proving the
+    #    gates bind the ev arm only, not the whole name.
+    for gated in (_EV_GATED_CASH, _EV_GATED_DEBT):
+        counts = conn.execute(
+            "SELECT count(*) FILTER (WHERE multiple = 'ev_ebitda'), "
+            "       count(*) FILTER (WHERE multiple = 'ps') "
+            "FROM fair_value_cohort_members WHERE as_of_date = %s AND instrument_id = %s",
+            (_AS_OF, gated),
+        ).fetchone()
+        assert counts is not None and (counts[0], counts[1]) == (0, 1), gated
+
+    # 3. The dual-class member's ev row exists flagged, and the pass-2 median
+    #    excludes it (keep_dual=False for every cap-based multiple): cohort = the
+    #    8 single-class members, median of {8,10,16,20,25,40,50,80} = 22.5.
+    dual_row = conn.execute(
+        "SELECT dual_class_suppressed FROM fair_value_cohort_members "
+        "WHERE as_of_date = %s AND multiple = 'ev_ebitda' AND instrument_id = %s",
+        (_AS_OF, _EV_DUAL),
+    ).fetchone()
+    assert dual_row is not None and dual_row[0] is True
+    ev_pct, ev_meta = peer_pct_for(conn, _EV_TARGET_ID, _SIC, 1.0e9, "ev_ebitda", _AS_OF)
+    assert ev_meta["cohort_n"] == len(_EV_SINGLE)  # dual + gated never in the member set
+    assert ev_pct.p50 is not None and ev_pct.p50 == pytest.approx(22.5)
+    assert ev_pct.p75 is not None and ev_pct.p75 < 100.0  # dual's 100x never reaches the tail

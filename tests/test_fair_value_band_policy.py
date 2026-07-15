@@ -208,8 +208,18 @@ def test_cap_envelope_preserves_order():
 
 
 def test_cap_envelope_unknown_multiple_is_noop():
-    # A multiple not in the cap table (e.g. future ev_ebitda) passes through unclamped.
-    assert cap_envelope("ev_ebitda", 1.0, 10.0, 1000.0) == (1.0, 1000.0, False, False)
+    # A multiple not in the cap table (e.g. a future p_fcf) passes through
+    # unclamped. ev_ebitda WAS the example here until #2021 gave it a real cap
+    # entry (see test_cap_envelope_ev_ebitda_clamps).
+    assert cap_envelope("p_fcf", 1.0, 10.0, 1000.0) == (1.0, 1000.0, False, False)
+
+
+def test_cap_envelope_ev_ebitda_clamps():
+    # #2021: ev_ebitda now has cap entries (R_UP=2.8, R_DN=1.9) — no longer the
+    # unknown-multiple no-op. high 1000 -> base 10*2.8 = 28; low 1 -> 10/1.9.
+    low, high, capped_low, capped_high = cap_envelope("ev_ebitda", 1.0, 10.0, 1000.0)
+    assert high == 28.0 and round(low, 4) == round(10.0 / 1.9, 4)
+    assert capped_low is True and capped_high is True
 
 
 def test_cap_envelope_nonpositive_base_is_noop():
@@ -286,14 +296,15 @@ def test_compute_band_cap_two_legs_base_unchanged_when_nonbase_leg_capped():
 
 def test_cap_constants_cover_all_multiples_and_are_valid():
     # PR #2033 review NITPICK: lock the cap constants against a silent bad edit /
-    # doc drift. Guards the cap invariant — every synthesizable multiple {pe,ps,pb}
-    # has an R_UP AND R_DN, and each R >= 1 (R < 1 makes cap_hi < base / cap_lo > base,
-    # inverting low <= base <= high and tripping combine_across's fail-closed order
-    # check). A new multiple added without a cap entry (e.g. Phase-2 ev_ebitda) fails
-    # here, forcing a conscious calibration + spec §6.2 update.
+    # doc drift. Guards the cap invariant — every synthesizable multiple
+    # {pe,ps,pb,ev_ebitda} has an R_UP AND R_DN, and each R >= 1 (R < 1 makes
+    # cap_hi < base / cap_lo > base, inverting low <= base <= high and tripping
+    # combine_across's fail-closed order check). A new multiple added without a
+    # cap entry fails here, forcing a conscious calibration + spec update.
+    # ev_ebitda joined in #2021 (fvb_v3) — calibration in spec 2026-07-15 §3.5.
     from app.services.fair_value_band import _R_DN, _R_UP
 
-    multiples = {"pe", "ps", "pb"}
+    multiples = {"pe", "ps", "pb", "ev_ebitda"}
     assert set(_R_UP) == multiples and set(_R_DN) == multiples
     assert all(v >= 1.0 for v in _R_UP.values()), _R_UP
     assert all(v >= 1.0 for v in _R_DN.values()), _R_DN
@@ -474,3 +485,245 @@ def test_shape_present_row_carries_price_as_of():
     assert out["available"] is True
     assert out["price_as_of"] == "2026-07-11"
     assert out["base"] == 110.0
+
+
+# --- #2021 EV/EBITDA (fvb_v3) ---
+# Spec: docs/proposals/valuation/2026-07-15-fair-value-band-ev-ebitda.md
+
+
+def _ev_kwargs(**kw: Any) -> dict[str, Any]:
+    """Fully ev-computable profitable non-financial; override per case."""
+    base: dict[str, Any] = dict(
+        net_income_ttm=500.0,
+        eps_diluted_ttm=2.0,
+        revenue_ttm=9_000.0,
+        operating_income_ttm=800.0,
+        depreciation_amort_ttm=200.0,
+        long_term_debt=1_000.0,
+        short_term_debt=100.0,
+        cash=600.0,
+        interest_expense_ttm=50.0,
+    )
+    base.update(kw)
+    return base
+
+
+def test_ebitda_ttm_strict_none_propagation():
+    from app.services.fair_value_band import ebitda_ttm
+
+    assert ebitda_ttm(800.0, 200.0) == 1_000.0
+    assert ebitda_ttm(None, 200.0) is None  # strict: no COALESCE(op, 0)
+    assert ebitda_ttm(800.0, None) is None  # strict: no COALESCE(d&a, 0)
+
+
+def test_net_debt_coalesce_and_cash_gate():
+    from app.services.fair_value_band import net_debt
+
+    assert net_debt(1_000.0, 100.0, 600.0) == 500.0
+    assert net_debt(None, None, 600.0) == -600.0  # debt-null -> 0 (net cash)
+    assert net_debt(1_000.0, None, 600.0) == 400.0
+    assert net_debt(1_000.0, 100.0, None) is None  # cash gate: None iff cash None
+
+
+def test_profitable_with_ebitda_selects_three():
+    t = _t(**_ev_kwargs())
+    assert select_multiples(t) == ["pe", "ps", "ev_ebitda"]
+
+
+def test_profitable_without_da_keeps_pe_ps():
+    # Strict D&A: the dominant real-world absence (671 names full-pop) — the
+    # name keeps its pe/ps legs, ev never assigned.
+    t = _t(**_ev_kwargs(depreciation_amort_ttm=None))
+    assert select_multiples(t) == ["pe", "ps"]
+
+
+def test_ev_gate_nonpositive_ebitda():
+    t = _t(**_ev_kwargs(operating_income_ttm=-300.0, depreciation_amort_ttm=100.0))
+    assert select_multiples(t) == ["pe", "ps"]
+
+
+def test_ev_gate_cash_null():
+    t = _t(**_ev_kwargs(cash=None))
+    assert select_multiples(t) == ["pe", "ps"]
+
+
+def test_ev_gate_debt_null_with_interest_incoherent():
+    # Debt-both-NULL + positive interest = unrecorded debt (13/103 full-pop).
+    t = _t(**_ev_kwargs(long_term_debt=None, short_term_debt=None, interest_expense_ttm=50.0))
+    assert select_multiples(t) == ["pe", "ps"]
+
+
+def test_ev_gate_debt_null_without_interest_ok():
+    # Debt-both-NULL + no positive interest = consistent with zero debt (90/103).
+    t = _t(**_ev_kwargs(long_term_debt=None, short_term_debt=None, interest_expense_ttm=None))
+    assert select_multiples(t) == ["pe", "ps", "ev_ebitda"]
+    t0 = _t(**_ev_kwargs(long_term_debt=None, short_term_debt=None, interest_expense_ttm=0.0))
+    assert select_multiples(t0) == ["pe", "ps", "ev_ebitda"]
+
+
+def test_dual_class_target_drops_ev():
+    # EV is cap-based; the multiclass intersect-{pe} gate covers it (sql/201:254).
+    t = _t(**_ev_kwargs(target_basis="total_company"))
+    assert select_multiples(t) == ["pe"]
+
+
+def test_financial_never_gets_ev():
+    t = _t(**_ev_kwargs(sic="6021", shareholders_equity=5_000.0))
+    assert select_multiples(t) == ["pb", "pe"]
+
+
+def test_to_per_share_ev_affine():
+    # implied = (mult * EBITDA - net_debt) / shares
+    triple = to_per_share(
+        "ev_ebitda",
+        5.0,
+        10.0,
+        15.0,
+        eps=None,
+        revenue=None,
+        shareholders_equity=None,
+        shares=10.0,
+        ebitda=100.0,
+        net_debt_value=200.0,
+    )
+    assert triple == (30.0, 80.0, 130.0)  # (5*100-200)/10 etc.
+    assert triple[0] <= triple[1] <= triple[2]  # affine preserves order
+
+
+def test_to_per_share_ev_net_cash_raises_value():
+    with_cash = to_per_share(
+        "ev_ebitda",
+        5.0,
+        10.0,
+        15.0,
+        eps=None,
+        revenue=None,
+        shareholders_equity=None,
+        shares=10.0,
+        ebitda=100.0,
+        net_debt_value=-200.0,
+    )
+    assert with_cash == (70.0, 120.0, 170.0)  # net cash adds equity value
+
+
+def test_to_per_share_ev_missing_inputs_raises():
+    with pytest.raises(ValueError):
+        to_per_share(
+            "ev_ebitda",
+            5.0,
+            10.0,
+            15.0,
+            eps=None,
+            revenue=None,
+            shareholders_equity=None,
+            shares=10.0,
+            ebitda=None,
+            net_debt_value=200.0,
+        )
+
+
+def _ev_target(**kw: Any) -> TargetInputs:
+    return _t(**_ev_kwargs(**kw))
+
+
+def test_compute_band_ev_leg_dropped_nonpositive_sibling_survives():
+    # ev converts <= 0 (mult*EBITDA < net_debt) -> leg dropped fail-closed with
+    # peer stats retained + flag; the pe leg still produces the band.
+    t = _ev_target(revenue_ttm=None, long_term_debt=20_000.0, cash=100.0)
+    assert select_multiples(t) == ["pe", "ev_ebitda"]
+    res = compute_band(
+        t,
+        peer_by_multiple={
+            "pe": PeerPct(p25=6.0, p50=8.0, p75=12.0),
+            "ev_ebitda": PeerPct(p25=5.0, p50=10.0, p75=15.0),  # 15*1000 < 20000 net debt
+        },
+        own_by_multiple={"pe": OwnPct(None, None, None), "ev_ebitda": OwnPct(None, None, None)},
+        own_points_by_multiple={"pe": 0, "ev_ebitda": 0},
+        cohort_meta={
+            "pe": {"cohort_n": 40, "excluded_stale_n": 0},
+            "ev_ebitda": {"cohort_n": 40, "excluded_stale_n": 0},
+        },
+        sic_level=3,
+    )
+    assert res.reason == "ok"
+    assert res.base == 16.0  # pe alone: 8 * eps 2.0
+    ev_entry = res.basis["multiples"]["ev_ebitda"]
+    assert ev_entry["dropped_nonpositive"] is True
+    assert "base_value" not in ev_entry  # never contributed
+    assert ev_entry["peer"]["p50"] == 10.0  # stats retained for audit
+    assert ev_entry["net_debt"] == 20_000.0  # 20000 ltd + 100 std - 100 cash
+    assert res.n_selected == 2  # profile-selected, synth-None precedent
+
+
+def test_compute_band_ev_only_leg_dropped_is_thin_cohort():
+    t = _ev_target(eps_diluted_ttm=None, revenue_ttm=None, long_term_debt=20_000.0, cash=100.0)
+    assert select_multiples(t) == ["ev_ebitda"]
+    res = compute_band(
+        t,
+        peer_by_multiple={"ev_ebitda": PeerPct(p25=5.0, p50=10.0, p75=15.0)},
+        own_by_multiple={"ev_ebitda": OwnPct(None, None, None)},
+        own_points_by_multiple={"ev_ebitda": 0},
+        cohort_meta={"ev_ebitda": {"cohort_n": 40, "excluded_stale_n": 0}},
+        sic_level=3,
+    )
+    assert res.reason == "thin_cohort"
+    assert res.base is None
+    assert res.basis["multiples"]["ev_ebitda"]["dropped_nonpositive"] is True
+
+
+def test_compute_band_ev_peer_only_cap_binds():
+    # Peer-only ev leg with a fat p75: bull clamped to base*_R_UP["ev_ebitda"]=2.8;
+    # base untouched (base-neutral cap, the peer-only tail case the cap exists for).
+    t = _ev_target(
+        eps_diluted_ttm=None,
+        revenue_ttm=None,
+        long_term_debt=None,
+        short_term_debt=None,
+        interest_expense_ttm=None,
+        cash=0.0,
+    )
+    assert select_multiples(t) == ["ev_ebitda"]
+    res = compute_band(
+        t,
+        peer_by_multiple={"ev_ebitda": PeerPct(p25=5.0, p50=10.0, p75=100.0)},
+        own_by_multiple={"ev_ebitda": OwnPct(None, None, None)},
+        own_points_by_multiple={"ev_ebitda": 0},
+        cohort_meta={"ev_ebitda": {"cohort_n": 40, "excluded_stale_n": 0}},
+        sic_level=3,
+    )
+    assert res.reason == "ok"
+    # ebitda 1000, net_debt 0, shares 1000: base = 10*1000/1000 = 10
+    assert res.base == 10.0
+    assert res.bull is not None and round(res.bull, 6) == 28.0  # 100 -> capped 28
+    assert res.basis["multiples"]["ev_ebitda"]["capped_high"] is True
+    assert res.basis["multiples"]["ev_ebitda"]["precap_high_mult"] == 100.0
+
+
+def test_golden_hd_ev_leg():
+    # §2 worked fixture (HD-shaped): EBITDA 24.307B, net debt 1.902B, shares 997M.
+    # Frozen drift guard for the affine conversion at real-world magnitudes.
+    t = _ev_target(
+        eps_diluted_ttm=None,
+        revenue_ttm=None,
+        operating_income_ttm=20_738e6,
+        depreciation_amort_ttm=3_569e6,
+        long_term_debt=1_902e6,
+        short_term_debt=0.0,
+        cash=0.0,
+        shares_outstanding=997e6,
+    )
+    res = compute_band(
+        t,
+        peer_by_multiple={"ev_ebitda": PeerPct(p25=10.0, p50=13.0, p75=16.0)},
+        own_by_multiple={"ev_ebitda": OwnPct(None, None, None)},
+        own_points_by_multiple={"ev_ebitda": 0},
+        cohort_meta={"ev_ebitda": {"cohort_n": 20, "excluded_stale_n": 0}},
+        sic_level=4,
+    )
+    assert res.reason == "ok"
+    assert res.bear is not None and res.base is not None and res.bull is not None
+    assert round(res.bear, 1) == 241.9  # (10*24.307e9 - 1.902e9) / 997e6
+    assert round(res.base, 1) == 315.0  # (13*24.307e9 - 1.902e9) / 997e6
+    assert round(res.bull, 1) == 388.2  # (16*24.307e9 - 1.902e9) / 997e6
+    assert res.basis["multiples"]["ev_ebitda"]["ebitda_ttm"] == 24_307e6
+    assert res.basis["multiples"]["ev_ebitda"]["net_debt"] == 1_902e6
