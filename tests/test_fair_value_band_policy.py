@@ -918,6 +918,33 @@ def test_compute_band_screen_provenance_and_knock():
     assert held_entry["screen"] == {"sic_level": 4, "width_tier": 1, "survivors_n": 11}
 
 
+def test_compute_band_peer_ids_provenance_carried_and_absent_when_peerless():
+    # #2031: peer_ids from cohort_meta lands in the basis entry verbatim; a
+    # peer-absent (own-only) leg's meta has no peer_ids and the entry stays
+    # keyless — provenance never claims a cohort the walk didn't find.
+    t = _t(revenue_ttm=1000.0, net_income_ttm=100.0, eps_diluted_ttm=10.0)
+    res = compute_band(
+        t,
+        peer_by_multiple={
+            "pe": PeerPct(p25=6.0, p50=8.0, p75=12.0),
+            "ps": PeerPct(None, None, None),  # peer-absent: own-only leg
+        },
+        own_by_multiple={
+            "pe": OwnPct(None, None, None),
+            "ps": OwnPct(p25=4.0, p50=6.0, p75=9.0),
+        },
+        own_points_by_multiple={"pe": 0, "ps": 8},
+        cohort_meta={
+            "pe": {"cohort_n": 40, "excluded_stale_n": 0, "sic_level": 4, "peer_ids": [11, 22, 33, 44, 55, 66, 77, 88]},
+            "ps": {"cohort_n": 3, "excluded_stale_n": 0, "sic_level": 0},
+        },
+        sic_level=4,
+    )
+    assert res.reason == "ok"
+    assert res.basis["multiples"]["pe"]["peer_ids"] == [11, 22, 33, 44, 55, 66, 77, 88]
+    assert "peer_ids" not in res.basis["multiples"]["ps"]
+
+
 def test_compute_band_own_only_screenable_leg_does_not_knock():
     # ps leg with NO peer side (own-only) marked cohort_screened=False: the knock
     # must NOT fire — there is no peer cohort to screen (spec §4.3). Quality here

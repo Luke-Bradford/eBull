@@ -612,6 +612,12 @@ def compute_band(
         if "cohort_screened" in meta:
             entry["cohort_screened"] = meta["cohort_screened"]
             entry["screen"] = meta.get("screen", {})
+        # #2031 chosen-member provenance, present iff a peer cohort was found
+        # (absent on peer-absent legs — the walk never chose anyone). Kept even
+        # when the leg ends non-contributing (synth-None / dropped), matching
+        # the peer-stats-stay-auditable rule above.
+        if "peer_ids" in meta:
+            entry["peer_ids"] = meta["peer_ids"]
         synth = synth_multiple(peer, own)
         if synth is None:
             basis["multiples"][m] = entry
@@ -1020,7 +1026,10 @@ def peer_pct_for(
 
     INVARIANT (A4 review): never returns a partial some-None triple — percentiles()
     yields all three, and the MIN_PEERS-unmet path returns PeerPct(None,None,None).
-    Returns (PeerPct, {"cohort_n","excluded_stale_n","sic_level"[,"cohort_screened","screen"]})."""
+    Returns (PeerPct, {"cohort_n","excluded_stale_n","sic_level"
+    [,"peer_ids","cohort_screened","screen"]}); peer_ids (#2031 provenance) is the
+    sorted chosen member set, present iff the walk found a cohort (never on the
+    comparator-absent fallback_meta path)."""
     keep_dual = multiple == "pe"
     cutoff = as_of_date - _dt.timedelta(days=PEER_STALE_DAYS)
 
@@ -1051,8 +1060,10 @@ def peer_pct_for(
                     rows_cache[level] = cur.fetchall()
         return rows_cache[level]
 
-    def _refine(fresh: list[dict[str, Any]]) -> list[float]:
+    def _refine(fresh: list[dict[str, Any]]) -> list[tuple[int, float]]:
         """Size-refine fresh rows to the nearest PEER_LIMIT positive multiples.
+        Returns (instrument_id, mult) pairs — the ids feed the #2031 peer_ids
+        provenance so the chosen-8 is reconstructable from the stored row.
 
         F1 (High): _rank_peers DROPS members with missing/non-positive
         total_assets, so a set with >= MIN_PEERS FRESH members can still
@@ -1083,11 +1094,13 @@ def peer_pct_for(
                 self_total_assets=float(target_total_assets),
                 limit=PEER_LIMIT,
             )
-            chosen = [mult_by_id[pr.instrument_id] for pr in ranked if pr.instrument_id in mult_by_id]
+            chosen = [
+                (pr.instrument_id, mult_by_id[pr.instrument_id]) for pr in ranked if pr.instrument_id in mult_by_id
+            ]
             if not chosen:  # every fresh member lacked a positive total_assets
-                chosen = list(mult_by_id.values())
+                chosen = list(mult_by_id.items())
         else:
-            chosen = list(mult_by_id.values())
+            chosen = list(mult_by_id.items())
         return chosen
 
     # --- v4 screened pass (width-major, spec §4.1) ---
@@ -1110,11 +1123,15 @@ def peer_pct_for(
                     chosen = _refine(survivors)
                     if len(chosen) < MIN_PEERS:
                         continue
-                    p25, p50, p75 = percentiles(chosen, (0.25, 0.5, 0.75))
+                    p25, p50, p75 = percentiles([v for _, v in chosen], (0.25, 0.5, 0.75))
                     return PeerPct(p25=p25, p50=p50, p75=p75), {
                         "cohort_n": len(rows),
                         "excluded_stale_n": len(rows) - len(fresh),
                         "sic_level": level,
+                        # #2031 provenance: the chosen member set, sorted for
+                        # determinism (rank order reconstructable by joining
+                        # fair_value_cohort_members at as_of_date).
+                        "peer_ids": sorted(i for i, _ in chosen),
                         "cohort_screened": True,
                         "screen": {
                             "sic_level": level,
@@ -1159,13 +1176,15 @@ def peer_pct_for(
         chosen = _refine(fresh)
         if len(chosen) < MIN_PEERS:
             continue
-        p25, p50, p75 = percentiles(chosen, (0.25, 0.5, 0.75))
+        p25, p50, p75 = percentiles([v for _, v in chosen], (0.25, 0.5, 0.75))
         result = (
             PeerPct(p25=p25, p50=p50, p75=p75),
             {
                 "cohort_n": len(rows),
                 "excluded_stale_n": excluded_stale_n,
                 "sic_level": level,
+                # #2031 provenance (same contract as the screened pass).
+                "peer_ids": sorted(i for i, _ in chosen),
             },
         )
         break

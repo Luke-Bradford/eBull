@@ -279,6 +279,11 @@ def test_two_pass_cohort_excludes_dual_class_member(ebull_test_conn: psycopg.Con
     assert pe_pct.p50 == pytest.approx(23.5, abs=0.05)  # dual (pe=100) pulls the p50 up
     assert abs(pe_pct.p50 - 23.0) > 0.25  # NOT the 23.0 of the dual-excluded 7-member set
 
+    # 5. #2031 peer_ids provenance mirrors the routing at the ID level: the
+    #    dual member is absent from the P/S chosen set, present in the P/E one.
+    assert ps_meta["peer_ids"] == sorted(_SINGLE)
+    assert pe_meta["peer_ids"] == sorted([*(i for i in _SINGLE if _SINGLE[i][2] is not None), _DUAL])
+
 
 def test_single_name_run_anchors_to_materialized_cohort(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
     """A7 fix I1: a single-name cascade run anchors to the materialized cohort
@@ -544,6 +549,9 @@ def test_companion_screen_end_to_end(ebull_test_conn: psycopg.Connection[tuple])
     assert ps_entry["cohort_screened"] is True
     assert ps_entry["screen"] == {"sic_level": 4, "width_tier": 0, "survivors_n": len(_SCR_NEAR)}
     assert ps_entry["sic_level"] == 4
+    # #2031 provenance on the SCREENED path: exactly the 8 near survivors,
+    # sorted — the far peers never enter the chosen set.
+    assert ps_entry["peer_ids"] == sorted(_SCR_NEAR)
     # Screened p50 = median of the 8 near multiples {10..17} = 13.5; the far
     # 100x members never reach the percentiles.
     assert ps_entry["peer"]["p50"] == pytest.approx(13.5, abs=0.01)
@@ -567,6 +575,10 @@ def test_companion_screen_end_to_end(ebull_test_conn: psycopg.Connection[tuple])
     assert ps_entry["cohort_screened"] is False
     assert ps_entry["screen"] == {"reason": "target_companion_missing"}
     assert ps_entry["peer"]["p75"] > 17.0  # far 100x members present unscreened
+    # #2031 provenance on the UNSCREENED-fallback path, alongside the flag
+    # (Codex ckpt-2 coverage gap): nearest-8 by |ln TA| with id tie-break =
+    # the six 5e9 names (dist 0) + the two lowest-id 1e9 near peers.
+    assert ps_entry["peer_ids"] == sorted([_SCR_TARGET, _SCR_UNMATCHED, *_SCR_FAR, 8301, 8302])
 
     # 4. FALLBACK no_screened_cohort: companions present but margin 0.60 matches
     #    neither the 8 near (0.10) nor enough far peers at any tier.
