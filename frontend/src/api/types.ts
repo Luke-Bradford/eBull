@@ -1250,7 +1250,7 @@ export interface ThesisTargetChange {
   field: string;
   from_value: number | null;
   to_value: number | null;
-  kind: string; // 'added' | 'removed' | 'moved'
+  kind: "added" | "removed" | "moved";
   rel_move: number | null;
 }
 

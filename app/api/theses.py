@@ -21,6 +21,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import psycopg
 import psycopg.rows
@@ -98,7 +99,9 @@ class TargetChangeModel(BaseModel):
     field: str
     from_value: float | None
     to_value: float | None
-    kind: str  # added | removed | moved (thesis_diff.TargetChange contract)
+    # Closed set emitted by thesis_diff._target_changes — code-constrained,
+    # not open JSON, so a response Literal is safe here (#1808 carve-out).
+    kind: Literal["added", "removed", "moved"]
     rel_move: float | None
 
 
@@ -128,7 +131,13 @@ class ThesisDiffModel(BaseModel):
 
 
 def _diff_model(prev_row: dict[str, object], curr_row: dict[str, object]) -> ThesisDiffModel:
-    """Compute the pure diff and lift it into the response model."""
+    """Compute the pure diff and lift it into the response model.
+
+    COUPLING: ``ThesisDiffModel`` (and its nested models) must mirror
+    ``thesis_diff.ThesisDiff`` field-for-field — ``dataclasses.asdict``
+    round-trips by exact name. Renaming a field in one without the other
+    fails model_validate at request time, not at import time.
+    """
     return ThesisDiffModel.model_validate(dataclasses.asdict(compute_thesis_diff(prev_row, curr_row)))
 
 
