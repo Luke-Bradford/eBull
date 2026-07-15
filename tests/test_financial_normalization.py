@@ -1906,6 +1906,44 @@ class TestDaComponentSum2036:
         periods = _derive_periods_from_facts(facts, reported_currency="USD")
         assert periods == []
 
+    def test_component_sum_applies_to_fy_row(self) -> None:
+        """FY rows get the component sum too — the Q4 = FY - sum(Q) derivation
+        needs the FY row's depreciation_amort (bot NITPICK, PR #2040)."""
+        facts = self._component_facts()
+        facts.append(
+            _fact(
+                concept="OperatingIncomeLoss",
+                val=Decimal("4000"),
+                period_start="2024-01-01",
+                period_end="2024-12-31",
+                fiscal_period="FY",
+                accession_number="op-FY",
+            )
+        )
+        facts.append(
+            _fact(
+                concept="Depreciation",
+                val=Decimal("500"),
+                period_start="2024-01-01",
+                period_end="2024-12-31",
+                fiscal_period="FY",
+                accession_number="dep-FY",
+            )
+        )
+        facts.append(
+            _fact(
+                concept="AmortizationOfIntangibleAssets",
+                val=Decimal("170"),
+                period_start="2024-01-01",
+                period_end="2024-12-31",
+                fiscal_period="FY",
+                accession_number="ami-FY",
+            )
+        )
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        by_type = {p.period_type: p for p in periods}
+        assert by_type["FY"].depreciation_amort == Decimal("670")
+
     def test_depreciation_is_raw_only(self) -> None:
         """The load-bearing split (spec §3.3): Depreciation is captured into
         financial_facts_raw but must never enter the column priority pick."""

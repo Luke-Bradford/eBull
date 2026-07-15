@@ -1177,6 +1177,10 @@ def _derive_periods_from_facts(
                     )
                     if filled is not None:
                         setattr(row, col, filled)
+            # Deliberately ALL period types incl. FY: the Q4 = FY − ΣQ
+            # derivation below needs the FY row's depreciation_amort, so a
+            # component-sum name whose FY D&A stayed None would never get a
+            # derived Q4 and strict TTM (sql/220) would keep failing.
             if row.depreciation_amort is None:
                 dep = _resolve_flow_value(
                     ytd_pools.get(_DA_COMPONENT_CONCEPT),
