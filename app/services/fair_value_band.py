@@ -1131,13 +1131,12 @@ def peer_pct_for(
             # that had no inputs. (Values are unaffected either way: the
             # unscreened fallback below IS the pre-v4 walk.) The screened pass
             # visits every ladder level before landing here, so rows_cache holds
-            # the full member set this walk can ever see.
-            if not any(
-                target_screenable(multiple, _member_companions(r))
-                for cached in rows_cache.values()
-                if cached
-                for r in cached
-            ):
+            # the full member set this walk can ever see; empty-but-valid
+            # cohorts ([] or unresolved-SIC None levels) contribute no rows, so
+            # the override requires member rows to EXIST — a zero-member cohort
+            # keeps no_screened_cohort (PR #2045 review WARNING).
+            cached_rows = [r for cached in rows_cache.values() if cached for r in cached]
+            if cached_rows and not any(target_screenable(multiple, _member_companions(r)) for r in cached_rows):
                 screen_reason = "cohort_companions_missing"
 
     # --- unscreened walk (pre-v4 semantics, unchanged) ---

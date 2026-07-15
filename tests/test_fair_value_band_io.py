@@ -68,6 +68,7 @@ def _seed_member(
     ev: dict[str, float | None] | None = None,
     margin: float = 0.1,
     prior_revenue_ttm: float | None = None,
+    sic: str = _SIC,
 ) -> None:
     """Seed one instrument so its as-of multiples are exactly (ps, pb, pe).
 
@@ -98,7 +99,7 @@ def _seed_member(
     )
     conn.execute(
         "INSERT INTO instrument_sec_profile (instrument_id, cik, sic) VALUES (%s, %s, %s)",
-        (iid, cik, _SIC),
+        (iid, cik, sic),
     )
     conn.execute(
         "INSERT INTO price_daily (instrument_id, price_date, close) VALUES (%s, %s, %s)",
@@ -611,3 +612,45 @@ def test_companion_screen_pre_v4_cohort_annotates_companions_missing(
     # Unscreened stats: all 14 sibling members (near 8 + far 4 + 2 co-targets)
     # feed the walk; the far 100x members reach the tail unscreened.
     assert ps_entry["peer"]["p75"] > 17.0
+
+
+def test_companion_screen_zero_member_cohort_stays_no_screened_cohort(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:  # noqa: F811
+    """PR #2045 review PREVENTION: a screen-capable target whose SIC has ZERO
+    member rows at every ladder level must fall back with no_screened_cohort —
+    the cohort_companions_missing override requires member rows to EXIST (it
+    flags companion-column absence, not cohort absence)."""
+    conn = ebull_test_conn
+    _seed_screen_cohort(conn)
+    # Lone SIC "9911": no sibling members at SIC-4/3/2 (others are 35xx).
+    _seed_member(
+        conn,
+        8340,
+        ps=8.0,
+        pb=1.5,
+        pe=18.0,
+        total_assets=5.0e9,
+        cik=str(1_000_000_000 + 8340),
+        margin=0.10,
+        prior_revenue_ttm=(_CLOSE * _SHARES / 8.0) / 1.25,
+        sic="9911",
+    )
+    conn.commit()
+    materialize_cohort_members(conn, _AS_OF)
+    conn.commit()
+
+    result = refresh_fair_value_band_batch(conn, [8340])
+    conn.commit()
+    # No peers anywhere + no own history -> statused thin_cohort; the v4 basis
+    # entry still records the screen audit trail (provenance survives
+    # non-contribution, spec §4.4).
+    assert result == {"written": 0, "statused": 1, "failed": 0}
+    row = conn.execute(
+        "SELECT reason, basis_json FROM fair_value_band_current WHERE instrument_id = %s",
+        (8340,),
+    ).fetchone()
+    assert row is not None and row[0] == "thin_cohort"
+    ps_entry = row[1]["multiples"]["ps"]
+    assert ps_entry["cohort_screened"] is False
+    assert ps_entry["screen"] == {"reason": "no_screened_cohort"}
