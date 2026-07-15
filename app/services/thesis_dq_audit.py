@@ -285,21 +285,24 @@ def compute_thesis_dq_report(conn: psycopg.Connection[Any]) -> ThesisDqReport:
         if detail := check_zone(row["buy_zone_low"], row["buy_zone_high"]):
             add(row, "zone_inverted", "violation", detail)
 
-        zoneless = classify_zoneless_buy(row["stance"], row["buy_zone_low"], row["buy_zone_high"], anchor_available)
-        if zoneless == "zoneless_buy":
-            add(row, "zoneless_buy", "violation", "stance=buy with no buy zone despite available price anchor")
-        elif zoneless == "zoneless_buy_no_anchor":
-            counts["zoneless_buy_no_anchor"] = counts.get("zoneless_buy_no_anchor", 0) + 1
-
         if is_target_abstention(row["bear_value"], row["base_value"], row["bull_value"]):
             counts["target_abstention"] = counts.get("target_abstention", 0) + 1
 
+        # Anchor-gated predicates (zoneless-buy, stale anchor, base-vs-close,
+        # claim-lint) need a usable run summary — a thesis without one is
+        # counted ONLY via no_run / no_context_summary (spec; Codex ckpt-2).
         if row["run_id"] is None:
             counts["no_run"] = counts.get("no_run", 0) + 1
             continue
         if not isinstance(blocks, dict):
             counts["no_context_summary"] = counts.get("no_context_summary", 0) + 1
             continue
+
+        zoneless = classify_zoneless_buy(row["stance"], row["buy_zone_low"], row["buy_zone_high"], anchor_available)
+        if zoneless == "zoneless_buy":
+            add(row, "zoneless_buy", "violation", "stance=buy with no buy zone despite available price anchor")
+        elif zoneless == "zoneless_buy_no_anchor":
+            counts["zoneless_buy_no_anchor"] = counts.get("zoneless_buy_no_anchor", 0) + 1
 
         anchor_as_of = _parse_iso_date(anchor.get("as_of")) if anchor else None
         if detail := check_stale_anchor(anchor_as_of, row["created_at"]):

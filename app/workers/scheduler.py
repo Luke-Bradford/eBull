@@ -827,9 +827,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "Read-only; findings are operator-triage candidates (no "
             "auto-regen). row_count = total violations."
         ),
-        # 05:10 UTC — after the 02:30 fundamentals_sync + 03:30 ownership
-        # repair window; a pure read on the db lane, cheap at any hour.
-        cadence=Cadence.daily(hour=5, minute=10),
+        # 05:12 UTC — after the 02:30 fundamentals_sync + 03:30 ownership
+        # repair window; NOT 5-min-aligned (orchestrator_high_frequency_sync
+        # shares the db lane and fires on the :00/:05 grid — an aligned slot
+        # silently loses the lane-acquire race every night, #1707 class).
+        cadence=Cadence.daily(hour=5, minute=12),
         # A missed night is re-covered next night; nothing accumulates.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
