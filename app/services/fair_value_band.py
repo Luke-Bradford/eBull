@@ -1026,6 +1026,9 @@ def peer_pct_for(
 
     # One member fetch per SIC level, shared by the screened pass (which may
     # touch every level per width tier) and the unscreened fallback walk.
+    # Keyed by level ONLY: every other query param (multiple, keep_dual,
+    # as_of_date, target) is fixed for the lifetime of this call — the cache
+    # must not outlive it (review NITPICK, PR #2045).
     rows_cache: dict[int, list[dict[str, Any]] | None] = {}
 
     def _rows(level: int) -> list[dict[str, Any]] | None:
