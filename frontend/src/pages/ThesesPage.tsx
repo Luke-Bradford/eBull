@@ -76,6 +76,25 @@ function staleLabel(reason: string): string {
   return "stale";
 }
 
+/** #2013 — compact what-changed chip next to the run status. Amber when the
+ *  change is material (stance/type/target move per thesis_diff); muted for
+ *  a non-material tweak. Absent for v1 / gap rows / unchanged regens. */
+function ChangeChip({ row }: { row: ThesisLibraryItem }) {
+  if (row.last_change_summary === null) return null;
+  const cls = row.last_change_material
+    ? "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300"
+    : "border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400";
+  return (
+    <span
+      data-testid="thesis-change-chip"
+      className={`inline-block max-w-48 truncate rounded border px-1.5 py-0.5 align-bottom text-[10px] font-medium ${cls}`}
+      title={row.last_change_summary}
+    >
+      Δ {row.last_change_summary}
+    </span>
+  );
+}
+
 function RunStatusCell({ row }: { row: ThesisLibraryItem }) {
   if (row.run_status === "running") {
     return (
@@ -388,7 +407,10 @@ export function ThesesPage(): JSX.Element {
                         ) : null}
                       </td>
                       <td className="px-2 py-2">
-                        <RunStatusCell row={row} />
+                        <div className="flex items-center gap-1.5">
+                          <RunStatusCell row={row} />
+                          <ChangeChip row={row} />
+                        </div>
                       </td>
                       <td className="px-2 py-2 text-right">
                         <button

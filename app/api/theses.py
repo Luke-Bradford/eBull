@@ -18,8 +18,10 @@ has ``confidence_score``.  This module uses the actual schema column name.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import psycopg
 import psycopg.rows
@@ -32,6 +34,7 @@ from app.services.llm_client import LLMClientPair, LLMProviderNotConfigured, mak
 from app.services.runtime_config import RuntimeConfigCorrupt
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.services.thesis import find_stale_instruments, generate_thesis
+from app.services.thesis_diff import compute_thesis_diff
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,63 @@ MAX_PAGE_LIMIT = 200
 # ---------------------------------------------------------------------------
 
 
+class FieldChangeModel(BaseModel):
+    from_value: str | None
+    to_value: str | None
+
+
+class ConfidenceChangeModel(BaseModel):
+    from_value: float | None
+    to_value: float | None
+    delta: float | None
+
+
+class TargetChangeModel(BaseModel):
+    field: str
+    from_value: float | None
+    to_value: float | None
+    # Closed set emitted by thesis_diff._target_changes — code-constrained,
+    # not open JSON, so a response Literal is safe here (#1808 carve-out).
+    kind: Literal["added", "removed", "moved"]
+    rel_move: float | None
+
+
+class ThesisDiffModel(BaseModel):
+    """Structured what-changed vs the prior version (#2013).
+
+    Mirrors ``app.services.thesis_diff.ThesisDiff`` 1:1 — the diff (and its
+    materiality predicate) is computed on read from the two append-only rows,
+    never stored.
+    """
+
+    prev_version: int
+    curr_version: int
+    stance: FieldChangeModel | None
+    thesis_type: FieldChangeModel | None
+    confidence: ConfidenceChangeModel | None
+    targets: list[TargetChangeModel]
+    break_conditions_added: list[str]
+    break_conditions_removed: list[str]
+    memo_sections_added: list[str]
+    memo_sections_removed: list[str]
+    memo_sections_changed: list[str]
+    prompt_version: FieldChangeModel | None
+    model: FieldChangeModel | None
+    material: bool
+    summary: str
+
+
+def _diff_model(prev_row: dict[str, object], curr_row: dict[str, object]) -> ThesisDiffModel:
+    """Compute the pure diff and lift it into the response model.
+
+    COUPLING: ``ThesisDiffModel`` (and its nested models) must mirror
+    ``thesis_diff.ThesisDiff`` field-for-field — ``dataclasses.asdict``
+    round-trips by exact name. Renaming a field in one without the other
+    fails model_validate at request time, not at import time.
+    """
+    return ThesisDiffModel.model_validate(dataclasses.asdict(compute_thesis_diff(prev_row, curr_row)))
+
+
 class ThesisDetail(BaseModel):
     """Single thesis row with all columns including critic output.
 
@@ -115,6 +175,9 @@ class ThesisDetail(BaseModel):
     provider: str | None = None
     is_stale: bool | None = None
     stale_reason: str | None = None
+    # #2013 — diff vs the (instrument_id, thesis_version - 1) predecessor.
+    # None when thesis_version == 1 or the predecessor row is missing.
+    diff: ThesisDiffModel | None = None
 
 
 class ThesisHistoryResponse(BaseModel):
@@ -167,6 +230,11 @@ class ThesisLibraryItem(BaseModel):
     run_error: str | None
     run_trigger: str | None
     run_started_at: datetime | None
+    # #2013 — compact field-level what-changed vs the predecessor version
+    # (stance/type/target moves only; no memo compare on the list path).
+    # None/False when the latest thesis is v1 or the predecessor is missing.
+    last_change_summary: str | None = None
+    last_change_material: bool = False
 
 
 class ThesisLibraryResponse(BaseModel):
@@ -220,6 +288,37 @@ _THESIS_COLUMNS = """
     t.break_conditions_json, t.memo_markdown, t.critic_json,
     t.created_at, t.prompt_version, t.model, t.provider
 """
+
+
+def _fetch_diffs(
+    conn: psycopg.Connection[object],
+    instrument_id: int,
+    rows: list[dict[str, object]],
+) -> dict[int, ThesisDiffModel]:
+    """thesis_id → diff vs predecessor, for one instrument's thesis rows.
+
+    Predecessors are fetched by an explicit ``thesis_version - 1`` lookup
+    (NOT page adjacency — the ``created_at DESC`` page order does not
+    guarantee version contiguity). Rows at version 1, or whose predecessor
+    row is missing, simply have no entry.
+    """
+    wanted = {int(r["thesis_version"]) - 1: r for r in rows if int(r["thesis_version"]) > 1}  # type: ignore[arg-type]
+    if not wanted:
+        return {}
+    sql = f"""
+        SELECT {_THESIS_COLUMNS}
+        FROM theses t
+        WHERE t.instrument_id = %(instrument_id)s
+          AND t.thesis_version = ANY(%(versions)s)
+    """  # safe: _THESIS_COLUMNS is a module-level constant, not user input
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, {"instrument_id": instrument_id, "versions": list(wanted)})
+        predecessors = {int(p["thesis_version"]): p for p in cur.fetchall()}  # type: ignore[arg-type]
+    return {
+        int(curr["thesis_id"]): _diff_model(predecessors[version], curr)  # type: ignore[arg-type]
+        for version, curr in wanted.items()
+        if version in predecessors
+    }
 
 
 def _critic_verdict(critic_json: object) -> str | None:
@@ -303,6 +402,7 @@ _LIBRARY_SQL = """
     SELECT
         t.thesis_id, t.instrument_id, t.thesis_version, t.thesis_type,
         t.stance, t.confidence_score, t.buy_zone_low, t.buy_zone_high,
+        t.base_value, t.bull_value, t.bear_value,
         t.critic_json, t.created_at,
         i.symbol, i.company_name,
         EXISTS (
@@ -315,11 +415,21 @@ _LIBRARY_SQL = """
         r.status      AS run_status,
         r.error       AS run_error,
         r.trigger     AS run_trigger,
-        r.started_at  AS run_started_at
+        r.started_at  AS run_started_at,
+        pv.thesis_id  AS prev_thesis_id,
+        pv.stance     AS prev_stance,
+        pv.thesis_type AS prev_thesis_type,
+        pv.confidence_score AS prev_confidence_score,
+        pv.buy_zone_low  AS prev_buy_zone_low,
+        pv.buy_zone_high AS prev_buy_zone_high,
+        pv.base_value    AS prev_base_value,
+        pv.bull_value    AS prev_bull_value,
+        pv.bear_value    AS prev_bear_value
     FROM (
         SELECT DISTINCT ON (instrument_id)
             thesis_id, instrument_id, thesis_version, thesis_type,
             stance, confidence_score, buy_zone_low, buy_zone_high,
+            base_value, bull_value, bear_value,
             critic_json, created_at
         FROM theses
         ORDER BY instrument_id, created_at DESC, thesis_version DESC
@@ -340,6 +450,18 @@ _LIBRARY_SQL = """
         ORDER BY r.started_at DESC, r.run_id DESC
         LIMIT 1
     ) r ON TRUE
+    -- #2013: predecessor row by explicit version-1 lookup (unique per
+    -- instrument via UNIQUE(instrument_id, thesis_version)); memo/break
+    -- columns deliberately omitted — the library summary is field-level
+    -- only, the full diff lives on the per-instrument endpoints.
+    LEFT JOIN LATERAL (
+        SELECT p.thesis_id, p.stance, p.thesis_type, p.confidence_score,
+               p.buy_zone_low, p.buy_zone_high,
+               p.base_value, p.bull_value, p.bear_value
+        FROM theses p
+        WHERE p.instrument_id = t.instrument_id
+          AND p.thesis_version = t.thesis_version - 1
+    ) pv ON TRUE
     ORDER BY t.created_at DESC, t.thesis_id DESC
 """
 
@@ -358,6 +480,9 @@ _HELD_NO_THESIS_SQL = """
         NULL::numeric     AS confidence_score,
         NULL::numeric     AS buy_zone_low,
         NULL::numeric     AS buy_zone_high,
+        NULL::numeric     AS base_value,
+        NULL::numeric     AS bull_value,
+        NULL::numeric     AS bear_value,
         NULL::jsonb       AS critic_json,
         NULL::timestamptz AS created_at,
         i.symbol, i.company_name,
@@ -367,7 +492,16 @@ _HELD_NO_THESIS_SQL = """
         r.status      AS run_status,
         r.error       AS run_error,
         r.trigger     AS run_trigger,
-        r.started_at  AS run_started_at
+        r.started_at  AS run_started_at,
+        NULL::bigint  AS prev_thesis_id,
+        NULL::text    AS prev_stance,
+        NULL::text    AS prev_thesis_type,
+        NULL::numeric AS prev_confidence_score,
+        NULL::numeric AS prev_buy_zone_low,
+        NULL::numeric AS prev_buy_zone_high,
+        NULL::numeric AS prev_base_value,
+        NULL::numeric AS prev_bull_value,
+        NULL::numeric AS prev_bear_value
     FROM instruments i
     LEFT JOIN LATERAL (
         SELECT s.total_score, s.rank
@@ -395,6 +529,37 @@ _HELD_NO_THESIS_SQL = """
           )
     ORDER BY i.symbol
 """
+
+
+# Value fields forwarded from a library row into the diff module. Field-level
+# only (no memo/break columns on the list path — see _LIBRARY_SQL comment).
+_LIBRARY_DIFF_FIELDS = (
+    "stance",
+    "thesis_type",
+    "confidence_score",
+    "buy_zone_low",
+    "buy_zone_high",
+    "base_value",
+    "bull_value",
+    "bear_value",
+)
+
+
+def _library_change_fields(row: dict[str, object]) -> tuple[str | None, bool]:
+    """(last_change_summary, last_change_material) for one library row (#2013).
+
+    (None, False) for v1 / gap rows / missing predecessor. The materiality
+    predicate + summary come from the shared ``thesis_diff`` module — never
+    re-derived here.
+    """
+    if row.get("prev_thesis_id") is None or row.get("thesis_version") is None:
+        return None, False
+    version = int(row["thesis_version"])  # type: ignore[arg-type]
+    curr: dict[str, object] = {f: row.get(f) for f in _LIBRARY_DIFF_FIELDS}
+    prev: dict[str, object] = {f: row.get(f"prev_{f}") for f in _LIBRARY_DIFF_FIELDS}
+    curr["thesis_version"], prev["thesis_version"] = version, version - 1
+    diff = compute_thesis_diff(prev, curr)
+    return diff.summary or None, diff.material
 
 
 @router.get("", response_model=ThesisLibraryResponse)
@@ -444,9 +609,12 @@ def list_theses(
         limit=limit,
     )
 
+    change_fields = [_library_change_fields(row) for row in page]
     items = [
         ThesisLibraryItem(
             instrument_id=row["instrument_id"],  # type: ignore[arg-type]
+            last_change_summary=change_fields[idx][0],
+            last_change_material=change_fields[idx][1],
             symbol=row["symbol"],  # type: ignore[arg-type]
             company_name=row["company_name"],  # type: ignore[arg-type]
             thesis_id=row["thesis_id"],  # type: ignore[arg-type]
@@ -467,7 +635,7 @@ def list_theses(
             run_trigger=row["run_trigger"],  # type: ignore[arg-type]
             run_started_at=row["run_started_at"],  # type: ignore[arg-type]
         )
-        for row in page
+        for idx, row in enumerate(page)
     ]
     return ThesisLibraryResponse(items=items, total=total, offset=offset, limit=limit)
 
@@ -565,6 +733,7 @@ def get_latest_thesis(
             return None
 
     thesis = _parse_thesis(row)
+    thesis.diff = _fetch_diffs(conn, instrument_id, [row]).get(int(row["thesis_id"]))  # type: ignore[arg-type]
     # Staleness single-source (#1902): the FE used to duplicate a 30-day
     # constant; the canonical predicate is find_stale_instruments
     # (coverage cadence + #273 filing-event triggers). reason=None means
@@ -637,7 +806,10 @@ def get_thesis_history(
         cur.execute(data_sql, data_params)
         rows = cur.fetchall()
 
+    diffs = _fetch_diffs(conn, instrument_id, rows)
     items = [_parse_thesis(r) for r in rows]
+    for item in items:
+        item.diff = diffs.get(item.thesis_id)
     return ThesisHistoryResponse(
         instrument_id=instrument_id,
         items=items,

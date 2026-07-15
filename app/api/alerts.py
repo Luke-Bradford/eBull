@@ -56,6 +56,7 @@ from app.db.snapshot import snapshot_read
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.scoring import _DEFAULT_MODEL_VERSION
 from app.services.thesis import find_stale_instruments
+from app.services.thesis_diff import compute_thesis_diff
 
 router = APIRouter(
     prefix="/alerts",
@@ -170,6 +171,27 @@ class RankMovesResponse(BaseModel):
 
 class RankMovesMarkSeenRequest(BaseModel):
     seen_through_rank_event_id: int = Field(gt=0)
+
+
+class ThesisChange(BaseModel):
+    thesis_id: int
+    instrument_id: int
+    symbol: str
+    thesis_version: int
+    created_at: datetime
+    summary: str
+    stance_from: str | None
+    stance_to: str | None
+
+
+class ThesisChangesResponse(BaseModel):
+    alerts_last_seen_thesis_change_id: int | None
+    unseen_count: int
+    changes: list[ThesisChange]
+
+
+class ThesisChangesMarkSeenRequest(BaseModel):
+    seen_through_thesis_id: int = Field(gt=0)
 
 
 class ThesisStalenessItem(BaseModel):
@@ -679,6 +701,158 @@ def mark_rank_moves_seen(
             {
                 **params,
                 "seen_through_rank_event_id": body.seen_through_rank_event_id,
+                "op": operator_id,
+            },
+        )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# #2013 — thesis-change alert feed (a thesis regenerated with a MATERIAL
+# change vs its prior version)
+#
+#   GET  /alerts/thesis-changes
+#   POST /alerts/thesis-changes/seen     (body: {seen_through_thesis_id})
+#
+# Same cursor semantics as the rank-move feed: BIGSERIAL cursor
+# (theses.thesis_id), strict '>' comparison, GREATEST+COALESCE monotonicity,
+# LEAST clamp on /seen, m.max_id IS NOT NULL empty-window guard. Window =
+# 14 days (thesis cadence is slower than scoring's 7-day rank window).
+#
+# The MATERIALITY predicate deliberately lives in Python
+# (thesis_diff.compute_thesis_diff — the same single source the theses API
+# and the library summary use), NOT in the SQL fragment: duplicating the
+# stance/null-transition/≥5%-move logic in SQL is exactly the predicate
+# drift the prevention log warns about. Consequences, both accepted:
+#   1. GET scans every windowed version>1 pair and filters in Python. Cheap
+#      by construction — theses holds 325 rows total on dev and regen
+#      throughput is ≤5/hour, so the window is dozens of pairs, not
+#      thousands. The response list cap (50) applies AFTER materiality;
+#      unseen_count is computed over ALL material windowed pairs, never
+#      truncated (Codex ckpt-1 finding 1).
+#   2. /seen's LEAST clamp bounds against MAX(thesis_id) over the SQL
+#      window WITHOUT materiality (SQL can't compute it). A cursor may
+#      therefore advance past a non-material id — harmless: non-material
+#      changes never surface and unseen_count only counts material ids
+#      above the cursor.
+# Predecessor pairing is an explicit version-1 self-join (versions are
+# unique per instrument); memo/break columns are omitted — the feed needs
+# stance/type/target materiality + the compact summary, not section diffs.
+# ---------------------------------------------------------------------------
+
+_THESIS_CHANGE_WINDOW_WHERE = """
+    t.thesis_version > 1
+    AND t.created_at >= now() - INTERVAL '14 days'
+"""
+
+_THESIS_CHANGES_LIST_CAP = 50
+
+_THESIS_CHANGE_DIFF_FIELDS = (
+    "stance",
+    "thesis_type",
+    "confidence_score",
+    "buy_zone_low",
+    "buy_zone_high",
+    "base_value",
+    "bull_value",
+    "bear_value",
+)
+
+
+@router.get("/thesis-changes", response_model=ThesisChangesResponse)
+def get_thesis_changes(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ThesisChangesResponse:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT alerts_last_seen_thesis_change_id FROM operators WHERE operator_id = %(op)s",
+            {"op": operator_id},
+        )
+        op_row = cur.fetchone()
+        last_seen: int | None = op_row["alerts_last_seen_thesis_change_id"] if op_row else None
+
+        prev_cols = ",\n                ".join(f"p.{f} AS prev_{f}" for f in _THESIS_CHANGE_DIFF_FIELDS)
+        curr_cols = ",\n                ".join(f"t.{f}" for f in _THESIS_CHANGE_DIFF_FIELDS)
+        cur.execute(
+            f"""
+            SELECT
+                t.thesis_id, t.instrument_id, i.symbol, t.thesis_version,
+                t.created_at,
+                {curr_cols},
+                {prev_cols}
+            FROM theses t
+            JOIN theses p
+              ON p.instrument_id = t.instrument_id
+             AND p.thesis_version = t.thesis_version - 1
+            JOIN instruments i ON i.instrument_id = t.instrument_id
+            WHERE {_THESIS_CHANGE_WINDOW_WHERE}
+            ORDER BY t.thesis_id DESC
+            """,
+        )
+        rows = cur.fetchall()
+
+    changes: list[ThesisChange] = []
+    unseen_count = 0
+    for row in rows:
+        curr = {f: row[f] for f in _THESIS_CHANGE_DIFF_FIELDS}
+        prev = {f: row[f"prev_{f}"] for f in _THESIS_CHANGE_DIFF_FIELDS}
+        version = int(row["thesis_version"])  # type: ignore[arg-type]
+        curr["thesis_version"], prev["thesis_version"] = version, version - 1
+        diff = compute_thesis_diff(prev, curr)
+        if not diff.material:
+            continue
+        thesis_id = int(row["thesis_id"])  # type: ignore[arg-type]
+        if last_seen is None or thesis_id > last_seen:
+            unseen_count += 1
+        if len(changes) < _THESIS_CHANGES_LIST_CAP:
+            changes.append(
+                ThesisChange(
+                    thesis_id=thesis_id,
+                    instrument_id=int(row["instrument_id"]),  # type: ignore[arg-type]
+                    symbol=str(row["symbol"]),
+                    thesis_version=version,
+                    created_at=row["created_at"],  # type: ignore[arg-type]
+                    summary=diff.summary,
+                    stance_from=diff.stance.from_value if diff.stance else None,
+                    stance_to=diff.stance.to_value if diff.stance else None,
+                )
+            )
+
+    return ThesisChangesResponse(
+        alerts_last_seen_thesis_change_id=last_seen,
+        unseen_count=unseen_count,
+        changes=changes,
+    )
+
+
+@router.post("/thesis-changes/seen", status_code=status.HTTP_204_NO_CONTENT)
+def mark_thesis_changes_seen(
+    body: ThesisChangesMarkSeenRequest,
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> None:
+    operator_id = _resolve_operator(conn)
+    with conn.cursor() as cur:
+        # m.max_id IS NOT NULL guard preserves NULL cursor on empty window
+        # (coverage/position /seen shape). Clamp bound is the SQL window max
+        # WITHOUT materiality — see the section comment, consequence 2.
+        cur.execute(
+            f"""
+            UPDATE operators AS op
+            SET alerts_last_seen_thesis_change_id = GREATEST(
+                COALESCE(op.alerts_last_seen_thesis_change_id, 0),
+                LEAST(%(seen_through_thesis_id)s, m.max_id)
+            )
+            FROM (
+                SELECT MAX(t.thesis_id) AS max_id
+                FROM theses t
+                WHERE {_THESIS_CHANGE_WINDOW_WHERE}
+            ) AS m
+            WHERE op.operator_id = %(op)s
+              AND m.max_id IS NOT NULL
+            """,
+            {
+                "seen_through_thesis_id": body.seen_through_thesis_id,
                 "op": operator_id,
             },
         )

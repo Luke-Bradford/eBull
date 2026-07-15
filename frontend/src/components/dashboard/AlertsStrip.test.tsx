@@ -13,6 +13,8 @@ import type {
   PositionAlertsResponse,
   RankMove,
   RankMovesResponse,
+  ThesisChange,
+  ThesisChangesResponse,
   ThesisStalenessResponse,
 } from "@/api/types";
 
@@ -30,6 +32,8 @@ vi.mock("@/api/alerts", () => ({
   markRankMovesSeen: vi.fn(),
   dismissAllRankMoves: vi.fn(),
   fetchThesisStaleness: vi.fn(),
+  fetchThesisChanges: vi.fn(),
+  markThesisChangesSeen: vi.fn(),
 }));
 
 import * as alertsApi from "@/api/alerts";
@@ -39,6 +43,7 @@ const mockedPositionFetch = vi.mocked(alertsApi.fetchPositionAlerts);
 const mockedCoverageFetch = vi.mocked(alertsApi.fetchCoverageStatusDrops);
 const mockedRankFetch = vi.mocked(alertsApi.fetchRankMoves);
 const mockedThesisStaleFetch = vi.mocked(alertsApi.fetchThesisStaleness);
+const mockedThesisChangesFetch = vi.mocked(alertsApi.fetchThesisChanges);
 
 const mockedMarkGuard = vi.mocked(alertsApi.markAlertsSeen);
 const mockedMarkPosition = vi.mocked(alertsApi.markPositionAlertsSeen);
@@ -73,6 +78,11 @@ const EMPTY_RANK: RankMovesResponse = {
 const EMPTY_THESIS_STALE: ThesisStalenessResponse = {
   items: [],
 };
+const EMPTY_THESIS_CHANGES: ThesisChangesResponse = {
+  alerts_last_seen_thesis_change_id: null,
+  unseen_count: 0,
+  changes: [],
+};
 
 function stubAll(
   overrides: {
@@ -81,6 +91,7 @@ function stubAll(
     coverage?: Partial<CoverageStatusDropsResponse> | Error;
     rank?: Partial<RankMovesResponse> | Error;
     thesisStale?: Partial<ThesisStalenessResponse> | Error;
+    thesisChanges?: Partial<ThesisChangesResponse> | Error;
   } = {},
 ) {
   if (overrides.guard instanceof Error) {
@@ -109,6 +120,14 @@ function stubAll(
     mockedThesisStaleFetch.mockResolvedValue({
       ...EMPTY_THESIS_STALE,
       ...overrides.thesisStale,
+    });
+  }
+  if (overrides.thesisChanges instanceof Error) {
+    mockedThesisChangesFetch.mockRejectedValue(overrides.thesisChanges);
+  } else {
+    mockedThesisChangesFetch.mockResolvedValue({
+      ...EMPTY_THESIS_CHANGES,
+      ...overrides.thesisChanges,
     });
   }
 }
@@ -163,6 +182,20 @@ function makeRankMove(overrides: Partial<RankMove> = {}): RankMove {
   };
 }
 
+function makeThesisChange(overrides: Partial<ThesisChange> = {}): ThesisChange {
+  return {
+    thesis_id: 316,
+    instrument_id: 46,
+    symbol: "LGND",
+    thesis_version: 3,
+    created_at: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    summary: "stance hold→avoid · type compounder→speculative",
+    stance_from: "hold",
+    stance_to: "avoid",
+    ...overrides,
+  };
+}
+
 function renderStrip() {
   return render(
     <MemoryRouter>
@@ -178,6 +211,7 @@ beforeEach(() => {
   // fetch. Tests that exercise those feeds override this.
   mockedRankFetch.mockResolvedValue(EMPTY_RANK);
   mockedThesisStaleFetch.mockResolvedValue(EMPTY_THESIS_STALE);
+  mockedThesisChangesFetch.mockResolvedValue(EMPTY_THESIS_CHANGES);
 });
 
 // ---------------------------------------------------------------------------
@@ -737,5 +771,53 @@ describe("AlertsStrip — thesis staleness", () => {
     renderStrip();
     // Pill counts only the cursor feeds (guard's 1), not the stale thesis.
     expect(await screen.findByText("1 new")).toBeInTheDocument();
+  });
+});
+
+describe("AlertsStrip — thesis changes (#2013)", () => {
+  it("renders a RE-THESIS card with the summary, counted in the unseen pill", async () => {
+    stubAll({
+      thesisChanges: { changes: [makeThesisChange()], unseen_count: 1 },
+    });
+    renderStrip();
+    expect(await screen.findByText("RE-THESIS")).toBeInTheDocument();
+    expect(screen.getByText("LGND")).toBeInTheDocument();
+    expect(
+      screen.getByText("stance hold→avoid · type compounder→speculative"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 new")).toBeInTheDocument();
+    // Card links to the instrument page.
+    const link = screen.getByText("LGND").closest("a");
+    expect(link).toHaveAttribute("href", "/instruments/46");
+  });
+
+  it("groups multiple in-window changes per instrument, latest shown", async () => {
+    stubAll({
+      thesisChanges: {
+        changes: [
+          makeThesisChange({ thesis_id: 320, thesis_version: 4, summary: "base 100→120 (+20%)" }),
+          makeThesisChange({ thesis_id: 316 }),
+        ],
+        unseen_count: 2,
+      },
+    });
+    renderStrip();
+    expect(await screen.findByText("base 100→120 (+20%)")).toBeInTheDocument();
+    expect(screen.getByText("×2")).toBeInTheDocument();
+  });
+
+  it("mark-all-read advances the thesis-change cursor to the max listed thesis_id", async () => {
+    const mockedMarkThesisChanges = vi.mocked(alertsApi.markThesisChangesSeen);
+    mockedMarkThesisChanges.mockResolvedValue(undefined);
+    stubAll({
+      thesisChanges: {
+        changes: [makeThesisChange({ thesis_id: 316 }), makeThesisChange({ thesis_id: 320, thesis_version: 4 })],
+        unseen_count: 2,
+      },
+    });
+    renderStrip();
+    const btn = await screen.findByRole("button", { name: /Mark all read/i });
+    await userEvent.click(btn);
+    expect(mockedMarkThesisChanges).toHaveBeenCalledWith(320);
   });
 });

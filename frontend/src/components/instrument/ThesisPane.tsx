@@ -3,7 +3,7 @@ import { CriticVerdictBadge } from "@/components/theses/CriticVerdictBadge";
 import { MemoMarkdown } from "@/components/theses/MemoMarkdown";
 import { StanceBadge } from "@/components/theses/StanceBadge";
 import { EmptyState } from "@/components/states/EmptyState";
-import type { ThesisDetail } from "@/api/types";
+import type { ThesisDetail, ThesisDiff } from "@/api/types";
 
 export interface ThesisPaneProps {
   readonly thesis: ThesisDetail | null;
@@ -67,6 +67,67 @@ function formatDate(iso: string): string {
   return Number.isNaN(d.getTime())
     ? iso
     : d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
+/** #2013 — what changed vs the prior version. Material changes (stance/type/
+ *  target moves, from the server-computed thesis_diff) get a prominent line;
+ *  informational-only diffs (memo/break-condition/provenance drift) get a
+ *  muted one. Expandable detail lists break-condition and memo-section churn. */
+function DiffBlock({ diff }: { diff: ThesisDiff }): JSX.Element | null {
+  const hasDetail =
+    diff.break_conditions_added.length > 0 ||
+    diff.break_conditions_removed.length > 0 ||
+    diff.memo_sections_added.length > 0 ||
+    diff.memo_sections_removed.length > 0 ||
+    diff.memo_sections_changed.length > 0;
+  const hasAnything = diff.summary !== "" || hasDetail || diff.confidence !== null;
+  if (!hasAnything) return null;
+
+  const confidenceNote =
+    diff.confidence !== null && diff.confidence.delta !== null
+      ? `conf ${diff.confidence.delta >= 0 ? "+" : ""}${(diff.confidence.delta * 100).toFixed(0)}pp`
+      : null;
+  const headline = [diff.summary !== "" ? diff.summary : null, confidenceNote]
+    .filter((s): s is string => s !== null)
+    .join(" · ");
+
+  return (
+    <div
+      data-testid="thesis-diff"
+      className={`rounded border px-2 py-1.5 text-xs ${
+        diff.material
+          ? "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200"
+          : "border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400"
+      }`}
+    >
+      <span className="font-medium">Δ vs v{diff.prev_version}:</span>{" "}
+      {headline !== "" ? headline : "minor changes (memo/break conditions)"}
+      {hasDetail && (
+        <details className="mt-1">
+          <summary className="cursor-pointer select-none text-[11px] opacity-80">
+            details
+          </summary>
+          <ul className="mt-1 list-inside list-disc space-y-0.5 text-[11px]">
+            {diff.break_conditions_added.map((c) => (
+              <li key={`bc+${c}`}>break condition added: {c}</li>
+            ))}
+            {diff.break_conditions_removed.map((c) => (
+              <li key={`bc-${c}`}>break condition removed: {c}</li>
+            ))}
+            {diff.memo_sections_added.map((s) => (
+              <li key={`ms+${s}`}>memo section added: {s}</li>
+            ))}
+            {diff.memo_sections_removed.map((s) => (
+              <li key={`ms-${s}`}>memo section removed: {s}</li>
+            ))}
+            {diff.memo_sections_changed.map((s) => (
+              <li key={`ms~${s}`}>memo section revised: {s}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
 }
 
 interface BodyProps {
@@ -144,6 +205,8 @@ function ThesisBody({ thesis, currentPrice, currency }: BodyProps): JSX.Element 
           </span>
         )}
       </div>
+
+      {thesis.diff !== null && thesis.diff !== undefined && <DiffBlock diff={thesis.diff} />}
 
       {hasBand && (
         <div className="rounded bg-slate-50 dark:bg-slate-900/40 p-3">

@@ -1961,3 +1961,114 @@ def test_thesis_staleness_empty_when_held_theses_fresh(client: TestClient) -> No
     resp = client.get("/alerts/thesis-staleness")
     assert resp.status_code == 200
     assert resp.json() == {"items": []}
+
+
+# ---------------------------------------------------------------------------
+# #2013 — thesis-change alert feed (cursor on theses.thesis_id, materiality
+# decided in Python by thesis_diff.compute_thesis_diff)
+# ---------------------------------------------------------------------------
+
+
+def _thesis_change_row(
+    thesis_id: int = 316,
+    instrument_id: int = 46,
+    symbol: str = "LGND",
+    thesis_version: int = 3,
+    stance: str = "avoid",
+    prev_stance: str = "hold",
+    base_value: float | None = 100.0,
+    prev_base_value: float | None = 100.0,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "thesis_id": thesis_id,
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "thesis_version": thesis_version,
+        "created_at": datetime(2026, 7, 15, 10, 0, 0, tzinfo=UTC),
+        "stance": stance,
+        "thesis_type": "value",
+        "confidence_score": 0.6,
+        "buy_zone_low": None,
+        "buy_zone_high": None,
+        "base_value": base_value,
+        "bull_value": None,
+        "bear_value": None,
+        "prev_stance": prev_stance,
+        "prev_thesis_type": "value",
+        "prev_confidence_score": 0.6,
+        "prev_buy_zone_low": None,
+        "prev_buy_zone_high": None,
+        "prev_base_value": prev_base_value,
+        "prev_bull_value": None,
+        "prev_bear_value": None,
+    }
+    return row
+
+
+def test_thesis_changes_get_filters_non_material_and_counts_unseen_above_cursor(
+    client: TestClient,
+) -> None:
+    rows = [
+        # Material (stance change), above the cursor → listed + unseen.
+        _thesis_change_row(thesis_id=320),
+        # Non-material (2% base move, no stance change) → dropped entirely.
+        _thesis_change_row(
+            thesis_id=318,
+            instrument_id=47,
+            symbol="AAPL",
+            stance="hold",
+            prev_stance="hold",
+            base_value=102.0,
+            prev_base_value=100.0,
+        ),
+        # Material but at/below the cursor → listed (in-window) yet NOT unseen.
+        _thesis_change_row(thesis_id=310, instrument_id=48, symbol="GME"),
+    ]
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[{"alerts_last_seen_thesis_change_id": 315}],
+            fetchall_returns=rows,
+        )
+        resp = client.get("/alerts/thesis-changes")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["alerts_last_seen_thesis_change_id"] == 315
+    assert body["unseen_count"] == 1
+    listed = {c["symbol"]: c for c in body["changes"]}
+    assert set(listed) == {"LGND", "GME"}  # AAPL's 2% move is non-material
+    assert listed["LGND"]["summary"] == "stance hold→avoid"
+    assert listed["LGND"]["stance_from"] == "hold"
+    assert listed["LGND"]["stance_to"] == "avoid"
+
+
+def test_thesis_changes_get_null_cursor_counts_all_material(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[{"alerts_last_seen_thesis_change_id": None}],
+            fetchall_returns=[_thesis_change_row()],
+        )
+        resp = client.get("/alerts/thesis-changes")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["alerts_last_seen_thesis_change_id"] is None
+    assert body["unseen_count"] == 1
+    assert len(body["changes"]) == 1
+
+
+def test_thesis_changes_post_seen_writes_update(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn()
+        resp = client.post("/alerts/thesis-changes/seen", json={"seen_through_thesis_id": 320})
+    assert resp.status_code == 204
+    sql = cur.execute.call_args_list[-1].args[0]
+    assert "alerts_last_seen_thesis_change_id" in sql
+    assert "GREATEST" in sql
+    assert "m.max_id IS NOT NULL" in sql
+    cur._parent_conn.commit.assert_called_once()
+
+
+def test_thesis_changes_post_seen_rejects_non_positive(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn()
+        resp = client.post("/alerts/thesis-changes/seen", json={"seen_through_thesis_id": 0})
+    assert resp.status_code == 422

@@ -163,4 +163,40 @@ describe("ThesisPane", () => {
     // The literal "### Valuation" raw line must NOT appear.
     expect(screen.queryByText(/### Valuation/)).not.toBeInTheDocument();
   });
+
+  it("renders the material diff block with summary + expandable detail (#2013)", () => {
+    const thesis = {
+      ...FIXTURE,
+      diff: {
+        prev_version: 2,
+        curr_version: 3,
+        stance: { from_value: "buy", to_value: "watch" },
+        thesis_type: null,
+        confidence: { from_value: 0.8, to_value: 0.65, delta: -0.15 },
+        targets: [],
+        break_conditions_added: ["New CEO departs"],
+        break_conditions_removed: [],
+        memo_sections_added: [],
+        memo_sections_removed: [],
+        memo_sections_changed: ["Valuation"],
+        prompt_version: null,
+        model: null,
+        material: true,
+        summary: "stance buy→watch",
+      },
+    } as unknown as ThesisDetail;
+    render(<ThesisPane thesis={thesis} errored={false} />);
+    const block = screen.getByTestId("thesis-diff");
+    expect(block).toHaveTextContent("Δ vs v2:");
+    expect(block).toHaveTextContent("stance buy→watch");
+    expect(block).toHaveTextContent("conf -15pp");
+    expect(block).toHaveTextContent("break condition added: New CEO departs");
+    expect(block).toHaveTextContent("memo section revised: Valuation");
+  });
+
+  it("omits the diff block on v1 rows (diff null)", () => {
+    const thesis = { ...FIXTURE, diff: null } as unknown as ThesisDetail;
+    render(<ThesisPane thesis={thesis} errored={false} />);
+    expect(screen.queryByTestId("thesis-diff")).not.toBeInTheDocument();
+  });
 });

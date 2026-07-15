@@ -38,6 +38,8 @@ function makeItem(overrides: Partial<ThesisLibraryItem> = {}): ThesisLibraryItem
     run_error: null,
     run_trigger: "manual",
     run_started_at: null,
+    last_change_summary: null,
+    last_change_material: false,
     ...overrides,
   };
 }
