@@ -472,6 +472,55 @@ def list_theses(
     return ThesisLibraryResponse(items=items, total=total, offset=offset, limit=limit)
 
 
+class ThesisDqFindingModel(BaseModel):
+    instrument_id: int
+    symbol: str
+    thesis_id: int
+    dq_class: str
+    severity: str
+    detail: str
+
+
+class ThesisDqReportResponse(BaseModel):
+    scanned: int
+    total_violations: int
+    class_counts: dict[str, int]
+    findings: list[ThesisDqFindingModel]
+    truncated: bool
+
+
+# Registered BEFORE /{instrument_id}: that path param is typed int, so a
+# later-registered literal path would 422 ("dq-audit" fails int parse) —
+# FastAPI matches in registration order with no fall-through.
+@router.get("/dq-audit", response_model=ThesisDqReportResponse)
+def get_thesis_dq_audit(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> ThesisDqReportResponse:
+    """Standing thesis DQ audit (#2014) — compute-on-read, same report the
+    nightly ``thesis_dq_audit`` job logs. Findings are operator-triage
+    candidates (no auto-regen)."""
+    from app.services.thesis_dq_audit import compute_thesis_dq_report
+
+    report = compute_thesis_dq_report(conn)
+    return ThesisDqReportResponse(
+        scanned=report.scanned,
+        total_violations=report.total_violations,
+        class_counts=report.class_counts,
+        findings=[
+            ThesisDqFindingModel(
+                instrument_id=f.instrument_id,
+                symbol=f.symbol,
+                thesis_id=f.thesis_id,
+                dq_class=f.dq_class,
+                severity=f.severity,
+                detail=f.detail,
+            )
+            for f in report.findings
+        ],
+        truncated=report.truncated,
+    )
+
+
 @router.get("/{instrument_id}", response_model=ThesisDetail | None)
 def get_latest_thesis(
     instrument_id: int,

@@ -327,6 +327,7 @@ JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
 # SCHEDULED_JOBS/_INVOKERS, zero job_runs rows ever recorded), renamed at
 # re-registration. Hourly, held ∪ top-ranked scope, batch-bounded.
 JOB_THESIS_REFRESH = "thesis_refresh"
+JOB_THESIS_DQ_AUDIT = "thesis_dq_audit"
 JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
@@ -813,6 +814,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # would fire a multi-minute LLM batch on every dev-stack restart.
         catch_up_on_boot=False,
         prerequisite=_llm_provider_resolvable,
+    ),
+    ScheduledJob(
+        name=JOB_THESIS_DQ_AUDIT,
+        display_name="Thesis DQ audit",
+        source="db",
+        description=(
+            "Nightly full-population DQ scan of the latest stored thesis "
+            "per instrument (#2014): target ordering, buy-zone sanity, "
+            "zoneless buys, base-vs-anchor-close distance, availability "
+            "claim-lint vs the run's context summary, stale price anchors. "
+            "Read-only; findings are operator-triage candidates (no "
+            "auto-regen). row_count = total violations."
+        ),
+        # 05:10 UTC — after the 02:30 fundamentals_sync + 03:30 ownership
+        # repair window; a pure read on the db lane, cheap at any hour.
+        cadence=Cadence.daily(hour=5, minute=10),
+        # A missed night is re-covered next night; nothing accumulates.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_PORTFOLIO_EOD_SNAPSHOT,
@@ -4869,6 +4889,35 @@ def raw_payload_retention_sweep(params: Mapping[str, Any]) -> None:
             dict(sorted(summary.by_source.items(), key=lambda kv: kv[1], reverse=True)),
             summary.dry_run,
         )
+
+
+def thesis_dq_audit() -> None:
+    """Nightly full-population DQ scan of stored theses (#2014).
+
+    Thin wrapper around
+    :func:`app.services.thesis_dq_audit.compute_thesis_dq_report` —
+    read-only, no writes beyond job_runs telemetry. ``row_count`` is the
+    total violation+flag+candidate count (info classes excluded) so ops
+    health / /system/jobs surfaces the number without a new table.
+    Findings themselves are served compute-on-read via
+    ``GET /theses/dq-audit``.
+    """
+    from app.services.thesis_dq_audit import compute_thesis_dq_report
+
+    with _tracked_job(JOB_THESIS_DQ_AUDIT) as tracker:
+        with connect_job() as conn:
+            report = compute_thesis_dq_report(conn)
+        tracker.row_count = report.total_violations
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(report.class_counts.items())) or "clean"
+        if report.total_violations:
+            logger.warning(
+                "thesis_dq_audit: %d violation(s) across %d theses — %s",
+                report.total_violations,
+                report.scanned,
+                summary,
+            )
+        else:
+            logger.info("thesis_dq_audit: clean — scanned=%d (%s)", report.scanned, summary)
 
 
 def financial_facts_retention_sweep() -> None:
