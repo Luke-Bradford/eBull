@@ -151,9 +151,10 @@ def screen_passes(tier: ScreenTier, target: CompanionVars, peer: CompanionVars) 
 
 
 def target_screenable(multiple: str, target: CompanionVars | None) -> bool:
-    """True iff the screen applies to ``multiple`` AND the target carries every
-    companion the tightest tier screens on (tiers screen the same field set at
-    every width, so tier 0 is representative)."""
+    """True iff the screen applies to ``multiple`` AND the given side carries
+    every companion the tightest tier screens on (tiers screen the same field
+    set at every width, so tier 0 is representative). Used for the target gate
+    AND the member-side companions-present check (deploy-window guard)."""
     tiers = _SCREEN_TIERS.get(multiple)
     if tiers is None or target is None:
         return False
@@ -1119,6 +1120,22 @@ def peer_pct_for(
                         },
                     }
             screen_reason = "no_screened_cohort"
+            # Deploy-window guard (Codex ckpt-2 P2): a single-name cascade may
+            # anchor to a cohort materialized BEFORE the sql/228 backfill, whose
+            # companion columns are all NULL — that is "the cohort carries no
+            # companion data", not "no comparable peers exist at any width".
+            # Annotate distinctly so the stored provenance never claims a screen
+            # that had no inputs. (Values are unaffected either way: the
+            # unscreened fallback below IS the pre-v4 walk.) The screened pass
+            # visits every ladder level before landing here, so rows_cache holds
+            # the full member set this walk can ever see.
+            if not any(
+                target_screenable(multiple, _member_companions(r))
+                for cached in rows_cache.values()
+                if cached
+                for r in cached
+            ):
+                screen_reason = "cohort_companions_missing"
 
     # --- unscreened walk (pre-v4 semantics, unchanged) ---
     fallback_meta: dict[str, Any] = {"cohort_n": 0, "excluded_stale_n": 0, "sic_level": 0}

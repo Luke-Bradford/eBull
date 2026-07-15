@@ -580,3 +580,34 @@ def test_companion_screen_end_to_end(ebull_test_conn: psycopg.Connection[tuple])
     ps_entry = basis[0]["multiples"]["ps"]
     assert ps_entry["cohort_screened"] is False
     assert ps_entry["screen"] == {"reason": "no_screened_cohort"}
+
+
+def test_companion_screen_pre_v4_cohort_annotates_companions_missing(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:  # noqa: F811
+    """Codex ckpt-2 P2 (deploy->backfill window): a single-name cascade anchored
+    to a cohort materialized BEFORE the sql/228 backfill (companion columns all
+    NULL) must annotate the fallback as cohort_companions_missing — never the
+    misleading no_screened_cohort — while producing the identical unscreened
+    (pre-v4) peer stats."""
+    conn = ebull_test_conn
+    _seed_screen_cohort(conn)
+    materialize_cohort_members(conn, _AS_OF)
+    # Simulate the pre-v4 member set: strip every companion column.
+    conn.execute("UPDATE fair_value_cohort_members SET net_margin = NULL, rev_growth_yoy = NULL, roe = NULL")
+    conn.commit()
+
+    result = refresh_fair_value_band_batch(conn, [_SCR_TARGET])
+    conn.commit()
+    assert result == {"written": 1, "statused": 0, "failed": 0}
+    basis = conn.execute(
+        "SELECT basis_json FROM fair_value_band_current WHERE instrument_id = %s",
+        (_SCR_TARGET,),
+    ).fetchone()
+    assert basis is not None
+    ps_entry = basis[0]["multiples"]["ps"]
+    assert ps_entry["cohort_screened"] is False
+    assert ps_entry["screen"] == {"reason": "cohort_companions_missing"}
+    # Unscreened stats: all 14 sibling members (near 8 + far 4 + 2 co-targets)
+    # feed the walk; the far 100x members reach the tail unscreened.
+    assert ps_entry["peer"]["p75"] > 17.0

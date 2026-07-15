@@ -65,7 +65,7 @@ A high fallback rate is the finding, not mis-design (verdict): no comparable set
 Per screenable leg, `basis_json.multiples[m]` gains (same reconstructability discipline as `precap_*`/`capped_*`):
 
 - held: `"cohort_screened": true, "screen": {"sic_level": L, "width_tier": i, "survivors_n": n}` (`width_tier` = 0-based index into the frozen tier table; `survivors_n` = post-screen fresh count pre-refine);
-- fallback: `"cohort_screened": false, "screen": {"reason": "no_screened_cohort" | "target_companion_missing"}`.
+- fallback: `"cohort_screened": false, "screen": {"reason": "no_screened_cohort" | "target_companion_missing" | "cohort_companions_missing"}`. The third reason (Codex ckpt-2 P2) marks a member set that carries NO companion data for this multiple at any ladder level — chiefly the deploy→backfill window, where a single-name cascade anchors to a cohort materialized before the sql/228 columns were populated; the provenance must not claim a width-exhausted screen that never had inputs. Values are unaffected (the fallback IS the pre-v4 walk); the knock applies to all three (an unscreened cohort carries less comparability confidence regardless of why).
 
 `pe` legs carry neither key (screen not applicable). Width constants live in code under `METHOD_VERSION` pinning — (tier index, method_version) fully reconstructs the widths.
 
