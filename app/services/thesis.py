@@ -135,7 +135,12 @@ _MAX_TOKENS_CRITIC = 2048
 # writer output field break_predicates — structured twins of prose conditions
 # in the #2012 closed vocabulary, soft-validated (never retry-fails), stored
 # in theses.break_predicates_json as a purely-additive recall channel for
-# the nightly break scan. Context shape unchanged.
+# the nightly break scan. Context shape unchanged. Re-gate round 2 (judge A
+# 0-4-7 loss vs v4 exposed three numeric-defect classes in round 1):
+# worked example abstracted to placeholders (the literal "12 x EPS 3.10 =
+# 37.20" leaked verbatim into a MSFT memo), derived arithmetic must END in a
+# per-share price + band sanity cross-check (a $52.8B P/S "target" shipped),
+# cited figures verbatim-or-show-inputs (fabricated 13.1% gross margin).
 _PROMPT_VERSION = "v5"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
@@ -1080,13 +1085,21 @@ Rules:
        multiple / the context's current multiple), using a non-null ratio
        from `valuation` (pe_ratio, pb_ratio, p_fcf_ratio, ev_ebitda, ...).
      Justify the multiple you chose (own history or peer judgement) and SHOW
-     THE ARITHMETIC in the memo's valuation section, e.g.
-     "base = 12 x EPS 3.10 = 37.20". Derive bear/bull from the SAME basis
+     THE ARITHMETIC in the memo's valuation section, in the form
+     "base = <your multiple> x EPS <the eps from THIS context> = <product>"
+     — computed from THIS context's numbers, never illustrative ones.
+     Derive bear/bull from the SAME basis
      under stated downside/upside assumptions — never copy context landmarks
      (52-week high/low, book value) into target slots. NEVER derive
      per-share targets from absolute-dollar fields (`fcf`, `revenue_ttm`,
      `cash`, `debt`): share count is not in the context, so any such
-     per-share figure would be fabricated.
+     per-share figure would be fabricated. Your arithmetic must END in a
+     per-share price comparable to `price_anchor.close`; if it produces a
+     $B-scale figure (a market cap, a revenue) the basis is invalid —
+     discard it, do not write it into the memo. When a `fair_value_band` is
+     present at ANY quality, sanity-check your derived base against the
+     band's base/bull — an order-of-magnitude disagreement means your
+     arithmetic is wrong, not the band.
   3. Only when NO basis has its inputs (no eps, no book_value, no usable
      ratio+price): null targets are allowed, but the memo MUST then contain
      an explicit abstention line naming the missing input, e.g.
@@ -1117,6 +1130,10 @@ Rules:
     condition. Conditions outside the vocabulary (filing events, guidance
     cuts, competitive losses) are still good break conditions — they simply
     get no twin.
+- Every figure you cite must either be copied VERBATIM (digit-for-digit)
+  from the context, or be a derived number whose inputs are shown inline
+  (e.g. "price 390.10 vs 52w high 524.00 = 25.5% below"). Never state a
+  rounded or recalled approximation as if it were a context figure.
 - Data-availability language MUST mirror the block status fields verbatim
   (#1632 evidence discipline). Never state a block is unavailable, missing, or
   absent when its `available`/status field marks it present. When a block IS
