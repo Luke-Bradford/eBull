@@ -237,24 +237,28 @@ def _to_float(val: object) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _price_inputs_evaluable(
+def _evaluable_prices(
     close_now: float | None,
     close_at_mint: float | None,
     close_now_date: date | None,
     today: date,
-) -> bool:
-    """Shared guard for the price-driven rules (#1988 price_move/band_exit).
+) -> tuple[float, float] | None:
+    """Shared guard for the price-driven rules (#1988 price_move/band_exit):
+    returns the validated (close_now, close_at_mint) pair, or None.
 
     Zero/negative closes are non-price sentinels (day-change spec) and a
     latest close older than the freshness bound means the rules are NOT
     EVALUATED — absent/stale inputs are absent triggers, never fires
-    (#1632 NULL-never-0).
+    (#1632 NULL-never-0). Returning the narrowed pair keeps the caller to
+    a single check (no duplicated None guards, no prod asserts).
     """
     if close_now is None or close_at_mint is None or close_now_date is None:
-        return False
+        return None
     if close_now <= 0 or close_at_mint <= 0:
-        return False
-    return (today - close_now_date).days <= _PRICE_FRESHNESS_MAX_DAYS
+        return None
+    if (today - close_now_date).days > _PRICE_FRESHNESS_MAX_DAYS:
+        return None
+    return (close_now, close_at_mint)
 
 
 def _price_move_fired(close_now: float, close_at_mint: float) -> bool:
@@ -519,25 +523,23 @@ def find_stale_instruments(
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="break_fired"))
             continue
 
-        # Rules 6-7 (#1988): structural price triggers — data-driven regen
+        # Rules 5-6 (#1988): structural price triggers — data-driven regen
         # between the sharper break_fired signal and the cadence catch-all.
         # Both share the price-input guards (positive closes + freshness);
         # a name that is 30%-moved AND outside its band reports price_move
         # (first match wins, existing contract). Self-rearming: firing
         # regenerates the thesis -> new created_at -> new mint baseline.
-        if (
-            close_now is not None
-            and close_at_mint is not None
-            and _price_inputs_evaluable(close_now, close_at_mint, close_now_date, now.date())
-        ):
-            if _price_move_fired(close_now, close_at_mint):
+        prices = _evaluable_prices(close_now, close_at_mint, close_now_date, now.date())
+        if prices is not None:
+            now_px, mint_px = prices
+            if _price_move_fired(now_px, mint_px):
                 stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="price_move"))
                 continue
-            if _band_exit_fired(close_now, close_at_mint, bear_value, bull_value):
+            if _band_exit_fired(now_px, mint_px, bear_value, bull_value):
                 stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="band_exit"))
                 continue
 
-        # Rule 8 (#1988): news storm on a name with a real news baseline.
+        # Rule 7 (#1988): news storm on a name with a real news baseline.
         # Independent of price evaluability — a stale price series must not
         # mask a news trigger.
         if _news_spike_fired(m7, m30):

@@ -29,8 +29,8 @@ from app.services.thesis import (
     _band_exit_fired,
     _call_critic,
     _call_writer,
+    _evaluable_prices,
     _news_spike_fired,
-    _price_inputs_evaluable,
     _price_move_fired,
     _shape_analytics_evidence,
     _shape_price_anchor,
@@ -362,10 +362,10 @@ class TestStalenessV2Predicates:
         close_date: object,
         expected: bool,
     ) -> None:
-        assert (
-            _price_inputs_evaluable(close_now, close_at_mint, close_date, self._TODAY)  # type: ignore[arg-type]
-            is expected
-        )
+        result = _evaluable_prices(close_now, close_at_mint, close_date, self._TODAY)  # type: ignore[arg-type]
+        assert (result is not None) is expected
+        if result is not None:
+            assert result == (close_now, close_at_mint)
 
     @pytest.mark.parametrize(
         ("close_now", "close_at_mint", "expected"),
