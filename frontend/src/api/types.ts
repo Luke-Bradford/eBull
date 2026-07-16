@@ -1272,6 +1272,23 @@ export interface ThesisDiff {
   summary: string;
 }
 
+/** #2051 — machine-checkable break predicate (#2012). `predicate_index`
+ *  aligns with `break_conditions_json`; conditions without a predicate row
+ *  are prose (unmonitored). `fired_at`/`observed_value` non-null iff the
+ *  predicate's at-most-one break event exists. */
+export interface ThesisBreakPredicate {
+  predicate_index: number;
+  metric: string;
+  op: string; // '<' | '>'
+  threshold: number | null; // null for the two regime metrics
+  unit: string;
+  /** 'pending' | 'armed' | 'already_true' | 'already_true_after_gap' */
+  baseline_state: string;
+  baselined_at: string | null;
+  fired_at: string | null;
+  observed_value: number | null;
+}
+
 export interface ThesisDetail {
   thesis_id: number;
   instrument_id: number;
@@ -1300,6 +1317,9 @@ export interface ThesisDetail {
   stale_reason?: string | null;
   /** #2013 — diff vs the version-1 predecessor; null on v1 rows. */
   diff?: ThesisDiff | null;
+  /** #2051 — index-aligned machine-checkable predicates; empty when the
+   *  thesis is unscanned or all conditions are prose. */
+  break_predicates?: ThesisBreakPredicate[];
 }
 
 export interface ThesisHistoryResponse {
@@ -1917,6 +1937,31 @@ export interface ThesisChangesResponse {
   alerts_last_seen_thesis_change_id: number | null;
   unseen_count: number;
   changes: ThesisChange[];
+}
+
+// ---------------------------------------------------------------------------
+// #2051 thesis-break alert feed (app/api/alerts.py, PR-B of #2012)
+// ---------------------------------------------------------------------------
+
+export interface ThesisBreakEventAlert {
+  break_event_id: number;
+  thesis_id: number;
+  instrument_id: number;
+  symbol: string;
+  predicate_index: number;
+  metric: string;
+  op: string; // '<' | '>'
+  threshold: number | null; // null for the two regime metrics
+  observed_value: number;
+  observed_as_of: string | null;
+  source_text: string; // the writer's verbatim break condition
+  fired_at: string;
+}
+
+export interface ThesisBreaksResponse {
+  alerts_last_seen_break_event_id: number | null;
+  unseen_count: number;
+  breaks: ThesisBreakEventAlert[];
 }
 
 // ---------------------------------------------------------------------------

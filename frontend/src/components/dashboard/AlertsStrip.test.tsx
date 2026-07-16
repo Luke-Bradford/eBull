@@ -13,6 +13,8 @@ import type {
   PositionAlertsResponse,
   RankMove,
   RankMovesResponse,
+  ThesisBreakEventAlert,
+  ThesisBreaksResponse,
   ThesisChange,
   ThesisChangesResponse,
   ThesisStalenessResponse,
@@ -34,6 +36,8 @@ vi.mock("@/api/alerts", () => ({
   fetchThesisStaleness: vi.fn(),
   fetchThesisChanges: vi.fn(),
   markThesisChangesSeen: vi.fn(),
+  fetchThesisBreaks: vi.fn(),
+  markThesisBreaksSeen: vi.fn(),
 }));
 
 import * as alertsApi from "@/api/alerts";
@@ -44,6 +48,8 @@ const mockedCoverageFetch = vi.mocked(alertsApi.fetchCoverageStatusDrops);
 const mockedRankFetch = vi.mocked(alertsApi.fetchRankMoves);
 const mockedThesisStaleFetch = vi.mocked(alertsApi.fetchThesisStaleness);
 const mockedThesisChangesFetch = vi.mocked(alertsApi.fetchThesisChanges);
+const mockedThesisBreaksFetch = vi.mocked(alertsApi.fetchThesisBreaks);
+const mockedMarkThesisBreaks = vi.mocked(alertsApi.markThesisBreaksSeen);
 
 const mockedMarkGuard = vi.mocked(alertsApi.markAlertsSeen);
 const mockedMarkPosition = vi.mocked(alertsApi.markPositionAlertsSeen);
@@ -83,6 +89,11 @@ const EMPTY_THESIS_CHANGES: ThesisChangesResponse = {
   unseen_count: 0,
   changes: [],
 };
+const EMPTY_THESIS_BREAKS: ThesisBreaksResponse = {
+  alerts_last_seen_break_event_id: null,
+  unseen_count: 0,
+  breaks: [],
+};
 
 function stubAll(
   overrides: {
@@ -92,6 +103,7 @@ function stubAll(
     rank?: Partial<RankMovesResponse> | Error;
     thesisStale?: Partial<ThesisStalenessResponse> | Error;
     thesisChanges?: Partial<ThesisChangesResponse> | Error;
+    thesisBreaks?: Partial<ThesisBreaksResponse> | Error;
   } = {},
 ) {
   if (overrides.guard instanceof Error) {
@@ -128,6 +140,14 @@ function stubAll(
     mockedThesisChangesFetch.mockResolvedValue({
       ...EMPTY_THESIS_CHANGES,
       ...overrides.thesisChanges,
+    });
+  }
+  if (overrides.thesisBreaks instanceof Error) {
+    mockedThesisBreaksFetch.mockRejectedValue(overrides.thesisBreaks);
+  } else {
+    mockedThesisBreaksFetch.mockResolvedValue({
+      ...EMPTY_THESIS_BREAKS,
+      ...overrides.thesisBreaks,
     });
   }
 }
@@ -192,6 +212,26 @@ function makeThesisChange(overrides: Partial<ThesisChange> = {}): ThesisChange {
     summary: "stance hold→avoid · type compounder→speculative",
     stance_from: "hold",
     stance_to: "avoid",
+    ...overrides,
+  };
+}
+
+function makeThesisBreak(
+  overrides: Partial<ThesisBreakEventAlert> = {},
+): ThesisBreakEventAlert {
+  return {
+    break_event_id: 9,
+    thesis_id: 316,
+    instrument_id: 46,
+    symbol: "LGND",
+    predicate_index: 2,
+    metric: "rsi_14",
+    op: ">",
+    threshold: 70,
+    observed_value: 74.2,
+    observed_as_of: "2026-07-15",
+    source_text: "RSI-14 rises above 70",
+    fired_at: new Date(Date.now() - 25 * 60 * 1000).toISOString(),
     ...overrides,
   };
 }
@@ -819,5 +859,79 @@ describe("AlertsStrip — thesis changes (#2013)", () => {
     const btn = await screen.findByRole("button", { name: /Mark all read/i });
     await userEvent.click(btn);
     expect(mockedMarkThesisChanges).toHaveBeenCalledWith(320);
+  });
+});
+
+describe("AlertsStrip — thesis breaks (#2051)", () => {
+  it("renders a BREAK card with condition + evidence, counted in the unseen pill", async () => {
+    stubAll({
+      thesisBreaks: { breaks: [makeThesisBreak()], unseen_count: 1 },
+    });
+    renderStrip();
+    expect(await screen.findByText("BREAK")).toBeInTheDocument();
+    expect(screen.getByText("LGND")).toBeInTheDocument();
+    expect(screen.getByText("RSI-14 rises above 70")).toBeInTheDocument();
+    expect(
+      screen.getByText("observed 74.2 (threshold > 70) · re-thesis queued"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 new")).toBeInTheDocument();
+    const link = screen.getByText("LGND").closest("a");
+    expect(link).toHaveAttribute("href", "/instruments/46");
+  });
+
+  it("regime metric (null threshold) shows observed value only", async () => {
+    stubAll({
+      thesisBreaks: {
+        breaks: [
+          makeThesisBreak({
+            metric: "sma_50_vs_sma_200",
+            threshold: null,
+            observed_value: -1,
+            source_text: "50-day SMA crosses below the 200-day SMA",
+          }),
+        ],
+        unseen_count: 1,
+      },
+    });
+    renderStrip();
+    expect(
+      await screen.findByText("observed -1 · re-thesis queued"),
+    ).toBeInTheDocument();
+  });
+
+  it("groups multiple in-window fires per instrument, latest shown", async () => {
+    stubAll({
+      thesisBreaks: {
+        breaks: [
+          makeThesisBreak({
+            break_event_id: 11,
+            predicate_index: 4,
+            source_text: "Days-to-cover exceeds 10",
+          }),
+          makeThesisBreak({ break_event_id: 9 }),
+        ],
+        unseen_count: 2,
+      },
+    });
+    renderStrip();
+    expect(await screen.findByText("Days-to-cover exceeds 10")).toBeInTheDocument();
+    expect(screen.getByText("×2")).toBeInTheDocument();
+  });
+
+  it("mark-all-read advances the break cursor to the max listed break_event_id", async () => {
+    mockedMarkThesisBreaks.mockResolvedValue(undefined);
+    stubAll({
+      thesisBreaks: {
+        breaks: [
+          makeThesisBreak({ break_event_id: 9 }),
+          makeThesisBreak({ break_event_id: 11, predicate_index: 4 }),
+        ],
+        unseen_count: 2,
+      },
+    });
+    renderStrip();
+    const btn = await screen.findByRole("button", { name: /Mark all read/i });
+    await userEvent.click(btn);
+    expect(mockedMarkThesisBreaks).toHaveBeenCalledWith(11);
   });
 });

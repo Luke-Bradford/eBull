@@ -21,6 +21,7 @@ import type {
   GuardRejection,
   PositionAlert,
   RankMove,
+  ThesisBreakEventAlert,
   ThesisChange,
   ThesisStalenessItem,
 } from "@/api/types";
@@ -39,6 +40,7 @@ export type Cursors = {
   coverage: number | null;
   rank: number | null;
   thesisChange: number | null;
+  thesisBreak: number | null;
 };
 
 export interface GuardReasonMeta {
@@ -270,12 +272,38 @@ export interface ThesisChangeItem {
   unseen: boolean;
 }
 
+/**
+ * Thesis break (#2051, PR-B of #2012) — one card per instrument whose thesis
+ * had a machine-checked break predicate fire (a genuine false→true
+ * transition; the writer's own premises can never fire). Event feed cursored
+ * on thesis_break_events.break_event_id. A break is a TRIGGER, not a
+ * verdict: the stale rule queues a regeneration and the resulting #2013
+ * RE-THESIS card carries the outcome — this card says why it was queued.
+ */
+export interface ThesisBreakItem {
+  kind: "thesisBreak";
+  tier: Tier;
+  id: string;
+  symbol: string;
+  instrumentId: number;
+  sourceText: string; // latest event's verbatim break condition
+  observedValue: number;
+  threshold: number | null;
+  op: string;
+  count: number;
+  latestTs: string;
+  sortKey: number;
+  maxId: number;
+  unseen: boolean;
+}
+
 export type AlertItem =
   | GuardGroupItem
   | PositionItem
   | CoverageGroupItem
   | RankMoveItem
   | ThesisChangeItem
+  | ThesisBreakItem
   | ThesisStaleItem;
 
 function uniqueSorted(values: (string | null)[]): string[] {
@@ -294,6 +322,7 @@ export function buildAlertModel(
   cursors: Cursors,
   staleTheses: ThesisStalenessItem[] = [],
   thesisChanges: ThesisChange[] = [],
+  thesisBreaks: ThesisBreakEventAlert[] = [],
 ): AlertItem[] {
   const items: AlertItem[] = [];
 
@@ -423,6 +452,40 @@ export function buildAlertModel(
       sortKey: Date.parse(latest.created_at),
       maxId,
       unseen: cursors.thesisChange === null || maxId > cursors.thesisChange,
+    });
+  }
+
+  // Thesis breaks (#2051) → one card per instrument (informational tier —
+  // the break has already queued a regeneration via the break_fired stale
+  // rule; the operator reviews, the engine acts). Multiple in-window fires
+  // on one instrument (distinct predicates) show the latest (highest
+  // break_event_id) and count the rest — same shape as thesis changes.
+  const thesisBreakGroups = new Map<number, ThesisBreakEventAlert[]>();
+  for (const b of thesisBreaks) {
+    const arr = thesisBreakGroups.get(b.instrument_id);
+    if (arr) arr.push(b);
+    else thesisBreakGroups.set(b.instrument_id, [b]);
+  }
+  for (const [instrumentId, members] of thesisBreakGroups) {
+    const maxId = Math.max(...members.map((m) => m.break_event_id));
+    const latest = members.reduce((a, b) =>
+      b.break_event_id > a.break_event_id ? b : a,
+    );
+    items.push({
+      kind: "thesisBreak",
+      tier: "informational",
+      id: `thesisBreak:${instrumentId}`,
+      symbol: latest.symbol,
+      instrumentId,
+      sourceText: latest.source_text,
+      observedValue: latest.observed_value,
+      threshold: latest.threshold,
+      op: latest.op,
+      count: members.length,
+      latestTs: latest.fired_at,
+      sortKey: Date.parse(latest.fired_at),
+      maxId,
+      unseen: cursors.thesisBreak === null || maxId > cursors.thesisBreak,
     });
   }
 

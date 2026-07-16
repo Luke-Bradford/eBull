@@ -79,7 +79,11 @@ def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
     result_iter = iter(cursor_results)
 
     def _on_execute(*_args: Any, **_kwargs: Any) -> None:
-        rows = next(result_iter)
+        # Exhausted → empty set, not StopIteration: ancillary read-path
+        # lookups (#2013 diff predecessors, #2051 break predicates) run on
+        # every detail/history call and default to honest-empty results;
+        # tests that care about them supply explicit result sets in order.
+        rows = next(result_iter, [])
         cur.fetchone.return_value = rows[0] if rows else None
         cur.fetchall.return_value = rows
 
@@ -396,7 +400,7 @@ class TestGetLatestThesisStaleness:
         # monthly cadence + a past created_at is deterministically stale
         # against the real clock.
         conn.execute.return_value.fetchall.return_value = [
-            (100, "AAPL", "monthly", _EARLIER, None, None),
+            (100, "AAPL", "monthly", _EARLIER, None, None, False),
         ]
         resp = client.get("/theses/100")
         _cleanup()
@@ -568,7 +572,7 @@ class TestListTheses:
         )
         conn = _with_conn([[], [row]])
         conn.execute.return_value.fetchall.return_value = [
-            (100, "AAPL", "monthly", _EARLIER, None, None),
+            (100, "AAPL", "monthly", _EARLIER, None, None, False),
         ]
         resp = client.get("/theses")
         _cleanup()
@@ -608,7 +612,7 @@ class TestListTheses:
         }
         conn = _with_conn([[gap_row], [_make_library_row(100, "AAPL")]])
         conn.execute.return_value.fetchall.return_value = [
-            (200, "GME", None, None, None, None),  # no_thesis via find_stale
+            (200, "GME", None, None, None, None, False),  # no_thesis via find_stale
         ]
         resp = client.get("/theses")
         _cleanup()
