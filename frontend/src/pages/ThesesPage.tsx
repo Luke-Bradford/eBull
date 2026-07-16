@@ -73,6 +73,7 @@ function staleLabel(reason: string): string {
   }
   if (reason === "missing_frequency") return "no cadence";
   if (reason === "no_thesis") return "missing";
+  if (reason === "break_fired") return "break";
   return "stale";
 }
 

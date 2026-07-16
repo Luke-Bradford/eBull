@@ -328,6 +328,7 @@ JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
 # re-registration. Hourly, held ∪ top-ranked scope, batch-bounded.
 JOB_THESIS_REFRESH = "thesis_refresh"
 JOB_THESIS_DQ_AUDIT = "thesis_dq_audit"
+JOB_THESIS_BREAK_SCAN = "thesis_break_scan"
 JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
@@ -832,6 +833,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # shares the db lane and fires on the :00/:05 grid — an aligned slot
         # silently loses the lane-acquire race every night, #1707 class).
         cadence=Cadence.daily(hour=5, minute=12),
+        # A missed night is re-covered next night; nothing accumulates.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_THESIS_BREAK_SCAN,
+        display_name="Thesis break scan",
+        source="db",
+        description=(
+            "Nightly evaluation of machine-checkable thesis break "
+            "predicates (#2012): extract closed-vocabulary predicates "
+            "from the latest thesis per instrument, baseline/arm them, "
+            "and emit at most one break event per predicate per thesis "
+            "version on a genuine false→true transition. Fired events "
+            "mark the thesis stale (break_fired) for the existing "
+            "thesis_refresh drain. row_count = events emitted."
+        ),
+        # 05:22 UTC — same reasoning as thesis_dq_audit's 05:12 slot
+        # (post-fundamentals window, NOT 5-min-aligned per the #1707
+        # tick-race), offset so the two nightly thesis scans never
+        # contend for the db lane at the same minute.
+        cadence=Cadence.daily(hour=5, minute=22),
         # A missed night is re-covered next night; nothing accumulates.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
@@ -4920,6 +4943,35 @@ def thesis_dq_audit() -> None:
             )
         else:
             logger.info("thesis_dq_audit: clean — scanned=%d (%s)", report.scanned, summary)
+
+
+def thesis_break_scan() -> None:
+    """Nightly machine-checkable break-predicate scan (#2012).
+
+    Thin wrapper around
+    :func:`app.services.thesis_break_scan.run_thesis_break_scan`.
+    ``row_count`` is the number of break events EMITTED this run (0 on a
+    healthy night — every fire costs a re-thesis, so a quiet scan is the
+    steady state). The full census (baseline states, eval statuses,
+    sector-gated count) lands in the tracker note for /system/jobs.
+    """
+    from app.services.thesis_break_scan import run_thesis_break_scan
+
+    with _tracked_job(JOB_THESIS_BREAK_SCAN) as tracker:
+        with connect_job() as conn:
+            report = run_thesis_break_scan(conn)
+        tracker.row_count = report.fired
+        states = ", ".join(f"{k}={v}" for k, v in sorted(report.state_counts.items())) or "none"
+        evals = ", ".join(f"{k}={v}" for k, v in sorted(report.eval_counts.items())) or "none"
+        tracker.note = (
+            f"theses={report.scanned_theses} predicates={report.predicates_total} "
+            f"inserted={report.predicates_inserted} sector_gated={report.sector_gated} "
+            f"fired={report.fired}; states: {states}; evals: {evals}"
+        )
+        if report.fired:
+            logger.warning("thesis_break_scan: %d break event(s) fired — states: %s", report.fired, states)
+        else:
+            logger.info("thesis_break_scan: no fires — predicates=%d (%s)", report.predicates_total, states)
 
 
 def financial_facts_retention_sweep() -> None:

@@ -123,6 +123,7 @@ from app.workers.scheduler import (
     JOB_SEC_N_PORT_INGEST,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
+    JOB_THESIS_BREAK_SCAN,
     JOB_THESIS_DQ_AUDIT,
     JOB_THESIS_REFRESH,
     JOB_WEEKLY_REPORT,
@@ -182,6 +183,7 @@ from app.workers.scheduler import (
     sec_n_port_ingest,
     sec_nport_filer_directory_sync,
     seed_cost_models,
+    thesis_break_scan,
     thesis_dq_audit,
     thesis_refresh,
     weekly_report,
@@ -305,6 +307,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # #1919 PR-B — hourly scheduled + Admin "Run now". The body carries its
     # own provider-resolvable PREREQ_SKIP guard so the manual path (which
     # bypasses ScheduledJob.prerequisite) is equally gated.
+    JOB_THESIS_BREAK_SCAN: _adapt_zero_arg(thesis_break_scan),
     JOB_THESIS_DQ_AUDIT: _adapt_zero_arg(thesis_dq_audit),
     JOB_THESIS_REFRESH: _adapt_zero_arg(thesis_refresh),
     JOB_PORTFOLIO_EOD_SNAPSHOT: _adapt_zero_arg(portfolio_eod_snapshot_job),

@@ -90,6 +90,7 @@ StaleReason = Literal[
     "event_new_10k",
     "event_new_10q",
     "event_new_8k",
+    "break_fired",
 ]
 
 _VALID_THESIS_TYPES: frozenset[str] = frozenset({"compounder", "value", "turnaround", "speculative"})
@@ -226,7 +227,10 @@ def find_stale_instruments(
       3. filing_events row newer than latest thesis, filing_type in
          ('10-K', '10-K/A', '10-Q', '10-Q/A', '8-K', '8-K/A') → stale
          (reason: "event_new_{10k,10q,8k}")
-      4. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
+      4. a thesis_break_events row exists for the LATEST thesis (#2012,
+         thesis_id equality — never a timestamp filter) → stale
+         (reason: "break_fired")
+      5. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
 
     Every returned instrument must have ``coverage.filings_status =
     'analysable'`` (#268 Chunk J gate). Non-analysable instruments are
@@ -282,7 +286,16 @@ def find_stale_instruments(
             c.review_frequency,
             MAX(t.created_at)                        AS latest_thesis_at,
             le.created_at                            AS latest_event_created_at,
-            le.filing_type                           AS latest_event_filing_type
+            le.filing_type                           AS latest_event_filing_type,
+            EXISTS (
+                SELECT 1 FROM thesis_break_events e
+                WHERE e.thesis_id = (
+                    SELECT t2.thesis_id FROM theses t2
+                    WHERE t2.instrument_id = i.instrument_id
+                    ORDER BY t2.created_at DESC, t2.thesis_version DESC, t2.thesis_id DESC
+                    LIMIT 1
+                )
+            )                                        AS break_fired
         FROM instruments i
         JOIN coverage c ON c.instrument_id = i.instrument_id
         LEFT JOIN theses t ON t.instrument_id = i.instrument_id
@@ -319,6 +332,7 @@ def find_stale_instruments(
         latest_thesis_at: datetime | None = row[3]
         latest_event_created_at: datetime | None = row[4]
         latest_event_filing_type: str | None = row[5]
+        break_fired: bool = bool(row[6])
 
         if latest_thesis_at is None:
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="no_thesis"))
@@ -343,6 +357,20 @@ def find_stale_instruments(
         ):
             reason = _event_reason_for_form(latest_event_filing_type)
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason=reason))
+            continue
+
+        # Rule 5 (#2012): a thesis_break_events row exists for the LATEST
+        # thesis — a machine-checkable break condition transitioned
+        # false→true after arming. Keyed by thesis_id EQUALITY in the
+        # SELECT above (never a fired_at timestamp filter: a delayed scan
+        # can stamp an OLD thesis's event after its replacement was
+        # created, which would re-stale the new thesis forever). Ordered
+        # after the filing-event rules (a break never masks a 10-K/10-Q
+        # trigger) but BEFORE the generic cadence rule — a fired break is
+        # the more specific reason and must not be shadowed by mere age
+        # (Codex ckpt-2); every path regenerates either way.
+        if break_fired:
+            stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="break_fired"))
             continue
 
         threshold = latest_thesis_at + timedelta(days=_REVIEW_FREQUENCY_DAYS[review_frequency])
