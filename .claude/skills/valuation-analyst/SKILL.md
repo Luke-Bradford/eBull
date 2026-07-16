@@ -24,7 +24,7 @@ surface* consumed downstream. Owning skills: `thesis-writer` (produces),
 
 Also distinct: **`fair_value_band`** (#2009, `app/services/fair_value_band.py`)
 is a *deterministic comps evidence band* (bear/base/bull per-share from P/E,
-P/S, P/B + EV/EBITDA percentiles, **fvb_v4** #2032) that feeds the thesis writer
+P/S, P/B + EV/EBITDA percentiles, **fvb_v5** #2043) that feeds the thesis writer
 as passive evidence + a **base-to-base** divergence audit — NOT the thesis
 bear/base/bull. Synthesis rules: peer + own percentiles, blend base,
 **outer-envelope wings clamped by a fixed per-leg cap** (`_R_UP`/`_R_DN`, v2
@@ -41,11 +41,24 @@ frozen absolute width tiers, width-major walk, unscreened fallback +
 `cohort_screened:false` + quality knock; **pe is EXCLUDED** (wrong companion —
 canonical is forward EARNINGS growth, no source; revenue-YoY full-pop refuted
 as churn-only) and a **margin-only degrade stage is refuted** (acceptance-gate
-variant: ~40-45% median leg-p50 churn, no consistent tail win). Residual
-DCTH-class cross-leg base disagreement is #2043, NOT a screen defect. Specs:
+variant: ~40-45% median leg-p50 churn, no consistent tail win). The residual
+DCTH-class cross-leg base disagreement was fixed by the **fvb_v5
+earnings-representativeness gate** (#2043): the pe leg is non-contributing when
+the last-4 FY **net-income** history says earnings are non-representative
+(G1 `median_low(FY NI)≤0` never-profitable / G2 depressed `<med_low/3` / G3
+spiked `>3×med_high` + margin conjunction), Damodaran ch.22/ch.10/ch.35
+source-ruled. Judged on NI, NOT margin (revenue under-captured for
+banks/REITs) and NOT EPS (XBRL FY EPS not split-adjusted). Fail-open <3 FYs.
+Cross-leg-distance arbitration is REFUTED (no canon rule; the >2x mass is
+healthy dispersion — ADBE/AMGN-class); disagreement only flags:
+`basis_json.cross_leg_base_ratio` + quality knock at >3x (the `(max-min)/base`
+spread misses the canonical case — DCTH 36.8x ratio = 1.89 spread). New absent
+reason `earnings_nonrepresentative` (sql/229) when the gate removes the only
+synthesizable leg. Specs:
 `docs/proposals/valuation/2026-07-13-fair-value-band-v2-robustness.md`,
 `docs/proposals/valuation/2026-07-15-fair-value-band-ev-ebitda.md`,
-`docs/proposals/valuation/2026-07-15-fvb-v4-companion-screen.md`.
+`docs/proposals/valuation/2026-07-15-fvb-v4-companion-screen.md`,
+`docs/proposals/valuation/2026-07-15-fvb-v5-earnings-representativeness-gate.md`.
 
 ## What it is
 

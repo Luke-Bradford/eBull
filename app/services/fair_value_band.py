@@ -63,6 +63,13 @@ _R_DN: dict[str, float] = {"pe": 2.7, "ps": 4.3, "pb": 2.4, "ev_ebitda": 1.9}
 _EARNINGS_HIST_MIN_FY = 3
 _EARNINGS_REP_K = 3.0
 
+# v5 (#2043) §4.5: cross-leg base max/min ratio above which the quality tier
+# takes a knock. A DISTINCT calibration from _EARNINGS_REP_K (same value by
+# coincidence): this one is censused on the ok-band ratio distribution (63
+# bands >2x are healthy dispersion; >3x is where the anchor is materially
+# contested), and the two may drift independently on recalibration.
+_CROSS_LEG_RATIO_KNOCK = 3.0
+
 
 @dataclass(frozen=True)
 class CompanionVars:
@@ -535,7 +542,7 @@ def band_quality_status(q: QualityInputs) -> str:
     # v5 (#2043) §4.5 knock: legs disagreeing >3x on base = the band's anchor
     # is materially contested (census: 21 bands >5x sat at "medium" under the
     # spread knock alone).
-    score -= 1 if q.cross_leg_base_ratio > 3.0 else 0
+    score -= 1 if q.cross_leg_base_ratio > _CROSS_LEG_RATIO_KNOCK else 0
     if score >= 7:
         return "high"
     if score >= 4:
