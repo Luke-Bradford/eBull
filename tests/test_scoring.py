@@ -928,14 +928,16 @@ def _quote_row(spread_flag: bool, last: float, bid: float, ask: float) -> dict[s
 
 def _thesis_row(
     confidence_score: float,
-    base_value: float,
-    bear_value: float,
+    base_value: float | None,
+    bear_value: float | None,
     created_at: datetime,
+    stance: str = "buy",
 ) -> dict[str, object]:
     return {
         "confidence_score": confidence_score,
         "base_value": base_value,
         "bear_value": bear_value,
+        "stance": stance,
         "created_at": created_at,
     }
 
@@ -1083,6 +1085,21 @@ class TestComputeScore:
         # Missing thesis is no longer penalised (per #169 — T3→T2
         # promotion relies on deterministic signals, not thesis).
         assert "stale_thesis" not in penalty_names
+
+    def test_thesis_without_targets_notes_stance_not_absence(self) -> None:
+        # #2005: an avoid thesis with null targets must not be reported
+        # as "(no thesis)" in the value-family explanation.
+        conn = _make_fake_conn(
+            fund_rows=[_fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
+            price_row=_price_row(0.05, 0.20, 0.35, 120.0),
+            quote_row=_quote_row(False, 120.0, 119.5, 120.5),
+            thesis_row=_thesis_row(0.20, None, None, _RECENT, stance="avoid"),
+            news_rows=[],
+            avg_red_flag=0.0,
+        )
+        result = compute_score(1, conn, "v1-balanced")
+        assert "thesis without targets, stance: avoid" in result.explanation
+        assert "(no thesis)" not in result.explanation
 
     def test_unknown_model_version_raises(self) -> None:
         conn = MagicMock()
