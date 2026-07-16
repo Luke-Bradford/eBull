@@ -189,3 +189,15 @@ return null so the UI shows "—"/"unavailable", never `0`. Same
 "no-data ≠ zero" rule the risk layer encodes as `benchmark_missing`.
 Verify on a window the data does NOT cover, not just a healthy one.
 (#1817 `_benchmark_closes`.)
+
+## SQL/JSON path wildcards: `[*]` is array-only — against an object it is silently false
+
+`jsonb_path_exists(col, '$.multiples[*].peer_ids')` returns FALSE for every
+row when `multiples` is an OBJECT keyed by name (`{"pe": {...}, "ps": {...}}`)
+— `[*]` matches array elements only; the member wildcard is `.*`
+(`'$.multiples.*.peer_ids'`). No error is raised, so "0 rows have X" from a
+jsonpath probe is indistinguishable from "wrong wildcard": before concluding
+a jsonb feature is absent, `SELECT jsonb_pretty(col) … LIMIT 1` and check the
+actual container shape. (2026-07-16 #2012 session: a `[*]` probe on
+fair_value_band `basis_json.multiples` read shipped #2031 peer_ids provenance
+as missing — a `.*` re-probe found 448/553.)
