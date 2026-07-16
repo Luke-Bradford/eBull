@@ -676,7 +676,7 @@ export function AlertsStrip(): JSX.Element | null {
       Math.max(0, unseenRank - renderedRank) +
       Math.max(0, unseenThesisChange - renderedThesisChange) +
       Math.max(0, unseenThesisBreak - renderedThesisBreak);
-    const msg = `Dismiss all ${totalUnseen} unseen alerts? ${hiddenCount} are not shown above. Review them at /recommendations before dismissing if they might matter.`;
+    const msg = `Dismiss all ${totalUnseen} unseen alerts? ${hiddenCount} are not shown above. Review them at /recommendations (or /theses for thesis alerts) before dismissing if they might matter.`;
     if (!window.confirm(msg)) return;
 
     const promises: Promise<void>[] = [];
