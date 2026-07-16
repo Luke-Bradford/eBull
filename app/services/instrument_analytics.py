@@ -433,23 +433,25 @@ def compute_peer_grades(
 # ---------------------------------------------------------------------------
 def _read_latest_two_fy_facts(
     conn: psycopg.Connection[Any], instrument_id: int
-) -> tuple[dict[str, float] | None, dict[str, float] | None]:
+) -> tuple[dict[str, float] | None, dict[str, float] | None, date | None]:
     """Latest two fiscal years of annual (10-K, fiscal_period='FY') us-gaap facts
-    for the F/Z concepts, one ``{concept: float}`` dict per FY (current, prior).
+    for the F/Z concepts, one ``{concept: float}`` dict per FY (current, prior),
+    plus the current FY's canonical period_end (the as-of for freshness bounds,
+    #2012 — never the scoring timestamp, which would make stale facts look fresh).
 
     DISTINCT ON (concept, fiscal_year) collapses to ONE value per concept per FY,
     preferring the canonical FY-end (``period_end DESC``) then the latest filing
     (``filed_date DESC``). The period_end tie-break guards against a comparative
     prior-year line carried in a later 10-K being mistaken for the FY value.
-    Returns (None, None) when no annual facts are on file.
+    Returns (None, None, None) when no annual facts are on file.
     """
-    rows: list[tuple[int, str, float]]
+    rows: list[tuple[int, str, float, date]]
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT fiscal_year, concept, val FROM (
+            SELECT fiscal_year, concept, val, period_end FROM (
                 SELECT DISTINCT ON (concept, fiscal_year)
-                    fiscal_year, concept, val
+                    fiscal_year, concept, val, period_end
                 FROM financial_facts_raw
                 WHERE instrument_id = %(iid)s
                   AND taxonomy = 'us-gaap'
@@ -474,16 +476,30 @@ def _read_latest_two_fy_facts(
             """,
             {"iid": instrument_id, "concepts": list(PIOTROSKI_ALTMAN_CONCEPTS)},
         )
-        rows = [(int(r[0]), str(r[1]), float(r[2])) for r in cur.fetchall()]
+        rows = [(int(r[0]), str(r[1]), float(r[2]), r[3]) for r in cur.fetchall()]
 
     if not rows:
-        return None, None
-    years = sorted({fy for fy, _, _ in rows}, reverse=True)
+        return None, None, None
+    years = sorted({fy for fy, _, _, _ in rows}, reverse=True)
     curr_year = years[0]
     prior_year = years[1] if len(years) > 1 else None
-    curr = {c: v for fy, c, v in rows if fy == curr_year}
-    prior = {c: v for fy, c, v in rows if fy == prior_year} if prior_year is not None else None
-    return curr, prior
+    curr = {c: v for fy, c, v, _ in rows if fy == curr_year}
+    prior = {c: v for fy, c, v, _ in rows if fy == prior_year} if prior_year is not None else None
+    curr_pes = [pe for fy, _, _, pe in rows if fy == curr_year and pe is not None]
+    return curr, prior, (max(curr_pes) if curr_pes else None)
+
+
+def read_latest_fy_altman(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[AltmanResult, date | None]:
+    """Latest-FY Altman Z″ plus the FY period_end it was computed from.
+
+    The as-of for #2012's freshness bound is the FACT period end — a
+    filing-derived date — never a scoring/scan timestamp. Sector gating
+    (financial firms are outside the Z″ model) is the CALLER's job:
+    this reader computes for whatever instrument it is given."""
+    curr, _prior, period_end = _read_latest_two_fy_facts(conn, instrument_id)
+    if curr is None:
+        return AltmanResult(None, None, reason="no_annual_facts"), None
+    return altman_z2(curr), period_end
 
 
 def _read_13f_delta(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[float | None, date | None]:
@@ -557,7 +573,7 @@ def assemble_instrument_analytics(
         curr = prior = None
         try:
             with conn.transaction():
-                curr, prior = _read_latest_two_fy_facts(conn, instrument_id)
+                curr, prior, _fy_end = _read_latest_two_fy_facts(conn, instrument_id)
         except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
             curr = prior = None
         if curr is None:
