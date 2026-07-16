@@ -398,6 +398,41 @@ class TestValidateWriterOutput:
         # Degenerate but coherent: bear == base == bull is allowed (strict > only).
         _validate_writer_output({**_VALID_WRITER, "bear_value": 200.0, "base_value": 200.0, "bull_value": 200.0})
 
+    # --- anchor-gated buy enforcement (#2010) ---
+
+    def test_buy_with_anchor_requires_base(self) -> None:
+        bad = {**_VALID_WRITER, "base_value": None, "bear_value": None, "bull_value": None}
+        with pytest.raises(ValueError, match="buy stance requires"):
+            _validate_writer_output(bad, require_buy_zone=True)
+
+    def test_buy_with_anchor_requires_zone(self) -> None:
+        bad = {**_VALID_WRITER, "buy_zone_high": None}
+        with pytest.raises(ValueError, match="buy stance requires"):
+            _validate_writer_output(bad, require_buy_zone=True)
+
+    def test_buy_with_anchor_complete_passes(self) -> None:
+        _validate_writer_output(_VALID_WRITER, require_buy_zone=True)
+
+    def test_non_buy_with_anchor_null_targets_passes(self) -> None:
+        # Only the buy stance is gated — watch/hold/avoid may abstain
+        # (tier-3 justification is a prompt rule, not a schema rule).
+        ok = {
+            **_VALID_WRITER,
+            "stance": "watch",
+            "buy_zone_low": None,
+            "buy_zone_high": None,
+            "base_value": None,
+            "bull_value": None,
+            "bear_value": None,
+        }
+        _validate_writer_output(ok, require_buy_zone=True)
+
+    def test_buy_without_anchor_null_zone_passes(self) -> None:
+        # Anchor-less contexts keep the v4 rule: zones are meaningless
+        # without a market price, so nulls remain valid.
+        ok = {**_VALID_WRITER, "buy_zone_low": None, "buy_zone_high": None, "base_value": None}
+        _validate_writer_output(ok, require_buy_zone=False)
+
     def test_nan_band_value_treated_as_missing(self) -> None:
         # NaN coerces to None (via _to_float), so it drops out of the ordering
         # comparison rather than silently passing an incoherent band.

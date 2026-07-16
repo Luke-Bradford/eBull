@@ -12,16 +12,64 @@
     },
     "fundamentals": [
       {
-        "as_of_date": "2018-12-31",
-        "revenue_ttm": 182447000000.0,
+        "as_of_date": "2026-03-31",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -107704000000.0,
+        "cash": null,
+        "debt": 68048000000.0,
+        "net_debt": null,
+        "eps": 20.89,
+        "book_value": null
+      },
+      {
+        "as_of_date": "2025-12-31",
+        "revenue_ttm": null,
         "gross_margin": null,
         "operating_margin": null,
         "fcf": -147782000000.0,
-        "cash": 278793000000.0,
-        "debt": 269929000000.0,
-        "net_debt": -8864000000.0,
+        "cash": null,
+        "debt": 64776000000.0,
+        "net_debt": null,
         "eps": 20.02,
-        "book_value": 135.0189
+        "book_value": 134.4255
+      },
+      {
+        "as_of_date": "2025-09-30",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -119748000000.0,
+        "cash": null,
+        "debt": 69355000000.0,
+        "net_debt": null,
+        "eps": 20.2,
+        "book_value": null
+      },
+      {
+        "as_of_date": "2025-06-30",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -148615000000.0,
+        "cash": null,
+        "debt": 65293000000.0,
+        "net_debt": null,
+        "eps": 19.5,
+        "book_value": null
+      },
+      {
+        "as_of_date": "2025-03-31",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -139693000000.0,
+        "cash": null,
+        "debt": 64980000000.0,
+        "net_debt": null,
+        "eps": 20.38,
+        "book_value": null
       }
     ],
     "filings": [],
@@ -35,12 +83,28 @@
         "importance_score": 0.8333
       },
       {
+        "event_time": "2026-07-11T02:39:48+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Dow Jones Futures: Watch Nvidia, Micron, Sandisk, Robinhood As Market Sets Up; Big Earnings Due",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8303
+      },
+      {
         "event_time": "2026-07-08T22:45:00+00:00",
         "source": "Yahoo Finance",
         "headline": "A Positive Outlook as Q2 Earnings Season Gets Underway",
         "category": "earnings",
         "sentiment_score": 0.0,
         "importance_score": 0.8111
+      },
+      {
+        "event_time": "2026-07-10T22:32:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Q2 Earnings Season Arrives: Can Results Match Upbeat Expectations?",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.81
       },
       {
         "event_time": "2026-07-01T21:53:03+00:00",
@@ -67,6 +131,14 @@
         "importance_score": 0.799
       },
       {
+        "event_time": "2026-07-10T20:11:38+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Meta Leads Again as Markets Look Forward to Earnings: Stock Market Today",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.7986
+      },
+      {
         "event_time": "2026-07-01T20:09:00+00:00",
         "source": "Yahoo Finance",
         "headline": "Wells Fargo Stock Has Lagged Other Banks. Earnings Can Change That.",
@@ -81,30 +153,6 @@
         "category": "earnings",
         "sentiment_score": 0.3333,
         "importance_score": 0.7948
-      },
-      {
-        "event_time": "2026-07-06T18:35:00+00:00",
-        "source": "Yahoo Finance",
-        "headline": "Navigating the Prospects for Bank ETFs as Q2 Earnings Season Kicks Off",
-        "category": "earnings",
-        "sentiment_score": 0.3333,
-        "importance_score": 0.7907
-      },
-      {
-        "event_time": "2026-07-08T17:12:11+00:00",
-        "source": "Yahoo Finance",
-        "headline": "Wise (LSE:WISE) Stock Sees Split Analyst Revisions As Growth Outlook Improves",
-        "category": "earnings",
-        "sentiment_score": 0.6667,
-        "importance_score": 0.7839
-      },
-      {
-        "event_time": "2026-06-29T16:52:42+00:00",
-        "source": "Yahoo Finance",
-        "headline": "Major Banks Poised for Strong Quarterly Results, Outlook, Deutsche Bank Says",
-        "category": "earnings",
-        "sentiment_score": 0.6667,
-        "importance_score": 0.7823
       }
     ],
     "prior_thesis": null,
@@ -181,25 +229,25 @@
       ]
     },
     "price_anchor": {
-      "close": 331.2,
-      "price_date": "2026-07-09",
+      "close": 336.07,
+      "price_date": "2026-07-10",
       "currency": "USD",
       "high_52w": 343.16,
       "low_52w": 279.0,
       "window_days_52w": 252,
-      "return_1w": -0.007284,
-      "return_1m": 0.064952,
-      "return_3m": 0.070459,
-      "return_6m": 0.005662,
-      "return_1y": 0.171911
+      "return_1w": 0.007313,
+      "return_1m": 0.087605,
+      "return_3m": 0.085007,
+      "return_6m": 0.022434,
+      "return_1y": 0.168501
     },
     "valuation": {
       "available": true,
-      "current_price": 336.12,
-      "price_as_of": "2026-07-10T10:34:30.970861+00:00",
+      "current_price": 345.3,
+      "price_as_of": "2026-07-16T11:51:10.487126+00:00",
       "market_cap_live": null,
       "enterprise_value": null,
-      "pe_ratio": 16.089995213020583,
+      "pe_ratio": 16.52943992340833,
       "pb_ratio": null,
       "p_fcf_ratio": null,
       "fcf_yield": null,
@@ -211,12 +259,64 @@
       "operating_margin": null,
       "roa": 0.012019038970712022,
       "roe": 0.16179354902510176,
-      "dividend_yield": 1.7553254789955968,
+      "dividend_yield": 1.7086591369823343,
       "is_complete_ttm": true
+    },
+    "fair_value_band": {
+      "available": true,
+      "reason": "ok",
+      "quality_status": "medium",
+      "bear": 262.945479,
+      "base": 298.550091,
+      "bull": 365.115953,
+      "as_of_date": "2026-07-15",
+      "ttm_end": "2026-03-31",
+      "price_as_of": "2026-07-10",
+      "basis": {
+        "ttm_end": "2026-03-31",
+        "selected": [
+          "pe"
+        ],
+        "multiples": {
+          "pe": {
+            "own": {
+              "p25": 12.587145935612096,
+              "p50": 14.416306347043733,
+              "p75": 15.375777240416351
+            },
+            "peer": {
+              "p25": 12.819856000000001,
+              "p50": 14.1667565,
+              "p75": 17.4780255
+            },
+            "cohort_n": 72,
+            "peer_ids": [
+              1011,
+              1037,
+              1837,
+              2201,
+              7957,
+              8941,
+              9126,
+              10403
+            ],
+            "sic_level": 4,
+            "base_value": 298.5500914373718,
+            "capped_low": false,
+            "own_points": 6,
+            "capped_high": false,
+            "precap_low_mult": 12.587145935612096,
+            "excluded_stale_n": 52,
+            "precap_high_mult": 17.4780255
+          }
+        },
+        "price_as_of": "2026-07-10",
+        "own_capped_total": 0
+      }
     },
     "analytics_evidence": {
       "schema": "iar_v1",
-      "as_of": "2026-07-09T03:37:43.108188+00:00",
+      "as_of": "2026-07-15T12:43:49.910179+00:00",
       "model_version": "v1.3-balanced",
       "piotroski": {
         "score": null,
@@ -236,65 +336,58 @@
           "caveat": "<=135d stale",
           "signal": 0.0,
           "source": "ownership_institutions_observations",
-          "delta_shares_pct": -0.997
+          "delta_shares_pct": -0.988
         },
         "short_interest": {
-          "asof": "2026-06-15",
-          "caveat": "% shares outstanding (public float not ingested); bi-monthly",
-          "signal": 1.0,
-          "source": "finra_short_interest_current",
-          "falling": false,
-          "short_pct": 0.0112,
-          "days_to_cover": 3.55
+          "reason": "no_short_interest_or_shares",
+          "signal": null
         },
         "insider_net_90d": {
           "asof": "2026-06-02",
-          "caveat": null,
-          "signal": 0.4593,
-          "source": "insider_transactions",
-          "net_shares": -219769.0,
-          "shares_outstanding": 2696200000.0
+          "reason": "no_insider_or_shares",
+          "signal": null,
+          "net_shares": -39378.0
         }
       },
       "peer_grade": {
         "peer_key": "4",
-        "peer_n": 616,
+        "peer_n": 619,
         "basis": "run_eligible_sector",
         "families": {
           "value": {
-            "hybrid": 0.8953,
+            "hybrid": 0.8932,
             "percentile": 0.9992
           },
           "quality": {
-            "hybrid": 0.2913,
-            "percentile": 0.1542
+            "hybrid": 0.3818,
+            "percentile": 0.5727
           },
           "momentum": {
-            "hybrid": 0.5855,
-            "percentile": 0.5544
+            "hybrid": 0.6438,
+            "percentile": 0.6438
           },
           "sentiment": {
-            "hybrid": 0.6528,
-            "percentile": 0.8693
+            "hybrid": 0.6589,
+            "percentile": 0.8635
           },
           "confidence": {
-            "hybrid": 0.5,
-            "percentile": 0.5
+            "hybrid": 0.4981,
+            "percentile": 0.4935
           },
           "turnaround": {
-            "hybrid": 0.6876,
-            "percentile": 0.892
+            "hybrid": 0.459,
+            "percentile": 0.3635
           }
         }
       }
     },
     "ta_state": {
-      "sma_50": 314.925,
-      "sma_200": 308.435779,
-      "rsi_14": 56.8793,
-      "macd_histogram": -0.694331,
-      "atr_14": 7.800537,
-      "volatility_30d": 0.212164,
+      "sma_50": 315.4574,
+      "sma_200": 308.574969,
+      "rsi_14": 61.346,
+      "macd_histogram": -0.484935,
+      "atr_14": 7.927335,
+      "volatility_30d": 0.213133,
       "price_vs_sma200": "above",
       "sma_50_200_regime": "golden"
     },

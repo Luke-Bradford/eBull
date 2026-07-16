@@ -13,14 +13,14 @@
     "fundamentals": [
       {
         "as_of_date": "2026-05-02",
-        "revenue_ttm": 3629900000.0,
-        "gross_margin": 0.3295,
-        "operating_margin": 0.0639,
-        "fcf": 597300000.0,
+        "revenue_ttm": 3732800000.0,
+        "gross_margin": 0.3439,
+        "operating_margin": 0.1035,
+        "fcf": 740600000.0,
         "cash": 7397600000.0,
-        "debt": 4164300000.0,
-        "net_debt": -3233300000.0,
-        "eps": 0.77,
+        "debt": null,
+        "net_debt": null,
+        "eps": 1.34,
         "book_value": 13.0201
       },
       {
@@ -34,10 +34,54 @@
         "net_debt": -2140400000.0,
         "eps": 0.77,
         "book_value": 12.1445
+      },
+      {
+        "as_of_date": "2025-11-01",
+        "revenue_ttm": 3808200000.0,
+        "gross_margin": 0.3079,
+        "operating_margin": 0.0464,
+        "fcf": 568700000.0,
+        "cash": 7842700000.0,
+        "debt": null,
+        "net_debt": null,
+        "eps": 0.89,
+        "book_value": 11.8397
+      },
+      {
+        "as_of_date": "2025-08-02",
+        "revenue_ttm": 3847500000.0,
+        "gross_margin": 0.3006,
+        "operating_margin": 0.0265,
+        "fcf": 481700000.0,
+        "cash": 8694400000.0,
+        "debt": null,
+        "net_debt": null,
+        "eps": 0.8,
+        "book_value": 11.5648
+      },
+      {
+        "as_of_date": "2025-05-03",
+        "revenue_ttm": 3673600000.0,
+        "gross_margin": 0.3055,
+        "operating_margin": 0.0037,
+        "fcf": 433900000.0,
+        "cash": 6385800000.0,
+        "debt": null,
+        "net_debt": null,
+        "eps": 0.53,
+        "book_value": 11.15
       }
     ],
     "filings": [],
     "news": [
+      {
+        "event_time": "2026-07-14T12:38:01+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Best Buy vs. GameStop: What Their Revenue Trends Tell Investors About These Specialty Retailers",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.8333
+      },
       {
         "event_time": "2026-06-27T00:01:54+00:00",
         "source": "Yahoo Finance",
@@ -53,6 +97,22 @@
         "category": "earnings",
         "sentiment_score": 0.0,
         "importance_score": 0.7723
+      },
+      {
+        "event_time": "2026-07-16T09:12:01+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Uber Eats expands retail offering with GameStop partnership",
+        "category": "general",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.6
+      },
+      {
+        "event_time": "2026-07-15T12:00:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "GameStop Joins Uber Eats to Deliver Video Games, Collectibles, and Electronics to Customers Nationwide",
+        "category": "general",
+        "sentiment_score": 0.0,
+        "importance_score": 0.6
       },
       {
         "event_time": "2026-06-28T04:15:16+00:00",
@@ -93,42 +153,18 @@
         "category": "general",
         "sentiment_score": 0.0,
         "importance_score": 0.5655
-      },
-      {
-        "event_time": "2026-07-07T20:05:00+00:00",
-        "source": "Yahoo Finance",
-        "headline": "GameStop Stockholders Approve Proposals at 2026 Annual Meeting, Including Increased Share Authorization",
-        "category": "general",
-        "sentiment_score": 0.3333,
-        "importance_score": 0.5647
-      },
-      {
-        "event_time": "2026-07-01T20:01:24+00:00",
-        "source": "Yahoo Finance",
-        "headline": "Is The Jack In The Box Short Squeeze Back On?",
-        "category": "general",
-        "sentiment_score": 0.0,
-        "importance_score": 0.5644
-      },
-      {
-        "event_time": "2026-07-01T19:41:56+00:00",
-        "source": "Yahoo Finance",
-        "headline": "Musk Meme Traders Rush Back Into Tesla When the Stock Hits $420",
-        "category": "general",
-        "sentiment_score": 0.0,
-        "importance_score": 0.5628
       }
     ],
     "prior_thesis": {
-      "version": 2,
+      "version": 3,
       "thesis_type": "turnaround",
-      "stance": "watch",
-      "confidence_score": 0.75,
+      "stance": "buy",
+      "confidence_score": 0.82,
       "buy_zone_low": 20.0,
       "buy_zone_high": 25.0,
-      "base_value": 22.5,
-      "bull_value": 30.0,
-      "bear_value": 15.0,
+      "base_value": 24.0,
+      "bull_value": 32.0,
+      "bear_value": 18.0,
       "break_conditions": [
         "Failure to achieve FY26 EBITDA guidance (>$1.5B)",
         "Material delay or underperformance in eBay integration",
@@ -136,8 +172,8 @@
         "Shareholder approval not secured for $8B merger",
         "3Y volatility exceeds 100% annualized"
       ],
-      "memo_markdown": "### Business Quality & Catalysts\nGameStop's FY25 results demonstrate a structural turnaround, with revenue (+75% YoY) and EBITDA ($1.05B) nearing FY26 guidance. The merger with eBay, now shareholder-approved, positions the company to dominate physical-digital convergence. Management's focus on optimizing 20K+ stores while leveraging eBay's 200M active buyers creates a dual-channel growth engine. Improved gross margin (37% vs 18% in 2022) and operating margin (12% vs -60% in 2022) signal operational discipline.\n\n### Valuation & Metrics\nWith shares currently trading at 1.2x FY26 EBITDA (vs 0.4x in early 2023), the stock appears fairly valued relative to its earnings trajectory. Risk metrics highlight extreme volatility (3Y annualized vol: 97%, beta: 1.14), with 5% VaR at -32% (3Y window). Historical max drawdown of -78% (2022) remains a critical risk, though current fundamentals suggest improved resiliency versus the 2022-2023 collapse. Free cash flow of $1.2B and $2.1B net cash provide downside protection.\n\n### Risks & Stance\nDespite progress, execution risks remain: eBay integration (Q1 2025 target), PlayStation 5 lifecycle risks (2025-2026), and potential regulatory scrutiny of the merger. The 3Y volatility and 16% Calmar ratio (annualized return of 22%) suggest high-risk/high-reward dynamics. We maintain a 'watch' stance, with a tighter buy zone ($20-25) reflecting recent strength. Conviction increases to 75% from 65% due to EBITDA upgrades and merger approval, but we await Q1 2025 results before escalating to 'buy' status.",
-      "created_at": "2026-07-10T09:10:48.587112+00:00"
+      "memo_markdown": "### Business Quality & Catalysts\nGameStop has executed a clear turnaround, evidenced by FY25 revenue growth of 75% YoY, strong EBITDA performance ($1.05B), and a revised FY26 EBITDA outlook of $600M (nearly double FY25). The shareholder-approved merger with eBay represents a transformative catalyst, positioning the company to dominate physical-digital retail convergence. Operational improvements are evident: gross margin has expanded to 37% (vs. 18% in 2022), operating margin to 12% (vs. -60% in 2022), and free cash flow reached $1.2B with $2.1B in net cash. The company\u2019s 20K+ store network and eBay\u2019s 200M active buyers create a dual-channel growth engine.\n\n### Valuation & Metrics\nWith shares trading at 1.2x FY26 EBITDA (vs. 0.4x in early 2023), the stock appears fairly valued relative to its earnings trajectory. Valuation metrics highlight a compelling mix of strength and risk: P/E of 16.36, P/B of 1.68, and EV/EBITDA of 6.31. Strong fundamentals include 20.45% net margin, 13.06% ROE, and a 3.38% free cash flow yield. However, risk metrics underscore volatility: 3Y annualized volatility of 97%, beta of 1.15, and a max drawdown of -62.65% (3Y window). The 5% VaR of -5.37% and worst-day loss of -38.89% remain critical downside risks, though current cash reserves offer some downside protection.\n\n### Risks & Stance\nExecution risks persist: eBay integration (Q1 2025 target), PlayStation 5 lifecycle risks (2025\u20132026), and regulatory scrutiny of the merger. The 3Y volatility and low Calmar ratio (-0.03) indicate high-risk/high-reward dynamics. However, improved fundamentals, merger approval, and EBITDA upgrades increase confidence to 82% from 75%. The current price ($21.89) aligns with the $20\u201325 buy zone, suggesting a $24 base target (11% upside) and $32 bull case (46% upside). We upgrade to 'buy' as the thesis gains momentum, but caution remains around integration risks and market volatility.",
+      "created_at": "2026-07-10T12:47:14.742746+00:00"
     },
     "risk_metrics": {
       "metric_version": "risk_v1",
@@ -212,30 +248,30 @@
       ]
     },
     "price_anchor": {
-      "close": 21.89,
-      "price_date": "2026-07-10",
+      "close": 22.15,
+      "price_date": "2026-07-16",
       "currency": "USD",
       "high_52w": 29.65,
       "low_52w": 19.8501,
       "window_days_52w": 252,
-      "return_1w": -0.038647,
-      "return_1m": -0.020143,
-      "return_3m": -0.05809,
-      "return_6m": 0.03264,
-      "return_1y": -0.050544
+      "return_1w": 0.010493,
+      "return_1m": 0.0365,
+      "return_3m": -0.11753,
+      "return_6m": 0.041471,
+      "return_1y": -0.063203
     },
     "valuation": {
       "available": true,
-      "current_price": 21.89,
-      "price_as_of": "2026-07-10T10:34:34.447923+00:00",
-      "market_cap_live": 9822043000.0,
-      "enterprise_value": 2424443000.0,
-      "pe_ratio": 16.33582089552239,
-      "pb_ratio": 1.6812521182451516,
-      "p_fcf_ratio": 29.504484830279363,
-      "fcf_yield": 0.03389315237166036,
-      "ev_revenue": 0.6494971603086155,
-      "ev_ebitda": 6.277687726566546,
+      "current_price": 22.14,
+      "price_as_of": "2026-07-16T11:52:57.307982+00:00",
+      "market_cap_live": 9934218000.0,
+      "enterprise_value": 2536618000.0,
+      "pe_ratio": 16.52238805970149,
+      "pb_ratio": 1.700453261669605,
+      "p_fcf_ratio": 13.413742911153118,
+      "fcf_yield": 0.07455040749055436,
+      "ev_revenue": 0.6795483283326189,
+      "ev_ebitda": 6.568146038322113,
       "debt_equity_ratio": 0.0,
       "net_margin": 0.20445777968281184,
       "gross_margin": 0.3438705529361337,
@@ -245,9 +281,73 @@
       "dividend_yield": null,
       "is_complete_ttm": true
     },
+    "fair_value_band": {
+      "available": true,
+      "reason": "ok",
+      "quality_status": "low",
+      "bear": 9.297443,
+      "base": 15.270444,
+      "bull": 22.733538,
+      "as_of_date": "2026-07-15",
+      "ttm_end": "2026-05-02",
+      "price_as_of": "2026-07-15",
+      "basis": {
+        "ttm_end": "2026-05-02",
+        "selected": [
+          "pe",
+          "ps"
+        ],
+        "multiples": {
+          "pe": {
+            "own": {
+              "p25": 21.898977272727272,
+              "p50": 30.99233766233766,
+              "p75": 124.20222222222223
+            },
+            "peer": {
+              "p25": null,
+              "p50": null,
+              "p75": null
+            },
+            "cohort_n": 4,
+            "sic_level": 0,
+            "own_points": 13,
+            "earnings_nonrep": "G3_spiked",
+            "excluded_stale_n": 3
+          },
+          "ps": {
+            "own": {
+              "p25": 1.1175961093449838,
+              "p50": 1.8355786749335818,
+              "p75": 2.732677480231836
+            },
+            "peer": {
+              "p25": null,
+              "p50": null,
+              "p75": null
+            },
+            "screen": {
+              "reason": "no_screened_cohort"
+            },
+            "cohort_n": 4,
+            "sic_level": 0,
+            "base_value": 15.270443676826552,
+            "capped_low": false,
+            "own_points": 16,
+            "capped_high": false,
+            "cohort_screened": false,
+            "precap_low_mult": 1.1175961093449838,
+            "excluded_stale_n": 3,
+            "precap_high_mult": 2.732677480231836
+          }
+        },
+        "price_as_of": "2026-07-15",
+        "own_capped_total": 0
+      }
+    },
     "analytics_evidence": {
       "schema": "iar_v1",
-      "as_of": "2026-07-09T03:37:43.108188+00:00",
+      "as_of": "2026-07-15T12:43:49.910179+00:00",
       "model_version": "v1.3-balanced",
       "piotroski": {
         "score": 6,
@@ -268,65 +368,64 @@
           "caveat": "<=135d stale",
           "signal": 0.0,
           "source": "ownership_institutions_observations",
-          "delta_shares_pct": -0.9996
+          "delta_shares_pct": -0.9985
         },
         "short_interest": {
-          "asof": "2026-06-15",
+          "asof": "2026-06-30",
           "caveat": "% shares outstanding (public float not ingested); bi-monthly",
-          "signal": 0.7914,
+          "signal": 0.8021,
           "source": "finra_short_interest_current",
           "falling": true,
-          "short_pct": 0.1272,
-          "days_to_cover": 8.34
+          "short_pct": 0.1245,
+          "days_to_cover": 10.75
         },
         "insider_net_90d": {
-          "asof": "2026-04-13",
           "caveat": null,
-          "signal": 0.4956,
+          "signal": 0.5,
           "source": "insider_transactions",
-          "net_shares": -3912.0,
+          "net_shares": 0.0,
           "shares_outstanding": 448700000.0
         }
       },
       "peer_grade": {
         "peer_key": "7",
-        "peer_n": 312,
+        "peer_n": 313,
         "basis": "run_eligible_sector",
         "families": {
           "value": {
-            "hybrid": 0.7302,
-            "percentile": 0.9984
+            "hybrid": 0.2336,
+            "percentile": 0.0144
           },
           "quality": {
-            "hybrid": 0.6516,
-            "percentile": 0.7099
+            "hybrid": 0.4762,
+            "percentile": 0.647
           },
           "momentum": {
-            "hybrid": 0.4983,
-            "percentile": 0.4952
+            "hybrid": 0.464,
+            "percentile": 0.4425
           },
           "sentiment": {
-            "hybrid": 0.6608,
-            "percentile": 0.8798
+            "hybrid": 0.6618,
+            "percentile": 0.8802
           },
           "confidence": {
-            "hybrid": 0.5,
-            "percentile": 0.5
+            "hybrid": 0.8735,
+            "percentile": 0.9984
           },
           "turnaround": {
-            "hybrid": 0.2613,
-            "percentile": 0.0545
+            "hybrid": 0.534,
+            "percentile": 0.4968
           }
         }
       }
     },
     "ta_state": {
-      "sma_50": 22.2382,
-      "sma_200": 22.882361,
-      "rsi_14": 48.1195,
-      "macd_histogram": 0.044977,
-      "atr_14": 0.664324,
-      "volatility_30d": 0.268541,
+      "sma_50": 22.0246,
+      "sma_200": 22.802097,
+      "rsi_14": 51.3394,
+      "macd_histogram": 0.040576,
+      "atr_14": 0.64445,
+      "volatility_30d": 0.235094,
       "price_vs_sma200": "below",
       "sma_50_200_regime": "death"
     },

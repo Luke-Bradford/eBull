@@ -1,0 +1,467 @@
+{
+  "symbol": "FSLR",
+  "instrument_id": 1117,
+  "context": {
+    "instrument": {
+      "symbol": "FSLR",
+      "company_name": "First Solar, Inc.",
+      "sector": "8",
+      "industry": null,
+      "country": "US",
+      "currency": "USD"
+    },
+    "fundamentals": [
+      {
+        "as_of_date": "2026-03-31",
+        "revenue_ttm": 5419048000.0,
+        "gross_margin": 0.4174,
+        "operating_margin": 0.3176,
+        "fcf": 1667783000.0,
+        "cash": 2362979000.0,
+        "debt": 237182000.0,
+        "net_debt": -2125797000.0,
+        "eps": 15.48,
+        "book_value": 91.9338
+      },
+      {
+        "as_of_date": "2025-12-31",
+        "revenue_ttm": 5219376000.0,
+        "gross_margin": 0.4062,
+        "operating_margin": 0.3059,
+        "fcf": 1187230000.0,
+        "cash": 2803514000.0,
+        "debt": 282593000.0,
+        "net_debt": -2520921000.0,
+        "eps": 14.21,
+        "book_value": 88.8828
+      },
+      {
+        "as_of_date": "2025-09-30",
+        "revenue_ttm": 5050625000.0,
+        "gross_margin": 0.4005,
+        "operating_margin": 0.2981,
+        "fcf": 614521000.0,
+        "cash": 1992173000.0,
+        "debt": 282565000.0,
+        "net_debt": -1709608000.0,
+        "eps": 13.03,
+        "book_value": 84.0134
+      },
+      {
+        "as_of_date": "2025-06-30",
+        "revenue_ttm": 4343437000.0,
+        "gross_margin": 0.4276,
+        "operating_margin": 0.3135,
+        "fcf": -942701000.0,
+        "cash": 1124740000.0,
+        "debt": 327972000.0,
+        "net_debt": -796768000.0,
+        "eps": 11.7,
+        "book_value": 79.6862
+      },
+      {
+        "as_of_date": "2025-03-31",
+        "revenue_ttm": 4256749000.0,
+        "gross_margin": 0.4361,
+        "operating_margin": 0.3224,
+        "fcf": -976292000.0,
+        "cash": 837641000.0,
+        "debt": 327942000.0,
+        "net_debt": -509699000.0,
+        "eps": 11.77,
+        "book_value": 76.3429
+      }
+    ],
+    "filings": [],
+    "news": [
+      {
+        "event_time": "2026-07-08T15:54:27+00:00",
+        "source": "Yahoo Finance",
+        "headline": "First Solar's Quarterly Earnings Preview: What You Need to Know",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.7776
+      },
+      {
+        "event_time": "2026-07-06T20:36:01+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Why Is First Solar (FSLR) Stock Soaring Today",
+        "category": "analyst_note",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.6672
+      },
+      {
+        "event_time": "2026-07-06T16:26:27+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Wall Street Believes This Solar Stock Could Climb 36% Due To A Potential Tariff Decision Next Month",
+        "category": "analyst_note",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.6469
+      },
+      {
+        "event_time": "2026-07-06T23:24:01+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Why Enphase (ENPH) Stock Is Up Today",
+        "category": "general",
+        "sentiment_score": 1.0,
+        "importance_score": 0.581
+      },
+      {
+        "event_time": "2026-07-08T21:50:03+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Here's Why First Solar (FSLR) Fell More Than Broader Market",
+        "category": "general",
+        "sentiment_score": -0.3333,
+        "importance_score": 0.5733
+      },
+      {
+        "event_time": "2026-07-08T21:05:41+00:00",
+        "source": "Yahoo Finance",
+        "headline": "What The Market Refuses To Pay For FSLR",
+        "category": "general",
+        "sentiment_score": 0.0,
+        "importance_score": 0.5697
+      },
+      {
+        "event_time": "2026-07-07T22:09:06+00:00",
+        "source": "Yahoo Finance",
+        "headline": "First Solar (FSLR) Draws Tariff Backed Upgrades, Is It Fairly Valued?",
+        "category": "analyst_note",
+        "sentiment_score": 0.0,
+        "importance_score": 0.5572
+      },
+      {
+        "event_time": "2026-07-06T17:42:55+00:00",
+        "source": "Yahoo Finance",
+        "headline": "First Solar Climbs 5% on Bullish Wells Fargo Note, SolarEdge Jumps 8%, Canadian Solar Gains 7%, Enphase Rises 5%",
+        "category": "general",
+        "sentiment_score": 1.0,
+        "importance_score": 0.5531
+      },
+      {
+        "event_time": "2026-07-08T17:11:32+00:00",
+        "source": "Yahoo Finance",
+        "headline": "First Solar (FSLR) Faces New Securities Fraud Lawsuits As August Investor Deadlines Near",
+        "category": "general",
+        "sentiment_score": -0.6667,
+        "importance_score": 0.5505
+      },
+      {
+        "event_time": "2026-07-06T15:40:02+00:00",
+        "source": "Yahoo Finance",
+        "headline": "FSLR or SHLS: Which Is the Better Value Stock Right Now?",
+        "category": "general",
+        "sentiment_score": 0.0,
+        "importance_score": 0.5431
+      }
+    ],
+    "prior_thesis": null,
+    "risk_metrics": {
+      "metric_version": "risk_v1",
+      "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
+      "windows": [
+        {
+          "window_key": "1y",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.34129811624017725,
+          "excess_cagr_vs_spy": 0.13540630975342005,
+          "vol_annualized": 0.5371349159254007,
+          "beta": 1.5207065674959175,
+          "beta_r2": 0.13402492617042183,
+          "calmar": 0.9544189478811728,
+          "max_drawdown": -0.35759780020908555,
+          "current_drawdown": -0.24647081266692103,
+          "var_5": -0.04674754,
+          "worst_day": -0.11318835050235279,
+          "cagr_status": "partial_window",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "partial_window"
+        },
+        {
+          "window_key": "3y",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.0756355269503971,
+          "excess_cagr_vs_spy": -0.11893934735072177,
+          "vol_annualized": 0.5631114662416223,
+          "beta": 1.2595629389455592,
+          "beta_r2": 0.10498117805790112,
+          "calmar": 0.12627502594141654,
+          "max_drawdown": -0.5989745508782321,
+          "current_drawdown": -0.24647081266692103,
+          "var_5": -0.04796281,
+          "worst_day": -0.17834324665603912,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        },
+        {
+          "window_key": "full",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.33013167231652385,
+          "excess_cagr_vs_spy": 0.1896580285604142,
+          "vol_annualized": 0.5624926529966506,
+          "beta": 1.1094512234018015,
+          "beta_r2": 0.10562180979536702,
+          "calmar": 0.5511614338747383,
+          "max_drawdown": -0.5989745508782321,
+          "current_drawdown": -0.24647081266692103,
+          "var_5": -0.04655788,
+          "worst_day": -0.17834324665603912,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        }
+      ]
+    },
+    "price_anchor": {
+      "close": 227.84,
+      "price_date": "2026-07-10",
+      "currency": "USD",
+      "high_52w": 320.21,
+      "low_52w": 159.6102,
+      "window_days_52w": 252,
+      "return_1w": 0.017143,
+      "return_1m": -0.082585,
+      "return_3m": 0.120819,
+      "return_6m": -0.04302,
+      "return_1y": 0.383427
+    },
+    "valuation": {
+      "available": false,
+      "reason": "no_live_quote"
+    },
+    "fair_value_band": {
+      "available": true,
+      "reason": "ok",
+      "quality_status": "high",
+      "bear": 208.449644,
+      "base": 511.101609,
+      "bull": 1314.435806,
+      "as_of_date": "2026-07-15",
+      "ttm_end": "2026-03-31",
+      "price_as_of": "2026-07-10",
+      "basis": {
+        "ttm_end": "2026-03-31",
+        "selected": [
+          "pe",
+          "ps",
+          "ev_ebitda"
+        ],
+        "multiples": {
+          "pe": {
+            "own": {
+              "p25": 15.758005211319585,
+              "p50": 20.087678571428572,
+              "p75": 37.54231178175662
+            },
+            "peer": {
+              "p25": 28.76029225,
+              "p50": 54.9485305,
+              "p75": 84.91187375
+            },
+            "cohort_n": 37,
+            "peer_ids": [
+              1634,
+              1706,
+              2484,
+              4121,
+              4160,
+              4313,
+              4358,
+              6471
+            ],
+            "sic_level": 4,
+            "base_value": 580.7802582128571,
+            "capped_low": false,
+            "own_points": 15,
+            "capped_high": false,
+            "precap_low_mult": 15.758005211319585,
+            "excluded_stale_n": 14,
+            "precap_high_mult": 84.91187375
+          },
+          "ps": {
+            "own": {
+              "p25": 4.3807146157846075,
+              "p50": 5.406771264039974,
+              "p75": 6.163873485542802
+            },
+            "peer": {
+              "p25": 4.133298,
+              "p50": 8.66183,
+              "p75": 15.53497225
+            },
+            "screen": {
+              "sic_level": 3,
+              "width_tier": 2,
+              "survivors_n": 9
+            },
+            "cohort_n": 81,
+            "peer_ids": [
+              4264,
+              4408,
+              6037,
+              6471,
+              8867,
+              9434,
+              9832,
+              1047933
+            ],
+            "sic_level": 3,
+            "base_value": 354.75241926320706,
+            "capped_low": false,
+            "own_points": 16,
+            "capped_high": false,
+            "cohort_screened": true,
+            "precap_low_mult": 4.133298,
+            "excluded_stale_n": 53,
+            "precap_high_mult": 15.53497225
+          },
+          "ev_ebitda": {
+            "own": {
+              "p25": null,
+              "p50": null,
+              "p75": null
+            },
+            "peer": {
+              "p25": 13.376655750000001,
+              "p50": 23.240141,
+              "p75": 46.3777135
+            },
+            "screen": {
+              "sic_level": 3,
+              "width_tier": 2,
+              "survivors_n": 9
+            },
+            "cohort_n": 37,
+            "net_debt": -2125797000.0,
+            "peer_ids": [
+              4264,
+              4408,
+              6037,
+              6471,
+              8867,
+              9434,
+              9832,
+              1047933
+            ],
+            "sic_level": 3,
+            "base_value": 511.1016091704389,
+            "capped_low": false,
+            "ebitda_ttm": 2271656000.0,
+            "own_points": 0,
+            "capped_high": false,
+            "cohort_screened": true,
+            "precap_low_mult": 13.376655750000001,
+            "excluded_stale_n": 15,
+            "precap_high_mult": 46.3777135
+          }
+        },
+        "price_as_of": "2026-07-10",
+        "own_capped_total": 0,
+        "cross_leg_base_ratio": 1.6371424877639795
+      }
+    },
+    "analytics_evidence": {
+      "schema": "iar_v1",
+      "as_of": "2026-07-15T12:43:49.910179+00:00",
+      "model_version": "v1.3-balanced",
+      "piotroski": {
+        "score": 7,
+        "band": "strong",
+        "components_available": 9,
+        "suppressed": false,
+        "reason": null
+      },
+      "altman_z": {
+        "z": 6.9735,
+        "band": "safe",
+        "reason": null,
+        "suppressed": false
+      },
+      "positioning": {
+        "inst_13f_qoq": {
+          "asof": "2026-06-30",
+          "caveat": "<=135d stale",
+          "signal": 0.0,
+          "source": "ownership_institutions_observations",
+          "delta_shares_pct": -0.9834
+        },
+        "short_interest": {
+          "asof": "2026-06-30",
+          "caveat": "% shares outstanding (public float not ingested); bi-monthly",
+          "signal": 0.9939,
+          "source": "finra_short_interest_current",
+          "falling": true,
+          "short_pct": 0.0765,
+          "days_to_cover": 4.21
+        },
+        "insider_net_90d": {
+          "asof": "2026-06-02",
+          "caveat": null,
+          "signal": 0.4,
+          "source": "insider_transactions",
+          "net_shares": -46265.0,
+          "shares_outstanding": 107453003.0
+        }
+      },
+      "peer_grade": {
+        "peer_key": "8",
+        "peer_n": 348,
+        "basis": "run_eligible_sector",
+        "families": {
+          "value": {
+            "hybrid": 0.5047,
+            "percentile": 0.5158
+          },
+          "quality": {
+            "hybrid": 0.822,
+            "percentile": 0.9698
+          },
+          "momentum": {
+            "hybrid": 0.4136,
+            "percentile": 0.4009
+          },
+          "sentiment": {
+            "hybrid": 0.7125,
+            "percentile": 0.8894
+          },
+          "confidence": {
+            "hybrid": 0.5,
+            "percentile": 0.5
+          },
+          "turnaround": {
+            "hybrid": 0.8855,
+            "percentile": 0.9684
+          }
+        }
+      }
+    },
+    "ta_state": {
+      "sma_50": 249.624,
+      "sma_200": 234.297072,
+      "rsi_14": 41.1635,
+      "macd_histogram": -2.030663,
+      "atr_14": 12.941832,
+      "volatility_30d": 0.592072,
+      "price_vs_sma200": "below",
+      "sma_50_200_regime": "golden"
+    },
+    "earnings_history": [],
+    "analyst_estimates": null
+  }
+}

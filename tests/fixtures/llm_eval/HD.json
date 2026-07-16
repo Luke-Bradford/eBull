@@ -13,15 +13,63 @@
     "fundamentals": [
       {
         "as_of_date": "2026-05-03",
+        "revenue_ttm": 166592000000.0,
+        "gross_margin": 0.3313,
+        "operating_margin": 0.1245,
+        "fcf": 18032000000.0,
+        "cash": 1601000000.0,
+        "debt": 3503000000.0,
+        "net_debt": 1902000000.0,
+        "eps": 14.08,
+        "book_value": 13.9157
+      },
+      {
+        "as_of_date": "2026-02-01",
         "revenue_ttm": 164683000000.0,
         "gross_margin": 0.3332,
         "operating_margin": 0.1268,
         "fcf": 16325000000.0,
-        "cash": 1601000000.0,
-        "debt": 49397000000.0,
-        "net_debt": 47796000000.0,
+        "cash": 1389000000.0,
+        "debt": 53861000000.0,
+        "net_debt": 52472000000.0,
         "eps": 14.23,
-        "book_value": 13.9157
+        "book_value": 12.8645
+      },
+      {
+        "as_of_date": "2025-11-02",
+        "revenue_ttm": 166189000000.0,
+        "gross_margin": 0.3336,
+        "operating_margin": 0.1296,
+        "fcf": 17649000000.0,
+        "cash": 1684000000.0,
+        "debt": 3200000000.0,
+        "net_debt": 1516000000.0,
+        "eps": 14.66,
+        "book_value": 12.1769
+      },
+      {
+        "as_of_date": "2025-08-03",
+        "revenue_ttm": 165054000000.0,
+        "gross_margin": 0.3335,
+        "operating_margin": 0.1309,
+        "fcf": 17872000000.0,
+        "cash": 2804000000.0,
+        "debt": 0.0,
+        "net_debt": -2804000000.0,
+        "eps": 14.71,
+        "book_value": 10.7186
+      },
+      {
+        "as_of_date": "2025-05-04",
+        "revenue_ttm": 162952000000.0,
+        "gross_margin": 0.3334,
+        "operating_margin": 0.1324,
+        "fcf": 18638000000.0,
+        "cash": 1369000000.0,
+        "debt": 38000000.0,
+        "net_debt": -1331000000.0,
+        "eps": 14.73,
+        "book_value": 7.995
       }
     ],
     "filings": [],
@@ -116,9 +164,13 @@
       "available": false,
       "reason": "no_live_quote"
     },
+    "fair_value_band": {
+      "available": false,
+      "reason": "stale_price"
+    },
     "analytics_evidence": {
       "schema": "iar_v1",
-      "as_of": "2026-07-09T03:37:43.108188+00:00",
+      "as_of": "2026-07-15T12:43:49.910179+00:00",
       "model_version": "v1.3-balanced",
       "piotroski": {
         "score": 4,
@@ -139,16 +191,16 @@
           "caveat": "<=135d stale",
           "signal": 0.0,
           "source": "ownership_institutions_observations",
-          "delta_shares_pct": -0.9954
+          "delta_shares_pct": -0.9871
         },
         "short_interest": {
-          "asof": "2026-06-15",
+          "asof": "2026-06-30",
           "caveat": "% shares outstanding (public float not ingested); bi-monthly",
           "signal": 1.0,
           "source": "finra_short_interest_current",
-          "falling": false,
-          "short_pct": 0.0136,
-          "days_to_cover": 3.05
+          "falling": true,
+          "short_pct": 0.0133,
+          "days_to_cover": 2.11
         },
         "insider_net_90d": {
           "asof": "2026-05-21",
@@ -161,32 +213,32 @@
       },
       "peer_grade": {
         "peer_key": "7",
-        "peer_n": 312,
+        "peer_n": 313,
         "basis": "run_eligible_sector",
         "families": {
           "value": {
-            "hybrid": 0.5043,
-            "percentile": 0.5144
+            "hybrid": 0.501,
+            "percentile": 0.5032
           },
           "quality": {
-            "hybrid": 0.6647,
-            "percentile": 0.726
+            "hybrid": 0.5671,
+            "percentile": 0.762
           },
           "momentum": {
-            "hybrid": 0.4175,
-            "percentile": 0.367
+            "hybrid": 0.4162,
+            "percentile": 0.3626
           },
           "sentiment": {
-            "hybrid": 0.4779,
-            "percentile": 0.4263
+            "hybrid": 0.4751,
+            "percentile": 0.4169
           },
           "confidence": {
-            "hybrid": 0.5,
-            "percentile": 0.5
+            "hybrid": 0.5029,
+            "percentile": 0.5096
           },
           "turnaround": {
-            "hybrid": 0.4865,
-            "percentile": 0.4551
+            "hybrid": 0.4065,
+            "percentile": 0.3051
           }
         }
       }

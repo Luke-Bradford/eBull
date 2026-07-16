@@ -165,3 +165,57 @@ def test_altman_sector_gate_blocks_insert(ebull_test_conn: psycopg.Connection[tu
     assert report.sector_gated >= 1
     row = conn.execute("SELECT COUNT(*) FROM thesis_break_predicates WHERE instrument_id = %s", (iid,)).fetchone()
     assert row is not None and int(row[0]) == 0
+
+
+def test_writer_native_predicates_additive_only(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#2010 writer channel: a validated writer predicate fills ONLY an
+    extractor-None slot (origin='writer'); on an index the extractor parsed,
+    the extractor wins unconditionally — a hallucinated writer twin must not
+    suppress or replace the precision channel."""
+    conn = ebull_test_conn
+    iid = 910_003
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+        "VALUES (%s, 'WRTN', 'Writer Native Co', TRUE) ON CONFLICT (instrument_id) DO NOTHING",
+        (iid,),
+    )
+    conn.execute(
+        """
+        INSERT INTO theses (instrument_id, thesis_version, thesis_type, stance, memo_markdown,
+                            break_conditions_json, break_predicates_json)
+        VALUES (%s, 1, 'value', 'watch', 'memo',
+                '["Short interest climbs past a fifth of the register",
+                  "RSI-14 crosses above 70 (overbought territory)"]'::jsonb,
+                '[{"condition_index": 0, "metric": "short_interest_pct_shares_out", "op": ">", "threshold": 20.0},
+                  {"condition_index": 1, "metric": "altman_z", "op": "<", "threshold": 1.8}]'::jsonb)
+        """,
+        (iid,),
+    )
+    conn.execute(
+        """
+        INSERT INTO price_daily (instrument_id, price_date, close, rsi_14)
+        VALUES (%s, CURRENT_DATE, 100.0, 50.0)
+        ON CONFLICT (instrument_id, price_date) DO UPDATE SET rsi_14 = EXCLUDED.rsi_14
+        """,
+        (iid,),
+    )
+    conn.commit()
+
+    run_thesis_break_scan(conn)
+
+    rows = conn.execute(
+        "SELECT predicate_index, metric, op, threshold, origin, source_text "
+        "FROM thesis_break_predicates WHERE instrument_id = %s ORDER BY predicate_index",
+        (iid,),
+    ).fetchall()
+    assert len(rows) == 2
+    # Index 0: extractor fails open (free phrasing) → writer twin fills the slot.
+    assert rows[0][0] == 0
+    assert (rows[0][1], rows[0][2], float(rows[0][3])) == ("short_interest_pct_shares_out", ">", 20.0)
+    assert rows[0][4] == "writer"
+    assert rows[0][5] == "Short interest climbs past a fifth of the register"
+    # Index 1: extractor parsed rsi > 70 → extractor wins; the writer's
+    # contradicting altman twin for the same index is ignored.
+    assert rows[1][0] == 1
+    assert (rows[1][1], rows[1][2], float(rows[1][3])) == ("rsi_14", ">", 70.0)
+    assert rows[1][4] == "extractor"

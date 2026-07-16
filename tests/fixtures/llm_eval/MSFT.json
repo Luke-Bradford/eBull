@@ -13,15 +13,63 @@
     "fundamentals": [
       {
         "as_of_date": "2026-03-31",
+        "revenue_ttm": 318273000000.0,
+        "gross_margin": 0.6831,
+        "operating_margin": 0.468,
+        "fcf": 72916000000.0,
+        "cash": 32105000000.0,
+        "debt": 40262000000.0,
+        "net_debt": 8157000000.0,
+        "eps": 16.8,
+        "book_value": 55.777
+      },
+      {
+        "as_of_date": "2025-12-31",
+        "revenue_ttm": 305453000000.0,
+        "gross_margin": 0.6859,
+        "operating_margin": 0.4667,
+        "fcf": 77412000000.0,
+        "cash": 24296000000.0,
+        "debt": 40262000000.0,
+        "net_debt": 15966000000.0,
+        "eps": 15.99,
+        "book_value": 52.6148
+      },
+      {
+        "as_of_date": "2025-09-30",
+        "revenue_ttm": 293812000000.0,
+        "gross_margin": 0.6876,
+        "operating_margin": 0.4627,
+        "fcf": 78017000000.0,
+        "cash": 28849000000.0,
+        "debt": 43208000000.0,
+        "net_debt": 14359000000.0,
+        "eps": 14.06,
+        "book_value": 48.8399
+      },
+      {
+        "as_of_date": "2025-06-30",
         "revenue_ttm": 281724000000.0,
         "gross_margin": 0.6882,
         "operating_margin": 0.4562,
         "fcf": 71611000000.0,
-        "cash": 32105000000.0,
-        "debt": 40262000000.0,
-        "net_debt": 8157000000.0,
+        "cash": 30242000000.0,
+        "debt": 43151000000.0,
+        "net_debt": 12909000000.0,
         "eps": 13.64,
-        "book_value": 55.777
+        "book_value": 46.2038
+      },
+      {
+        "as_of_date": "2025-03-31",
+        "revenue_ttm": 270010000000.0,
+        "gross_margin": 0.6907,
+        "operating_margin": 0.4523,
+        "fcf": 69365000000.0,
+        "cash": 28828000000.0,
+        "debt": 42881000000.0,
+        "net_debt": 14053000000.0,
+        "eps": 12.93,
+        "book_value": 43.2998
       }
     ],
     "filings": [],
@@ -43,12 +91,36 @@
         "importance_score": 0.8233
       },
       {
+        "event_time": "2026-07-11T00:13:16+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Why tech investors are reevaluating AI investments",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.8183
+      },
+      {
+        "event_time": "2026-07-10T22:12:42+00:00",
+        "source": "Yahoo Finance",
+        "headline": "I\u2019d Put $25,000 in These 2 ETFs Before the Next Earnings Season",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8085
+      },
+      {
         "event_time": "2026-06-29T20:26:15+00:00",
         "source": "Yahoo Finance",
         "headline": "Consumer Internet Stocks Q1 Teardown: Expedia (NASDAQ:EXPE) Vs The Rest",
         "category": "earnings",
         "sentiment_score": 0.0,
         "importance_score": 0.7998
+      },
+      {
+        "event_time": "2026-07-10T20:16:34+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Amazon, Microsoft and Meta Among HSBC Earnings Picks",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.799
       },
       {
         "event_time": "2026-07-08T20:14:46+00:00",
@@ -75,36 +147,12 @@
         "importance_score": 0.798
       },
       {
-        "event_time": "2026-07-04T13:16:18+00:00",
+        "event_time": "2026-07-10T19:13:26+00:00",
         "source": "Yahoo Finance",
-        "headline": "Meta (META) Launches Meta Compute To Sell AI Power Beyond Advertising",
+        "headline": "Microsoft (MSFT) Stock Looks Cheap On Earnings While Cash Flow Drives Debate",
         "category": "earnings",
         "sentiment_score": 0.3333,
-        "importance_score": 0.7646
-      },
-      {
-        "event_time": "2026-06-30T01:08:41+00:00",
-        "source": "Yahoo Finance",
-        "headline": "Wall Street Tech Analyst: Micron Could 4x If the AI Cycle Lasts Through 2030",
-        "category": "analyst_note",
-        "sentiment_score": 0.0,
-        "importance_score": 0.6895
-      },
-      {
-        "event_time": "2026-07-06T19:41:19+00:00",
-        "source": "Yahoo Finance",
-        "headline": "JPMorgan Cuts Wix.com (WIX) Target to $62 in a Sector-Wide Recalibration",
-        "category": "analyst_note",
-        "sentiment_score": -0.6667,
-        "importance_score": 0.6628
-      },
-      {
-        "event_time": "2026-07-08T15:35:24+00:00",
-        "source": "Yahoo Finance",
-        "headline": "Microsoft (MSFT) Unifies Copilot Strategy to Challenge ChatGPT and Claude",
-        "category": "analyst_note",
-        "sentiment_score": 0.0,
-        "importance_score": 0.6427
+        "importance_score": 0.7938
       }
     ],
     "prior_thesis": null,
@@ -181,17 +229,17 @@
       ]
     },
     "price_anchor": {
-      "close": 383.74,
-      "price_date": "2026-07-09",
+      "close": 384.94,
+      "price_date": "2026-07-10",
       "currency": "USD",
       "high_52w": 560.8874,
       "low_52w": 349.21,
       "window_days_52w": 252,
-      "return_1w": -0.016304,
-      "return_1m": -0.050149,
-      "return_3m": 0.027086,
-      "return_6m": -0.196176,
-      "return_1y": -0.236255
+      "return_1w": -0.013227,
+      "return_1m": -0.031597,
+      "return_3m": 0.03819,
+      "return_6m": -0.195546,
+      "return_1y": -0.231009
     },
     "valuation": {
       "available": true,
@@ -204,7 +252,7 @@
       "p_fcf_ratio": 39.74508886938395,
       "fcf_yield": 0.025160341276033987,
       "ev_revenue": 9.131185805896196,
-      "ev_ebitda": 19.510394946192527,
+      "ev_ebitda": 15.738422588908083,
       "debt_equity_ratio": 0.09716507347351502,
       "net_margin": 0.39342325613545603,
       "gross_margin": 0.6830928165442874,
@@ -214,9 +262,140 @@
       "dividend_yield": 0.9125865162778775,
       "is_complete_ttm": true
     },
+    "fair_value_band": {
+      "available": true,
+      "reason": "ok",
+      "quality_status": "medium",
+      "bear": 132.712965,
+      "base": 340.814296,
+      "bull": 994.563704,
+      "as_of_date": "2026-07-15",
+      "ttm_end": "2026-03-31",
+      "price_as_of": "2026-07-10",
+      "basis": {
+        "ttm_end": "2026-03-31",
+        "selected": [
+          "pe",
+          "ps",
+          "ev_ebitda"
+        ],
+        "multiples": {
+          "pe": {
+            "own": {
+              "p25": 28.352392490052054,
+              "p50": 32.54409265325059,
+              "p75": 35.70961616114273
+            },
+            "peer": {
+              "p25": 16.673696,
+              "p50": 25.560779,
+              "p75": 59.2002205
+            },
+            "cohort_n": 70,
+            "peer_ids": [
+              1124,
+              1126,
+              1134,
+              1777,
+              1839,
+              1967,
+              4329,
+              5964
+            ],
+            "sic_level": 4,
+            "base_value": 488.0809218873049,
+            "capped_low": false,
+            "own_points": 16,
+            "capped_high": false,
+            "precap_low_mult": 16.673696,
+            "excluded_stale_n": 47,
+            "precap_high_mult": 59.2002205
+          },
+          "ps": {
+            "own": {
+              "p25": 10.141685540636797,
+              "p50": 11.737075169932414,
+              "p75": 12.679731363806818
+            },
+            "peer": {
+              "p25": 3.0977324999999998,
+              "p50": 4.1732245,
+              "p75": 7.98830025
+            },
+            "screen": {
+              "sic_level": 3,
+              "width_tier": 2,
+              "survivors_n": 9
+            },
+            "cohort_n": 185,
+            "peer_ids": [
+              1126,
+              1777,
+              4378,
+              5653,
+              8851,
+              8939,
+              10198,
+              15235
+            ],
+            "sic_level": 3,
+            "base_value": 340.81429579003895,
+            "capped_low": false,
+            "own_points": 16,
+            "capped_high": false,
+            "cohort_screened": true,
+            "precap_low_mult": 3.0977324999999998,
+            "excluded_stale_n": 158,
+            "precap_high_mult": 12.679731363806818
+          },
+          "ev_ebitda": {
+            "own": {
+              "p25": null,
+              "p50": null,
+              "p75": null
+            },
+            "peer": {
+              "p25": 8.9578515,
+              "p50": 10.5242025,
+              "p75": 26.82634675
+            },
+            "screen": {
+              "sic_level": 3,
+              "width_tier": 2,
+              "survivors_n": 9
+            },
+            "cohort_n": 75,
+            "net_debt": 8157000000.0,
+            "peer_ids": [
+              1126,
+              1777,
+              4378,
+              5653,
+              8851,
+              8939,
+              10198,
+              15235
+            ],
+            "sic_level": 3,
+            "base_value": 260.49409894232065,
+            "capped_low": false,
+            "ebitda_ttm": 184657000000.0,
+            "own_points": 0,
+            "capped_high": false,
+            "cohort_screened": true,
+            "precap_low_mult": 8.9578515,
+            "excluded_stale_n": 56,
+            "precap_high_mult": 26.82634675
+          }
+        },
+        "price_as_of": "2026-07-10",
+        "own_capped_total": 0,
+        "cross_leg_base_ratio": 1.8736736220476808
+      }
+    },
     "analytics_evidence": {
       "schema": "iar_v1",
-      "as_of": "2026-07-09T03:37:43.108188+00:00",
+      "as_of": "2026-07-15T12:43:49.910179+00:00",
       "model_version": "v1.3-balanced",
       "piotroski": {
         "score": 6,
@@ -237,16 +416,16 @@
           "caveat": "<=135d stale",
           "signal": 0.0,
           "source": "ownership_institutions_observations",
-          "delta_shares_pct": -0.9957
+          "delta_shares_pct": -0.987
         },
         "short_interest": {
-          "asof": "2026-06-15",
+          "asof": "2026-06-30",
           "caveat": "% shares outstanding (public float not ingested); bi-monthly",
           "signal": 1.0,
           "source": "finra_short_interest_current",
-          "falling": false,
-          "short_pct": 0.0128,
-          "days_to_cover": 2.61
+          "falling": true,
+          "short_pct": 0.012,
+          "days_to_cover": 1.47
         },
         "insider_net_90d": {
           "asof": "2026-06-15",
@@ -259,43 +438,43 @@
       },
       "peer_grade": {
         "peer_key": "8",
-        "peer_n": 347,
+        "peer_n": 348,
         "basis": "run_eligible_sector",
         "families": {
           "value": {
-            "hybrid": 0.3561,
-            "percentile": 0.0389
+            "hybrid": 0.3569,
+            "percentile": 0.0417
           },
           "quality": {
-            "hybrid": 0.9149,
-            "percentile": 0.9496
+            "hybrid": 0.9291,
+            "percentile": 0.9971
           },
           "momentum": {
-            "hybrid": 0.4566,
-            "percentile": 0.4568
+            "hybrid": 0.4679,
+            "percentile": 0.4641
           },
           "sentiment": {
-            "hybrid": 0.6032,
-            "percentile": 0.7795
+            "hybrid": 0.609,
+            "percentile": 0.7773
           },
           "confidence": {
             "hybrid": 0.5,
             "percentile": 0.5
           },
           "turnaround": {
-            "hybrid": 0.4767,
-            "percentile": 0.4222
+            "hybrid": 0.7414,
+            "percentile": 0.7213
           }
         }
       }
     },
     "ta_state": {
-      "sma_50": 402.6666,
-      "sma_200": 440.919094,
-      "rsi_14": 46.7925,
-      "macd_histogram": 2.493489,
-      "atr_14": 11.504433,
-      "volatility_30d": 0.372588,
+      "sma_50": 402.1618,
+      "sma_200": 440.271361,
+      "rsi_14": 47.5761,
+      "macd_histogram": 2.402335,
+      "atr_14": 12.075691,
+      "volatility_30d": 0.337049,
       "price_vs_sma200": "below",
       "sma_50_200_regime": "death"
     },

@@ -13,37 +13,168 @@
     "fundamentals": [
       {
         "as_of_date": "2026-03-28",
+        "revenue_ttm": 451442000000.0,
+        "gross_margin": 0.4786,
+        "operating_margin": 0.3264,
+        "fcf": 129174000000.0,
+        "cash": 45572000000.0,
+        "debt": 84697000000.0,
+        "net_debt": 39125000000.0,
+        "eps": 8.26,
+        "book_value": 7.2602
+      },
+      {
+        "as_of_date": "2025-12-27",
+        "revenue_ttm": 435617000000.0,
+        "gross_margin": 0.4733,
+        "operating_margin": 0.3238,
+        "fcf": 123324000000.0,
+        "cash": 45317000000.0,
+        "debt": 90497000000.0,
+        "net_debt": 45180000000.0,
+        "eps": 7.9,
+        "book_value": 5.9982
+      },
+      {
+        "as_of_date": "2025-09-27",
         "revenue_ttm": 416161000000.0,
         "gross_margin": 0.4691,
         "operating_margin": 0.3197,
         "fcf": 98767000000.0,
-        "cash": 45572000000.0,
-        "debt": 82700000000.0,
-        "net_debt": 37128000000.0,
+        "cash": 35934000000.0,
+        "debt": 98657000000.0,
+        "net_debt": 62723000000.0,
         "eps": 7.46,
-        "book_value": 7.2602
+        "book_value": 4.991
+      },
+      {
+        "as_of_date": "2025-06-28",
+        "revenue_ttm": 408625000000.0,
+        "gross_margin": 0.4668,
+        "operating_margin": 0.3187,
+        "fcf": 96184000000.0,
+        "cash": 36269000000.0,
+        "debt": 101723000000.0,
+        "net_debt": 65454000000.0,
+        "eps": 6.59,
+        "book_value": 4.431
+      },
+      {
+        "as_of_date": "2025-03-29",
+        "revenue_ttm": 400366000000.0,
+        "gross_margin": 0.4663,
+        "operating_margin": 0.3181,
+        "fcf": 98486000000.0,
+        "cash": 28162000000.0,
+        "debt": 98182000000.0,
+        "net_debt": 70020000000.0,
+        "eps": 6.42,
+        "book_value": 4.4712
       }
     ],
     "filings": [],
-    "news": [],
+    "news": [
+      {
+        "event_time": "2026-07-16T10:40:27+00:00",
+        "source": "Yahoo Finance",
+        "headline": "AI Weekly: SK Hynix shares jump up and down, Apple sues OpenAI",
+        "category": "earnings",
+        "sentiment_score": 1.0,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-16T10:31:16+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Stock market today: Dow, S&P 500, Nasdaq futures mixed ahead of Netflix earnings",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-16T10:00:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "$3.2 trillion rotation from chips to the 'Magnificent 7' has left the S&P 500 going nowhere: Chart of the Day",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-16T08:31:08+00:00",
+        "source": "Yahoo Finance",
+        "headline": "TSMC scores record profit, eyes on retail sales, earnings - What\u2019s moving markets",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-14T12:47:19+00:00",
+        "source": "Yahoo Finance",
+        "headline": "What Could Push GOOGL Stock Higher From Here?",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-14T12:12:53+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Berkshire Hathaway (BRK.B) Stock May Be A Bargain After AI Portfolio Shift",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-14T10:54:11+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Buy Apple stock ahead of expected $200 iPhone price hikes: Morgan Stanley",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-13T05:37:56+00:00",
+        "source": "Yahoo Finance",
+        "headline": "TSMC posts record revenue in second quarter on AI demand",
+        "category": "earnings",
+        "sentiment_score": 1.0,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-16T03:12:22+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Dow Jones Futures: Apple, Google Mask Dell, Sandisk, Micron Sell-Off; J.B. Hunt Jumps Late",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.8141
+      },
+      {
+        "event_time": "2026-07-10T22:12:42+00:00",
+        "source": "Yahoo Finance",
+        "headline": "I\u2019d Put $25,000 in These 2 ETFs Before the Next Earnings Season",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8085
+      }
+    ],
     "prior_thesis": {
-      "version": 1,
+      "version": 5,
       "thesis_type": "compounder",
-      "stance": "buy",
-      "confidence_score": 0.9,
+      "stance": "hold",
+      "confidence_score": 0.75,
       "buy_zone_low": null,
       "buy_zone_high": null,
-      "base_value": null,
-      "bull_value": null,
-      "bear_value": null,
+      "base_value": 309.85,
+      "bull_value": 752.74,
+      "bear_value": 202.32,
       "break_conditions": [
-        "Material disruption in iPhone demand due to macroeconomic collapse",
-        "Regulatory clampdown on AI innovation (core growth driver)",
-        "Breakdown in supply chain resilience (Taiwan/China)",
-        "Sustained failure to innovate in wearables/cloud services"
+        "iPhone demand collapse due to macroeconomic downturn",
+        "Regulatory barriers to AI integration in products",
+        "Geopolitical disruptions in supply chain networks",
+        "Failure to maintain innovation leadership in wearables/cloud",
+        "Valuation multiples (P/E=38.2, P/B=43.5) exceeding historical norms without commensurate growth delivery",
+        "Legal risks from OpenAI trade secrets lawsuit impacting product roadmap or reputation"
       ],
-      "memo_markdown": "### Business Quality\nApple (AAPL) demonstrates textbook compounder attributes with $416B TTM revenue, 46.9% gross margins, and $98.8B free cash flow. Strong balance sheet (net debt/EBITDA < 1x) supports reinvestment. Innovation moats in hardware-software integration and ecosystem lock-in remain intact despite saturation risks in core markets.\n\n### Key Financials\nRecent fundamental snapshot shows 31.97% operating margin, $45.6B cash reserves, and robust 7.46 EPS. While 1Y CAGR appears inflated by partial_window data, 3Y and full-window metrics show 16.7% CAGR vs S&P 500 (benchmark_symbol: SPY). Beta of 1.06 (3Y) reflects moderate volatility, though max drawdown of -33% underscores tail risk exposure.\n\n### Valuation & Risks\nAbsence of current price data limits precise valuation analysis, but book value of $7.26 provides a floor. Risk profile shows 25.5% annualized volatility (3Y) and 2.57% VaR_5, with worst daily loss of -9.4%. While Calmar ratio of 0.51 suggests underperformance during drawdowns, the 1Y window (status: partial_window) shows exceptional risk-adjusted returns (3.36x). Thesis hinges on sustained margin power and services growth, with critical break conditions centered on innovation stagnation or regulatory overreach.",
-      "created_at": "2026-07-09T20:14:19.817578+00:00"
+      "memo_markdown": "### Business Quality\nApple maintains strong compounder characteristics with $451B TTM revenue, 47.86% gross margins, and $45.6B cash reserves. Operating margin of 32.64% and ROA of 33.03% reflect durable profitability. However, rising net debt ($39.1B) and margin pressures from global supply chains pose challenges. The recent lawsuit against OpenAI introduces legal risks that could disrupt AI integration in products.\n\n### Key Financials\nCurrent price of $316.14 is slightly above the fair value band's base value of $309.85 (quality_status: medium). Valuation appears rich (P/E=38.2, P/B=43.5) but fundamentals remain robust with EPS of $8.26 and book value of $7.26. Risk metrics show 16.7% 3Y CAGR (window_key: 3y, as_of_date: 2026-06-12, metric_version: risk_v1), but 25.5% annualized volatility and -33% max drawdown (3Y window) highlight downside risks. Technicals are bullish: price above SMA200 ($272.70), RSI-14=64.6 (neutral), and golden SMA50/200 regime. However, 13F institutional inflows declined 99.6% YoY, and insider net selling (-302,924 shares) raises near-term caution.\n\n### Valuation & Risks\nRich valuations reflect aggressive growth expectations, though dividend yield of 32.9% suggests payout pressure. Fair value band (quality_status: medium) shows a $202.32 to $752.74 range, with current price near the base value. Risk profile includes 25.5% 3Y volatility, -33% max drawdown, and 0.505 Calmar ratio (window_key: 3y). While fundamentals remain strong, valuation stretchedness, legal risks (e.g., AI trade secrets lawsuit), and sector peer grade (quality percentile 95.9%) justify a hold. Break conditions remain critical, and upside requires margin expansion or earnings acceleration without valuation compression.",
+      "created_at": "2026-07-13T13:28:41.010152+00:00"
     },
     "risk_metrics": {
       "metric_version": "risk_v1",
@@ -118,17 +249,17 @@
       ]
     },
     "price_anchor": {
-      "close": 291.22,
-      "price_date": "2026-06-12",
+      "close": 327.91,
+      "price_date": "2026-07-16",
       "currency": "USD",
-      "high_52w": 317.3,
-      "low_52w": 194.7873,
-      "window_days_52w": 248,
-      "return_1w": -0.054235,
-      "return_1m": -0.02514,
-      "return_3m": 0.1653,
-      "return_6m": 0.046531,
-      "return_1y": 0.46488
+      "high_52w": 328.67,
+      "low_52w": 201.1977,
+      "window_days_52w": 252,
+      "return_1w": 0.039664,
+      "return_1m": 0.097607,
+      "return_3m": 0.243733,
+      "return_6m": 0.272829,
+      "return_1y": 0.562483
     },
     "valuation": {
       "available": true,
@@ -138,10 +269,10 @@
       "enterprise_value": 4671914254800.0,
       "pe_ratio": 38.238498789346245,
       "pb_ratio": 43.50404498783935,
-      "p_fcf_ratio": 89.86633408597145,
-      "fcf_yield": 0.011127637620594837,
+      "p_fcf_ratio": 35.86471933051543,
+      "fcf_yield": 0.02788255474089691,
       "ev_revenue": 10.348869300596755,
-      "ev_ebitda": 31.026127339620135,
+      "ev_ebitda": 29.20384466920038,
       "debt_equity_ratio": 0.7953442074917129,
       "net_margin": 0.2715188219084622,
       "gross_margin": 0.47862405358827936,
@@ -151,9 +282,140 @@
       "dividend_yield": 0.3292702232072186,
       "is_complete_ttm": true
     },
+    "fair_value_band": {
+      "available": true,
+      "reason": "ok",
+      "quality_status": "medium",
+      "bear": 151.882286,
+      "base": 298.783697,
+      "bull": 510.862816,
+      "as_of_date": "2026-07-15",
+      "ttm_end": "2026-03-28",
+      "price_as_of": "2026-07-15",
+      "basis": {
+        "ttm_end": "2026-03-28",
+        "selected": [
+          "pe",
+          "ps",
+          "ev_ebitda"
+        ],
+        "multiples": {
+          "pe": {
+            "own": {
+              "p25": 32.3293136790246,
+              "p50": 34.52030379746835,
+              "p75": 36.113523323495656
+            },
+            "peer": {
+              "p25": 33.46023025,
+              "p50": 37.824417,
+              "p75": 61.8477985
+            },
+            "cohort_n": 24,
+            "peer_ids": [
+              1013,
+              1129,
+              4124,
+              4294,
+              4346,
+              4391,
+              6809,
+              10794
+            ],
+            "sic_level": 3,
+            "base_value": 298.78369689354423,
+            "capped_low": false,
+            "own_points": 7,
+            "capped_high": false,
+            "precap_low_mult": 32.3293136790246,
+            "excluded_stale_n": 13,
+            "precap_high_mult": 61.8477985
+          },
+          "ps": {
+            "own": {
+              "p25": 8.213320118154327,
+              "p50": 8.790084298905214,
+              "p75": 9.127707906229334
+            },
+            "peer": {
+              "p25": 4.934768999999999,
+              "p50": 7.6509635,
+              "p75": 11.855698499999999
+            },
+            "screen": {
+              "sic_level": 2,
+              "width_tier": 2,
+              "survivors_n": 15
+            },
+            "cohort_n": 89,
+            "peer_ids": [
+              4273,
+              4294,
+              4346,
+              4391,
+              6456,
+              8912,
+              8946,
+              9589
+            ],
+            "sic_level": 2,
+            "base_value": 253.01122782381816,
+            "capped_low": false,
+            "own_points": 7,
+            "capped_high": false,
+            "cohort_screened": true,
+            "precap_low_mult": 4.934768999999999,
+            "excluded_stale_n": 63,
+            "precap_high_mult": 11.855698499999999
+          },
+          "ev_ebitda": {
+            "own": {
+              "p25": null,
+              "p50": null,
+              "p75": null
+            },
+            "peer": {
+              "p25": 15.9163655,
+              "p50": 31.001234500000002,
+              "p75": 39.65474125
+            },
+            "screen": {
+              "sic_level": 2,
+              "width_tier": 2,
+              "survivors_n": 11
+            },
+            "cohort_n": 45,
+            "net_debt": 39125000000.0,
+            "peer_ids": [
+              4294,
+              4346,
+              4391,
+              6456,
+              8912,
+              8946,
+              9504,
+              9589
+            ],
+            "sic_level": 2,
+            "base_value": 335.4535827576916,
+            "capped_low": true,
+            "ebitda_ttm": 159976000000.0,
+            "own_points": 0,
+            "capped_high": false,
+            "cohort_screened": true,
+            "precap_low_mult": 15.9163655,
+            "excluded_stale_n": 26,
+            "precap_high_mult": 39.65474125
+          }
+        },
+        "price_as_of": "2026-07-15",
+        "own_capped_total": 0,
+        "cross_leg_base_ratio": 1.3258446498322254
+      }
+    },
     "analytics_evidence": {
       "schema": "iar_v1",
-      "as_of": "2026-07-09T03:37:43.108188+00:00",
+      "as_of": "2026-07-15T12:43:49.910179+00:00",
       "model_version": "v1.3-balanced",
       "piotroski": {
         "score": 8,
@@ -174,16 +436,16 @@
           "caveat": "<=135d stale",
           "signal": 0.0,
           "source": "ownership_institutions_observations",
-          "delta_shares_pct": -0.9959
+          "delta_shares_pct": -0.9879
         },
         "short_interest": {
-          "asof": "2026-06-15",
+          "asof": "2026-06-30",
           "caveat": "% shares outstanding (public float not ingested); bi-monthly",
           "signal": 1.0,
           "source": "finra_short_interest_current",
           "falling": true,
-          "short_pct": 0.0098,
-          "days_to_cover": 2.76
+          "short_pct": 0.0096,
+          "days_to_cover": 1.73
         },
         "insider_net_90d": {
           "asof": "2026-06-16",
@@ -196,43 +458,43 @@
       },
       "peer_grade": {
         "peer_key": "3",
-        "peer_n": 936,
+        "peer_n": 937,
         "basis": "run_eligible_sector",
         "families": {
           "value": {
-            "hybrid": 0.1616,
-            "percentile": 0.0016
+            "hybrid": 0.0513,
+            "percentile": 0.0069
           },
           "quality": {
-            "hybrid": 0.8674,
-            "percentile": 0.9439
+            "hybrid": 0.7702,
+            "percentile": 0.9589
           },
           "momentum": {
-            "hybrid": 0.5935,
-            "percentile": 0.6255
+            "hybrid": 0.7866,
+            "percentile": 0.8575
           },
           "sentiment": {
-            "hybrid": 0.4846,
-            "percentile": 0.4487
+            "hybrid": 0.6295,
+            "percentile": 0.8746
           },
           "confidence": {
-            "hybrid": 0.5,
-            "percentile": 0.5
+            "hybrid": 0.8239,
+            "percentile": 0.9963
           },
           "turnaround": {
-            "hybrid": 0.478,
-            "percentile": 0.4268
+            "hybrid": 0.7667,
+            "percentile": 0.8058
           }
         }
       }
     },
     "ta_state": {
-      "sma_50": 285.245202,
-      "sma_200": 266.077624,
-      "rsi_14": 43.9262,
-      "macd_histogram": -3.496412,
-      "atr_14": 7.751069,
-      "volatility_30d": 0.245026,
+      "sma_50": 302.0902,
+      "sma_200": 273.739931,
+      "rsi_14": 70.4633,
+      "macd_histogram": 2.699571,
+      "atr_14": 7.855479,
+      "volatility_30d": 0.33448,
       "price_vs_sma200": "above",
       "sma_50_200_regime": "golden"
     },
