@@ -36,6 +36,10 @@ vi.mock("@/api/budget", () => ({
   createCapitalEvent: vi.fn(),
 }));
 
+// #1992: sections read the authenticated operator for audit attribution.
+const useSessionMock = vi.fn(() => ({ operator: { id: "1", username: "luke" } }));
+vi.mock("@/lib/session", () => ({ useSession: () => useSessionMock() }));
+
 const mockedFetchConfig = vi.mocked(fetchBudgetConfig);
 const mockedFetchEvents = vi.mocked(fetchCapitalEvents);
 const mockedUpdateConfig = vi.mocked(updateBudgetConfig);
@@ -173,7 +177,7 @@ describe("BudgetConfigSection — save", () => {
     expect(mockedUpdateConfig).toHaveBeenCalledWith({
       cash_buffer_pct: 0.1,
       cgt_scenario: undefined,
-      updated_by: "operator",
+      updated_by: "luke",
       reason: "increasing buffer",
     });
   });
@@ -199,7 +203,7 @@ describe("BudgetConfigSection — save", () => {
     expect(mockedUpdateConfig).toHaveBeenCalledWith({
       cash_buffer_pct: undefined,
       cgt_scenario: "basic",
-      updated_by: "operator",
+      updated_by: "luke",
       reason: "switching scenario",
     });
   });

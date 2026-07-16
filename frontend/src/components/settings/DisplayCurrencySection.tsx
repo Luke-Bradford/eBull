@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "@/api/client";
+import { useSession } from "@/lib/session";
 
 const SUPPORTED_CURRENCIES = ["GBP", "USD", "EUR"] as const;
 
@@ -9,6 +10,11 @@ interface Props {
 }
 
 export function DisplayCurrencySection({ currentCurrency, onChanged }: Props) {
+  const { operator } = useSession();
+  // Audit attribution must be a REAL identity — never a fabricated
+  // fallback string (KillSwitchSection precedent, #1992). Block the save
+  // instead when no operator is authenticated.
+  const operatorName = operator?.username ?? null;
   const [selected, setSelected] = useState(currentCurrency);
 
   // Sync local state when prop updates (e.g. after save + reload).
@@ -19,14 +25,14 @@ export function DisplayCurrencySection({ currentCurrency, onChanged }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   async function handleSave() {
-    if (selected === currentCurrency) return;
+    if (selected === currentCurrency || operatorName === null) return;
     setSaving(true);
     setError(null);
     try {
       await apiFetch("/config", {
         method: "PATCH",
         body: JSON.stringify({
-          updated_by: "operator",
+          updated_by: operatorName,
           reason: `Changed display currency to ${selected}`,
           display_currency: selected,
         }),
@@ -66,7 +72,7 @@ export function DisplayCurrencySection({ currentCurrency, onChanged }: Props) {
           <button
             type="button"
             onClick={() => void handleSave()}
-            disabled={saving || selected === currentCurrency}
+            disabled={saving || selected === currentCurrency || operatorName === null}
             className="rounded bg-slate-800 px-3 py-1.5 text-sm font-medium text-white disabled:bg-slate-400"
           >
             {saving ? "Saving..." : "Save currency"}
