@@ -604,22 +604,29 @@ def _evaluate_exit(
     Return (should_exit, reason).
 
     EXIT if any of:
-      1. break_conditions present AND max_red_flag >= EXIT_RED_FLAG_THRESHOLD
-         (thesis break / severe risk event)
+      1. max_red_flag >= EXIT_RED_FLAG_THRESHOLD (severe risk event)
       2. current_price >= thesis.base_value (valuation target achieved)
+
+    Rule 1 deliberately does NOT consult ``break_conditions_json`` (#2050):
+    the old ``break_conditions and …`` term was a tautology on the full
+    population (345/345 latest theses carry a non-empty array) whose only
+    reachable effect was DANGEROUS — a thesis with an empty/missing array and
+    a severe red flag would silently HOLD, gating the severe-risk exit on
+    memo formatting. ADD/BUY already apply the same threshold
+    unconditionally. Thesis BREAKS reach EXIT via regeneration, not here
+    (#2012 Design 1: break event → ``break_fired`` stale → thesis_refresh →
+    the regenerated stance/targets drive this evaluator).
     """
     thesis = details.get("thesis")
     if thesis is None:
         return False, ""
 
-    # Rule 1 — thesis break / severe red flag
+    # Rule 1 — severe risk event
     max_red_flag: float | None = details.get("max_red_flag")
-    break_conditions = thesis.get("break_conditions_json")
-    if break_conditions and max_red_flag is not None and max_red_flag >= EXIT_RED_FLAG_THRESHOLD:
+    if max_red_flag is not None and max_red_flag >= EXIT_RED_FLAG_THRESHOLD:
         return (
             True,
-            f"Thesis break triggered: max_red_flag={max_red_flag:.2f} "
-            f">= threshold={EXIT_RED_FLAG_THRESHOLD}; break conditions present",
+            f"Severe risk event: max_red_flag={max_red_flag:.2f} >= threshold={EXIT_RED_FLAG_THRESHOLD}",
         )
 
     # Rule 2 — valuation target achieved
