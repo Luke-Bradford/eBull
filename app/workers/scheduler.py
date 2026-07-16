@@ -819,7 +819,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_THESIS_DQ_AUDIT,
         display_name="Thesis DQ audit",
-        source="db",
+        # #2052 — own single-job lane. On the catch-all ``db`` lane the 02:30
+        # fundamentals_sync held the lock 6-11h+ nightly (released only by the
+        # next daemon restart) and this job had ZERO scheduled fires ever —
+        # the patient acquire-retry window (~11.5s) is no match for an
+        # hours-long holder. Read-only body → write-disjoint by construction.
+        source="db_thesis_dq",
         description=(
             "Nightly full-population DQ scan of the latest stored thesis "
             "per instrument (#2014): target ordering, buy-zone sanity, "
@@ -829,9 +834,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "auto-regen). row_count = total violations."
         ),
         # 05:12 UTC — after the 02:30 fundamentals_sync + 03:30 ownership
-        # repair window; NOT 5-min-aligned (orchestrator_high_frequency_sync
-        # shares the db lane and fires on the :00/:05 grid — an aligned slot
-        # silently loses the lane-acquire race every night, #1707 class).
+        # repair window so the scan reads the freshest nightly data (the slot
+        # is data-readiness, not lane-contention: since #2052 the job owns its
+        # lane and no longer races the db-lane holders).
         cadence=Cadence.daily(hour=5, minute=12),
         # A missed night is re-covered next night; nothing accumulates.
         catch_up_on_boot=False,
@@ -840,7 +845,12 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     ScheduledJob(
         name=JOB_THESIS_BREAK_SCAN,
         display_name="Thesis break scan",
-        source="db",
+        # #2052 — own single-job lane (same starvation as thesis_dq_audit;
+        # SEPARATE lane, not shared with it — boot catch-up / manual triggers
+        # co-fire the two scans despite the 05:12/05:22 stagger, the
+        # db_liveness/db_retry #1526 lesson). Sole writer of the
+        # thesis_break_* tables; see app/jobs/sources.py::Lane.
+        source="db_thesis_break",
         description=(
             "Nightly evaluation of machine-checkable thesis break "
             "predicates (#2012): extract closed-vocabulary predicates "
@@ -850,10 +860,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "mark the thesis stale (break_fired) for the existing "
             "thesis_refresh drain. row_count = events emitted."
         ),
-        # 05:22 UTC — same reasoning as thesis_dq_audit's 05:12 slot
-        # (post-fundamentals window, NOT 5-min-aligned per the #1707
-        # tick-race), offset so the two nightly thesis scans never
-        # contend for the db lane at the same minute.
+        # 05:22 UTC — same post-fundamentals data-readiness window as
+        # thesis_dq_audit's 05:12 slot; the stagger is layout hygiene only
+        # since #2052 (each scan owns its lane, so they cannot contend).
         cadence=Cadence.daily(hour=5, minute=22),
         # A missed night is re-covered next night; nothing accumulates.
         catch_up_on_boot=False,

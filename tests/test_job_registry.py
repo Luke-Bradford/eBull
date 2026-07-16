@@ -127,6 +127,15 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # per-instrument via the K.3 instrument_lock, not the lane. See
         # app/jobs/sources.py::Lane.
         "llm_thesis",
+        # #2052 — thesis_dq_audit + thesis_break_scan single-job lanes. On the
+        # catch-all ``db`` lane the 02:30 fundamentals_sync held the lock
+        # 6-11h+ nightly (released only by the next daemon restart) and the
+        # 05:12/05:22 audit slots silently starved (dq_audit: zero scheduled
+        # fires ever). SEPARATE lanes (the #1526 db_liveness/db_retry lesson):
+        # boot catch-up / manual triggers co-fire them despite the stagger.
+        # See app/jobs/sources.py::Lane.
+        "db_thesis_dq",
+        "db_thesis_break",
     }
 )
 
@@ -237,6 +246,10 @@ class TestSourceRegistry:
         # sec_bulk_download is a bootstrap-only invoker mapped to its
         # own source bucket per _STAGE_LANE_OVERRIDES.
         assert source_for("sec_bulk_download") == "sec_bulk_download"
+        # #2052 — the two nightly thesis audit scans own single-job lanes so
+        # the 02:30 fundamentals_sync db-lane hold can no longer starve them.
+        assert source_for("thesis_dq_audit") == "db_thesis_dq"
+        assert source_for("thesis_break_scan") == "db_thesis_break"
 
 
 class TestOrchestratorAdapterSourceCoverage:

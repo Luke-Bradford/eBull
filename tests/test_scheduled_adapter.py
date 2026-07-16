@@ -11,6 +11,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX
 from app.services.processes import scheduled_adapter
 from app.services.processes.param_metadata import ParamMetadata
 from app.workers.scheduler import JOB_FUNDAMENTALS_SYNC, JOB_RETRY_DEFERRED
@@ -928,3 +929,109 @@ def test_source_watermark_fresh_false_for_job_without_source(
     row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
     assert row is not None
     assert row.source_watermark_fresh is False
+
+
+# ---------------------------------------------------------------------------
+# #2052 — lane_busy skips must not reset the schedule-missed anchor.
+# ---------------------------------------------------------------------------
+
+
+def _insert_skip(
+    conn: psycopg.Connection[tuple],
+    *,
+    job_name: str,
+    error_msg: str,
+    age: str = "1 minute",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, finished_at, status, row_count, error_msg)
+        VALUES (%(n)s, now() - %(age)s::interval, now() - %(age)s::interval, 'skipped', 0, %(msg)s)
+        """,
+        {"n": job_name, "age": age, "msg": error_msg},
+    )
+
+
+def test_lane_busy_skip_does_not_reset_schedule_missed_anchor(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A fresh ``lane_busy`` skip row must NOT green-wash a starved job: the
+    ``expected_fire_at`` anchor comes from the latest NON-lane-busy terminal
+    (the 2h-old success), so schedule_missed still surfaces. The status pill
+    keeps reading the true latest terminal (idle)."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, finished_at, status)
+        VALUES (%s, now() - interval '2 hours',
+                now() - interval '2 hours' + interval '30 seconds', 'success')
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    _insert_skip(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        error_msg=LANE_BUSY_SKIP_PREFIX + "lane stayed busy through the ~11.50s retry window",
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "schedule_missed" in row.stale_reasons
+    assert row.status == "idle"  # pill still reflects the true latest terminal
+    assert row.last_run is not None
+    assert row.last_run.status == "skipped"
+
+
+def test_all_lane_busy_history_falls_back_to_first_seen_anchor(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A job whose ENTIRE history is lane_busy skips anchors on the persisted
+    ``job_first_seen`` row (#1508 C6 anchor) — the never-started path cannot
+    arm because the skip rows make the terminal row non-null."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_first_seen (job_name, first_seen)
+        VALUES (%s, now() - interval '2 hours')
+        ON CONFLICT (job_name) DO UPDATE SET first_seen = now() - interval '2 hours'
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    _insert_skip(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        error_msg=LANE_BUSY_SKIP_PREFIX + "lane is busy and all 3 lane-retry slots are in use",
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "schedule_missed" in row.stale_reasons
+
+
+def test_prereq_skip_still_resets_schedule_missed_anchor(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Regression pin for today's benign behaviour: a prereq/gate skip means
+    "decided the work needn't run" and DOES reset the overdue clock (e.g.
+    retry_deferred_recommendations skips every cadence benignly)."""
+    _ensure_kill_switch_off(ebull_test_conn)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, finished_at, status)
+        VALUES (%s, now() - interval '2 hours',
+                now() - interval '2 hours' + interval '30 seconds', 'success')
+        """,
+        (JOB_RETRY_DEFERRED,),
+    )
+    _insert_skip(
+        ebull_test_conn,
+        job_name=JOB_RETRY_DEFERRED,
+        error_msg="no timing_deferred BUY/ADD recommendations",
+    )
+    ebull_test_conn.commit()
+
+    row = scheduled_adapter.get_row(ebull_test_conn, process_id=JOB_RETRY_DEFERRED)
+    assert row is not None
+    assert "schedule_missed" not in row.stale_reasons

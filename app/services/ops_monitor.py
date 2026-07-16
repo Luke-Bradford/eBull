@@ -31,7 +31,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import psycopg
 import psycopg.rows
@@ -568,6 +568,17 @@ def reap_orphaned_job_runs(
             {"a": attempt, "n": next_retry_at, "id": int(run_id)},
         )
     return len(reaped)
+
+
+# #2052 — machine-checkable reason prefix for a scheduled fire skipped because
+# its lane stayed busy (``_fire_scheduled_with_lane_retry`` exhausted its
+# acquire-retry window, or no waiter slot was free). Delimiter included so a
+# future ``lane_busyX`` reason can never be misclassified. Consumed by the
+# writer (``app/jobs/runtime.py``) and by the ``expected_fire_at`` anchor
+# exclusion in ``app/services/processes/scheduled_adapter.py`` — a lane-busy
+# skip means "work was due, couldn't start", so unlike prereq/gate skips it
+# must NOT reset the schedule-missed clock.
+LANE_BUSY_SKIP_PREFIX: Final[str] = "lane_busy: "
 
 
 def record_job_skip(
