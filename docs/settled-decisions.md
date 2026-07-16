@@ -788,6 +788,23 @@ Rules:
 
 ---
 
+## Coverage tier → review_frequency assignment (#1996, settled 2026-07-16)
+
+`coverage.review_frequency` is ASSIGNED from the coverage tier, single
+mapping: **T1='weekly', T2='monthly', T3='monthly'**
+(`TIER_REVIEW_FREQUENCY` in `app/services/coverage.py` — the only writer
+source). Every path that sets `coverage_tier` (seed, bootstrap
+gap-filler, promote/demote/override via `_apply_tier_change`) writes the
+frequency in the same statement; sql/233 backfills pre-writer NULL rows.
+
+Rationale: filing-event triggers (#273) cover real-news regen instantly;
+the `review_frequency` age window is only a drift catch-all, and the
+long-horizon posture (not day-trading) needs no daily rewrites. The
+VALUE mapping (daily=1/weekly=7/monthly=30 days) was already settled;
+this fixes the ASSIGNMENT. Matches the 2026-07-10 interim dev seed.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

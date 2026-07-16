@@ -21,12 +21,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.coverage import (
+    _REVIEW_FREQUENCY_DAYS,
     DEMOTE_T1_TO_T2_SCORE,
     DEMOTE_T2_TO_T3_SCORE,
     PROMOTE_T2_TO_T1_CONFIDENCE,
     PROMOTE_T2_TO_T1_SCORE,
     PROMOTE_T3_TO_T2_SCORE,
     TIER_1_CAP,
+    TIER_REVIEW_FREQUENCY,
     InstrumentSnapshot,
     ReviewResult,
     TierChange,
@@ -37,6 +39,7 @@ from app.services.coverage import (
     _is_thesis_fresh,
     override_tier,
     review_coverage,
+    review_frequency_for_tier,
     seed_coverage,
 )
 
@@ -834,6 +837,19 @@ class TestReviewCoverage:
         assert len(update_calls) == 1
         assert len(insert_calls) == 1
 
+    @patch("app.services.coverage._utcnow", return_value=_NOW)
+    def test_tier_change_writes_review_frequency(self, _mock_now: MagicMock) -> None:
+        """#1996: every tier write assigns review_frequency from the settled
+        mapping in the same UPDATE statement."""
+        snap = _snap(instrument_id=1, current_tier=3, total_score=0.60)  # promotes 3→2
+        conn = self._mock_conn_for_snapshots([snap])
+        review_coverage(conn)
+        update_calls = [(sql, params) for sql, params in self._writes if "UPDATE coverage" in sql]
+        assert len(update_calls) == 1
+        sql, params = update_calls[0]
+        assert "review_frequency" in sql
+        assert params["freq"] == "monthly"  # new tier 2 → monthly
+
 
 # ---------------------------------------------------------------------------
 # override_tier
@@ -938,6 +954,31 @@ class TestOverrideTier:
 
 
 # ---------------------------------------------------------------------------
+# Tier → review_frequency mapping (#1996)
+# ---------------------------------------------------------------------------
+
+
+class TestTierReviewFrequencyMapping:
+    def test_settled_mapping(self) -> None:
+        """Pins the settled decision (docs/settled-decisions.md 2026-07-16):
+        T1=weekly, T2=T3=monthly."""
+        assert TIER_REVIEW_FREQUENCY == {1: "weekly", 2: "monthly", 3: "monthly"}
+
+    def test_covers_every_tier(self) -> None:
+        assert set(TIER_REVIEW_FREQUENCY) == {1, 2, 3}
+
+    def test_values_are_known_frequencies(self) -> None:
+        """Every assigned frequency must resolve in the staleness lookup —
+        an unknown value would silently label theses 'freshness unknown'."""
+        assert set(TIER_REVIEW_FREQUENCY.values()) <= set(_REVIEW_FREQUENCY_DAYS)
+
+    def test_review_frequency_for_tier(self) -> None:
+        assert review_frequency_for_tier(1) == "weekly"
+        assert review_frequency_for_tier(2) == "monthly"
+        assert review_frequency_for_tier(3) == "monthly"
+
+
+# ---------------------------------------------------------------------------
 # seed_coverage
 # ---------------------------------------------------------------------------
 
@@ -980,6 +1021,8 @@ class TestSeedCoverage:
         sql = conn.execute.call_args[0][0]
         assert "INSERT INTO coverage" in sql
         assert "is_tradable = TRUE" in sql
+        assert "review_frequency" in sql  # #1996: seed assigns frequency
+        assert conn.execute.call_args[0][1] == {"freq": "monthly"}
 
     def test_noop_when_populated(self) -> None:
         """Non-empty coverage table skips seeding entirely."""
@@ -1048,13 +1091,15 @@ class TestBootstrapMissingCoverageRows:
         import re
 
         assert re.search(
-            r"INSERT INTO coverage \(instrument_id,\s*coverage_tier,\s*filings_status\)",
+            r"INSERT INTO coverage \(instrument_id,\s*coverage_tier,\s*filings_status,\s*review_frequency\)",
             sql,
-        ), "filings_status must appear in the INSERT column list"
+        ), "filings_status + review_frequency must appear in the INSERT column list"
         assert re.search(
-            r"SELECT i\.instrument_id,\s*3,\s*'unknown'",
+            r"SELECT i\.instrument_id,\s*3,\s*'unknown',\s*%\(freq\)s",
             sql,
-        ), "'unknown' literal must be the third SELECT projection value"
+        ), "'unknown' literal + freq param must follow the tier in the SELECT projection"
+        params = conn.execute.call_args[0][1]
+        assert params == {"freq": "monthly"}  # #1996: T3 → monthly
 
     def test_noop_when_no_gaps(self) -> None:
         """Every tradable instrument already has coverage → zero inserts."""
