@@ -91,6 +91,9 @@ StaleReason = Literal[
     "event_new_10q",
     "event_new_8k",
     "break_fired",
+    "price_move",
+    "band_exit",
+    "news_spike",
 ]
 
 _VALID_THESIS_TYPES: frozenset[str] = frozenset({"compounder", "value", "turnaround", "speculative"})
@@ -102,6 +105,30 @@ _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
     "weekly": 7,
     "monthly": 30,
 }
+
+# ---------------------------------------------------------------------------
+# Staleness v2 thresholds (#1988) — spec:
+# docs/specs/thesis/2026-07-16-thesis-staleness-v2.md
+# ---------------------------------------------------------------------------
+
+# |move since mint| that marks a thesis stale. PROVISIONAL: derived from the
+# universe 30d distribution (~5.7% exceedance) because the 7-day-old corpus
+# has a degenerate own distribution — MUST be re-verified against the actual
+# fire rate ~30d post-ship (target ~2-8%/month; fvb R-retune precedent).
+_PRICE_MOVE_THRESHOLD = 0.30
+
+# Latest close older than this vs scan date → price rules NOT evaluated
+# (#2012 break-predicate freshness bound for price-derived inputs): a stale
+# close firing a regen would re-anchor the thesis on the same stale price.
+_PRICE_FRESHNESS_MAX_DAYS = 10
+
+# news_spike: 7d importance-mass rate >= ratio x prior-23d baseline rate,
+# with an absolute 7d-mass floor that kills tiny-baseline ratio explosions
+# (one story on a near-zero-news name is not a storm).
+_NEWS_SPIKE_RATIO = 3.0
+_NEWS_SPIKE_MASS_FLOOR = 2.0
+_NEWS_WINDOW_DAYS = 7
+_NEWS_BASELINE_DAYS = 23
 
 # ---------------------------------------------------------------------------
 # LLM call budgets + prompt version
@@ -210,6 +237,70 @@ def _to_float(val: object) -> float | None:
 # ---------------------------------------------------------------------------
 
 
+def _price_inputs_evaluable(
+    close_now: float | None,
+    close_at_mint: float | None,
+    close_now_date: date | None,
+    today: date,
+) -> bool:
+    """Shared guard for the price-driven rules (#1988 price_move/band_exit).
+
+    Zero/negative closes are non-price sentinels (day-change spec) and a
+    latest close older than the freshness bound means the rules are NOT
+    EVALUATED — absent/stale inputs are absent triggers, never fires
+    (#1632 NULL-never-0).
+    """
+    if close_now is None or close_at_mint is None or close_now_date is None:
+        return False
+    if close_now <= 0 or close_at_mint <= 0:
+        return False
+    return (today - close_now_date).days <= _PRICE_FRESHNESS_MAX_DAYS
+
+
+def _price_move_fired(close_now: float, close_at_mint: float) -> bool:
+    """|move since mint| >= threshold. Symmetric: a +30% melt-up invalidates
+    a buy-zone as surely as a -30% crash invalidates a bear floor."""
+    return abs(close_now - close_at_mint) / close_at_mint >= _PRICE_MOVE_THRESHOLD
+
+
+def _band_exit_fired(
+    close_now: float,
+    close_at_mint: float,
+    bear: float | None,
+    bull: float | None,
+) -> bool:
+    """Price crossed OUTSIDE [bear, bull] having minted INSIDE it.
+
+    Arm-at-mint is #2012 Design 5 verbatim: 15/60 banded theses were
+    already outside their band at mint (writers price bands around, not
+    on, the spot) — that class is premise and must never fire. No state
+    table: the mint-time close is deterministic history, so armed
+    (minted-inside) is re-derived on every scan.
+    """
+    if bear is None or bull is None:
+        return False
+    minted_inside = bear <= close_at_mint <= bull
+    now_outside = not (bear <= close_now <= bull)
+    return minted_inside and now_outside
+
+
+def _news_spike_fired(m7: float, m30: float) -> bool:
+    """Trailing-7d importance-mass rate >= ratio x prior-23d baseline rate,
+    over an absolute mass floor.
+
+    Self-rearming without state: stored importance scores are static but
+    window membership rolls a spike's stories out of the 7d window and
+    into the baseline, so the ratio subsides ~a week after the storm.
+    Baseline-less names (baseline <= 0) are not evaluated.
+    """
+    baseline = (m30 - m7) / _NEWS_BASELINE_DAYS
+    if baseline <= 0:
+        return False
+    if m7 < _NEWS_SPIKE_MASS_FLOOR:
+        return False
+    return (m7 / _NEWS_WINDOW_DAYS) >= _NEWS_SPIKE_RATIO * baseline
+
+
 def find_stale_instruments(
     conn: psycopg.Connection[Any],
     tier: int | None = 1,
@@ -230,7 +321,15 @@ def find_stale_instruments(
       4. a thesis_break_events row exists for the LATEST thesis (#2012,
          thesis_id equality — never a timestamp filter) → stale
          (reason: "break_fired")
-      5. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
+      5. |close_now − close_at_mint| / close_at_mint >= 0.30 (#1988,
+         both closes > 0, latest close <= 10d old) → stale
+         (reason: "price_move")
+      6. close crossed OUTSIDE [bear, bull] having minted INSIDE it
+         (#1988 arm-at-mint; the minted-outside class is premise and
+         never fires) → stale (reason: "band_exit")
+      7. trailing-7d importance mass rate >= 3x the prior-23d baseline
+         rate AND 7d mass >= 2.0 (#1988) → stale (reason: "news_spike")
+      8. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
 
     Every returned instrument must have ``coverage.filings_status =
     'analysable'`` (#268 Chunk J gate). Non-analysable instruments are
@@ -277,6 +376,14 @@ def find_stale_instruments(
     # newest row is an 8-K (audit-trail lie). LATERAL scope + explicit
     # ORDER BY created_at DESC, filing_event_id DESC resolves ties
     # deterministically.
+    #
+    # #1988: the latest thesis is itself a LATERAL row (API tiebreak
+    # order — same latest-by-created_at the old MAX aggregate selected)
+    # so the price rules can read ITS bear/bull and mint date, and the
+    # break-event EXISTS keys off lt.thesis_id directly. pm/pn are the
+    # #2014 at-or-before close reads; nm aggregates 30d importance mass
+    # with importance_score IS NULL rows excluded EXPLICITLY (a
+    # treatment decision, not an implicit SUM null-skip).
     query = (
         psql.SQL(
             """
@@ -284,21 +391,29 @@ def find_stale_instruments(
             i.instrument_id,
             i.symbol,
             c.review_frequency,
-            MAX(t.created_at)                        AS latest_thesis_at,
+            lt.created_at                            AS latest_thesis_at,
             le.created_at                            AS latest_event_created_at,
             le.filing_type                           AS latest_event_filing_type,
             EXISTS (
                 SELECT 1 FROM thesis_break_events e
-                WHERE e.thesis_id = (
-                    SELECT t2.thesis_id FROM theses t2
-                    WHERE t2.instrument_id = i.instrument_id
-                    ORDER BY t2.created_at DESC, t2.thesis_version DESC, t2.thesis_id DESC
-                    LIMIT 1
-                )
-            )                                        AS break_fired
+                WHERE e.thesis_id = lt.thesis_id
+            )                                        AS break_fired,
+            lt.bear_value,
+            lt.bull_value,
+            pn.close                                 AS close_now,
+            pn.price_date                            AS close_now_date,
+            pm.close                                 AS close_at_mint,
+            nm.m7,
+            nm.m30
         FROM instruments i
         JOIN coverage c ON c.instrument_id = i.instrument_id
-        LEFT JOIN theses t ON t.instrument_id = i.instrument_id
+        LEFT JOIN LATERAL (
+            SELECT t.thesis_id, t.created_at, t.bear_value, t.bull_value
+            FROM theses t
+            WHERE t.instrument_id = i.instrument_id
+            ORDER BY t.created_at DESC, t.thesis_version DESC, t.thesis_id DESC
+            LIMIT 1
+        ) lt ON TRUE
         LEFT JOIN LATERAL (
             SELECT fe.created_at, fe.filing_type
             FROM filing_events fe
@@ -309,13 +424,37 @@ def find_stale_instruments(
             ORDER BY fe.created_at DESC, fe.filing_event_id DESC
             LIMIT 1
         ) le ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT p.close, p.price_date
+            FROM price_daily p
+            WHERE p.instrument_id = i.instrument_id
+            ORDER BY p.price_date DESC
+            LIMIT 1
+        ) pn ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT p.close
+            FROM price_daily p
+            WHERE p.instrument_id = i.instrument_id
+              AND p.price_date <= lt.created_at::date
+            ORDER BY p.price_date DESC
+            LIMIT 1
+        ) pm ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT
+                COALESCE(SUM(n.importance_score)
+                    FILTER (WHERE n.event_time >= NOW() - INTERVAL '7 days'), 0) AS m7,
+                COALESCE(SUM(n.importance_score), 0)                             AS m30
+            FROM news_events n
+            WHERE n.instrument_id = i.instrument_id
+              AND n.event_time >= NOW() - INTERVAL '30 days'
+              AND n.event_time <= NOW()
+              AND n.importance_score IS NOT NULL
+        ) nm ON TRUE
         WHERE """
         )
         + where_block
         + psql.SQL(
             """
-        GROUP BY i.instrument_id, i.symbol, c.review_frequency,
-                 le.created_at, le.filing_type
         ORDER BY i.symbol
         """
         )
@@ -333,6 +472,13 @@ def find_stale_instruments(
         latest_event_created_at: datetime | None = row[4]
         latest_event_filing_type: str | None = row[5]
         break_fired: bool = bool(row[6])
+        bear_value = _to_float(row[7])
+        bull_value = _to_float(row[8])
+        close_now = _to_float(row[9])
+        close_now_date: date | None = row[10]
+        close_at_mint = _to_float(row[11])
+        m7 = _to_float(row[12]) or 0.0
+        m30 = _to_float(row[13]) or 0.0
 
         if latest_thesis_at is None:
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="no_thesis"))
@@ -371,6 +517,31 @@ def find_stale_instruments(
         # (Codex ckpt-2); every path regenerates either way.
         if break_fired:
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="break_fired"))
+            continue
+
+        # Rules 6-7 (#1988): structural price triggers — data-driven regen
+        # between the sharper break_fired signal and the cadence catch-all.
+        # Both share the price-input guards (positive closes + freshness);
+        # a name that is 30%-moved AND outside its band reports price_move
+        # (first match wins, existing contract). Self-rearming: firing
+        # regenerates the thesis -> new created_at -> new mint baseline.
+        if (
+            close_now is not None
+            and close_at_mint is not None
+            and _price_inputs_evaluable(close_now, close_at_mint, close_now_date, now.date())
+        ):
+            if _price_move_fired(close_now, close_at_mint):
+                stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="price_move"))
+                continue
+            if _band_exit_fired(close_now, close_at_mint, bear_value, bull_value):
+                stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="band_exit"))
+                continue
+
+        # Rule 8 (#1988): news storm on a name with a real news baseline.
+        # Independent of price evaluability — a stale price series must not
+        # mask a news trigger.
+        if _news_spike_fired(m7, m30):
+            stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="news_spike"))
             continue
 
         threshold = latest_thesis_at + timedelta(days=_REVIEW_FREQUENCY_DAYS[review_frequency])
