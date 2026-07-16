@@ -84,6 +84,8 @@ Lane = Literal[
     "db_ownership_obs",
     "db_raw_sweep",
     "db_size_sample",
+    "db_thesis_dq",
+    "db_thesis_break",
     "llm_thesis",
     "risk_metrics",
     "fair_value_band",
@@ -273,6 +275,23 @@ when one overruns). Scheduled-only, so NOT added to the
   for a once-daily job. Write-disjoint: sole writer of ``pg_size_sample``, no
   other job touches it. Scheduled-only, so NOT added to the
   ``bootstrap_stages.lane`` CHECK (matches ``db_liveness`` / ``db_raw_sweep``).
+
+* ``db_thesis_dq`` / ``db_thesis_break`` — ``thesis_dq_audit`` (daily 05:12,
+  #2014) and ``thesis_break_scan`` (daily 05:22, #2012), one single-job lane
+  each (#2052). Both sat on the catch-all ``db`` lane, whose 02:30
+  ``fundamentals_sync`` held the lock 6-11h+ FOUR consecutive nights
+  (07-13→07-16, released only by the next daemon restart) — the #1526/#1527
+  starvation class with an unbounded holder: ``thesis_dq_audit`` had ZERO
+  scheduled fires ever. SEPARATE lanes, not one shared audit lane (the
+  ``db_liveness``/``db_retry`` lesson above): boot catch-up and manual
+  triggers co-fire them despite the 05:12/05:22 stagger. Write-disjointness:
+  ``thesis_dq_audit`` is read-only (writes only ``job_runs``);
+  ``thesis_break_scan`` is the SOLE writer of ``thesis_break_predicates`` +
+  ``thesis_break_events`` (full-census 2026-07-16 — 3 write sites, all in
+  ``app/services/thesis_break_scan.py``; the ``break_fired`` stale-mark is a
+  read-side EXISTS in ``app/services/thesis.py``, not a write). Scheduled-only,
+  so NOT added to the ``bootstrap_stages.lane`` CHECK (matches
+  ``db_liveness`` / ``db_retry`` / ``db_size_sample``).
 
 * ``llm_thesis`` — ``thesis_refresh`` (#1919 PR-B) only. Hourly LLM
   thesis generation: a batch of ≤5 local-LLM generations holds the lane

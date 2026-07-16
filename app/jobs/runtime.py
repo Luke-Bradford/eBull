@@ -62,7 +62,7 @@ from app.db.background_write import background_write_connection
 from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.jobs.sources import JobInvoker
-from app.services.ops_monitor import fetch_latest_successful_runs, record_job_skip
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, fetch_latest_successful_runs, record_job_skip
 from app.services.process_stop import acquire_prelude_lock
 from app.services.processes.bootstrap_gate import check_bootstrap_state_gate
 from app.services.processes.param_metadata import (
@@ -654,6 +654,40 @@ def _lane_backoff_for(job_name: str) -> tuple[float, ...]:
     return _LANE_BUSY_RETRY_BACKOFF
 
 
+def _record_lane_busy_skip(
+    database_url: str,
+    job_name: str,
+    detail: str,
+    params: Mapping[str, Any] | None,
+) -> None:
+    """Best-effort ``status='skipped'`` job_runs row for a lane-busy skip (#2052).
+
+    Pre-#2052 both lane-busy exits in ``_fire_scheduled_with_lane_retry`` were
+    log-only — the ONLY silent skips on the scheduled-fire path (param/gate/
+    prereq blocks all write rows). ``thesis_dq_audit`` starved every night with
+    zero trace (#1707 class made worse by an unbounded db-lane holder). The
+    reason carries the machine-checkable ``LANE_BUSY_SKIP_PREFIX`` so the
+    Processes adapter can EXCLUDE these rows from the ``expected_fire_at``
+    anchor — a lane-busy skip is "work was due, couldn't start", and must not
+    reset the schedule-missed clock the way a benign prereq skip does.
+
+    Never raises: a telemetry write must not replace the skip's normal return
+    path (same posture as ``_wrap_invoker``'s param-validation skip writer).
+    Written only when the body never ran — outside any ``_tracked_job``
+    (prevention-log L848).
+    """
+    try:
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            record_job_skip(
+                conn,
+                job_name,
+                LANE_BUSY_SKIP_PREFIX + detail,
+                params_snapshot=dict(params) if params is not None else None,
+            )
+    except Exception:
+        logger.exception("failed to record lane-busy skip for %r", job_name)
+
+
 def _fire_scheduled_with_lane_retry(
     database_url: str,
     job_name: str,
@@ -661,6 +695,7 @@ def _fire_scheduled_with_lane_retry(
     *,
     backoff: tuple[float, ...] = _LANE_BUSY_RETRY_BACKOFF,
     sleep: Callable[[float], None] = time.sleep,
+    params: Mapping[str, Any] | None = None,
 ) -> None:
     """Run a scheduled fire under its source-level ``JobLock``, retrying ONLY a
     failed lock ACQUIRE on lane contention (#1538).
@@ -679,9 +714,12 @@ def _fire_scheduled_with_lane_retry(
       * Worst case (lane held longer than the retry window, or no slot free) is
         the old skip exactly — no new failure mode.
 
-    Returns normally on a lane-contention skip (after logging). Propagates
+    Returns normally on a lane-contention skip — after logging AND a
+    best-effort ``lane_busy`` skip row (#2052; both skip exits were previously
+    the only silent skips on the scheduled path). Propagates
     ``JobAlreadyRunning`` ONLY when ``run`` itself raised it (body-origin), plus
     any exception ``run`` raises — the caller's existing handlers own those.
+    ``params`` is only used for the skip row's ``params_snapshot``.
     """
     slot_held = False
     try:
@@ -698,23 +736,20 @@ def _fire_scheduled_with_lane_retry(
                     raise
                 if attempt == 0:
                     if not _LANE_WAIT_SLOTS.acquire(blocking=False):
-                        logger.info(
-                            "scheduled fire of %r skipped: its lane is busy and all %d "
-                            "lane-retry slots are in use; will fire next cadence",
-                            job_name,
-                            _MAX_CONCURRENT_LANE_WAITERS,
+                        detail = (
+                            f"lane is busy and all {_MAX_CONCURRENT_LANE_WAITERS} "
+                            "lane-retry slots are in use; will fire next cadence"
                         )
+                        logger.info("scheduled fire of %r skipped: %s", job_name, detail)
+                        _record_lane_busy_skip(database_url, job_name, detail, params)
                         return
                     slot_held = True
                 if attempt < len(backoff):
                     sleep(backoff[attempt])
                     continue
-                logger.info(
-                    "scheduled fire of %r skipped: its lane stayed busy through the "
-                    "~%.2fs retry window; will fire next cadence",
-                    job_name,
-                    sum(backoff),
-                )
+                detail = f"lane stayed busy through the ~{sum(backoff):.2f}s retry window; will fire next cadence"
+                logger.info("scheduled fire of %r skipped: %s", job_name, detail)
+                _record_lane_busy_skip(database_url, job_name, detail, params)
                 return
     finally:
         if slot_held:
@@ -2083,6 +2118,7 @@ class JobRuntime:
                     job_name,
                     _run_scheduled_body,
                     backoff=_lane_backoff_for(job_name),
+                    params=params,
                 )
             except JobAlreadyRunning:
                 # The helper retries the ACQUIRE, so this is reached ONLY when
