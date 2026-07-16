@@ -1941,7 +1941,7 @@ def test_thesis_staleness_reports_stale_held_instrument(client: TestClient) -> N
     # monthly cadence + past thesis timestamp is deterministically stale.
     conn = cur._parent_conn
     conn.execute.return_value.fetchall.return_value = [
-        (5, "GME", "monthly", stale_at, None, None),
+        (5, "GME", "monthly", stale_at, None, None, False),
     ]
     resp = client.get("/alerts/thesis-staleness")
     assert resp.status_code == 200
@@ -2072,3 +2072,139 @@ def test_thesis_changes_post_seen_rejects_non_positive(client: TestClient) -> No
         _install_conn()
         resp = client.post("/alerts/thesis-changes/seen", json={"seen_through_thesis_id": 0})
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# #2051 (PR-B of #2012) — thesis-break alert feed (cursor on
+# thesis_break_events.break_event_id; pure SQL event log, no Python
+# materiality pass — every event is material by construction)
+# ---------------------------------------------------------------------------
+
+
+def _break_event_row(
+    break_event_id: int = 7,
+    thesis_id: int = 316,
+    instrument_id: int = 46,
+    symbol: str = "LGND",
+    predicate_index: int = 2,
+    metric: str = "rsi_14",
+    op: str = ">",
+    threshold: float | None = 70.0,
+    observed_value: float = 74.2,
+) -> dict[str, object]:
+    return {
+        "break_event_id": break_event_id,
+        "thesis_id": thesis_id,
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "predicate_index": predicate_index,
+        "metric": metric,
+        "op": op,
+        "threshold": Decimal(str(threshold)) if threshold is not None else None,
+        "observed_value": Decimal(str(observed_value)),
+        "observed_as_of": datetime(2026, 7, 15, tzinfo=UTC).date(),
+        "source_text": "RSI-14 rises above 70",
+        "fired_at": datetime(2026, 7, 16, 5, 22, 0, tzinfo=UTC),
+    }
+
+
+def test_thesis_breaks_get_empty_state(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_break_event_id": None},
+                {"unseen_count": 0},
+            ],
+            fetchall_returns=[],
+        )
+        resp = client.get("/alerts/thesis-breaks")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "alerts_last_seen_break_event_id": None,
+        "unseen_count": 0,
+        "breaks": [],
+    }
+
+
+def test_thesis_breaks_get_lists_events_with_cursor(client: TestClient) -> None:
+    rows = [
+        _break_event_row(break_event_id=9),
+        _break_event_row(
+            break_event_id=8,
+            instrument_id=48,
+            symbol="GME",
+            metric="sma_50_vs_sma_200",
+            threshold=None,
+            observed_value=-1.0,
+        ),
+    ]
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_break_event_id": 8},
+                {"unseen_count": 1},
+            ],
+            fetchall_returns=rows,
+        )
+        resp = client.get("/alerts/thesis-breaks")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["alerts_last_seen_break_event_id"] == 8
+    assert body["unseen_count"] == 1
+    assert [b["break_event_id"] for b in body["breaks"]] == [9, 8]
+    lgnd = body["breaks"][0]
+    assert lgnd["symbol"] == "LGND"
+    assert lgnd["threshold"] == 70.0
+    assert lgnd["observed_value"] == 74.2
+    assert lgnd["source_text"] == "RSI-14 rises above 70"
+    # Regime metric: threshold is honestly null, never coerced.
+    assert body["breaks"][1]["threshold"] is None
+
+
+def test_thesis_breaks_get_unseen_query_uses_cursor_and_window(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn(
+            fetchone_returns=[
+                {"alerts_last_seen_break_event_id": 8},
+                {"unseen_count": 0},
+            ],
+            fetchall_returns=[],
+        )
+        resp = client.get("/alerts/thesis-breaks")
+    assert resp.status_code == 200
+    count_sql = cur.execute.call_args_list[1].args[0]
+    list_sql = cur.execute.call_args_list[2].args[0]
+    # Shared canonical window fragment in BOTH queries (drift guard) + strict
+    # '>' cursor comparison in the count only.
+    assert "fired_at >= now() - INTERVAL '14 days'" in count_sql
+    assert "fired_at >= now() - INTERVAL '14 days'" in list_sql
+    assert "e.break_event_id > %(last_id)s::BIGINT" in count_sql
+    assert "ORDER BY e.break_event_id DESC" in list_sql
+
+
+def test_thesis_breaks_post_seen_writes_clamped_update(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        cur = _install_conn()
+        resp = client.post("/alerts/thesis-breaks/seen", json={"seen_through_break_event_id": 9})
+    assert resp.status_code == 204
+    sql = cur.execute.call_args_list[-1].args[0]
+    assert "alerts_last_seen_break_event_id" in sql
+    assert "GREATEST" in sql
+    assert "LEAST" in sql
+    assert "m.max_id IS NOT NULL" in sql
+    assert "fired_at >= now() - INTERVAL '14 days'" in sql
+    cur._parent_conn.commit.assert_called_once()
+
+
+def test_thesis_breaks_post_seen_rejects_non_positive(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn()
+        resp = client.post("/alerts/thesis-breaks/seen", json={"seen_through_break_event_id": 0})
+    assert resp.status_code == 422
+
+
+def test_thesis_breaks_get_503_when_no_operator(client: TestClient) -> None:
+    with patch("app.api.alerts.sole_operator_id", side_effect=NoOperatorError()):
+        _install_conn()
+        resp = client.get("/alerts/thesis-breaks")
+    assert resp.status_code == 503

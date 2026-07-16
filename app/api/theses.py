@@ -141,6 +141,31 @@ def _diff_model(prev_row: dict[str, object], curr_row: dict[str, object]) -> The
     return ThesisDiffModel.model_validate(dataclasses.asdict(compute_thesis_diff(prev_row, curr_row)))
 
 
+class ThesisBreakPredicateModel(BaseModel):
+    """One machine-checkable break predicate for a thesis (#2012 PR-A tables,
+    surfaced by #2051 PR-B). ``predicate_index`` aligns with the thesis's
+    ``break_conditions_json`` array; conditions with no predicate row are
+    prose (unmonitored — the honest majority, ~95% of conditions).
+
+    ``baseline_state`` semantics (app/services/thesis_break.py state machine):
+    'pending' = input absent/stale, retries nightly; 'armed' = baselined
+    false, may fire; 'already_true' / 'already_true_after_gap' = the writer's
+    own premise (true at first evaluation) — NEVER fires, re-arms only if a
+    later scan observes false. ``fired_at``/``observed_value`` come from the
+    at-most-one thesis_break_events row (UNIQUE per predicate per thesis).
+    """
+
+    predicate_index: int
+    metric: str
+    op: str  # '<' | '>' (DB CHECK; open string in the response, #1808)
+    threshold: float | None  # NULL for the two regime metrics
+    unit: str
+    baseline_state: str
+    baselined_at: datetime | None
+    fired_at: datetime | None = None
+    observed_value: float | None = None
+
+
 class ThesisDetail(BaseModel):
     """Single thesis row with all columns including critic output.
 
@@ -178,6 +203,10 @@ class ThesisDetail(BaseModel):
     # #2013 — diff vs the (instrument_id, thesis_version - 1) predecessor.
     # None when thesis_version == 1 or the predecessor row is missing.
     diff: ThesisDiffModel | None = None
+    # #2051 — machine-checkable predicates extracted from
+    # break_conditions_json (index-aligned; conditions absent from this list
+    # are prose/unmonitored). Empty for pre-#2012 theses not yet scanned.
+    break_predicates: list[ThesisBreakPredicateModel] = []
 
 
 class ThesisHistoryResponse(BaseModel):
@@ -319,6 +348,41 @@ def _fetch_diffs(
         for version, curr in wanted.items()
         if version in predecessors
     }
+
+
+def _fetch_break_predicates(
+    conn: psycopg.Connection[object],
+    thesis_ids: list[int],
+) -> dict[int, list[ThesisBreakPredicateModel]]:
+    """thesis_id → break predicates (index-ordered), with fire evidence.
+
+    LEFT JOIN onto thesis_break_events: at most one event per predicate per
+    thesis version (UNIQUE, migration 230), so the join never fans out.
+    """
+    if not thesis_ids:
+        return {}
+    out: dict[int, list[ThesisBreakPredicateModel]] = {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+                p.thesis_id, p.predicate_index, p.metric, p.op, p.threshold,
+                p.unit, p.baseline_state, p.baselined_at,
+                e.fired_at, e.observed_value
+            FROM thesis_break_predicates p
+            LEFT JOIN thesis_break_events e
+              ON e.thesis_id = p.thesis_id
+             AND e.predicate_index = p.predicate_index
+            WHERE p.thesis_id = ANY(%(ids)s)
+            ORDER BY p.thesis_id, p.predicate_index
+            """,
+            {"ids": thesis_ids},
+        )
+        for row in cur.fetchall():
+            out.setdefault(int(row["thesis_id"]), []).append(  # type: ignore[arg-type]
+                ThesisBreakPredicateModel.model_validate(row)
+            )
+    return out
 
 
 def _critic_verdict(critic_json: object) -> str | None:
@@ -734,6 +798,7 @@ def get_latest_thesis(
 
     thesis = _parse_thesis(row)
     thesis.diff = _fetch_diffs(conn, instrument_id, [row]).get(int(row["thesis_id"]))  # type: ignore[arg-type]
+    thesis.break_predicates = _fetch_break_predicates(conn, [thesis.thesis_id]).get(thesis.thesis_id, [])
     # Staleness single-source (#1902): the FE used to duplicate a 30-day
     # constant; the canonical predicate is find_stale_instruments
     # (coverage cadence + #273 filing-event triggers). reason=None means
@@ -808,8 +873,10 @@ def get_thesis_history(
 
     diffs = _fetch_diffs(conn, instrument_id, rows)
     items = [_parse_thesis(r) for r in rows]
+    predicates = _fetch_break_predicates(conn, [i.thesis_id for i in items])
     for item in items:
         item.diff = diffs.get(item.thesis_id)
+        item.break_predicates = predicates.get(item.thesis_id, [])
     return ThesisHistoryResponse(
         instrument_id=instrument_id,
         items=items,

@@ -4,6 +4,7 @@ import type {
   GuardRejectionsResponse,
   PositionAlertsResponse,
   RankMovesResponse,
+  ThesisBreaksResponse,
   ThesisChangesResponse,
   ThesisStalenessResponse,
 } from "@/api/types";
@@ -116,6 +117,26 @@ export function markThesisChangesSeen(seenThroughThesisId: number): Promise<void
   return apiFetch<void>("/alerts/thesis-changes/seen", {
     method: "POST",
     body: JSON.stringify({ seen_through_thesis_id: seenThroughThesisId }),
+  });
+}
+
+// --- #2051 thesis-break endpoints (PR-B of #2012) -----------------------------
+// Cursor feed on thesis_break_events.break_event_id; dismiss with the newest
+// listed id clears everything older, so there is no dismiss-all endpoint
+// (same contract as thesis-changes).
+
+export function fetchThesisBreaks(): Promise<ThesisBreaksResponse> {
+  return apiFetch<ThesisBreaksResponse>("/alerts/thesis-breaks");
+}
+
+export function markThesisBreaksSeen(
+  seenThroughBreakEventId: number,
+): Promise<void> {
+  return apiFetch<void>("/alerts/thesis-breaks/seen", {
+    method: "POST",
+    body: JSON.stringify({
+      seen_through_break_event_id: seenThroughBreakEventId,
+    }),
   });
 }
 

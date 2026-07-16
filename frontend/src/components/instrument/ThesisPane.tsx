@@ -3,7 +3,7 @@ import { CriticVerdictBadge } from "@/components/theses/CriticVerdictBadge";
 import { MemoMarkdown } from "@/components/theses/MemoMarkdown";
 import { StanceBadge } from "@/components/theses/StanceBadge";
 import { EmptyState } from "@/components/states/EmptyState";
-import type { ThesisDetail, ThesisDiff } from "@/api/types";
+import type { ThesisBreakPredicate, ThesisDetail, ThesisDiff } from "@/api/types";
 
 export interface ThesisPaneProps {
   readonly thesis: ThesisDetail | null;
@@ -130,6 +130,60 @@ function DiffBlock({ diff }: { diff: ThesisDiff }): JSX.Element | null {
   );
 }
 
+/** #2051 — status chip for a machine-checkable break condition. States from
+ *  the arm/baseline machine (app/services/thesis_break.py): only 'armed'
+ *  predicates can ever fire; 'already_true*' is the writer's own premise
+ *  (true at first evaluation) and is deliberately muted — surfacing it as a
+ *  break would alert on the thesis's own starting assumption. The two
+ *  premise labels are never merged (spec: after_gap is an honest "cannot
+ *  tell premise from missed transition", counted separately). */
+function BreakPredicateChip({ pred }: { pred: ThesisBreakPredicate }): JSX.Element {
+  const muted =
+    "rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-1 py-0.5 text-[10px] font-medium text-slate-500 dark:text-slate-400";
+  if (pred.fired_at !== null) {
+    const evidence =
+      pred.threshold !== null
+        ? `observed ${pred.observed_value ?? "?"} vs threshold ${pred.op} ${pred.threshold}`
+        : `observed ${pred.observed_value ?? "?"}`;
+    return (
+      <span
+        className="rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-1 py-0.5 text-[10px] font-semibold uppercase text-amber-700 dark:text-amber-300"
+        title={`Break fired ${formatDate(pred.fired_at)} — ${evidence}. Regeneration queued via the break_fired stale rule.`}
+      >
+        fired
+      </span>
+    );
+  }
+  switch (pred.baseline_state) {
+    case "armed":
+      return (
+        <span className={muted} title="Monitored nightly — baselined false; fires on a genuine false→true transition.">
+          armed
+        </span>
+      );
+    case "pending":
+      return (
+        <span className={muted} title="Awaiting evaluable input (absent or stale data) — retries at the next nightly scan.">
+          pending
+        </span>
+      );
+    case "already_true":
+      return (
+        <span className={muted} title="Writer premise, not a trigger — already true when first evaluated, so it can never fire. Re-arms only if a later scan observes it false.">
+          premise
+        </span>
+      );
+    case "already_true_after_gap":
+      return (
+        <span className={muted} title="Writer premise, not a trigger — true at a first evaluation that came after an unobserved gap, so a premise cannot be distinguished from a missed transition. Never fires; re-arms if a later scan observes it false.">
+          premise (gap)
+        </span>
+      );
+    default:
+      return <span className={muted}>{pred.baseline_state}</span>;
+  }
+}
+
 interface BodyProps {
   readonly thesis: ThesisDetail;
   readonly currentPrice: string | null;
@@ -138,6 +192,9 @@ interface BodyProps {
 
 function ThesisBody({ thesis, currentPrice, currency }: BodyProps): JSX.Element {
   const breaks = thesis.break_conditions_json ?? [];
+  const predicateByIndex = new Map(
+    (thesis.break_predicates ?? []).map((p) => [p.predicate_index, p]),
+  );
   const critic = thesis.critic_json;
   const criticSummary = critic ? criticString(critic, "summary") : null;
   const criticRisks = critic ? criticList(critic, "key_risks") : [];
@@ -266,9 +323,27 @@ function ThesisBody({ thesis, currentPrice, currency }: BodyProps): JSX.Element 
             Break conditions
           </div>
           <ul className="list-inside list-disc space-y-0.5 text-xs text-slate-600 dark:text-slate-400">
-            {breaks.map((b, i) => (
-              <li key={i}>{b}</li>
-            ))}
+            {breaks.map((b, i) => {
+              // #2051 — predicates are index-aligned with the conditions
+              // array; a condition without a predicate row is prose
+              // (unmonitored) and renders without a chip.
+              const pred = predicateByIndex.get(i);
+              const fired = pred !== undefined && pred.fired_at !== null;
+              return (
+                <li
+                  key={i}
+                  className={fired ? "text-amber-700 dark:text-amber-300" : undefined}
+                >
+                  {b}
+                  {pred !== undefined && (
+                    <>
+                      {" "}
+                      <BreakPredicateChip pred={pred} />
+                    </>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

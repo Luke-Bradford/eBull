@@ -23,6 +23,7 @@ const NO_CURSORS: Cursors = {
   coverage: null,
   rank: null,
   thesisChange: null,
+  thesisBreak: null,
 };
 
 function guard(o: Partial<GuardRejection> = {}): GuardRejection {

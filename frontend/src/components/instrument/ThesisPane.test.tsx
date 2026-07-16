@@ -200,3 +200,107 @@ describe("ThesisPane", () => {
     expect(screen.queryByTestId("thesis-diff")).not.toBeInTheDocument();
   });
 });
+
+describe("ThesisPane — break predicate rows (#2051)", () => {
+  const conditions = [
+    "Loss of key patents", // prose — no predicate row
+    "RSI-14 rises above 70",
+    "Altman Z-score crosses into distress (<1.8)",
+    "Days-to-cover exceeds 10",
+    "Price falls below the 200-day SMA",
+  ];
+  const predicates = [
+    {
+      predicate_index: 1,
+      metric: "rsi_14",
+      op: ">",
+      threshold: 70,
+      unit: "index",
+      baseline_state: "armed",
+      baselined_at: "2026-07-16T05:22:00+00:00",
+      fired_at: null,
+      observed_value: null,
+    },
+    {
+      predicate_index: 2,
+      metric: "altman_z",
+      op: "<",
+      threshold: 1.8,
+      unit: "zscore",
+      baseline_state: "already_true",
+      baselined_at: "2026-07-16T05:22:00+00:00",
+      fired_at: null,
+      observed_value: null,
+    },
+    {
+      predicate_index: 3,
+      metric: "short_interest_days_to_cover",
+      op: ">",
+      threshold: 10,
+      unit: "days",
+      baseline_state: "armed",
+      baselined_at: "2026-07-16T05:22:00+00:00",
+      fired_at: "2026-07-17T05:22:00+00:00",
+      observed_value: 12.4,
+    },
+    {
+      predicate_index: 4,
+      metric: "price_vs_sma200",
+      op: "<",
+      threshold: null,
+      unit: "regime",
+      baseline_state: "pending",
+      baselined_at: null,
+      fired_at: null,
+      observed_value: null,
+    },
+  ];
+  const withPredicates = {
+    ...FIXTURE,
+    break_conditions_json: conditions,
+    break_predicates: predicates,
+  } as unknown as ThesisDetail;
+
+  it("chips armed/pending muted, premise with writer-premise tooltip, prose bare", () => {
+    render(<ThesisPane thesis={withPredicates} errored={false} />);
+    expect(screen.getByText("armed")).toBeInTheDocument();
+    expect(screen.getByText("pending")).toBeInTheDocument();
+    const premise = screen.getByText("premise");
+    expect(premise).toHaveAttribute("title", expect.stringContaining("Writer premise, not a trigger"));
+    // Prose condition renders without any chip in its row.
+    const prose = screen.getByText(/Loss of key patents/);
+    expect(prose.querySelector("span")).toBeNull();
+  });
+
+  it("fired predicate renders amber with evidence tooltip", () => {
+    render(<ThesisPane thesis={withPredicates} errored={false} />);
+    const fired = screen.getByText("fired");
+    expect(fired).toHaveAttribute(
+      "title",
+      expect.stringContaining("observed 12.4 vs threshold > 10"),
+    );
+    const row = fired.closest("li");
+    expect(row).toHaveClass("text-amber-700");
+  });
+
+  it("distinguishes already_true_after_gap from already_true", () => {
+    const gapped = {
+      ...withPredicates,
+      break_predicates: [
+        { ...predicates[1], baseline_state: "already_true_after_gap" },
+      ],
+    } as unknown as ThesisDetail;
+    render(<ThesisPane thesis={gapped} errored={false} />);
+    const chip = screen.getByText("premise (gap)");
+    expect(chip).toHaveAttribute("title", expect.stringContaining("unobserved gap"));
+  });
+
+  it("renders plain conditions when break_predicates is absent (older payloads)", () => {
+    const bare = {
+      ...FIXTURE,
+      break_conditions_json: ["Lose 50% market share"],
+    } as unknown as ThesisDetail;
+    render(<ThesisPane thesis={bare} errored={false} />);
+    expect(screen.getByText("Lose 50% market share")).toBeInTheDocument();
+  });
+});
