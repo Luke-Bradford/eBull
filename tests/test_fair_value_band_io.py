@@ -666,3 +666,49 @@ def test_companion_screen_zero_member_cohort_stays_no_screened_cohort(
     ps_entry = row[1]["multiples"]["ps"]
     assert ps_entry["cohort_screened"] is False
     assert ps_entry["screen"] == {"reason": "no_screened_cohort"}
+
+
+def test_fy_history_sql_latest_filed_last_four(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
+    """v5 (#2043) §4.2: _FY_HISTORY_SQL skips NULL-NI / superseded /
+    non-normalized FY rows and returns the last 4 usable FYs newest-first.
+    (financial_periods PK is (iid, period_end, period_type), so the DISTINCT ON
+    dedup is defensive — one row per FY period can exist.)"""
+    conn = ebull_test_conn
+    iid = 9301
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable) "
+        "VALUES (%s, 'FVBFY', 'FVB FY Co', 'USD', TRUE)",
+        (iid,),
+    )
+    rows = [
+        # (period_end, ni, revenue, filed, superseded, status)
+        ("2019-12-31", 99.0, 100.0, "2020-02-01", "2020-06-01", "normalized"),  # superseded -> excluded
+        ("2020-12-31", 5.0, 100.0, "2021-02-01", None, "normalized"),  # 5th usable -> cut by LIMIT 4
+        ("2021-12-31", 10.0, 100.0, "2022-02-01", None, "normalized"),
+        ("2022-12-31", 20.0, 100.0, "2023-02-01", None, "normalized"),
+        ("2023-12-31", None, 100.0, "2024-02-01", None, "normalized"),  # NULL NI -> excluded
+        ("2024-12-31", 40.0, 100.0, "2025-02-01", None, "raw"),  # not normalized -> excluded
+        ("2025-12-31", 44.0, 110.0, "2026-02-01", None, "normalized"),
+    ]
+    for end, ni, rev, filed, sup, status in rows:
+        conn.execute(
+            """
+            INSERT INTO financial_periods
+              (instrument_id, period_end_date, period_type, fiscal_year, source, source_ref,
+               reported_currency, revenue, net_income, filed_date, superseded_at, normalization_status)
+            VALUES (%s, %s, 'FY', %s, 'test', %s, 'USD', %s, %s, %s, %s, %s)
+            """,
+            (iid, end, int(end[:4]), f"fy{iid}{end}{filed}", rev, ni, filed, sup, status),
+        )
+
+    from app.services.fair_value_band import _FY_HISTORY_SQL
+
+    with conn.cursor() as cur:
+        cur.execute(_FY_HISTORY_SQL, {"iid": iid})
+        got = cur.fetchall()
+    assert [(str(r[0]), float(r[1])) for r in got] == [
+        ("2025-12-31", 44.0),
+        ("2022-12-31", 20.0),  # NULL-NI 2023 + non-normalized 2024 skipped
+        ("2021-12-31", 10.0),
+        ("2020-12-31", 5.0),  # 2019 superseded excluded; window fills to 4
+    ]
