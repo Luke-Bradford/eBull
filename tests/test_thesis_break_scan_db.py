@@ -163,7 +163,5 @@ def test_altman_sector_gate_blocks_insert(ebull_test_conn: psycopg.Connection[tu
 
     report = run_thesis_break_scan(conn)
     assert report.sector_gated >= 1
-    row = conn.execute(
-        "SELECT COUNT(*) FROM thesis_break_predicates WHERE instrument_id = %s", (iid,)
-    ).fetchone()
+    row = conn.execute("SELECT COUNT(*) FROM thesis_break_predicates WHERE instrument_id = %s", (iid,)).fetchone()
     assert row is not None and int(row[0]) == 0

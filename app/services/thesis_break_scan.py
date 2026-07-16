@@ -240,7 +240,11 @@ def run_thesis_break_scan(conn: psycopg.Connection[Any], *, now: datetime | None
         if not isinstance(conditions, list):
             continue
         iid = int(t["instrument_id"])
-        for idx, pred in enumerate(extract_predicates([c for c in conditions if isinstance(c, str)])):
+        # Pass the RAW array — extract_predicates None-maps non-string
+        # elements itself, keeping predicate_index aligned with the
+        # original break_conditions_json slots (a pre-filter would shift
+        # every index after a malformed element).
+        for idx, pred in enumerate(extract_predicates(list(conditions))):
             if pred is None:
                 continue
             if pred.metric in _ALTMAN_METRICS and iid in financial:

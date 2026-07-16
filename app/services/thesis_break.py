@@ -28,6 +28,7 @@ Spec: docs/proposals/thesis/2026-07-16-thesis-break-predicates.md.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Literal
@@ -386,6 +387,9 @@ def _extract_one(condition: str) -> BreakPredicate | None:
     return None
 
 
-def extract_predicates(conditions: list[str]) -> list[BreakPredicate | None]:
-    """Index-aligned with break_conditions_json; None = prose (fail-open)."""
+def extract_predicates(conditions: Sequence[object]) -> list[BreakPredicate | None]:
+    """Index-aligned with break_conditions_json; None = prose (fail-open).
+
+    Accepts the RAW jsonb array — non-string elements map to None in place
+    so a malformed element can never shift later predicate indexes."""
     return [_extract_one(c) if isinstance(c, str) else None for c in conditions]

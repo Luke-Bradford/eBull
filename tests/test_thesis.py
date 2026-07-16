@@ -297,6 +297,16 @@ class TestFindStaleInstruments:
         assert len(result) == 1
         assert result[0].reason == "break_fired"
 
+    def test_break_beats_cadence_stale(self) -> None:
+        # Aged past cadence AND break fired → the specific reason wins
+        # (Codex ckpt-2: break must not be shadowed by mere age).
+        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=30), None, None, True)]
+        conn = _make_conn(stale_rows=rows)
+        with patch("app.services.thesis._utcnow", return_value=_NOW):
+            result = find_stale_instruments(conn, tier=1)
+        assert len(result) == 1
+        assert result[0].reason == "break_fired"
+
     def test_break_never_masks_filing_event(self) -> None:
         # Rule ordering: a new 10-K and a fired break both present → the
         # filing-event reason wins (spec: break ordered AFTER event rules).

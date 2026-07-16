@@ -135,6 +135,14 @@ def test_index_alignment_and_non_strings() -> None:
     assert out[2] is not None and out[2].metric == "rsi_14"
 
 
+def test_non_string_element_never_shifts_later_indexes() -> None:
+    # Codex ckpt-2: a malformed (non-string) element must map to None IN
+    # PLACE so predicate_index stays aligned with break_conditions_json.
+    out = extract_predicates([42, "RSI-14 crosses above 70"])
+    assert out[0] is None
+    assert out[1] is not None and out[1].metric == "rsi_14"
+
+
 # ---------------------------------------------------------------------------
 # observe() — per-input freshness bounds, fail-closed
 # ---------------------------------------------------------------------------

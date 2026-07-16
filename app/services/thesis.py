@@ -227,10 +227,10 @@ def find_stale_instruments(
       3. filing_events row newer than latest thesis, filing_type in
          ('10-K', '10-K/A', '10-Q', '10-Q/A', '8-K', '8-K/A') → stale
          (reason: "event_new_{10k,10q,8k}")
-      4. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
-      5. a thesis_break_events row exists for the LATEST thesis (#2012,
+      4. a thesis_break_events row exists for the LATEST thesis (#2012,
          thesis_id equality — never a timestamp filter) → stale
          (reason: "break_fired")
+      5. now >= latest_thesis.created_at + interval(review_frequency) → stale (reason: "stale")
 
     Every returned instrument must have ``coverage.filings_status =
     'analysable'`` (#268 Chunk J gate). Non-analysable instruments are
@@ -359,21 +359,23 @@ def find_stale_instruments(
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason=reason))
             continue
 
-        threshold = latest_thesis_at + timedelta(days=_REVIEW_FREQUENCY_DAYS[review_frequency])
-        if now >= threshold:
-            stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="stale"))
-            continue
-
         # Rule 5 (#2012): a thesis_break_events row exists for the LATEST
         # thesis — a machine-checkable break condition transitioned
         # false→true after arming. Keyed by thesis_id EQUALITY in the
         # SELECT above (never a fired_at timestamp filter: a delayed scan
         # can stamp an OLD thesis's event after its replacement was
         # created, which would re-stale the new thesis forever). Ordered
-        # after the filing-event rules so a break never masks a 10-K/10-Q
-        # trigger in the reason telemetry; both paths regenerate.
+        # after the filing-event rules (a break never masks a 10-K/10-Q
+        # trigger) but BEFORE the generic cadence rule — a fired break is
+        # the more specific reason and must not be shadowed by mere age
+        # (Codex ckpt-2); every path regenerates either way.
         if break_fired:
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="break_fired"))
+            continue
+
+        threshold = latest_thesis_at + timedelta(days=_REVIEW_FREQUENCY_DAYS[review_frequency])
+        if now >= threshold:
+            stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="stale"))
 
     return stale
 

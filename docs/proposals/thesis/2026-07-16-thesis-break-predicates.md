@@ -229,7 +229,9 @@ Coverage = fire population (282 latest theses), dev 2026-07-16.
    (Codex ckpt-1 BLOCKING). A `fired_at > latest_thesis.created_at` timestamp filter is NOT an
    acceptable substitute and must not be used: a delayed scan can stamp an OLD thesis's event with
    a `fired_at` later than its replacement's `created_at`, re-staling the new thesis (Codex ckpt-1
-   rev2 HIGH). Ordered AFTER the filing-event rules so a break never masks a 10-K trigger.
+   rev2 HIGH). Ordered AFTER the filing-event rules so a break never masks a 10-K trigger, but
+   BEFORE the generic cadence rule — a fired break is the more specific reason and must not be
+   shadowed by mere age (Codex ckpt-2); every path regenerates either way.
 5. Nightly job `thesis_break_scan` in `SCHEDULED_JOBS`, `db` lane, **NOT 5-min-aligned** (#1707
    tick-race; #2014 used 05:12 → use 05:22). `row_count` = events emitted.
 6. `GET /alerts/thesis-breaks` — event feed + `POST /seen` cursor mirroring #2013's
