@@ -29,14 +29,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 import psycopg
 import psycopg.rows
 
-# Same coercion chokepoint as the DQ audit — psycopg numerics arrive as
-# Decimal; NaN/±inf coerce to None instead of poisoning comparisons.
-from app.services.thesis import _to_float
 from app.services.thesis_dq_audit import _anchor_block, _parse_iso_date
 
 HORIZONS: tuple[int, ...] = (30, 90, 365)
@@ -121,12 +119,17 @@ def classify_immature(
     return "immature_series_stalled"
 
 
-def close_row_at_or_before(conn: psycopg.Connection[Any], instrument_id: int, as_of: date) -> tuple[date, float] | None:
+def close_row_at_or_before(
+    conn: psycopg.Connection[Any], instrument_id: int, as_of: date
+) -> tuple[date, Decimal] | None:
     """(price_date, close) of the last print at or before ``as_of``.
 
     Same read as ``thesis_dq_audit._close_at_or_before`` but the ledger
     also needs the trading day actually used (``realized_date``), hence
-    the widened return shape rather than a shared helper.
+    the widened return shape rather than a shared helper. The close stays
+    ``Decimal`` end-to-end (NUMERIC in, NUMERIC out — no binary-float
+    round-trip; PR #2061 review); a non-finite NUMERIC (NaN) maps to None
+    the same way the ``_to_float`` chokepoint would.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -140,8 +143,8 @@ def close_row_at_or_before(conn: psycopg.Connection[Any], instrument_id: int, as
         row = cur.fetchone()
     if row is None:
         return None
-    close = _to_float(row[1])
-    if close is None:
+    close = row[1]
+    if not isinstance(close, Decimal) or not close.is_finite():
         return None
     return (row[0], close)
 
