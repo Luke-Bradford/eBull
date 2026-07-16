@@ -106,6 +106,24 @@ _REVIEW_FREQUENCY_DAYS: dict[str, int] = {
     "monthly": 30,
 }
 
+# Tier → review_frequency assignment (#1996, settled decision: T1=weekly,
+# T2=T3=monthly). Filing-event triggers (#273) cover real-news regen
+# instantly; the age window is only a drift catch-all, so the long-horizon
+# posture needs no daily rewrites. Single writer source: every path that
+# sets coverage_tier (seed, bootstrap gap-filler, promote/demote/override
+# via _apply_tier_change) assigns review_frequency from this mapping.
+TIER_REVIEW_FREQUENCY: dict[int, str] = {
+    1: "weekly",
+    2: "monthly",
+    3: "monthly",
+}
+
+
+def review_frequency_for_tier(tier: int) -> str:
+    """Return the settled review_frequency for a coverage tier (#1996)."""
+    return TIER_REVIEW_FREQUENCY[tier]
+
+
 # ---------------------------------------------------------------------------
 # Domain types
 # ---------------------------------------------------------------------------
@@ -536,8 +554,16 @@ def _apply_tier_change(
     """Update the coverage row and insert an audit record for a single tier change."""
     if change.old_tier != change.new_tier:
         conn.execute(
-            "UPDATE coverage SET coverage_tier = %(tier)s WHERE instrument_id = %(id)s",
-            {"tier": change.new_tier, "id": change.instrument_id},
+            """
+            UPDATE coverage
+            SET coverage_tier = %(tier)s, review_frequency = %(freq)s
+            WHERE instrument_id = %(id)s
+            """,
+            {
+                "tier": change.new_tier,
+                "freq": review_frequency_for_tier(change.new_tier),
+                "id": change.instrument_id,
+            },
         )
 
     conn.execute(
@@ -785,12 +811,13 @@ def seed_coverage(
 
         result = conn.execute(
             """
-            INSERT INTO coverage (instrument_id, coverage_tier)
-            SELECT instrument_id, 3
+            INSERT INTO coverage (instrument_id, coverage_tier, review_frequency)
+            SELECT instrument_id, 3, %(freq)s
             FROM instruments
             WHERE is_tradable = TRUE
             ON CONFLICT DO NOTHING
-            """
+            """,
+            {"freq": review_frequency_for_tier(3)},
         )
         if result.rowcount == -1:
             raise RuntimeError("seed_coverage INSERT INTO coverage: server did not report a command tag (rowcount=-1)")
@@ -838,15 +865,16 @@ def bootstrap_missing_coverage_rows(
     with conn.transaction():
         result = conn.execute(
             """
-            INSERT INTO coverage (instrument_id, coverage_tier, filings_status)
-            SELECT i.instrument_id, 3, 'unknown'
+            INSERT INTO coverage (instrument_id, coverage_tier, filings_status, review_frequency)
+            SELECT i.instrument_id, 3, 'unknown', %(freq)s
             FROM instruments i
             WHERE i.is_tradable = TRUE
               AND NOT EXISTS (
                   SELECT 1 FROM coverage c WHERE c.instrument_id = i.instrument_id
               )
             ON CONFLICT DO NOTHING
-            """
+            """,
+            {"freq": review_frequency_for_tier(3)},
         )
         if result.rowcount == -1:
             raise RuntimeError(

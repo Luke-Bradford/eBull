@@ -41,7 +41,12 @@ from app.providers.implementations.sec_edgar import SecFilingsProvider
 from app.providers.implementations.sec_fundamentals import SecFundamentalsProvider
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.canonical_instrument_redirects import JOB_POPULATE_CANONICAL_REDIRECTS
-from app.services.coverage import bootstrap_missing_coverage_rows, review_coverage, seed_coverage
+from app.services.coverage import (
+    bootstrap_missing_coverage_rows,
+    review_coverage,
+    review_frequency_for_tier,
+    seed_coverage,
+)
 from app.services.deferred_retry import retry_deferred_recommendations
 from app.services.entry_timing import evaluate_entry_conditions
 from app.services.etoro_lookups import refresh_etoro_lookups
@@ -2245,12 +2250,13 @@ def _promote_held_to_tier1(conn: psycopg.Connection[Any]) -> int:
     result = conn.execute(
         """
         UPDATE coverage
-        SET coverage_tier = 1
+        SET coverage_tier = 1, review_frequency = %(freq)s
         WHERE instrument_id IN (
             SELECT instrument_id FROM positions WHERE current_units > 0
         )
           AND coverage_tier != 1
-        """
+        """,
+        {"freq": review_frequency_for_tier(1)},
     )
     return result.rowcount
 
