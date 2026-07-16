@@ -307,25 +307,25 @@ def test_premise_true_stays() -> None:
 
 
 def test_sanitize_none_is_empty_ok() -> None:
-    assert sanitize_writer_break_predicates(None, 3) == ([], [])
+    assert sanitize_writer_break_predicates(None, ["a", "b", "c"]) == ([], [])
 
 
 def test_sanitize_non_list_dropped_whole() -> None:
-    survivors, reasons = sanitize_writer_break_predicates({"metric": "rsi_14"}, 3)
+    survivors, reasons = sanitize_writer_break_predicates({"metric": "rsi_14"}, ["a", "b", "c"])
     assert survivors == []
     assert reasons == ["break_predicates is not a list: dict"]
 
 
 def test_sanitize_valid_threshold_entry_survives_normalized() -> None:
     raw = [{"condition_index": 1, "metric": "altman_z", "op": "<", "threshold": 2}]
-    survivors, reasons = sanitize_writer_break_predicates(raw, 2)
+    survivors, reasons = sanitize_writer_break_predicates(raw, ["c0", "c1"])
     assert reasons == []
     assert survivors == [{"condition_index": 1, "metric": "altman_z", "op": "<", "threshold": 2.0}]
 
 
 def test_sanitize_valid_regime_entry_survives() -> None:
     raw = [{"condition_index": 0, "metric": "price_vs_sma200", "op": "<", "threshold": None}]
-    survivors, reasons = sanitize_writer_break_predicates(raw, 1)
+    survivors, reasons = sanitize_writer_break_predicates(raw, ["c0"])
     assert reasons == []
     assert survivors == [{"condition_index": 0, "metric": "price_vs_sma200", "op": "<", "threshold": None}]
 
@@ -348,7 +348,7 @@ def test_sanitize_valid_regime_entry_survives() -> None:
     ],
 )
 def test_sanitize_invalid_entries_dropped(entry: object, reason_fragment: str) -> None:
-    survivors, reasons = sanitize_writer_break_predicates([entry], 2)
+    survivors, reasons = sanitize_writer_break_predicates([entry], ["c0", "c1"])
     assert survivors == []
     assert len(reasons) == 1 and reason_fragment in reasons[0]
 
@@ -358,7 +358,7 @@ def test_sanitize_duplicate_condition_index_second_dropped() -> None:
         {"condition_index": 0, "metric": "rsi_14", "op": "<", "threshold": 30},
         {"condition_index": 0, "metric": "altman_z", "op": "<", "threshold": 1.8},
     ]
-    survivors, reasons = sanitize_writer_break_predicates(raw, 1)
+    survivors, reasons = sanitize_writer_break_predicates(raw, ["c0"])
     assert [s["metric"] for s in survivors] == ["rsi_14"]
     assert len(reasons) == 1 and "duplicate condition_index" in reasons[0]
 
@@ -369,7 +369,7 @@ def test_sanitize_mixed_keeps_survivors() -> None:
         {"condition_index": 1, "metric": "made_up", "op": ">", "threshold": 5},
         {"condition_index": 2, "metric": "sma_50_vs_sma_200", "op": "<", "threshold": None},
     ]
-    survivors, reasons = sanitize_writer_break_predicates(raw, 3)
+    survivors, reasons = sanitize_writer_break_predicates(raw, ["c0", "c1", "c2"])
     assert [s["condition_index"] for s in survivors] == [0, 2]
     assert len(reasons) == 1 and "unknown metric" in reasons[0]
 
@@ -378,3 +378,12 @@ def test_metric_units_cover_full_vocabulary() -> None:
     # The writer channel derives its unit from METRIC_UNITS — every metric
     # the sanitizer can pass must have one (KeyError at scan time otherwise).
     assert set(METRIC_UNITS) == set(FRESHNESS_BOUNDS)
+
+
+def test_sanitize_non_string_condition_slot_dropped() -> None:
+    # Codex ckpt-2: a structured twin must mirror a PROSE condition — an
+    # index pointing at a malformed non-string element has nothing to mirror.
+    raw = [{"condition_index": 1, "metric": "rsi_14", "op": "<", "threshold": 30}]
+    survivors, reasons = sanitize_writer_break_predicates(raw, ["ok", 123])
+    assert survivors == []
+    assert len(reasons) == 1 and "non-string condition" in reasons[0]

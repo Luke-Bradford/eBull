@@ -219,3 +219,63 @@ def test_writer_native_predicates_additive_only(ebull_test_conn: psycopg.Connect
     assert rows[1][0] == 1
     assert (rows[1][1], rows[1][2], float(rows[1][3])) == ("rsi_14", ">", 70.0)
     assert rows[1][4] == "extractor"
+
+
+def test_extractor_takeover_of_stale_writer_row(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#2010 re-scan takeover: an extractor parse that DIFFERS from an
+    existing writer-origin row takes the slot over and resets the baseline
+    (the old baseline graded a different predicate). Identical predicates
+    leave the row untouched (plain DO NOTHING path)."""
+    conn = ebull_test_conn
+    iid = 910_004
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+        "VALUES (%s, 'TKVR', 'Takeover Test Co', TRUE) ON CONFLICT (instrument_id) DO NOTHING",
+        (iid,),
+    )
+    row = conn.execute(
+        """
+        INSERT INTO theses (instrument_id, thesis_version, thesis_type, stance, memo_markdown,
+                            break_conditions_json)
+        VALUES (%s, 1, 'value', 'watch', 'memo',
+                '["RSI-14 crosses above 70 (overbought territory)"]'::jsonb)
+        RETURNING thesis_id
+        """,
+        (iid,),
+    ).fetchone()
+    assert row is not None
+    thesis_id = int(row[0])
+    # Simulate a pre-improvement scan: a writer-origin row holds the slot the
+    # extractor NOW parses (as rsi_14 > 70) with a DIFFERENT predicate.
+    conn.execute(
+        """
+        INSERT INTO thesis_break_predicates
+            (thesis_id, predicate_index, instrument_id, metric, op, threshold, unit,
+             source_text, baseline_state, baselined_at, origin)
+        VALUES (%s, 0, %s, 'altman_z', '<', 1.8, 'zscore', 'stale writer twin', 'armed', now(), 'writer')
+        """,
+        (thesis_id, iid),
+    )
+    conn.execute(
+        """
+        INSERT INTO price_daily (instrument_id, price_date, close, rsi_14)
+        VALUES (%s, CURRENT_DATE, 100.0, 50.0)
+        ON CONFLICT (instrument_id, price_date) DO UPDATE SET rsi_14 = EXCLUDED.rsi_14
+        """,
+        (iid,),
+    )
+    conn.commit()
+
+    run_thesis_break_scan(conn)
+
+    row = conn.execute(
+        "SELECT metric, op, threshold, origin, baseline_state FROM thesis_break_predicates "
+        "WHERE thesis_id = %s AND predicate_index = 0",
+        (thesis_id,),
+    ).fetchone()
+    assert row is not None
+    assert (row[0], row[1], float(row[2]), row[3]) == ("rsi_14", ">", 70.0, "extractor")
+    # Baseline reset by the takeover, then re-baselined by the same scan
+    # (rsi 50 < 70 → false → armed; newly-taken-over rows re-enter the
+    # normal state machine).
+    assert row[4] == "armed"

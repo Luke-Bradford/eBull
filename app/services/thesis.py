@@ -1323,13 +1323,19 @@ def _validate_writer_output(data: dict[str, object], *, require_buy_zone: bool =
     if zone_low is not None and zone_high is not None and zone_low > zone_high:
         raise ValueError(f"Writer output inverted buy zone: buy_zone_low {zone_low} > buy_zone_high {zone_high}")
 
-    # #2010: a buy with a live price anchor must be actionable — base target
-    # plus both zone bounds. Anchor-less contexts keep the v4 rule (zones are
+    # #2010: a buy with a live price anchor must be actionable — the full
+    # bear/base/bull target set plus both zone bounds (issue wording:
+    # "targets/zone REQUIRED for buy"; Codex ckpt-2 — base alone is not
+    # "targets"). Anchor-less contexts keep the v4 rule (zones are
     # meaningless without a market price), so the call site gates this.
-    # Current pop at ship time: 13/13 v4 buys already comply.
-    if require_buy_zone and stance == "buy" and (base is None or zone_low is None or zone_high is None):
+    # Current pop at ship time: 13/13 v4 buys already carry all five.
+    if (
+        require_buy_zone
+        and stance == "buy"
+        and (bear is None or base is None or bull is None or zone_low is None or zone_high is None)
+    ):
         raise ValueError(
-            "Writer output buy stance requires base_value and buy_zone_low/high when price_anchor is present"
+            "Writer output buy stance requires bear/base/bull values and buy_zone_low/high when price_anchor is present"
         )
 
 
@@ -1405,7 +1411,7 @@ def _insert_thesis_atomic(
     # #2010: writer-native structured predicates — soft-validated, best-effort
     # recall channel. Invalid entries (or a malformed top-level field) are
     # dropped with a warning, NEVER a retry-fail; prose stays canonical.
-    break_predicates, dropped = sanitize_writer_break_predicates(writer.get("break_predicates"), len(break_conditions))
+    break_predicates, dropped = sanitize_writer_break_predicates(writer.get("break_predicates"), break_conditions)
     if dropped:
         logger.warning(
             "Writer break_predicates dropped %d invalid entr%s for instrument_id=%s: %s",

@@ -249,7 +249,7 @@ def run_thesis_break_scan(conn: psycopg.Connection[Any], *, now: datetime | None
         # a hallucinated writer twin can never suppress a correct extraction.
         # Re-sanitize on read (fail-open): rows written before sql/232, or a
         # hand-edited jsonb, must not crash the scan.
-        writer_preds, _ = sanitize_writer_break_predicates(t["break_predicates_json"], len(conditions))
+        writer_preds, _ = sanitize_writer_break_predicates(t["break_predicates_json"], conditions)
         # Sanitizer guarantees condition_index is an int; the isinstance
         # narrows for the type checker without an assert in the prod path.
         writer_by_idx = {idx: p for p in writer_preds if isinstance(idx := p["condition_index"], int)}
@@ -281,6 +281,15 @@ def run_thesis_break_scan(conn: psycopg.Connection[Any], *, now: datetime | None
     inserted_keys: set[tuple[int, int]] = set()
     with conn.transaction():
         for thesis_id, idx, iid, pred, origin in to_insert:
+            # DO NOTHING preserves the arm/baseline state on re-scan — with
+            # ONE exception (Codex ckpt-2): if an extractor-vocabulary
+            # improvement now parses a condition a WRITER row filled with a
+            # DIFFERENT predicate, the precision channel takes the slot over
+            # and the baseline resets to pending (the old baseline graded a
+            # different predicate; the gap-uncertainty machinery then applies
+            # — already_true_after_gap if true at next evaluation). Identical
+            # (metric, op, threshold) leaves the row untouched. A writer row
+            # is never allowed to shadow the extractor.
             row = conn.execute(
                 """
                 INSERT INTO thesis_break_predicates
@@ -288,7 +297,20 @@ def run_thesis_break_scan(conn: psycopg.Connection[Any], *, now: datetime | None
                      source_text, origin)
                 VALUES (%(tid)s, %(idx)s, %(iid)s, %(metric)s, %(op)s, %(threshold)s, %(unit)s,
                         %(src)s, %(origin)s)
-                ON CONFLICT (thesis_id, predicate_index) DO NOTHING
+                ON CONFLICT (thesis_id, predicate_index) DO UPDATE SET
+                    metric = EXCLUDED.metric,
+                    op = EXCLUDED.op,
+                    threshold = EXCLUDED.threshold,
+                    unit = EXCLUDED.unit,
+                    source_text = EXCLUDED.source_text,
+                    origin = EXCLUDED.origin,
+                    baseline_state = 'pending',
+                    baselined_at = NULL
+                WHERE thesis_break_predicates.origin = 'writer'
+                  AND EXCLUDED.origin = 'extractor'
+                  AND (thesis_break_predicates.metric, thesis_break_predicates.op,
+                       thesis_break_predicates.threshold)
+                      IS DISTINCT FROM (EXCLUDED.metric, EXCLUDED.op, EXCLUDED.threshold)
                 RETURNING thesis_id, predicate_index
                 """,
                 {

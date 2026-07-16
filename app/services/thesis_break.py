@@ -147,7 +147,7 @@ METRIC_UNITS: dict[str, str] = {
 
 def sanitize_writer_break_predicates(
     raw: object,
-    n_conditions: int,
+    conditions: Sequence[object],
 ) -> tuple[list[dict[str, object]], list[str]]:
     """Soft-validate the writer's OPTIONAL structured ``break_predicates`` (#2010).
 
@@ -157,8 +157,11 @@ def sanitize_writer_break_predicates(
     Survivor shape is storage-ready:
     ``{"condition_index": int, "metric": str, "op": "<"|">", "threshold": float|None}``.
     ``condition_index`` validates against the RAW ``break_conditions`` array
-    bounds (index-alignment contract, PR-A).
+    (index-alignment contract, PR-A) and must point at a STRING slot — a
+    predicate is a structured twin of a prose condition; a twin of a
+    malformed non-string element has no prose to mirror (Codex ckpt-2).
     """
+    n_conditions = len(conditions)
     if raw is None:
         return [], []
     if not isinstance(raw, list):
@@ -181,6 +184,9 @@ def sanitize_writer_break_predicates(
         idx = entry.get("condition_index")
         if isinstance(idx, bool) or not isinstance(idx, int) or not (0 <= idx < n_conditions):
             reasons.append(f"[{i}] condition_index out of range: {idx!r}")
+            continue
+        if not isinstance(conditions[idx], str):
+            reasons.append(f"[{i}] condition_index {idx} points at a non-string condition")
             continue
         if idx in seen:
             reasons.append(f"[{i}] duplicate condition_index {idx}")
