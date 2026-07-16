@@ -531,6 +531,7 @@ def _value_score(
     pe_ratio: float | None = None,
     fcf_yield: float | None = None,
     price_target_mean: float | None = None,
+    thesis_stance: str | None = None,
 ) -> tuple[float, list[str]]:
     """
     Thesis valuation upside as the primary value proxy.
@@ -542,6 +543,11 @@ def _value_score(
     Fallback path (fundamentals-derived): when base_value is None.
       Blends up to three signals — P/E attractiveness (35%), FCF yield (35%),
       and price-target upside (30%) — re-normalised across available components.
+
+    ``thesis_stance`` is the latest thesis' stance when one exists (None = no
+    thesis row). A thesis may legitimately decline per-share targets (e.g. an
+    ``avoid`` stance), so the fallback note must not report it as absent
+    (#2005).
 
     Returns (score, missing_components).
     """
@@ -574,8 +580,16 @@ def _value_score(
         return _clip(score), notes
 
     # ----------------------------------------------------------------------
-    # Fallback path: fundamentals-derived (no thesis)
+    # Fallback path: fundamentals-derived (no thesis, or thesis without
+    # per-share targets)
     # ----------------------------------------------------------------------
+    fallback_note = (
+        "fundamentals fallback (no thesis)"
+        if thesis_stance is None
+        # "without targets", not "declined": legacy/DQ rows also carry null
+        # targets — absence of targets is the fact, intent is not observable.
+        else f"fundamentals fallback (thesis without targets, stance: {thesis_stance})"
+    )
     notes.append("base_value missing")
     if bear_value is None:
         notes.append("bear_value missing")
@@ -599,12 +613,12 @@ def _value_score(
         components.append((pt_score, 0.30))
 
     if not components:
-        notes.append("fundamentals fallback (no thesis)")
+        notes.append(fallback_note)
         return 0.5, notes
 
     total_weight = sum(w for _, w in components)
     score = sum(s * w / total_weight for s, w in components)
-    notes.append("fundamentals fallback (no thesis)")
+    notes.append(fallback_note)
     return _clip(score), notes
 
 
@@ -1165,10 +1179,10 @@ def _load_instrument_data(
         )
         quote_row: dict[str, Any] | None = cur.fetchone()
 
-        # Latest thesis (confidence + valuation bands + created_at)
+        # Latest thesis (confidence + valuation bands + stance + created_at)
         cur.execute(
             """
-            SELECT confidence_score, base_value, bear_value, created_at
+            SELECT confidence_score, base_value, bear_value, stance, created_at
             FROM theses
             WHERE instrument_id = %(id)s
             ORDER BY thesis_version DESC
@@ -1510,6 +1524,7 @@ def compute_score(
         # value-score branch falls back to thesis base/bear and
         # multiples when this is None.
         price_target_mean=None,
+        thesis_stance=str(thesis_row["stance"]) if thesis_row and thesis_row["stance"] is not None else None,
     )
     if v_notes:
         explanation_parts.append("value: " + "; ".join(v_notes))
