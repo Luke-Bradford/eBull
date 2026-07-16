@@ -805,6 +805,31 @@ this fixes the ASSIGNMENT. Matches the 2026-07-10 interim dev seed.
 
 ---
 
+## Thesis staleness v2 thresholds (#1988, settled 2026-07-16)
+
+Three structural data-driven regen triggers in `find_stale_instruments`
+(additive; #273 semantics + existing reason order preserved; ordered
+break_fired → price_move → band_exit → news_spike → cadence):
+
+- **price_move: |move since mint| ≥ 0.30** — universe-derived
+  (~5.7% 30d exceedance). **PROVISIONAL**: the 7-day-old corpus has a
+  degenerate own distribution; MUST re-verify the actual fire rate
+  ~30d post-ship (target ~2-8%/month; fvb R-retune precedent).
+- **band_exit** — close outside [bear, bull] having minted INSIDE
+  (arm-at-mint per #2012 Design 5; the 15/60 minted-outside class is
+  premise and never fires). No state table: mint close is deterministic
+  history.
+- **news_spike: 7d importance-mass rate ≥ 3× prior-23d baseline rate
+  AND 7d mass ≥ 2.0** — the absolute floor kills tiny-baseline ratio
+  explosions; baseline-less names are not evaluated.
+- **Price-input guards:** both closes > 0, latest close ≤ 10d old
+  (#2012 price freshness bound) — else the price rules are NOT
+  evaluated (#1632 NULL-never-0).
+
+**Spec:** `docs/specs/thesis/2026-07-16-thesis-staleness-v2.md`.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
