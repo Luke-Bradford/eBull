@@ -17,12 +17,18 @@ import type { FormEvent } from "react";
 import { patchConfig } from "@/api/config";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { useConfig } from "@/lib/ConfigContext";
+import { useSession } from "@/lib/session";
 
 // Must match VALID_LLM_PROVIDERS in app/services/runtime_config.py.
 const LLM_PROVIDERS = ["openai_compatible", "anthropic"] as const;
 
 export function LlmProviderSection(): JSX.Element {
   const config = useConfig();
+  const { operator } = useSession();
+  // Audit attribution must be a REAL identity — never a fabricated
+  // fallback string (KillSwitchSection precedent, #1992). Block the save
+  // instead when no operator is authenticated.
+  const operatorName = operator?.username ?? null;
 
   // Local override > server value (BudgetConfigSection pattern): null
   // means "not edited", so a refetch cleanly repopulates from the server.
@@ -47,6 +53,7 @@ export function LlmProviderSection(): JSX.Element {
 
   async function handleSave(e: FormEvent) {
     e.preventDefault();
+    if (operatorName === null) return;
     setSaving(true);
     setError(false);
     setSuccess(false);
@@ -54,7 +61,7 @@ export function LlmProviderSection(): JSX.Element {
       // Only send fields that actually changed — the backend rejects
       // no-op patches with 422.
       await patchConfig({
-        updated_by: "operator",
+        updated_by: operatorName,
         reason,
         llm_provider: provider ?? undefined,
         llm_base_url: baseUrl ?? undefined,
@@ -184,7 +191,7 @@ export function LlmProviderSection(): JSX.Element {
 
             <button
               type="submit"
-              disabled={saving || reasonMissing || nothingChanged}
+              disabled={saving || reasonMissing || nothingChanged || operatorName === null}
               className="rounded bg-slate-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {saving ? "Saving..." : "Save LLM config"}

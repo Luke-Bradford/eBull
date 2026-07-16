@@ -24,6 +24,12 @@ vi.mock("@/api/config", () => ({
   patchConfig: vi.fn(),
 }));
 
+// #1992: sections read the authenticated operator for audit attribution.
+const useSessionMock = vi.fn((): { operator: { id: string; username: string } | null } => ({
+  operator: { id: "1", username: "luke" },
+}));
+vi.mock("@/lib/session", () => ({ useSession: () => useSessionMock() }));
+
 const mockedPatchConfig = vi.mocked(patchConfig);
 
 function configResponse(): ConfigResponse {
@@ -108,7 +114,7 @@ describe("LlmProviderSection", () => {
 
     await waitFor(() => expect(mockedPatchConfig).toHaveBeenCalledOnce());
     expect(mockedPatchConfig).toHaveBeenCalledWith({
-      updated_by: "operator",
+      updated_by: "luke",
       reason: "benchmarking",
       llm_provider: undefined,
       llm_base_url: undefined,
@@ -133,7 +139,7 @@ describe("LlmProviderSection", () => {
 
     await waitFor(() => expect(mockedPatchConfig).toHaveBeenCalledOnce());
     expect(mockedPatchConfig).toHaveBeenCalledWith({
-      updated_by: "operator",
+      updated_by: "luke",
       reason: "stricter critic",
       llm_provider: undefined,
       llm_base_url: undefined,
@@ -161,7 +167,7 @@ describe("LlmProviderSection", () => {
 
     await waitFor(() => expect(mockedPatchConfig).toHaveBeenCalledOnce());
     expect(mockedPatchConfig).toHaveBeenCalledWith({
-      updated_by: "operator",
+      updated_by: "luke",
       reason: "flip to cloud",
       llm_provider: "anthropic",
       llm_base_url: undefined,
@@ -180,6 +186,15 @@ describe("LlmProviderSection", () => {
     await user.click(screen.getByRole("button", { name: /save llm config/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/failed to save llm config/i);
+  });
+
+  it("blocks save when no operator is authenticated (#1992)", () => {
+    useSessionMock.mockReturnValueOnce({ operator: null });
+    renderSection();
+    // Real identity required for runtime_config_audit attribution — the
+    // save button is disabled rather than sending a fabricated fallback.
+    expect(screen.getByRole("button", { name: /save llm config/i })).toBeDisabled();
+    expect(mockedPatchConfig).not.toHaveBeenCalled();
   });
 
   it("renders the retry surface when config fetch errored", () => {

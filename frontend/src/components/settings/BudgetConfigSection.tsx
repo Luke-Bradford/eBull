@@ -10,8 +10,14 @@ import type { CapitalEventResponse } from "@/api/types";
 import { SectionSkeleton, SectionError } from "@/components/dashboard/Section";
 import { formatDateTime, formatMoney } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
+import { useSession } from "@/lib/session";
 
 export function BudgetConfigSection() {
+  const { operator } = useSession();
+  // Audit attribution must be a REAL identity — never a fabricated
+  // fallback string (KillSwitchSection precedent, #1992). Block the save
+  // instead when no operator is authenticated.
+  const operatorName = operator?.username ?? null;
   // ---- Config state ----
   const config = useAsync(fetchBudgetConfig, []);
   const [cashBufferPct, setCashBufferPct] = useState<number | null>(null);
@@ -38,6 +44,7 @@ export function BudgetConfigSection() {
 
   async function handleConfigSave(e: FormEvent) {
     e.preventDefault();
+    if (operatorName === null) return;
     setConfigSaving(true);
     setConfigError(false);
     setConfigSuccess(false);
@@ -51,7 +58,7 @@ export function BudgetConfigSection() {
         // Convert percentage (display) back to fraction (API).
         cash_buffer_pct: bufferChanged ? displayedBufferPct / 100 : undefined,
         cgt_scenario: scenarioChanged ? displayedCgtScenario : undefined,
-        updated_by: "operator",
+        updated_by: operatorName,
         reason: configReason,
       });
       setCashBufferPct(null);
@@ -199,7 +206,7 @@ export function BudgetConfigSection() {
 
               <button
                 type="submit"
-                disabled={configSaving || configReasonMissing || configNothingChanged}
+                disabled={configSaving || configReasonMissing || configNothingChanged || operatorName === null}
                 className="rounded bg-slate-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {configSaving ? "Saving..." : "Save config"}
