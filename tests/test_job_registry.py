@@ -136,6 +136,9 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # See app/jobs/sources.py::Lane.
         "db_thesis_dq",
         "db_thesis_break",
+        # #2002 — thesis_outcome_capture single-job lane (same #2052/#1526
+        # rationale); sole writer of thesis_outcomes.
+        "db_thesis_outcomes",
     }
 )
 

@@ -125,6 +125,7 @@ from app.workers.scheduler import (
     JOB_SEED_COST_MODELS,
     JOB_THESIS_BREAK_SCAN,
     JOB_THESIS_DQ_AUDIT,
+    JOB_THESIS_OUTCOME_CAPTURE,
     JOB_THESIS_REFRESH,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
@@ -185,6 +186,7 @@ from app.workers.scheduler import (
     seed_cost_models,
     thesis_break_scan,
     thesis_dq_audit,
+    thesis_outcome_capture,
     thesis_refresh,
     weekly_report,
 )
@@ -309,6 +311,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # bypasses ScheduledJob.prerequisite) is equally gated.
     JOB_THESIS_BREAK_SCAN: _adapt_zero_arg(thesis_break_scan),
     JOB_THESIS_DQ_AUDIT: _adapt_zero_arg(thesis_dq_audit),
+    JOB_THESIS_OUTCOME_CAPTURE: _adapt_zero_arg(thesis_outcome_capture),
     JOB_THESIS_REFRESH: _adapt_zero_arg(thesis_refresh),
     JOB_PORTFOLIO_EOD_SNAPSHOT: _adapt_zero_arg(portfolio_eod_snapshot_job),
     JOB_FX_HISTORY_BACKFILL: _adapt_zero_arg(fx_history_backfill_job),
