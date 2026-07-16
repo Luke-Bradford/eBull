@@ -121,7 +121,9 @@ New OPTIONAL output field (operator brief on #2010, item 4):
 ]
 ```
 
-- `condition_index` references the `break_conditions` array (0-based).
+- `condition_index` references the `break_conditions` array (0-based) and
+  must point at a STRING slot — a twin of a malformed non-string element
+  has no prose to mirror (Codex ckpt-2), so it is dropped.
 - `metric` ∈ closed vocabulary; `op` ∈ {"<", ">"}; `threshold` float, or
   null for the two regime metrics (`price_vs_sma200`, `sma_50_vs_sma_200`).
 - **Soft-validated at INSERT, never retry-fails the thesis**: entries with
@@ -163,16 +165,33 @@ Everything downstream is untouched: freshness bounds, arm/baseline,
 already_true quarantine, altman sector gate (applies at insert regardless of
 origin), event fire path, alerts.
 
+**Re-scan takeover (Codex ckpt-2)**: the upsert's DO NOTHING preserves
+baseline state EXCEPT when an extractor-vocabulary improvement now parses a
+condition a writer-origin row filled with a DIFFERENT (metric, op,
+threshold) — the extractor takes the slot over and the baseline resets to
+pending (the old baseline graded a different predicate; gap-uncertainty
+machinery then applies). Identical predicates leave the row untouched. A
+writer row never shadows the extractor in either direction. Known edge
+(accepted, documented): if the stale writer predicate had already FIRED its
+event, UNIQUE(thesis_id, predicate_index) suppresses a second fire for the
+taken-over predicate on that thesis version — rare (requires a fired writer
+twin AND a vocabulary change that reparses it differently), self-heals on
+the next thesis version.
+
 ### 5. Validator — buy-stance enforcement
 
 `_validate_writer_output` gains an anchor-gated rule, threaded from the call
 site (the validator itself stays output-only; the writer call passes
 `require_buy_zone=price_anchor is not None`):
 
-- stance == "buy" AND anchor present AND (base_value null OR zone_low null
-  OR zone_high null) → ValueError → rides the existing retry-once.
+- stance == "buy" AND anchor present AND (bear/base/bull null OR zone_low
+  null OR zone_high null) → ValueError → rides the existing retry-once.
+  Full target set, not base alone (Codex ckpt-2: issue wording is
+  "targets/zone", and the tier-2 procedure derives bear/bull from the same
+  basis anyway).
 
-Current pop: 13/13 v4 buys already comply → expected live failure rate ≈ 0.
+Current pop: 13/13 v4 buys already carry all five → expected live failure
+rate ≈ 0.
 
 **Harness plumbing (Codex ckpt-1 High)**: `scripts/llm_eval_thesis.py`
 `classify_attempt` calls the imported validator directly — it MUST pass
