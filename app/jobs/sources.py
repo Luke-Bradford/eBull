@@ -86,6 +86,7 @@ Lane = Literal[
     "db_size_sample",
     "db_thesis_dq",
     "db_thesis_break",
+    "db_thesis_outcomes",
     "llm_thesis",
     "risk_metrics",
     "fair_value_band",

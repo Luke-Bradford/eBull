@@ -334,6 +334,7 @@ JOB_DAILY_NEWS_REFRESH = "daily_news_refresh"
 JOB_THESIS_REFRESH = "thesis_refresh"
 JOB_THESIS_DQ_AUDIT = "thesis_dq_audit"
 JOB_THESIS_BREAK_SCAN = "thesis_break_scan"
+JOB_THESIS_OUTCOME_CAPTURE = "thesis_outcome_capture"
 JOB_MORNING_CANDIDATE_REVIEW = "morning_candidate_review"
 JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
@@ -869,6 +870,29 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # thesis_dq_audit's 05:12 slot; the stagger is layout hygiene only
         # since #2052 (each scan owns its lane, so they cannot contend).
         cadence=Cadence.daily(hour=5, minute=22),
+        # A missed night is re-covered next night; nothing accumulates.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_THESIS_OUTCOME_CAPTURE,
+        display_name="Thesis outcome capture",
+        # Own single-job lane per the #2052/#1526 lesson (boot catch-up /
+        # manual triggers co-fire the 05:1x-05:3x scans despite the
+        # stagger). Sole writer of thesis_outcomes; see
+        # app/jobs/sources.py::Lane.
+        source="db_thesis_outcomes",
+        description=(
+            "Nightly calibration-ledger capture (#2002): insert realized "
+            "returns per thesis version at 30/90/365d horizons into the "
+            "append-only thesis_outcomes table. Maturity is data-anchored "
+            "(max price_date >= anchor + horizon), anchors re-read from "
+            "price_daily — deterministic, no LLM. row_count = outcome rows "
+            "inserted (0 = healthy steady state)."
+        ),
+        # 05:32 UTC — post-fundamentals data-readiness window, offset from
+        # dq_audit 05:12 / break_scan 05:22, non-5-minute-aligned (#1707).
+        cadence=Cadence.daily(hour=5, minute=32),
         # A missed night is re-covered next night; nothing accumulates.
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
@@ -4987,6 +5011,34 @@ def thesis_break_scan() -> None:
             logger.warning("thesis_break_scan: %d break event(s) fired — states: %s", report.fired, states)
         else:
             logger.info("thesis_break_scan: no fires — predicates=%d (%s)", report.predicates_total, states)
+
+
+def thesis_outcome_capture() -> None:
+    """Nightly calibration-ledger outcome capture (#2002).
+
+    Thin wrapper around
+    :func:`app.services.thesis_outcomes.capture_thesis_outcomes`.
+    ``row_count`` is the number of outcome rows INSERTED this run (0 is
+    the healthy steady state — pairs mature slowly by design). The full
+    census (anchorless, immature split, dead series, skips) lands in the
+    tracker note for /system/jobs.
+    """
+    from app.services.thesis_outcomes import capture_thesis_outcomes
+
+    with _tracked_job(JOB_THESIS_OUTCOME_CAPTURE) as tracker:
+        with connect_job() as conn:
+            report = capture_thesis_outcomes(conn)
+        tracker.row_count = report.inserted
+        tracker.note = (
+            f"theses={report.scanned_theses} anchorless={report.anchorless} "
+            f"mature={report.mature_pairs} inserted={report.inserted} "
+            f"immature_current={report.immature_data_current} "
+            f"immature_stalled={report.immature_series_stalled} "
+            f"series_dead={report.series_dead} "
+            f"missing_close={report.skipped_missing_close} "
+            f"nonpositive_close={report.skipped_nonpositive_close}"
+        )
+        logger.info("thesis_outcome_capture: %s", tracker.note)
 
 
 def financial_facts_retention_sweep() -> None:
