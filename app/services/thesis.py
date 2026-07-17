@@ -454,6 +454,9 @@ def find_stale_instruments(
             LIMIT 1
         ) pn ON TRUE
         LEFT JOIN LATERAL (
+            -- Mint-close read: SQL mirror of
+            -- thesis_dq_audit.close_row_at_or_before (#2070 — that helper
+            -- is the semantic source for close-at-or-before reads).
             SELECT p.close
             FROM price_daily p
             WHERE p.instrument_id = i.instrument_id
