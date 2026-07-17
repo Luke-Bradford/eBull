@@ -73,7 +73,10 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # SCT-bearing bodies rewash + backfill comp automatically (no separate
 # backfill script). ``rewash_filings`` imports THIS literal for its ParserSpec
 # current_version so the two can't drift.
-_PARSER_VERSION_DEF14A = "def14a-v2"
+# v3 (#2086): Item 402 exec comp now runs on the ownership-tombstone path
+# too — the tombstoned-with-stored-raw cohort must rewash to pick up SCTs
+# the 402↔403 coupling previously skipped (GME class).
+_PARSER_VERSION_DEF14A = "def14a-v3"
 
 logger = logging.getLogger(__name__)
 

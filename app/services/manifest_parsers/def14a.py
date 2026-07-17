@@ -324,6 +324,50 @@ def _parse_def14a(
         # tombstoned. Write the log row with status='partial' to
         # mirror legacy accounting so /coverage/def14a counts a
         # consistent figure.
+        #
+        # #2086 — Item 402(c) exec comp runs HERE too, before the
+        # tombstone return. Reg S-K Items 402 and 403 are independent
+        # items of Schedule 14A: a proxy whose beneficial-ownership
+        # table defeats the detector (GME: best_score 0-9 across all
+        # proxies) can still carry a perfectly standard Summary
+        # Compensation Table. Comp stays a savepoint-isolated
+        # best-effort augment that never changes this ParseOutcome —
+        # the row still tombstones for Item 403 accounting.
+        # Belt-and-braces try around the whole comp attempt: the callee
+        # already savepoint-isolates and swallows parse/upsert failures,
+        # but the tombstone ingest-log write below MUST happen regardless
+        # — comp can never be allowed to block the Item-403 accounting
+        # it was just decoupled from (review round 1). Failures are
+        # logged with traceback, never silent.
+        try:
+            try:
+                comp_siblings = _resolve_siblings(conn, instrument_id=instrument_id, issuer_cik=issuer_cik)
+            except Exception:  # noqa: BLE001 — logged fallback to the primary instrument
+                logger.exception(
+                    "def14a manifest parser: sibling resolve failed pre-comp accession=%s",
+                    accession,
+                )
+                comp_siblings = [instrument_id]
+            apply_exec_comp_best_effort(
+                conn,
+                accession_number=accession,
+                issuer_cik=issuer_cik,
+                body=body,
+                instrument_ids=comp_siblings,
+            )
+        except Exception:  # noqa: BLE001 — comp is an augment; tombstone accounting proceeds
+            logger.exception(
+                "def14a manifest parser: exec-comp augment raised on tombstone path accession=%s",
+                accession,
+            )
+            try:
+                conn.rollback()
+            except psycopg.Error:
+                logger.debug(
+                    "def14a manifest parser: rollback suppressed after comp failure accession=%s",
+                    accession,
+                    exc_info=True,
+                )
         try:
             with conn.transaction():
                 _record_ingest_attempt(

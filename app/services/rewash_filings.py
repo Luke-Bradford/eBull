@@ -595,11 +595,21 @@ def _apply_def14a(
                 f"{raw_doc.accession_number} (best_score={parsed.raw_table_score}); "
                 f"previous parser found rows"
             )
-        # Rescue cohort with still-empty parse. Don't raise —
-        # parser hasn't improved enough yet. Skip without bumping
-        # parser_version so a future sweep with a better parser
-        # re-tries.
-        return False
+        # Rescue cohort with still-empty ownership parse. #2086: Item
+        # 402 is independent of Item 403 — attempt the exec-comp
+        # rewash BEFORE deciding the outcome (this is exactly the
+        # tombstoned-with-SCT cohort the v3 bump exists to backfill;
+        # Codex ckpt-2 P2). Comp written → the accession has been
+        # meaningfully rewashed at v3 → True (bumps parser_version).
+        # No comp either → keep the pre-existing rescue semantics:
+        # skip without bumping so a future improved parser re-tries.
+        comp_written = _rewash_exec_comp(
+            conn,
+            raw_doc=raw_doc,
+            issuer_cik=str(issuer_cik),
+            instrument_id=int(instrument_id),
+        )
+        return comp_written > 0
 
     # Replace-then-insert: clear all existing holders for the
     # accession so a holder dropped by the new parser cannot
@@ -637,35 +647,58 @@ def _apply_def14a(
     )
     refresh_def14a_current(conn, instrument_id=int(instrument_id))
 
-    # Item 402(c) exec-comp rewash (#1945). Replace-then-insert for THIS
-    # instrument (scoped, unlike the holdings DELETE which clears by accession —
-    # comp is written per resolved instrument so we never nuke a sibling's comp
-    # rows). The whole comp block runs in its OWN SAVEPOINT so that an
-    # UNEXPECTED comp parse/upsert failure rolls back comp only and cannot
-    # collateral-damage the already-applied Item 403 holdings rewash (#1700
-    # per-section isolation). The INTENTIONAL regression signal — a re-parse
-    # that yields zero comp rows for an accession that PREVIOUSLY had them — is
-    # deliberately re-raised as RewashParseError, mirroring the holdings
-    # contract, so the accession fails + retries instead of silently zeroing
-    # typed rows. (Comp absence on an accession that never had comp is expected
-    # — many bodies carry no SCT — so the first-time v1→v2 backfill never
-    # raises.)
-    # Function-local imports match this file's convention for the def14a
-    # parser/upsert helpers (see the Item 403 holdings path at the
-    # parse_beneficial_ownership_table / _upsert_holding imports above): the
-    # heavy sec_def14a + def14a_ingest modules are pulled in only when a
-    # def14a_body actually reaches rewash, keeping this module's import graph
-    # light. _PARSER_VERSION_DEF14A stays module-level because register_parser
-    # consumes it at import time.
+    # Item 402(c) exec-comp rewash (#1945; helper shared with the
+    # rescue-cohort branch above since #2086).
+    _rewash_exec_comp(
+        conn,
+        raw_doc=raw_doc,
+        issuer_cik=str(issuer_cik),
+        instrument_id=int(instrument_id),
+    )
+    return True
+
+
+def _rewash_exec_comp(
+    conn: psycopg.Connection[Any],
+    *,
+    raw_doc: RawFilingDocument,
+    issuer_cik: str,
+    instrument_id: int,
+) -> int:
+    """Item 402(c) exec-comp rewash (#1945, extracted for #2086).
+
+    Replace-then-insert for THIS instrument (scoped, unlike the holdings
+    DELETE which clears by accession — comp is written per resolved
+    instrument so we never nuke a sibling's comp rows). The whole comp
+    block runs in its OWN SAVEPOINT so that an UNEXPECTED comp
+    parse/upsert failure rolls back comp only and cannot
+    collateral-damage an already-applied Item 403 holdings rewash (#1700
+    per-section isolation). The INTENTIONAL regression signal — a
+    re-parse that yields zero comp rows for an accession that PREVIOUSLY
+    had them — is deliberately re-raised as RewashParseError, mirroring
+    the holdings contract, so the accession fails + retries instead of
+    silently zeroing typed rows. (Comp absence on an accession that
+    never had comp is expected — many bodies carry no SCT.)
+
+    Returns the number of comp rows written (0 on absence or on a
+    swallowed unexpected failure).
+
+    Function-local imports match this file's convention for the def14a
+    parser/upsert helpers: the heavy sec_def14a + def14a_ingest modules
+    are pulled in only when a def14a_body actually reaches rewash.
+    _PARSER_VERSION_DEF14A stays module-level because register_parser
+    consumes it at import time.
+    """
     from app.providers.implementations.sec_def14a import parse_summary_compensation_table
     from app.services.def14a_ingest import _upsert_comp
 
+    written = 0
     try:
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT 1 FROM def14a_exec_compensation WHERE accession_number = %s AND instrument_id = %s LIMIT 1",
-                    (raw_doc.accession_number, int(instrument_id)),
+                    (raw_doc.accession_number, instrument_id),
                 )
                 had_comp_rows = cur.fetchone() is not None
 
@@ -684,16 +717,17 @@ def _apply_def14a(
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM def14a_exec_compensation WHERE accession_number = %s AND instrument_id = %s",
-                    (raw_doc.accession_number, int(instrument_id)),
+                    (raw_doc.accession_number, instrument_id),
                 )
             for comp_row in comp.rows:
                 _upsert_comp(
                     conn,
                     accession_number=raw_doc.accession_number,
-                    issuer_cik=str(issuer_cik),
-                    instrument_id=int(instrument_id),
+                    issuer_cik=issuer_cik,
+                    instrument_id=instrument_id,
                     row=comp_row,
                 )
+                written += 1
     except RewashParseError:
         # Intentional regression — propagate to fail + retry this accession
         # (the savepoint has already rolled comp back).
@@ -703,7 +737,8 @@ def _apply_def14a(
             "def14a rewash: exec-comp augment failed accession=%s (holdings rewash preserved)",
             raw_doc.accession_number,
         )
-    return True
+        return 0
+    return written
 
 
 register_parser(
