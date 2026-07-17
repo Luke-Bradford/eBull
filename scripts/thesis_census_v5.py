@@ -144,13 +144,13 @@ def run_census(conn: psycopg.Connection[object]) -> None:
         print("No v5 theses yet — run at census time (~2026-07-24).")
     print(
         f"{'band':>5} {'tier':>8} {'n':>4}  {'abstention':>16} {'zoneless_buy':>16} "
-        f"{'of_float':>9}  {'premise_true (pred-level)':>26}"
+        f"{'of_float':>16}  {'premise_true (pred-level)':>26}"
     )
     for (band, tier), seg in sorted(segments.items()):
         print(
             f"{'yes' if band else 'no':>5} {tier:>8} {seg.n:>4}  "
             f"{_pct(seg.abstention, seg.n):>16} {_pct(seg.zoneless_buy, seg.n):>16} "
-            f"{seg.of_float:>9}  {_pct(seg.n_premise_true, seg.n_predicates):>26}"
+            f"{_pct(seg.of_float, seg.n):>16}  {_pct(seg.n_premise_true, seg.n_predicates):>26}"
         )
 
     print(f"\nStratified T2 pre-batch, band-absent skew ({len(prebatch)} names, run BEFORE wide backfill):")
