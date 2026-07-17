@@ -753,6 +753,66 @@ def get_thesis_dq_audit(
     )
 
 
+class CalibrationCohortModel(BaseModel):
+    model: str | None
+    prompt_version: str | None
+    horizon_days: int
+    total_theses: int
+    anchorless: int
+    immature_data_current: int
+    immature_series_stalled: int
+    series_dead: int
+    outcome_rows: int
+    targets_absent: int
+    confidence_absent: int
+    direction_claims: int
+    target_distance_mape: float | None
+    stance_hit_rate: float | None
+    conviction_brier: float | None
+
+
+class CalibrationScoreboardResponse(BaseModel):
+    method_version: str
+    cohorts: list[CalibrationCohortModel]
+
+
+# Also registered BEFORE /{instrument_id} — same literal-vs-int rule as
+# /dq-audit above.
+@router.get("/calibration-scoreboard", response_model=CalibrationScoreboardResponse)
+def get_calibration_scoreboard(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CalibrationScoreboardResponse:
+    """Calibration scoreboard (#2068) — compute-on-read over the #2002
+    ``thesis_outcomes`` ledger, per (model, prompt_version, horizon)
+    cohort. Metric definitions are fixed in the calibration-ledger spec;
+    coverage counters are first-class (honest missingness)."""
+    from app.services.thesis_outcomes import METHOD_VERSION, compute_calibration_scoreboard
+
+    return CalibrationScoreboardResponse(
+        method_version=METHOD_VERSION,
+        cohorts=[
+            CalibrationCohortModel(
+                model=c.model,
+                prompt_version=c.prompt_version,
+                horizon_days=c.horizon_days,
+                total_theses=c.total_theses,
+                anchorless=c.anchorless,
+                immature_data_current=c.immature_data_current,
+                immature_series_stalled=c.immature_series_stalled,
+                series_dead=c.series_dead,
+                outcome_rows=c.outcome_rows,
+                targets_absent=c.targets_absent,
+                confidence_absent=c.confidence_absent,
+                direction_claims=c.direction_claims,
+                target_distance_mape=c.target_distance_mape,
+                stance_hit_rate=c.stance_hit_rate,
+                conviction_brier=c.conviction_brier,
+            )
+            for c in compute_calibration_scoreboard(conn)
+        ],
+    )
+
+
 @router.get("/{instrument_id}", response_model=ThesisDetail | None)
 def get_latest_thesis(
     instrument_id: int,

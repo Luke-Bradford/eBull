@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 import psycopg
@@ -250,3 +251,179 @@ def capture_thesis_outcomes(conn: psycopg.Connection[Any]) -> ThesisOutcomeCaptu
         skipped_missing_close=missing_close,
         skipped_nonpositive_close=nonpositive,
     )
+
+
+# --- Calibration scoreboard (#2068) — read-side over the ledger ----------
+#
+# Metric definitions are FIXED in the spec ("Metric definitions" section,
+# docs/proposals/thesis/2026-07-16-calibration-ledger-schema.md); this is
+# an implementation, not a redesign. Cohort = (model, prompt_version,
+# horizon_days) over ALL thesis versions (the ledger scores versions, not
+# instruments). Coverage counters are first-class output — honest
+# missingness, never imputation.
+
+_DIRECTION_STANCES = frozenset({"buy", "avoid"})
+
+_SCOREBOARD_THESES_SQL = """
+SELECT t.thesis_id, t.model, t.prompt_version, t.stance,
+       t.base_value, t.confidence_score, i.is_tradable,
+       r.context_summary, p.max_price_date
+FROM theses t
+JOIN instruments i ON i.instrument_id = t.instrument_id
+LEFT JOIN LATERAL (
+    SELECT context_summary
+    FROM thesis_runs r
+    WHERE r.thesis_id = t.thesis_id AND r.context_summary IS NOT NULL
+    ORDER BY r.run_id DESC
+    LIMIT 1
+) r ON TRUE
+LEFT JOIN LATERAL (
+    SELECT max(price_date) AS max_price_date
+    FROM price_daily p
+    WHERE p.instrument_id = t.instrument_id
+) p ON TRUE
+ORDER BY t.thesis_id
+"""
+
+_SCOREBOARD_OUTCOMES_SQL = """
+SELECT thesis_id, horizon_days, realized_close, realized_return
+FROM thesis_outcomes
+"""
+
+
+@dataclass(frozen=True)
+class CohortScore:
+    """One (model, prompt_version, horizon) scoreboard row."""
+
+    model: str | None
+    prompt_version: str | None
+    horizon_days: int
+    # Coverage counters (spec item 4 — always reported).
+    total_theses: int
+    anchorless: int
+    immature_data_current: int
+    immature_series_stalled: int
+    series_dead: int
+    outcome_rows: int
+    targets_absent: int
+    confidence_absent: int
+    direction_claims: int
+    # Metrics (None when the contributing set is empty — never imputed).
+    target_distance_mape: float | None
+    stance_hit_rate: float | None
+    conviction_brier: float | None
+
+
+def aggregate_scoreboard(
+    thesis_rows: list[dict[str, Any]],
+    outcomes: dict[tuple[int, int], tuple[Decimal, Decimal]],
+    today: date,
+) -> list[CohortScore]:
+    """Pure aggregation over plain values (table-testable, no DB).
+
+    ``thesis_rows``: one dict per thesis version (keys: thesis_id, model,
+    prompt_version, stance, base_value, confidence_score, is_tradable,
+    context_summary, max_price_date). ``outcomes``: (thesis_id, horizon)
+    -> (realized_close, realized_return).
+
+    Per spec: MAPE-form target distance over base_value-bearing outcome
+    rows; stance hit-rate over direction claims (buy hit <=> return > 0,
+    avoid hit <=> return < 0; watch/hold make no claim); conviction Brier
+    over direction claims with non-null confidence_score (diagnostic —
+    "does conviction behave like a calibrated probability?"). A mature
+    pair the nightly capture has not yet minted counts as immature here
+    (compute-on-read never classifies ahead of the ledger).
+    """
+    acc: dict[tuple[str | None, str | None, int], dict[str, Any]] = {}
+
+    def bucket(model: str | None, pv: str | None, horizon: int) -> dict[str, Any]:
+        key = (model, pv, horizon)
+        if key not in acc:
+            acc[key] = {
+                "total_theses": 0,
+                "anchorless": 0,
+                "immature_data_current": 0,
+                "immature_series_stalled": 0,
+                "series_dead": 0,
+                "outcome_rows": 0,
+                "targets_absent": 0,
+                "confidence_absent": 0,
+                "direction_claims": 0,
+                "mape_terms": [],
+                "hits": 0,
+                "brier_terms": [],
+            }
+        return acc[key]
+
+    for row in thesis_rows:
+        anchor_date = anchor_date_from_summary(row["context_summary"])
+        for horizon in HORIZONS:
+            b = bucket(row["model"], row["prompt_version"], horizon)
+            b["total_theses"] += 1
+            if anchor_date is None:
+                b["anchorless"] += 1
+                continue
+            outcome = outcomes.get((int(row["thesis_id"]), horizon))
+            if outcome is None:
+                kind = classify_immature(
+                    is_tradable=bool(row["is_tradable"]),
+                    max_price_date=row["max_price_date"],
+                    due_date=anchor_date + timedelta(days=horizon),
+                    today=today,
+                )
+                b[kind] += 1
+                continue
+            realized_close, realized_return = outcome
+            b["outcome_rows"] += 1
+            base_value = row["base_value"]
+            if base_value is None:
+                b["targets_absent"] += 1
+            else:
+                b["mape_terms"].append(abs(Decimal(base_value) - realized_close) / realized_close)
+            if row["stance"] in _DIRECTION_STANCES:
+                b["direction_claims"] += 1
+                hit = realized_return > 0 if row["stance"] == "buy" else realized_return < 0
+                if hit:
+                    b["hits"] += 1
+                confidence = row["confidence_score"]
+                if confidence is None:
+                    b["confidence_absent"] += 1
+                else:
+                    b["brier_terms"].append((Decimal(confidence) - (1 if hit else 0)) ** 2)
+
+    def _mean(terms: list[Decimal]) -> float | None:
+        return float(sum(terms) / len(terms)) if terms else None
+
+    return [
+        CohortScore(
+            model=model,
+            prompt_version=pv,
+            horizon_days=horizon,
+            total_theses=b["total_theses"],
+            anchorless=b["anchorless"],
+            immature_data_current=b["immature_data_current"],
+            immature_series_stalled=b["immature_series_stalled"],
+            series_dead=b["series_dead"],
+            outcome_rows=b["outcome_rows"],
+            targets_absent=b["targets_absent"],
+            confidence_absent=b["confidence_absent"],
+            direction_claims=b["direction_claims"],
+            target_distance_mape=_mean(b["mape_terms"]),
+            stance_hit_rate=(b["hits"] / b["direction_claims"]) if b["direction_claims"] else None,
+            conviction_brier=_mean(b["brier_terms"]),
+        )
+        for (model, pv, horizon), b in sorted(acc.items(), key=lambda kv: (kv[0][0] or "", kv[0][1] or "", kv[0][2]))
+    ]
+
+
+def compute_calibration_scoreboard(conn: psycopg.Connection[Any]) -> list[CohortScore]:
+    """The one DB reader for the scoreboard endpoint (#2068)."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(_SCOREBOARD_THESES_SQL)
+        thesis_rows = cur.fetchall()
+    outcomes: dict[tuple[int, int], tuple[Decimal, Decimal]] = {}
+    with conn.cursor() as cur:
+        cur.execute(_SCOREBOARD_OUTCOMES_SQL)
+        for thesis_id, horizon_days, realized_close, realized_return in cur.fetchall():
+            outcomes[(int(thesis_id), int(horizon_days))] = (realized_close, realized_return)
+    return aggregate_scoreboard(thesis_rows, outcomes, date.today())
