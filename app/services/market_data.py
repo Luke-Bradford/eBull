@@ -274,6 +274,7 @@ def refresh_market_data(
             fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=today)
         upserted = 0
         computed = 0
+        adjustment_detected = False
         try:
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
@@ -289,7 +290,7 @@ def refresh_market_data(
                     stored = _stored_overlap_closes(conn, instrument_id, [b.price_date for b in bars])
                     ratio = detect_adjustment_event(stored, bars)
                     if ratio is not None:
-                        adjustment_refetches += 1
+                        adjustment_detected = True
                         logger.warning(
                             "Adjustment event detected for %s (id=%d): overlap close ratio %s — "
                             "re-fetching full %d-bar history to heal the series",
@@ -309,6 +310,10 @@ def refresh_market_data(
             # — and that same instrument is also counted in ``candles_failed``.
             candle_rows_upserted += upserted
             features_computed += computed
+            # Counted only after a clean commit (same #1293 rule as the row
+            # totals) — a heal whose re-fetch or write failed did NOT happen.
+            if adjustment_detected:
+                adjustment_refetches += 1
             # A clean fetch proves the provider + DB are reachable → reset.
             consecutive_systemic_failures = 0
         except Exception as exc:
