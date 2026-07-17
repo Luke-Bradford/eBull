@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import psycopg
@@ -205,18 +206,35 @@ def _anchor_block(summary: object) -> dict[str, Any] | None:
     return anchor if isinstance(anchor, dict) else None
 
 
-def _close_at_or_before(conn: psycopg.Connection[Any], instrument_id: int, as_of: date) -> float | None:
+def close_row_at_or_before(
+    conn: psycopg.Connection[Any], instrument_id: int, as_of: date
+) -> tuple[date, Decimal] | None:
+    """(price_date, close) of the last print at or before ``as_of``.
+
+    The single Python implementation of the close-at-or-before read
+    (#2070): this audit and the calibration ledger (``thesis_outcomes``)
+    both delegate here; ``find_stale_instruments``' mint-close LATERAL in
+    ``app/services/thesis.py`` mirrors it SQL-side. The close stays
+    ``Decimal`` end-to-end (NUMERIC in, NUMERIC out — no binary-float
+    round-trip; PR #2061 review); a non-finite NUMERIC (NaN) maps to
+    None the same way the ``_to_float`` chokepoint would.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT close FROM price_daily
+            SELECT price_date, close FROM price_daily
             WHERE instrument_id = %(iid)s AND price_date <= %(as_of)s
             ORDER BY price_date DESC LIMIT 1
             """,
             {"iid": instrument_id, "as_of": as_of},
         )
         row = cur.fetchone()
-    return _to_float(row[0]) if row else None
+    if row is None:
+        return None
+    close = row[1]
+    if not isinstance(close, Decimal) or not close.is_finite():
+        return None
+    return (row[0], close)
 
 
 _LATEST_THESES_SQL = """
@@ -309,7 +327,8 @@ def compute_thesis_dq_report(conn: psycopg.Connection[Any]) -> ThesisDqReport:
             add(row, "stale_price_anchor", "flag", detail)
 
         if anchor_as_of is not None:
-            anchor_close = _close_at_or_before(conn, row["instrument_id"], anchor_as_of)
+            close_row = close_row_at_or_before(conn, row["instrument_id"], anchor_as_of)
+            anchor_close = _to_float(close_row[1]) if close_row else None
             if detail := check_base_vs_anchor_close(row["base_value"], anchor_close):
                 add(row, "base_far_from_close", "flag", detail)
 
