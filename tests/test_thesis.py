@@ -1464,3 +1464,23 @@ class TestShapeTaState:
         assert out["sma_50_200_regime"] is None
         assert out["price_vs_sma200"] is None
         assert out["sma_50"] is None
+
+
+class TestNewsSpikeRatioGuard:
+    """PR #2082 review — a spike fully concentrated in the 7d window
+    (m30 == m7 → baseline 0) must not fire and must not divide."""
+
+    def test_concentrated_spike_no_baseline_returns_none(self) -> None:
+        from app.services.thesis import _news_spike_ratio
+
+        assert _news_spike_ratio(10.0, 10.0) is None
+        assert _news_spike_ratio(10.0, 9.0) is None  # negative baseline
+
+    def test_fired_ratio_matches_detail_math(self) -> None:
+        from app.services.thesis import _news_spike_ratio
+
+        # m7=7, m30=30 → baseline 1/day, 7d rate 1/day → ratio 1 < 3 → None
+        assert _news_spike_ratio(7.0, 30.0) is None
+        # m7=7, m30=8.5 (baseline ≈0.065) → ratio ≈15.3 over floor → fires
+        ratio = _news_spike_ratio(7.0, 8.5)
+        assert ratio is not None and ratio == pytest.approx(15.33, abs=0.01)

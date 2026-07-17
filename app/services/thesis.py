@@ -312,21 +312,33 @@ def _band_exit_fired(
     return minted_inside and now_outside
 
 
-def _news_spike_fired(m7: float, m30: float) -> bool:
-    """Trailing-7d importance-mass rate >= ratio x prior-23d baseline rate,
-    over an absolute mass floor.
+def _news_spike_ratio(m7: float, m30: float) -> float | None:
+    """The fired spike ratio (>= ``_NEWS_SPIKE_RATIO``), or None when the
+    predicate does not fire.
+
+    Trailing-7d importance-mass rate vs the prior-23d baseline rate, over
+    an absolute mass floor. Baseline-less names (baseline <= 0 — includes
+    a spike fully concentrated in the 7d window, m30 == m7) are not
+    evaluated, so the division is guarded by construction; the #2071
+    detail string consumes THIS return value, never re-derives it (PR
+    #2082 review — fire decision and reported ratio cannot desync).
 
     Self-rearming without state: stored importance scores are static but
     window membership rolls a spike's stories out of the 7d window and
     into the baseline, so the ratio subsides ~a week after the storm.
-    Baseline-less names (baseline <= 0) are not evaluated.
     """
     baseline = (m30 - m7) / _NEWS_BASELINE_DAYS
     if baseline <= 0:
-        return False
+        return None
     if m7 < _NEWS_SPIKE_MASS_FLOOR:
-        return False
-    return (m7 / _NEWS_WINDOW_DAYS) >= _NEWS_SPIKE_RATIO * baseline
+        return None
+    ratio = (m7 / _NEWS_WINDOW_DAYS) / baseline
+    return ratio if ratio >= _NEWS_SPIKE_RATIO else None
+
+
+def _news_spike_fired(m7: float, m30: float) -> bool:
+    """Boolean face of ``_news_spike_ratio`` (kept for the table tests)."""
+    return _news_spike_ratio(m7, m30) is not None
 
 
 def find_stale_instruments(
@@ -595,15 +607,13 @@ def find_stale_instruments(
         # Rule 7 (#1988): news storm on a name with a real news baseline.
         # Independent of price evaluability — a stale price series must not
         # mask a news trigger.
-        if _news_spike_fired(m7, m30):
-            baseline = (m30 - m7) / _NEWS_BASELINE_DAYS
-            ratio = (m7 / _NEWS_WINDOW_DAYS) / baseline
+        if (spike_ratio := _news_spike_ratio(m7, m30)) is not None:
             stale.append(
                 StaleInstrument(
                     instrument_id=instrument_id,
                     symbol=symbol,
                     reason="news_spike",
-                    detail=f"7d news mass {m7:.1f} at {ratio:.1f}x 30d baseline",
+                    detail=f"7d news mass {m7:.1f} at {spike_ratio:.1f}x 30d baseline",
                 )
             )
             continue
