@@ -72,7 +72,10 @@ _CANDIDATES_SQL = """
         cik_map.identifier_value AS cik,
         (m.accession_number IS NOT NULL) AS already_manifested
     FROM filing_events fe
-    JOIN LATERAL (
+    -- LEFT: events with no resolvable CIK must still reach the report
+    -- (dry-run no_cik column / seed skipped_no_cik counter); an inner
+    -- join would silently understate the population (Codex ckpt-2).
+    LEFT JOIN LATERAL (
         SELECT identifier_value
         FROM external_identifiers ei
         WHERE ei.instrument_id = fe.instrument_id
