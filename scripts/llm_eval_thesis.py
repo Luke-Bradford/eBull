@@ -19,16 +19,40 @@ Three subcommands:
   tok/s + wall-clock per call. ``--critic-model`` (#1995) runs the
   critic rounds on a DIFFERENT model, mirroring the production split
   knobs; default is the writer's model (pre-split behaviour).
-* ``judge`` (#1995) — content-grading stage. The structural harness above
-  gates schema validity only; the judge compares two writers' memos on
-  IDENTICAL fixtures for content quality (numeric grounding, anchor
-  discipline, reasoning). Pairs writer outputs per (symbol, iteration)
-  from ONE ``run --json-out`` file, presents each pair to the judge
-  model BLINDED (A/B, no model names) and TWICE with order swapped — a
-  win counts only when both orderings agree (position-bias control).
-  Every response is checked against ``--ctx-limit`` via the provider-
-  reported prompt_tokens: an overflow is a failed comparison, never a
-  silently-truncated grade (the Ollama default-4096 trap).
+* ``judge`` (#1995; panel + validity hardening #2067) — content-grading
+  stage. The structural harness above gates schema validity only; the
+  judge compares two writers' memos on IDENTICAL fixtures for content
+  quality (numeric grounding, anchor discipline, reasoning). Pairs
+  writer outputs per (symbol, iteration) from ONE ``run --json-out``
+  file, presents each pair to the judge model BLINDED (A/B, no model
+  names) and TWICE with order swapped — a win counts only when both
+  orderings agree (position-bias control). Every response is checked
+  against ``--ctx-limit`` via the provider-reported prompt_tokens: an
+  overflow is a failed comparison, never a silently-truncated grade
+  (the Ollama default-4096 trap).
+
+  #2067 hardening (evidence: the #2010 two-round re-gate):
+  * ``--judge-models`` accepts SEVERAL judges; per-pair panel winner
+    requires EVERY judge to agree on the same non-tie winner (a
+    flip decision needs both-judge agreement, not one model's vote).
+  * Self-judging is flagged: a judge whose model family (name before
+    ``:``) matches either writer is marked ``self_judge`` in the
+    report — qwen3 judging qwen3-authored memos is the documented
+    self-preference failure mode.
+  * Swap-agreement floor: a judge whose order-swap agreement rate is
+    below ``--agreement-floor`` (default 0.6) INVALIDATES the round
+    (exit code 3) instead of silently discounting disagreements to
+    ties — the #2010 round-1 45%-agreement gate was decided by ~4
+    agreed judgments.
+  * Judge budget 3072 (JPM r1 clipped at the #1995 2048 bump); a
+    ``finish_reason=length`` response is classified ``judge_clip``
+    and counted per-judge, never parsed as a grade.
+
+GATE RULE (#2067, non-negotiable): a judge verdict — win, loss, or
+no-flip — must not be ACTED ON until every losing pair's transcripts
+(memo + rationale) have been read. The decisive #2010 round-2 evidence
+(example-leak, fabricated margin) came from transcript reads, not the
+aggregate score. The report footer restates this.
 
 Go-live gate (spec §7): >=9/10 writer passes WITH retry on the chosen
 local model. ``--gate-model <model>`` makes the exit code enforce it.
@@ -40,8 +64,9 @@ Usage:
         --gate-model deepseek-r1:14b --json-out /tmp/llm_eval_results.json
     PYTHONPATH=. uv run python scripts/llm_eval_thesis.py judge \
         --results /tmp/llm_eval_results.json \
-        --model-a qwen3:14b --model-b deepseek-r1:14b \
-        --judge-model qwen3:14b --json-out /tmp/llm_judge_results.json
+        --model-a qwen3:14b --model-b phi4:14b \
+        --judge-models qwen3:14b deepseek-r1:14b \
+        --json-out /tmp/llm_judge_results.json
 """
 
 from __future__ import annotations
@@ -517,11 +542,26 @@ JUDGE_DIMENSIONS = (
     "internal_consistency",  # stance/confidence/zone/targets agree with each other
     "specificity",
 )
-# 2048, not 1024 — empirical (first 14B judge run, 2026-07-11): 8/10 pairs
-# came back unparseable at 1024; the 12-score-plus-rationale object plus any
-# leading model chatter needs the same headroom the critic got (#1987).
-_MAX_TOKENS_JUDGE = 2048
+# 3072 (#2067) — the 2048 bump (#1995: 8/10 pairs unparseable at 1024) still
+# length-clipped on live pairs (JPM, #2010 r1). Root cause: reasoning-model
+# preamble + the 12-score object + a long rationale can exceed 2048; a clipped
+# response is now ALSO classified explicitly (``judge_clip``) instead of
+# surfacing as generic unparseable-JSON.
+_MAX_TOKENS_JUDGE = 3072
 DEFAULT_CTX_LIMIT = 16384
+
+# #2067 — a judge whose order-swap agreement rate falls below this floor
+# invalidates the round (re-run or escalate) instead of silently shrinking
+# the effective sample via tie-discounting.
+JUDGE_AGREEMENT_FLOOR = 0.6
+
+
+def model_family(model: str) -> str:
+    """Family = the model name before the size tag (``qwen3:14b`` →
+    ``qwen3``). Used to flag self-judging: same-family judge/writer is
+    the documented self-preference failure mode. Pure; unit-tested."""
+    return model.split(":", 1)[0]
+
 
 _JUDGE_SYSTEM = """You are grading two anonymous investment memos written from the SAME research context.
 Respond ONLY with a JSON object of this exact shape:
@@ -672,8 +712,19 @@ def adjudicate_pair(
     )
 
 
-def aggregate_judgements(verdicts: list[JudgeVerdict]) -> dict[str, Any]:
-    """Fold verdicts into the judge report. Pure; unit-tested."""
+def aggregate_judgements(
+    verdicts: list[JudgeVerdict],
+    *,
+    agreement_floor: float = JUDGE_AGREEMENT_FLOOR,
+) -> dict[str, Any]:
+    """Fold verdicts into the judge report. Pure; unit-tested.
+
+    #2067: the report carries a ``valid`` flag — False when nothing was
+    judged OR the order-swap agreement rate sits below
+    ``agreement_floor``. An invalid round must be re-run (or escalated),
+    never read as a verdict: tie-discounting low agreement silently
+    shrinks the effective sample (#2010 r1: 45% agreement ⇒ ~4 agreed
+    judgments deciding a multi-day-backfill gate)."""
     scored = [v for v in verdicts if v.scores_a is not None and v.scores_b is not None]
     wins_a = sum(1 for v in verdicts if v.winner == "a")
     wins_b = sum(1 for v in verdicts if v.winner == "b")
@@ -682,6 +733,7 @@ def aggregate_judgements(verdicts: list[JudgeVerdict]) -> dict[str, Any]:
     # #2004 round 2); it is reported via ``failed`` alone.
     ties = sum(1 for v in verdicts if v.winner == "tie" and v.error is None)
     failed = sum(1 for v in verdicts if v.error is not None)
+    clipped = sum(1 for v in verdicts if v.error is not None and "judge_clip" in v.error)
     mean_a = (
         {
             d: statistics.mean(v.scores_a[d] for v in scored)  # type: ignore[index]
@@ -698,16 +750,70 @@ def aggregate_judgements(verdicts: list[JudgeVerdict]) -> dict[str, Any]:
         if scored
         else {}
     )
+    agreement = (sum(1 for v in scored if v.agreed) / len(scored)) if scored else None
+    valid = True
+    invalid_reason: str | None = None
+    if not scored:
+        valid = False
+        invalid_reason = "no pairs judged"
+    elif agreement is not None and agreement < agreement_floor:
+        valid = False
+        invalid_reason = (
+            f"order-swap agreement {agreement:.0%} below floor {agreement_floor:.0%} — "
+            "round INVALID: re-run on a quiet queue or escalate; do not read as a verdict"
+        )
     return {
         "pairs": len(verdicts),
         "judged": len(scored),
         "failed": failed,
+        "clipped": clipped,
         "wins_a": wins_a,
         "wins_b": wins_b,
         "ties": ties,
-        "order_agreement_rate": (sum(1 for v in scored if v.agreed) / len(scored)) if scored else None,
+        "order_agreement_rate": agreement,
+        "agreement_floor": agreement_floor,
+        "valid": valid,
+        "invalid_reason": invalid_reason,
         "mean_scores_a": mean_a,
         "mean_scores_b": mean_b,
+    }
+
+
+def combine_panel(per_judge: dict[str, list[JudgeVerdict]]) -> dict[str, Any]:
+    """Fold several judges' verdicts into panel decisions (#2067). Pure;
+    unit-tested.
+
+    Per (symbol, iteration) pair: the panel winner is a model ONLY when
+    every judge independently produced the same non-tie winner with no
+    error — a flip requires both-judge agreement; anything less is a
+    panel tie. Single-judge panels degenerate to that judge's verdicts.
+    """
+    by_pair: dict[tuple[str, int], list[JudgeVerdict]] = {}
+    for verdicts in per_judge.values():
+        for v in verdicts:
+            by_pair.setdefault((v.symbol, v.iteration), []).append(v)
+
+    n_judges = len(per_judge)
+    wins_a = wins_b = ties = 0
+    unanimous = 0
+    for pair_verdicts in by_pair.values():
+        winners = {v.winner for v in pair_verdicts}
+        errored = any(v.error is not None for v in pair_verdicts)
+        if len(pair_verdicts) == n_judges and not errored and len(winners) == 1 and winners != {"tie"}:
+            unanimous += 1
+            if winners == {"a"}:
+                wins_a += 1
+            else:
+                wins_b += 1
+        else:
+            ties += 1
+    return {
+        "judges": sorted(per_judge),
+        "pairs": len(by_pair),
+        "wins_a": wins_a,
+        "wins_b": wins_b,
+        "ties": ties,
+        "unanimous_rate": (unanimous / len(by_pair)) if by_pair else None,
     }
 
 
@@ -735,6 +841,14 @@ def _judge_call(
                 f"ctx_overflow: prompt_tokens={completion.prompt_tokens} + max_tokens={_MAX_TOKENS_JUDGE} "
                 f"> ctx_limit={ctx_limit} — response was generated from a truncated prompt"
             )
+        if completion.finish_reason == "length":
+            # #2067 — explicit clip class (JPM r1). A truncated grade must
+            # never be parsed; retry once (sampling may come in shorter),
+            # then surface as ``judge_clip`` so the aggregate counts it.
+            last_error = (
+                f"judge_clip: finish_reason=length at max_tokens={_MAX_TOKENS_JUDGE} — response truncated mid-grade"
+            )
+            continue
         try:
             data: object = json.loads(completion.text)
             if not isinstance(data, dict):
@@ -759,6 +873,7 @@ def run_judge(
     base_url: str,
     fixtures_dir: Path,
     ctx_limit: int,
+    agreement_floor: float = JUDGE_AGREEMENT_FLOOR,
 ) -> tuple[dict[str, Any], list[JudgeVerdict]]:
     results = json.loads(results_path.read_text())
     pairs = pair_writer_outputs(results, model_a, model_b)
@@ -784,26 +899,67 @@ def run_judge(
         swapped_pass, err2 = _judge_call(
             client, context_prompt=context_prompt, memo_first=memo_b, memo_second=memo_a, ctx_limit=ctx_limit
         )
-        verdict = adjudicate_pair(first_pass, swapped_pass, symbol=symbol, iteration=iteration, error=err1 or err2)
+        # Join (not `or`-collapse) so a clip on EITHER ordering stays
+        # visible to the aggregate's ``clipped`` counter (Codex ckpt-2:
+        # err1 non-clip + err2 clip must not report clipped=0).
+        errors = [e for e in (err1, err2) if e]
+        verdict = adjudicate_pair(
+            first_pass,
+            swapped_pass,
+            symbol=symbol,
+            iteration=iteration,
+            error=" ; ".join(errors) if errors else None,
+        )
         verdicts.append(verdict)
         print(
-            f"  judge {symbol} it{iteration}: winner={verdict.winner} agreed={verdict.agreed}"
+            f"  judge[{judge_model}] {symbol} it{iteration}: winner={verdict.winner} agreed={verdict.agreed}"
             + (f" [{verdict.error}]" if verdict.error else ""),
             flush=True,
         )
-    return aggregate_judgements(verdicts), verdicts
+    report = aggregate_judgements(verdicts, agreement_floor=agreement_floor)
+    report["judge_model"] = judge_model
+    report["self_judge"] = model_family(judge_model) in {model_family(model_a), model_family(model_b)}
+    return report, verdicts
 
 
 def print_judge_report(report: dict[str, Any], *, model_a: str, model_b: str, judge_model: str) -> None:
     print(f"\n=== judge: {model_a} (a) vs {model_b} (b) — judged by {judge_model} ===")
-    print(f"pairs: {report['pairs']}  judged: {report['judged']}  failed: {report['failed']}")
+    if report.get("self_judge"):
+        print(
+            f"⚠ SELF-JUDGE: {judge_model} shares a model family with a graded writer — "
+            "self-preference bias documented; corroborate with an independent-family judge (#2067)"
+        )
+    print(
+        f"pairs: {report['pairs']}  judged: {report['judged']}  failed: {report['failed']}"
+        f"  clipped: {report.get('clipped', 0)}"
+    )
     print(f"wins {model_a}: {report['wins_a']}  wins {model_b}: {report['wins_b']}  ties: {report['ties']}")
     agreement = report["order_agreement_rate"]
     print(f"order-swap agreement rate: {agreement:.0%}" if agreement is not None else "order-swap agreement rate: n/a")
+    if not report.get("valid", True):
+        print(f"✗ ROUND INVALID: {report['invalid_reason']}")
     if report["mean_scores_a"]:
         print(f"{'dimension':<22} {model_a:>14} {model_b:>14}")
         for dim in JUDGE_DIMENSIONS:
             print(f"{dim:<22} {report['mean_scores_a'][dim]:>14.2f} {report['mean_scores_b'][dim]:>14.2f}")
+
+
+def print_panel_report(panel: dict[str, Any], *, model_a: str, model_b: str) -> None:
+    print(f"\n=== panel: {', '.join(panel['judges'])} — unanimous non-tie wins only ===")
+    print(
+        f"pairs: {panel['pairs']}  wins {model_a}: {panel['wins_a']}  "
+        f"wins {model_b}: {panel['wins_b']}  ties/split: {panel['ties']}"
+    )
+    unanimous = panel["unanimous_rate"]
+    print(f"unanimous rate: {unanimous:.0%}" if unanimous is not None else "unanimous rate: n/a")
+
+
+def print_gate_rule_footer() -> None:
+    print(
+        "\nGATE RULE (#2067): do NOT act on this verdict until every losing "
+        "pair's transcripts (memo + rationale) have been read — the decisive "
+        "#2010 evidence came from transcript reads, not the aggregate score."
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -835,7 +991,25 @@ def main(argv: list[str] | None = None) -> int:
     p_judge.add_argument("--results", type=Path, required=True, help="run --json-out payload holding both models")
     p_judge.add_argument("--model-a", required=True)
     p_judge.add_argument("--model-b", required=True)
-    p_judge.add_argument("--judge-model", required=True)
+    p_judge.add_argument(
+        "--judge-models",
+        nargs="+",
+        default=None,
+        help="one or more judge models (#2067 panel: a flip requires every judge to agree); "
+        "prefer at least one from a different family than either writer",
+    )
+    p_judge.add_argument(
+        "--judge-model",
+        default=None,
+        help="legacy single-judge alias — appended to --judge-models",
+    )
+    p_judge.add_argument(
+        "--agreement-floor",
+        type=float,
+        default=JUDGE_AGREEMENT_FLOOR,
+        help="order-swap agreement rate below this invalidates the round (exit 3) instead of "
+        "tie-discounting it into a shrunken sample (#2067)",
+    )
     p_judge.add_argument("--fixtures-dir", type=Path, default=FIXTURES_DIR)
     p_judge.add_argument("--base-url", default=DEFAULT_BASE_URL)
     p_judge.add_argument(
@@ -853,29 +1027,68 @@ def main(argv: list[str] | None = None) -> int:
         return capture(args.symbols, args.out)
 
     if args.command == "judge":
-        report, verdicts = run_judge(
-            args.results,
-            model_a=args.model_a,
-            model_b=args.model_b,
-            judge_model=args.judge_model,
-            base_url=args.base_url,
-            fixtures_dir=args.fixtures_dir,
-            ctx_limit=args.ctx_limit,
-        )
-        print_judge_report(report, model_a=args.model_a, model_b=args.model_b, judge_model=args.judge_model)
+        judge_models: list[str] = list(args.judge_models or [])
+        if args.judge_model is not None:
+            judge_models.append(args.judge_model)
+        # Dedup preserving order — the same model via both flags must not
+        # re-run a full judge pass or duplicate-key the report.
+        judge_models = list(dict.fromkeys(judge_models))
+        if not judge_models:
+            raise SystemExit("judge: pass --judge-models (or the legacy --judge-model)")
+
+        per_judge_reports: dict[str, dict[str, Any]] = {}
+        per_judge_verdicts: dict[str, list[JudgeVerdict]] = {}
+        for jm in judge_models:
+            report, verdicts = run_judge(
+                args.results,
+                model_a=args.model_a,
+                model_b=args.model_b,
+                judge_model=jm,
+                base_url=args.base_url,
+                fixtures_dir=args.fixtures_dir,
+                ctx_limit=args.ctx_limit,
+                agreement_floor=args.agreement_floor,
+            )
+            per_judge_reports[jm] = report
+            per_judge_verdicts[jm] = verdicts
+            print_judge_report(report, model_a=args.model_a, model_b=args.model_b, judge_model=jm)
+
+        panel = combine_panel(per_judge_verdicts)
+        if len(judge_models) > 1:
+            print_panel_report(panel, model_a=args.model_a, model_b=args.model_b)
+        elif all(r["self_judge"] for r in per_judge_reports.values()):
+            print(
+                "⚠ single self-family judge — add an independent-family judge via "
+                "--judge-models before treating a flip as decided (#2067)"
+            )
+        print_gate_rule_footer()
+
         if args.json_out is not None:
             payload = {
                 "model_a": args.model_a,
                 "model_b": args.model_b,
-                "judge_model": args.judge_model,
-                "aggregate": report,
-                "verdicts": [asdict(v) for v in verdicts],
+                "judge_models": judge_models,
+                "per_judge": {
+                    jm: {
+                        "aggregate": per_judge_reports[jm],
+                        "verdicts": [asdict(v) for v in per_judge_verdicts[jm]],
+                    }
+                    for jm in judge_models
+                },
+                "panel": panel,
             }
             args.json_out.write_text(json.dumps(payload, indent=2) + "\n")
             print(f"\nfull judge results -> {args.json_out}")
-        # Exit code stays 0 unless nothing could be judged — the verdict is
-        # an operator decision input, not a gate.
-        return 0 if report["judged"] > 0 else 1
+
+        judged_any = any(r["judged"] > 0 for r in per_judge_reports.values())
+        if not judged_any:
+            return 1
+        # #2067: an agreement-floor breach on ANY judge invalidates the
+        # round loudly (exit 3) so chained scripts fail instead of
+        # reading a low-agreement verdict as evidence.
+        if any(not r["valid"] for r in per_judge_reports.values()):
+            return 3
+        return 0
 
     fixtures = load_fixtures(args.fixtures_dir)
     print(f"{len(fixtures)} fixtures x {args.iterations} iterations x {len(args.models)} models")

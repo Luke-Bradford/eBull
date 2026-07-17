@@ -479,3 +479,165 @@ class TestJudgeCall:
         assert parsed is None
         assert error is not None and error.startswith("transport")
         assert client.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# #2067 — judge-gate hardening
+# ---------------------------------------------------------------------------
+
+from scripts.llm_eval_thesis import (  # noqa: E402
+    JUDGE_AGREEMENT_FLOOR,
+    combine_panel,
+    model_family,
+)
+
+
+class TestModelFamily:
+    def test_strips_size_tag(self) -> None:
+        assert model_family("qwen3:14b") == "qwen3"
+        assert model_family("deepseek-r1:8b") == "deepseek-r1"
+
+    def test_no_tag_is_identity(self) -> None:
+        assert model_family("phi4") == "phi4"
+
+
+class TestAgreementFloor:
+    def test_low_agreement_invalidates_round(self) -> None:
+        # 1 agreed + 2 positional disagreements = 33% agreement < 60%.
+        agreed = adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)
+        d1 = adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="A"), symbol="GME", iteration=1)
+        d2 = adjudicate_pair(_judge_output(winner="B"), _judge_output(winner="B"), symbol="HD", iteration=1)
+        report = aggregate_judgements([agreed, d1, d2])
+        assert report["order_agreement_rate"] == pytest.approx(1 / 3)
+        assert report["valid"] is False
+        assert report["invalid_reason"] is not None and "below floor" in report["invalid_reason"]
+        assert report["agreement_floor"] == JUDGE_AGREEMENT_FLOOR
+
+    def test_high_agreement_is_valid(self) -> None:
+        verdicts = [
+            adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol=s, iteration=1)
+            for s in ("AAPL", "GME", "HD")
+        ]
+        report = aggregate_judgements(verdicts)
+        assert report["valid"] is True
+        assert report["invalid_reason"] is None
+
+    def test_nothing_judged_is_invalid(self) -> None:
+        failed = adjudicate_pair(None, None, symbol="AAPL", iteration=1, error="boom")
+        report = aggregate_judgements([failed])
+        assert report["valid"] is False
+        assert report["invalid_reason"] == "no pairs judged"
+
+    def test_floor_is_configurable(self) -> None:
+        agreed = adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)
+        d1 = adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="A"), symbol="GME", iteration=1)
+        report = aggregate_judgements([agreed, d1], agreement_floor=0.5)
+        assert report["valid"] is True
+
+
+class TestJudgeClip:
+    def test_length_finish_classified_and_counted(self) -> None:
+        client = FakeClient(
+            [
+                _completion("truncated {", finish_reason="length"),
+                _completion("still truncated {", finish_reason="length"),
+            ]
+        )
+        parsed, error = _judge_call(
+            client,  # type: ignore[arg-type]
+            context_prompt="ctx",
+            memo_first="a",
+            memo_second="b",
+            ctx_limit=16384,
+        )
+        assert parsed is None
+        assert error is not None and error.startswith("judge_clip")
+        assert client.calls == 2  # one retry, then surfaced
+
+        verdict = adjudicate_pair(None, None, symbol="JPM", iteration=1, error=error)
+        report = aggregate_judgements([verdict])
+        assert report["clipped"] == 1
+        assert report["failed"] == 1
+
+    def test_clip_retry_can_recover(self) -> None:
+        client = FakeClient(
+            [
+                _completion("truncated {", finish_reason="length"),
+                _completion(json.dumps(_judge_output())),
+            ]
+        )
+        parsed, error = _judge_call(
+            client,  # type: ignore[arg-type]
+            context_prompt="ctx",
+            memo_first="a",
+            memo_second="b",
+            ctx_limit=16384,
+        )
+        assert error is None
+        assert parsed is not None
+
+
+class TestCombinePanel:
+    def test_unanimous_non_tie_wins(self) -> None:
+        j1 = [adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)]
+        j2 = [adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)]
+        panel = combine_panel({"judge1": j1, "judge2": j2})
+        assert panel["wins_a"] == 1
+        assert panel["ties"] == 0
+        assert panel["unanimous_rate"] == 1.0
+
+    def test_split_verdict_is_tie(self) -> None:
+        j1 = [adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)]
+        j2 = [adjudicate_pair(_judge_output(winner="B"), _judge_output(winner="A"), symbol="AAPL", iteration=1)]
+        panel = combine_panel({"judge1": j1, "judge2": j2})
+        assert panel["wins_a"] == 0
+        assert panel["wins_b"] == 0
+        assert panel["ties"] == 1
+
+    def test_one_judge_tie_blocks_flip(self) -> None:
+        j1 = [adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)]
+        j2 = [adjudicate_pair(_judge_output(winner="tie"), _judge_output(winner="tie"), symbol="AAPL", iteration=1)]
+        panel = combine_panel({"judge1": j1, "judge2": j2})
+        assert panel["wins_a"] == 0
+        assert panel["ties"] == 1
+
+    def test_errored_pair_never_counts_as_win(self) -> None:
+        j1 = [adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)]
+        j2 = [adjudicate_pair(None, None, symbol="AAPL", iteration=1, error="judge_clip: ...")]
+        panel = combine_panel({"judge1": j1, "judge2": j2})
+        assert panel["wins_a"] == 0
+        assert panel["ties"] == 1
+
+    def test_missing_judge_coverage_is_tie(self) -> None:
+        # judge2 never judged AAPL it2 (e.g. fixture missing) — a pair
+        # covered by only one judge must not count as unanimous.
+        j1 = [
+            adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1),
+            adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=2),
+        ]
+        j2 = [adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1)]
+        panel = combine_panel({"judge1": j1, "judge2": j2})
+        assert panel["wins_a"] == 1
+        assert panel["ties"] == 1
+
+    def test_single_judge_degenerates(self) -> None:
+        j1 = [
+            adjudicate_pair(_judge_output(winner="A"), _judge_output(winner="B"), symbol="AAPL", iteration=1),
+            adjudicate_pair(_judge_output(winner="tie"), _judge_output(winner="tie"), symbol="GME", iteration=1),
+        ]
+        panel = combine_panel({"judge1": j1})
+        assert panel["wins_a"] == 1
+        assert panel["ties"] == 1
+
+
+class TestErrorJoinPreservesClip:
+    def test_clip_on_second_ordering_still_counted(self) -> None:
+        # Mirrors run_judge's join: err1 (non-clip) + err2 (clip) must
+        # keep the clip marker visible to the aggregate (Codex ckpt-2).
+        err1 = "transport: RuntimeError: connection refused"
+        err2 = "judge_clip: finish_reason=length at max_tokens=3072 — response truncated mid-grade"
+        joined = " ; ".join(e for e in (err1, err2) if e)
+        verdict = adjudicate_pair(None, None, symbol="JPM", iteration=1, error=joined)
+        report = aggregate_judgements([verdict])
+        assert report["failed"] == 1
+        assert report["clipped"] == 1
