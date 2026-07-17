@@ -1030,6 +1030,9 @@ def main(argv: list[str] | None = None) -> int:
         judge_models: list[str] = list(args.judge_models or [])
         if args.judge_model is not None:
             judge_models.append(args.judge_model)
+        # Dedup preserving order — the same model via both flags must not
+        # re-run a full judge pass or duplicate-key the report.
+        judge_models = list(dict.fromkeys(judge_models))
         if not judge_models:
             raise SystemExit("judge: pass --judge-models (or the legacy --judge-model)")
 
