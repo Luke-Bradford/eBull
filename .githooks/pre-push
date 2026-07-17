@@ -291,8 +291,37 @@ uv run pytest -m "not db" --tb=short -q
 # connections -> intermittent ERRORs on random parametrized cases (#1843). Smoke
 # is small (~135 tests, ~31s serial); the parallelism buys nothing and costs
 # determinism. The fast tier above keeps -n 4 (no DB => no contention).
+# #2073 — two worktrees pushing concurrently run this smoke tier against
+# the SAME dev DB and collide (test_etl_source_to_sink ERRORs, 07-16,
+# twice). Serialize with a mkdir lock — macOS ships bash 3.2 and no
+# flock(1), and mkdir is atomic on every POSIX filesystem. A waiting
+# hook queues (5s poll); a lock older than 10 min is presumed leaked
+# (SIGKILLed push — trap can't run on KILL) and stolen. The lock wraps
+# ONLY the smoke stage: the fast tier above touches no DB and the
+# stages below are read-only probes.
+SMOKE_LOCK_DIR="${TMPDIR:-/tmp}/ebull-prepush-smoke.lock"
+_release_smoke_lock() { rmdir "${SMOKE_LOCK_DIR}" 2>/dev/null || true; }
+smoke_lock_waits=0
+until mkdir "${SMOKE_LOCK_DIR}" 2>/dev/null; do
+  if [[ "${smoke_lock_waits}" -eq 0 ]]; then
+    echo "==> Pre-push gate: smoke lock held by a concurrent push — queuing"
+  fi
+  smoke_lock_waits=$((smoke_lock_waits + 1))
+  if [[ "${smoke_lock_waits}" -gt 120 ]]; then
+    echo "==> Pre-push gate: smoke lock stale (>10 min) — stealing"
+    _release_smoke_lock
+  fi
+  sleep 5
+done
+trap _release_smoke_lock EXIT
+
 echo "==> Pre-push gate: smoke (app boots against dev DB)"
 uv run pytest tests/smoke -n 0 --tb=short -q
+
+# Release promptly so a queued push can start while the non-DB stages
+# below finish; the EXIT trap still covers every failure path above.
+_release_smoke_lock
+trap - EXIT
 
 # Frontend dark-mode class hygiene (#708). Skipped if frontend/ is
 # absent (e.g. backend-only worktrees) or if `pnpm` is not on PATH —
