@@ -9,6 +9,17 @@ No silent ignores.
 No vague acknowledgements.
 No "I'll leave that for later" without a ticket.
 
+## Read the whole review first (finding-count check)
+
+Before triaging a round (PR #2090 lesson, 2026-07-17):
+
+1. Fetch the FULL review comment body — `gh pr view N --comments` read
+   untruncated, never through a fixed `grep -A N` window (a long review
+   truncates silently and the tail findings drop).
+2. Count the findings (`### [` headings) and make the resolution set
+   match that count exactly before posting it.
+3. A REQUEST CHANGES verdict with any unread tail = stop and re-fetch.
+
 ## Allowed terminal states
 
 Every review comment must end in exactly one of these forms:
