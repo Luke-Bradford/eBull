@@ -99,6 +99,29 @@ Follow this order unless the user explicitly says otherwise:
 11. Write a complete PR description.
 12. Follow the branch and PR workflow below — push, poll, wait, resolve, repeat until APPROVE on the most recent commit with CI green.
 
+## Standing retrospective checkpoint (#2075)
+
+After each epic close, or every ~10 merged PRs, run one "inheriting-team
+audit" pass: anything to contest? process inadequate anywhere? spec
+intent orphaned in prose? Findings become tickets IMMEDIATELY (template:
+the 2026-07-17 batch #2066-#2075). Do not fold findings into unrelated
+PRs or leave them in session notes — a finding without a ticket is lost.
+
+## Parallel-session coordination (#2075; 07-16 race lesson)
+
+Multiple sessions may hold overlapping handoffs. Non-negotiable:
+
+1. **Stake ownership on-issue at session start** for any ticket you will
+   work: one-line issue comment BEFORE coding. A ticket with a fresh
+   stake comment belongs to that session — pick something else.
+2. **Re-read the issue's latest comments IMMEDIATELY before posting**
+   any long-lived comment (evidence, verdict, close-out) — not just at
+   session start. The 07-16 duplicate landed 62s after the sibling's
+   despite a stake existing for hours.
+3. Before ANY close-out side effect (issue comment/close, merge,
+   re-detach), re-check live state via gh/git — a sibling may have done
+   it already.
+
 ## Branch and PR workflow
 
 1. Create a branch before touching code.
@@ -194,7 +217,7 @@ Run these before every push:
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
-uv run pytest -m "not db"        # fast tier: pure-logic, no Postgres (~25s)
+uv run pytest -m "not db"        # fast tier: pure-logic, no Postgres (~60-90s under load)
 uv run pytest tests/smoke        # app boots against the dev DB
 ```
 
