@@ -1285,3 +1285,67 @@ class TestRefreshMarketDataCircuitBreaker:
         )
         assert provider.get_daily_candles.call_count == 25
         assert summary.candles_failed == 25
+
+
+class TestDetectAdjustmentEvent:
+    """#2066 — ratio-scale overlap mismatch = split/adjustment event."""
+
+    @staticmethod
+    def _bar(price_date: date, close: str) -> OHLCVBar:
+        c = Decimal(close)
+        return OHLCVBar(price_date=price_date, open=c, high=c, low=c, close=c, volume=1000)
+
+    _D1 = date(2026, 7, 15)
+    _D2 = date(2026, 7, 16)
+
+    def test_forward_split_fires(self) -> None:
+        """2:1 split — stored old-basis 100, re-fetched back-adjusted 50."""
+        from app.services.market_data import detect_adjustment_event
+
+        ratio = detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "50")])
+        assert ratio == Decimal("2")
+
+    def test_reverse_split_fires(self) -> None:
+        """1:10 reverse split — stored 12, re-fetched 120; ratio is
+        direction-normalised so both directions read as the same event."""
+        from app.services.market_data import detect_adjustment_event
+
+        ratio = detect_adjustment_event({self._D1: Decimal("12")}, [self._bar(self._D1, "120")])
+        assert ratio == Decimal("10")
+
+    def test_small_correction_does_not_fire(self) -> None:
+        """A late exchange correction (single-digit %) is not an event."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "104")]) is None
+
+    def test_threshold_boundary_fires_inclusive(self) -> None:
+        """Exactly 1.2 fires (threshold is inclusive); just below does not."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "120")]) == Decimal("1.2")
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "119")]) is None
+
+    def test_zero_close_sentinel_skipped(self) -> None:
+        """price_daily zero-close sentinels must not fake a split."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("0")}, [self._bar(self._D1, "50")]) is None
+
+    def test_nonpositive_fetched_close_skipped(self) -> None:
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "0")]) is None
+
+    def test_no_overlap_no_signal(self) -> None:
+        """Dates absent from the store are new rows — no basis to compare."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({}, [self._bar(self._D1, "50")]) is None
+
+    def test_worst_ratio_of_multiple_overlaps_returned(self) -> None:
+        from app.services.market_data import detect_adjustment_event
+
+        stored = {self._D1: Decimal("100"), self._D2: Decimal("300")}
+        bars = [self._bar(self._D1, "50"), self._bar(self._D2, "100")]
+        assert detect_adjustment_event(stored, bars) == Decimal("3")
