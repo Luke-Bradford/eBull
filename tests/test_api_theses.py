@@ -426,7 +426,7 @@ class TestGetLatestThesisStaleness:
         # for a v1 row), then the find_stale_instruments read (dict_row
         # cursor since #2074) — monthly cadence + a past created_at is
         # deterministically stale against the real clock.
-        conn = _with_conn(
+        _with_conn(
             [
                 [_make_thesis_row(created_at=_EARLIER)],
                 [],
@@ -443,7 +443,7 @@ class TestGetLatestThesisStaleness:
 
     def test_fresh_thesis_reports_not_stale(self) -> None:
         # find_stale (second cursor read) defaults to the honest-empty set.
-        conn = _with_conn([[_make_thesis_row()]])
+        _with_conn([[_make_thesis_row()]])
         resp = client.get("/theses/100")
         _cleanup()
 
@@ -602,7 +602,7 @@ class TestListTheses:
             critic_json={"verdict": "Moderate challenge"},
             run_status="failed",
         )
-        conn = _with_conn([[], [row], [_stale_query_row(100, "AAPL", "monthly", _EARLIER)]])
+        _with_conn([[], [row], [_stale_query_row(100, "AAPL", "monthly", _EARLIER)]])
         resp = client.get("/theses")
         _cleanup()
 
@@ -639,7 +639,7 @@ class TestListTheses:
             "run_trigger": None,
             "run_started_at": None,
         }
-        conn = _with_conn(
+        _with_conn(
             [
                 [gap_row],
                 [_make_library_row(100, "AAPL")],
@@ -680,7 +680,7 @@ class TestListTheses:
             "run_trigger": None,
             "run_started_at": None,
         }
-        conn = _with_conn([[gap_row], [_make_library_row(100, "AAPL", stance="buy")]])
+        _with_conn([[gap_row], [_make_library_row(100, "AAPL", stance="buy")]])
         resp = client.get("/theses?stance=buy")
         _cleanup()
 
@@ -694,7 +694,7 @@ class TestListTheses:
         assert resp.status_code == 422
 
     def test_empty_library_returns_empty_page(self) -> None:
-        conn = _with_conn([[], []])
+        _with_conn([[], []])
         resp = client.get("/theses")
         _cleanup()
 
