@@ -1307,7 +1307,7 @@ def _load_instrument_data(
 
         # Realized-risk metrics (#1633, risk_v1 3y window). Read-only enrichment;
         # consumed only by v1.2+ models. RISK_METRICS_VERSION is imported lazily
-        # to avoid the risk_metrics → scheduler → refresh_cascade module-scope
+        # to avoid the risk_metrics → scheduler → thesis module-scope
         # import chain (mirrors #1632 thesis ingestion). Own savepoint: the table
         # may be absent in a partial test DB → degrade to None (no penalty).
         risk_row: dict[str, Any] | None = None
