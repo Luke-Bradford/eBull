@@ -224,3 +224,38 @@ class TestComputeReportRealQuery:
         assert "base_far_from_close" in by_class
         # v1 (clean, ordered) row was NOT scanned — latest-per-instrument only.
         assert report.class_counts["ordering"] == 1
+
+
+class TestCheckFireRate:
+    """#2072 — standing fire-rate band check (2-8%/month proxy)."""
+
+    def test_in_band_none(self) -> None:
+        from app.services.thesis_dq_audit import check_fire_rate
+
+        assert check_fire_rate("price_move", 5, 100) is None  # 5%
+
+    def test_above_band_flags(self) -> None:
+        from app.services.thesis_dq_audit import check_fire_rate
+
+        detail = check_fire_rate("price_move", 12, 100)
+        assert detail is not None and "above" in detail and "12.0%" in detail
+
+    def test_below_band_is_silent(self) -> None:
+        """A small standing count is the healthy drained steady state —
+        it cannot distinguish 'calibrated' from 'too tight'; #2063's
+        dated trailing-30d re-check owns the under-firing judgement."""
+        from app.services.thesis_dq_audit import check_fire_rate
+
+        assert check_fire_rate("band_exit", 1, 100) is None
+        assert check_fire_rate("news_spike", 0, 100) is None
+
+    def test_empty_population_none(self) -> None:
+        from app.services.thesis_dq_audit import check_fire_rate
+
+        assert check_fire_rate("price_move", 3, 0) is None
+
+    def test_band_edges_inclusive(self) -> None:
+        from app.services.thesis_dq_audit import check_fire_rate
+
+        assert check_fire_rate("price_move", 2, 100) is None  # 2% lower edge
+        assert check_fire_rate("price_move", 8, 100) is None  # 8% upper edge
