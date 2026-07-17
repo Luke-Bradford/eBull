@@ -1484,3 +1484,19 @@ class TestNewsSpikeRatioGuard:
         # m7=7, m30=8.5 (baseline ≈0.065) → ratio ≈15.3 over floor → fires
         ratio = _news_spike_ratio(7.0, 8.5)
         assert ratio is not None and ratio == pytest.approx(15.33, abs=0.01)
+
+
+class TestPriceMovePctGuard:
+    """PR #2082 review round-2 — same single-source shape as news_spike."""
+
+    def test_nonpositive_mint_close_returns_none(self) -> None:
+        from app.services.thesis import _price_move_pct
+
+        assert _price_move_pct(50.0, 0.0) is None
+        assert _price_move_pct(50.0, -1.0) is None
+
+    def test_fired_pct_matches_detail_math(self) -> None:
+        from app.services.thesis import _price_move_pct
+
+        assert _price_move_pct(65.0, 100.0) == pytest.approx(-0.35)
+        assert _price_move_pct(105.0, 100.0) is None  # +5% under threshold

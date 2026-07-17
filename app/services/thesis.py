@@ -285,10 +285,25 @@ def _evaluable_prices(
     return (close_now, close_at_mint)
 
 
+def _price_move_pct(close_now: float, close_at_mint: float) -> float | None:
+    """Signed move since mint when the price_move rule fires, else None.
+
+    Symmetric: a +30% melt-up invalidates a buy-zone as surely as a -30%
+    crash invalidates a bear floor. ``close_at_mint > 0`` is already
+    guaranteed by ``_evaluable_prices`` at the only call site, but the
+    guard is repeated here so the helper is safe standalone and the #2071
+    detail string consumes THIS return value (same single-source shape as
+    ``_news_spike_ratio``; PR #2082 review).
+    """
+    if close_at_mint <= 0:
+        return None
+    pct = (close_now - close_at_mint) / close_at_mint
+    return pct if abs(pct) >= _PRICE_MOVE_THRESHOLD else None
+
+
 def _price_move_fired(close_now: float, close_at_mint: float) -> bool:
-    """|move since mint| >= threshold. Symmetric: a +30% melt-up invalidates
-    a buy-zone as surely as a -30% crash invalidates a bear floor."""
-    return abs(close_now - close_at_mint) / close_at_mint >= _PRICE_MOVE_THRESHOLD
+    """Boolean face of ``_price_move_pct`` (kept for the table tests)."""
+    return _price_move_pct(close_now, close_at_mint) is not None
 
 
 def _band_exit_fired(
@@ -576,14 +591,13 @@ def find_stale_instruments(
         prices = _evaluable_prices(close_now, close_at_mint, close_now_date, now.date())
         if prices is not None:
             now_px, mint_px = prices
-            if _price_move_fired(now_px, mint_px):
-                pct = (now_px - mint_px) / mint_px
+            if (move_pct := _price_move_pct(now_px, mint_px)) is not None:
                 stale.append(
                     StaleInstrument(
                         instrument_id=instrument_id,
                         symbol=symbol,
                         reason="price_move",
-                        detail=f"close {now_px:g} vs {mint_px:g} at mint ({pct:+.0%})",
+                        detail=f"close {now_px:g} vs {mint_px:g} at mint ({move_pct:+.0%})",
                     )
                 )
                 continue
