@@ -180,6 +180,7 @@ def classify_attempt(
     duration_s: float,
     *,
     call: str,
+    require_buy_zone: bool = False,
 ) -> tuple[AttemptResult, dict[str, object] | None]:
     """Classify one completion against the production validators.
 
@@ -188,8 +189,18 @@ def classify_attempt(
     (production validator rejected) then pass. ``enum_ok`` is computed
     independently on every PARSED output so the spec's "enum validity"
     metric is reportable even when the schema fails on another field.
+
+    ``require_buy_zone`` mirrors production's anchor-gated buy enforcement
+    (#2010): the harness derives it from each fixture's ``price_anchor``,
+    or the gate silently under-enforces the very rule it is gating.
     """
-    validate = _validate_writer_output if call == "writer" else _validate_critic_output
+    if call == "writer":
+
+        def validate(data: dict[str, object]) -> None:
+            _validate_writer_output(data, require_buy_zone=require_buy_zone)
+
+    else:
+        validate = _validate_critic_output
     enums_ok = _writer_enums_ok if call == "writer" else _critic_enums_ok
 
     try:
@@ -263,6 +274,7 @@ def run_round(
     user: str,
     max_tokens: int,
     iteration: int = 1,
+    require_buy_zone: bool = False,
 ) -> RoundResult:
     """One production-shaped round: attempt, retry ONCE on parse/schema failure.
 
@@ -292,7 +304,9 @@ def run_round(
                 )
             )
             break  # prod does not retry transport errors
-        result, data = classify_attempt(completion, time.monotonic() - start, call=call)
+        result, data = classify_attempt(
+            completion, time.monotonic() - start, call=call, require_buy_zone=require_buy_zone
+        )
         attempts.append(result)
         if result.ok:
             parsed = data
@@ -408,6 +422,7 @@ def run_model(
                 user=_build_writer_prompt(context),
                 max_tokens=_MAX_TOKENS_WRITER,
                 iteration=iteration,
+                require_buy_zone=context.get("price_anchor") is not None,
             )
             rounds.append(writer)
             _print_round(model, iteration, writer)

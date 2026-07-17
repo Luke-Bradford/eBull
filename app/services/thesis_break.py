@@ -27,6 +27,7 @@ Spec: docs/proposals/thesis/2026-07-16-thesis-break-predicates.md.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -128,6 +129,86 @@ def observe(
             return MetricObservation(metric=metric, status="stale_input", inputs=present)
     as_of = min(inp.as_of for name, inp in present.items() if name in bounds and inp.as_of is not None)
     return MetricObservation(metric=metric, status="ok", value=value, as_of=as_of, inputs=present)
+
+
+# Display units per metric — the writer channel (#2010) has no regex match
+# to derive a unit from, so the vocabulary carries one per metric. The
+# extractor's constructors stay authoritative for their own rows.
+METRIC_UNITS: dict[str, str] = {
+    "altman_z": "zscore",
+    "rsi_14": "index",
+    "short_interest_pct_shares_out": "pct_shares_out",
+    "short_interest_days_to_cover": "days",
+    "short_interest_change_pct": "pct_change",
+    "price_vs_sma200": "regime",
+    "sma_50_vs_sma_200": "regime",
+}
+
+
+def sanitize_writer_break_predicates(
+    raw: object,
+    conditions: Sequence[object],
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Soft-validate the writer's OPTIONAL structured ``break_predicates`` (#2010).
+
+    Returns ``(survivors, drop_reasons)`` — NEVER raises. This channel is
+    best-effort recall: prose ``break_conditions`` stay canonical, and a
+    malformed field (top-level or per-entry) must not retry-fail the thesis.
+    Survivor shape is storage-ready:
+    ``{"condition_index": int, "metric": str, "op": "<"|">", "threshold": float|None}``.
+    ``condition_index`` validates against the RAW ``break_conditions`` array
+    (index-alignment contract, PR-A) and must point at a STRING slot — a
+    predicate is a structured twin of a prose condition; a twin of a
+    malformed non-string element has no prose to mirror (Codex ckpt-2).
+    """
+    n_conditions = len(conditions)
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        return [], [f"break_predicates is not a list: {type(raw).__name__}"]
+    survivors: list[dict[str, object]] = []
+    reasons: list[str] = []
+    seen: set[int] = set()
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            reasons.append(f"[{i}] not an object")
+            continue
+        metric = entry.get("metric")
+        if not isinstance(metric, str) or metric not in FRESHNESS_BOUNDS:
+            reasons.append(f"[{i}] unknown metric {metric!r}")
+            continue
+        op = entry.get("op")
+        if op not in ("<", ">"):
+            reasons.append(f"[{i}] invalid op {op!r}")
+            continue
+        idx = entry.get("condition_index")
+        if isinstance(idx, bool) or not isinstance(idx, int) or not (0 <= idx < n_conditions):
+            reasons.append(f"[{i}] condition_index out of range: {idx!r}")
+            continue
+        if not isinstance(conditions[idx], str):
+            reasons.append(f"[{i}] condition_index {idx} points at a non-string condition")
+            continue
+        if idx in seen:
+            reasons.append(f"[{i}] duplicate condition_index {idx}")
+            continue
+        threshold_raw = entry.get("threshold")
+        threshold: float | None
+        if metric in REGIME_METRICS:
+            if threshold_raw is not None:
+                reasons.append(f"[{i}] regime metric {metric} carries threshold {threshold_raw!r}")
+                continue
+            threshold = None
+        else:
+            if isinstance(threshold_raw, bool) or not isinstance(threshold_raw, (int, float)):
+                reasons.append(f"[{i}] non-numeric threshold {threshold_raw!r}")
+                continue
+            threshold = float(threshold_raw)
+            if not math.isfinite(threshold):
+                reasons.append(f"[{i}] non-finite threshold {threshold_raw!r}")
+                continue
+        seen.add(idx)
+        survivors.append({"condition_index": idx, "metric": metric, "op": op, "threshold": threshold})
+    return survivors, reasons
 
 
 EvalResult = Literal["true", "false", "no_input", "stale_input"]

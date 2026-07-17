@@ -34,6 +34,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.instrument_analytics import read_latest_fy_altman
 from app.services.thesis_break import (
+    METRIC_UNITS,
     BaselineState,
     BreakPredicate,
     MetricInput,
@@ -42,6 +43,7 @@ from app.services.thesis_break import (
     extract_predicates,
     next_baseline_state,
     observe,
+    sanitize_writer_break_predicates,
 )
 
 # SIC division H — finance, insurance, and real estate (Altman gate).
@@ -71,7 +73,8 @@ def _latest_theses(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
         cur.execute(
             """
             SELECT DISTINCT ON (t.instrument_id)
-                t.instrument_id, t.thesis_id, t.created_at, t.break_conditions_json
+                t.instrument_id, t.thesis_id, t.created_at, t.break_conditions_json,
+                t.break_predicates_json
             FROM theses t
             ORDER BY t.instrument_id, t.created_at DESC, t.thesis_version DESC, t.thesis_id DESC
             """
@@ -234,33 +237,80 @@ def run_thesis_break_scan(conn: psycopg.Connection[Any], *, now: datetime | None
 
     # -- extract + upsert predicate rows for the latest theses ------------
     sector_gated = 0
-    to_insert: list[tuple[int, int, int, BreakPredicate]] = []
+    to_insert: list[tuple[int, int, int, BreakPredicate, str]] = []
     for t in theses:
         conditions = t["break_conditions_json"]
         if not isinstance(conditions, list):
             continue
         iid = int(t["instrument_id"])
+        # #2010 writer-native channel — PURELY ADDITIVE recall: a validated
+        # writer predicate fills an index ONLY where the extractor returned
+        # None. The 100%-precision extractor channel is never overridden, so
+        # a hallucinated writer twin can never suppress a correct extraction.
+        # Re-sanitize on read (fail-open): rows written before sql/232, or a
+        # hand-edited jsonb, must not crash the scan.
+        writer_preds, _ = sanitize_writer_break_predicates(t["break_predicates_json"], conditions)
+        # Sanitizer guarantees condition_index is an int; the isinstance
+        # narrows for the type checker without an assert in the prod path.
+        writer_by_idx = {idx: p for p in writer_preds if isinstance(idx := p["condition_index"], int)}
         # Pass the RAW array — extract_predicates None-maps non-string
         # elements itself, keeping predicate_index aligned with the
         # original break_conditions_json slots (a pre-filter would shift
         # every index after a malformed element).
-        for idx, pred in enumerate(extract_predicates(list(conditions))):
+        for idx, extracted in enumerate(extract_predicates(list(conditions))):
+            origin = "extractor"
+            pred = extracted
             if pred is None:
-                continue
+                wp = writer_by_idx.get(idx)
+                if wp is None:
+                    continue
+                threshold = wp["threshold"]
+                pred = BreakPredicate(
+                    metric=str(wp["metric"]),
+                    op="<" if wp["op"] == "<" else ">",
+                    threshold=float(threshold) if threshold is not None else None,  # type: ignore[arg-type]
+                    unit=METRIC_UNITS[str(wp["metric"])],
+                    source_text=str(conditions[idx]),
+                )
+                origin = "writer"
             if pred.metric in _ALTMAN_METRICS and iid in financial:
                 sector_gated += 1
                 continue
-            to_insert.append((int(t["thesis_id"]), idx, iid, pred))
+            to_insert.append((int(t["thesis_id"]), idx, iid, pred, origin))
 
     inserted_keys: set[tuple[int, int]] = set()
     with conn.transaction():
-        for thesis_id, idx, iid, pred in to_insert:
+        for thesis_id, idx, iid, pred, origin in to_insert:
+            # DO NOTHING preserves the arm/baseline state on re-scan — with
+            # ONE exception (Codex ckpt-2): if an extractor-vocabulary
+            # improvement now parses a condition a WRITER row filled with a
+            # DIFFERENT predicate, the precision channel takes the slot over
+            # and the baseline resets to pending (the old baseline graded a
+            # different predicate; the gap-uncertainty machinery then applies
+            # — already_true_after_gap if true at next evaluation). Identical
+            # (metric, op, threshold) leaves the row untouched. A writer row
+            # is never allowed to shadow the extractor.
             row = conn.execute(
                 """
                 INSERT INTO thesis_break_predicates
-                    (thesis_id, predicate_index, instrument_id, metric, op, threshold, unit, source_text)
-                VALUES (%(tid)s, %(idx)s, %(iid)s, %(metric)s, %(op)s, %(threshold)s, %(unit)s, %(src)s)
-                ON CONFLICT (thesis_id, predicate_index) DO NOTHING
+                    (thesis_id, predicate_index, instrument_id, metric, op, threshold, unit,
+                     source_text, origin)
+                VALUES (%(tid)s, %(idx)s, %(iid)s, %(metric)s, %(op)s, %(threshold)s, %(unit)s,
+                        %(src)s, %(origin)s)
+                ON CONFLICT (thesis_id, predicate_index) DO UPDATE SET
+                    metric = EXCLUDED.metric,
+                    op = EXCLUDED.op,
+                    threshold = EXCLUDED.threshold,
+                    unit = EXCLUDED.unit,
+                    source_text = EXCLUDED.source_text,
+                    origin = EXCLUDED.origin,
+                    baseline_state = 'pending',
+                    baselined_at = NULL
+                WHERE thesis_break_predicates.origin = 'writer'
+                  AND EXCLUDED.origin = 'extractor'
+                  AND (thesis_break_predicates.metric, thesis_break_predicates.op,
+                       thesis_break_predicates.threshold)
+                      IS DISTINCT FROM (EXCLUDED.metric, EXCLUDED.op, EXCLUDED.threshold)
                 RETURNING thesis_id, predicate_index
                 """,
                 {
@@ -272,6 +322,7 @@ def run_thesis_break_scan(conn: psycopg.Connection[Any], *, now: datetime | None
                     "threshold": pred.threshold,
                     "unit": pred.unit,
                     "src": pred.source_text,
+                    "origin": origin,
                 },
             ).fetchone()
             if row is not None:

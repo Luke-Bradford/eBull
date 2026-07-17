@@ -73,6 +73,10 @@ from app.services.fair_value_band import (
 from app.services.instrument_analytics import SCHEMA_VERSION as _IAR_SCHEMA_VERSION
 from app.services.llm_client import LLMClient, LLMClientPair, LLMCompletion
 from app.services.technical_analysis import derive_trend_signals
+
+# Safe at module scope: thesis_break is pure (stdlib only, no app imports) —
+# no cycle risk by construction (its module docstring pins that contract).
+from app.services.thesis_break import sanitize_writer_break_predicates
 from app.services.thesis_context_audit import hash_context, summarize_context
 
 logger = logging.getLogger(__name__)
@@ -150,7 +154,21 @@ _MAX_TOKENS_CRITIC = 2048
 # "You will be given" bullet + a passive grounding rule (band is the primary
 # valuation anchor when available+high quality; price_anchor/52w range remain
 # the fallback). Scoring and _validate_writer_output are untouched.
-_PROMPT_VERSION = "v4"
+# v5 (#2010): valuation scaffold — three-tier target procedure (band-primary /
+# derived-basis with shown arithmetic / justified abstention); buy stance
+# requires targets + zone when a price anchor exists (validator-enforced,
+# rides retry-once); break-condition authoring contract (single metric,
+# false-at-write-time, shares-outstanding denominator only); NEW optional
+# writer output field break_predicates — structured twins of prose conditions
+# in the #2012 closed vocabulary, soft-validated (never retry-fails), stored
+# in theses.break_predicates_json as a purely-additive recall channel for
+# the nightly break scan. Context shape unchanged. Re-gate round 2 (judge A
+# 0-4-7 loss vs v4 exposed three numeric-defect classes in round 1):
+# worked example abstracted to placeholders (the literal "12 x EPS 3.10 =
+# 37.20" leaked verbatim into a MSFT memo), derived arithmetic must END in a
+# per-share price + band sanity cross-check (a $52.8B P/S "target" shipped),
+# cited figures verbatim-or-show-inputs (fabricated 13.1% gross margin).
+_PROMPT_VERSION = "v5"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -1184,6 +1202,9 @@ Produce a JSON object with EXACTLY these fields:
   "bull_value": <float or null>,
   "bear_value": <float or null>,
   "break_conditions": ["<condition 1>", "<condition 2>", ...],
+  "break_predicates": [
+    {"condition_index": <int>, "metric": "<metric>", "op": "<" or ">", "threshold": <float or null>}
+  ],
   "memo_markdown": "<full investment memo in markdown>"
 }
 
@@ -1191,9 +1212,18 @@ Rules:
 - thesis_type must be one of: compounder, value, turnaround, speculative
 - stance must be one of: buy, hold, watch, avoid
 - confidence_score in [0.0, 1.0] — higher means more conviction
-- buy_zone_low/high: only populate when stance is "buy"; null otherwise
-- base/bull/bear_value: per-share price targets in the instrument currency; null if insufficient data
-- break_conditions: list of concrete, specific events that would invalidate the thesis
+- buy_zone_low/high: only populate when stance is "buy"; null otherwise.
+  A "buy" stance with `price_anchor` present MUST carry base_value AND both
+  buy-zone bounds — a buy with no entry band is not actionable and will be
+  rejected.
+- base/bull/bear_value: per-share price targets in the instrument currency.
+  Produce them by the valuation procedure below; null only under its
+  abstention rule.
+- break_conditions: list of concrete, specific events that would invalidate
+  the thesis, written under the authoring contract below.
+- break_predicates: structured twins of break_conditions entries that map
+  onto the machine-checkable vocabulary (rules below). Omit the field, or
+  emit [], when nothing maps.
 - memo_markdown: full structured memo covering: business quality, key financials, recent news
   impact, valuation, risks, stance rationale. Min 3 paragraphs.
 - Use `risk_metrics` to ground the risk section: deep max drawdown, high beta,
@@ -1214,14 +1244,69 @@ Rules:
   stance (an entry band is meaningless without a market price), and emit
   base/bull/bear_value only if fundamentals give a defensible per-share
   basis.
-- `fair_value_band` is deterministic valuation-band evidence — a mechanical
-  prior, not a constraint. When it is available AND `quality_status` is
-  `high`, it is your PRIMARY valuation anchor: ground bear/base/bull against
-  it and explain any large gap; `price_anchor.close` and the 52-week range
-  are the fallback grounding in that case, not a second "justify if outside"
-  test. When it is absent, or `quality_status` is `medium`/`low`, treat it as
-  weak or no evidence and rely on your own judgement grounded in
-  `price_anchor`/fundamentals instead.
+- Valuation procedure — produce bear/base/bull in this priority order:
+  1. `fair_value_band` available AND `quality_status` `high`: it is your
+     PRIMARY valuation anchor — ground bear/base/bull against it and explain
+     any large gap in the memo; `price_anchor.close` and the 52-week range
+     are fallback grounding in that case, not a second "justify if outside"
+     test. (`medium`/`low` bands are weak evidence — fall to tier 2.)
+  2. Otherwise DERIVE the targets from ONE stated basis whose inputs the
+     context actually supplies:
+     - a multiple × `fundamentals` `eps` (per-share), or
+     - a multiple × `fundamentals` `book_value` (per-share), or
+     - re-rating arithmetic: `valuation.current_price` × (your target
+       multiple / the context's current multiple), using a non-null ratio
+       from `valuation` (pe_ratio, pb_ratio, p_fcf_ratio, ev_ebitda, ...).
+     Justify the multiple you chose (own history or peer judgement) and SHOW
+     THE ARITHMETIC in the memo's valuation section, in the form
+     "base = <your multiple> x EPS <the eps from THIS context> = <product>"
+     — computed from THIS context's numbers, never illustrative ones.
+     Derive bear/bull from the SAME basis
+     under stated downside/upside assumptions — never copy context landmarks
+     (52-week high/low, book value) into target slots. NEVER derive
+     per-share targets from absolute-dollar fields (`fcf`, `revenue_ttm`,
+     `cash`, `debt`): share count is not in the context, so any such
+     per-share figure would be fabricated. Your arithmetic must END in a
+     per-share price comparable to `price_anchor.close`; if it produces a
+     $B-scale figure (a market cap, a revenue) the basis is invalid —
+     discard it, do not write it into the memo. When a `fair_value_band` is
+     present at ANY quality, sanity-check your derived base against the
+     band's base/bull — an order-of-magnitude disagreement means your
+     arithmetic is wrong, not the band.
+  3. Only when NO basis has its inputs (no eps, no book_value, no usable
+     ratio+price): null targets are allowed, but the memo MUST then contain
+     an explicit abstention line naming the missing input, e.g.
+     "No per-share targets: eps and book_value absent". Silent null targets
+     are not valid output.
+- break_conditions authoring contract (each condition is machine-checked
+  nightly — write them to be checkable):
+  - ONE metric, ONE direction, ONE numeric threshold per condition. (Regime
+    conditions — price vs the 200-day SMA, 50-day vs 200-day SMA — carry no
+    threshold.) Each must be checkable on a single scan: NO composites
+    ("and"/"or"), NO duration or persistence qualifiers ("for 2+ weeks",
+    "sustained"), NO deadlines ("within 6 months", "fails to achieve").
+  - Every condition must be FALSE at write time. A break is a future
+    transition, not a restatement of the present — check the current values
+    in `analytics_evidence` (Altman Z, short interest) and `ta_state` (RSI,
+    SMA regime) first; if the condition already holds today it is your
+    premise, and belongs in the memo, not in break_conditions.
+  - Short interest conditions: denominate ONLY as a percent "of shares
+    outstanding". Float is not in the research context and cannot be
+    checked — never write "of float".
+  - When a condition maps onto the machine vocabulary, ALSO emit a
+    structured twin in `break_predicates`: metric one of [altman_z, rsi_14,
+    short_interest_pct_shares_out, short_interest_days_to_cover,
+    short_interest_change_pct, price_vs_sma200, sma_50_vs_sma_200]; op "<"
+    or ">"; threshold a number — null exactly for the two regime metrics
+    (price_vs_sma200, sma_50_vs_sma_200); condition_index = the 0-based
+    index of the prose condition it mirrors. At most one twin per prose
+    condition. Conditions outside the vocabulary (filing events, guidance
+    cuts, competitive losses) are still good break conditions — they simply
+    get no twin.
+- Every figure you cite must either be copied VERBATIM (digit-for-digit)
+  from the context, or be a derived number whose inputs are shown inline
+  (e.g. "price 390.10 vs 52w high 524.00 = 25.5% below"). Never state a
+  rounded or recalled approximation as if it were a context figure.
 - Data-availability language MUST mirror the block status fields verbatim
   (#1632 evidence discipline). Never state a block is unavailable, missing, or
   absent when its `available`/status field marks it present. When a block IS
@@ -1351,17 +1436,24 @@ def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[st
     Raises ValueError on unparseable or schema-invalid response
     (after one retry).
     """
+    # Buy-zone enforcement is anchor-gated (#2010): the validator stays
+    # output-only; the context decides whether the rule applies.
+    require_buy_zone = context.get("price_anchor") is not None
+
+    def _validate(data: dict[str, object]) -> None:
+        _validate_writer_output(data, require_buy_zone=require_buy_zone)
+
     return _call_with_one_retry(
         client,
         label="Writer",
         system=_WRITER_SYSTEM,
         user=_build_writer_prompt(context),
         max_tokens=_MAX_TOKENS_WRITER,
-        validate=_validate_writer_output,
+        validate=_validate,
     )
 
 
-def _validate_writer_output(data: dict[str, object]) -> None:
+def _validate_writer_output(data: dict[str, object], *, require_buy_zone: bool = False) -> None:
     required = {
         "thesis_type",
         "confidence_score",
@@ -1420,6 +1512,21 @@ def _validate_writer_output(data: dict[str, object]) -> None:
     zone_high = _to_float(data.get("buy_zone_high"))
     if zone_low is not None and zone_high is not None and zone_low > zone_high:
         raise ValueError(f"Writer output inverted buy zone: buy_zone_low {zone_low} > buy_zone_high {zone_high}")
+
+    # #2010: a buy with a live price anchor must be actionable — the full
+    # bear/base/bull target set plus both zone bounds (issue wording:
+    # "targets/zone REQUIRED for buy"; Codex ckpt-2 — base alone is not
+    # "targets"). Anchor-less contexts keep the v4 rule (zones are
+    # meaningless without a market price), so the call site gates this.
+    # Current pop at ship time: 13/13 v4 buys already carry all five.
+    if (
+        require_buy_zone
+        and stance == "buy"
+        and (bear is None or base is None or bull is None or zone_low is None or zone_high is None)
+    ):
+        raise ValueError(
+            "Writer output buy stance requires bear/base/bull values and buy_zone_low/high when price_anchor is present"
+        )
 
 
 def _call_critic(client: LLMClient, memo_markdown: str, context: dict[str, object]) -> dict[str, object]:
@@ -1487,7 +1594,22 @@ def _insert_thesis_atomic(
 
     Must be called inside an open transaction.
     """
-    break_conditions = writer.get("break_conditions") or []
+    break_conditions_raw = writer.get("break_conditions")
+    # Validator guarantees a list; the isinstance narrows for the type checker.
+    break_conditions: list[object] = break_conditions_raw if isinstance(break_conditions_raw, list) else []
+
+    # #2010: writer-native structured predicates — soft-validated, best-effort
+    # recall channel. Invalid entries (or a malformed top-level field) are
+    # dropped with a warning, NEVER a retry-fail; prose stays canonical.
+    break_predicates, dropped = sanitize_writer_break_predicates(writer.get("break_predicates"), break_conditions)
+    if dropped:
+        logger.warning(
+            "Writer break_predicates dropped %d invalid entr%s for instrument_id=%s: %s",
+            len(dropped),
+            "y" if len(dropped) == 1 else "ies",
+            instrument_id,
+            "; ".join(dropped),
+        )
 
     row = conn.execute(
         """
@@ -1496,7 +1618,7 @@ def _insert_thesis_atomic(
             thesis_type, confidence_score, stance,
             buy_zone_low, buy_zone_high,
             base_value, bull_value, bear_value,
-            break_conditions_json, memo_markdown, critic_json,
+            break_conditions_json, break_predicates_json, memo_markdown, critic_json,
             model, provider, prompt_version
         )
         VALUES (
@@ -1506,7 +1628,7 @@ def _insert_thesis_atomic(
             %(thesis_type)s, %(confidence_score)s, %(stance)s,
             %(buy_zone_low)s, %(buy_zone_high)s,
             %(base_value)s, %(bull_value)s, %(bear_value)s,
-            %(break_conditions_json)s, %(memo_markdown)s, %(critic_json)s,
+            %(break_conditions_json)s, %(break_predicates_json)s, %(memo_markdown)s, %(critic_json)s,
             %(model)s, %(provider)s, %(prompt_version)s
         )
         RETURNING thesis_id, thesis_version
@@ -1522,6 +1644,7 @@ def _insert_thesis_atomic(
             "bull_value": _to_float(writer.get("bull_value")),
             "bear_value": _to_float(writer.get("bear_value")),
             "break_conditions_json": Jsonb(break_conditions),
+            "break_predicates_json": Jsonb(break_predicates) if break_predicates else None,
             "memo_markdown": writer["memo_markdown"],
             "critic_json": Jsonb(critic) if critic else None,
             "model": model,
