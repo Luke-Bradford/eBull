@@ -1320,10 +1320,11 @@ class TestDetectAdjustmentEvent:
         assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "104")]) is None
 
     def test_threshold_boundary_fires_inclusive(self) -> None:
-        """5:4 split (1.25x) sits above the 1.2 threshold and fires."""
+        """Exactly 1.2 fires (threshold is inclusive); just below does not."""
         from app.services.market_data import detect_adjustment_event
 
-        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "80")]) == Decimal("1.25")
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "120")]) == Decimal("1.2")
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "119")]) is None
 
     def test_zero_close_sentinel_skipped(self) -> None:
         """price_daily zero-close sentinels must not fake a split."""

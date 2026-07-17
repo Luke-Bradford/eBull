@@ -290,7 +290,6 @@ def refresh_market_data(
                     stored = _stored_overlap_closes(conn, instrument_id, [b.price_date for b in bars])
                     ratio = detect_adjustment_event(stored, bars)
                     if ratio is not None:
-                        adjustment_detected = True
                         logger.warning(
                             "Adjustment event detected for %s (id=%d): overlap close ratio %s — "
                             "re-fetching full %d-bar history to heal the series",
@@ -300,6 +299,9 @@ def refresh_market_data(
                             lookback_days,
                         )
                         bars = provider.get_daily_candles(instrument_id, lookback_days)
+                        # An empty heal re-fetch wrote nothing — a heal is
+                        # only a heal if the series was actually rewritten.
+                        adjustment_detected = bool(bars)
                 if bars:
                     upserted = _upsert_candles(conn, instrument_id, bars)
                     computed = _compute_and_store_features(conn, instrument_id)
