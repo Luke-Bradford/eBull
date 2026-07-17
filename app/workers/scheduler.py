@@ -71,10 +71,6 @@ from app.services.position_monitor import (
     persist_position_alerts,
 )
 from app.services.processes.param_metadata import ParamMetadata
-from app.services.refresh_cascade import (
-    demote_to_rerank_needed,
-    instrument_lock,
-)
 from app.services.return_attribution import (
     SUMMARY_WINDOWS,
     compute_attribution_summary,
@@ -85,7 +81,7 @@ from app.services.sync_orchestrator import prereq_skip_reason
 from app.services.sync_orchestrator.progress import report_progress
 from app.services.sync_orchestrator.row_count_spikes import check_row_count_spike
 from app.services.tax_ledger import ingest_tax_events, run_disposal_matching
-from app.services.thesis import StaleInstrument, find_stale_instruments, generate_thesis
+from app.services.thesis import StaleInstrument, find_stale_instruments, generate_thesis, instrument_lock
 from app.services.trade_events import compute_history_min_date, fetch_trade_history_safely
 from app.services.universe import sync_universe
 from app.services.watermarks import get_watermark, set_watermark
@@ -3034,96 +3030,33 @@ def daily_financial_facts() -> None:
                 # remains the liveness signal.
                 tracker.row_count = 0
 
-            # Phase 3: cascade refresh (#276 Chunk K.1). The bare
-            # ``conn.commit()`` is reached only on the success path of
-            # Phase 1 + Phase 2 — Python exception propagation skips
-            # this line on any prior raise, and ``psycopg.connect()``
-            # as a context manager rolls back the connection on
-            # exception. The commit is required because
-            # ``normalize_financial_periods`` uses savepoints, not
-            # commit, and cascade reads must see committed state.
-            # Cascade runs even on submissions-only days (8-K thesis
-            # context update) as long as there were successful
-            # non-seed CIKs.
+            # (Former Phase 3 — LLM cascade refresh — removed by #2065.
+            # New-filing thesis staleness drains through the hourly
+            # ``thesis_refresh`` job's bounded batch on the ``llm_thesis``
+            # lane; thesis LLM failures surface on ``thesis_runs`` rows,
+            # not on this data job. The commit persists Phase 1+2 state.)
             conn.commit()
-            # #1919 PR-B — the cascade clients come from the
-            # ``make_llm_clients`` chokepoint (config-resolved, local-first
-            # default) instead of a hardcoded Anthropic construction.
-            cascade_failures: list[tuple[int, str]]
-            try:
-                cascade_clients = make_llm_clients(conn)
-            except LLMProviderNotConfigured as exc:
-                logger.info(
-                    "daily_financial_facts: %s — skipping cascade refresh (facts + normalization still committed)",
-                    exc,
-                )
-                cascade_failures = []
-            else:
-                from app.services.refresh_cascade import (
-                    cascade_refresh,
-                    changed_instruments_from_outcome,
-                )
-
-                # Cascade fires whenever the configured provider resolves
-                # (always, on the local-first default) so the retry outbox
-                # (K.2) gets drained even on days with zero new SEC work.
-                # ``cascade_refresh`` returns the empty-noop CascadeOutcome
-                # when both the retry queue and instrument_ids are empty.
-                changed_ids = changed_instruments_from_outcome(conn, plan, outcome)
-                cascade_outcome = cascade_refresh(conn, cascade_clients, changed_ids)
-                # Persist any cascade-side writes before the
-                # failure-surfacing raise below. compute_rankings
-                # writes score rows inside a
-                # ``with conn.transaction():`` block that may be
-                # nested as a savepoint under this connection's
-                # implicit outer tx — without this explicit
-                # commit, the raise propagates to
-                # psycopg.connect()'s CM rollback and discards
-                # any successful ranking writes AND any retry-queue
-                # mutations made by cascade's deferred-clear /
-                # marker path. On the failure path where
-                # compute_rankings itself rolled back (cascade_refresh's
-                # inner handler), this commit is a no-op on clean
-                # state. Thesis rows are already durably committed
-                # by generate_thesis per #293 and are unaffected
-                # either way.
-                conn.commit()
-                logger.info(
-                    "cascade_refresh outcome: considered=%d retries_drained=%d "
-                    "thesis_refreshed=%d rankings=%s failed=%d",
-                    cascade_outcome.instruments_considered,
-                    cascade_outcome.retries_drained,
-                    cascade_outcome.thesis_refreshed,
-                    cascade_outcome.rankings_recomputed,
-                    len(cascade_outcome.failed),
-                )
-                cascade_failures = list(cascade_outcome.failed)
 
             # Surface every partial-failure channel in a single combined raise
-            # AFTER all commits so successful CIKs' facts, rankings, and
-            # retry-queue mutations all land durably. Channels:
+            # AFTER the commit so successful CIKs' facts land durably.
+            # Channels:
             #   - outcome.failed        — per-CIK XBRL extract failures (#353)
             #   - plan.failed_plan_ciks — planner-phase skips (transient
             #                             submissions.json fetches that never
             #                             reached the executor)
-            #   - cascade_failures      — per-instrument thesis failures AND
-            #                             the -1 rerank sentinel
-            # Without a combined raise, a day where 20% of CIKs fail XBRL but
-            # cascade succeeds leaves tracker status='success', phase-1
-            # failed_phases empty, and Admin health green — masking a real
-            # partial outage. Re-entry path: the K.2 retry outbox re-queues
-            # failed executor CIKs, un-advanced master-index watermarks
-            # re-plan the planner-skipped CIKs, RERANK_NEEDED markers retry
-            # rankings — so all three failure channels converge back to
+            # Without a combined raise, a day where 20% of CIKs fail XBRL
+            # leaves tracker status='success', phase-1 failed_phases empty,
+            # and Admin health green — masking a real partial outage.
+            # Re-entry path: un-advanced master-index watermarks re-plan the
+            # planner-skipped CIKs, so both failure channels converge back to
             # green without manual intervention once the upstream source
             # recovers.
-            if outcome.failed or plan.failed_plan_ciks or cascade_failures:
+            if outcome.failed or plan.failed_plan_ciks:
                 raise RuntimeError(
                     "daily_financial_facts: "
                     f"xbrl_failed={len(outcome.failed)} ({outcome.failed}); "
                     f"planner_skipped={len(plan.failed_plan_ciks)} ({plan.failed_plan_ciks}); "
-                    f"cascade_failed={len(cascade_failures)} ({cascade_failures}); "
-                    "facts/normalization/cascade writes for successful CIKs were committed"
+                    "facts/normalization writes for successful CIKs were committed"
                 )
 
 
@@ -3176,7 +3109,7 @@ _THESIS_REFRESH_BATCH_LIMIT = 5
 
 
 def _thesis_refresh_candidates(conn: psycopg.Connection[Any]) -> list[int]:
-    """Candidate instrument_ids: held first, then top-N ranked (deduped).
+    """Candidate instrument_ids: held, then top-N ranked, then has-thesis.
 
     Held = ``positions.current_units > 0`` — the portfolio manager needs
     held theses fresh first (thesis-break monitoring + EXIT evaluation).
@@ -3186,6 +3119,16 @@ def _thesis_refresh_candidates(conn: psycopg.Connection[Any]) -> list[int]:
     (``app/api/scores.py``). A per-instrument latest-row shape would
     resurrect names from older runs that are no longer ranked (Codex
     ckpt-2 finding). Order is the batch priority order.
+
+    Has-thesis (#2065, third leg) = every tradable instrument with an
+    existing thesis, symbol-ordered — replaces the removed
+    fundamentals_sync cascade's refresh coverage for names outside
+    held ∪ top-N whose thesis a new filing supersedes.
+    ``is_tradable = TRUE`` mirrors the cascade's own
+    ``changed_instruments_from_outcome`` filter (behaviour parity; the
+    held leg keeps including non-tradable held names, unchanged). By
+    construction this leg adds zero ``no_thesis`` first-mints — the
+    wide-backfill operator gate stays intact.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -3213,8 +3156,26 @@ def _thesis_refresh_candidates(conn: psycopg.Connection[Any]) -> list[int]:
             {"mv": _DEFAULT_MODEL_VERSION, "top_n": _THESIS_REFRESH_TOP_N},
         )
         ranked = [int(row[0]) for row in cur.fetchall()]
-    held_set = set(held)
-    return held + [iid for iid in ranked if iid not in held_set]
+        cur.execute(
+            """
+            SELECT i.instrument_id
+            FROM instruments i
+            WHERE i.is_tradable = TRUE
+              AND EXISTS (
+                  SELECT 1 FROM theses t
+                  WHERE t.instrument_id = i.instrument_id
+              )
+            ORDER BY i.symbol, i.instrument_id
+            """
+        )
+        has_thesis = [int(row[0]) for row in cur.fetchall()]
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for iid in held + ranked + has_thesis:
+        if iid not in seen:
+            seen.add(iid)
+            ordered.append(iid)
+    return ordered
 
 
 def _select_thesis_batch(
@@ -3320,28 +3281,13 @@ def thesis_refresh() -> None:
                                 clients=clients,
                                 trigger="scheduled",
                             )
-                            # Increment BEFORE demote so a demote
-                            # failure can't silently under-count
-                            # a successful thesis write. The thesis
-                            # row is already committed by
-                            # generate_thesis (#293); the demote
-                            # call is a separate queue-mutation
-                            # side-effect we want to best-effort.
+                            # Thesis row is committed by generate_thesis
+                            # (#293). Rankings pick the fresh thesis up at
+                            # the next morning_candidate_review scoring
+                            # run (#2065 — the cascade rerank path is
+                            # gone; that daily recompute was already the
+                            # only rerank landing in practice).
                             generated += 1
-                            # The scheduled thesis write resolves any
-                            # pending cascade thesis signal but does not
-                            # run compute_rankings, so demote rather than
-                            # delete — preserves RERANK_NEEDED rows
-                            # untouched and converts thesis-failure /
-                            # LOCKED_BY_SIBLING rows to RERANK_NEEDED.
-                            try:
-                                demote_to_rerank_needed(conn, item.instrument_id)
-                            except Exception:
-                                logger.exception(
-                                    "thesis_refresh: demote_to_rerank_needed failed "
-                                    "for instrument_id=%d — queue signal stale until next run",
-                                    item.instrument_id,
-                                )
             except Exception:
                 logger.warning(
                     "thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",

@@ -1,11 +1,10 @@
-"""Unit tests for thesis_refresh (#1919 PR-B).
+"""Unit tests for thesis_refresh (#1919 PR-B; #2065 dropped the demote hook).
 
 Mocks psycopg.connect + make_llm_clients + generate_thesis +
-instrument_lock + demote_to_rerank_needed to prove the scheduler's
-per-instrument loop behaves per spec: acquired → generate + demote,
-not acquired → skip + count; provider-unresolvable → PREREQ_SKIP
-before _tracked_job. The scope/batch selection is pure and
-table-tested separately (no DB).
+instrument_lock to prove the scheduler's per-instrument loop behaves
+per spec: acquired → generate, not acquired → skip + count;
+provider-unresolvable → PREREQ_SKIP before _tracked_job. The
+scope/batch selection is pure and table-tested separately (no DB).
 """
 
 from __future__ import annotations
@@ -77,45 +76,39 @@ def mocked_env():  # type: ignore[no-untyped-def]
         }
 
 
-def test_lock_acquired_generates_and_demotes(mocked_env) -> None:  # type: ignore[no-untyped-def]
-    """Acquired lock → generate_thesis runs with trigger='scheduled',
-    demote_to_rerank_needed is called after success."""
+def test_lock_acquired_generates(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """Acquired lock → generate_thesis runs with trigger='scheduled'.
+    No queue side-effects remain post-#2065 (rankings pick the thesis
+    up at the next morning_candidate_review scoring run)."""
 
     @contextmanager
     def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
         yield True  # always acquire
 
-    with (
-        patch.object(scheduler, "instrument_lock", fake_lock),
-        patch.object(scheduler, "demote_to_rerank_needed") as demote_mock,
-    ):
+    with patch.object(scheduler, "instrument_lock", fake_lock):
         scheduler.thesis_refresh()
 
     mocked_env["generate_thesis"].assert_called_once()
     assert mocked_env["generate_thesis"].call_args.kwargs["trigger"] == "scheduled"
-    demote_mock.assert_called_once_with(mocked_env["conn"], 101)
-    # scheduler must NOT import clear_retry_success — only demote.
+    # The K.2 outbox hooks must be gone from the scheduler (#2065).
+    assert not hasattr(scheduler, "demote_to_rerank_needed")
     assert not hasattr(scheduler, "clear_retry_success")
     # tracker.row_count was set to 1 (generated)
     assert mocked_env["tracker"].row_count == 1
 
 
 def test_lock_not_acquired_skips_without_generate(mocked_env) -> None:  # type: ignore[no-untyped-def]
-    """Lock contention → generate_thesis NOT called, demote NOT
-    called (no enqueue on skip per K.3 spec)."""
+    """Lock contention → generate_thesis NOT called (no enqueue on
+    skip per K.3 spec)."""
 
     @contextmanager
     def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
         yield False  # sibling holds
 
-    with (
-        patch.object(scheduler, "instrument_lock", fake_lock),
-        patch.object(scheduler, "demote_to_rerank_needed") as demote_mock,
-    ):
+    with patch.object(scheduler, "instrument_lock", fake_lock):
         scheduler.thesis_refresh()
 
     mocked_env["generate_thesis"].assert_not_called()
-    demote_mock.assert_not_called()
     # No successful generations.
     assert mocked_env["tracker"].row_count == 0
 

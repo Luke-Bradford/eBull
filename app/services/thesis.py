@@ -46,7 +46,8 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
@@ -58,7 +59,7 @@ from psycopg.types.json import Jsonb
 
 # Safe at module scope (#2009 B3): fair_value_band's only app-internal deps are
 # peer_comparison and xbrl_derived_stats, neither of which imports thesis (or
-# anything that transitively reaches back here via scheduler/refresh_cascade) —
+# anything that transitively reaches back here via the scheduler) —
 # verified by grep, unlike risk_metrics below which genuinely cycles.
 from app.services.fair_value_band import (
     DIVERGENCE_THRESHOLD,
@@ -69,7 +70,7 @@ from app.services.fair_value_band import (
 
 # Safe at module scope: instrument_analytics has no app-module imports at
 # top level (its insider_transactions read is function-lazy), so this does
-# NOT re-enter the risk_metrics -> scheduler -> refresh_cascade cycle that
+# NOT re-enter the risk_metrics -> scheduler -> thesis cycle that
 # forces the lazy import inside _assemble_context.
 from app.services.instrument_analytics import SCHEMA_VERSION as _IAR_SCHEMA_VERSION
 from app.services.llm_client import LLMClient, LLMClientPair, LLMCompletion
@@ -81,6 +82,48 @@ from app.services.thesis_break import sanitize_writer_break_predicates
 from app.services.thesis_context_audit import hash_context, summarize_context
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Advisory lock (K.3, moved from refresh_cascade in #2065) — session-level,
+# held across the LLM call
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def instrument_lock(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+) -> Iterator[bool]:
+    """Session-level ``pg_try_advisory_lock`` keyed on instrument_id.
+
+    Yields True when acquired, False when a sibling session holds
+    the lock. Session-level (NOT xact-level) so the lock spans
+    ``generate_thesis``'s internal commit-before-Claude (#293).
+
+    Unlock in ``finally`` tolerates an INERROR connection by rolling
+    back and retrying once; if the retry still fails, the session
+    close will eventually release the advisory lock on Postgres'
+    side. The protected block's exception is never masked.
+    """
+    acquired_row = conn.execute("SELECT pg_try_advisory_lock(%s)", (instrument_id,)).fetchone()
+    acquired = bool(acquired_row[0]) if acquired_row else False
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                conn.execute("SELECT pg_advisory_unlock(%s)", (instrument_id,))
+            except psycopg.Error:
+                try:
+                    conn.rollback()
+                    conn.execute("SELECT pg_advisory_unlock(%s)", (instrument_id,))
+                except psycopg.Error:
+                    logger.exception(
+                        "instrument_lock: unlock failed for instrument_id=%d — session close will release",
+                        instrument_id,
+                    )
+
 
 # ---------------------------------------------------------------------------
 # Domain literals
@@ -1069,8 +1112,8 @@ def _assemble_context(
 
     # Realized-risk metrics (#1632): persisted, versioned, quality-flagged
     # risk_v1 scalars per window as structured evidence for the writer + critic.
-    # Lazy import — risk_metrics pulls in app.workers.scheduler, which transitively
-    # imports this module (refresh_cascade); a module-level import would be a cycle.
+    # Lazy import — risk_metrics pulls in app.workers.scheduler, which
+    # imports this module directly; a module-level import would be a cycle.
     # By call time thesis is fully initialized, so the function-level import is safe
     # and keeps the version/window constants single-sourced (no magic-string dup).
     from app.services.risk_metrics import RISK_METRICS_VERSION, WINDOW_KEYS

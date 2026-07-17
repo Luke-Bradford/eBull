@@ -5,9 +5,10 @@ lists per-CIK failures without raising. Before #353, `daily_financial_facts()`
 would merely log the failure count, so a day where 20% of SEC pulls crashed
 left the tracked job status='success' and Admin health green.
 
-The fix raises `RuntimeError` after the cascade + commits, so successful
-CIKs' facts, rankings, and retry-queue writes all land first, but the job
-itself fails and `fundamentals_sync` phase 1 sees the failure.
+The fix raises `RuntimeError` after the commit, so successful CIKs'
+facts land first, but the job itself fails and `fundamentals_sync`
+phase 1 sees the failure. (#2065 removed the Phase-3 LLM cascade and
+its `cascade_failed` channel from the combined raise.)
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.fundamentals import RefreshOutcome, RefreshPlan
-from app.services.llm_client import LLMProviderNotConfigured
 
 
 def _install_tracked_job_cm() -> MagicMock:
@@ -71,10 +71,6 @@ def test_daily_financial_facts_raises_when_outcome_has_failures() -> None:
         patch.object(scheduler.psycopg, "connect", return_value=fake_connect_cm),
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fundamentals_cls,
-        # Provider unresolvable → cascade block skipped (#1919 PR-B gate),
-        # so the partial-failure raise is the only thing standing between
-        # success and RuntimeError.
-        patch.object(scheduler, "make_llm_clients", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
         patch(
@@ -93,8 +89,8 @@ def test_daily_financial_facts_raises_when_outcome_has_failures() -> None:
             scheduler.daily_financial_facts()
 
     # Committed state: facts for successful CIK + normalization landed
-    # BEFORE the raise. Verify by counting commits: one after Phase 2
-    # (normalization), zero after cascade (provider unresolvable).
+    # BEFORE the raise (#2065: the post-Phase-2 commit precedes the
+    # combined raise).
     assert conn.commit.call_count >= 1
 
 
@@ -137,8 +133,6 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
         patch.object(scheduler.psycopg, "connect", return_value=fake_connect_cm),
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fundamentals_cls,
-        # Provider unresolvable → cascade block skipped (#1919 PR-B gate).
-        patch.object(scheduler, "make_llm_clients", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
     ):
@@ -149,16 +143,17 @@ def test_daily_financial_facts_raises_when_planner_has_skipped_ciks() -> None:
             scheduler.daily_financial_facts()
 
 
-def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
-    """When both channels fail, the single combined raise names both so
-    diagnostics don't drop one signal. Previously the cascade-raise
-    fired first and masked the XBRL failure."""
+def test_daily_financial_facts_combines_xbrl_and_planner_failures() -> None:
+    """When both remaining channels fail, the single combined raise names
+    both so diagnostics don't drop one signal (#2065 removed the third,
+    cascade_failed, channel)."""
     from app.workers import scheduler
 
     plan = RefreshPlan(
         seeds=[],
         refreshes=[("0000000002", "2026-04-18")],
         submissions_only_advances=[],
+        failed_plan_ciks=["0000000009"],
     )
     outcome = RefreshOutcome(
         seeded=0,
@@ -179,15 +174,6 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
     stub_settings.database_url = "postgresql://stub/"
     stub_settings.sec_user_agent = "test"
 
-    # Stub a cascade that reports one per-instrument failure.
-    cascade_outcome = MagicMock(
-        instruments_considered=1,
-        retries_drained=0,
-        thesis_refreshed=0,
-        rankings_recomputed=False,
-        failed=[(42, "RuntimeError")],
-    )
-
     with (
         patch.object(scheduler, "settings", stub_settings),
         patch.object(scheduler, "_tracked_job", return_value=tracked_cm),
@@ -204,10 +190,6 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
                 periods_canonical_upserted=0,
             ),
         ),
-        patch("app.services.refresh_cascade.cascade_refresh", return_value=cascade_outcome),
-        patch("app.services.refresh_cascade.changed_instruments_from_outcome", return_value=[42]),
-        # Resolvable provider → cascade enabled (#1919 PR-B gate).
-        patch.object(scheduler, "make_llm_clients", return_value=MagicMock()),
     ):
         filings_cls.return_value.__enter__.return_value = MagicMock()
         fundamentals_cls.return_value.__enter__.return_value = MagicMock()
@@ -216,7 +198,7 @@ def test_daily_financial_facts_combines_xbrl_and_cascade_failures() -> None:
             scheduler.daily_financial_facts()
         # Single raise names BOTH channels — no signal masking.
         assert "xbrl_failed=1" in str(excinfo.value)
-        assert "cascade_failed=1" in str(excinfo.value)
+        assert "planner_skipped=1" in str(excinfo.value)
 
 
 def test_daily_financial_facts_no_raise_when_outcome_clean() -> None:
@@ -244,8 +226,6 @@ def test_daily_financial_facts_no_raise_when_outcome_clean() -> None:
         patch.object(scheduler.psycopg, "connect", return_value=fake_connect_cm),
         patch.object(scheduler, "SecFilingsProvider") as filings_cls,
         patch.object(scheduler, "SecFundamentalsProvider") as fundamentals_cls,
-        # Provider unresolvable → cascade block skipped (#1919 PR-B gate).
-        patch.object(scheduler, "make_llm_clients", side_effect=LLMProviderNotConfigured("no key")),
         patch("app.services.fundamentals.plan_refresh", return_value=plan),
         patch("app.services.fundamentals.execute_refresh", return_value=outcome),
     ):
