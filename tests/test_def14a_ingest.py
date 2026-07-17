@@ -357,7 +357,7 @@ class TestIngestDef14a:
             document_kind="def14a_body",
         )
         assert doc is not None
-        assert doc.parser_version == "def14a-v2"
+        assert doc.parser_version == "def14a-v3"  # bumped by #2086 (402/403 decouple)
         assert doc.source_url == url
         assert len(doc.require_payload()) > 0
 

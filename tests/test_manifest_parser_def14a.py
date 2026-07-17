@@ -26,6 +26,7 @@ without touching SEC.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from textwrap import dedent
 
 import psycopg
@@ -141,6 +142,31 @@ _NOTICE_ONLY_DEF14A_HTML = dedent("""
 """)
 
 
+# #2086 — a proxy whose ownership table defeats the detector but which
+# carries a standard Summary Compensation Table (the GME class). The
+# ownership parse yields rows == [] (tombstone path); Item 402 must
+# still extract.
+_NO_OWNERSHIP_WITH_SCT_HTML = dedent("""
+<!DOCTYPE html>
+<html><body>
+<h2>Notice of Annual Meeting</h2>
+<p>The annual meeting will ratify the auditor. No governance changes.</p>
+<h2>Summary Compensation Table</h2>
+<table>
+  <tr>
+    <td>Name and Principal Position</td><td>Year</td><td>Salary ($)</td>
+    <td>Stock Awards ($)</td><td>Non-Equity Incentive Plan Compensation ($)</td>
+    <td>All Other Compensation ($)</td><td>Total ($)</td>
+  </tr>
+  <tr>
+    <td>Jane Roe\nChief Executive Officer</td><td>2025</td><td>1,000,000</td>
+    <td>5,000,000</td><td>2,000,000</td><td>50,000</td><td>8,050,000</td>
+  </tr>
+</table>
+</body></html>
+""")
+
+
 @pytest.fixture(autouse=True)
 def _reset_registry_then_reload():
     """Wipe the worker parser registry before each test, then call
@@ -192,7 +218,7 @@ def test_happy_path_parses_and_stores_raw_and_holdings(
     assert row is not None
     assert row.ingest_status == "parsed"
     assert row.raw_status == "stored"
-    assert row.parser_version == "def14a-v2"
+    assert row.parser_version == "def14a-v3"  # bumped by #2086 (402/403 decouple)
 
     # def14a_beneficial_holdings rows exist for the parsed table.
     with ebull_test_conn.cursor() as cur:
@@ -309,6 +335,62 @@ def test_no_table_tombstones_with_stored_raw(
         cur.execute("SELECT status FROM def14a_ingest_log WHERE accession_number = '0000111111-26-000030'")
         log_row = cur.fetchone()
     assert log_row is not None and log_row[0] == "partial"
+
+
+def test_ownership_tombstone_still_extracts_exec_comp(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2086 — Item 402 exec comp is independent of Item 403: a proxy
+    whose ownership table defeats the detector (GME class) still writes
+    def14a_exec_compensation rows; the manifest row tombstones for the
+    ownership accounting exactly as before."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    iid = 8740006
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="GMEX", cik="0000222333")
+    _seed_pending_def14a(
+        ebull_test_conn,
+        accession="0000222333-26-000040",
+        instrument_id=iid,
+        cik="0000222333",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _NO_OWNERSHIP_WITH_SCT_HTML,
+    )
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_def14a", max_rows=10)
+    ebull_test_conn.commit()
+
+    # Ownership outcome unchanged: tombstoned with stored raw.
+    assert stats.tombstoned == 1
+    row = get_manifest_row(ebull_test_conn, "0000222333-26-000040")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.raw_status == "stored"
+
+    # Item 402 extracted despite the Item 403 tombstone.
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT executive_name, fiscal_year, total_comp
+            FROM def14a_exec_compensation
+            WHERE accession_number = '0000222333-26-000040' AND instrument_id = %s
+            """,
+            (iid,),
+        )
+        comp_rows = cur.fetchall()
+    assert len(comp_rows) == 1
+    name, fy, total = comp_rows[0]
+    assert name == "Jane Roe"
+    assert fy == 2025
+    assert total == Decimal("8050000")
 
 
 def test_fetch_exception_marks_failed_with_backoff(
