@@ -628,3 +628,16 @@ class TestCombinePanel:
         panel = combine_panel({"judge1": j1})
         assert panel["wins_a"] == 1
         assert panel["ties"] == 1
+
+
+class TestErrorJoinPreservesClip:
+    def test_clip_on_second_ordering_still_counted(self) -> None:
+        # Mirrors run_judge's join: err1 (non-clip) + err2 (clip) must
+        # keep the clip marker visible to the aggregate (Codex ckpt-2).
+        err1 = "transport: RuntimeError: connection refused"
+        err2 = "judge_clip: finish_reason=length at max_tokens=3072 — response truncated mid-grade"
+        joined = " ; ".join(e for e in (err1, err2) if e)
+        verdict = adjudicate_pair(None, None, symbol="JPM", iteration=1, error=joined)
+        report = aggregate_judgements([verdict])
+        assert report["failed"] == 1
+        assert report["clipped"] == 1

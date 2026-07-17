@@ -899,7 +899,17 @@ def run_judge(
         swapped_pass, err2 = _judge_call(
             client, context_prompt=context_prompt, memo_first=memo_b, memo_second=memo_a, ctx_limit=ctx_limit
         )
-        verdict = adjudicate_pair(first_pass, swapped_pass, symbol=symbol, iteration=iteration, error=err1 or err2)
+        # Join (not `or`-collapse) so a clip on EITHER ordering stays
+        # visible to the aggregate's ``clipped`` counter (Codex ckpt-2:
+        # err1 non-clip + err2 clip must not report clipped=0).
+        errors = [e for e in (err1, err2) if e]
+        verdict = adjudicate_pair(
+            first_pass,
+            swapped_pass,
+            symbol=symbol,
+            iteration=iteration,
+            error=" ; ".join(errors) if errors else None,
+        )
         verdicts.append(verdict)
         print(
             f"  judge[{judge_model}] {symbol} it{iteration}: winner={verdict.winner} agreed={verdict.agreed}"
