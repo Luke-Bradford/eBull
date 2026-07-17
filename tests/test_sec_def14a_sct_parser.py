@@ -139,6 +139,157 @@ def test_gme_stacked_name_position_rows() -> None:
     assert result.rows[3].salary == Decimal("200000")
 
 
+def test_prdo_wrapped_title_fragments() -> None:
+    """Wrapped first-column layout (#2094 — PRDO): the logical name+title cell
+    wraps across the NEO block's three physical year rows. Row-2 fragments may
+    match the role lexicon at offset 0, but row-3 tails start with arbitrary
+    words ('Officer', 'Technical University') no lexicon can enumerate. The
+    fiscal-year descent (2024 → 2023 → 2022 inside a block; a new NEO restarts
+    at a newer year) must keep the fragments attached to the carried NEO and
+    concatenate the full title, backfilled onto every emitted row."""
+    header = _row(
+        "Name and Principal Position",
+        "Year",
+        "Salary ($)",
+        "Stock Awards ($)",
+        "Total ($)",
+    )
+    nelson_2024 = _row("Todd S. Nelson", "2024", "1,057,491", "3,323,796", "6,725,760")
+    nelson_2023 = _row("President and Chief Executive", "2023", "1,036,756", "2,138,972", "4,504,386")
+    nelson_2022 = _row("Officer", "2022", "1,011,469", "2,148,140", "4,512,179")
+    baskel_2024 = _row("Elise L. Baskel", "2024", "494,846", "515,919", "1,495,528")
+    baskel_2023 = _row("Senior Vice President – Colorado", "2023", "480,433", "434,439", "1,534,471")
+    baskel_2022 = _row("Technical University", "2022", "465,000", "381,145", "1,229,324")
+    table = f"<table>{header}{nelson_2024}{nelson_2023}{nelson_2022}{baskel_2024}{baskel_2023}{baskel_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2024),
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2023),
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2022),
+        ("Elise L. Baskel", "Senior Vice President – Colorado Technical University", 2024),
+        ("Elise L. Baskel", "Senior Vice President – Colorado Technical University", 2023),
+        ("Elise L. Baskel", "Senior Vice President – Colorado Technical University", 2022),
+    ]
+    assert result.rows[2].total_comp == Decimal("4512179")
+    assert result.rows[5].total_comp == Decimal("1229324")
+
+
+def test_hbnc_non_lexicon_second_row_fragment() -> None:
+    """Wrapped-title variant (#2094 — HBNC): even the SECOND row's fragment
+    starts with a non-lexicon word ('EVP,'), so no position has been captured
+    yet when it arrives. Year descent must still classify it as a title
+    continuation, and a later lexicon-matching tail appends to it."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    secor_2024 = _row("Mark E. Secor", "2024", "430,000", "672,269")
+    secor_2023 = _row("EVP,", "2023", "415,000", "630,000")
+    secor_2022 = _row("Chief Financial Officer", "2022", "400,000", "610,000")
+    table = f"<table>{header}{secor_2024}{secor_2023}{secor_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Mark E. Secor", "EVP, Chief Financial Officer", 2024),
+        ("Mark E. Secor", "EVP, Chief Financial Officer", 2023),
+        ("Mark E. Secor", "EVP, Chief Financial Officer", 2022),
+    ]
+
+
+def test_former_exec_block_starts_below_table_max_year() -> None:
+    """A departed NEO's block may start BELOW the table's newest year (no
+    FY2024 row). The block boundary is a year INCREASE relative to the
+    previous physical row — not equality with the table max — so the new
+    name must open a fresh block, not be absorbed as a title fragment."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    ceo_2024 = _row("Ann Incumbent\nChief Executive Officer", "2024", "900,000", "3,000,000")
+    ceo_2023 = _row("", "2023", "850,000", "2,800,000")
+    ceo_2022 = _row("", "2022", "800,000", "2,600,000")
+    former_2023 = _row("Jane Q. Departed\nFormer Chief Financial Officer", "2023", "600,000", "1,900,000")
+    former_2022 = _row("", "2022", "580,000", "1,700,000")
+    table = f"<table>{header}{ceo_2024}{ceo_2023}{ceo_2022}{former_2023}{former_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.fiscal_year) for r in result.rows] == [
+        ("Ann Incumbent", 2024),
+        ("Ann Incumbent", 2023),
+        ("Ann Incumbent", 2022),
+        ("Jane Q. Departed", 2023),
+        ("Jane Q. Departed", 2022),
+    ]
+    assert result.rows[3].principal_position == "Former Chief Financial Officer"
+
+
+def test_new_neo_opens_below_previous_rows_year() -> None:
+    """Codex ckpt-2 (#2094): a departed NEO's block can start BELOW the
+    previous physical row's year (current-year-only NEO first). A cell that
+    splits into a plausible person name + title must open a new block even
+    on a year-descending row; a title fragment ('Financial Officer &
+    Treasurer') must not."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    alice_2024 = _row("Alice A. Alpha\nChief Executive Officer", "2024", "500,000", "2,000,000")
+    bob_2023 = _row("Bob B. Beta\nFormer Chief Financial Officer", "2023", "400,000", "1,500,000")
+    bob_2022 = _row("", "2022", "380,000", "1,400,000")
+    table = f"<table>{header}{alice_2024}{bob_2023}{bob_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Alice A. Alpha", "Chief Executive Officer", 2024),
+        ("Bob B. Beta", "Former Chief Financial Officer", 2023),
+        ("Bob B. Beta", "Former Chief Financial Officer", 2022),
+    ]
+
+
+def test_fragment_with_interior_role_keyword_still_continues() -> None:
+    """A wrapped-title tail containing a role keyword at offset > 0
+    ('Financial Officer & Treasurer' — PRDO/Ghia) splits into a title-vocab
+    prefix, NOT a person name, so it must append to the carried NEO rather
+    than open a bogus block."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    ghia_2024 = _row("Ashish R. Ghia", "2024", "530,000", "3,405,287")
+    ghia_2023 = _row("Senior Vice President, Chief", "2023", "515,000", "2,290,706")
+    ghia_2022 = _row("Financial Officer & Treasurer", "2022", "500,000", "1,842,560")
+    table = f"<table>{header}{ghia_2024}{ghia_2023}{ghia_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Ashish R. Ghia", "Senior Vice President, Chief Financial Officer & Treasurer", 2024),
+        ("Ashish R. Ghia", "Senior Vice President, Chief Financial Officer & Treasurer", 2023),
+        ("Ashish R. Ghia", "Senior Vice President, Chief Financial Officer & Treasurer", 2022),
+    ]
+
+
+def test_single_year_table_new_neo_on_equal_year() -> None:
+    """One row per NEO, all the same fiscal year: equal years are NOT a
+    descent, so every name-like cell opens a new block."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    r1 = _row("Alice A. Alpha\nChief Executive Officer", "2024", "500,000", "2,000,000")
+    r2 = _row("Bob B. Beta\nChief Financial Officer", "2024", "400,000", "1,500,000")
+    table = f"<table>{header}{r1}{r2}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.fiscal_year) for r in result.rows] == [
+        ("Alice A. Alpha", 2024),
+        ("Bob B. Beta", 2024),
+    ]
+
+
+def test_name_repeated_on_each_year_row() -> None:
+    """Some filers repeat the NEO's name (or full name+title) on every year
+    row instead of using rowspan. A repeated first cell inside a descending
+    block must neither clobber the position nor be appended to it."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    r_2024 = _row("Carol C. Gamma\nChief Executive Officer", "2024", "700,000", "2,500,000")
+    r_2023 = _row("Carol C. Gamma", "2023", "650,000", "2,200,000")
+    r_2022 = _row("Carol C. Gamma\nChief Executive Officer", "2022", "600,000", "2,000,000")
+    table = f"<table>{header}{r_2024}{r_2023}{r_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Carol C. Gamma", "Chief Executive Officer", 2024),
+        ("Carol C. Gamma", "Chief Executive Officer", 2023),
+        ("Carol C. Gamma", "Chief Executive Officer", 2022),
+    ]
+
+
 def test_hd_folded_year_and_dash_null() -> None:
     """Separate name-only row; year folded into the value stream; ``—`` bonus
     is an explicit null (kept as a slot, not dropped). Full 8-column table."""
