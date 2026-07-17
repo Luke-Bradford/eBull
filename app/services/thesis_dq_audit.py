@@ -30,7 +30,9 @@ import psycopg.rows
 
 # Same coercion chokepoint as the #2007 insert-time guard — NaN/±inf → None
 # so a garbage target drops out of comparisons instead of defeating them.
-from app.services.thesis import _to_float
+# find_stale_instruments: the canonical staleness predicate (#1902 single
+# source), consumed by the #2072 fire-rate telemetry.
+from app.services.thesis import _to_float, find_stale_instruments
 
 # Findings payload cap — bounds the endpoint response on a large population
 # (mirrors compute_cik_gap_report's bounded per-row payload).
@@ -88,8 +90,52 @@ class ThesisDqFinding:
 
 # Info-only classes: counted, never emitted as findings rows.
 _INFO_CLASSES: frozenset[str] = frozenset(
-    {"target_abstention", "zoneless_buy_no_anchor", "no_run", "no_context_summary"}
+    {
+        "target_abstention",
+        "zoneless_buy_no_anchor",
+        "no_run",
+        "no_context_summary",
+        # #2072 — standing-telemetry counters (visibility, not defects).
+        "fire_rate_price_move",
+        "fire_rate_band_exit",
+        "fire_rate_news_spike",
+        "v5_total",
+        "v5_abstention",
+        "v5_zoneless_buy",
+        "v5_of_float",
+        "v5_predicates",
+        "v5_premise_true",
+    }
 )
+
+# #2072 — staleness-trigger calibration band, 2-8%/month (thesis-staleness
+# v2 spec acceptance gate; #2063 is the dated re-verification this audit
+# automates). The nightly count of STANDING fires is the proxy for the
+# monthly rate: firing regenerates the thesis (self-rearming) and the
+# hourly refresh drains fires at <=5/hr, so a standing count that stays
+# outside the band IS the miscalibration signal the spec describes.
+_FIRE_RATE_BAND: tuple[float, float] = (0.02, 0.08)
+_FIRE_RATE_REASONS: tuple[str, ...] = ("price_move", "band_exit", "news_spike")
+
+
+def check_fire_rate(reason: str, fires: int, population: int) -> str | None:
+    """Above-band detail string, or None (#2072).
+
+    Only the ABOVE direction flags: a standing count over the band's top
+    is a regen storm forming regardless of drain speed — the pre-backfill
+    hazard this audit exists for. Below-band is silent: the hourly
+    refresh drains fires at <=5/hr, so a small standing count is the
+    HEALTHY steady state and cannot distinguish 'calibrated + drained'
+    from 'threshold too tight' — #2063's dated re-check (trailing 30d)
+    owns the under-firing judgement.
+    """
+    if population <= 0:
+        return None
+    rate = fires / population
+    lo, hi = _FIRE_RATE_BAND
+    if rate <= hi:
+        return None
+    return f"{reason} standing fire rate {rate:.1%} ({fires}/{population}) above the {lo:.0%}-{hi:.0%}/month band"
 
 
 @dataclass(frozen=True)
@@ -261,6 +307,36 @@ ORDER BY l.instrument_id
 """
 
 
+# #2072 — v5 prompt-health census over the latest v5 thesis per instrument
+# (same latest-row tiebreak as everywhere; 'of float' substring = the
+# #2010 authoring-contract violation the census watches for).
+_V5_CENSUS_SQL = """
+WITH v5 AS (
+    SELECT DISTINCT ON (instrument_id) *
+    FROM theses
+    WHERE prompt_version = 'v5'
+    ORDER BY instrument_id, created_at DESC, thesis_version DESC, thesis_id DESC
+)
+SELECT count(*) AS total,
+       count(*) FILTER (WHERE bear_value IS NULL AND base_value IS NULL AND bull_value IS NULL) AS abstention,
+       count(*) FILTER (WHERE stance = 'buy' AND buy_zone_low IS NULL AND buy_zone_high IS NULL) AS zoneless_buy,
+       count(*) FILTER (WHERE break_conditions_json::text ILIKE '%of float%') AS of_float
+FROM v5
+"""
+
+_V5_PREDICATES_SQL = """
+SELECT count(*) AS preds,
+       count(*) FILTER (WHERE p.baseline_state IN ('already_true', 'already_true_after_gap')) AS premise_true
+FROM thesis_break_predicates p
+JOIN (
+    SELECT DISTINCT ON (instrument_id) thesis_id
+    FROM theses
+    WHERE prompt_version = 'v5'
+    ORDER BY instrument_id, created_at DESC, thesis_version DESC, thesis_id DESC
+) v ON v.thesis_id = p.thesis_id
+"""
+
+
 def compute_thesis_dq_report(conn: psycopg.Connection[Any]) -> ThesisDqReport:
     """Full-population scan of the latest thesis per instrument.
 
@@ -335,6 +411,47 @@ def compute_thesis_dq_report(conn: psycopg.Connection[Any]) -> ThesisDqReport:
         memo = row["memo_markdown"] or ""
         for block in claim_lint(memo, blocks):
             add(row, "claim_lint", "candidate", f"memo claims '{block}' unavailable; run summary says available")
+
+    # --- #2072 — standing threshold-calibration telemetry -----------------
+    # (1) v2 staleness-trigger fire rates vs the 2-8%/month band. Uses the
+    # canonical predicate directly (single source, #1902); population =
+    # latest-thesis count scanned above. Out-of-band emits a POPULATION-
+    # level flag finding (instrument_id 0 — not a per-row defect).
+    fires: dict[str, int] = {}
+    for hit in find_stale_instruments(conn, tier=None):
+        fires[hit.reason] = fires.get(hit.reason, 0) + 1
+    for reason in _FIRE_RATE_REASONS:
+        n = fires.get(reason, 0)
+        counts[f"fire_rate_{reason}"] = n
+        if detail := check_fire_rate(reason, n, scanned):
+            counts["fire_rate_out_of_band"] = counts.get("fire_rate_out_of_band", 0) + 1
+            findings.append(
+                ThesisDqFinding(
+                    instrument_id=0,
+                    symbol="POPULATION",
+                    thesis_id=0,
+                    dq_class="fire_rate_out_of_band",
+                    severity="flag",
+                    detail=detail,
+                )
+            )
+
+    # (2) v5 prompt-health census (of-float / premise-true / abstention /
+    # zoneless-buy over the latest prompt_version='v5' thesis per
+    # instrument) — the one-shot #2010 census checks as standing counters.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(_V5_CENSUS_SQL)
+        census = cur.fetchone()
+        cur.execute(_V5_PREDICATES_SQL)
+        preds = cur.fetchone()
+    if census is not None:
+        counts["v5_total"] = int(census["total"])
+        counts["v5_abstention"] = int(census["abstention"])
+        counts["v5_zoneless_buy"] = int(census["zoneless_buy"])
+        counts["v5_of_float"] = int(census["of_float"])
+    if preds is not None:
+        counts["v5_predicates"] = int(preds["preds"])
+        counts["v5_premise_true"] = int(preds["premise_true"])
 
     return ThesisDqReport(
         scanned=scanned,
