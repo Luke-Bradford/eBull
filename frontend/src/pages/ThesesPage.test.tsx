@@ -31,6 +31,7 @@ function makeItem(overrides: Partial<ThesisLibraryItem> = {}): ThesisLibraryItem
     created_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
     critic_verdict: "Weak challenge",
     stale_reason: null,
+    stale_detail: null,
     is_held: true,
     latest_score: 0.61,
     latest_rank: 7,

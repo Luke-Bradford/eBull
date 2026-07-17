@@ -783,8 +783,8 @@ describe("AlertsStrip — thesis staleness", () => {
     stubAll({
       thesisStale: {
         items: [
-          { instrument_id: 1, symbol: "GME", reason: "stale", latest_thesis_at: "2026-06-01T00:00:00Z" },
-          { instrument_id: 2, symbol: "AAPL", reason: "event_new_10k", latest_thesis_at: "2026-06-02T00:00:00Z" },
+          { instrument_id: 1, symbol: "GME", reason: "stale", detail: null, latest_thesis_at: "2026-06-01T00:00:00Z" },
+          { instrument_id: 2, symbol: "AAPL", reason: "event_new_10k", detail: null, latest_thesis_at: "2026-06-02T00:00:00Z" },
         ],
       },
     });
@@ -804,7 +804,7 @@ describe("AlertsStrip — thesis staleness", () => {
       guard: { rejections: [makeGuard()], unseen_count: 1 },
       thesisStale: {
         items: [
-          { instrument_id: 1, symbol: "GME", reason: "stale", latest_thesis_at: null },
+          { instrument_id: 1, symbol: "GME", reason: "stale", detail: null, latest_thesis_at: null },
         ],
       },
     });

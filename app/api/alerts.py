@@ -231,6 +231,7 @@ class ThesisStalenessItem(BaseModel):
     instrument_id: int
     symbol: str
     reason: str  # find_stale_instruments StaleReason (open string, #1808)
+    detail: str | None = None  # #2071 — magnitude for data-driven reasons
     latest_thesis_at: datetime | None  # None = no thesis at all
 
 
@@ -1079,6 +1080,7 @@ def get_thesis_staleness(
                 instrument_id=s.instrument_id,
                 symbol=s.symbol,
                 reason=s.reason,
+                detail=s.detail,
                 latest_thesis_at=latest_at.get(s.instrument_id),
             )
             for s in stale

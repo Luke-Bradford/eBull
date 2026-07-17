@@ -1315,6 +1315,8 @@ export interface ThesisDetail {
    *  Populated only on the latest-thesis GET; null on history/POST payloads. */
   is_stale?: boolean | null;
   stale_reason?: string | null;
+  /** #2071 — magnitude for data-driven reasons (price_move/band_exit/news_spike). */
+  stale_detail?: string | null;
   /** #2013 — diff vs the version-1 predecessor; null on v1 rows. */
   diff?: ThesisDiff | null;
   /** #2051 — index-aligned machine-checkable predicates; empty when the
@@ -1348,6 +1350,8 @@ export interface ThesisLibraryItem {
   critic_verdict: string | null;
   /** null = fresh, or outside refresh scope (not tradable / not analysable). */
   stale_reason: string | null;
+  /** #2071 — magnitude for data-driven reasons; null otherwise. */
+  stale_detail: string | null;
   is_held: boolean;
   latest_score: number | null;
   latest_rank: number | null;
@@ -1974,6 +1978,7 @@ export interface ThesisStalenessItem {
   instrument_id: number;
   symbol: string;
   reason: string; // find_stale_instruments StaleReason (open string)
+  detail: string | null; // #2071 — magnitude for data-driven reasons
   latest_thesis_at: string | null; // null = held instrument has no thesis at all
 }
 
