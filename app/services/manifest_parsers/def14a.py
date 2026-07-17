@@ -333,21 +333,41 @@ def _parse_def14a(
         # Compensation Table. Comp stays a savepoint-isolated
         # best-effort augment that never changes this ParseOutcome —
         # the row still tombstones for Item 403 accounting.
+        # Belt-and-braces try around the whole comp attempt: the callee
+        # already savepoint-isolates and swallows parse/upsert failures,
+        # but the tombstone ingest-log write below MUST happen regardless
+        # — comp can never be allowed to block the Item-403 accounting
+        # it was just decoupled from (review round 1). Failures are
+        # logged with traceback, never silent.
         try:
-            comp_siblings = _resolve_siblings(conn, instrument_id=instrument_id, issuer_cik=issuer_cik)
-        except Exception:  # noqa: BLE001 — best-effort: fall back to the primary
+            try:
+                comp_siblings = _resolve_siblings(conn, instrument_id=instrument_id, issuer_cik=issuer_cik)
+            except Exception:  # noqa: BLE001 — logged fallback to the primary instrument
+                logger.exception(
+                    "def14a manifest parser: sibling resolve failed pre-comp accession=%s",
+                    accession,
+                )
+                comp_siblings = [instrument_id]
+            apply_exec_comp_best_effort(
+                conn,
+                accession_number=accession,
+                issuer_cik=issuer_cik,
+                body=body,
+                instrument_ids=comp_siblings,
+            )
+        except Exception:  # noqa: BLE001 — comp is an augment; tombstone accounting proceeds
             logger.exception(
-                "def14a manifest parser: sibling resolve failed pre-comp accession=%s",
+                "def14a manifest parser: exec-comp augment raised on tombstone path accession=%s",
                 accession,
             )
-            comp_siblings = [instrument_id]
-        apply_exec_comp_best_effort(
-            conn,
-            accession_number=accession,
-            issuer_cik=issuer_cik,
-            body=body,
-            instrument_ids=comp_siblings,
-        )
+            try:
+                conn.rollback()
+            except psycopg.Error:
+                logger.debug(
+                    "def14a manifest parser: rollback suppressed after comp failure accession=%s",
+                    accession,
+                    exc_info=True,
+                )
         try:
             with conn.transaction():
                 _record_ingest_attempt(
