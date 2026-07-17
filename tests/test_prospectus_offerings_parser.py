@@ -94,6 +94,23 @@ def test_jef_424b5_percent_of_principal_yields_nulls() -> None:
     assert o.security_type == "Notes"
 
 
+def test_ngne_424b5_three_column_prefunded_warrant_cover() -> None:
+    """3-column cover (#2092 — NGNE, accession 0001628280-26-046666):
+    ``PER SHARE | PER PRE-FUNDED WARRANT | TOTAL`` header, three money values
+    per row. The per-warrant column must NOT leak into the aggregate fields —
+    Total is the LAST header column. Cover values hand-verified against SEC
+    EDGAR direct (30.00 × 3,500,000 + 29.999999 × 666,666 = 124,999,979)."""
+    o = parse_prospectus_offering(_fixture("ngne_424b5.htm"), "424B5")
+    assert o is not None
+    assert o.price_per_unit == Decimal("30.00")
+    assert o.unit_label == "Per Share"
+    assert o.aggregate_offering_amount == Decimal("124999979")
+    assert o.underwriting_discount == Decimal("7499999")
+    assert o.net_proceeds_to_issuer == Decimal("117499980")
+    assert o.is_issuer_offering is True
+    assert o.security_type == "Common Stock"
+
+
 def test_adt_424b7_no_pricing_table_stores_null_row() -> None:
     """Resale shelf with NO Item 501(b)(3) presentation (accession
     0001703056-26-000092): a recognizable prospectus without a resolvable
@@ -114,6 +131,45 @@ def test_adt_424b7_no_pricing_table_stores_null_row() -> None:
 
 def _cover(rows: str, head: str = "PROSPECTUS 5,000,000 Shares of Common Stock") -> str:
     return f"<html><body><p>{head}</p><table>{rows}</table></body></html>"
+
+
+def test_prose_per_share_before_header_does_not_inflate_count() -> None:
+    """Cover prose mentioning "per share and total" just before an ordinary
+    2-column header must not inflate the per-column count (Codex ckpt-2 on
+    #2092) — only the contiguous label run ending at Total counts, so the
+    2-value rows still map (per, total)."""
+    body = _cover(
+        "The price per share and total offering amounts are shown below. "
+        "Per Share Total "
+        "Price to Public $ 10.00 $ 1,000,000 "
+        "Underwriting Discounts and Commissions $ 0.50 $ 50,000 "
+        "Proceeds to us $ 9.50 $ 950,000 "
+    )
+    o = parse_prospectus_offering(body, "424B4")
+    assert o is not None
+    assert o.price_per_unit == Decimal("10.00")
+    assert o.aggregate_offering_amount == Decimal("1000000")
+    assert o.underwriting_discount == Decimal("50000")
+    assert o.net_proceeds_to_issuer == Decimal("950000")
+
+
+def test_three_column_header_count_mismatch_never_guesses_total() -> None:
+    """3-column header but only two money values in the row (a cell rendered
+    empty): the per-unit read stays anchored to the first column, the total is
+    ambiguous ⇒ NULL — the pre-#2092 positional read would have stored the
+    per-warrant price as the aggregate."""
+    body = _cover(
+        "Per Share Per Pre-Funded Warrant Total "
+        "Public Offering Price $ 10.00 $ 9.999999 "
+        "Underwriting Discounts and Commissions $ 0.50 $ 0.500000 "
+        "Proceeds to us $ 9.50 $ 9.499999 "
+    )
+    o = parse_prospectus_offering(body, "424B5")
+    assert o is not None
+    assert o.price_per_unit == Decimal("10.00")
+    assert o.aggregate_offering_amount is None
+    assert o.underwriting_discount is None
+    assert o.net_proceeds_to_issuer is None
 
 
 def test_resale_only_cover_is_issuer_false() -> None:

@@ -20,6 +20,9 @@ Three physical cover layouts observed on the real-fixture panel (FPS 424B4,
 MLCI 424B1, TD 424B3, JEF 424B5, ADT 424B7):
 
   * row-major   — ``Per Share Total <label> $ per $ total ...`` (FPS, MLCI)
+  * row-major 3-column — ``Per Share Per Pre-Funded Warrant Total`` (NGNE
+    #2092): Total is the LAST header column; the per-column count drives the
+    value-slot mapping
   * column-major — labels first, then ``Per Note $a $b $c Total $A $B $C`` (TD)
   * percent-of-principal — structured notes price as ``100.00%`` with empty
     ``$`` cells (JEF) → money fields NULL, never fabricated.
@@ -40,7 +43,9 @@ from typing import Any
 
 import psycopg
 
-PARSER_VERSION = 1
+# v2 (#2092): header-driven value-slot mapping — 3-column pre-funded-warrant
+# covers no longer leak the per-warrant column into the aggregate fields.
+PARSER_VERSION = 2
 
 # 424B2 admitted in #1975 (volume-gated at the manifest parser — the extractor
 # itself already handles B2-style covers; the JEF/TD fixtures ARE B2 shapes).
@@ -87,7 +92,10 @@ _UNIT_WORDS = (
     r"american depositary share|depositary share|share|note|unit|ads|bond|"
     r"warrant|right|security"
 )
-_UNIT_LABEL_RE = re.compile(rf"per ({_UNIT_WORDS})s?\b", re.IGNORECASE)
+# Up to two hyphenated/plain modifier words may sit between "per" and the unit
+# noun ("Per Pre-Funded Warrant" — NGNE #2092). Lazy + bounded so "per annum on
+# the note" (3 intervening words) never matches.
+_UNIT_LABEL_RE = re.compile(rf"per\s+(?:[\w-]+\s+){{0,2}}?({_UNIT_WORDS})s?\b", re.IGNORECASE)
 _TOTAL_WORD_RE = re.compile(r"\btotal\b", re.IGNORECASE)
 
 # Both closed ("securityholders") and spaced ("security holders") renderings
@@ -197,13 +205,38 @@ def _find_cover_cluster(text: str) -> tuple[re.Match[str], re.Match[str], re.Mat
     return None
 
 
-def _unit_label_before(text: str, pos: int) -> str | None:
-    """Column-header unit label ("Per Share Total") just before the cluster."""
+def _unit_label_before(text: str, pos: int) -> tuple[str | None, int]:
+    """Column headers just before the cluster → (first unit label, per-column
+    count).
+
+    A 2-column cover ("Per Share Total") yields ("Per Share", 1). A 3-column
+    pre-funded-warrant cover ("Per Share Per Pre-Funded Warrant Total" — NGNE
+    #2092) yields ("Per Share", 2): the FIRST per-label names the primary
+    security (Item 501(b)(3) presents the offered security first), the count
+    feeds the value-slot mapping in ``_row_values``. (None, 0) when no
+    per-label + Total header resolves in the window.
+
+    Only the CONTIGUOUS label run ending at the Total word counts — the gaps
+    between chained labels (and up to Total) may hold footnote markers and
+    punctuation but no letters. Cover prose like "price per share and total"
+    sitting before the real header would otherwise inflate the count and
+    NULL every total on an ordinary 2-column cover (Codex ckpt-2 Medium)."""
     window = text[max(0, pos - 120) : pos]
-    m = _UNIT_LABEL_RE.search(window)
-    if m and _TOTAL_WORD_RE.search(window, m.end()):
-        return _normalize_unit(m.group(1))
-    return None
+    labels = list(_UNIT_LABEL_RE.finditer(window))
+    if not labels:
+        return None, 0
+    for total_m in _TOTAL_WORD_RE.finditer(window):
+        chain: list[re.Match[str]] = []
+        end_anchor = total_m.start()
+        for lm in reversed([m for m in labels if m.end() <= total_m.start()]):
+            if re.search(r"[A-Za-z]", window[lm.end() : end_anchor]):
+                break
+            chain.append(lm)
+            end_anchor = lm.start()
+        if chain:
+            first = chain[-1]  # chain built backwards — last appended is leftmost
+            return _normalize_unit(first.group(1)), len(chain)
+    return None, 0
 
 
 def _normalize_unit(word: str) -> str:
@@ -236,20 +269,31 @@ def _detect_security_type(text: str) -> str | None:
     return best[1] if best else None
 
 
-def _row_values(segment: str, *, has_unit_header: bool) -> tuple[Decimal | None, Decimal | None]:
+def _row_values(segment: str, *, per_count: int) -> tuple[Decimal | None, Decimal | None]:
     """(per_unit, total) for one row-major cover row.
 
-    Two ``$`` values ⇒ (per-unit, total) — the Item 501(b)(3) two-column
-    presentation. One value with NO per-unit header ⇒ a total-only cover.
-    One value WITH a per-unit header is ambiguous (which column is empty?) ⇒
-    both NULL — never guess.
+    With a resolved header (``per_count`` ≥ 1) the expected slot count is
+    per-columns + Total, and Total is the LAST header column (the NGNE #2092
+    3-column cover leaked its middle Per-Pre-Funded-Warrant value into the
+    aggregate under the old positional ``values[1]`` read). Exact count →
+    (first, last). Count mismatch → the per-unit read stays reg-anchored to
+    the FIRST column but the total is ambiguous ⇒ NULL — never guess. A lone
+    value with a per-unit header is ambiguous (which column is empty?) ⇒ both
+    NULL. Headerless (``per_count == 0``): two values read as (per, total),
+    one value is a total-only cover — unchanged legacy behaviour.
     """
     if _RANGE_RE.search(segment):
         return None, None
     values = _segment_money(segment)
+    if per_count >= 1:
+        if len(values) == per_count + 1:
+            return values[0], values[-1]
+        if len(values) >= 2:
+            return values[0], None
+        return None, None
     if len(values) >= 2:
         return values[0], values[1]
-    if len(values) == 1 and not has_unit_header:
+    if len(values) == 1:
         return None, values[0]
     return None, None
 
@@ -306,7 +350,7 @@ def parse_prospectus_offering(body: str, subtype: str) -> ProspectusOffering | N
         proceeds_matches.append(nxt)
 
     currency = _detect_currency(text[price_m.start() : cluster_end])
-    unit_label = _unit_label_before(text, price_m.start())
+    unit_label, per_count = _unit_label_before(text, price_m.start())
 
     price_seg = text[price_m.end() : uw_m.start()]
     uw_seg = text[uw_m.end() : first_proceeds_m.start()]
@@ -322,9 +366,8 @@ def parse_prospectus_offering(body: str, subtype: str) -> ProspectusOffering | N
             security_type=security_type,
         )
 
-    has_unit_header = unit_label is not None
-    price_per_unit, aggregate = _row_values(price_seg, has_unit_header=has_unit_header)
-    _, uw_total = _row_values(uw_seg, has_unit_header=has_unit_header)
+    price_per_unit, aggregate = _row_values(price_seg, per_count=per_count)
+    _, uw_total = _row_values(uw_seg, per_count=per_count)
 
     issuer_total: Decimal | None = None
     selling_total: Decimal | None = None
@@ -337,7 +380,7 @@ def parse_prospectus_offering(body: str, subtype: str) -> ProspectusOffering | N
             else min(pm.end() + _LAST_SEGMENT_CAP, len(text))
         )
         seg = text[pm.end() : seg_end]
-        _, total = _row_values(seg, has_unit_header=has_unit_header)
+        _, total = _row_values(seg, per_count=per_count)
         if _classify_proceeds(text, pm):
             saw_selling_row = True
             if selling_total is None:
