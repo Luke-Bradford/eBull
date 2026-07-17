@@ -393,6 +393,58 @@ def test_ownership_tombstone_still_extracts_exec_comp(
     assert total == Decimal("8050000")
 
 
+def test_comp_augment_failure_never_blocks_tombstone_accounting(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PREVENTION pin (PR #2090 review): a comp-augment failure on the
+    tombstone path must not corrupt the connection state consumed by the
+    subsequent `_record_ingest_attempt` write — the row still tombstones
+    with the 'partial' log row exactly as if comp had never run."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+    from app.services.manifest_parsers import def14a as def14a_mod
+
+    iid = 8740009
+    _seed_instrument(ebull_test_conn, iid=iid, symbol="CMPX", cik="0000333444")
+    _seed_pending_def14a(
+        ebull_test_conn,
+        accession="0000333444-26-000050",
+        instrument_id=iid,
+        cik="0000333444",
+    )
+    ebull_test_conn.commit()
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(
+        sec_edgar.SecFilingsProvider,
+        "fetch_document_text",
+        lambda self, url: _NO_OWNERSHIP_WITH_SCT_HTML,
+    )
+
+    def _boom(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("comp augment exploded")
+
+    monkeypatch.setattr(def14a_mod, "apply_exec_comp_best_effort", _boom)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_def14a", max_rows=10)
+    ebull_test_conn.commit()
+
+    # Tombstone accounting landed despite the comp explosion.
+    assert stats.tombstoned == 1
+    row = get_manifest_row(ebull_test_conn, "0000333444-26-000050")
+    assert row is not None
+    assert row.ingest_status == "tombstoned"
+    assert row.raw_status == "stored"
+    with ebull_test_conn.cursor() as cur:
+        cur.execute("SELECT status FROM def14a_ingest_log WHERE accession_number = '0000333444-26-000050'")
+        log_row = cur.fetchone()
+        cur.execute("SELECT count(*) FROM def14a_exec_compensation WHERE accession_number = '0000333444-26-000050'")
+        comp_count = cur.fetchone()
+    assert log_row is not None and log_row[0] == "partial"
+    assert comp_count is not None and comp_count[0] == 0
+
+
 def test_fetch_exception_marks_failed_with_backoff(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

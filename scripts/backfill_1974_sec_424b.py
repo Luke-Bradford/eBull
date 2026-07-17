@@ -75,6 +75,12 @@ _CANDIDATES_SQL = """
     -- LEFT: events with no resolvable CIK must still reach the report
     -- (dry-run no_cik column / seed skipped_no_cik counter); an inner
     -- join would silently understate the population (Codex ckpt-2).
+    -- DISTINCT ON + ORDER BY (provider_filing_id, instrument_id):
+    -- a shared accession seeds ONE manifest row under the LOWEST
+    -- instrument_id — deterministic, matching #1792 and
+    -- seed_manifest_from_filing_events. Which sibling owns the row is
+    -- immaterial: share-class fan-out happens at parse time via
+    -- sibling resolution, not via the manifest row's instrument_id.
     LEFT JOIN LATERAL (
         SELECT identifier_value
         FROM external_identifiers ei
