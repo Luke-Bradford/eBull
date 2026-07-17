@@ -19,12 +19,12 @@ Usage:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
 import psycopg
 import psycopg.rows
-from dotenv import load_dotenv
+
+from app.config import settings
 
 # Latest v5 thesis per instrument (hourly regen would double-count a
 # name's behaviour otherwise), with its segment axes:
@@ -48,9 +48,13 @@ SELECT v.thesis_id, v.instrument_id, i.symbol, v.stance,
        c.coverage_tier
 FROM v5 v
 JOIN instruments i ON i.instrument_id = v.instrument_id
-LEFT JOIN fair_value_band_current b
-       ON b.instrument_id = v.instrument_id
-      AND b.method_version = (SELECT max(method_version) FROM fair_value_band_current)
+LEFT JOIN LATERAL (
+    SELECT b.base_value
+    FROM fair_value_band_current b
+    WHERE b.instrument_id = v.instrument_id
+    ORDER BY b.computed_at DESC
+    LIMIT 1
+) b ON TRUE
 LEFT JOIN LATERAL (
     SELECT s.completeness_tier
     FROM scores s
@@ -82,9 +86,13 @@ SELECT i.instrument_id, i.symbol, s.score,
        (b.base_value IS NULL) AS band_absent
 FROM instruments i
 JOIN coverage c ON c.instrument_id = i.instrument_id AND c.coverage_tier = 2
-LEFT JOIN fair_value_band_current b
-       ON b.instrument_id = i.instrument_id
-      AND b.method_version = (SELECT max(method_version) FROM fair_value_band_current)
+LEFT JOIN LATERAL (
+    SELECT b.base_value
+    FROM fair_value_band_current b
+    WHERE b.instrument_id = i.instrument_id
+    ORDER BY b.computed_at DESC
+    LIMIT 1
+) b ON TRUE
 LEFT JOIN LATERAL (
     SELECT s.total_score AS score
     FROM scores s
@@ -166,8 +174,10 @@ def run_census(conn: psycopg.Connection[object]) -> None:
 
 
 def main() -> None:
-    load_dotenv("/Users/lukebradford/Dev/eBull/.env")
-    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+    # House pattern (scripts/audit_agent_cik_contamination.py): Settings
+    # reads .env when present and falls back to the local-dev default —
+    # no hardcoded operator path (PR #2079 review WARNING).
+    with psycopg.connect(settings.database_url) as conn:
         run_census(conn)
 
 
