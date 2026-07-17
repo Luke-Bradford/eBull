@@ -25,6 +25,7 @@ import pytest
 
 from app.providers.implementations.sec_def14a import (
     _parse_dollar,
+    _position_only_cell,
     _resolve_sct_fields,
     _split_name_position,
     parse_summary_compensation_table,
@@ -102,6 +103,40 @@ def test_aapl_rowspan_continuation_shift() -> None:
     assert cook_2024.fiscal_year == 2024
     assert cook_2024.total_comp == Decimal("74609802")
     assert cook_2024.salary == Decimal("3000000")
+
+
+def test_gme_stacked_name_position_rows() -> None:
+    """Stacked name/position layout (#2088 — GME): the title renders on its
+    OWN physical row (the second year-row per NEO) and the third year-row's
+    name cell is empty. The title row must not clobber the carried name, the
+    title attaches to the carried NEO, and the already-emitted name row gets
+    the position backfilled. A following NEO resets the carry."""
+    header = _row(
+        "Name and Principal Position",
+        "Year",
+        "Salary ($)",
+        "Bonus ($)",
+        "Stock Awards ($)",
+        "Total ($)",
+    )
+    r1_2025 = _row("Ryan Cohen", "2025", "—", "—", "1,760,467", "1,760,467")
+    r1_2024 = _row("Chief Executive Officer", "2024", "—", "—", "268,553", "268,553")
+    r1_2023 = _row("", "2023", "—", "—", "100", "100")
+    r2_2025 = _row("Dan Moore", "2025", "200,000", "—", "2,166,562", "2,366,562")
+    r2_2024 = _row("Principal Financial and Accounting Officer", "2024", "192,615", "—", "636,600", "829,215")
+    table = f"<table>{header}{r1_2025}{r1_2024}{r1_2023}{r2_2025}{r2_2024}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Ryan Cohen", "Chief Executive Officer", 2025),
+        ("Ryan Cohen", "Chief Executive Officer", 2024),
+        ("Ryan Cohen", "Chief Executive Officer", 2023),
+        ("Dan Moore", "Principal Financial and Accounting Officer", 2025),
+        ("Dan Moore", "Principal Financial and Accounting Officer", 2024),
+    ]
+    assert result.rows[0].total_comp == Decimal("1760467")
+    assert result.rows[0].salary is None  # Cohen draws no salary — explicit dash
+    assert result.rows[3].salary == Decimal("200000")
 
 
 def test_hd_folded_year_and_dash_null() -> None:
@@ -426,6 +461,19 @@ def test_parse_dollar_variants() -> None:
     assert _parse_dollar("N/A") is None
     assert _parse_dollar("") is None
     assert _parse_dollar("   ") is None
+
+
+def test_position_only_cell_detection() -> None:
+    """Position-only = first role keyword at offset 0 (#2088). A cell leading
+    with a person's name is NOT position-only, even with a title after."""
+    assert _position_only_cell("Chief Executive Officer") == "Chief Executive Officer"
+    assert _position_only_cell("Principal Financial and Accounting Officer") == (
+        "Principal Financial and Accounting Officer"
+    )
+    assert _position_only_cell("General Counsel and Secretary") == "General Counsel and Secretary"
+    assert _position_only_cell("James Dimon Chairman and CEO") is None
+    assert _position_only_cell("Tim Cook\nChief Executive Officer") is None
+    assert _position_only_cell("") is None
 
 
 def test_split_name_position_newline() -> None:

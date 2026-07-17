@@ -62,7 +62,7 @@ from __future__ import annotations
 import html
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final
@@ -1194,6 +1194,26 @@ def _looks_like_name_cell(cell: str) -> bool:
     return bool(re.search(r"[A-Za-z]{2,}", stripped))
 
 
+def _position_only_cell(cell: str) -> str | None:
+    """Return the cleaned title text when CELL is a position-only fragment,
+    else ``None``.
+
+    Stacked name/position SCT layouts (GME) render the title on its OWN
+    physical row below the name row, so the continuation row's first cell is
+    a bare title ("Chief Executive Officer") that would otherwise pass
+    ``_looks_like_name_cell`` and clobber the carried NEO name (#2088). A
+    cell is position-only when the first role keyword matches at offset 0 —
+    a genuine "Name [Title]" cell always LEADS with the person's name."""
+    text = _clean_holder_name(cell).replace("\xa0", " ").replace("\n", " ").strip()
+    text = _INLINE_WHITESPACE_RE.sub(" ", text)
+    if not text:
+        return None
+    m = _POSITION_ROLE_RE.search(text)
+    if m is not None and m.start() == 0:
+        return text
+    return None
+
+
 def _extract_sct_row_values(cells_after_year: list[str]) -> list[Decimal | None]:
     """Compact the post-year cells into ordered value slots.
 
@@ -1353,7 +1373,21 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
         if first_nonempty_idx is None:
             continue
         if _looks_like_name_cell(cells[first_nonempty_idx]):
-            current_name, current_position = _split_name_position(cells[first_nonempty_idx])
+            position_fragment = _position_only_cell(cells[first_nonempty_idx])
+            if position_fragment is not None and current_name:
+                # Stacked name/position layout (GME, #2088): the title rides
+                # the NEXT physical row — it belongs to the carried NEO, it is
+                # not a new name. The name row was already emitted with a NULL
+                # position, so backfill this NEO's earlier rows too.
+                if current_position is None:
+                    current_position = position_fragment
+                    for i in range(len(rows) - 1, -1, -1):
+                        if rows[i].executive_name != current_name:
+                            break
+                        if rows[i].principal_position is None:
+                            rows[i] = replace(rows[i], principal_position=position_fragment)
+            else:
+                current_name, current_position = _split_name_position(cells[first_nonempty_idx])
 
         # Locate the fiscal-year token.
         year_idx = None
