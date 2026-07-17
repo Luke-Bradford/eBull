@@ -417,6 +417,12 @@ def compute_thesis_dq_report(conn: psycopg.Connection[Any]) -> ThesisDqReport:
     # canonical predicate directly (single source, #1902); population =
     # latest-thesis count scanned above. Out-of-band emits a POPULATION-
     # level flag finding (instrument_id 0 — not a per-row defect).
+    # Denominator note (PR #2083 review): `scanned` counts latest theses
+    # while find_stale evaluates the coverage population — the two are
+    # assumed aligned for the v2 reasons, which is safe because
+    # price_move/band_exit/news_spike can only fire on an instrument
+    # whose latest thesis exists (mint-anchored predicates), i.e. the
+    # numerator is a subset of the denominator by construction.
     fires: dict[str, int] = {}
     for hit in find_stale_instruments(conn, tier=None):
         fires[hit.reason] = fires.get(hit.reason, 0) + 1
