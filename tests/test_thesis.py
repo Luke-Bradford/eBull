@@ -50,11 +50,46 @@ from app.services.thesis import (
 
 _NOW = datetime(2026, 4, 4, 12, 0, 0, tzinfo=UTC)
 
-# #1988 v2 columns appended to the find_stale row: (bear_value, bull_value,
-# close_now, close_now_date, close_at_mint, m7, m30). This neutral tail
-# keeps pre-v2 rule tests exactly as they were: no prices → price rules
-# not evaluated; zero news mass → news_spike not evaluated.
-_V2_TAIL = (None, None, None, None, None, 0, 0)
+
+def _stale_row(
+    instrument_id: int = 1,
+    symbol: str = "AAPL",
+    review_frequency: str | None = "weekly",
+    latest_thesis_at: datetime | None = None,
+    latest_event_created_at: datetime | None = None,
+    latest_event_filing_type: str | None = None,
+    break_fired: bool = False,
+    bear_value: float | None = None,
+    bull_value: float | None = None,
+    close_now: float | None = None,
+    close_now_date: date | None = None,
+    close_at_mint: float | None = None,
+    m7: float = 0,
+    m30: float = 0,
+) -> dict[str, object]:
+    """One find_stale row keyed by its SELECT aliases (#2074).
+
+    A column addition touches THIS factory only — never the test call
+    sites (the #1988 positional-tail churn class). Defaults are the
+    neutral v2 tail: no prices -> price rules not evaluated; zero news
+    mass -> news_spike not evaluated."""
+    return {
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "review_frequency": review_frequency,
+        "latest_thesis_at": latest_thesis_at,
+        "latest_event_created_at": latest_event_created_at,
+        "latest_event_filing_type": latest_event_filing_type,
+        "break_fired": break_fired,
+        "bear_value": bear_value,
+        "bull_value": bull_value,
+        "close_now": close_now,
+        "close_now_date": close_now_date,
+        "close_at_mint": close_at_mint,
+        "m7": m7,
+        "m30": m30,
+    }
+
 
 _VALID_WRITER = {
     "thesis_type": "compounder",
@@ -81,7 +116,7 @@ _VALID_CRITIC = {
 
 def _make_conn(
     *,
-    stale_rows: list[tuple] | None = None,
+    stale_rows: list[dict[str, object]] | None = None,
     insert_returns_version: int = 1,
     insert_returns_thesis_id: int = 901,
     inst_row: tuple | None = None,
@@ -148,6 +183,26 @@ def _make_conn(
         return cursor
 
     conn.execute.side_effect = execute_side_effect
+
+    # #2074 — find_stale_instruments reads through
+    # conn.cursor(row_factory=dict_row); route the cursor's execute into
+    # the same dispatch so both access styles share one mock brain.
+    def cursor_factory(*_args: object, **_kwargs: object) -> MagicMock:
+        cm = MagicMock()
+        cur = MagicMock()
+
+        def cursor_execute(sql, params=None):  # type: ignore[no-untyped-def]
+            result = execute_side_effect(sql, params)
+            cur.fetchall = result.fetchall
+            cur.fetchone = result.fetchone
+            return cur
+
+        cur.execute.side_effect = cursor_execute
+        cm.__enter__ = MagicMock(return_value=cur)
+        cm.__exit__ = MagicMock(return_value=False)
+        return cm
+
+    conn.cursor.side_effect = cursor_factory
     conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
     conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
     return conn
@@ -223,7 +278,7 @@ class TestFindStaleInstruments:
         #  latest_event_filing_date, latest_event_filing_type, break_fired,
         #  bear_value, bull_value, close_now, close_now_date, close_at_mint,
         #  m7, m30)
-        rows = [(1, "AAPL", "weekly", None, None, None, False, *_V2_TAIL)]
+        rows = [_stale_row(review_frequency="weekly", latest_thesis_at=None)]
         conn = _make_conn(stale_rows=rows)
         result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
@@ -231,14 +286,14 @@ class TestFindStaleInstruments:
         assert result[0].symbol == "AAPL"
 
     def test_unknown_frequency_is_stale(self) -> None:
-        rows = [(1, "AAPL", "biannual", _NOW - timedelta(days=1), None, None, False, *_V2_TAIL)]
+        rows = [_stale_row(review_frequency="biannual", latest_thesis_at=_NOW - timedelta(days=1))]
         conn = _make_conn(stale_rows=rows)
         result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
         assert result[0].reason == "missing_frequency"
 
     def test_null_frequency_is_stale(self) -> None:
-        rows = [(1, "AAPL", None, _NOW - timedelta(days=1), None, None, False, *_V2_TAIL)]
+        rows = [_stale_row(review_frequency=None, latest_thesis_at=_NOW - timedelta(days=1))]
         conn = _make_conn(stale_rows=rows)
         result = find_stale_instruments(conn, tier=1)
         assert len(result) == 1
@@ -246,7 +301,7 @@ class TestFindStaleInstruments:
 
     def test_past_weekly_threshold_is_stale(self) -> None:
         # thesis created 8 days ago, weekly frequency → stale
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=8), None, None, False, *_V2_TAIL)]
+        rows = [_stale_row(review_frequency="weekly", latest_thesis_at=_NOW - timedelta(days=8))]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -255,7 +310,7 @@ class TestFindStaleInstruments:
 
     def test_within_weekly_threshold_is_fresh(self) -> None:
         # thesis created 3 days ago, weekly frequency → fresh
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=3), None, None, False, *_V2_TAIL)]
+        rows = [_stale_row(review_frequency="weekly", latest_thesis_at=_NOW - timedelta(days=3))]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -263,7 +318,7 @@ class TestFindStaleInstruments:
 
     def test_daily_threshold(self) -> None:
         # thesis created 25 hours ago, daily frequency → stale
-        rows = [(1, "MSFT", "daily", _NOW - timedelta(hours=25), None, None, False, *_V2_TAIL)]
+        rows = [_stale_row(symbol="MSFT", review_frequency="daily", latest_thesis_at=_NOW - timedelta(hours=25))]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -272,7 +327,7 @@ class TestFindStaleInstruments:
 
     def test_monthly_threshold(self) -> None:
         # thesis created 31 days ago, monthly frequency → stale
-        rows = [(1, "TSLA", "monthly", _NOW - timedelta(days=31), None, None, False, *_V2_TAIL)]
+        rows = [_stale_row(symbol="TSLA", review_frequency="monthly", latest_thesis_at=_NOW - timedelta(days=31))]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -280,9 +335,11 @@ class TestFindStaleInstruments:
 
     def test_multiple_instruments_mixed(self) -> None:
         rows = [
-            (1, "AAPL", "weekly", _NOW - timedelta(days=3), None, None, False, *_V2_TAIL),  # fresh
-            (2, "MSFT", "weekly", _NOW - timedelta(days=8), None, None, False, *_V2_TAIL),  # stale
-            (3, "GOOG", "weekly", None, None, None, False, *_V2_TAIL),  # no thesis
+            _stale_row(review_frequency="weekly", latest_thesis_at=_NOW - timedelta(days=3)),  # fresh
+            _stale_row(
+                instrument_id=2, symbol="MSFT", review_frequency="weekly", latest_thesis_at=_NOW - timedelta(days=8)
+            ),  # stale
+            _stale_row(instrument_id=3, symbol="GOOG", review_frequency="weekly", latest_thesis_at=None),  # no thesis
         ]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
@@ -294,7 +351,7 @@ class TestFindStaleInstruments:
 
     def test_exactly_at_threshold_is_stale(self) -> None:
         # now == created_at + 7 days exactly → stale (>= boundary)
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=7), None, None, False, *_V2_TAIL)]
+        rows = [_stale_row(review_frequency="weekly", latest_thesis_at=_NOW - timedelta(days=7))]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -303,7 +360,7 @@ class TestFindStaleInstruments:
 
     def test_break_fired_on_fresh_thesis(self) -> None:
         # #2012 rule 5: fresh thesis + a break event for the LATEST thesis.
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=1), None, None, True, *_V2_TAIL)]
+        rows = [_stale_row(review_frequency="weekly", latest_thesis_at=_NOW - timedelta(days=1), break_fired=True)]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -313,7 +370,7 @@ class TestFindStaleInstruments:
     def test_break_beats_cadence_stale(self) -> None:
         # Aged past cadence AND break fired → the specific reason wins
         # (Codex ckpt-2: break must not be shadowed by mere age).
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=30), None, None, True, *_V2_TAIL)]
+        rows = [_stale_row(review_frequency="weekly", latest_thesis_at=_NOW - timedelta(days=30), break_fired=True)]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -323,7 +380,15 @@ class TestFindStaleInstruments:
     def test_break_never_masks_filing_event(self) -> None:
         # Rule ordering: a new 10-K and a fired break both present → the
         # filing-event reason wins (spec: break ordered AFTER event rules).
-        rows = [(1, "AAPL", "weekly", _NOW - timedelta(days=1), _NOW, "10-K", True, *_V2_TAIL)]
+        rows = [
+            _stale_row(
+                review_frequency="weekly",
+                latest_thesis_at=_NOW - timedelta(days=1),
+                latest_event_created_at=_NOW,
+                latest_event_filing_type="10-K",
+                break_fired=True,
+            )
+        ]
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             result = find_stale_instruments(conn, tier=1)
@@ -444,27 +509,24 @@ class TestFindStaleInstrumentsV2Rules:
         event_at: datetime | None = None,
         event_form: str | None = None,
         break_fired: bool = False,
-    ) -> list[tuple[object, ...]]:
+    ) -> list[dict[str, object]]:
         return [
-            (
-                1,
-                "AAPL",
-                "weekly",
-                _NOW - timedelta(days=created_days_ago),
-                event_at,
-                event_form,
-                break_fired,
-                bear,
-                bull,
-                close_now,
-                (_NOW - timedelta(days=close_age_days)).date() if close_now is not None else None,
-                close_at_mint,
-                m7,
-                m30,
+            _stale_row(
+                latest_thesis_at=_NOW - timedelta(days=created_days_ago),
+                latest_event_created_at=event_at,
+                latest_event_filing_type=event_form,
+                break_fired=break_fired,
+                bear_value=bear,
+                bull_value=bull,
+                close_now=close_now,
+                close_now_date=(_NOW - timedelta(days=close_age_days)).date() if close_now is not None else None,
+                close_at_mint=close_at_mint,
+                m7=m7,
+                m30=m30,
             )
         ]
 
-    def _run(self, rows: list[tuple[object, ...]]) -> list[StaleInstrument]:
+    def _run(self, rows: list[dict[str, object]]) -> list[StaleInstrument]:
         conn = _make_conn(stale_rows=rows)
         with patch("app.services.thesis._utcnow", return_value=_NOW):
             return find_stale_instruments(conn, tier=1)
@@ -1402,3 +1464,39 @@ class TestShapeTaState:
         assert out["sma_50_200_regime"] is None
         assert out["price_vs_sma200"] is None
         assert out["sma_50"] is None
+
+
+class TestNewsSpikeRatioGuard:
+    """PR #2082 review — a spike fully concentrated in the 7d window
+    (m30 == m7 → baseline 0) must not fire and must not divide."""
+
+    def test_concentrated_spike_no_baseline_returns_none(self) -> None:
+        from app.services.thesis import _news_spike_ratio
+
+        assert _news_spike_ratio(10.0, 10.0) is None
+        assert _news_spike_ratio(10.0, 9.0) is None  # negative baseline
+
+    def test_fired_ratio_matches_detail_math(self) -> None:
+        from app.services.thesis import _news_spike_ratio
+
+        # m7=7, m30=30 → baseline 1/day, 7d rate 1/day → ratio 1 < 3 → None
+        assert _news_spike_ratio(7.0, 30.0) is None
+        # m7=7, m30=8.5 (baseline ≈0.065) → ratio ≈15.3 over floor → fires
+        ratio = _news_spike_ratio(7.0, 8.5)
+        assert ratio is not None and ratio == pytest.approx(15.33, abs=0.01)
+
+
+class TestPriceMovePctGuard:
+    """PR #2082 review round-2 — same single-source shape as news_spike."""
+
+    def test_nonpositive_mint_close_returns_none(self) -> None:
+        from app.services.thesis import _price_move_pct
+
+        assert _price_move_pct(50.0, 0.0) is None
+        assert _price_move_pct(50.0, -1.0) is None
+
+    def test_fired_pct_matches_detail_math(self) -> None:
+        from app.services.thesis import _price_move_pct
+
+        assert _price_move_pct(65.0, 100.0) == pytest.approx(-0.35)
+        assert _price_move_pct(105.0, 100.0) is None  # +5% under threshold

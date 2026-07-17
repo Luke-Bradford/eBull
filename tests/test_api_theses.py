@@ -68,6 +68,32 @@ def _make_thesis_row(
     }
 
 
+def _stale_query_row(
+    instrument_id: int,
+    symbol: str,
+    review_frequency: str | None,
+    latest_thesis_at: object,
+) -> dict[str, object]:
+    """One find_stale_instruments dict row (#2074 — keyed by SELECT alias;
+    neutral v2 tail so only the cadence rules evaluate)."""
+    return {
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "review_frequency": review_frequency,
+        "latest_thesis_at": latest_thesis_at,
+        "latest_event_created_at": None,
+        "latest_event_filing_type": None,
+        "break_fired": False,
+        "bear_value": None,
+        "bull_value": None,
+        "close_now": None,
+        "close_now_date": None,
+        "close_at_mint": None,
+        "m7": 0,
+        "m30": 0,
+    }
+
+
 def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
     """Build a mock psycopg.Connection.
 
@@ -395,13 +421,18 @@ class TestGetThesisHistory:
 class TestGetLatestThesisStaleness:
     def test_stale_thesis_carries_server_verdict(self) -> None:
         """find_stale_instruments (via conn.execute) drives is_stale."""
-        conn = _with_conn([[_make_thesis_row(created_at=_EARLIER)]])
-        # find_stale_instruments reads via conn.execute(...).fetchall() —
-        # monthly cadence + a past created_at is deterministically stale
-        # against the real clock.
-        conn.execute.return_value.fetchall.return_value = [
-            (100, "AAPL", "monthly", _EARLIER, None, None, False),
-        ]
+        # Cursor result sets in execute order: latest-thesis row, the #2051
+        # break-predicates read (the #2013 diff-predecessor read is skipped
+        # for a v1 row), then the find_stale_instruments read (dict_row
+        # cursor since #2074) — monthly cadence + a past created_at is
+        # deterministically stale against the real clock.
+        _with_conn(
+            [
+                [_make_thesis_row(created_at=_EARLIER)],
+                [],
+                [_stale_query_row(100, "AAPL", "monthly", _EARLIER)],
+            ]
+        )
         resp = client.get("/theses/100")
         _cleanup()
 
@@ -411,8 +442,8 @@ class TestGetLatestThesisStaleness:
         assert body["stale_reason"] == "stale"
 
     def test_fresh_thesis_reports_not_stale(self) -> None:
-        conn = _with_conn([[_make_thesis_row()]])
-        conn.execute.return_value.fetchall.return_value = []
+        # find_stale (second cursor read) defaults to the honest-empty set.
+        _with_conn([[_make_thesis_row()]])
         resp = client.get("/theses/100")
         _cleanup()
 
@@ -560,7 +591,8 @@ class TestCriticVerdictExtraction:
 
 
 class TestListTheses:
-    # Cursor result sets in execute order: [held-no-thesis rows], [library rows].
+    # Cursor result sets in execute order: [held-no-thesis rows], [library rows],
+    # then the find_stale_instruments read (dict_row cursor, #2074).
 
     def test_returns_enriched_items(self) -> None:
         row = _make_library_row(
@@ -570,10 +602,7 @@ class TestListTheses:
             critic_json={"verdict": "Moderate challenge"},
             run_status="failed",
         )
-        conn = _with_conn([[], [row]])
-        conn.execute.return_value.fetchall.return_value = [
-            (100, "AAPL", "monthly", _EARLIER, None, None, False),
-        ]
+        _with_conn([[], [row], [_stale_query_row(100, "AAPL", "monthly", _EARLIER)]])
         resp = client.get("/theses")
         _cleanup()
 
@@ -610,10 +639,13 @@ class TestListTheses:
             "run_trigger": None,
             "run_started_at": None,
         }
-        conn = _with_conn([[gap_row], [_make_library_row(100, "AAPL")]])
-        conn.execute.return_value.fetchall.return_value = [
-            (200, "GME", None, None, None, None, False),  # no_thesis via find_stale
-        ]
+        _with_conn(
+            [
+                [gap_row],
+                [_make_library_row(100, "AAPL")],
+                [_stale_query_row(200, "GME", None, None)],  # no_thesis via find_stale
+            ]
+        )
         resp = client.get("/theses")
         _cleanup()
 
@@ -648,8 +680,7 @@ class TestListTheses:
             "run_trigger": None,
             "run_started_at": None,
         }
-        conn = _with_conn([[gap_row], [_make_library_row(100, "AAPL", stance="buy")]])
-        conn.execute.return_value.fetchall.return_value = []
+        _with_conn([[gap_row], [_make_library_row(100, "AAPL", stance="buy")]])
         resp = client.get("/theses?stance=buy")
         _cleanup()
 
@@ -663,8 +694,7 @@ class TestListTheses:
         assert resp.status_code == 422
 
     def test_empty_library_returns_empty_page(self) -> None:
-        conn = _with_conn([[], []])
-        conn.execute.return_value.fetchall.return_value = []
+        _with_conn([[], []])
         resp = client.get("/theses")
         _cleanup()
 

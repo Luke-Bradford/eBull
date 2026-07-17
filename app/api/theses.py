@@ -200,6 +200,9 @@ class ThesisDetail(BaseModel):
     provider: str | None = None
     is_stale: bool | None = None
     stale_reason: str | None = None
+    # #2071 — magnitude string for the data-driven staleness reasons
+    # (price_move/band_exit/news_spike); None otherwise.
+    stale_detail: str | None = None
     # #2013 — diff vs the (instrument_id, thesis_version - 1) predecessor.
     # None when thesis_version == 1 or the predecessor row is missing.
     diff: ThesisDiffModel | None = None
@@ -252,6 +255,7 @@ class ThesisLibraryItem(BaseModel):
     created_at: datetime | None
     critic_verdict: str | None
     stale_reason: str | None
+    stale_detail: str | None  # #2071 — magnitude for data-driven reasons
     is_held: bool
     latest_score: float | None
     latest_rank: int | None
@@ -413,6 +417,7 @@ def filter_and_page_library(
     rows: list[dict[str, object]],
     stale_reasons: dict[int, str],
     *,
+    stale_details: dict[int, str | None] | None = None,
     held_only: bool,
     stale_only: bool,
     stance: str | None,
@@ -438,6 +443,7 @@ def filter_and_page_library(
         # python-hygiene.md "never assert production invariants").
         instrument_id = int(row["instrument_id"])  # type: ignore[arg-type]
         row["stale_reason"] = stale_reasons.get(instrument_id)
+        row["stale_detail"] = (stale_details or {}).get(instrument_id)
         if held_only and not row["is_held"]:
             continue
         if stale_only and row["stale_reason"] is None:
@@ -657,15 +663,17 @@ def list_theses(
         rows.sort(key=library_order_key)
 
     stale_reasons: dict[int, str] = {}
+    stale_details: dict[int, str | None] = {}
     if rows:
         instrument_ids = [int(r["instrument_id"]) for r in rows]  # type: ignore[arg-type]
-        stale_reasons = {
-            s.instrument_id: s.reason for s in find_stale_instruments(conn, tier=None, instrument_ids=instrument_ids)
-        }
+        stale_hits = find_stale_instruments(conn, tier=None, instrument_ids=instrument_ids)
+        stale_reasons = {s.instrument_id: s.reason for s in stale_hits}
+        stale_details = {s.instrument_id: s.detail for s in stale_hits}
 
     total, page = filter_and_page_library(
         rows,
         stale_reasons,
+        stale_details=stale_details,
         held_only=held_only,
         stale_only=stale,
         stance=stance,
@@ -691,6 +699,7 @@ def list_theses(
             created_at=row["created_at"],  # type: ignore[arg-type]
             critic_verdict=_critic_verdict(row["critic_json"]),
             stale_reason=row["stale_reason"],  # type: ignore[arg-type]
+            stale_detail=row["stale_detail"],  # type: ignore[arg-type]
             is_held=bool(row["is_held"]),
             latest_score=_parse_optional_float(row, "latest_score"),
             latest_rank=row["latest_rank"],  # type: ignore[arg-type]
@@ -866,6 +875,7 @@ def get_latest_thesis(
     # both render as not-stale because regeneration would never fire.
     stale = find_stale_instruments(conn, tier=None, instrument_ids=[instrument_id])
     thesis.stale_reason = stale[0].reason if stale else None
+    thesis.stale_detail = stale[0].detail if stale else None
     thesis.is_stale = bool(stale)
     return thesis
 

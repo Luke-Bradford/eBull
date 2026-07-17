@@ -52,6 +52,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 import psycopg
+import psycopg.rows
 from psycopg import sql as psql
 from psycopg.types.json import Jsonb
 
@@ -214,6 +215,11 @@ class StaleInstrument:
     instrument_id: int
     symbol: str
     reason: StaleReason
+    # #2071 — operator-facing magnitude for the data-driven v2 reasons
+    # (price_move / band_exit / news_spike; formats fixed in
+    # docs/specs/thesis/2026-07-16-thesis-staleness-v2.md). None for the
+    # cadence/event reasons, whose name is the whole story.
+    detail: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -279,10 +285,25 @@ def _evaluable_prices(
     return (close_now, close_at_mint)
 
 
+def _price_move_pct(close_now: float, close_at_mint: float) -> float | None:
+    """Signed move since mint when the price_move rule fires, else None.
+
+    Symmetric: a +30% melt-up invalidates a buy-zone as surely as a -30%
+    crash invalidates a bear floor. ``close_at_mint > 0`` is already
+    guaranteed by ``_evaluable_prices`` at the only call site, but the
+    guard is repeated here so the helper is safe standalone and the #2071
+    detail string consumes THIS return value (same single-source shape as
+    ``_news_spike_ratio``; PR #2082 review).
+    """
+    if close_at_mint <= 0:
+        return None
+    pct = (close_now - close_at_mint) / close_at_mint
+    return pct if abs(pct) >= _PRICE_MOVE_THRESHOLD else None
+
+
 def _price_move_fired(close_now: float, close_at_mint: float) -> bool:
-    """|move since mint| >= threshold. Symmetric: a +30% melt-up invalidates
-    a buy-zone as surely as a -30% crash invalidates a bear floor."""
-    return abs(close_now - close_at_mint) / close_at_mint >= _PRICE_MOVE_THRESHOLD
+    """Boolean face of ``_price_move_pct`` (kept for the table tests)."""
+    return _price_move_pct(close_now, close_at_mint) is not None
 
 
 def _band_exit_fired(
@@ -306,21 +327,33 @@ def _band_exit_fired(
     return minted_inside and now_outside
 
 
-def _news_spike_fired(m7: float, m30: float) -> bool:
-    """Trailing-7d importance-mass rate >= ratio x prior-23d baseline rate,
-    over an absolute mass floor.
+def _news_spike_ratio(m7: float, m30: float) -> float | None:
+    """The fired spike ratio (>= ``_NEWS_SPIKE_RATIO``), or None when the
+    predicate does not fire.
+
+    Trailing-7d importance-mass rate vs the prior-23d baseline rate, over
+    an absolute mass floor. Baseline-less names (baseline <= 0 — includes
+    a spike fully concentrated in the 7d window, m30 == m7) are not
+    evaluated, so the division is guarded by construction; the #2071
+    detail string consumes THIS return value, never re-derives it (PR
+    #2082 review — fire decision and reported ratio cannot desync).
 
     Self-rearming without state: stored importance scores are static but
     window membership rolls a spike's stories out of the 7d window and
     into the baseline, so the ratio subsides ~a week after the storm.
-    Baseline-less names (baseline <= 0) are not evaluated.
     """
     baseline = (m30 - m7) / _NEWS_BASELINE_DAYS
     if baseline <= 0:
-        return False
+        return None
     if m7 < _NEWS_SPIKE_MASS_FLOOR:
-        return False
-    return (m7 / _NEWS_WINDOW_DAYS) >= _NEWS_SPIKE_RATIO * baseline
+        return None
+    ratio = (m7 / _NEWS_WINDOW_DAYS) / baseline
+    return ratio if ratio >= _NEWS_SPIKE_RATIO else None
+
+
+def _news_spike_fired(m7: float, m30: float) -> bool:
+    """Boolean face of ``_news_spike_ratio`` (kept for the table tests)."""
+    return _news_spike_ratio(m7, m30) is not None
 
 
 def find_stale_instruments(
@@ -484,26 +517,31 @@ def find_stale_instruments(
         """
         )
     )
-    rows = conn.execute(query, params).fetchall()
+    # #2074 — dict_row: rows are keyed by the SELECT aliases, so a column
+    # addition can never silently shift positional reads (the #1988
+    # _V2_TAIL churn class) or break mocks that name their columns.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(query, params)
+        rows = cur.fetchall()
 
     now = _utcnow()
     stale: list[StaleInstrument] = []
 
     for row in rows:
-        instrument_id: int = row[0]
-        symbol: str = row[1]
-        review_frequency: str | None = row[2]
-        latest_thesis_at: datetime | None = row[3]
-        latest_event_created_at: datetime | None = row[4]
-        latest_event_filing_type: str | None = row[5]
-        break_fired: bool = bool(row[6])
-        bear_value = _to_float(row[7])
-        bull_value = _to_float(row[8])
-        close_now = _to_float(row[9])
-        close_now_date: date | None = row[10]
-        close_at_mint = _to_float(row[11])
-        m7 = _to_float(row[12]) or 0.0
-        m30 = _to_float(row[13]) or 0.0
+        instrument_id: int = row["instrument_id"]
+        symbol: str = row["symbol"]
+        review_frequency: str | None = row["review_frequency"]
+        latest_thesis_at: datetime | None = row["latest_thesis_at"]
+        latest_event_created_at: datetime | None = row["latest_event_created_at"]
+        latest_event_filing_type: str | None = row["latest_event_filing_type"]
+        break_fired: bool = bool(row["break_fired"])
+        bear_value = _to_float(row["bear_value"])
+        bull_value = _to_float(row["bull_value"])
+        close_now = _to_float(row["close_now"])
+        close_now_date: date | None = row["close_now_date"]
+        close_at_mint = _to_float(row["close_at_mint"])
+        m7 = _to_float(row["m7"]) or 0.0
+        m30 = _to_float(row["m30"]) or 0.0
 
         if latest_thesis_at is None:
             stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="no_thesis"))
@@ -553,18 +591,45 @@ def find_stale_instruments(
         prices = _evaluable_prices(close_now, close_at_mint, close_now_date, now.date())
         if prices is not None:
             now_px, mint_px = prices
-            if _price_move_fired(now_px, mint_px):
-                stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="price_move"))
+            if (move_pct := _price_move_pct(now_px, mint_px)) is not None:
+                stale.append(
+                    StaleInstrument(
+                        instrument_id=instrument_id,
+                        symbol=symbol,
+                        reason="price_move",
+                        detail=f"close {now_px:g} vs {mint_px:g} at mint ({move_pct:+.0%})",
+                    )
+                )
                 continue
-            if _band_exit_fired(now_px, mint_px, bear_value, bull_value):
-                stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="band_exit"))
+            if (
+                bear_value is not None
+                and bull_value is not None
+                and _band_exit_fired(now_px, mint_px, bear_value, bull_value)
+            ):
+                stale.append(
+                    StaleInstrument(
+                        instrument_id=instrument_id,
+                        symbol=symbol,
+                        reason="band_exit",
+                        detail=(
+                            f"close {now_px:g} outside [{bear_value:g}, {bull_value:g}] (minted inside at {mint_px:g})"
+                        ),
+                    )
+                )
                 continue
 
         # Rule 7 (#1988): news storm on a name with a real news baseline.
         # Independent of price evaluability — a stale price series must not
         # mask a news trigger.
-        if _news_spike_fired(m7, m30):
-            stale.append(StaleInstrument(instrument_id=instrument_id, symbol=symbol, reason="news_spike"))
+        if (spike_ratio := _news_spike_ratio(m7, m30)) is not None:
+            stale.append(
+                StaleInstrument(
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    reason="news_spike",
+                    detail=f"7d news mass {m7:.1f} at {spike_ratio:.1f}x 30d baseline",
+                )
+            )
             continue
 
         threshold = latest_thesis_at + timedelta(days=_REVIEW_FREQUENCY_DAYS[review_frequency])

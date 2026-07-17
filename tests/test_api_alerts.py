@@ -1931,17 +1931,34 @@ def test_thesis_staleness_empty_when_nothing_held(client: TestClient) -> None:
 
 def test_thesis_staleness_reports_stale_held_instrument(client: TestClient) -> None:
     cur = _install_conn()
-    # cursor fetchalls in call order: held ids, then latest-thesis timestamps.
+    # Cursor fetchalls in call order: held ids, then the
+    # find_stale_instruments read (dict_row cursor since #2074 — a
+    # monthly cadence + past thesis timestamp is deterministically
+    # stale), then latest-thesis timestamps. This mock was broken on
+    # main since #1988 (7-tuple vs the 14-column row); the dict shape
+    # fixes it (#2074 fix-in-scope).
     stale_at = datetime(2026, 4, 1, tzinfo=UTC)
     cur.fetchall.side_effect = [
         [{"instrument_id": 5}],
+        [
+            {
+                "instrument_id": 5,
+                "symbol": "GME",
+                "review_frequency": "monthly",
+                "latest_thesis_at": stale_at,
+                "latest_event_created_at": None,
+                "latest_event_filing_type": None,
+                "break_fired": False,
+                "bear_value": None,
+                "bull_value": None,
+                "close_now": None,
+                "close_now_date": None,
+                "close_at_mint": None,
+                "m7": 0,
+                "m30": 0,
+            }
+        ],
         [{"instrument_id": 5, "latest_thesis_at": stale_at}],
-    ]
-    # find_stale_instruments reads via conn.execute(...).fetchall() — a
-    # monthly cadence + past thesis timestamp is deterministically stale.
-    conn = cur._parent_conn
-    conn.execute.return_value.fetchall.return_value = [
-        (5, "GME", "monthly", stale_at, None, None, False),
     ]
     resp = client.get("/alerts/thesis-staleness")
     assert resp.status_code == 200
@@ -1955,9 +1972,8 @@ def test_thesis_staleness_reports_stale_held_instrument(client: TestClient) -> N
 
 def test_thesis_staleness_empty_when_held_theses_fresh(client: TestClient) -> None:
     cur = _install_conn()
-    cur.fetchall.side_effect = [[{"instrument_id": 5}]]
-    conn = cur._parent_conn
-    conn.execute.return_value.fetchall.return_value = []
+    # held ids, then an empty find_stale read (fresh).
+    cur.fetchall.side_effect = [[{"instrument_id": 5}], []]
     resp = client.get("/alerts/thesis-staleness")
     assert resp.status_code == 200
     assert resp.json() == {"items": []}
