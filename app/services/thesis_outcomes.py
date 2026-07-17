@@ -333,6 +333,13 @@ def aggregate_scoreboard(
     "does conviction behave like a calibrated probability?"). A mature
     pair the nightly capture has not yet minted counts as immature here
     (compute-on-read never classifies ahead of the ledger).
+
+    Scoping (Codex ckpt-2 Medium): the COVERAGE counters (targets_absent,
+    confidence_absent, direction_claims) are POPULATION-scoped — counted
+    over every thesis in the cohort, matured or not, matching the spec's
+    own full-population verification framing ("78/399 carry base_value",
+    "direction-claim cohort today = 180"). METRIC denominators stay
+    outcome-scoped (a hit-rate needs a realized return).
     """
     acc: dict[tuple[str | None, str | None, int], dict[str, Any]] = {}
 
@@ -351,15 +358,24 @@ def aggregate_scoreboard(
                 "direction_claims": 0,
                 "mape_terms": [],
                 "hits": 0,
+                "direction_outcomes": 0,
                 "brier_terms": [],
             }
         return acc[key]
 
     for row in thesis_rows:
         anchor_date = anchor_date_from_summary(row["context_summary"])
+        direction = row["stance"] in _DIRECTION_STANCES
         for horizon in HORIZONS:
             b = bucket(row["model"], row["prompt_version"], horizon)
             b["total_theses"] += 1
+            # Population-scoped coverage — counted before any maturity gate.
+            if row["base_value"] is None:
+                b["targets_absent"] += 1
+            if direction:
+                b["direction_claims"] += 1
+                if row["confidence_score"] is None:
+                    b["confidence_absent"] += 1
             if anchor_date is None:
                 b["anchorless"] += 1
                 continue
@@ -375,20 +391,15 @@ def aggregate_scoreboard(
                 continue
             realized_close, realized_return = outcome
             b["outcome_rows"] += 1
-            base_value = row["base_value"]
-            if base_value is None:
-                b["targets_absent"] += 1
-            else:
-                b["mape_terms"].append(abs(Decimal(base_value) - realized_close) / realized_close)
-            if row["stance"] in _DIRECTION_STANCES:
-                b["direction_claims"] += 1
+            if row["base_value"] is not None:
+                b["mape_terms"].append(abs(Decimal(row["base_value"]) - realized_close) / realized_close)
+            if direction:
+                b["direction_outcomes"] += 1
                 hit = realized_return > 0 if row["stance"] == "buy" else realized_return < 0
                 if hit:
                     b["hits"] += 1
                 confidence = row["confidence_score"]
-                if confidence is None:
-                    b["confidence_absent"] += 1
-                else:
+                if confidence is not None:
                     b["brier_terms"].append((Decimal(confidence) - (1 if hit else 0)) ** 2)
 
     def _mean(terms: list[Decimal]) -> float | None:
@@ -409,7 +420,7 @@ def aggregate_scoreboard(
             confidence_absent=b["confidence_absent"],
             direction_claims=b["direction_claims"],
             target_distance_mape=_mean(b["mape_terms"]),
-            stance_hit_rate=(b["hits"] / b["direction_claims"]) if b["direction_claims"] else None,
+            stance_hit_rate=(b["hits"] / b["direction_outcomes"]) if b["direction_outcomes"] else None,
             conviction_brier=_mean(b["brier_terms"]),
         )
         for (model, pv, horizon), b in sorted(acc.items(), key=lambda kv: (kv[0][0] or "", kv[0][1] or "", kv[0][2]))

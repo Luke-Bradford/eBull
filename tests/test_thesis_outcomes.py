@@ -208,3 +208,21 @@ class TestAggregateScoreboard:
         assert keys == {("qwen3:14b", "v4"), ("qwen3:14b", "v5"), (None, None)}
         assert len(cohorts) == 9  # 3 cohorts x 3 horizons
         assert all(c.total_theses == 1 for c in cohorts)
+
+    def test_coverage_counters_are_population_scoped(self) -> None:
+        """Codex ckpt-2: targets_absent / confidence_absent /
+        direction_claims count the whole cohort population — an immature
+        thesis with no outcome row still contributes coverage."""
+        from app.services.thesis_outcomes import aggregate_scoreboard
+
+        rows = [
+            self._row(thesis_id=1, stance="avoid", base_value=None, confidence_score=None, max_price_date=self._TODAY)
+        ]
+        cohorts = aggregate_scoreboard(rows, {}, self._TODAY)
+        c30 = next(c for c in cohorts if c.horizon_days == 30)
+        assert c30.outcome_rows == 0
+        assert c30.direction_claims == 1
+        assert c30.targets_absent == 1
+        assert c30.confidence_absent == 1
+        assert c30.immature_data_current == 1
+        assert c30.stance_hit_rate is None
