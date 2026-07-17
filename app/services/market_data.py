@@ -186,6 +186,10 @@ class MarketRefreshSummary:
     # both report 0 candles written.
     candles_skipped: int = 0
     candles_failed: int = 0
+    # #2066 — instruments whose incremental overlap showed a ratio-scale
+    # close mismatch (split/adjustment event) and were healed with an
+    # in-run full-history re-fetch.
+    adjustment_refetches: int = 0
 
 
 def refresh_market_data(
@@ -258,6 +262,7 @@ def refresh_market_data(
     total = len(instruments)
     # #1833 batch circuit-breaker — consecutive systemic failures.
     consecutive_systemic_failures = 0
+    adjustment_refetches = 0
     for idx, (instrument_id, symbol) in enumerate(instruments, start=1):
         if not force_backfill and _candles_are_fresh(conn, instrument_id, today):
             candles_skipped += 1
@@ -272,6 +277,28 @@ def refresh_market_data(
         try:
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
+                # #2066 split-cliff guard: provider history is back-adjusted
+                # at fetch time, so a future split re-bases every bar — but an
+                # incremental fetch only rewrites the overlap window, leaving
+                # all older rows on the old basis (a permanent cliff at the
+                # buffer edge). The overlap re-fetch is the one place the two
+                # bases meet: a ratio-scale close mismatch on an already-stored
+                # date = adjustment event → heal same-day with an in-run
+                # full-history re-fetch (idempotent upsert rewrites the series).
+                if bars and not force_backfill and fetch_count == _INCREMENTAL_FETCH_BARS:
+                    stored = _stored_overlap_closes(conn, instrument_id, [b.price_date for b in bars])
+                    ratio = detect_adjustment_event(stored, bars)
+                    if ratio is not None:
+                        adjustment_refetches += 1
+                        logger.warning(
+                            "Adjustment event detected for %s (id=%d): overlap close ratio %s — "
+                            "re-fetching full %d-bar history to heal the series",
+                            symbol,
+                            instrument_id,
+                            ratio,
+                            lookback_days,
+                        )
+                        bars = provider.get_daily_candles(instrument_id, lookback_days)
                 if bars:
                     upserted = _upsert_candles(conn, instrument_id, bars)
                     computed = _compute_and_store_features(conn, instrument_id)
@@ -364,6 +391,7 @@ def refresh_market_data(
         spread_flags_set=spread_flags_set,
         candles_skipped=candles_skipped,
         candles_failed=candles_failed,
+        adjustment_refetches=adjustment_refetches,
     )
 
 
@@ -459,6 +487,62 @@ def _candles_fetch_count(
         # Gap wider than the incremental window — backfill to close it.
         return default
     return _INCREMENTAL_FETCH_BARS
+
+
+# #2066 — smallest overlap close ratio that reads as an adjustment event
+# rather than a late correction. Splits re-base by the split ratio (2x,
+# 3x, 10x; smallest common uneven split 5:4 = 1.25x); exchange corrections
+# to a finalized close are single-digit percent. 1.2 sits between the two
+# with margin, and a false positive only costs one idempotent full-history
+# re-fetch, so the threshold errs low.
+_ADJUSTMENT_RATIO_THRESHOLD = Decimal("1.2")
+
+
+def detect_adjustment_event(
+    stored_closes: dict[date, Decimal],
+    bars: list[OHLCVBar],
+) -> Decimal | None:
+    """Ratio-scale mismatch between stored and re-fetched overlap closes (#2066).
+
+    Provider candles are back-adjusted at fetch time, so after a split every
+    re-fetched bar is on the new basis while stored rows outside the fetch
+    window keep the old one. Comparing the re-fetched bars against what is
+    already stored for the SAME dates exposes the re-basing: returns the
+    largest direction-normalised close ratio (max(r, 1/r)) at or above
+    ``_ADJUSTMENT_RATIO_THRESHOLD``, or None when the overlap is consistent.
+
+    Non-positive closes on either side are skipped — ``price_daily`` holds
+    zero-close sentinels and a garbage quote must not fake a split. Dates
+    absent from ``stored_closes`` (new rows) carry no signal.
+    """
+    worst: Decimal | None = None
+    for bar in bars:
+        stored = stored_closes.get(bar.price_date)
+        if stored is None or stored <= 0 or bar.close <= 0:
+            continue
+        ratio = bar.close / stored
+        normalised = max(ratio, Decimal(1) / ratio)
+        if normalised >= _ADJUSTMENT_RATIO_THRESHOLD and (worst is None or normalised > worst):
+            worst = normalised
+    return worst
+
+
+def _stored_overlap_closes(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    dates: list[date],
+) -> dict[date, Decimal]:
+    """Stored ``price_daily`` closes for the given dates (#2066 overlap read)."""
+    if not dates:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT price_date, close FROM price_daily
+        WHERE instrument_id = %(instrument_id)s AND price_date = ANY(%(dates)s)
+        """,
+        {"instrument_id": instrument_id, "dates": dates},
+    ).fetchall()
+    return {row[0]: row[1] for row in rows}
 
 
 def _upsert_candles(

@@ -185,6 +185,42 @@ HERE so the capture schema provably supports them:
   stores `price_as_of` but NOT the anchor close → re-read contract above
   is required, not optional.
 
+## Adjustment-event defect rows — remediation runbook (#2066)
+
+Provider candle history is back-adjusted at fetch time, but the daily
+incremental refresh only rewrites the overlap window — a FUTURE split
+re-bases the fetched bars while rows older than the buffer keep the old
+basis, leaving a permanent cliff at (split_date − buffer). The market-data
+layer detects this at the incremental-fetch overlap (stored-vs-fetched
+ratio-scale close mismatch, `detect_adjustment_event` in
+`app/services/market_data.py`) and heals the series same-day with an
+in-run full-history re-fetch.
+
+The exposure window for this ledger: an outcome row captured BETWEEN the
+split taking effect and the heal (same run, so in practice only rows
+minted by a capture job racing the candle refresh, or captured while
+detection was broken) mixes bases — `anchor_close` on one basis,
+`realized_close` on the other — and insert-once means the defect row is
+frozen. `method_version` covers method changes, NOT data defects.
+
+**Append-only ≠ never-delete-defects.** Remediation for rows straddling a
+detected adjustment event:
+
+1. Identify: instrument + detection date from the refresh log line
+   ("Adjustment event detected"). Defect candidates are
+   `thesis_outcomes` rows for that instrument whose `(anchor_date,
+   realized_date)` straddle the event date AND whose `captured_at` is
+   before the heal.
+2. `DELETE FROM thesis_outcomes` for exactly those rows (record thesis_ids
+   in the ops note).
+3. Re-run `capture_thesis_outcomes` (nightly job re-mints them from the
+   healed series; insert-once makes the re-capture idempotent).
+
+`price_move`/`band_exit` staleness triggers (#1988) need no remediation:
+the heal lands the same night, so the worst case is a one-night false
+fire (a 2:1 split reads as −50% until healed) — a spurious regen, not a
+corrupted record. Documented as accepted.
+
 ## Non-goals (this slice)
 
 - No scoreboard endpoint / dashboard panel / conviction frontier / rec
