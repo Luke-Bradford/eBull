@@ -291,8 +291,66 @@ uv run pytest -m "not db" --tb=short -q
 # connections -> intermittent ERRORs on random parametrized cases (#1843). Smoke
 # is small (~135 tests, ~31s serial); the parallelism buys nothing and costs
 # determinism. The fast tier above keeps -n 4 (no DB => no contention).
+# #2073 — two worktrees pushing concurrently run this smoke tier against
+# the SAME dev DB and collide (test_etl_source_to_sink ERRORs, 07-16,
+# twice). Serialize with a mkdir lock — macOS ships bash 3.2 and no
+# flock(1), and mkdir is atomic on every POSIX filesystem. A waiting
+# hook queues (5s poll). Stealing is LIVENESS-based, not age-based: a
+# lock whose owner pid is dead (SIGKILLed push — trap can't run on
+# KILL) or absent ~15s is leaked and stolen; a live owner is never
+# stolen — it is running the smoke tier and the waiter's whole job is
+# to wait for it. The lock wraps ONLY the smoke stage: the fast tier
+# above touches no DB and the stages below are read-only probes.
+SMOKE_LOCK_DIR="${TMPDIR:-/tmp}/ebull-prepush-smoke.lock"
+# Ownership-safe release (Codex ckpt-2 High): only the pid that wrote the
+# marker may remove the dir, so a slow owner can never delete a lock a
+# later push now holds.
+_release_smoke_lock() {
+  if [[ "$(cat "${SMOKE_LOCK_DIR}/pid" 2>/dev/null)" == "$$" ]]; then
+    rm -rf "${SMOKE_LOCK_DIR}" 2>/dev/null || true
+  fi
+}
+# A lock whose owner pid is dead (SIGKILLed push — trap cannot run on
+# KILL) or absent for ~15s (crash inside the mkdir→pid-write window) is
+# leaked. Steal via atomic mv so exactly ONE waiter wins the steal; the
+# loser's mv fails and it re-loops into a fresh mkdir race.
+_smoke_lock_owner_alive() {
+  local owner
+  owner="$(cat "${SMOKE_LOCK_DIR}/pid" 2>/dev/null || true)"
+  [[ "${owner}" =~ ^[0-9]+$ ]] && kill -0 "${owner}" 2>/dev/null
+}
+smoke_lock_polls=0
+smoke_dead_polls=0
+until mkdir "${SMOKE_LOCK_DIR}" 2>/dev/null; do
+  if [[ "${smoke_lock_polls}" -eq 0 ]]; then
+    echo "==> Pre-push gate: smoke lock held by a concurrent push — queuing"
+  fi
+  smoke_lock_polls=$((smoke_lock_polls + 1))
+  if _smoke_lock_owner_alive; then
+    smoke_dead_polls=0
+  else
+    smoke_dead_polls=$((smoke_dead_polls + 1))
+    if [[ "${smoke_dead_polls}" -gt 3 ]]; then
+      stale="${SMOKE_LOCK_DIR}.stale.$$"
+      if mv "${SMOKE_LOCK_DIR}" "${stale}" 2>/dev/null; then
+        echo "==> Pre-push gate: smoke lock owner dead — stole leaked lock"
+        rm -rf "${stale}"
+      fi
+      continue
+    fi
+  fi
+  sleep 5
+done
+echo "$$" > "${SMOKE_LOCK_DIR}/pid"
+trap _release_smoke_lock EXIT
+
 echo "==> Pre-push gate: smoke (app boots against dev DB)"
 uv run pytest tests/smoke -n 0 --tb=short -q
+
+# Release promptly so a queued push can start while the non-DB stages
+# below finish; the EXIT trap still covers every failure path above.
+_release_smoke_lock
+trap - EXIT
 
 # Frontend dark-mode class hygiene (#708). Skipped if frontend/ is
 # absent (e.g. backend-only worktrees) or if `pnpm` is not on PATH —

@@ -30,6 +30,22 @@ uv run pytest -m db                                  # full integration tier
 
 Fix failures before pushing. If `uv` is not on PATH, run `where uv` to find it and add to shell config.
 
+**Never pipe `git push` (#2073):** `git push | tail` (or any pipe) makes the
+shell report the PIPE's exit status, silently masking a pre-push hook
+failure — the push looks green while nothing left the machine. Run
+`git push` unpiped (redirect to a file if the output is long) and verify
+with `git status -sb` after EVERY push: the branch must show
+`...origin/<branch>` with no `[ahead N]`.
+
+**Concurrent worktree pushes (#2073):** the hook's smoke stage holds a
+mkdir lock (`$TMPDIR/ebull-prepush-smoke.lock`) so two pushes queue
+instead of colliding on the shared dev DB. A push that waits with
+"smoke lock held by a concurrent push — queuing" is healthy. Stealing
+is liveness-based: only a lock whose owner pid is dead (or whose pid
+marker stays absent ~15s) is stolen; a live owner is waited on
+indefinitely. Fast tier ~60-90s under load (the ~25s figure above is
+quiet-machine).
+
 ## Then read `git diff origin/main...HEAD` top to bottom
 
 Adopt the reviewer's posture: read what is there, not what you intended.
