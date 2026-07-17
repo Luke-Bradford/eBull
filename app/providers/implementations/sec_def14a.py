@@ -1081,7 +1081,7 @@ _POSITION_ROLE_RE: Final[re.Pattern[str]] = re.compile(
     r"executive\s+vice\s+president|senior\s+vice\s+president|vice\s+president|"
     r"vice\s+chair(?:man|woman|person)?|"
     r"president|chair(?:man|woman|person)?|"
-    r"general\s+counsel|chief|ceo|cfo|coo|cto|"
+    r"general\s+counsel|chief|ceo|cfo|coo|cto|evp|svp|"
     r"executive\s+officer|principal\s+\w+|treasurer|secretary|"
     r"director|founder"
     r")"
@@ -1178,8 +1178,12 @@ def _split_name_position(cell: str) -> tuple[str, str | None]:
 
 def _clean_name_footnote(name: str) -> str:
     """Strip a trailing inline footnote reference digit from an executive name
-    (JPM's "Daniel Pinto 11" → "Daniel Pinto")."""
-    return _TRAILING_FOOTNOTE_RE.sub("", name.strip()).strip()
+    (JPM's "Daniel Pinto 11" → "Daniel Pinto") and any trailing connector
+    punctuation left by a split mid-phrase ("Adolphus B. Baker," → same
+    without the comma; #2094). Periods are kept — "Jr." / "M.D." are real
+    name endings."""
+    cleaned = _TRAILING_FOOTNOTE_RE.sub("", name.strip()).strip()
+    return re.sub(r"[,;&–—/-]+\s*$", "", cleaned).strip()
 
 
 def _looks_like_name_cell(cell: str) -> bool:
@@ -1194,6 +1198,12 @@ def _looks_like_name_cell(cell: str) -> bool:
     return bool(re.search(r"[A-Za-z]{2,}", stripped))
 
 
+def _normalize_first_cell(cell: str) -> str:
+    """Flatten an SCT first-column cell to single-line, single-spaced text."""
+    text = _clean_holder_name(cell).replace("\xa0", " ").replace("\n", " ").strip()
+    return _INLINE_WHITESPACE_RE.sub(" ", text)
+
+
 def _position_only_cell(cell: str) -> str | None:
     """Return the cleaned title text when CELL is a position-only fragment,
     else ``None``.
@@ -1204,14 +1214,111 @@ def _position_only_cell(cell: str) -> str | None:
     ``_looks_like_name_cell`` and clobber the carried NEO name (#2088). A
     cell is position-only when the first role keyword matches at offset 0 —
     a genuine "Name [Title]" cell always LEADS with the person's name."""
-    text = _clean_holder_name(cell).replace("\xa0", " ").replace("\n", " ").strip()
-    text = _INLINE_WHITESPACE_RE.sub(" ", text)
+    text = _normalize_first_cell(cell)
     if not text:
         return None
     m = _POSITION_ROLE_RE.search(text)
     if m is not None and m.start() == 0:
         return text
     return None
+
+
+# Words that appear in SCT title text but essentially never inside a person's
+# legal name. Used as NEGATIVE evidence when deciding whether a year-descending
+# first cell opens a new NEO block (#2094 Codex ckpt-2 High): a candidate name
+# containing any of these is a wrapped-title fragment, not a person. A negative
+# vocabulary on the NAME side is robust where positive enumeration of every
+# possible fragment START word is impossible.
+_TITLE_VOCAB: Final[frozenset[str]] = frozenset(
+    {
+        "officer",
+        "counsel",
+        "secretary",
+        "treasurer",
+        "president",
+        "chair",
+        "chairman",
+        "chairwoman",
+        "chairperson",
+        "chief",
+        "executive",
+        "vice",
+        "senior",
+        "principal",
+        "general",
+        "director",
+        "founder",
+        "ceo",
+        "cfo",
+        "coo",
+        "cto",
+        "evp",
+        "svp",
+        "vp",
+        "former",
+        "interim",
+        "acting",
+        "division",
+        "group",
+        "university",
+        "system",
+        "company",
+        "corporation",
+        "bank",
+        "banking",
+        "operations",
+        "operating",
+        "financial",
+        "finance",
+        "technology",
+        "administrative",
+        "administration",
+        "compliance",
+        "accounting",
+        "marketing",
+        "commercial",
+        "resources",
+        "human",
+        "legal",
+        "global",
+        "strategy",
+        "and",
+        "of",
+        "the",
+    }
+)
+
+_TRAILING_CONNECTOR_RE: Final[re.Pattern[str]] = re.compile(r"[,&–—/-]\s*$")
+
+
+def _plausible_person_name(text: str) -> bool:
+    """True when TEXT plausibly is a person's name (not a title fragment).
+
+    Person names have 2+ tokens, never end in a connector, and contain no
+    title vocabulary. Only consulted on year-descending rows (#2094) to let
+    a genuine new NEO whose block starts below the previous row's fiscal
+    year (e.g. a departed exec listed after a current-year-only NEO) open a
+    fresh block instead of being absorbed as a title continuation."""
+    stripped = text.strip()
+    if not stripped or _TRAILING_CONNECTOR_RE.search(stripped):
+        return False
+    tokens = [t for t in re.split(r"[\s,]+", stripped) if t]
+    if len(tokens) < 2:
+        return False
+    return not any(t.lower().strip(".&/") in _TITLE_VOCAB for t in tokens)
+
+
+def _backfill_position(rows: list[Def14AExecCompRow], name: str, position: str) -> None:
+    """Rewrite the position on the carried NEO's already-emitted rows.
+
+    Walks back over the contiguous tail of ROWS belonging to NAME and
+    replaces the position outright — earlier rows may hold either ``None``
+    (name row emitted before any title row, #2088) or a partial prefix of a
+    title that wrapped over several physical rows (#2094)."""
+    for i in range(len(rows) - 1, -1, -1):
+        if rows[i].executive_name != name:
+            break
+        rows[i] = replace(rows[i], principal_position=position)
 
 
 def _extract_sct_row_values(cells_after_year: list[str]) -> list[Decimal | None]:
@@ -1361,47 +1468,85 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
     rows: list[Def14AExecCompRow] = []
     current_name = ""
     current_position: str | None = None
+    prev_row_year: int | None = None
 
     for raw_row in best_table.rows:
         cells = [_sct_norm(c) for c in raw_row]
         if not any(cells):
             continue
 
-        # Leading name cell? (present on the first row per NEO; absent on
-        # rowspan continuation rows.)
         first_nonempty_idx = next((i for i, c in enumerate(cells) if c), None)
         if first_nonempty_idx is None:
             continue
-        if _looks_like_name_cell(cells[first_nonempty_idx]):
-            position_fragment = _position_only_cell(cells[first_nonempty_idx])
-            if position_fragment is not None and current_name:
-                # Stacked name/position layout (GME, #2088): the title rides
-                # the NEXT physical row — it belongs to the carried NEO, it is
-                # not a new name. The name row was already emitted with a NULL
-                # position, so backfill this NEO's earlier rows too.
-                if current_position is None:
-                    current_position = position_fragment
-                    for i in range(len(rows) - 1, -1, -1):
-                        if rows[i].executive_name != current_name:
-                            break
-                        if rows[i].principal_position is None:
-                            rows[i] = replace(rows[i], principal_position=position_fragment)
-            else:
-                current_name, current_position = _split_name_position(cells[first_nonempty_idx])
 
-        # Locate the fiscal-year token.
+        # Fiscal-year token first — the name-cell decision below needs THIS
+        # row's year to detect wrapped-title continuations (#2094).
         year_idx = None
         for i, c in enumerate(cells):
             if _YEAR_RE.match(_FOOTNOTE_RE.sub("", c).strip()):
                 year_idx = i
                 break
-        if year_idx is None:
+        row_year = int(_FOOTNOTE_RE.sub("", cells[year_idx]).strip()) if year_idx is not None else None
+
+        # Leading name cell? (present on the first row per NEO; absent on
+        # rowspan continuation rows.)
+        if _looks_like_name_cell(cells[first_nonempty_idx]):
+            first_cell = cells[first_nonempty_idx]
+            cleaned = _normalize_first_cell(first_cell)
+            position_fragment = _position_only_cell(first_cell)
+            # #2094 — wrapped first-column layouts (PRDO/HBNC) spread ONE
+            # logical name+title cell across the NEO block's physical
+            # per-fiscal-year rows. A new NEO's block always restarts at a
+            # NEWER year (§ 229.402(c)(2)(ii) rows render newest-first), so a
+            # name-like cell on a year-DESCENDING row is a continuation
+            # fragment of the carried NEO's title, whatever word it starts
+            # with — a role lexicon cannot enumerate mid-title fragments
+            # ("Officer", "EVP,", "Technical University").
+            year_descends = (
+                bool(current_name) and row_year is not None and prev_row_year is not None and row_year < prev_row_year
+            )
+            restated_name = bool(current_name) and (cleaned == current_name or cleaned.startswith(current_name + " "))
+            if restated_name:
+                # Per-year name repeat (no rowspan) — same NEO, keep the carry.
+                pass
+            elif position_fragment is not None and current_name:
+                # Stacked name/position layout (GME, #2088): the title rides
+                # a LATER physical row — it belongs to the carried NEO, it is
+                # not a new name. Earlier emitted rows get the position
+                # backfilled; a lexicon-matching TAIL of a wrapped title
+                # (#2094 "…Chief Financial Officer") appends instead.
+                if current_position is None:
+                    current_position = position_fragment
+                    _backfill_position(rows, current_name, current_position)
+                elif year_descends:
+                    current_position = f"{current_position} {position_fragment}"
+                    _backfill_position(rows, current_name, current_position)
+                # else: repeated full-title row — drop, keep the carry.
+            elif year_descends:
+                # A genuine NEW NEO may still open on a descending year — a
+                # departed exec's block starts below a current-year-only
+                # NEO's row (Codex ckpt-2 High). Escape when the cell splits
+                # into a plausible person name + a title; otherwise it is a
+                # wrapped-title fragment and appends to the carry.
+                cand_name, cand_pos = _split_name_position(first_cell)
+                if cand_pos is not None and _plausible_person_name(cand_name):
+                    current_name, current_position = cand_name, cand_pos
+                else:
+                    current_position = f"{current_position} {cleaned}" if current_position else cleaned
+                    _backfill_position(rows, current_name, current_position)
+            else:
+                current_name, current_position = _split_name_position(first_cell)
+
+        if row_year is not None:
+            prev_row_year = row_year
+
+        if year_idx is None or row_year is None:
             # Name-only header row (HD) or a prose row — nothing to emit.
             continue
         if not current_name:
             continue  # values with no NEO context yet — skip defensively.
 
-        fiscal_year = int(_FOOTNOTE_RE.sub("", cells[year_idx]).strip())
+        fiscal_year = row_year
         values = _extract_sct_row_values(cells[year_idx + 1 :])
         if not values:
             continue

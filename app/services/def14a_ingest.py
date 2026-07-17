@@ -76,7 +76,7 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # v3 (#2086): Item 402 exec comp now runs on the ownership-tombstone path
 # too — the tombstoned-with-stored-raw cohort must rewash to pick up SCTs
 # the 402↔403 coupling previously skipped (GME class).
-_PARSER_VERSION_DEF14A = "def14a-v3"
+_PARSER_VERSION_DEF14A = "def14a-v4"
 
 logger = logging.getLogger(__name__)
 
