@@ -3156,6 +3156,11 @@ def _thesis_refresh_candidates(conn: psycopg.Connection[Any]) -> list[int]:
             {"mv": _DEFAULT_MODEL_VERSION, "top_n": _THESIS_REFRESH_TOP_N},
         )
         ranked = [int(row[0]) for row in cur.fetchall()]
+        # Deliberately un-LIMITed: candidates are only an ORDERING input.
+        # Cost is bounded downstream — find_stale_instruments filters to
+        # actually-stale rows and _select_thesis_batch caps generations at
+        # _THESIS_REFRESH_BATCH_LIMIT per run; the query itself is one
+        # indexed scan over ~hundreds of thesis-bearing instruments.
         cur.execute(
             """
             SELECT i.instrument_id
