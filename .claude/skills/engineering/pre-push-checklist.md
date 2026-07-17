@@ -40,9 +40,11 @@ with `git status -sb` after EVERY push: the branch must show
 **Concurrent worktree pushes (#2073):** the hook's smoke stage holds a
 mkdir lock (`$TMPDIR/ebull-prepush-smoke.lock`) so two pushes queue
 instead of colliding on the shared dev DB. A push that waits with
-"smoke lock held by a concurrent push — queuing" is healthy; a stale
-lock (>10 min) is stolen automatically. Fast tier ~60-90s under load
-(the ~25s figure above is quiet-machine).
+"smoke lock held by a concurrent push — queuing" is healthy. Stealing
+is liveness-based: only a lock whose owner pid is dead (or whose pid
+marker stays absent ~15s) is stolen; a live owner is waited on
+indefinitely. Fast tier ~60-90s under load (the ~25s figure above is
+quiet-machine).
 
 ## Then read `git diff origin/main...HEAD` top to bottom
 

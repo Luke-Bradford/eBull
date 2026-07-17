@@ -295,10 +295,12 @@ uv run pytest -m "not db" --tb=short -q
 # the SAME dev DB and collide (test_etl_source_to_sink ERRORs, 07-16,
 # twice). Serialize with a mkdir lock — macOS ships bash 3.2 and no
 # flock(1), and mkdir is atomic on every POSIX filesystem. A waiting
-# hook queues (5s poll); a lock older than 10 min is presumed leaked
-# (SIGKILLed push — trap can't run on KILL) and stolen. The lock wraps
-# ONLY the smoke stage: the fast tier above touches no DB and the
-# stages below are read-only probes.
+# hook queues (5s poll). Stealing is LIVENESS-based, not age-based: a
+# lock whose owner pid is dead (SIGKILLed push — trap can't run on
+# KILL) or absent ~15s is leaked and stolen; a live owner is never
+# stolen — it is running the smoke tier and the waiter's whole job is
+# to wait for it. The lock wraps ONLY the smoke stage: the fast tier
+# above touches no DB and the stages below are read-only probes.
 SMOKE_LOCK_DIR="${TMPDIR:-/tmp}/ebull-prepush-smoke.lock"
 # Ownership-safe release (Codex ckpt-2 High): only the pid that wrote the
 # marker may remove the dir, so a slow owner can never delete a lock a
