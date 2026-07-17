@@ -926,6 +926,109 @@ def test_def14a_apply_rescues_tombstoned_accession(
     assert [r[0] for r in rows] == ["Rescued Holder"]
 
 
+def test_def14a_rescue_with_no_ownership_table_still_rewashes_exec_comp(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """#2086 — the tombstoned-with-SCT cohort (GME class): rescue path
+    where the ownership parse still finds nothing, but the body carries
+    a Summary Compensation Table. The rewash must write comp rows AND
+    count as reparsed (parser_version bumps) instead of skipping
+    forever (Codex ckpt-2 P2)."""
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialOwnershipTable,
+        Def14AExecCompRow,
+        Def14ASummaryCompTable,
+    )
+
+    conn = ebull_test_conn
+    instrument_id = 950_070
+    accession = "0001234567-26-000003"
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES (%s, 'D14C', 'DEF 14A Comp Rescue', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status)
+        VALUES (%s, '0000999001', 'partial')
+        """,
+        (accession,),
+    )
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type, source_url,
+            provider, provider_filing_id, primary_document_url
+        ) VALUES (%s, '2025-03-01', 'DEF 14A', 'https://example.com/y',
+                  'sec', %s, 'https://example.com/y')
+        """,
+        (instrument_id, accession),
+    )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    empty_ownership = Def14ABeneficialOwnershipTable(as_of_date=None, rows=[], raw_table_score=3)
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: empty_ownership,
+    )
+    sct = Def14ASummaryCompTable(
+        rows=(
+            Def14AExecCompRow(
+                executive_name="Jane Roe",
+                principal_position="Chief Executive Officer",
+                fiscal_year=2025,
+                salary=Decimal("1000000"),
+                bonus=None,
+                stock_awards=Decimal("5000000"),
+                option_awards=None,
+                non_equity_incentive=Decimal("2000000"),
+                pension_nqdc=None,
+                other_comp=Decimal("50000"),
+                total_comp=Decimal("8050000"),
+            ),
+        ),
+        raw_table_score=20,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_summary_compensation_table",
+        lambda _html: sct,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    assert result.rows_reparsed == 1  # comp written → bumped, not skipped
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT executive_name, total_comp FROM def14a_exec_compensation WHERE accession_number = %s",
+            (accession,),
+        )
+        comp_rows = cur.fetchall()
+        cur.execute(
+            "SELECT count(*) FROM def14a_beneficial_holdings WHERE accession_number = %s",
+            (accession,),
+        )
+        holdings_count = cur.fetchone()
+    assert comp_rows == [("Jane Roe", Decimal("8050000.00"))]
+    assert holdings_count is not None and holdings_count[0] == 0
+
+
 def test_blockholders_apply_raises_on_parse_failure(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
