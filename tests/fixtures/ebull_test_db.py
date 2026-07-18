@@ -134,7 +134,6 @@ def _hash_cache_path() -> Path:
 # (review-prevention-log entry "Test-teardown list missing new FK-child
 # tables").
 _PLANNER_TABLES: tuple[str, ...] = (
-    "cascade_retry_queue",
     "cik_upsert_timing",
     "financial_facts_raw",
     # #554 — dimensional XBRL facts (segments / product / geographic).
