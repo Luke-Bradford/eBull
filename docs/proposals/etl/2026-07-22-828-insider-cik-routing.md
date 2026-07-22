@@ -67,8 +67,11 @@ re-fetch.
 ### PR-1 — writer routing (prevent new mislinks)
 
 In the Form 4 / Form 3 apply paths (`insider_transactions._ingest_single`,
-`insider_form3_ingest._ingest_single`) and DEF 14A
-(`def14a_ingest._ingest_single_accession`):
+`insider_form3_ingest._ingest_single`). **DEF 14A is OUT of PR-1 scope**: the same
+production-resolver scan over `def14a_ingest_log ⋈ filing_events` finds **1 mislink
+in 43,145 bindings** (proxies have no reporting-owner EDGAR stream — the Form 4
+discovery trap does not exist for them); handle that 1 row in the PR-2 backfill
+sweep, no code path needed.
 
 - After parse, resolve `parsed.issuer_cik` → sibling set via
   `siblings_for_issuer_cik` (the settled resolver; NOT the single-answer
@@ -128,6 +131,5 @@ rebinding at all under that model.
 - `filing_events` owner-row DELETE is destructive → snapshot first (PR-2 step 1).
 - Observations DELETE+refan touches `refresh_insiders_current` rollups — per-
   instrument, verified by the full-pop invariants above.
-- DEF 14A path included in PR-1 for completeness but its mislink exposure is not yet
-  quantified — quantify with the same production-resolver scan against
-  `def14a_ingest_log`/`filing_events` before writing that code path.
+- DEF 14A mislink exposure quantified 2026-07-22: 1 / 43,145 `filing_events`
+  bindings — no writer-routing code path warranted (see PR-1 scope note).
