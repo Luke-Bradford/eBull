@@ -224,9 +224,13 @@ def _global_fe_stray_repair(conn: psycopg.Connection) -> int:
     insider accession — the owner-stream L2 pollution, whether or not the
     accession's ENTITY row was mislinked (Codex ckpt-2 on this script: the
     cohort-keyed check let healthy-entity strays hide). Snapshot kind
-    ``filing_events_global`` captures these rows first. All such accessions
-    were verified to retain issuer-sibling fe coverage (444/444 full-pop
-    2026-07-22), so no sibling inserts are needed."""
+    ``filing_events_global`` captures these rows first.
+
+    Live safety guard (PR #2111 review): a stray is deleted ONLY when an
+    issuer-sibling fe row exists for the accession — self-enforcing, not
+    doc-only (the 2026-07-22 run verified 444/444 had coverage; the guard
+    makes that a standing property). A guard-blocked stray (no sibling
+    coverage) is left in place and surfaces via the GLOBAL fe invariant."""
     with conn.cursor() as cur:
         cur.execute(
             _SIB_CTE
@@ -238,6 +242,12 @@ def _global_fe_stray_repair(conn: psycopg.Connection) -> int:
               AND s.cik = lpad(btrim(f.issuer_cik), 10, '0')
               AND f.issuer_cik IS NOT NULL
               AND NOT (fe.instrument_id = ANY(s.ids))
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe2
+                  WHERE fe2.provider = 'sec'
+                    AND fe2.provider_filing_id = fe.provider_filing_id
+                    AND fe2.instrument_id = ANY(s.ids)
+              )
             """
         )
         deleted = cur.rowcount
@@ -420,6 +430,12 @@ def main() -> int:
                 specs[kind].apply_fn(conn, raw_doc)  # type: ignore[index]
                 conn.commit()
                 reparsed += 1
+            except psycopg.OperationalError, psycopg.InterfaceError:
+                # Connection-level death: every subsequent apply would fail
+                # too — abort loudly instead of logging 700 tracebacks
+                # (PR #2111 review).
+                logger.exception("connection failure at accession=%s — aborting sweep", accession)
+                raise
             except Exception:  # noqa: BLE001 — single-accession failure must not abort the sweep
                 logger.exception("apply failed for accession=%s kind=%s", accession, kind)
                 conn.rollback()
