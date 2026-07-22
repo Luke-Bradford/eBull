@@ -81,7 +81,14 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # newlines (render wraps, not delimiters), split at the position-title onset,
 # else whole cell = name; fixes bare-first-name truncation ("Sundar"→"Sundar
 # Pichai") and the mid-title leak ("…Chief Executive Officer" absorbed).
-_PARSER_VERSION_DEF14A = "def14a-v5"
+# v6 (#2100 + #2099): `group`/`managing` join the title-modifier prefix
+# ("Group President" / "Managing Director" split before the modifier), and
+# single-token executive names are repaired from same-document evidence only
+# (intra-SCT sibling superset, camel-verbatim spaced form, FY-gated Item
+# 402(v) PvP iXBRL PeoName facts) with unanimity + (name, fy)-collision
+# guards. Specs: docs/proposals/etl/2026-07-22-def14a-pvp-neo-name-oracle.md
+# + …-def14a-sct-residual-name-classes.md.
+_PARSER_VERSION_DEF14A = "def14a-v6"
 
 logger = logging.getLogger(__name__)
 

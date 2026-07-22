@@ -1063,15 +1063,21 @@ _DASH_NULLS: Final[frozenset[str]] = frozenset({"-", "—", "–", "n/a", "na"})
 # "executive vice president" wins over "president".
 #
 # The leading-modifier prefix (``senior``/``former``/``acting``/``interim``/
-# ``executive``/``co-``) pulls those title words into the MATCH so the split
-# boundary lands before them — otherwise "Ann-Marie Campbell Senior Executive
-# Vice President" leaves "Senior" glued to the name and "Bradford L. Smith Vice
-# Chair" splits at "Chair" (#1967). ``executive`` was added (#2097) so
-# "Raymond R. Quirk Executive Chairman" / "Executive Vice- Chairman" split at
-# "Executive", not one word late — and so ``_position_only_cell`` recognises a
-# bare "Executive Chairman" title row instead of minting a bogus "Executive"
-# NEO. ``vice[-\s]+chair`` is listed explicitly (before bare ``chair``, and
-# hyphen-tolerant for "Vice- Chairman") so "Vice Chair" splits at "Vice".
+# ``executive``/``group``/``managing``/``co-``) pulls those title words into
+# the MATCH so the split boundary lands before them — otherwise "Ann-Marie
+# Campbell Senior Executive Vice President" leaves "Senior" glued to the name
+# and "Bradford L. Smith Vice Chair" splits at "Chair" (#1967). ``executive``
+# was added (#2097) so "Raymond R. Quirk Executive Chairman" / "Executive
+# Vice- Chairman" split at "Executive", not one word late — and so
+# ``_position_only_cell`` recognises a bare "Executive Chairman" title row
+# instead of minting a bogus "Executive" NEO. ``group``/``managing`` were
+# added (#2100 Class 3) for "Group President" / "Managing Director" /
+# "Senior Managing Director" titles ("David E. Govrin Group President…" split
+# at "Group"; a bare "Managing Director" row classifies position-only instead
+# of minting a bogus "Managing" NEO). Full-pop verified (6,042 accessions):
+# 141 leak names fixed, zero real-surname regressions. ``vice[-\s]+chair`` is
+# listed explicitly (before bare ``chair``, and hyphen-tolerant for "Vice-
+# Chairman") so "Vice Chair" splits at "Vice".
 #
 # The modifier prefix is bounded ``{0,3}`` (real titles carry at most one or two
 # leading modifiers, e.g. "Former Senior") rather than ``*`` — an unbounded
@@ -1079,7 +1085,7 @@ _DASH_NULLS: Final[frozenset[str]] = frozenset({"-", "—", "–", "n/a", "na"})
 # ("Senior Senior … X"), and this parser runs on untrusted SEC filing HTML.
 _POSITION_ROLE_RE: Final[re.Pattern[str]] = re.compile(
     r"\b("
-    r"(?:(?:senior|former|acting|interim|executive)\s+|co-?\s*){0,3}"
+    r"(?:(?:senior|former|acting|interim|executive|group|managing)\s+|co-?\s*){0,3}"
     r"(?:"
     r"chief\s+\w+|"
     r"executive\s+vice\s+president|senior\s+vice\s+president|vice\s+president|"
@@ -1332,6 +1338,263 @@ def _backfill_position(rows: list[Def14AExecCompRow], name: str, position: str) 
         if rows[i].executive_name != name:
             break
         rows[i] = replace(rows[i], principal_position=position)
+
+
+# ---------------------------------------------------------------------------
+# PvP iXBRL NEO-name oracle + truncated-name repair (#2099 / #2100)
+# ---------------------------------------------------------------------------
+# Item 402(v)(3) requires the PvP footnotes to name every NEO; 402(v)(7) puts
+# that disclosure inside the Inline-XBRL mandate. Filers tag the names as
+# ``PeoName`` facts (ECD taxonomy, ns ``http://xbrl.sec.gov/ecd/YYYY``) in
+# contexts dimensioned by ``ExecutiveCategoryAxis`` × ``IndividualAxis``.
+# Specs: docs/proposals/etl/2026-07-22-def14a-pvp-neo-name-oracle.md and
+# …-def14a-sct-residual-name-classes.md (full-population verification there).
+
+_ECD_NS_URI_PREFIX: Final[str] = "http://xbrl.sec.gov/ecd"
+
+# Suspicious executive_name trigger class: a single token is a truncation
+# fingerprint (surname-only SCT labels, glued CJK romanisations).
+_SUSPICIOUS_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z'’\-]+$")
+
+# Glued camel name (``HechunWei``). First run ≥3 lowercase chars excludes
+# Mc/La/De/Di-prefixed real surnames (McDonald, LaBelle, DiCaprio).
+_CAMEL_GLUED_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Z][a-z]{2,}[A-Z][a-z]+$")
+
+_HONORIFIC_RE: Final[re.Pattern[str]] = re.compile(r"^(?:mr|ms|mrs|dr)\.?\s+", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class Def14APvpNeoName:
+    """One person named in the PvP iXBRL facts.
+
+    ``name_text`` is the fact value as the footnote renders it — may be an
+    honorific form ("Mr. Cook"), never treated as more authoritative than the
+    SCT's own HTML (the oracle is corroboration, not ground truth: a filer
+    typo'd "Douglas P. Pferdehirt" for the real Douglas J.)."""
+
+    name_text: str
+    individual_member: str | None
+    executive_category: str | None
+    covered_end_years: frozenset[int]
+
+
+def parse_pvp_neo_names(html_text: str) -> tuple[Def14APvpNeoName, ...]:
+    """Extract the Item 402(v) ``PeoName`` facts from an iXBRL DEF 14A body.
+
+    HTML-mode lxml traps (each verified empirically, spec D1): the HTML parser
+    does NOT namespace-expand — ``ix:nonNumeric`` survives as the literal
+    lowercased tag ``ix:nonnumeric``, ``nsmap`` is not populated, and
+    attribute NAMES are lowercased (``contextRef`` → ``contextref``) while
+    values keep their case. So: harvest ``xmlns:*`` declarations as literal
+    attributes, split QNames manually, read lowercased attribute names.
+    Matching is namespace-URI-resolved (ECD ns is versioned yearly), with a
+    literal-``ecd`` fallback when no declaration is found (fact-level prefix
+    drift measured 0 full-pop; the fallback covers mangled declarations).
+
+    Best-effort: returns ``()`` on any parse failure — an absent oracle must
+    never break the SCT parse."""
+    if not html_text:
+        return ()
+    try:
+        from lxml import html as lxml_html
+    except ImportError:  # pragma: no cover - lxml is an app dependency
+        return ()
+    try:
+        tree = lxml_html.fromstring(html_text.encode("utf-8", errors="replace"))
+    except Exception:
+        return ()
+
+    ecd_prefixes: set[str] = set()
+    contexts: list = []
+    facts: list = []
+    for el in tree.iter():
+        tag = el.tag if isinstance(el.tag, str) else ""
+        for attr, value in el.attrib.items():
+            if attr.startswith("xmlns:") and value.startswith(_ECD_NS_URI_PREFIX):
+                ecd_prefixes.add(attr[len("xmlns:") :].lower())
+        if tag.endswith("context"):
+            contexts.append(el)
+        elif tag.endswith("nonnumeric"):
+            facts.append(el)
+    if not ecd_prefixes:
+        ecd_prefixes = {"ecd"}
+
+    def _is_ecd(qname: str | None, localname: str) -> bool:
+        if not qname or ":" not in qname:
+            return False
+        prefix, local = qname.rsplit(":", 1)
+        return prefix.lower() in ecd_prefixes and local.lower() == localname.lower()
+
+    # contextRef → (individual member, executive category, period end-year)
+    ctx_info: dict[str, tuple[str | None, str | None, int | None]] = {}
+    for ctx in contexts:
+        cid = ctx.get("id")
+        if not cid:
+            continue
+        individual: str | None = None
+        category: str | None = None
+        end_year: int | None = None
+        for child in ctx.iter():
+            ctag = child.tag if isinstance(child.tag, str) else ""
+            if ctag.endswith("explicitmember"):
+                dim = child.get("dimension") or ""
+                member = (child.text or "").strip()
+                if _is_ecd(dim, "IndividualAxis"):
+                    individual = member or None
+                elif _is_ecd(dim, "ExecutiveCategoryAxis"):
+                    category = member or None
+            elif ctag.endswith("enddate") or ctag.endswith("instant"):
+                raw = (child.text or "").strip()
+                if len(raw) >= 4 and raw[:4].isdigit():
+                    end_year = int(raw[:4])
+        ctx_info[cid] = (individual, category, end_year)
+
+    # Group facts by person (IndividualAxis member when present, else the
+    # normalised name text) and union the covered end-years.
+    grouped: dict[str, dict] = {}
+    for fact in facts:
+        if not _is_ecd(fact.get("name"), "PeoName"):
+            continue
+        text = _INLINE_WHITESPACE_RE.sub(" ", fact.text_content().replace("\n", " ")).strip()
+        text = _TRAILING_FOOTNOTE_RE.sub("", text).strip()
+        if not text:
+            continue
+        individual, category, end_year = ctx_info.get(fact.get("contextref") or "", (None, None, None))
+        key = individual or text.lower()
+        entry = grouped.setdefault(key, {"name": text, "individual": individual, "category": category, "years": set()})
+        if len(text) > len(entry["name"]):
+            entry["name"] = text  # keep the most complete rendering
+        entry["category"] = entry["category"] or category
+        if end_year is not None:
+            entry["years"].add(end_year)
+
+    return tuple(
+        Def14APvpNeoName(
+            name_text=e["name"],
+            individual_member=e["individual"],
+            executive_category=e["category"],
+            covered_end_years=frozenset(e["years"]),
+        )
+        for e in grouped.values()
+    )
+
+
+def _name_token_seq(name: str) -> tuple[str, ...]:
+    """Lowercased comparison tokens IN ORDER: honorific-stripped, punctuation
+    split. Order is kept because token order is identity-bearing — "Hechun
+    Wei" and "Wei Hechun" are different people (fresh-agent review)."""
+    s = _HONORIFIC_RE.sub("", name.strip())
+    return tuple(t for t in re.split(r"[^\w'’]+", s.lower()) if t)
+
+
+def _name_tokens(name: str) -> frozenset[str]:
+    """Set form of :func:`_name_token_seq` for the subset tests (initials
+    included — they stay in replacement text and are material for
+    disagreement, spec C2)."""
+    return frozenset(_name_token_seq(name))
+
+
+def _candidates_agree(a: str, b: str) -> bool:
+    """Spec C2 agreement: STRICT full-token subset either way ("Cook" ⊆
+    "Tim Cook"; "Damon Hininger" ⊆ "Damon T. Hininger" — the one-side-initials
+    case is covered by the subset branch). Equal token SETS agree only when
+    the token ORDER also matches — a permutation ("Hechun Wei" vs
+    "Wei Hechun") is two different people, not agreement. Conflicting
+    initials ("Douglas J." vs "Douglas P.": neither set a subset) are a
+    disagreement."""
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if ta == tb:
+        return _name_token_seq(a) == _name_token_seq(b)
+    return ta < tb or tb < ta
+
+
+def _flatten_document_text(html_text: str) -> str:
+    """Tag-strip + entity-decode + whitespace-collapse the whole body (camel
+    verbatim check only — no pattern harvesting, spec C2). ``<script>`` /
+    ``<style>`` blocks are dropped WITH their contents so embedded JS/CSS
+    text can never "validate" a camel split (review NITPICK)."""
+    text = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1>", " ", html_text)
+    return _INLINE_WHITESPACE_RE.sub(" ", html.unescape(re.sub(r"<[^>]+>", " ", text)).replace("\n", " "))
+
+
+def _repair_truncated_names(rows: list[Def14AExecCompRow], html_text: str) -> list[Def14AExecCompRow]:
+    """Repair single-token executive names from same-document evidence
+    (#2100 C2): intra-SCT sibling superset, camel-verbatim spaced form, and
+    the FY-gated PvP oracle. Repair fires only on unanimous candidates; a
+    (replacement, fiscal_year) collision with an existing parsed row skips
+    the repair entirely (no partial renames — the FTI case, where a
+    conflicting same-FY total must stay visible under its own label)."""
+    suspicious = sorted({r.executive_name for r in rows if _SUSPICIOUS_NAME_RE.fullmatch(r.executive_name.strip())})
+    if not suspicious:
+        return rows
+
+    fy_by_name: dict[str, set[int]] = {}
+    for r in rows:
+        fy_by_name.setdefault(r.executive_name, set()).add(r.fiscal_year)
+    distinct_names = sorted(fy_by_name)
+
+    doc_text: str | None = None
+    oracle: tuple[Def14APvpNeoName, ...] | None = None
+    renames: dict[str, str] = {}
+
+    for name in suspicious:
+        ntoks = _name_tokens(name)
+        if not ntoks:
+            continue
+        # (source-priority order; replacement picks the most complete form,
+        # ties broken sibling > camel > oracle)
+        candidates: list[str] = []
+
+        for other in distinct_names:
+            if other != name and ntoks < _name_tokens(other):
+                candidates.append(other)
+
+        if _CAMEL_GLUED_RE.fullmatch(name.strip()):
+            if doc_text is None:
+                doc_text = _flatten_document_text(html_text)
+            spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name.strip())
+            # Word-bounded, not substring — "Jon Smith" must not be
+            # "validated" by an unrelated "Jon Smithson" in the prose
+            # (fresh-agent review).
+            if re.search(rf"(?<![A-Za-z]){re.escape(spaced)}(?![A-Za-z])", doc_text):
+                candidates.append(spaced)
+
+        if oracle is None:
+            oracle = parse_pvp_neo_names(html_text)
+        row_years = fy_by_name[name]
+        for person in oracle:
+            ptoks = _name_tokens(person.name_text)
+            if not (ntoks < ptoks):
+                continue
+            # Per-name atomic FY gate: EVERY row year must fall inside the
+            # person's covered period-end years (fy label ≤ end-year ≤
+            # label+1 tolerates non-calendar fiscal years).
+            covered = person.covered_end_years
+            if not covered or not all((fy in covered or fy + 1 in covered) for fy in row_years):
+                continue
+            cleaned = _HONORIFIC_RE.sub("", person.name_text).strip()
+            if len(_name_tokens(cleaned)) > len(ntoks):
+                candidates.append(cleaned)
+
+        if not candidates:
+            continue
+        if any(not _candidates_agree(a, b) for i, a in enumerate(candidates) for b in candidates[i + 1 :]):
+            continue
+        replacement = max(candidates, key=lambda c: (len(_name_tokens(c)), -candidates.index(c)))
+        if replacement == name:
+            continue
+        # Collision guard: never merge onto an existing (name, fy) row — and
+        # check EVERY agreeing candidate, not just the chosen text (Codex
+        # ckpt-2 P2: a same-FY sibling row under a shorter agreeing spelling
+        # must block the repair too, else the same person splits across two
+        # spellings).
+        if any(fy_by_name.get(c, set()) & row_years for c in candidates):
+            continue
+        renames[name] = replacement
+
+    if not renames:
+        return rows
+    return [replace(r, executive_name=renames[r.executive_name]) if r.executive_name in renames else r for r in rows]
 
 
 def _extract_sct_row_values(cells_after_year: list[str]) -> list[Decimal | None]:
@@ -1588,5 +1851,12 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
                 total_comp=mapped["total_comp"],
             )
         )
+
+    # #2100 C2 — same-document truncated-name repair (single-token names
+    # only; unanimous evidence only). Best-effort: never fails the parse.
+    try:
+        rows = _repair_truncated_names(rows, html_text)
+    except Exception:  # pragma: no cover - defensive; parser must not raise
+        logger.exception("SCT name repair failed; keeping unrepaired names")
 
     return Def14ASummaryCompTable(rows=tuple(rows), raw_table_score=best_score)

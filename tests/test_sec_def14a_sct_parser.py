@@ -28,6 +28,7 @@ from app.providers.implementations.sec_def14a import (
     _position_only_cell,
     _resolve_sct_fields,
     _split_name_position,
+    parse_pvp_neo_names,
     parse_summary_compensation_table,
 )
 
@@ -779,3 +780,269 @@ def test_split_name_position_surname_is_title_vocab_word() -> None:
     compound-title leaks it was meant to catch.)"""
     assert _split_name_position("Robert A. Bank") == ("Robert A. Bank", None)
     assert _split_name_position("Mary Global") == ("Mary Global", None)
+
+
+# ---------------------------------------------------------------------------
+# def14a-v6 (#2100 + #2099) — group/managing modifiers + same-document
+# truncated-name repair (sibling / camel-verbatim / PvP iXBRL oracle)
+# ---------------------------------------------------------------------------
+
+
+def _pvp_context(cid: str, start: str, end: str, member: str | None = None) -> str:
+    dim = f'<xbrldi:explicitMember dimension="ecd:IndividualAxis">{member}</xbrldi:explicitMember>' if member else ""
+    return (
+        f'<xbrli:context id="{cid}"><xbrli:entity>{dim}</xbrli:entity>'
+        f"<xbrli:period><xbrli:startDate>{start}</xbrli:startDate>"
+        f"<xbrli:endDate>{end}</xbrli:endDate></xbrli:period></xbrli:context>"
+    )
+
+
+def _pvp_doc(body_html: str, *, contexts: str = "", facts: str = "", ecd_prefix: str = "ecd") -> str:
+    """Minimal iXBRL proxy shell: xmlns declarations + hidden contexts/facts."""
+    return (
+        f'<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL" '
+        f'xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+        f'xmlns:{ecd_prefix}="http://xbrl.sec.gov/ecd/2025">'
+        f"<body><div style='display:none'><ix:header><ix:resources>{contexts}"
+        f"</ix:resources></ix:header>{facts}</div>{body_html}</body></html>"
+    )
+
+
+def _simple_sct(*name_year_total: tuple[str, str, str]) -> str:
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    rows = "".join(_row(n, y, "100,000", t) for n, y, t in name_year_total)
+    return f"<h2>Summary Compensation Table</h2><table>{header}{rows}</table>"
+
+
+def test_group_modifier_splits_title() -> None:
+    """#2100 Class 3 — 'Group President…' / 'Senior Managing Director' are
+    titles; the split lands before the modifier."""
+    assert _split_name_position("David E. Govrin Group President, Americas") == (
+        "David E. Govrin",
+        "Group President, Americas",
+    )
+    assert _split_name_position("Susan D. Nickey Senior Managing Director") == (
+        "Susan D. Nickey",
+        "Senior Managing Director",
+    )
+    # A bare stacked title row classifies position-only (no bogus NEO).
+    assert _position_only_cell("Managing Director, Finance") == "Managing Director, Finance"
+    assert _position_only_cell("Group President") == "Group President"
+
+
+def test_new_modifiers_fuzz_stays_bounded() -> None:
+    """L2121 — the {0,3} modifier bound holds for the new group/managing
+    alternatives (no quadratic blowup on adversarial runs)."""
+    import time
+
+    for run in ("Group " * 5000, "Managing " * 5000):
+        start = time.monotonic()
+        _split_name_position(run + "X")
+        assert time.monotonic() - start < 0.5
+
+
+def test_pvp_neo_names_extraction() -> None:
+    """PeoName facts grouped per person; entity-decode; whitespace-flattened
+    fact values; covered end-years unioned across per-FY contexts."""
+    contexts = (
+        _pvp_context("c1", "2024-01-01", "2024-12-31", "aapl:CookMember")
+        + _pvp_context("c2", "2025-01-01", "2025-12-31", "aapl:CookMember")
+        + _pvp_context("c3", "2025-01-01", "2025-12-31", "aapl:OBrienMember")
+    )
+    facts = (
+        '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Mr. Cook</ix:nonNumeric>'
+        '<ix:nonNumeric contextRef="c2" name="ecd:PeoName">Mr. Cook</ix:nonNumeric>'
+        '<ix:nonNumeric contextRef="c3" name="ecd:PeoName">Deirdre O&#8217;Brien</ix:nonNumeric>'
+    )
+    result = parse_pvp_neo_names(_pvp_doc("", contexts=contexts, facts=facts))
+    by_member = {p.individual_member: p for p in result}
+    assert by_member["aapl:CookMember"].name_text == "Mr. Cook"
+    assert by_member["aapl:CookMember"].covered_end_years == frozenset({2024, 2025})
+    assert by_member["aapl:OBrienMember"].name_text == "Deirdre O’Brien"
+
+
+def test_pvp_neo_names_uri_resolved_prefix() -> None:
+    """ECD matching is namespace-URI-resolved — a non-'ecd' declared prefix
+    still extracts; and no facts → ()."""
+    contexts = _pvp_context("c1", "2025-01-01", "2025-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="pvp:PeoName">Jane Roe</ix:nonNumeric>'
+    doc = _pvp_doc("", contexts=contexts, facts=facts, ecd_prefix="pvp")
+    assert [p.name_text for p in parse_pvp_neo_names(doc)] == ["Jane Roe"]
+    assert parse_pvp_neo_names("<html><body>no ixbrl here</body></html>") == ()
+
+
+def test_surname_only_repaired_from_pvp_oracle() -> None:
+    """CXW shape — surname-only SCT rows + a PvP PeoName covering every row
+    FY → repaired to the oracle's full form."""
+    sct = _simple_sct(("Hininger", "2025", "7,203,173"), ("", "2024", "7,471,923"))
+    contexts = "".join(
+        _pvp_context(f"c{i}", f"{y}-01-01", f"{y}-12-31") for i, y in enumerate((2021, 2022, 2023, 2024, 2025))
+    )
+    facts = "".join(
+        f'<ix:nonNumeric contextRef="c{i}" name="ecd:PeoName">Damon T. Hininger</ix:nonNumeric>' for i in range(5)
+    )
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Damon T. Hininger"]
+    assert {r.fiscal_year for r in result.rows} == {2024, 2025}
+
+
+def test_oracle_fy_gate_blocks_partial_coverage() -> None:
+    """Per-name atomic FY gate — an oracle fact covering only FY2025 must not
+    rename rows spanning 2023-25 (no partial renames)."""
+    sct = _simple_sct(("Charles", "2025", "1,000,000"), ("", "2024", "900,000"), ("", "2023", "800,000"))
+    contexts = _pvp_context("c1", "2025-01-01", "2025-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Dirkson Charles</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Charles"]
+
+
+def test_oracle_honorific_never_shortens() -> None:
+    """'Mr. Cook' (honorific-only oracle form) can never repair 'Cook' — the
+    replacement must be strictly more token-complete after honorific strip."""
+    sct = _simple_sct(("Cook", "2025", "74,294,811"))
+    contexts = _pvp_context("c1", "2025-01-01", "2025-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Mr. Cook</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Cook"]
+
+
+def test_sibling_superset_repairs_wrapped_name() -> None:
+    """A single-token name with EXACTLY ONE intra-SCT token-superset sibling
+    on non-overlapping FYs adopts the sibling's spelling. (The single-token
+    block opens FIRST at a lower year so the full-name block is a genuine
+    new-NEO open, not a #2094 carry.)"""
+    sct = _simple_sct(
+        ("Pferdehirt", "2022", "14,774,294"),
+        ("Douglas J. Pferdehirt\nChief Executive Officer", "2023", "17,062,495"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert {r.executive_name for r in result.rows} == {"Douglas J. Pferdehirt"}
+    assert {r.fiscal_year for r in result.rows} == {2022, 2023}
+
+
+def test_sibling_collision_blocks_repair() -> None:
+    """FTI shape — the suspicious row's FY collides with the sibling's own
+    row for the same FY (conflicting totals) → NO repair, both stay visible."""
+    sct = _simple_sct(
+        ("Pferdehirt", "2023", "393,737"),
+        ("Douglas J. Pferdehirt\nChief Executive Officer", "2023", "17,062,495"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    names = sorted({r.executive_name for r in result.rows})
+    assert names == ["Douglas J. Pferdehirt", "Pferdehirt"]
+
+
+def test_camel_glued_split_validated_by_document() -> None:
+    """CJK glued romanisation splits ONLY when the spaced form occurs verbatim
+    in the same document; Mc-style surnames and unvalidated camels survive."""
+    sct = _simple_sct(("HechunWei", "2024", "7,025"))
+    result = parse_summary_compensation_table(f"<html><body>{sct}<p>Hechun Wei is our CEO.</p></body></html>")
+    assert sorted({r.executive_name for r in result.rows}) == ["Hechun Wei"]
+    # No spaced form in document → unchanged.
+    sct2 = _simple_sct(("LushaNiu", "2024", "5,000"))
+    result2 = parse_summary_compensation_table(f"<html><body>{sct2}</body></html>")
+    assert sorted({r.executive_name for r in result2.rows}) == ["LushaNiu"]
+    # 2-char first capital run (real camel surname) is never split.
+    sct3 = _simple_sct(("McDonald", "2024", "5,000"))
+    result3 = parse_summary_compensation_table(f"<html><body>{sct3}<p>Mc Donald</p></body></html>")
+    assert sorted({r.executive_name for r in result3.rows}) == ["McDonald"]
+
+
+def test_cross_source_disagreement_blocks_repair() -> None:
+    """Conflicting initials across sources ('Douglas J.' sibling vs
+    'Douglas P.' oracle) are a disagreement → no repair even without an FY
+    collision."""
+    sct = _simple_sct(
+        ("Pferdehirt", "2022", "14,774,294"),
+        ("Douglas J. Pferdehirt\nChief Executive Officer", "2023", "17,062,495"),
+    )
+    contexts = _pvp_context("c1", "2022-01-01", "2022-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Douglas P. Pferdehirt</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Douglas J. Pferdehirt", "Pferdehirt"]
+
+
+def test_fragment_rows_never_repaired() -> None:
+    """Bogus fragment names ('Executive') with no unanimous evidence stay
+    untouched — repairing them would be wrong, deleting them is forbidden."""
+    sct = _simple_sct(("Executive", "2024", "1,000"), ("Jane Doe\nChief Executive Officer", "2024", "2,000"))
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert "Executive" in {r.executive_name for r in result.rows}
+
+
+def test_candidates_agree_order_and_initials() -> None:
+    """Direct unit pins on the agreement predicate (fresh-agent review):
+    permutation of the same token set = two different people = disagreement;
+    conflicting initials = disagreement; subset (incl. one-side initials,
+    honorifics) = agreement."""
+    from app.providers.implementations.sec_def14a import _candidates_agree
+
+    assert _candidates_agree("Cook", "Tim Cook")
+    assert _candidates_agree("Damon Hininger", "Damon T. Hininger")
+    assert _candidates_agree("Mr. Cook", "Tim Cook")
+    assert not _candidates_agree("Hechun Wei", "Wei Hechun")
+    assert not _candidates_agree("Douglas J. Pferdehirt", "Douglas P. Pferdehirt")
+    assert _candidates_agree("Hechun Wei", "Hechun Wei")
+
+
+def test_permuted_sibling_names_block_repair() -> None:
+    """Two real people whose names are token-permutations ('Hechun Wei' /
+    'Wei Hechun') must never let a shared-token single-token row repair onto
+    either — the set-equal-order-differs pair disagrees."""
+    sct = _simple_sct(
+        ("Wei", "2022", "1,000"),
+        ("Hechun Wei\nChief Executive Officer", "2023", "2,000"),
+        ("Wei Hechun\nChief Financial Officer", "2023", "3,000"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert "Wei" in {r.executive_name for r in result.rows}
+
+
+def test_camel_split_needs_word_boundary() -> None:
+    """The camel-verbatim check is word-bounded — 'Jon Smithson' in prose must
+    not validate a 'JonSmith' split."""
+    sct = _simple_sct(("JonSmith", "2024", "1,000"))
+    doc = f"<html><body>{sct}<p>Our counsel Jon Smithson advised.</p></body></html>"
+    result = parse_summary_compensation_table(doc)
+    assert sorted({r.executive_name for r in result.rows}) == ["JonSmith"]
+
+
+def test_collision_guard_checks_all_candidates() -> None:
+    """Codex ckpt-2 P2 — a same-FY row under a SHORTER agreeing sibling
+    spelling blocks the repair even when the chosen replacement would be a
+    longer oracle spelling (no same-person split across two spellings)."""
+    sct = _simple_sct(
+        ("Hininger", "2024", "393,737"),
+        ("Damon Hininger\nChief Executive Officer", "2024", "7,471,923"),
+    )
+    contexts = _pvp_context("c1", "2024-01-01", "2024-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Damon T. Hininger</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Damon Hininger", "Hininger"]
+
+
+def test_hyphenated_names_in_agreement_and_repair() -> None:
+    """Review NITPICK — hyphen-splitting in _name_token_seq must not block
+    valid agreement/repair: 'Ann-Marie' subsets 'Ann-Marie Campbell'
+    (predicate-level), and a single-token 'Campbell' repairs onto a
+    hyphenated-first-name sibling. (A leading 'Ann-Marie' short row is
+    absorbed by the pre-existing restated-name carry before repair is
+    consulted, so the predicate is pinned directly.)"""
+    from app.providers.implementations.sec_def14a import _candidates_agree
+
+    assert _candidates_agree("Ann-Marie", "Ann-Marie Campbell")
+    sct = _simple_sct(
+        ("Campbell", "2022", "1,000"),
+        ("Ann-Marie Campbell\nChief Executive Officer", "2023", "2,000"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert {r.executive_name for r in result.rows} == {"Ann-Marie Campbell"}
+
+
+def test_camel_split_ignores_script_and_style_text() -> None:
+    """Review NITPICK — a spaced form appearing only inside <script>/<style>
+    contents must not validate a camel-glued split."""
+    sct = _simple_sct(("JonSmith", "2024", "1,000"))
+    doc = f"<html><body>{sct}<script>var x = 'Jon Smith';</script><style>/* Jon Smith */</style></body></html>"
+    result = parse_summary_compensation_table(doc)
+    assert sorted({r.executive_name for r in result.rows}) == ["JonSmith"]

@@ -21,6 +21,7 @@ import psycopg.rows
 import pytest
 
 from app.services.def14a_ingest import (
+    _PARSER_VERSION_DEF14A,
     bootstrap_def14a,
     discover_pending_def14a,
     ingest_def14a,
@@ -357,7 +358,10 @@ class TestIngestDef14a:
             document_kind="def14a_body",
         )
         assert doc is not None
-        assert doc.parser_version == "def14a-v3"  # bumped by #2086 (402/403 decouple)
+        # Reference the live constant — literal pins went stale across three
+        # version bumps because this is db-tier, off the fast push gate
+        # (#2100 fresh-agent review).
+        assert doc.parser_version == _PARSER_VERSION_DEF14A
         assert doc.source_url == url
         assert len(doc.require_payload()) > 0
 

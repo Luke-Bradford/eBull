@@ -36,6 +36,7 @@ from app.jobs.sec_manifest_worker import (
     clear_registered_parsers,
     run_manifest_worker,
 )
+from app.services.def14a_ingest import _PARSER_VERSION_DEF14A
 from app.services.sec_manifest import get_manifest_row, record_manifest_entry
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 
@@ -218,7 +219,10 @@ def test_happy_path_parses_and_stores_raw_and_holdings(
     assert row is not None
     assert row.ingest_status == "parsed"
     assert row.raw_status == "stored"
-    assert row.parser_version == "def14a-v5"  # v3 #2086 (402/403 decouple) → v4 #2094 → v5 #2097 (name/title split)
+    # Live constant, not a literal — the literal went stale on every bump
+    # (v3 #2086 → v4 #2094 → v5 #2097 → v6 #2100) and this is db-tier, off
+    # the fast push gate (#2100 fresh-agent review).
+    assert row.parser_version == _PARSER_VERSION_DEF14A
 
     # def14a_beneficial_holdings rows exist for the parsed table.
     with ebull_test_conn.cursor() as cur:
