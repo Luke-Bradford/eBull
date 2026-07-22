@@ -34,9 +34,11 @@ def siblings_for_issuer_cik(conn: psycopg.Connection[Any], cik: str) -> list[int
     Ordering is deterministic (instrument_id ASC), NOT semantically
     primary. Per-instrument fan-out callers iterate the full list.
     Callers that need a single canonical sibling for entity-level
-    row writes should pick by explicit policy (e.g.
-    ``instruments.is_primary_listing``) rather than relying on this
-    ordering.
+    row writes use :func:`pick_entity_instrument` (the #828 policy,
+    made final by the #2108 verdict). ``instruments.is_primary_listing``
+    is NOT usable as an entity-primary marker — it is a per-symbol
+    dedup flag and both siblings carry ``true`` in every ambiguous
+    set (#2108 full-pop scan).
 
     Raises ``ValueError`` if ``cik`` is not numeric after
     normalisation. Empty string and obvious non-CIK input fail
@@ -59,6 +61,56 @@ def siblings_for_issuer_cik(conn: psycopg.Connection[Any], cik: str) -> list[int
             (cik_padded,),
         )
         return [int(row[0]) for row in cur.fetchall()]
+
+
+def sibling_instruments_for_instrument(conn: psycopg.Connection[Any], instrument_id: int) -> list[int]:
+    """Return the share-class sibling set containing this instrument.
+
+    Instrument → its CURRENT primary sec/cik value → every instrument
+    currently primary-bound to it. Falls back to ``[instrument_id]``
+    when the instrument has no CIK binding (the result always contains
+    the input, so ``instrument_id = ANY(result)`` reads never narrow).
+
+    Both sides pin ``is_primary = TRUE``: the CIK upsert path demotes
+    an instrument's superseded CIK rows to ``is_primary = FALSE``
+    (#1173), and joining through a demoted value could union across
+    ISSUER boundaries if a historical CIK were ever recycled or
+    shared. Zero such rows exist today (2026-07-22 full-pop: 8
+    demoted rows, none co-bound to another instrument — Codex ckpt-2
+    on #2108), so the filter costs nothing and closes the structural
+    hole.
+
+    #2108: this is the read-side sibling-union used where an
+    entity-level insider table is filtered per instrument at
+    request time and the ``filing_events`` bridge is too expensive
+    (measured 5× per resolver call on the worst-case instrument).
+    Reach is a superset of the direct-key read because #828 PR-1
+    keeps entity-row ``instrument_id`` inside the sibling set by
+    construction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT sib.instrument_id
+            FROM external_identifiers own
+            JOIN external_identifiers sib
+              ON sib.identifier_value = own.identifier_value
+             AND sib.provider = 'sec'
+             AND sib.identifier_type = 'cik'
+             AND sib.is_primary = TRUE
+            WHERE own.provider = 'sec'
+              AND own.identifier_type = 'cik'
+              AND own.is_primary = TRUE
+              AND own.instrument_id = %s
+            ORDER BY sib.instrument_id
+            """,
+            (int(instrument_id),),
+        )
+        siblings = [int(row[0]) for row in cur.fetchall()]
+    if int(instrument_id) not in siblings:
+        siblings.append(int(instrument_id))
+        siblings.sort()
+    return siblings
 
 
 @dataclass(frozen=True)

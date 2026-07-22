@@ -29,11 +29,11 @@
 ```
 `cik_str` is **integer** in JSON, **not zero-padded**. Always pad to 10 digits with `f"CIK{cik:010d}"` before constructing API URLs.
 
-**Coverage** (corrected 2026-05-17 from empirical sample):
+**Coverage** (re-corrected 2026-07-22 from live fetch — #2108; supersedes the 2026-05-17 note):
 
-- `company_tickers.json` and `company_tickers_exchange.json` share the same CIK row cohort COUNT (10,353 entries each as of 2026-05-17).
-- `company_tickers.json` is **CIK-grain**: one row per CIK, ticker is the primary symbol. Includes pink-sheet/OTC tickers (e.g. `PTPIF`, `EMCGF`) — earlier framing that these were "excluded" was inaccurate.
-- `company_tickers_exchange.json` is **ticker-grain**: 10,353 rows / 7,996 unique CIKs / 1,446 multi-ticker CIKs. Captures share-class siblings (GOOG/GOOGL), preferred-series tickers (BAC=17 variants, JPM=9, MS=10), and ADR+OTC siblings (BABA/BABAF/BBAAY). Adds the `exchange` enum (Nasdaq / NYSE / OTC / CBOE / NULL).
+- **BOTH `company_tickers.json` and `company_tickers_exchange.json` are ticker-grain as of 2026-07-22**: each 10,419 rows / 8,014 unique CIKs / 1,463 multi-ticker CIKs (BAC=17, JPM=9). The 2026-05-17 claim that `company_tickers.json` was CIK-grain/one-row-per-CIK no longer holds — SEC converged the files; multi-ticker CIKs (GOOG/GOOGL, share-class siblings, preferred series, ADR+OTC siblings) appear in both. Re-verify grain empirically before relying on it — it has changed at least once.
+- Row ORDER within a CIK is NOT a primacy signal (no documented semantics; empirically TAP-A precedes TAP while AGM precedes AGM-A — #2108).
+- `company_tickers_exchange.json` additionally carries the `exchange` enum (Nasdaq / NYSE / OTC / CBOE / NULL) in `{fields, data}` array form.
 - `company_tickers_mf.json` covers the mutual-fund universe (~28k rows with `seriesId` + `classId`) — disjoint from the two above.
 
 eBull pattern lives in `daily_cik_refresh` (`app/workers/scheduler.py`):

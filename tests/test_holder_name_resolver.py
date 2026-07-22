@@ -87,6 +87,64 @@ def test_resolver_matches_form4_filer(
     assert public[2] == Decimal("250000")
 
 
+def test_resolver_matches_across_share_class_siblings(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """#2108 sibling union: entity-level Form 4 rows carry ONE
+    bookkeeping instrument_id inside the issuer's sibling set; a
+    resolve from the OTHER sibling must still match (GOOGL proxy
+    holders vs Form 4 rows stored under GOOG)."""
+    conn = ebull_test_conn
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id, symbol, company_name, exchange, currency, is_tradable
+        ) VALUES
+            (789102, 'RESA', 'Resolver Sibling A', '4', 'USD', TRUE),
+            (789103, 'RESB', 'Resolver Sibling B', '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+    )
+    # Both siblings co-bind the issuer CIK (#1102 partial-unique shape).
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            provider, identifier_type, identifier_value, instrument_id, is_primary
+        ) VALUES
+            ('sec', 'cik', '0000789102', 789102, TRUE),
+            ('sec', 'cik', '0000789102', 789103, TRUE)
+        ON CONFLICT (provider, identifier_type, identifier_value, instrument_id)
+            WHERE provider = 'sec' AND identifier_type = 'cik'
+            DO NOTHING
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO insider_filings (
+            accession_number, instrument_id, document_type, issuer_cik
+        ) VALUES ('F4-RES-SIB-001', 789102, '4', '0000789102')
+        ON CONFLICT (accession_number) DO NOTHING
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO insider_transactions (
+            accession_number, txn_row_num, instrument_id, filer_cik, filer_name,
+            txn_date, txn_code, shares, post_transaction_shares, is_derivative
+        ) VALUES ('F4-RES-SIB-001', 1, 789102, '0007654321', 'Sibling Holder',
+                  %s, 'P', 100, %s, FALSE)
+        """,
+        (date(2026, 3, 1), Decimal("500000")),
+    )
+    conn.commit()
+
+    # Resolve from sibling B — the row is stored under sibling A.
+    matched, cik, shares = resolve_holder_to_filer(conn, instrument_id=789103, holder_name="Sibling Holder")
+    assert matched is True
+    assert cik == "0007654321"
+    assert shares == Decimal("500000")
+
+
 def test_resolver_returns_no_match_for_unknown_holder(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
 ) -> None:
