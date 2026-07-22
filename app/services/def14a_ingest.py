@@ -76,7 +76,12 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # v3 (#2086): Item 402 exec comp now runs on the ownership-tombstone path
 # too — the tombstoned-with-stored-raw cohort must rewash to pick up SCTs
 # the 402↔403 coupling previously skipped (GME class).
-_PARSER_VERSION_DEF14A = "def14a-v4"
+# v4 (#2094): SCT wrapped first-column cells no longer clobber executive_name.
+# v5 (#2097): SCT name/title split is role-boundary-first — flatten intra-cell
+# newlines (render wraps, not delimiters), split at the position-title onset,
+# else whole cell = name; fixes bare-first-name truncation ("Sundar"→"Sundar
+# Pichai") and the mid-title leak ("…Chief Executive Officer" absorbed).
+_PARSER_VERSION_DEF14A = "def14a-v5"
 
 logger = logging.getLogger(__name__)
 

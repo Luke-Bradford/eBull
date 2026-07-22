@@ -219,6 +219,16 @@ parsed["signatures"]                   # list[Signature dataclass]
 
 **Codex 1d/1e/1f on the PR11 spec all caught this in sequence** — the documentation gap cost three review rounds. This entry exists so the next PR adopting `parse_xml` gets it right on the first pass.
 
+### G16 — DEF 14A SCT name/title split leaks the title into the name (do NOT drop-in for exec comp)
+`edgar.proxy.html_extractor.extract_summary_compensation(tree)` returns `list[ExecutiveCompEntry(name, title, year, salary…total)]` and DOES flatten intra-cell newlines first (`_split_name_title`, `html_extractor.py:551` — `re.sub(r'\s+',' ',cell)`; the later `\n`-split at :554 is dead code). But it then **comma-splits before role-keyword-splits** (:554 vs :570), so a multi-clause NEO cell leaks the first title phrase into `name`. Verified empirically on Alphabet `0001308179-25-000511` (edgartools 5.30.2, offline via `lxml.html.fromstring(body_bytes)`):
+
+```
+edgartools: name='Sundar Pichai Chief Executive Officer'  title='Alphabet and Google, and Director'
+our parser: name='Sundar Pichai'  position='Chief Executive Officer, Alphabet and Google, and Director'
+```
+
+Our `sec_def14a.py::_split_name_position` splits at the FIRST `_POSITION_ROLE_RE` keyword (the semantic name/title boundary) → correct name. **Keep our parser for SCT; do NOT swap to edgartools here.** The shared, proven core (both do it) is *flatten the newline first* — a `\n` in an SCT first-cell is a render wrap, never a name/title delimiter (#2097). The genuinely reliable NEO-*name* source is the Item 402(v) Pay-vs-Performance **dimensional iXBRL** tags (edgartools `ProxyStatement` "named executives when dimensionally tagged", `core.py:727`) — machine-readable names, but only PEO/NEO totals, not the per-year SCT components we store; a cross-check candidate, not a drop-in (research ticket #2099).
+
 ## Decision tree — when to use edgartools vs roll-our-own
 
 ```
