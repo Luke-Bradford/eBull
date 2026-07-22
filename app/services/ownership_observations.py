@@ -401,6 +401,43 @@ def refresh_insiders_current(
         return int(row[0]) if row else 0
 
 
+def tombstone_non_sibling_insider_observations(
+    conn: psycopg.Connection[Any],
+    *,
+    source_accession: str,
+    sibling_instrument_ids: list[int],
+) -> list[int]:
+    """#828 PR-1 — soft-delete an accession's insider observations on
+    instruments OUTSIDE the issuer's sibling set.
+
+    Called from the insider apply chokepoints when writer routing detects an
+    owner-stream mislink and the accession already carries live observation
+    rows on the wrong (owner) instrument — legacy pre-#1117 fan-out rows, or
+    a rewash of a historically-mislinked accession. Tombstone via
+    ``known_to`` (I6 — never hard-delete observations); the caller must run
+    ``refresh_insiders_current`` for every returned instrument so the owner's
+    ``_current`` snapshot drops the rows too.
+
+    Returns the DISTINCT affected instrument_ids (empty when nothing was
+    live on a non-sibling instrument — the common case for new filings).
+    """
+    if not sibling_instrument_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ownership_insiders_observations
+            SET known_to = NOW()
+            WHERE source_accession = %(acc)s
+              AND known_to IS NULL
+              AND NOT (instrument_id = ANY(%(sibs)s::bigint[]))
+            RETURNING instrument_id
+            """,
+            {"acc": source_accession, "sibs": sibling_instrument_ids},
+        )
+        return sorted({int(r[0]) for r in cur.fetchall()})
+
+
 # ---------------------------------------------------------------------------
 # Institutions — record + refresh (#840.B)
 # ---------------------------------------------------------------------------

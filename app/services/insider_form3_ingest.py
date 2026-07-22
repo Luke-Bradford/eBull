@@ -43,6 +43,7 @@ import psycopg
 
 from app.providers.concurrent_fetch import FetchOutcome, fetch_document_texts_classified
 from app.services import raw_filings
+from app.services.filings import reconcile_mislinked_ownership_filing_events
 from app.services.insider_transactions import (
     ParsedForm3,
     ParsedHolding,
@@ -54,8 +55,9 @@ from app.services.manifest_parsers._classify import format_upsert_error, is_tran
 from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
+    tombstone_non_sibling_insider_observations,
 )
-from app.services.sec_identity import siblings_for_issuer_cik
+from app.services.sec_identity import resolve_insider_writer_routing
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,23 @@ def upsert_form_3_filing(
     raw_filings.acquire_filing_accession_write_lock(conn, accession_number)
     if filed_at is None:
         filed_at = lookup_sec_filed_at(conn, accession_number)
+
+    # #828 PR-1 — route entity-level writes by the PARSED issuer CIK, not the
+    # discovery-time instrument (see upsert_filing for the Form 4/5 mirror).
+    routing = resolve_insider_writer_routing(conn, discovery_instrument_id=instrument_id, issuer_cik=parsed.issuer_cik)
+    entity_instrument_id = routing.entity_instrument_id
+    if routing.is_mislink:
+        logger.warning(
+            "form3 writer routing (#828): accession=%s discovered under "
+            "instrument %s but issuer CIK %s maps to siblings %s — entity rows "
+            "routed to instrument %s",
+            accession_number,
+            instrument_id,
+            parsed.issuer_cik,
+            routing.sibling_instrument_ids,
+            entity_instrument_id,
+        )
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -137,6 +156,7 @@ def upsert_form_3_filing(
                 %s, %s, FALSE
             )
             ON CONFLICT (accession_number) DO UPDATE SET
+                instrument_id                = EXCLUDED.instrument_id,
                 document_type                = EXCLUDED.document_type,
                 period_of_report             = EXCLUDED.period_of_report,
                 date_of_original_submission  = EXCLUDED.date_of_original_submission,
@@ -158,7 +178,7 @@ def upsert_form_3_filing(
             """,
             (
                 accession_number,
-                instrument_id,
+                entity_instrument_id,
                 parsed.document_type,
                 parsed.period_of_report,
                 parsed.date_of_original_submission,
@@ -304,7 +324,7 @@ def upsert_form_3_filing(
                 )
                 """,
                 (
-                    instrument_id,
+                    entity_instrument_id,
                     accession_number,
                     holding.row_num,
                     holding.filer_cik,
@@ -340,16 +360,7 @@ def upsert_form_3_filing(
     # same issuer; each share-class sibling carries its own
     # ownership_insiders_observations rows. Entity-level tables
     # (insider_filings, insider_initial_holdings) stay PK=accession.
-    issuer_cik = parsed.issuer_cik or ""
-    if issuer_cik:
-        try:
-            siblings = siblings_for_issuer_cik(conn, issuer_cik)
-        except ValueError:
-            siblings = [instrument_id]
-        if not siblings:
-            siblings = [instrument_id]
-    else:
-        siblings = [instrument_id]
+    siblings = routing.sibling_instrument_ids or [entity_instrument_id]
     for sibling_iid in siblings:
         _record_form3_observations_for_filing(
             conn,
@@ -360,6 +371,28 @@ def upsert_form_3_filing(
             filed_at=filed_at,
         )
         refresh_insiders_current(conn, instrument_id=sibling_iid)
+
+    # #828 PR-1 — see upsert_filing: the owner-instrument filing_events rows
+    # ARE the read-bridge pollution; repoint the bridge at the issuer siblings
+    # and soft-delete any stale non-sibling observations (Codex ckpt-2
+    # finding 2), refreshing the affected instruments' _current.
+    if routing.is_mislink:
+        reconcile_mislinked_ownership_filing_events(
+            conn,
+            accession_number=accession_number,
+            sibling_instrument_ids=routing.sibling_instrument_ids,
+            filing_type=parsed.document_type or "",
+            filed_at=filed_at,
+            period_of_report=parsed.period_of_report,
+            primary_document_url=primary_document_url,
+            symbol=parsed.issuer_trading_symbol,
+        )
+        for stale_iid in tombstone_non_sibling_insider_observations(
+            conn,
+            source_accession=accession_number,
+            sibling_instrument_ids=routing.sibling_instrument_ids,
+        ):
+            refresh_insiders_current(conn, instrument_id=stale_iid)
 
 
 def _record_form3_observations_for_filing(
