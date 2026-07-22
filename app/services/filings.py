@@ -120,6 +120,133 @@ def filing_within_retention(filing_date: date, now: datetime | None = None) -> b
 
 
 # ---------------------------------------------------------------------------
+# #828 PR-1 — ownership-form (Form 3/4/5) filing_events routing guard.
+#
+# EDGAR indexes each ownership document under BOTH the issuer's CIK stream
+# and every reporting owner's CIK stream (sec-edgar skill §"issuer-scoped
+# fan-out"). A Form 4 for BAC filed by Berkshire surfaces in Berkshire's
+# submissions feed; a discovery walk keyed on the OWNER's feed would bind
+# the accession to the owner's instrument — the filing_events bridge row IS
+# the L2/tombstone-count pollution (spec
+# docs/proposals/etl/2026-07-22-828-insider-cik-routing.md).
+#
+# The parser-time reroute (insider_transactions.upsert_filing /
+# insider_form3_ingest.upsert_form_3_filing) only covers the
+# owner-discovered-FIRST ordering. When the ISSUER stream parses first and
+# the owner's stream is walked later (or re-walked in a full submissions
+# walk), the fe writers below would re-create the owner binding with no
+# re-parse ever running — this guard closes that ordering. It consults the
+# already-parsed ``insider_filings.issuer_cik`` and blocks the write only
+# when the issuer has a non-empty in-universe sibling set that EXCLUDES the
+# target instrument. Fail-open by construction: unparsed accession,
+# tombstone, NULL/garbage issuer_cik, or empty sibling set → allow (the
+# unroutable cohort keeps its discovery linkage).
+# ---------------------------------------------------------------------------
+OWNERSHIP_FILING_TYPES: frozenset[str] = frozenset({"3", "3/A", "4", "4/A", "5", "5/A"})
+
+
+def _ownership_filing_event_write_allowed(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    *,
+    instrument_id: str | int,
+    provider_filing_id: str,
+    filing_type: str | None,
+) -> bool:
+    if filing_type not in OWNERSHIP_FILING_TYPES:
+        return True
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM insider_filings f
+        WHERE f.accession_number = %(acc)s
+          AND f.is_tombstone = FALSE
+          AND f.issuer_cik IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM external_identifiers ei
+              WHERE ei.provider = 'sec'
+                AND ei.identifier_type = 'cik'
+                AND ei.identifier_value = lpad(btrim(f.issuer_cik), 10, '0')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM external_identifiers ei2
+              WHERE ei2.provider = 'sec'
+                AND ei2.identifier_type = 'cik'
+                AND ei2.identifier_value = lpad(btrim(f.issuer_cik), 10, '0')
+                AND ei2.instrument_id = %(iid)s
+          )
+        """,
+        {"acc": provider_filing_id, "iid": int(instrument_id)},
+    ).fetchone()
+    return row is None
+
+
+def reconcile_mislinked_ownership_filing_events(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    *,
+    accession_number: str,
+    sibling_instrument_ids: list[int],
+    filing_type: str,
+    filed_at: datetime | None,
+    period_of_report: date | None,
+    primary_document_url: str | None,
+    symbol: str | None,
+) -> int:
+    """#828 PR-1 — point the filing_events bridge at the issuer siblings.
+
+    Called from the insider apply chokepoints ONLY when routing detected a
+    mislink (discovery instrument outside a non-empty issuer sibling set):
+    deletes every non-sibling binding for the accession (the owner-stream
+    pollution) and upserts one row per issuer sibling so the per-instrument
+    read bridges see the filing immediately (idempotent — same
+    ``(provider, provider_filing_id, instrument_id)`` conflict key as every
+    other filing_events writer). Returns the number of deleted rows.
+
+    When ``filed_at`` is unknown the sibling upserts are skipped (the
+    ``filing_date`` column is NOT NULL); the delete still runs — a missing
+    bridge row is honest-invisible, a wrong-instrument one is pollution.
+    """
+    if not sibling_instrument_ids:
+        # Defensive: routing never calls this with an empty set (a mislink
+        # requires a non-empty sibling set); an empty array here would make
+        # NOT ANY() delete EVERY binding for the accession.
+        logger.warning(
+            "filing_events reconcile (#828): accession=%s called with empty sibling set; refusing to delete",
+            accession_number,
+        )
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM filing_events
+            WHERE provider = 'sec'
+              AND provider_filing_id = %(acc)s
+              AND NOT (instrument_id = ANY(%(sibs)s::bigint[]))
+            """,
+            {"acc": accession_number, "sibs": sibling_instrument_ids},
+        )
+        deleted = cur.rowcount
+    if filed_at is None:
+        logger.warning(
+            "filing_events reconcile (#828): accession=%s has no filed_at; "
+            "deleted %d non-sibling rows but skipped sibling upserts",
+            accession_number,
+            deleted,
+        )
+        return deleted
+    result = FilingSearchResult(
+        provider_filing_id=accession_number,
+        symbol=symbol or "",
+        filed_at=filed_at,
+        filing_type=filing_type,
+        period_of_report=period_of_report,
+        primary_document_url=primary_document_url,
+    )
+    for sibling_iid in sibling_instrument_ids:
+        _upsert_filing(conn, str(sibling_iid), "sec", result)
+    return deleted
+
+
+# ---------------------------------------------------------------------------
 # #1347 — first-install cohort recency floor for S17 (DEF 14A bootstrap) and
 # S18 (business-summary bootstrap). These two stages otherwise walk the FULL
 # historical filing_events backlog and deadline-cut at 60 min (Run #8). The
@@ -689,6 +816,19 @@ def _upsert_filing_event(
             FILING_EVENTS_RETENTION_YEARS,
         )
         return
+    if not _ownership_filing_event_write_allowed(
+        conn,
+        instrument_id=instrument_id,
+        provider_filing_id=event.provider_filing_id,
+        filing_type=event.filing_type,
+    ):
+        logger.debug(
+            "filing_events: skipping %s/%s for instrument %s — ownership filing routed to issuer siblings (#828)",
+            provider_name,
+            event.provider_filing_id,
+            instrument_id,
+        )
+        return
     conn.execute(
         """
         INSERT INTO filing_events (
@@ -770,6 +910,19 @@ def _upsert_filing(
             result.provider_filing_id,
             filing_date.isoformat(),
             FILING_EVENTS_RETENTION_YEARS,
+        )
+        return False
+    if not _ownership_filing_event_write_allowed(
+        conn,
+        instrument_id=instrument_id,
+        provider_filing_id=result.provider_filing_id,
+        filing_type=result.filing_type,
+    ):
+        logger.debug(
+            "filing_events: skipping %s/%s for instrument %s — ownership filing routed to issuer siblings (#828)",
+            provider_name,
+            result.provider_filing_id,
+            instrument_id,
         )
         return False
     conn.execute(
