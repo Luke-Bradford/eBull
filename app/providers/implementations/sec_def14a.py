@@ -1580,8 +1580,12 @@ def _repair_truncated_names(rows: list[Def14AExecCompRow], html_text: str) -> li
         replacement = max(candidates, key=lambda c: (len(_name_tokens(c)), -candidates.index(c)))
         if replacement == name:
             continue
-        # Collision guard: never merge onto an existing (name, fy) row.
-        if fy_by_name.get(replacement, set()) & row_years:
+        # Collision guard: never merge onto an existing (name, fy) row — and
+        # check EVERY agreeing candidate, not just the chosen text (Codex
+        # ckpt-2 P2: a same-FY sibling row under a shorter agreeing spelling
+        # must block the repair too, else the same person splits across two
+        # spellings).
+        if any(fy_by_name.get(c, set()) & row_years for c in candidates):
             continue
         renames[name] = replacement
 

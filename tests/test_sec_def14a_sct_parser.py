@@ -1005,3 +1005,17 @@ def test_camel_split_needs_word_boundary() -> None:
     doc = f"<html><body>{sct}<p>Our counsel Jon Smithson advised.</p></body></html>"
     result = parse_summary_compensation_table(doc)
     assert sorted({r.executive_name for r in result.rows}) == ["JonSmith"]
+
+
+def test_collision_guard_checks_all_candidates() -> None:
+    """Codex ckpt-2 P2 — a same-FY row under a SHORTER agreeing sibling
+    spelling blocks the repair even when the chosen replacement would be a
+    longer oracle spelling (no same-person split across two spellings)."""
+    sct = _simple_sct(
+        ("Hininger", "2024", "393,737"),
+        ("Damon Hininger\nChief Executive Officer", "2024", "7,471,923"),
+    )
+    contexts = _pvp_context("c1", "2024-01-01", "2024-12-31")
+    facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Damon T. Hininger</ix:nonNumeric>'
+    result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
+    assert sorted({r.executive_name for r in result.rows}) == ["Damon Hininger", "Hininger"]
