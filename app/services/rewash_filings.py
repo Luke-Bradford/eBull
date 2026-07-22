@@ -603,11 +603,11 @@ def _apply_def14a(
         # meaningfully rewashed at v3 → True (bumps parser_version).
         # No comp either → keep the pre-existing rescue semantics:
         # skip without bumping so a future improved parser re-tries.
-        comp_written = _rewash_exec_comp(
+        comp_written = _rewash_exec_comp_all_instruments(
             conn,
             raw_doc=raw_doc,
             issuer_cik=str(issuer_cik),
-            instrument_id=int(instrument_id),
+            resolved_instrument_id=int(instrument_id),
         )
         return comp_written > 0
 
@@ -649,13 +649,106 @@ def _apply_def14a(
 
     # Item 402(c) exec-comp rewash (#1945; helper shared with the
     # rescue-cohort branch above since #2086).
-    _rewash_exec_comp(
+    _rewash_exec_comp_all_instruments(
         conn,
         raw_doc=raw_doc,
         issuer_cik=str(issuer_cik),
-        instrument_id=int(instrument_id),
+        resolved_instrument_id=int(instrument_id),
     )
     return True
+
+
+def _rewash_exec_comp_all_instruments(
+    conn: psycopg.Connection[Any],
+    *,
+    raw_doc: RawFilingDocument,
+    issuer_cik: str,
+    resolved_instrument_id: int,
+) -> int:
+    """#2105 — comp rewash must cover every sibling share-class instrument.
+
+    One DEF 14A accession legitimately owns exec-comp rows under EVERY
+    sibling instrument of the issuer (Reg S-K Item 402 SCT is
+    registrant-level disclosure; first ingest writes it once per sibling
+    as each sibling's manifest row ingests the accession independently).
+    ``_apply_def14a``'s accession resolution picks ONE sibling
+    (``LIMIT 1``), so a single-instrument comp rewash froze the other
+    siblings' rows on the old parser (#2105: GOOG 'Sundar' stale next to
+    GOOGL 'Sundar Pichai' clean, 89 accessions full-pop). Re-apply the
+    comp rewash for every instrument that already has comp rows for this
+    accession, plus the resolved one.
+
+    Sibling set = ``_resolve_siblings`` (the SAME resolver the live
+    manifest ingest fans out with, so rewash output converges to what a
+    fresh first-ingest under the current parser would write) UNION every
+    instrument that already has comp rows for the accession (so a
+    historical row under an instrument that has since left the sibling
+    set is refreshed rather than frozen on the old parser).
+
+    Per-sibling ``_rewash_exec_comp`` calls re-parse the same body
+    (2-5 siblings, offline rewash cadence — accepted over threading a
+    parsed table through the SAVEPOINT-per-instrument isolation).
+    ``RewashParseError`` from any sibling propagates → the whole
+    accession fails + retries, matching the single-instrument contract.
+
+    Returns total comp rows written across siblings.
+    """
+    # Function-local import per this file's def14a convention (and the
+    # #1731 manifest_parsers init-order trap).
+    from app.services.manifest_parsers.def14a import _resolve_siblings
+
+    try:
+        instrument_ids = set(_resolve_siblings(conn, instrument_id=resolved_instrument_id, issuer_cik=issuer_cik))
+    except ValueError:
+        # Garbage non-numeric CIK (siblings_for_issuer_cik fail-fast).
+        # Surface the DQ issue in the log but still refresh the rows we
+        # KNOW about — total failure would freeze them on the old parser,
+        # which is the exact bug this helper exists to fix (Codex ckpt-2).
+        logger.warning(
+            "def14a rewash: non-numeric issuer_cik=%r for accession=%s; "
+            "sibling resolution skipped, refreshing known comp instruments only",
+            issuer_cik,
+            raw_doc.accession_number,
+        )
+        instrument_ids = set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT instrument_id
+            FROM def14a_exec_compensation
+            WHERE accession_number = %s
+              AND instrument_id IS NOT NULL
+            """,
+            (raw_doc.accession_number,),
+        )
+        instrument_ids.update(int(row[0]) for row in cur.fetchall())
+    instrument_ids.add(resolved_instrument_id)
+
+    total = 0
+    for iid in sorted(instrument_ids):
+        total += _rewash_exec_comp(
+            conn,
+            raw_doc=raw_doc,
+            issuer_cik=issuer_cik,
+            instrument_id=iid,
+        )
+
+    if total > 0:
+        # Belt-and-braces: comp.instrument_id is nullable by schema
+        # (CIK-resolved post-parse, mirror 097) and the per-instrument
+        # DELETE above can never reach a NULL-keyed row — it would
+        # survive every rewash and get version-pinned. Live population
+        # is 0 (dev full-pop check 2026-07-22), so this is a latent
+        # guard, not a data path (Codex ckpt-2).
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM def14a_exec_compensation
+                WHERE accession_number = %s AND instrument_id IS NULL
+                """,
+                (raw_doc.accession_number,),
+            )
+    return total
 
 
 def _rewash_exec_comp(

@@ -1029,6 +1029,149 @@ def test_def14a_rescue_with_no_ownership_table_still_rewashes_exec_comp(
     assert holdings_count is not None and holdings_count[0] == 0
 
 
+def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+) -> None:
+    """#2105 — one DEF 14A accession owns exec-comp rows under EVERY
+    share-class sibling instrument (live ingest fans out via
+    ``_resolve_siblings``), but ``_apply_def14a`` resolves ONE
+    instrument (``LIMIT 1``). The comp rewash must refresh ALL
+    instruments holding comp rows for the accession, not just the
+    resolved one — GOOG kept stale truncated 'Sundar' rows while
+    GOOGL got the repaired 'Sundar Pichai' (89 accessions full-pop)."""
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialHolder,
+        Def14ABeneficialOwnershipTable,
+        Def14AExecCompRow,
+        Def14ASummaryCompTable,
+    )
+
+    conn = ebull_test_conn
+    resolved_id = 950_090
+    sibling_id = 950_091
+    resolver_only_id = 950_092  # in the CIK sibling set, NO existing comp rows
+    accession = "0001234567-26-000004"
+    for iid, sym in ((resolved_id, "D14SA"), (sibling_id, "D14SB"), (resolver_only_id, "D14SC")):
+        conn.execute(
+            """
+            INSERT INTO instruments (
+                instrument_id, symbol, company_name, exchange, currency, is_tradable
+            ) VALUES (%s, %s, 'DEF 14A Sibling', '4', 'USD', TRUE)
+            ON CONFLICT (instrument_id) DO NOTHING
+            """,
+            (iid, sym),
+        )
+    # The _resolve_siblings half of the union: resolver_only_id co-binds the
+    # issuer CIK in external_identifiers, proving a row-less current sibling
+    # gets comp written fresh (rewash converges to first-ingest fan-out).
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES (%s, 'sec', 'cik', '0000999002', FALSE)
+        """,
+        (resolver_only_id,),
+    )
+    # Happy-path resolution: holdings row under the RESOLVED instrument only.
+    conn.execute(
+        """
+        INSERT INTO def14a_beneficial_holdings (
+            instrument_id, accession_number, issuer_cik,
+            holder_name, holder_role, shares, percent_of_class, as_of_date
+        ) VALUES (%s, %s, '0000999002', 'Holder A', 'officer', 100, 5.0, '2025-01-01')
+        """,
+        (resolved_id, accession),
+    )
+    # Stale truncated-name comp rows under BOTH siblings (old-parser output),
+    # plus a NULL-instrument legacy row the per-instrument DELETE can never
+    # reach — the post-rewash sweep must clear it.
+    for iid in (resolved_id, sibling_id, None):
+        conn.execute(
+            """
+            INSERT INTO def14a_exec_compensation (
+                instrument_id, accession_number, issuer_cik,
+                executive_name, fiscal_year, total_comp
+            ) VALUES (%s, %s, '0000999002', 'Sundar', 2024, 1.00)
+            """,
+            (iid, accession),
+        )
+    _seed_raw(conn, accession=accession, kind="def14a_body", parser_version="def14a-v0")
+    conn.commit()
+
+    ownership = Def14ABeneficialOwnershipTable(
+        as_of_date=None,
+        rows=[
+            Def14ABeneficialHolder(
+                holder_name="Holder A",
+                holder_role="officer",
+                shares=Decimal("100"),
+                percent_of_class=Decimal("5.0"),
+            ),
+        ],
+        raw_table_score=10,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_beneficial_ownership_table",
+        lambda _html: ownership,
+    )
+    sct = Def14ASummaryCompTable(
+        rows=(
+            Def14AExecCompRow(
+                executive_name="Sundar Pichai",
+                principal_position="Chief Executive Officer",
+                fiscal_year=2024,
+                salary=Decimal("650000"),
+                bonus=None,
+                stock_awards=None,
+                option_awards=None,
+                non_equity_incentive=None,
+                pension_nqdc=None,
+                other_comp=None,
+                total_comp=Decimal("650000"),
+            ),
+        ),
+        raw_table_score=20,
+    )
+    monkeypatch.setattr(
+        "app.providers.implementations.sec_def14a.parse_summary_compensation_table",
+        lambda _html: sct,
+    )
+
+    rewash_filings._REGISTRY.clear()
+    register_parser(
+        ParserSpec(
+            document_kind="def14a_body",
+            current_version="def14a-v1",
+            apply_fn=rewash_filings._apply_def14a,
+        )
+    )
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    assert result.rows_reparsed == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT instrument_id, executive_name
+            FROM def14a_exec_compensation
+            WHERE accession_number = %s
+            ORDER BY instrument_id
+            """,
+            (accession,),
+        )
+        rows = cur.fetchall()
+    # ALL siblings refreshed to the new parse — including the row-less
+    # resolver-only sibling — and neither the stale 'Sundar' rows nor the
+    # NULL-instrument legacy row survive.
+    assert rows == [
+        (resolved_id, "Sundar Pichai"),
+        (sibling_id, "Sundar Pichai"),
+        (resolver_only_id, "Sundar Pichai"),
+    ]
+
+
 def test_blockholders_apply_raises_on_parse_failure(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
