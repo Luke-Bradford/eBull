@@ -968,3 +968,40 @@ def test_fragment_rows_never_repaired() -> None:
     sct = _simple_sct(("Executive", "2024", "1,000"), ("Jane Doe\nChief Executive Officer", "2024", "2,000"))
     result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
     assert "Executive" in {r.executive_name for r in result.rows}
+
+
+def test_candidates_agree_order_and_initials() -> None:
+    """Direct unit pins on the agreement predicate (fresh-agent review):
+    permutation of the same token set = two different people = disagreement;
+    conflicting initials = disagreement; subset (incl. one-side initials,
+    honorifics) = agreement."""
+    from app.providers.implementations.sec_def14a import _candidates_agree
+
+    assert _candidates_agree("Cook", "Tim Cook")
+    assert _candidates_agree("Damon Hininger", "Damon T. Hininger")
+    assert _candidates_agree("Mr. Cook", "Tim Cook")
+    assert not _candidates_agree("Hechun Wei", "Wei Hechun")
+    assert not _candidates_agree("Douglas J. Pferdehirt", "Douglas P. Pferdehirt")
+    assert _candidates_agree("Hechun Wei", "Hechun Wei")
+
+
+def test_permuted_sibling_names_block_repair() -> None:
+    """Two real people whose names are token-permutations ('Hechun Wei' /
+    'Wei Hechun') must never let a shared-token single-token row repair onto
+    either — the set-equal-order-differs pair disagrees."""
+    sct = _simple_sct(
+        ("Wei", "2022", "1,000"),
+        ("Hechun Wei\nChief Executive Officer", "2023", "2,000"),
+        ("Wei Hechun\nChief Financial Officer", "2023", "3,000"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert "Wei" in {r.executive_name for r in result.rows}
+
+
+def test_camel_split_needs_word_boundary() -> None:
+    """The camel-verbatim check is word-bounded — 'Jon Smithson' in prose must
+    not validate a 'JonSmith' split."""
+    sct = _simple_sct(("JonSmith", "2024", "1,000"))
+    doc = f"<html><body>{sct}<p>Our counsel Jon Smithson advised.</p></body></html>"
+    result = parse_summary_compensation_table(doc)
+    assert sorted({r.executive_name for r in result.rows}) == ["JonSmith"]

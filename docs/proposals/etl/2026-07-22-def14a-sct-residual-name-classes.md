@@ -72,15 +72,20 @@ pattern harvesting):
 
 **Repair iff every pair of candidates AGREES and the union names ONE person.**
 Two candidates agree iff, after honorific-strip + lowercase, one FULL token
-set (initials included) is a subset of the other ("Cook" ⊆ "Tim Cook";
-"Damon Hininger" ⊆ "Damon T. Hininger"), OR their initials-dropped sets are
-equal with an initial present on only ONE side. Conflicting initials are a
-DISAGREEMENT: "Douglas J. Pferdehirt" vs "Douglas P. Pferdehirt" repairs
-nothing (Codex ckpt-1 M1 — initials are material for disagreement even though
-they are dropped for the suspicious-name subset TEST). Any disagreement or
-within-source ambiguity → no repair. Replacement = the most token-complete
-agreeing form; tie → sibling > camel > oracle (prefers the same-table HTML
-spelling over a possibly-typo'd fact value).
+set (initials included) is a STRICT subset of the other ("Cook" ⊆ "Tim Cook";
+"Damon Hininger" ⊆ "Damon T. Hininger" — the one-side-initials case is
+covered by the subset branch), or the token sets are equal AND the token
+ORDER matches. Token order is identity-bearing: a permutation
+("Hechun Wei" vs "Wei Hechun") is two different people and DISAGREES
+(fresh-agent review — an order-blind set comparison would have let a shared
+single token repair onto either). Conflicting initials are a DISAGREEMENT:
+"Douglas J. Pferdehirt" vs "Douglas P. Pferdehirt" repairs nothing (Codex
+ckpt-1 M1). Any disagreement or within-source ambiguity → no repair.
+Replacement = the most token-complete agreeing form; tie → sibling > camel >
+oracle (prefers the same-table HTML spelling over a possibly-typo'd fact
+value). The camel-verbatim occurrence check is WORD-BOUNDED, not substring —
+"Jon Smithson" in prose must not validate a "JonSmith" split (fresh-agent
+review).
 
 **Per-name atomicity of the oracle gate (Codex ckpt-1 H1)**: repair renames
 ALL rows carrying the suspicious name, so the oracle FY gate must hold for

@@ -1479,26 +1479,33 @@ def parse_pvp_neo_names(html_text: str) -> tuple[Def14APvpNeoName, ...]:
     )
 
 
-def _name_tokens(name: str, *, drop_initials: bool = False) -> frozenset[str]:
-    """Lowercased comparison token set: honorific-stripped, punctuation split;
-    1-char initial tokens optionally dropped (subset TEST only — initials stay
-    in replacement text and are material for disagreement, spec C2)."""
+def _name_token_seq(name: str) -> tuple[str, ...]:
+    """Lowercased comparison tokens IN ORDER: honorific-stripped, punctuation
+    split. Order is kept because token order is identity-bearing — "Hechun
+    Wei" and "Wei Hechun" are different people (fresh-agent review)."""
     s = _HONORIFIC_RE.sub("", name.strip())
-    tokens = [t for t in re.split(r"[^\w'’]+", s.lower()) if t]
-    if drop_initials:
-        tokens = [t for t in tokens if len(t) > 1]
-    return frozenset(tokens)
+    return tuple(t for t in re.split(r"[^\w'’]+", s.lower()) if t)
+
+
+def _name_tokens(name: str) -> frozenset[str]:
+    """Set form of :func:`_name_token_seq` for the subset tests (initials
+    included — they stay in replacement text and are material for
+    disagreement, spec C2)."""
+    return frozenset(_name_token_seq(name))
 
 
 def _candidates_agree(a: str, b: str) -> bool:
-    """Spec C2 agreement: full-token subset either way, OR initials-dropped
-    sets equal with initials present on only ONE side. Conflicting initials
-    ("Douglas J." vs "Douglas P.") are a disagreement."""
+    """Spec C2 agreement: STRICT full-token subset either way ("Cook" ⊆
+    "Tim Cook"; "Damon Hininger" ⊆ "Damon T. Hininger" — the one-side-initials
+    case is covered by the subset branch). Equal token SETS agree only when
+    the token ORDER also matches — a permutation ("Hechun Wei" vs
+    "Wei Hechun") is two different people, not agreement. Conflicting
+    initials ("Douglas J." vs "Douglas P.": neither set a subset) are a
+    disagreement."""
     ta, tb = _name_tokens(a), _name_tokens(b)
-    if ta <= tb or tb <= ta:
-        return True
-    da, db = _name_tokens(a, drop_initials=True), _name_tokens(b, drop_initials=True)
-    return da == db and (ta != da) != (tb != db)
+    if ta == tb:
+        return _name_token_seq(a) == _name_token_seq(b)
+    return ta < tb or tb < ta
 
 
 def _flatten_document_text(html_text: str) -> str:
@@ -1543,7 +1550,10 @@ def _repair_truncated_names(rows: list[Def14AExecCompRow], html_text: str) -> li
             if doc_text is None:
                 doc_text = _flatten_document_text(html_text)
             spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name.strip())
-            if spaced in doc_text:
+            # Word-bounded, not substring — "Jon Smith" must not be
+            # "validated" by an unrelated "Jon Smithson" in the prose
+            # (fresh-agent review).
+            if re.search(rf"(?<![A-Za-z]){re.escape(spaced)}(?![A-Za-z])", doc_text):
                 candidates.append(spaced)
 
         if oracle is None:
