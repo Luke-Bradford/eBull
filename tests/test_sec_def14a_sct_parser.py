@@ -1019,3 +1019,30 @@ def test_collision_guard_checks_all_candidates() -> None:
     facts = '<ix:nonNumeric contextRef="c1" name="ecd:PeoName">Damon T. Hininger</ix:nonNumeric>'
     result = parse_summary_compensation_table(_pvp_doc(sct, contexts=contexts, facts=facts))
     assert sorted({r.executive_name for r in result.rows}) == ["Damon Hininger", "Hininger"]
+
+
+def test_hyphenated_names_in_agreement_and_repair() -> None:
+    """Review NITPICK — hyphen-splitting in _name_token_seq must not block
+    valid agreement/repair: 'Ann-Marie' subsets 'Ann-Marie Campbell'
+    (predicate-level), and a single-token 'Campbell' repairs onto a
+    hyphenated-first-name sibling. (A leading 'Ann-Marie' short row is
+    absorbed by the pre-existing restated-name carry before repair is
+    consulted, so the predicate is pinned directly.)"""
+    from app.providers.implementations.sec_def14a import _candidates_agree
+
+    assert _candidates_agree("Ann-Marie", "Ann-Marie Campbell")
+    sct = _simple_sct(
+        ("Campbell", "2022", "1,000"),
+        ("Ann-Marie Campbell\nChief Executive Officer", "2023", "2,000"),
+    )
+    result = parse_summary_compensation_table(f"<html><body>{sct}</body></html>")
+    assert {r.executive_name for r in result.rows} == {"Ann-Marie Campbell"}
+
+
+def test_camel_split_ignores_script_and_style_text() -> None:
+    """Review NITPICK — a spaced form appearing only inside <script>/<style>
+    contents must not validate a camel-glued split."""
+    sct = _simple_sct(("JonSmith", "2024", "1,000"))
+    doc = f"<html><body>{sct}<script>var x = 'Jon Smith';</script><style>/* Jon Smith */</style></body></html>"
+    result = parse_summary_compensation_table(doc)
+    assert sorted({r.executive_name for r in result.rows}) == ["JonSmith"]

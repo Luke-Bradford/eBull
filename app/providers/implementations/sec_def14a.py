@@ -1510,8 +1510,11 @@ def _candidates_agree(a: str, b: str) -> bool:
 
 def _flatten_document_text(html_text: str) -> str:
     """Tag-strip + entity-decode + whitespace-collapse the whole body (camel
-    verbatim check only — no pattern harvesting, spec C2)."""
-    return _INLINE_WHITESPACE_RE.sub(" ", html.unescape(re.sub(r"<[^>]+>", " ", html_text)).replace("\n", " "))
+    verbatim check only — no pattern harvesting, spec C2). ``<script>`` /
+    ``<style>`` blocks are dropped WITH their contents so embedded JS/CSS
+    text can never "validate" a camel split (review NITPICK)."""
+    text = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1>", " ", html_text)
+    return _INLINE_WHITESPACE_RE.sub(" ", html.unescape(re.sub(r"<[^>]+>", " ", text)).replace("\n", " "))
 
 
 def _repair_truncated_names(rows: list[Def14AExecCompRow], html_text: str) -> list[Def14AExecCompRow]:
