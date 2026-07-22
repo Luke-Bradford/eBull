@@ -163,8 +163,13 @@ prefixed tag/attribute QNames manually; reads `contextref` (lowercased). No
 exactly these three traps; its working form is the reference.) Collect
 `ix:nonnumeric` facts whose `name` QName resolves (via the document's xmlns
 declarations) to namespace-URI starting `http://xbrl.sec.gov/ecd` + localname
-`PeoName` — NOT the literal prefix `ecd:`; full-pop measured **300 of 5,841
-(5.1%)** PeoName-bearing bodies declare a different prefix. Resolve
+`PeoName` — NOT the literal prefix `ecd:`. (Correction, post-merge #2100
+verification: the initially-reported "5.1% prefix drift" was falsified on
+inspection — those 300 bodies carry `PeoName` only inside embedded
+MetaLinks-style JSON, with NO iXBRL fact; fact-level prefix drift measured
+**0** full-pop. URI resolution is kept for correctness — the ECD namespace is
+versioned yearly and a literal-prefix match is one filer-toolchain change from
+silent misses.) Resolve
 `contextRef` → explicit members + period end-dates on the URI-resolved
 `IndividualAxis` / `ExecutiveCategoryAxis` from the context definitions.
 Normalise the fact value: entity-decode, flatten ALL whitespace (the #2097
