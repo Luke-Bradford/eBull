@@ -1063,11 +1063,15 @@ _DASH_NULLS: Final[frozenset[str]] = frozenset({"-", "—", "–", "n/a", "na"})
 # "executive vice president" wins over "president".
 #
 # The leading-modifier prefix (``senior``/``former``/``acting``/``interim``/
-# ``co-``) pulls those title words into the MATCH so the split boundary lands
-# before them — otherwise "Ann-Marie Campbell Senior Executive Vice President"
-# leaves "Senior" glued to the name and "Bradford L. Smith Vice Chair" splits
-# at "Chair" (#1967). ``vice\s+chair`` is listed explicitly (before bare
-# ``chair``) so "Vice Chair" splits at "Vice", not "Chair".
+# ``executive``/``co-``) pulls those title words into the MATCH so the split
+# boundary lands before them — otherwise "Ann-Marie Campbell Senior Executive
+# Vice President" leaves "Senior" glued to the name and "Bradford L. Smith Vice
+# Chair" splits at "Chair" (#1967). ``executive`` was added (#2097) so
+# "Raymond R. Quirk Executive Chairman" / "Executive Vice- Chairman" split at
+# "Executive", not one word late — and so ``_position_only_cell`` recognises a
+# bare "Executive Chairman" title row instead of minting a bogus "Executive"
+# NEO. ``vice[-\s]+chair`` is listed explicitly (before bare ``chair``, and
+# hyphen-tolerant for "Vice- Chairman") so "Vice Chair" splits at "Vice".
 #
 # The modifier prefix is bounded ``{0,3}`` (real titles carry at most one or two
 # leading modifiers, e.g. "Former Senior") rather than ``*`` — an unbounded
@@ -1075,11 +1079,11 @@ _DASH_NULLS: Final[frozenset[str]] = frozenset({"-", "—", "–", "n/a", "na"})
 # ("Senior Senior … X"), and this parser runs on untrusted SEC filing HTML.
 _POSITION_ROLE_RE: Final[re.Pattern[str]] = re.compile(
     r"\b("
-    r"(?:(?:senior|former|acting|interim)\s+|co-?\s*){0,3}"
+    r"(?:(?:senior|former|acting|interim|executive)\s+|co-?\s*){0,3}"
     r"(?:"
     r"chief\s+\w+|"
     r"executive\s+vice\s+president|senior\s+vice\s+president|vice\s+president|"
-    r"vice\s+chair(?:man|woman|person)?|"
+    r"vice[-\s]+chair(?:man|woman|person)?|"
     r"president|chair(?:man|woman|person)?|"
     r"general\s+counsel|chief|ceo|cfo|coo|cto|evp|svp|"
     r"executive\s+officer|principal\s+\w+|treasurer|secretary|"
@@ -1151,28 +1155,37 @@ def _parse_dollar(raw: str) -> Decimal | None:
 
 
 def _split_name_position(cell: str) -> tuple[str, str | None]:
-    """Split a "Name / Title" SCT first cell into (name, position).
+    """Split a "Name and Principal Position" SCT first cell (Item 402(c)(2)(i))
+    into (name, position).
 
-    Prefers a newline delimiter (AAPL/MSFT put the name on line 1, the
-    title on line 2 — ``_strip_inline_html`` preserves ``\\n``). Falls
-    back to splitting at the first position-role keyword (JPM/HD render
-    "James Dimon Chairman and CEO" on one line). Footnote markers are
-    stripped from the name. Position is raw free-text (v1)."""
-    text = _clean_holder_name(cell).replace("\xa0", " ").strip()
-    text = _INLINE_WHITESPACE_RE.sub(" ", text)
+    An HTML line break inside this cell is a RENDER wrap at an arbitrary point,
+    NOT a name/title delimiter — it falls mid-name ("Sundar\\nPichai") or
+    mid-title ("…Officer\\nand President"), so a newline-first rule truncated the
+    name both too short and too long (#2097). We therefore flatten newlines to
+    spaces and split at the ONSET of the position title (the first
+    ``_POSITION_ROLE_RE`` keyword — the semantic boundary). When no role keyword
+    is present the whole flattened cell is the name (the title, if any, rides a
+    later stacked physical row and is attached by ``_position_only_cell`` /
+    ``_backfill_position``, #2088); this only ever preserves the name, never
+    truncates it. Footnote markers are stripped from the name; position is raw
+    free-text (v1).
+
+    Corroborated by edgartools' own SCT extractor, which flattens whitespace then
+    keyword-splits (edgartools skill G16). Our first-role-keyword split avoids the
+    title leak edgartools' comma-first split produces on multi-clause NEO cells
+    ("Sundar Pichai Chief Executive Officer")."""
+    text = _clean_holder_name(cell).replace("\xa0", " ")
+    # Flatten newlines to spaces FIRST — a \n here is a render wrap, not a
+    # delimiter (#2097). _INLINE_WHITESPACE_RE does not match \n, hence the
+    # explicit replace before collapsing the rest of the inline whitespace.
+    text = _INLINE_WHITESPACE_RE.sub(" ", text.replace("\n", " ")).strip()
     if not text:
         return "", None
-    # Newline delimiter → line 1 is the name, remainder is the title. (Keep the
-    # \n check BEFORE the role split — some filers put a footnote digit at the
-    # end of the name line, stripped by _clean_name_footnote below.)
-    if "\n" in text:
-        name, _, position = text.partition("\n")
-        pos = _INLINE_WHITESPACE_RE.sub(" ", position.replace("\n", " ")).strip()
-        return _clean_name_footnote(name), (pos or None)
-    # Otherwise split at the first role keyword.
+    # Split at the first role keyword (the name/title boundary).
     m = _POSITION_ROLE_RE.search(text)
     if m and m.start() > 0:
         return _clean_name_footnote(text[: m.start()].rstrip(",")), text[m.start() :].strip() or None
+    # No role keyword → the whole cell is the name (no title in this cell).
     return _clean_name_footnote(text), None
 
 

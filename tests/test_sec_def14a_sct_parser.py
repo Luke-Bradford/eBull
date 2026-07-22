@@ -194,6 +194,46 @@ def test_hbnc_non_lexicon_second_row_fragment() -> None:
     ]
 
 
+def test_intracell_name_wrap_before_title() -> None:
+    """#2097 — the whole name+title rides ONE first cell but the NEO's NAME
+    itself wraps (render break) before the title onset (Alphabet template):
+    'Sundar<br>Pichai<br>Chief Executive Officer, …'. A newline-first split
+    truncated the name to its first token ('Sundar'); the role-boundary split
+    keeps the full name. The wrap delimiter is incidental (``<br>`` collapses to
+    a space here, a block element yields ``\\n`` on other filers) — both flatten
+    to the same role-keyword split."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    pichai = _row("Sundar<br>Pichai<br>Chief Executive Officer, Alphabet", "2024", "2,000,000", "10,725,043")
+    porat = _row("Ruth M.<br>Porat<br>President and Chief Investment Officer", "2024", "1,000,000", "30,166,427")
+    table = f"<table>{header}{pichai}{porat}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Sundar Pichai", "Chief Executive Officer, Alphabet", 2024),
+        ("Ruth M. Porat", "President and Chief Investment Officer", 2024),
+    ]
+
+
+def test_wrapped_title_fragment_with_embedded_newline() -> None:
+    """#2094 + #2097 — a year-descending wrapped-TITLE fragment that itself
+    carries an embedded render wrap ('President and<br>Chief Executive') must
+    still attach to the carried NEO, not escape as a new one. Flattening the
+    newline (role-boundary split) does not change the #2094 continuation
+    classification (Codex ckpt-1 regression guard)."""
+    header = _row("Name and Principal Position", "Year", "Salary ($)", "Total ($)")
+    nelson_2024 = _row("Todd S. Nelson", "2024", "1,057,491", "6,725,760")
+    nelson_2023 = _row("President and<br>Chief Executive", "2023", "1,036,756", "4,504,386")
+    nelson_2022 = _row("Officer", "2022", "1,011,469", "4,512,179")
+    table = f"<table>{header}{nelson_2024}{nelson_2023}{nelson_2022}</table>"
+    result = parse_summary_compensation_table(_sct_doc(table))
+
+    assert [(r.executive_name, r.principal_position, r.fiscal_year) for r in result.rows] == [
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2024),
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2023),
+        ("Todd S. Nelson", "President and Chief Executive Officer", 2022),
+    ]
+
+
 def test_former_exec_block_starts_below_table_max_year() -> None:
     """A departed NEO's block may start BELOW the table's newest year (no
     FY2024 row). The block boundary is a year INCREASE relative to the
@@ -625,6 +665,11 @@ def test_position_only_cell_detection() -> None:
     assert _position_only_cell("James Dimon Chairman and CEO") is None
     assert _position_only_cell("Tim Cook\nChief Executive Officer") is None
     assert _position_only_cell("") is None
+    # #2097 — "executive" is a leading title modifier, so a bare "Executive
+    # Chairman" title row is now recognised as position-only (previously it
+    # matched only at "Chairman", minting a bogus "Executive" NEO).
+    assert _position_only_cell("Executive Chairman") == "Executive Chairman"
+    assert _position_only_cell("Executive Vice- Chairman") == "Executive Vice- Chairman"
 
 
 def test_split_name_position_newline() -> None:
@@ -697,3 +742,40 @@ def test_split_name_position_preserves_clean_names() -> None:
         "Chairman and Chief Executive Officer",
     )
     assert _split_name_position("Jane Doe") == ("Jane Doe", None)
+
+
+def test_split_name_position_intracell_newline_2097() -> None:
+    """#2097 — a newline inside the cell is a render wrap, not a name/title
+    delimiter. It falls mid-name or mid-title; the role-boundary split recovers
+    the correct name in both faces, and a title-free wrapped name stays whole."""
+    # Bare-first-name wrap (Alphabet): '\n' falls mid-name.
+    assert _split_name_position("Sundar\n Pichai \n Chief Executive Officer, Alphabet") == (
+        "Sundar Pichai",
+        "Chief Executive Officer, Alphabet",
+    )
+    # Mid-title wrap: '\n' falls inside the title — name must not absorb it.
+    assert _split_name_position("T. Wilson Eglin Chief Executive Officer\nand President") == (
+        "T. Wilson Eglin",
+        "Chief Executive Officer and President",
+    )
+    # Wrapped NAME with no title in the cell (Cato) — whole cell is the name.
+    assert _split_name_position("John\n P. D. Cato") == ("John P. D. Cato", None)
+    # Compound "Executive [Vice-] Chairman" title splits at "Executive" (#2097
+    # exec modifier + hyphen-tolerant vice-chair), not one word late.
+    assert _split_name_position("Raymond\nR. Quirk Executive Vice- Chairman") == (
+        "Raymond R. Quirk",
+        "Executive Vice- Chairman",
+    )
+    assert _split_name_position("Morgan E. O'Brien \n Executive Chairman") == (
+        "Morgan E. O'Brien",
+        "Executive Chairman",
+    )
+
+
+def test_split_name_position_surname_is_title_vocab_word() -> None:
+    """Codex ckpt-1 — the fix never mutates the name, so a real surname that
+    happens to be a title-vocabulary word ('Bank') survives intact. (No
+    trailing-title trim was adopted; the role-boundary split alone handles the
+    compound-title leaks it was meant to catch.)"""
+    assert _split_name_position("Robert A. Bank") == ("Robert A. Bank", None)
+    assert _split_name_position("Mary Global") == ("Mary Global", None)
