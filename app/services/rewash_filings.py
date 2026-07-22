@@ -697,7 +697,20 @@ def _rewash_exec_comp_all_instruments(
     # #1731 manifest_parsers init-order trap).
     from app.services.manifest_parsers.def14a import _resolve_siblings
 
-    instrument_ids = set(_resolve_siblings(conn, instrument_id=resolved_instrument_id, issuer_cik=issuer_cik))
+    try:
+        instrument_ids = set(_resolve_siblings(conn, instrument_id=resolved_instrument_id, issuer_cik=issuer_cik))
+    except ValueError:
+        # Garbage non-numeric CIK (siblings_for_issuer_cik fail-fast).
+        # Surface the DQ issue in the log but still refresh the rows we
+        # KNOW about — total failure would freeze them on the old parser,
+        # which is the exact bug this helper exists to fix (Codex ckpt-2).
+        logger.warning(
+            "def14a rewash: non-numeric issuer_cik=%r for accession=%s; "
+            "sibling resolution skipped, refreshing known comp instruments only",
+            issuer_cik,
+            raw_doc.accession_number,
+        )
+        instrument_ids = set()
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -719,6 +732,22 @@ def _rewash_exec_comp_all_instruments(
             issuer_cik=issuer_cik,
             instrument_id=iid,
         )
+
+    if total > 0:
+        # Belt-and-braces: comp.instrument_id is nullable by schema
+        # (CIK-resolved post-parse, mirror 097) and the per-instrument
+        # DELETE above can never reach a NULL-keyed row — it would
+        # survive every rewash and get version-pinned. Live population
+        # is 0 (dev full-pop check 2026-07-22), so this is a latent
+        # guard, not a data path (Codex ckpt-2).
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM def14a_exec_compensation
+                WHERE accession_number = %s AND instrument_id IS NULL
+                """,
+                (raw_doc.accession_number,),
+            )
     return total
 
 

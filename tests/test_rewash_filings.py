@@ -1051,8 +1051,9 @@ def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
     conn = ebull_test_conn
     resolved_id = 950_090
     sibling_id = 950_091
+    resolver_only_id = 950_092  # in the CIK sibling set, NO existing comp rows
     accession = "0001234567-26-000004"
-    for iid, sym in ((resolved_id, "D14SA"), (sibling_id, "D14SB")):
+    for iid, sym in ((resolved_id, "D14SA"), (sibling_id, "D14SB"), (resolver_only_id, "D14SC")):
         conn.execute(
             """
             INSERT INTO instruments (
@@ -1062,6 +1063,17 @@ def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
             """,
             (iid, sym),
         )
+    # The _resolve_siblings half of the union: resolver_only_id co-binds the
+    # issuer CIK in external_identifiers, proving a row-less current sibling
+    # gets comp written fresh (rewash converges to first-ingest fan-out).
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (
+            instrument_id, provider, identifier_type, identifier_value, is_primary
+        ) VALUES (%s, 'sec', 'cik', '0000999002', FALSE)
+        """,
+        (resolver_only_id,),
+    )
     # Happy-path resolution: holdings row under the RESOLVED instrument only.
     conn.execute(
         """
@@ -1072,8 +1084,10 @@ def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
         """,
         (resolved_id, accession),
     )
-    # Stale truncated-name comp rows under BOTH siblings (old-parser output).
-    for iid in (resolved_id, sibling_id):
+    # Stale truncated-name comp rows under BOTH siblings (old-parser output),
+    # plus a NULL-instrument legacy row the per-instrument DELETE can never
+    # reach — the post-rewash sweep must clear it.
+    for iid in (resolved_id, sibling_id, None):
         conn.execute(
             """
             INSERT INTO def14a_exec_compensation (
@@ -1148,10 +1162,13 @@ def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
             (accession,),
         )
         rows = cur.fetchall()
-    # BOTH siblings refreshed to the new parse; no stale 'Sundar' anywhere.
+    # ALL siblings refreshed to the new parse — including the row-less
+    # resolver-only sibling — and neither the stale 'Sundar' rows nor the
+    # NULL-instrument legacy row survive.
     assert rows == [
         (resolved_id, "Sundar Pichai"),
         (sibling_id, "Sundar Pichai"),
+        (resolver_only_id, "Sundar Pichai"),
     ]
 
 
