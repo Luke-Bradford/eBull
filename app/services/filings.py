@@ -49,6 +49,7 @@ from app.services.bootstrap_state import (
     set_stage_processed,
 )
 from app.services.filings_risk import score_filing_red_flag
+from app.services.sec_identity import siblings_for_issuer_cik
 
 logger = logging.getLogger(__name__)
 
@@ -156,28 +157,26 @@ def _ownership_filing_event_write_allowed(
         return True
     row = conn.execute(
         """
-        SELECT 1
-        FROM insider_filings f
-        WHERE f.accession_number = %(acc)s
-          AND f.is_tombstone = FALSE
-          AND f.issuer_cik IS NOT NULL
-          AND EXISTS (
-              SELECT 1 FROM external_identifiers ei
-              WHERE ei.provider = 'sec'
-                AND ei.identifier_type = 'cik'
-                AND ei.identifier_value = lpad(btrim(f.issuer_cik), 10, '0')
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM external_identifiers ei2
-              WHERE ei2.provider = 'sec'
-                AND ei2.identifier_type = 'cik'
-                AND ei2.identifier_value = lpad(btrim(f.issuer_cik), 10, '0')
-                AND ei2.instrument_id = %(iid)s
-          )
+        SELECT issuer_cik
+        FROM insider_filings
+        WHERE accession_number = %(acc)s
+          AND is_tombstone = FALSE
+          AND issuer_cik IS NOT NULL
         """,
-        {"acc": provider_filing_id, "iid": int(instrument_id)},
+        {"acc": provider_filing_id},
     ).fetchone()
-    return row is None
+    if row is None:
+        return True
+    # Membership check goes through the SAME production resolver routing
+    # uses (siblings_for_issuer_cik) so the guard and the router can never
+    # disagree on what counts as a sibling (PR #2109 review WARNING).
+    try:
+        siblings = siblings_for_issuer_cik(conn, str(row[0]))
+    except ValueError:
+        return True
+    if not siblings:
+        return True
+    return int(instrument_id) in siblings
 
 
 def reconcile_mislinked_ownership_filing_events(
