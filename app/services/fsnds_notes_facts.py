@@ -34,7 +34,7 @@ from typing import Any
 
 import psycopg
 
-from app.services.dimensional_facts import DimensionalFact
+from app.services.dimensional_facts import DimensionalFact, prettify_localname
 from app.services.fsds_class_shares import iter_fsds_num, read_fsds_sub
 from app.services.sec_identity import siblings_for_issuer_cik
 
@@ -61,18 +61,19 @@ DEFAULT_LABEL = "All award types"
 
 
 # Standard us-gaap award-type members whose scope is company-wide-for-that-
-# type by construction. A single NON-standard member (usually a plan name)
+# type by construction, mapped to fixed server-owned memo copy (a generic
+# ``label.lower()`` mangles acronym members — "…rights sars"; review
+# NITPICK on PR #2122). A single NON-standard member (usually a plan name)
 # has unknowable scope → abstain. Spec "Read rule".
-STANDARD_AWARD_MEMBERS: frozenset[str] = frozenset(
-    {
-        "RestrictedStockUnitsRSU",
-        "RestrictedStock",
-        "PerformanceShares",
-        "PhantomShareUnitsPhantomStockUnits",
-        "StockAppreciationRightsSARS",
-        "DeferredStockUnits",
-    }
-)
+_STANDARD_MEMBER_COPY: dict[str, str] = {
+    "RestrictedStockUnitsRSU": "unvested RSUs",
+    "RestrictedStock": "unvested restricted stock",
+    "PerformanceShares": "unvested performance shares",
+    "PhantomShareUnitsPhantomStockUnits": "unvested phantom share units",
+    "StockAppreciationRightsSARS": "unvested stock appreciation rights",
+    "DeferredStockUnits": "unvested deferred stock units",
+}
+STANDARD_AWARD_MEMBERS: frozenset[str] = frozenset(_STANDARD_MEMBER_COPY)
 
 _RSU_MEMBER = "RestrictedStockUnitsRSU"
 
@@ -102,10 +103,10 @@ def select_nonvested_memo(rows: list[tuple[str, str, Decimal]]) -> NonvestedMemo
         return NonvestedMemo(shares=default[1], label="unvested awards", member_qname=DEFAULT_MEMBER)
     members = {q: lv for q, lv in by_member.items() if q != DEFAULT_MEMBER}
     if len(members) == 1:
-        (qname, (label, val)) = next(iter(members.items()))
-        if qname in STANDARD_AWARD_MEMBERS:
-            memo_label = "unvested RSUs" if qname == _RSU_MEMBER else f"unvested {label.lower()}"
-            return NonvestedMemo(shares=val, label=memo_label, member_qname=qname)
+        (qname, (_label, val)) = next(iter(members.items()))
+        copy = _STANDARD_MEMBER_COPY.get(qname)
+        if copy is not None:
+            return NonvestedMemo(shares=val, label=copy, member_qname=qname)
         return None
     rsu = members.get(_RSU_MEMBER)
     if rsu is not None:
@@ -113,15 +114,9 @@ def select_nonvested_memo(rows: list[tuple[str, str, Decimal]]) -> NonvestedMemo
     return None
 
 
-def _prettify_member(localname: str) -> str:
-    """CamelCase → spaced words (no label linkbase in FSNDS); same quick
-    tier as the FSDS loader."""
-    out: list[str] = []
-    for i, ch in enumerate(localname):
-        if i > 0 and ch.isupper() and (localname[i - 1].islower() or localname[i - 1].isdigit()):
-            out.append(" ")
-        out.append(ch)
-    return "".join(out)
+# CamelCase → spaced-words quick-tier label, shared with the FSDS loader
+# (review NITPICK on PR #2122 — was duplicated verbatim).
+_prettify_member = prettify_localname
 
 
 def _parse_value(raw: str) -> Decimal | None:

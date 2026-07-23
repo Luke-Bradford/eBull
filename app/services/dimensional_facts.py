@@ -359,6 +359,20 @@ def prettify_member(member_qname: str) -> str:
     return _CAMEL_BOUNDARY.sub(" ", local).strip()
 
 
+def prettify_localname(localname: str) -> str:
+    """Quick-tier member label for the DERA TSV loaders (no label linkbase
+    in FSDS/FSNDS): split camelCase on lower/digit→upper boundaries.
+    ``SpecialtyDiagnostics`` → ``Specialty Diagnostics``; ``US`` → ``US``.
+    Shared by the FSDS bulk + FSNDS notes loaders (review NITPICK on
+    PR #2122 — was duplicated verbatim)."""
+    out: list[str] = []
+    for i, ch in enumerate(localname):
+        if i > 0 and ch.isupper() and (localname[i - 1].islower() or localname[i - 1].isdigit()):
+            out.append(" ")
+        out.append(ch)
+    return "".join(out)
+
+
 def _label_for(member_qname: str, labels: Mapping[str, str]) -> str:
     hit = labels.get(_member_fragment(member_qname)) if ":" in member_qname else None
     if hit:
