@@ -213,3 +213,18 @@ a jsonb feature is absent, `SELECT jsonb_pretty(col) … LIMIT 1` and check the
 actual container shape. (2026-07-16 #2012 session: a `[*]` probe on
 fair_value_band `basis_json.multiples` read shipped #2031 peer_ids provenance
 as missing — a `.*` re-probe found 448/553.)
+
+## Bounded NUMERIC columns need write-side saturation for unbounded ratios
+
+A ratio computed in Python (`diff / base`) is unbounded, but the column it
+lands in is not — `NUMERIC(10,4)` rejects anything ≥ 10^6 with
+`numeric field overflow`. A tiny denominator against a large numerator
+(parser-garbage share counts, 1-share proxy rows vs multi-million Form 4
+cumulatives) WILL eventually exceed any precision you pick, and the
+harness fixtures won't contain that row — only a full-population run
+finds it (#966: `drift_pct` overflowed on the dev seed run, 12-fixture
+harness green). Fix at the WRITE side: clamp to an explicit saturation
+sentinel (`min(ratio, SENTINEL)`) chosen so the consumer's thresholds
+still classify correctly, and document the sentinel where it's defined.
+Do not widen the column instead — the next pathological row outgrows
+that too, and a saturated sentinel is honest about "beyond measurable".
