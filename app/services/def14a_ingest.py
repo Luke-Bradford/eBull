@@ -839,6 +839,38 @@ def apply_exec_comp_best_effort(
     return written
 
 
+def run_drift_detection_best_effort(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_ids: list[int],
+    accession_number: str,
+) -> None:
+    """Re-run the DEF 14A vs Form 4 drift detector for the instruments a
+    filing just wrote (#966). Mirrors ``apply_exec_comp_best_effort``:
+    SAVEPOINT-isolated + best-effort — a drift failure rolls back drift
+    ONLY and never poisons the caller's connection or aborts the
+    already-applied Item 403 holdings write (#1700 per-section failure
+    isolation). Drift is a coverage-integrity augment, never a gate on
+    the holdings outcome.
+    """
+    from app.services.def14a_drift import detect_drift
+
+    try:
+        with conn.transaction():
+            for instrument_id in instrument_ids:
+                report = detect_drift(conn, instrument_id=instrument_id)
+                if report.alerts_emitted:
+                    logger.info(
+                        "def14a drift: instrument_id=%d accession=%s alerts=%d by_severity=%s",
+                        instrument_id,
+                        accession_number,
+                        report.alerts_emitted,
+                        report.alerts_by_severity,
+                    )
+    except Exception:  # noqa: BLE001 — best-effort augment; never propagate
+        logger.exception("def14a drift: detector raised accession=%s", accession_number)
+
+
 # ---------------------------------------------------------------------------
 # Per-accession driver
 # ---------------------------------------------------------------------------
@@ -1016,6 +1048,15 @@ def _ingest_single_accession(
         body=body,
         instrument_ids=siblings,
     )
+
+    # DEF 14A vs Form 4 drift re-check (#966). Best-effort, same isolation
+    # contract as exec-comp above.
+    if parsed.rows:
+        run_drift_detection_best_effort(
+            conn,
+            instrument_ids=siblings,
+            accession_number=ref.accession_number,
+        )
 
     return _AccessionOutcome(
         status="success",

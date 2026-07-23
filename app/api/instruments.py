@@ -4772,6 +4772,17 @@ class _BannerModel(BaseModel):
     body: str
 
 
+class _Def14ADriftModel(BaseModel):
+    """DEF 14A vs Form 4 drift chip (#966). Present only when the
+    instrument has warning/critical drift alerts. ``chip`` is
+    server-owned copy the FE renders verbatim."""
+
+    worst_severity: Literal["warning", "critical"]
+    alert_count: int
+    chip: str
+    holders: list[str]
+
+
 class _HistoricalSymbolModel(BaseModel):
     symbol: str
     effective_from: date
@@ -4904,6 +4915,10 @@ class OwnershipRollupResponse(BaseModel):
     # on the no_data path / when no comparison figure is on file. Default so older
     # callers/tests need no change.
     denominator_cross_check: _DenominatorCrossCheckModel = Field(default_factory=_DenominatorCrossCheckModel)
+    # DEF 14A vs Form 4 drift chip (#966). Null when the instrument has no
+    # warning/critical drift alerts. Present on the no_data path too — the
+    # coverage-integrity signal is denominator-independent.
+    def14a_drift: _Def14ADriftModel | None = None
     computed_at: datetime
 
 
@@ -5015,6 +5030,16 @@ def _rollup_to_response(
             variant=rollup.banner.variant,
             headline=rollup.banner.headline,
             body=rollup.banner.body,
+        ),
+        def14a_drift=(
+            _Def14ADriftModel(
+                worst_severity=rollup.def14a_drift.worst_severity,
+                alert_count=rollup.def14a_drift.alert_count,
+                chip=rollup.def14a_drift.chip,
+                holders=list(rollup.def14a_drift.holders),
+            )
+            if rollup.def14a_drift is not None
+            else None
         ),
         historical_symbols=[
             _HistoricalSymbolModel(

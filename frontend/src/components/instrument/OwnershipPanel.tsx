@@ -38,6 +38,7 @@ import { useNavigate } from "react-router-dom";
 
 import { fetchOwnershipRollup } from "@/api/ownership";
 import type {
+  OwnershipDef14ADrift,
   OwnershipRollupResponse,
   OwnershipSlice,
   OwnershipSliceCategory,
@@ -230,6 +231,9 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
     return (
       <div className="flex flex-col gap-3">
         <OwnershipCoverageBanner banner={rollup.banner} />
+        {/* Drift is denominator-independent (#966) — keep the chip
+            visible even when the rollup itself is degraded. */}
+        <Def14ADriftChip drift={rollup.def14a_drift ?? null} />
         <HistoricalSymbolCallout
           currentSymbol={rollup.symbol}
           historicalSymbols={rollup.historical_symbols}
@@ -252,6 +256,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
     return (
       <div className="flex flex-col gap-3">
         <OwnershipCoverageBanner banner={rollup.banner} />
+        <Def14ADriftChip drift={rollup.def14a_drift ?? null} />
         <HistoricalSymbolCallout
           currentSymbol={rollup.symbol}
           historicalSymbols={rollup.historical_symbols}
@@ -272,6 +277,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
         historicalSymbols={rollup.historical_symbols}
       />
       <ConcentrationChip rollup={rollup} />
+      <Def14ADriftChip drift={rollup.def14a_drift ?? null} />
       {rollup.dual_class_denominator !== null && (
         <DualClassDenominatorCallout note={rollup.dual_class_denominator.note} />
       )}
@@ -333,6 +339,35 @@ function ConcentrationChip({ rollup }: ConcentrationChipProps): JSX.Element {
     <p className="text-xs text-slate-500 dark:text-slate-400" data-test="concentration-chip">
       {rollup.concentration.info_chip}
     </p>
+  );
+}
+
+function Def14ADriftChip({
+  drift,
+}: {
+  readonly drift: OwnershipDef14ADrift | null;
+}): JSX.Element | null {
+  // #966 — DEF 14A vs Form 4 drift. Server-owned copy; no client-side
+  // threshold logic (operator-ui convention). Amber = warning, red =
+  // critical (color semantics table).
+  if (drift === null) {
+    return null;
+  }
+  const palette =
+    drift.worst_severity === "critical"
+      ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-200"
+      : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-200";
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 text-xs ${palette}`}
+      role="status"
+      data-test="def14a-drift-chip"
+    >
+      {drift.chip}
+      {drift.holders.length > 0 && (
+        <span className="opacity-80"> Worst: {drift.holders.join(", ")}.</span>
+      )}
+    </div>
   );
 }
 

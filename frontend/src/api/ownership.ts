@@ -222,6 +222,17 @@ export interface OwnershipBanner {
   readonly body: string;
 }
 
+/** DEF 14A vs Form 4 drift chip (#966). Present only when the
+ *  instrument has warning/critical drift alerts. ``chip`` is
+ *  server-owned copy rendered verbatim — no client-side threshold
+ *  logic. */
+export interface OwnershipDef14ADrift {
+  readonly worst_severity: 'warning' | 'critical';
+  readonly alert_count: number;
+  readonly chip: string;
+  readonly holders: readonly string[];
+}
+
 /** One row of ``instrument_symbol_history``, oldest-first. Frontend
  *  renders a "Filed as X" callout when the chain includes any symbol
  *  other than the current one (Batch 7 of #788). */
@@ -384,6 +395,10 @@ export interface OwnershipRollupResponse {
   readonly sanity?: OwnershipSanityChecks;
   /** Independent denominator tie-out (#1647 part 5). Optional for back-compat. */
   readonly denominator_cross_check?: OwnershipDenominatorCrossCheck;
+  /** DEF 14A vs Form 4 drift chip (#966). Null when no warning/critical
+   *  drift alerts; present on the no_data path too (denominator-
+   *  independent). Optional for back-compat. */
+  readonly def14a_drift?: OwnershipDef14ADrift | null;
   readonly computed_at: string;
 }
 
