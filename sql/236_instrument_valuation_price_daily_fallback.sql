@@ -52,26 +52,47 @@ WITH dual_class AS (
       AND ei.identifier_type = 'cik'
       AND ei.is_primary = TRUE
 ),
-priced AS (
+priced AS NOT MATERIALIZED (
     -- #1857: freshest price wins. The quote is used iff it is at least
-    -- as recent (by date) as the latest strictly-positive daily close —
-    -- a stale snapshot quote must not shadow a fresher close. The
-    -- strictly-positive close filter mirrors compute_day_change's rule
-    -- (a non-positive close is a sentinel, not a price). The as-of
-    -- stamp pairs with the price actually used.
+    -- as recent (by UTC date — the ::date cast is pinned so a session
+    -- timezone cannot flip the winner near midnight) as the latest
+    -- strictly-positive daily close — a stale snapshot quote must not
+    -- shadow a fresher close. The strictly-positive close filter mirrors
+    -- compute_day_change's rule (a non-positive close is a sentinel, not
+    -- a price). The as-of stamp pairs with the price actually used.
+    --
+    -- Shape: driving id-set (both sources' instrument ids, index-only
+    -- scans) + LEFT JOIN quotes + LEFT JOIN LATERAL latest-close. NOT a
+    -- FULL OUTER JOIN over a global DISTINCT ON — that shape rescanned
+    -- and sorted all of price_daily (~5M rows) on EVERY per-instrument
+    -- view query (Codex ckpt-2: 1.7s/instrument × ~3,900 = ~2h per
+    -- compute_rankings run). The LATERAL is a per-id backward index
+    -- scan on the (instrument_id, price_date) PK, and an instrument_id
+    -- predicate pushes into both UNION branches. NOT MATERIALIZED is
+    -- load-bearing: priced is referenced by BOTH pipelines, so PG would
+    -- otherwise materialize the CTE and the per-instrument predicate
+    -- could not reach inside it (EXPLAIN showed the full 3M-tuple merge
+    -- on every WHERE instrument_id query).
     SELECT
-        instrument_id,
+        ids.instrument_id,
         CASE WHEN q.price IS NOT NULL
-                  AND (pd.price_date IS NULL OR q.quoted_at::date >= pd.price_date)
+                  AND (pd.price_date IS NULL
+                       OR (q.quoted_at AT TIME ZONE 'UTC')::date >= pd.price_date)
              THEN q.price
              ELSE pd.close
         END AS price,
         CASE WHEN q.price IS NOT NULL
-                  AND (pd.price_date IS NULL OR q.quoted_at::date >= pd.price_date)
+                  AND (pd.price_date IS NULL
+                       OR (q.quoted_at AT TIME ZONE 'UTC')::date >= pd.price_date)
              THEN q.quoted_at
              ELSE pd.price_date::timestamptz
         END AS quoted_at
     FROM (
+        SELECT instrument_id FROM quotes
+        UNION
+        SELECT instrument_id FROM price_daily
+    ) ids
+    LEFT JOIN (
         SELECT instrument_id,
                COALESCE(
                    NULLIF(GREATEST(last, 0), 0),
@@ -79,16 +100,15 @@ priced AS (
                )                    AS price,
                quoted_at
         FROM quotes
-    ) q
-    FULL OUTER JOIN (
-        SELECT DISTINCT ON (instrument_id)
-               instrument_id,
-               close,
-               price_date
-        FROM price_daily
-        WHERE close > 0
-        ORDER BY instrument_id, price_date DESC
-    ) pd USING (instrument_id)
+    ) q USING (instrument_id)
+    LEFT JOIN LATERAL (
+        SELECT p.close, p.price_date
+        FROM price_daily p
+        WHERE p.instrument_id = ids.instrument_id
+          AND p.close > 0
+        ORDER BY p.price_date DESC
+        LIMIT 1
+    ) pd ON TRUE
 ),
 new_pipeline AS (
     SELECT
@@ -184,7 +204,11 @@ new_pipeline AS (
     WHERE ttm.is_complete_ttm = TRUE
 ),
 legacy AS (
-    SELECT DISTINCT ON (fs.instrument_id)
+    -- LATERAL latest-snapshot rather than DISTINCT ON: a DISTINCT ON
+    -- subquery is not qual-pushdown-safe, which forced the per-instrument
+    -- view query to evaluate this branch's inlined ``priced`` copy over
+    -- the whole table (#1857 ckpt-2 perf finding).
+    SELECT
         p.instrument_id,
         p.price,
         p.quoted_at,
@@ -236,13 +260,18 @@ legacy AS (
         NULL::numeric AS ebitda_ttm,
         fs.fcf AS fcf_ttm
     FROM priced p
-    JOIN fundamentals_snapshot fs USING (instrument_id)
+    JOIN LATERAL (
+        SELECT *
+        FROM fundamentals_snapshot fs0
+        WHERE fs0.instrument_id = p.instrument_id
+        ORDER BY fs0.as_of_date DESC
+        LIMIT 1
+    ) fs ON TRUE
     WHERE NOT EXISTS (
         SELECT 1 FROM financial_periods_ttm ttm
         WHERE ttm.instrument_id = p.instrument_id
           AND ttm.is_complete_ttm = TRUE
     )
-    ORDER BY fs.instrument_id, fs.as_of_date DESC
 )
 SELECT
     v.instrument_id,
