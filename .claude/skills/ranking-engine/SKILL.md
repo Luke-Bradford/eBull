@@ -1,6 +1,6 @@
 ---
 name: ranking-engine
-description: eBull deterministic scoring + ranking — the v1.3 model (families, penalties, Calmar reward, completeness), where it's stored and read, and the invariants it must preserve.
+description: eBull deterministic scoring + ranking — the v1.5 model (families, penalties, Calmar reward, completeness), where it's stored and read, and the invariants it must preserve.
 ---
 
 # ranking-engine
@@ -26,9 +26,11 @@ Eligibility (`compute_rankings`): `is_tradable = TRUE`, a `coverage` row with
 data}. No tier gate — T3 names are scored so the weekly coverage review can
 promote on deterministic signal alone.
 
-## The v1.3 model
+## The model (v1.5-balanced current)
 
-Default `model_version = "v1.3-balanced"`. `model_version` encodes the scoring
+Default `model_version = "v1.5-balanced"` (v1.4 #1857: value family priced off
+latest price_daily close; v1.5 #1939: FPI ADR/ADS cap-basis suppression).
+`model_version` encodes the scoring
 mode; `rank_delta` is only ever compared **within the same model_version**.
 
 **Six families** (weighted sum -> `raw_total` in [0,1]):
