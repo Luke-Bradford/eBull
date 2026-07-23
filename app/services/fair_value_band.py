@@ -326,6 +326,12 @@ def select_multiples(t: TargetInputs) -> list[str]:
     else:
         selected = []
 
+    if t.target_basis == "fpi_adr_unavailable":
+        # #1939: FPI ADR/ADS — even the per-share pe leg is wrong (per-ADS
+        # price vs per-ordinary-share EPS differ by the un-ingested ADS
+        # ratio). No multiple is basis-safe; the band goes absent rather
+        # than publishing an ordinary-share target as an ADS target.
+        return []
     if t.target_basis != "not_multiclass":
         selected = [m for m in selected if m == "pe"]
 
