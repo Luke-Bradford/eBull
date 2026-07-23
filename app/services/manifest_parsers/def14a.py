@@ -71,6 +71,7 @@ from app.services.def14a_ingest import (
     _upsert_holding,
     apply_exec_comp_best_effort,
     def14a_within_cap,
+    run_drift_detection_best_effort,
 )
 from app.services.ownership_observations import (
     refresh_def14a_current,
@@ -509,6 +510,14 @@ def _parse_def14a(
         issuer_cik=issuer_cik,
         body=body,
         instrument_ids=siblings,
+    )
+
+    # DEF 14A vs Form 4 drift re-check (#966). Same best-effort contract as
+    # exec-comp above — never changes the ParseOutcome.
+    run_drift_detection_best_effort(
+        conn,
+        instrument_ids=siblings,
+        accession_number=accession,
     )
 
     return ParseOutcome(

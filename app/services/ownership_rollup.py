@@ -317,6 +317,26 @@ class ConcentrationInfo:
 
 
 @dataclass(frozen=True)
+class Def14ADriftInfo:
+    """DEF 14A vs Form 4 cumulative drift summary for the chip (#966).
+
+    Built from ``def14a_drift_alerts`` (written by
+    ``def14a_drift.detect_drift`` at the ingest/rewash/weekly loci) —
+    a read-only summary, never a detector invocation. ``info``-severity
+    alerts (unmatched proxy names) are EXCLUDED: that population is
+    already visible as the ``def14a_unmatched`` slice, and a chip
+    restating it would double-signal. Drift is a COVERAGE-INTEGRITY
+    signal (missed/late Form 4s, ingest gap) — never a holdings
+    correction (Item 403 vs Section 16(a) restate the same shares;
+    prevention-log #1851/#1852)."""
+
+    worst_severity: Literal["warning", "critical"]
+    alert_count: int
+    chip: str
+    holders: tuple[str, ...]  # top 3 holder names by |drift_pct| DESC
+
+
+@dataclass(frozen=True)
 class SanityChecks:
     """Raw plausibility facts over the pie-wedge slices (#1647 part 4).
 
@@ -546,6 +566,12 @@ class OwnershipRollup:
     # default_factory is only the safety net for CSV-test fixtures, mirroring how
     # ``sanity`` was added (Codex ckpt-1 LOW — no silent default masking a wiring miss).
     denominator_cross_check: DenominatorCrossCheck = field(default_factory=DenominatorCrossCheck.unavailable)
+    # DEF 14A vs Form 4 drift chip (#966). None when the instrument has no
+    # warning/critical drift alerts. Carried through BOTH the main assembly
+    # and ``no_data`` — a coverage-integrity signal must not vanish exactly
+    # when the rollup is otherwise degraded. Last field with a default so
+    # existing constructors need no change.
+    def14a_drift: Def14ADriftInfo | None = None
 
     @classmethod
     def no_data(
@@ -556,6 +582,7 @@ class OwnershipRollup:
         *,
         reason: NoDataReason = "absent",
         stale_as_of: date | None = None,
+        def14a_drift: Def14ADriftInfo | None = None,
     ) -> OwnershipRollup:
         """Empty payload for the ``no_data`` state. 200 OK with the error
         banner, not 503 — the frontend renders a uniform empty state
@@ -618,6 +645,7 @@ class OwnershipRollup:
             corrections_applied=(),
             denominator_cross_check=DenominatorCrossCheck.unavailable(),
             computed_at=datetime.now(tz=UTC),
+            def14a_drift=def14a_drift,
         )
 
 
@@ -1089,6 +1117,47 @@ def _read_def14a_unmatched_from_current(conn: psycopg.Connection[Any], instrumen
             (instrument_id,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def _read_def14a_drift(conn: psycopg.Connection[Any], instrument_id: int) -> Def14ADriftInfo | None:
+    """Summarise this instrument's warning/critical drift alerts for the
+    chip (#966). Read-only over ``def14a_drift_alerts`` (the detector
+    runs at the write loci, never here). ``info`` severity excluded —
+    unmatched-name noise already renders as the ``def14a_unmatched``
+    slice. Returns None when no warning/critical alerts exist.
+
+    Uses the existing ``(instrument_id, detected_at)`` index for the
+    instrument scope; the residual severity filter walks that
+    instrument's handful of alert rows.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT holder_name, severity, drift_pct
+            FROM def14a_drift_alerts
+            WHERE instrument_id = %(iid)s
+              AND severity IN ('warning', 'critical')
+            ORDER BY drift_pct DESC NULLS LAST, holder_name
+            """,
+            {"iid": instrument_id},
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    worst: Literal["warning", "critical"] = "critical" if any(r["severity"] == "critical" for r in rows) else "warning"
+    n = len(rows)
+    holders_phrase = f"{n} holder diverges" if n == 1 else f"{n} holders diverge"
+    chip = (
+        f"Proxy vs insider-stream drift: {holders_phrase} ≥5% between the "
+        f"DEF 14A table and Form 4 cumulative positions — possible missed "
+        f"or unreported insider filings."
+    )
+    return Def14ADriftInfo(
+        worst_severity=worst,
+        alert_count=n,
+        chip=chip,
+        holders=tuple(str(r["holder_name"]) for r in rows[:3]),
+    )
 
 
 def _enrich_and_union_def14a(
@@ -3551,11 +3620,16 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     """
     outstanding, outstanding_as_of, outstanding_source = _read_shares_outstanding(conn, instrument_id)
     historical_symbols = tuple(historical_symbols_for(conn, instrument_id))
+    # Drift chip (#966) is denominator-independent — read it BEFORE the
+    # no_data short-circuits so a coverage-integrity signal doesn't vanish
+    # exactly when the rollup is otherwise degraded.
+    def14a_drift = _read_def14a_drift(conn, instrument_id)
     if outstanding is None or outstanding <= 0:
         return OwnershipRollup.no_data(
             symbol=symbol,
             instrument_id=instrument_id,
             historical_symbols=historical_symbols,
+            def14a_drift=def14a_drift,
         )
     # A denominator many years stale produces nonsense percentages — a
     # single 13F holding renders >100% of "outstanding" (BRK.B: 124% off a
@@ -3568,6 +3642,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
             historical_symbols=historical_symbols,
             reason="stale_denominator",
             stale_as_of=outstanding_as_of,
+            def14a_drift=def14a_drift,
         )
     treasury, treasury_as_of = _read_treasury_from_current(conn, instrument_id)
     sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)
@@ -3748,6 +3823,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         sanity=sanity,
         denominator_cross_check=denominator_cross_check,
         computed_at=datetime.now(tz=UTC),
+        def14a_drift=def14a_drift,
     )
 
 

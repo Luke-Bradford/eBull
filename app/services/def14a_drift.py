@@ -183,7 +183,12 @@ def _compute_drift_pct(
             return None
         return Decimal("999")
     diff = abs(def14a_shares - form4_cumulative)
-    return diff / def14a_shares
+    # Saturate at the same 999 sentinel: a tiny DEF 14A figure against a
+    # large Form 4 cumulative can push the ratio past NUMERIC(10,4)'s
+    # 10^6 ceiling (#966 full-population seed run overflowed on dev).
+    # Any drift this side of 25% is critical regardless — the magnitude
+    # beyond the sentinel carries no additional signal.
+    return min(diff / def14a_shares, Decimal("999"))
 
 
 _normalise_name = normalise_name
@@ -217,18 +222,63 @@ def _delete_alert(
     )
 
 
+def _purge_superseded_alerts(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    holder_name: str,
+    keep_accession: str,
+) -> None:
+    """Delete alert rows for this (instrument, holder) from accessions
+    OTHER than the latest one (#966 Codex ckpt-1 HIGH). The detector
+    only evaluates the latest accession per holder, so rows minted from
+    superseded accessions would otherwise linger forever and leak into
+    any severity-scoped read. Idempotent.
+    """
+    conn.execute(
+        """
+        DELETE FROM def14a_drift_alerts
+        WHERE instrument_id = %(iid)s
+          AND holder_name = %(name)s
+          AND accession_number <> %(keep)s
+        """,
+        {"iid": instrument_id, "name": holder_name, "keep": keep_accession},
+    )
+
+
 def _upsert_alert(conn: psycopg.Connection[tuple], alert: DriftAlert) -> None:
-    """Idempotent INSERT — refreshes ``detected_at`` on conflict."""
+    """Idempotent INSERT — refreshes ``detected_at`` on conflict.
+
+    Guarded (#966 Codex ckpt-2 MED): the INSERT is conditional on the
+    alert's accession still being the holder's LATEST row in
+    ``def14a_beneficial_holdings`` at write time. Two detectors
+    processing different accessions of the same issuer serialize per
+    accession only — without the guard, a detector that read before a
+    newer accession landed could re-mint a stale alert after the newer
+    run's purge. With it, the stale write is a no-op in either commit
+    order. The subquery mirrors ``_select_latest_def14a_holders``'s
+    ordering exactly.
+    """
     conn.execute(
         """
         INSERT INTO def14a_drift_alerts (
             instrument_id, holder_name, matched_filer_cik,
             def14a_shares, form4_cumulative, drift_pct,
             severity, accession_number, as_of_date
-        ) VALUES (
+        )
+        SELECT
             %(iid)s, %(name)s, %(cik)s,
             %(def14a)s, %(form4)s, %(drift)s,
             %(severity)s, %(accession)s, %(as_of)s
+        WHERE %(accession)s = (
+            SELECT h.accession_number
+            FROM def14a_beneficial_holdings h
+            WHERE h.instrument_id = %(iid)s
+              AND h.holder_name = %(name)s
+              AND h.issuer_cik <> 'CIK-MISSING'
+              AND h.shares IS NOT NULL
+            ORDER BY h.as_of_date DESC NULLS LAST, h.accession_number DESC
+            LIMIT 1
         )
         ON CONFLICT (instrument_id, holder_name, accession_number) DO UPDATE SET
             matched_filer_cik = EXCLUDED.matched_filer_cik,
@@ -326,6 +376,16 @@ def detect_drift(
         accession = str(row["accession_number"])
         as_of: date | None = row["as_of_date"]
 
+        # Purge alert rows minted from superseded accessions BEFORE the
+        # clear/upsert branch so every run converges the table to
+        # latest-accession-only rows (#966).
+        _purge_superseded_alerts(
+            conn,
+            instrument_id=iid,
+            holder_name=holder_name,
+            keep_accession=accession,
+        )
+
         matched, matched_cik, form4_cumulative = _resolve_holder_match(conn, instrument_id=iid, holder_name=holder_name)
 
         drift_pct = _compute_drift_pct(def14a_shares=def14a_shares, form4_cumulative=form4_cumulative)
@@ -361,6 +421,27 @@ def detect_drift(
         )
         alerts_emitted += 1
         by_severity[severity] += 1
+
+    # Orphan purge (#966 Codex ckpt-2 HIGH): a rewash DELETE+re-INSERT
+    # can rename or drop a holder from def14a_beneficial_holdings
+    # entirely — that holder is then never returned by
+    # _select_latest_def14a_holders, so their alert row would linger
+    # forever. Delete alerts whose (instrument, holder) no longer exists
+    # in the typed table at all. Scoped to the run's instrument filter.
+    conn.execute(
+        """
+        DELETE FROM def14a_drift_alerts a
+        WHERE (%(iid)s::BIGINT IS NULL OR a.instrument_id = %(iid)s::BIGINT)
+          AND NOT EXISTS (
+            SELECT 1 FROM def14a_beneficial_holdings h
+            WHERE h.instrument_id = a.instrument_id
+              AND h.holder_name = a.holder_name
+              AND h.issuer_cik <> %(sentinel)s
+              AND h.shares IS NOT NULL
+          )
+        """,
+        {"iid": instrument_id, "sentinel": _CIK_MISSING_SENTINEL},
+    )
 
     return DriftReport(
         holders_evaluated=holders_evaluated,

@@ -5611,22 +5611,31 @@ def ownership_observations_backfill() -> None:
     sweep), which only refreshes ``_current`` and assumes
     ``_observations`` is already populated.
     """
+    from app.services.def14a_drift import detect_drift
     from app.services.ownership_observations_sync import sync_all
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_BACKFILL) as tracker:
         with connect_job() as conn:
             result = sync_all(conn)
+            # Weekly global DEF 14A vs Form 4 drift repair (#966) — the
+            # convergence net behind the three per-filing hooks. Same
+            # connection/txn as the sync so a drift failure rolls back
+            # with the batch rather than half-applying.
+            drift = detect_drift(conn)
 
         tracker.row_count = result.total_observations_recorded
         logger.info(
             "ownership_observations_backfill: total_observations=%d "
-            "insiders=%d institutions=%d blockholders=%d treasury=%d def14a=%d",
+            "insiders=%d institutions=%d blockholders=%d treasury=%d def14a=%d "
+            "drift_holders=%d drift_alerts=%d",
             result.total_observations_recorded,
             result.insiders.observations_recorded,
             result.institutions.observations_recorded,
             result.blockholders.observations_recorded,
             result.treasury.observations_recorded,
             result.def14a.observations_recorded,
+            drift.holders_evaluated,
+            drift.alerts_emitted,
         )
 
 

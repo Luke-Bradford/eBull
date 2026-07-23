@@ -655,6 +655,18 @@ def _apply_def14a(
         issuer_cik=str(issuer_cik),
         resolved_instrument_id=int(instrument_id),
     )
+
+    # DEF 14A vs Form 4 drift re-check (#966). Rewash is the third
+    # direct writer of def14a_beneficial_holdings (#817) — it does NOT
+    # go through the manifest parser, so hook here explicitly. Same
+    # best-effort contract; never changes the rewash outcome.
+    from app.services.def14a_ingest import run_drift_detection_best_effort
+
+    run_drift_detection_best_effort(
+        conn,
+        instrument_ids=[int(instrument_id)],
+        accession_number=raw_doc.accession_number,
+    )
     return True
 
 
