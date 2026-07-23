@@ -75,18 +75,8 @@ priced AS NOT MATERIALIZED (
     -- on every WHERE instrument_id query).
     SELECT
         ids.instrument_id,
-        CASE WHEN q.price IS NOT NULL
-                  AND (pd.price_date IS NULL
-                       OR (q.quoted_at AT TIME ZONE 'UTC')::date >= pd.price_date)
-             THEN q.price
-             ELSE pd.close
-        END AS price,
-        CASE WHEN q.price IS NOT NULL
-                  AND (pd.price_date IS NULL
-                       OR (q.quoted_at AT TIME ZONE 'UTC')::date >= pd.price_date)
-             THEN q.quoted_at
-             ELSE pd.price_date::timestamptz
-        END AS quoted_at
+        CASE WHEN w.use_quote THEN q.price     ELSE pd.close                    END AS price,
+        CASE WHEN w.use_quote THEN q.quoted_at ELSE pd.price_date::timestamptz  END AS quoted_at
     FROM (
         SELECT instrument_id FROM quotes
         UNION
@@ -109,6 +99,14 @@ priced AS NOT MATERIALIZED (
         ORDER BY p.price_date DESC
         LIMIT 1
     ) pd ON TRUE
+    -- Single source of truth for the recency verdict — referenced by both
+    -- CASE columns above so the price and its as-of stamp cannot drift.
+    CROSS JOIN LATERAL (
+        SELECT q.price IS NOT NULL
+               AND (pd.price_date IS NULL
+                    OR (q.quoted_at AT TIME ZONE 'UTC')::date >= pd.price_date)
+               AS use_quote
+    ) w
 ),
 new_pipeline AS (
     SELECT
