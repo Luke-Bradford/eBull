@@ -122,7 +122,10 @@ _prettify_member = prettify_localname
 def _parse_value(raw: str) -> Decimal | None:
     try:
         return Decimal(raw)
-    except InvalidOperation, ValueError, TypeError:
+    except InvalidOperation:
+        # raw is always a str here (TSV field) — Decimal(str) raises only
+        # InvalidOperation (review NITPICK round 4: ValueError/TypeError
+        # were dead branches).
         return None
 
 

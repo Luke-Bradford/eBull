@@ -1196,7 +1196,7 @@ def _read_nonvested_awards(
             WITH winner AS (
                 SELECT f.source_accession
                   FROM instrument_dimensional_facts f
-                 WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type'
+                 WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
                  ORDER BY f.filed_at DESC, f.source_accession DESC
                  LIMIT 1
             ),
@@ -1204,14 +1204,14 @@ def _read_nonvested_awards(
                 SELECT MAX(f.period_end) AS period_end
                   FROM instrument_dimensional_facts f
                   JOIN winner w ON w.source_accession = f.source_accession
-                 WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type'
+                 WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
             )
             SELECT f.member_qname, f.member_label, f.val,
                    f.period_end, f.source_accession
               FROM instrument_dimensional_facts f
               JOIN winner w ON w.source_accession = f.source_accession
               JOIN latest l ON l.period_end = f.period_end
-             WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type'
+             WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
             """,
             {"iid": instrument_id},
         )
