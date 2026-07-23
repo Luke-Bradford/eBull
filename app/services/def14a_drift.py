@@ -222,27 +222,44 @@ def _delete_alert(
     )
 
 
-def _purge_superseded_alerts(
+def _reconcile_alert_rows(
     conn: psycopg.Connection[tuple],
     *,
-    instrument_id: int,
-    holder_name: str,
-    keep_accession: str,
+    instrument_id: int | None,
 ) -> None:
-    """Delete alert rows for this (instrument, holder) from accessions
-    OTHER than the latest one (#966 Codex ckpt-1 HIGH). The detector
-    only evaluates the latest accession per holder, so rows minted from
-    superseded accessions would otherwise linger forever and leak into
-    any severity-scoped read. Idempotent.
+    """One set-based DELETE converging the alert table to
+    latest-accession-only rows for holders that still exist (#966).
+
+    Covers BOTH lingering classes in one statement (review WARNING on
+    the earlier per-holder DELETE-in-loop shape — 23k round trips per
+    global run):
+
+      * superseded accessions (Codex ckpt-1 HIGH) — the correlated
+        subquery returns the holder's latest accession and
+        ``IS DISTINCT FROM`` deletes rows minted from any other;
+      * vanished/renamed holders (Codex ckpt-2 HIGH) — a rewash
+        DELETE+re-INSERT can drop the holder from
+        ``def14a_beneficial_holdings`` entirely, the subquery returns
+        NULL, and ``IS DISTINCT FROM`` (NULL-safe) deletes the orphan.
+
+    Scoped to the run's instrument filter; idempotent.
     """
     conn.execute(
         """
-        DELETE FROM def14a_drift_alerts
-        WHERE instrument_id = %(iid)s
-          AND holder_name = %(name)s
-          AND accession_number <> %(keep)s
+        DELETE FROM def14a_drift_alerts a
+        WHERE (%(iid)s::BIGINT IS NULL OR a.instrument_id = %(iid)s::BIGINT)
+          AND a.accession_number IS DISTINCT FROM (
+            SELECT h.accession_number
+            FROM def14a_beneficial_holdings h
+            WHERE h.instrument_id = a.instrument_id
+              AND h.holder_name = a.holder_name
+              AND h.issuer_cik <> %(sentinel)s
+              AND h.shares IS NOT NULL
+            ORDER BY h.as_of_date DESC NULLS LAST, h.accession_number DESC
+            LIMIT 1
+          )
         """,
-        {"iid": instrument_id, "name": holder_name, "keep": keep_accession},
+        {"iid": instrument_id, "sentinel": _CIK_MISSING_SENTINEL},
     )
 
 
@@ -376,16 +393,6 @@ def detect_drift(
         accession = str(row["accession_number"])
         as_of: date | None = row["as_of_date"]
 
-        # Purge alert rows minted from superseded accessions BEFORE the
-        # clear/upsert branch so every run converges the table to
-        # latest-accession-only rows (#966).
-        _purge_superseded_alerts(
-            conn,
-            instrument_id=iid,
-            holder_name=holder_name,
-            keep_accession=accession,
-        )
-
         matched, matched_cik, form4_cumulative = _resolve_holder_match(conn, instrument_id=iid, holder_name=holder_name)
 
         drift_pct = _compute_drift_pct(def14a_shares=def14a_shares, form4_cumulative=form4_cumulative)
@@ -422,26 +429,9 @@ def detect_drift(
         alerts_emitted += 1
         by_severity[severity] += 1
 
-    # Orphan purge (#966 Codex ckpt-2 HIGH): a rewash DELETE+re-INSERT
-    # can rename or drop a holder from def14a_beneficial_holdings
-    # entirely — that holder is then never returned by
-    # _select_latest_def14a_holders, so their alert row would linger
-    # forever. Delete alerts whose (instrument, holder) no longer exists
-    # in the typed table at all. Scoped to the run's instrument filter.
-    conn.execute(
-        """
-        DELETE FROM def14a_drift_alerts a
-        WHERE (%(iid)s::BIGINT IS NULL OR a.instrument_id = %(iid)s::BIGINT)
-          AND NOT EXISTS (
-            SELECT 1 FROM def14a_beneficial_holdings h
-            WHERE h.instrument_id = a.instrument_id
-              AND h.holder_name = a.holder_name
-              AND h.issuer_cik <> %(sentinel)s
-              AND h.shares IS NOT NULL
-          )
-        """,
-        {"iid": instrument_id, "sentinel": _CIK_MISSING_SENTINEL},
-    )
+    # Single set-based reconcile (superseded accessions + vanished
+    # holders) — see _reconcile_alert_rows.
+    _reconcile_alert_rows(conn, instrument_id=instrument_id)
 
     return DriftReport(
         holders_evaluated=holders_evaluated,
