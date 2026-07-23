@@ -6,8 +6,9 @@ operating margin, debt/equity, net margin), their cohort medians, and a peer
 set — entirely from EXISTING tables (no new ingest):
 
   * price-free factors from ``financial_periods_ttm`` (is_complete_ttm),
-  * ``pe_ratio`` from the ``instrument_valuation`` view (price-gated → thin on
-    dev; flagged ``dev_limited`` by the caller),
+  * ``pe_ratio`` from the ``instrument_valuation`` view (universe-wide since
+    sql/236 priced the view off the latest ``price_daily`` close, #1857;
+    thinness is governed by the ordinary coverage ratio like any factor),
   * ``revenue_growth_yoy`` from the two most recent canonical FY rows in
     ``financial_periods``, with a consecutive-year day-gap guard,
   * cohort medians via ``percentile_cont`` over the SIC cohort's complete-TTM set,
@@ -23,9 +24,10 @@ sql/221). Unlike the band (which goes comparator-absent under threshold),
 peer_comparison is a DISCLOSURE surface: under threshold it widens to SIC-2 and
 renders thin (``cohort_sic_level == 0``), never absent.
 
-Factor formulas MIRROR ``instrument_valuation`` (sql/201) — do not re-derive.
-The view's ~32-row ceiling is its live-price join; bypassed here by reading
-``financial_periods_ttm`` directly for the price-free factors.
+Factor formulas MIRROR ``instrument_valuation`` (sql/236) — do not re-derive.
+The price-free factors still read ``financial_periods_ttm`` directly (no view
+dependency for figures that need no price; the historical ~32-row live-price
+ceiling was lifted by sql/236's price_daily fallback).
 """
 
 from __future__ import annotations
@@ -100,9 +102,12 @@ FACTOR_BETTER_WHEN: dict[str, str] = {
     "debt_equity_ratio": "lower",
     "net_margin": "higher",
 }
-# pe_ratio is price-gated (instrument_valuation live-price join) → structurally
-# thin on dev regardless of how many sector members exist.
-DEV_LIMITED_FACTORS: frozenset[str] = frozenset({"pe_ratio"})
+# Empty since #1857 (sql/236): pe_ratio was structurally price-gated while
+# instrument_valuation joined only the live-quote snapshot; the price_daily
+# fallback lifted that, so its thinness is now governed by the ordinary
+# coverage-ratio test below. Kept as the hook for any future factor whose
+# source is structurally absent on dev.
+DEV_LIMITED_FACTORS: frozenset[str] = frozenset()
 
 # A factor is "thin" (greyed + ⚠ in the UI, its sector median read as noisy) when
 # it is either structurally dev-limited OR its sector coverage is below this

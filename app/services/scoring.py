@@ -44,15 +44,18 @@ from app.services.xbrl_derived_stats import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL_VERSION = "v1.3-balanced"
+_DEFAULT_MODEL_VERSION = "v1.4-balanced"
 
 # Model-version prefix gates (single source — the next version is a one-line add,
 # not a scattered string edit). TA-enhanced momentum applies from v1.1; the
 # realized-risk penalty from v1.2; both carry forward to v1.3 (which only ADDS the
 # Calmar reward on top — Codex ckpt-1 HIGH: v1.3 must inherit v1.2 behavior).
-_TA_MOMENTUM_PREFIXES: tuple[str, ...] = ("v1.1", "v1.2", "v1.3")
-_RISK_PENALTY_PREFIXES: tuple[str, ...] = ("v1.2", "v1.3")
-_CALMAR_REWARD_PREFIXES: tuple[str, ...] = ("v1.3",)
+# v1.4 inherits ALL v1.3 behavior — the bump marks the #1857 value-input change
+# (instrument_valuation priced off price_daily fallback, sql/236), not a
+# scoring-code change.
+_TA_MOMENTUM_PREFIXES: tuple[str, ...] = ("v1.1", "v1.2", "v1.3", "v1.4")
+_RISK_PENALTY_PREFIXES: tuple[str, ...] = ("v1.2", "v1.3", "v1.4")
+_CALMAR_REWARD_PREFIXES: tuple[str, ...] = ("v1.3", "v1.4")
 
 # ---------------------------------------------------------------------------
 # Weight modes  (must sum to 1.0)
@@ -159,6 +162,37 @@ _WEIGHT_MODES: dict[str, dict[str, float]] = {
         "turnaround": 0.05,
     },
     "v1.3-speculative": {
+        "turnaround": 0.30,
+        "value": 0.25,
+        "momentum": 0.15,
+        "confidence": 0.15,
+        "sentiment": 0.10,
+        "quality": 0.05,
+    },
+    # v1.4 — identical family weights to v1.3. The bump marks the #1857
+    # value-INPUT change (sql/236: instrument_valuation prices off the
+    # latest price_daily close when no live quote exists, so pe_ratio /
+    # fcf_yield populate for ~3,900 names instead of ~60 and the value
+    # family stops returning the 0.5 empty-components default for 97% of
+    # the universe). rank_delta only ever compares within a model_version,
+    # so v1.3 history stays internally consistent.
+    "v1.4-balanced": {
+        "quality": 0.25,
+        "value": 0.25,
+        "turnaround": 0.20,
+        "confidence": 0.15,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+    },
+    "v1.4-conservative": {
+        "quality": 0.35,
+        "value": 0.25,
+        "confidence": 0.20,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+        "turnaround": 0.05,
+    },
+    "v1.4-speculative": {
         "turnaround": 0.30,
         "value": 0.25,
         "momentum": 0.15,
