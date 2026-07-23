@@ -315,6 +315,9 @@ def refresh_drs_disclosures(
     """
     result = DrsRefreshResult()
     for cik in sorted(DRS_DISCLOSURE_CIKS):
+        siblings = siblings_for_issuer_cik(conn, cik)
+        if not siblings:
+            continue  # no resolved instruments — skip before the filings query
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -340,9 +343,6 @@ def refresh_drs_disclosures(
                 {"cik": cik, "since": since},
             )
             filings = cur.fetchall()
-        siblings = siblings_for_issuer_cik(conn, cik)
-        if not siblings:
-            continue
         for f in filings:
             result.filings_examined += 1
             try:
