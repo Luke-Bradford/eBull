@@ -327,7 +327,7 @@ class PeerFactor(BaseModel):
     instrument_value: float | None
     cohort_median: float | None
     cohort_n: int  # # cohort members with a non-null value for this factor
-    dev_limited: bool  # True when thin: price-gated (P/E) OR cohort coverage <20% (#1836)
+    dev_limited: bool  # True when thin: cohort coverage <20% (#1836; P/E price gate lifted by sql/236)
     better_when: Literal["higher", "lower"]
 
 
@@ -987,8 +987,9 @@ def get_instrument_peer_comparison(
     size-proximity peer set — all derived server-side from existing fundamentals
     (no new ingest). Cohort = SEC SIC walked 4→3→2 to the narrowest level with
     ``MIN_COHORT`` peers (``cohort_sic_level``; 0 = SIC-2 fallback, thin). A
-    factor is ``dev_limited`` (thin: greyed + ⚠) when price-gated (P/E) OR its
-    cohort coverage is <20% (#1836). 404 when the instrument has no SIC
+    factor is ``dev_limited`` (thin: greyed + ⚠) when its cohort coverage is
+    <20% (#1836; the P/E structural price gate was lifted by sql/236, #1857).
+    404 when the instrument has no SIC
     classification or no complete-TTM fundamentals. Policy lives in
     app/services/peer_comparison.py (``resolve_sic_level``, ``is_factor_thin``).
     """

@@ -53,9 +53,11 @@ def test_row_factors_maps_all_keys() -> None:
     assert f["net_margin"] is None
 
 
-def test_is_factor_thin_price_gated_always_thin() -> None:
-    # pe_ratio is structurally dev-limited regardless of coverage.
-    assert is_factor_thin("pe_ratio", cohort_n=1000, cohort_member_count=1000) is True
+def test_is_factor_thin_pe_ratio_governed_by_coverage() -> None:
+    # #1857 (sql/236): the structural price gate is lifted — pe_ratio follows
+    # the ordinary coverage-ratio test like any other factor.
+    assert is_factor_thin("pe_ratio", cohort_n=1000, cohort_member_count=1000) is False
+    assert is_factor_thin("pe_ratio", cohort_n=10, cohort_member_count=1000) is True
 
 
 def test_is_factor_thin_low_coverage_flagged() -> None:
