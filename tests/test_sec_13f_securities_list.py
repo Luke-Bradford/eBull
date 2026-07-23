@@ -205,7 +205,7 @@ class TestBackfillCusipCoverage:
             year=2025,
             quarter=4,
             today=date(2026, 5, 5),
-            fetch=lambda *_: payload,
+            fetch=lambda *_: (payload, "test://13flist"),
         )
 
         assert result.list_rows == 2
@@ -241,8 +241,12 @@ class TestBackfillCusipCoverage:
         conn.commit()
         payload = _line("037833100", "APPLE INC", "COM")
 
-        first = backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
-        second = backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+        first = backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (payload, "test://13flist")
+        )
+        second = backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (payload, "test://13flist")
+        )
 
         assert first.inserted == 1
         # Second run: the instrument is now mapped, so it's not in
@@ -270,7 +274,9 @@ class TestBackfillCusipCoverage:
         # Synthesise a backfill that matches Apple Hospitality REIT
         # to the same CUSIP (engineered ambiguity for test clarity).
         payload = _line("037833100", "APPLE HOSPITALITY REIT", "COM")
-        result = backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+        result = backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (payload, "test://13flist")
+        )
 
         assert result.tombstoned_conflict == 1
         assert result.inserted == 0
@@ -289,7 +295,9 @@ class TestBackfillCusipCoverage:
         _seed_instrument(conn, iid=914_030, symbol="WIDGET", company_name="Acme Widget Manufacturing Co")
         conn.commit()
         payload = _line("999999999", "ENTIRELY DIFFERENT NAME LLC", "COM")
-        result = backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+        result = backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (payload, "test://13flist")
+        )
         assert result.inserted == 0
         assert result.tombstoned_unresolvable >= 1
 
@@ -305,7 +313,9 @@ class TestBackfillCusipCoverage:
         # Two distinct CUSIPs, both normalise to "ALPHABET" after
         # share-class strip.
         payload = _line("02079K305", "ALPHABET INC", "CL A") + _line("02079K107", "ALPHABET INC", "CL C")
-        result = backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+        result = backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (payload, "test://13flist")
+        )
         assert result.tombstoned_ambiguous == 1
         assert result.inserted == 0
 
@@ -319,7 +329,9 @@ class TestBackfillCusipCoverage:
         _seed_instrument(conn, iid=914_060, symbol="DEL", company_name="Deleted Issuer Corp")
         conn.commit()
         payload = _line("999999999", "DELETED ISSUER CORP", "COM", status="E", per_row_flag="D")
-        result = backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+        result = backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (payload, "test://13flist")
+        )
         # 'D' status is a deleted row; backfill skips it as
         # unresolvable to avoid mapping to a stale CUSIP.
         assert result.inserted == 0
@@ -383,7 +395,9 @@ class TestBackfillCusipCoverage:
         conn.commit()
         payload = _line("037833100", "APPLE INC", "COM")
 
-        backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+        backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (payload, "test://13flist")
+        )
 
         with conn.cursor() as cur:
             cur.execute(
@@ -396,7 +410,10 @@ class TestBackfillCusipCoverage:
         assert rows[0][0] == 2025
         assert rows[0][1] == 4
         assert rows[0][2] == payload
-        assert "13flist2025q4.txt" in rows[0][3]
+        # #2118: source_url records the URL the fetch actually served
+        # (current-vs-legacy name differs by quarter), not a formatted
+        # constant.
+        assert rows[0][3] == "test://13flist"
 
     def test_raw_payload_upsert_idempotent(
         self,
@@ -411,8 +428,12 @@ class TestBackfillCusipCoverage:
         first = _line("037833100", "APPLE INC", "COM")
         second = _line("037833100", "APPLE INC", "COM NEW")
 
-        backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: first)
-        backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: second)
+        backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (first, "test://13flist")
+        )
+        backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (second, "test://13flist")
+        )
 
         with conn.cursor() as cur:
             cur.execute(
@@ -434,7 +455,9 @@ class TestBackfillCusipCoverage:
         _seed_instrument(conn, iid=914_100, symbol="AAPL", company_name="Apple Inc.")
         conn.commit()
         payload = _line("037833100", "APPLE INC", "COM") + _line("999999999", "DELETED CORP", "COM", per_row_flag="D")
-        result = backfill_cusip_coverage(conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: payload)
+        result = backfill_cusip_coverage(
+            conn, year=2025, quarter=4, today=date(2026, 5, 5), fetch=lambda *_: (payload, "test://13flist")
+        )
         # 2 raw rows, 1 after deleted-status filter; list_rows is RAW.
         assert result.list_rows == 2
 
@@ -449,9 +472,9 @@ class TestBackfillCusipCoverage:
         conn.commit()
         captured: dict[str, tuple[int, int]] = {}
 
-        def _fake(year: int, quarter: int) -> str:
+        def _fake(year: int, quarter: int) -> tuple[str, str]:
             captured["q"] = (year, quarter)
-            return _line("037833100", "APPLE INC", "COM")
+            return _line("037833100", "APPLE INC", "COM"), "test://13flist"
 
         backfill_cusip_coverage(conn, today=date(2026, 5, 5), fetch=_fake)
         # 2026-05-05 → most recent closed quarter is 2026 Q1.
@@ -566,3 +589,79 @@ class TestParseDateNPORT:
         ts = _parse_filing_date("25-FEB-2026")
         assert ts is not None
         assert ts.date().isoformat() == "2026-02-25"
+
+
+class TestFetchUrlFallback:
+    """#2118: SEC renamed the TXT to ``13flist{y}q{q}-txt.txt`` at
+    2026q2. Fetch must try the current name first, fall back to the
+    legacy name on 404, and re-raise when every candidate 404s."""
+
+    @staticmethod
+    def _fake_urlopen(responses: dict[str, str]):
+        import io
+        import urllib.error
+
+        def _opener(req, timeout=0):  # noqa: ANN001, ANN202
+            url = req.full_url
+            if url in responses:
+                # BytesIO is already a context manager, like the real
+                # http.client.HTTPResponse.
+                return io.BytesIO(responses[url].encode("latin-1"))
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)  # type: ignore[arg-type]
+
+        return _opener
+
+    def test_current_name_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import urllib.request
+
+        from app.services import sec_13f_securities_list as mod
+
+        current = "https://www.sec.gov/files/investment/13flist2026q2-txt.txt"
+        monkeypatch.setattr(urllib.request, "urlopen", self._fake_urlopen({current: "BODY-NEW"}))
+        payload, url = mod.fetch_13f_list_txt(2026, 2)
+        assert payload == "BODY-NEW"
+        assert url == current
+
+    def test_legacy_fallback_on_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import urllib.request
+
+        from app.services import sec_13f_securities_list as mod
+
+        legacy = "https://www.sec.gov/files/investment/13flist2025q4.txt"
+        monkeypatch.setattr(urllib.request, "urlopen", self._fake_urlopen({legacy: "BODY-OLD"}))
+        payload, url = mod.fetch_13f_list_txt(2025, 4)
+        assert payload == "BODY-OLD"
+        assert url == legacy
+
+    def test_all_404_reraises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import urllib.error
+        import urllib.request
+
+        from app.services import sec_13f_securities_list as mod
+
+        monkeypatch.setattr(urllib.request, "urlopen", self._fake_urlopen({}))
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            mod.fetch_13f_list_txt(2026, 3)
+        # The re-raised error is the LAST candidate's 404 (legacy name),
+        # so the operator log names the final URL tried.
+        assert exc_info.value.code == 404
+        assert exc_info.value.url == "https://www.sec.gov/files/investment/13flist2026q3.txt"
+
+    def test_non_404_http_error_raises_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import urllib.error
+        import urllib.request
+
+        from app.services import sec_13f_securities_list as mod
+
+        attempted: list[str] = []
+
+        def _opener(req, timeout=0):  # noqa: ANN001, ANN202
+            attempted.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", None, None)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(urllib.request, "urlopen", _opener)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            mod.fetch_13f_list_txt(2026, 2)
+        assert exc_info.value.code == 503
+        # Non-404 aborts immediately — no legacy-name fallback attempt.
+        assert attempted == ["https://www.sec.gov/files/investment/13flist2026q2-txt.txt"]

@@ -3,7 +3,10 @@
 The Official List is the canonical free regulated source for
 CUSIP↔issuer mapping for US-listed equities and ADRs. SEC publishes
 it quarterly as a fixed-width TXT under
-``https://www.sec.gov/files/investment/13flist{year}q{quarter}.txt``.
+``https://www.sec.gov/files/investment/13flist{year}q{quarter}-txt.txt``
+(renamed from ``13flist{year}q{quarter}.txt`` at 2026q2 — #2118; the
+fetcher tries the current name first and falls back to the legacy one
+for older quarters).
 
 Why this matters: eBull's settled "free regulated-source-only"
 posture (#532) means we cannot license CUSIPs from CGS. The eToro
@@ -52,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -74,7 +78,14 @@ from app.services.sec_13f_filer_directory import _last_completed_quarter
 logger = logging.getLogger(__name__)
 
 
-_LIST_URL = "https://www.sec.gov/files/investment/13flist{year}q{quarter}.txt"
+# SEC renamed the TXT at 2026q2 (#2118): the pre-rename name 404s for
+# 2026q2+. Try the current name first, fall back to the legacy name so
+# re-fetches of older quarters keep working. Same class as
+# prevention-log #1769 — SEC renames break pinned constants.
+_LIST_URL_PATTERNS = (
+    "https://www.sec.gov/files/investment/13flist{year}q{quarter}-txt.txt",
+    "https://www.sec.gov/files/investment/13flist{year}q{quarter}.txt",
+)
 
 # CUSIP shape: 9 alphanumeric. SEC uses CUSIP for US issuers and
 # CINS (CUSIP International Numbering System — same shape, alpha
@@ -109,16 +120,29 @@ class CusipCoverageBackfillResult:
     sweep: SweepReport
 
 
-def fetch_13f_list_txt(year: int, quarter: int) -> str:
-    """Fetch one quarterly Official List TXT. Raises on network or
-    decode failure — caller decides whether to retry or surface."""
-    url = _LIST_URL.format(year=year, quarter=quarter)
-    req = urllib.request.Request(url, headers={"User-Agent": settings.sec_user_agent})
-    with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 — fixed SEC URL
-        # SEC ships the list as ASCII; latin-1 decode is the safe
-        # fallback for the rare row with extended chars in issuer
-        # name (e.g. accented letters in foreign filer names).
-        return resp.read().decode("latin-1")
+def fetch_13f_list_txt(year: int, quarter: int) -> tuple[str, str]:
+    """Fetch one quarterly Official List TXT. Returns ``(payload,
+    source_url)`` — the URL that actually served the body, so the raw
+    store's audit trail stays honest across the #2118 rename. Tries the
+    current ``-txt.txt`` name first, falls back to the legacy name on
+    404; raises on network or decode failure (and re-raises the LAST
+    404 if every candidate misses) — caller decides whether to retry."""
+    last_err: urllib.error.HTTPError | None = None
+    for pattern in _LIST_URL_PATTERNS:
+        url = pattern.format(year=year, quarter=quarter)
+        req = urllib.request.Request(url, headers={"User-Agent": settings.sec_user_agent})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 — fixed SEC URL
+                # SEC ships the list as ASCII; latin-1 decode is the safe
+                # fallback for the rare row with extended chars in issuer
+                # name (e.g. accented letters in foreign filer names).
+                return resp.read().decode("latin-1"), url
+        except urllib.error.HTTPError as err:
+            if err.code != 404:
+                raise
+            last_err = err
+    assert last_err is not None  # loop body always runs: patterns is non-empty
+    raise last_err
 
 
 def _store_raw_list(
@@ -127,13 +151,16 @@ def _store_raw_list(
     year: int,
     quarter: int,
     payload: str,
+    source_url: str,
 ) -> None:
     """Persist the raw SEC TXT body to ``sec_reference_documents``
     BEFORE the parse step runs. Implements the eBull
     raw-payload-before-normalisation non-negotiable. Idempotent:
     re-fetching the same quarter overwrites the body and refreshes
-    ``fetched_at``. Codex / Claude review BLOCKING for #914."""
-    url = _LIST_URL.format(year=year, quarter=quarter)
+    ``fetched_at``. Codex / Claude review BLOCKING for #914.
+    ``source_url`` is the URL the fetch actually served (#2118 — the
+    current-vs-legacy name differs by quarter)."""
+    url = source_url
     conn.execute(
         """
         INSERT INTO sec_reference_documents (
@@ -461,7 +488,7 @@ def backfill_cusip_coverage(
     *,
     year: int | None = None,
     quarter: int | None = None,
-    fetch: Callable[[int, int], str] = fetch_13f_list_txt,
+    fetch: Callable[[int, int], tuple[str, str]] = fetch_13f_list_txt,
     today: date | None = None,
     threshold: float = MATCH_THRESHOLD,
 ) -> CusipCoverageBackfillResult:
@@ -481,12 +508,12 @@ def backfill_cusip_coverage(
         year = year if year is not None else y
         quarter = quarter if quarter is not None else q
 
-    payload = fetch(year, quarter)
+    payload, source_url = fetch(year, quarter)
     # Persist the raw SEC body BEFORE parsing — eBull non-negotiable
     # (Claude review BLOCKING #914). Re-wash workflows can replay
     # against the stored body without re-fetching from SEC; the
     # operator gets a "what did SEC say last quarter" audit trail.
-    _store_raw_list(conn, year=year, quarter=quarter, payload=payload)
+    _store_raw_list(conn, year=year, quarter=quarter, payload=payload, source_url=source_url)
     raw_securities = list(parse_13f_list(payload))
     # Skip deleted-this-quarter rows so a new mapping doesn't anchor
     # on a CUSIP the SEC just removed from the 13(f)-eligible list.
