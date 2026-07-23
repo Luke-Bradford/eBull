@@ -214,6 +214,20 @@ def extract_drs_disclosure(text: str) -> DrsDisclosure | None:
             implied_reg = registered / total * 100
             implied_street = street_shares / total * 100
             if abs(implied_reg - registered_pct) > 3 or abs(implied_street - street_pct) > 3:
+                # Distinguish a sanity-gate drop from a plain no-match in the
+                # logs (review NITPICK round 2) — the caller's
+                # filings_no_disclosure counter covers both, this line splits
+                # them for diagnosis.
+                logger.warning(
+                    "drs_disclosure: cross-side sanity gate rejected extraction "
+                    "(registered=%s@%s%% street=%s@%s%% implied=%.1f/%.1f)",
+                    registered,
+                    registered_pct,
+                    street_shares,
+                    street_pct,
+                    implied_reg,
+                    implied_street,
+                )
                 return None
 
     return DrsDisclosure(
