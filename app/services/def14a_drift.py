@@ -292,7 +292,7 @@ def _upsert_alert(conn: psycopg.Connection[tuple], alert: DriftAlert) -> None:
             FROM def14a_beneficial_holdings h
             WHERE h.instrument_id = %(iid)s
               AND h.holder_name = %(name)s
-              AND h.issuer_cik <> 'CIK-MISSING'
+              AND h.issuer_cik <> %(sentinel)s
               AND h.shares IS NOT NULL
             ORDER BY h.as_of_date DESC NULLS LAST, h.accession_number DESC
             LIMIT 1
@@ -316,6 +316,7 @@ def _upsert_alert(conn: psycopg.Connection[tuple], alert: DriftAlert) -> None:
             "severity": alert.severity,
             "accession": alert.accession_number,
             "as_of": alert.as_of_date,
+            "sentinel": _CIK_MISSING_SENTINEL,
         },
     )
 

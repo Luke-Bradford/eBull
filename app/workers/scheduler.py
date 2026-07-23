@@ -5611,17 +5611,28 @@ def ownership_observations_backfill() -> None:
     sweep), which only refreshes ``_current`` and assumes
     ``_observations`` is already populated.
     """
-    from app.services.def14a_drift import detect_drift
+    from app.services.def14a_drift import DriftReport, detect_drift
     from app.services.ownership_observations_sync import sync_all
 
     with _tracked_job(JOB_OWNERSHIP_OBSERVATIONS_BACKFILL) as tracker:
         with connect_job() as conn:
             result = sync_all(conn)
             # Weekly global DEF 14A vs Form 4 drift repair (#966) — the
-            # convergence net behind the three per-filing hooks. Same
-            # connection/txn as the sync so a drift failure rolls back
-            # with the batch rather than half-applying.
-            drift = detect_drift(conn)
+            # convergence net behind the three per-filing hooks. Drift is
+            # an AUGMENT: savepoint-isolated + best-effort (same #1700
+            # contract as run_drift_detection_best_effort) so a detector
+            # failure rolls back drift ONLY and never aborts sync_all's
+            # already-applied batch (review round-3 WARNING).
+            drift = DriftReport(
+                holders_evaluated=0,
+                alerts_emitted=0,
+                alerts_by_severity={"info": 0, "warning": 0, "critical": 0},
+            )
+            try:
+                with conn.transaction():
+                    drift = detect_drift(conn)
+            except Exception:  # noqa: BLE001 — best-effort augment; never propagate
+                logger.exception("ownership_observations_backfill: drift repair failed")
 
         tracker.row_count = result.total_observations_recorded
         logger.info(
