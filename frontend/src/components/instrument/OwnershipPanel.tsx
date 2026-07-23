@@ -39,6 +39,7 @@ import { useNavigate } from "react-router-dom";
 import { fetchOwnershipRollup } from "@/api/ownership";
 import type {
   OwnershipDef14ADrift,
+  OwnershipNonvestedAwards,
   OwnershipRollupResponse,
   OwnershipSlice,
   OwnershipSliceCategory,
@@ -321,6 +322,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
           </p>
           <SliceTable rollup={rollup} />
           <ResidualLine rollup={rollup} />
+          <NonvestedAwardsMemo memo={rollup.nonvested_awards ?? null} />
           <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
             Click any colored wedge for the per-filer drilldown.
           </p>
@@ -368,6 +370,31 @@ function Def14ADriftChip({
         <span className="opacity-80"> Worst: {drift.holders.join(", ")}.</span>
       )}
     </div>
+  );
+}
+
+function NonvestedAwardsMemo({
+  memo,
+}: {
+  readonly memo: OwnershipNonvestedAwards | null;
+}): JSX.Element | null {
+  // #844 — unvested RSU/PSU memo. Absolute count only (RSUs are not
+  // outstanding until vested — never a wedge); server-owned label.
+  if (memo === null) {
+    return null;
+  }
+  const shares = parseShareCount(memo.shares);
+  if (shares === null || shares <= 0) {
+    return null;
+  }
+  return (
+    <p
+      className="mt-1 text-xs text-slate-500 dark:text-slate-400"
+      data-test="nonvested-awards-memo"
+    >
+      +{formatShares(shares)} {memo.label} (not outstanding until vested; as of{" "}
+      {memo.period_end}).
+    </p>
   );
 }
 

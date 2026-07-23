@@ -562,6 +562,9 @@ _INVOKERS[_bulk_jobs.JOB_SEC_FSDS_CLASS_SHARES_INGEST] = _tracked_zero_arg(
 _INVOKERS[_bulk_jobs.JOB_SEC_FSDS_DIMENSIONAL_INGEST] = _tracked_zero_arg(
     _bulk_jobs.JOB_SEC_FSDS_DIMENSIONAL_INGEST, _bulk_jobs.sec_fsds_dimensional_ingest_job
 )
+_INVOKERS[_bulk_jobs.JOB_SEC_FSNDS_NOTES_INGEST] = _tracked_zero_arg(
+    _bulk_jobs.JOB_SEC_FSNDS_NOTES_INGEST, _bulk_jobs.sec_fsnds_notes_ingest_job
+)
 _INVOKERS[_files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK] = _tracked_zero_arg(
     _files_walk.JOB_SEC_SUBMISSIONS_FILES_WALK, _files_walk.sec_submissions_files_walk_job
 )

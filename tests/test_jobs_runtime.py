@@ -463,6 +463,7 @@ class TestProductionInvokerRegistry:
             "sec_nport_ingest_from_dataset",
             "sec_fsds_class_shares_ingest",  # #788 — bootstrap Phase-C stage + standalone operator trigger
             "sec_fsds_dimensional_ingest",  # #1590 — bootstrap dimensional-facts stage + standalone operator trigger
+            "sec_fsnds_notes_ingest",  # #844 — FSNDS unvested-award counts, standalone operator trigger
             # #1155 — manual-trigger-only operator triage. Registered in
             # _INVOKERS so POST /jobs/sec_rebuild/run works; intentionally
             # NOT in SCHEDULED_JOBS (no cadence). Params declared in

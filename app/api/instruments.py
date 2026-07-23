@@ -4783,6 +4783,17 @@ class _Def14ADriftModel(BaseModel):
     holders: list[str]
 
 
+class _NonvestedAwardsModel(BaseModel):
+    """Unvested RSU/PSU memo line (#844) — absolute count from the latest
+    10-K ASC 718 note (FSNDS ``award_type`` facts). Overlay only, never a
+    pie wedge. ``label`` is server-owned copy the FE renders verbatim."""
+
+    shares: Decimal
+    label: str
+    period_end: date
+    source_accession: str
+
+
 class _HistoricalSymbolModel(BaseModel):
     symbol: str
     effective_from: date
@@ -4919,6 +4930,9 @@ class OwnershipRollupResponse(BaseModel):
     # warning/critical drift alerts. Present on the no_data path too — the
     # coverage-integrity signal is denominator-independent.
     def14a_drift: _Def14ADriftModel | None = None
+    # Unvested RSU/PSU memo (#844). Null when no award facts, when the
+    # read rule abstains, or when the note is stale (548d bound).
+    nonvested_awards: _NonvestedAwardsModel | None = None
     computed_at: datetime
 
 
@@ -5039,6 +5053,16 @@ def _rollup_to_response(
                 holders=list(rollup.def14a_drift.holders),
             )
             if rollup.def14a_drift is not None
+            else None
+        ),
+        nonvested_awards=(
+            _NonvestedAwardsModel(
+                shares=rollup.nonvested_awards.shares,
+                label=rollup.nonvested_awards.label,
+                period_end=rollup.nonvested_awards.period_end,
+                source_accession=rollup.nonvested_awards.source_accession,
+            )
+            if rollup.nonvested_awards is not None
             else None
         ),
         historical_symbols=[

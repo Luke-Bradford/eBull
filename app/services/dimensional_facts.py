@@ -49,8 +49,15 @@ from app.services.xbrl_instance import (
 
 logger = logging.getLogger(__name__)
 
-DimensionalAxis = Literal["business_segment", "product_service", "geographic"]
-DimensionalMetric = Literal["revenue", "operating_income", "assets"]
+DimensionalAxis = Literal["business_segment", "product_service", "geographic", "award_type"]
+DimensionalMetric = Literal["revenue", "operating_income", "assets", "nonvested_awards"]
+
+# Axes the #554 per-filing extractor (and the #1590 FSDS bulk loader) own.
+# The FSNDS notes loader (#844) owns ``award_type`` EXCLUSIVELY — the
+# per-filing rewash's delete-then-insert and the FSDS bulk existence
+# check are BOTH scoped to this tuple so neither wipes nor blocks the
+# other family's rows for the same 10-K accession.
+PER_FILING_AXES: tuple[DimensionalAxis, ...] = ("business_segment", "product_service", "geographic")
 
 # Period sanity window (prevention log §1455 — same bounds as the
 # sec_fundamentals parser guard).
@@ -71,11 +78,12 @@ _CONCEPT_TO_METRIC: dict[str, tuple[DimensionalMetric, int]] = {
 # carry instant contexts. Anything else for that metric is skipped.
 _INSTANT_METRICS: frozenset[str] = frozenset({"assets"})
 
-# Metrics allowed per axis route (spec §D3 table).
+# Metrics allowed per axis route (spec §D3 table; award_type per #844).
 _AXIS_METRICS: dict[DimensionalAxis, frozenset[str]] = {
     "business_segment": frozenset({"revenue", "operating_income", "assets"}),
     "product_service": frozenset({"revenue"}),
     "geographic": frozenset({"revenue"}),
+    "award_type": frozenset({"nonvested_awards"}),
 }
 
 _XSI_NIL = "{http://www.w3.org/2001/XMLSchema-instance}nil"
@@ -349,6 +357,20 @@ def prettify_member(member_qname: str) -> str:
     members like ``country:US`` → ``US``)."""
     local = member_localname(member_qname) or member_qname
     return _CAMEL_BOUNDARY.sub(" ", local).strip()
+
+
+def prettify_localname(localname: str) -> str:
+    """Quick-tier member label for the DERA TSV loaders (no label linkbase
+    in FSDS/FSNDS): split camelCase on lower/digit→upper boundaries.
+    ``SpecialtyDiagnostics`` → ``Specialty Diagnostics``; ``US`` → ``US``.
+    Shared by the FSDS bulk + FSNDS notes loaders (review NITPICK on
+    PR #2122 — was duplicated verbatim)."""
+    out: list[str] = []
+    for i, ch in enumerate(localname):
+        if i > 0 and ch.isupper() and (localname[i - 1].islower() or localname[i - 1].isdigit()):
+            out.append(" ")
+        out.append(ch)
+    return "".join(out)
 
 
 def _label_for(member_qname: str, labels: Mapping[str, str]) -> str:

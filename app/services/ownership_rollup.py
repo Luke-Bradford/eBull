@@ -337,6 +337,22 @@ class Def14ADriftInfo:
 
 
 @dataclass(frozen=True)
+class NonvestedAwardsInfo:
+    """Unvested RSU/PSU memo line (#844) — absolute count from the latest
+    10-K's ASC 718 note via the FSNDS loader (axis ``award_type``). Overlay
+    ONLY: RSUs are not outstanding until vested, so this never joins the
+    pie/residual/concentration. ``label`` is server-owned copy
+    ("unvested RSUs" / "unvested awards" / "unvested <member>") chosen by
+    ``select_nonvested_memo`` — the axis is non-additive (award types mix
+    with plan names) so the figure is a single row, never a Σ."""
+
+    shares: Decimal
+    label: str
+    period_end: date
+    source_accession: str
+
+
+@dataclass(frozen=True)
 class SanityChecks:
     """Raw plausibility facts over the pie-wedge slices (#1647 part 4).
 
@@ -572,6 +588,10 @@ class OwnershipRollup:
     # when the rollup is otherwise degraded. Last field with a default so
     # existing constructors need no change.
     def14a_drift: Def14ADriftInfo | None = None
+    # Unvested RSU/PSU memo (#844). None when no award facts, when the read
+    # rule abstains, or when the latest note is staler than the 548-day
+    # bound. Main assembly only (a no_data page has no chart to memo).
+    nonvested_awards: NonvestedAwardsInfo | None = None
 
     @classmethod
     def no_data(
@@ -1157,6 +1177,58 @@ def _read_def14a_drift(conn: psycopg.Connection[Any], instrument_id: int) -> Def
         alert_count=n,
         chip=chip,
         holders=tuple(str(r["holder_name"]) for r in rows[:3]),
+    )
+
+
+def _read_nonvested_awards(
+    conn: psycopg.Connection[Any], instrument_id: int, *, today: date
+) -> NonvestedAwardsInfo | None:
+    """Unvested-award memo (#844): winner accession = latest filed
+    ``award_type`` filing; figure = the read-rule pick over the winner's
+    latest-period rows (``select_nonvested_memo`` — never a Σ; the axis is
+    non-additive). None on no data, read-rule abstention, or a note staler
+    than the shared 548-day bound."""
+    from app.services.fsnds_notes_facts import select_nonvested_memo
+
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH winner AS (
+                SELECT f.source_accession
+                  FROM instrument_dimensional_facts f
+                 WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
+                 ORDER BY f.filed_at DESC, f.source_accession DESC
+                 LIMIT 1
+            ),
+            latest AS (
+                SELECT MAX(f.period_end) AS period_end
+                  FROM instrument_dimensional_facts f
+                  JOIN winner w ON w.source_accession = f.source_accession
+                 WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
+            )
+            SELECT f.member_qname, f.member_label, f.val,
+                   f.period_end, f.source_accession
+              FROM instrument_dimensional_facts f
+              JOIN winner w ON w.source_accession = f.source_accession
+              JOIN latest l ON l.period_end = f.period_end
+             WHERE f.instrument_id = %(iid)s AND f.axis = 'award_type' AND NOT f.is_subtotal
+            """,
+            {"iid": instrument_id},
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    period_end: date = rows[0]["period_end"]
+    if _denominator_too_stale(period_end, today):
+        return None
+    memo = select_nonvested_memo([(str(r["member_qname"]), str(r["member_label"]), Decimal(r["val"])) for r in rows])
+    if memo is None:
+        return None
+    return NonvestedAwardsInfo(
+        shares=memo.shares,
+        label=memo.label,
+        period_end=period_end,
+        source_accession=str(rows[0]["source_accession"]),
     )
 
 
@@ -3645,6 +3717,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
             def14a_drift=def14a_drift,
         )
     treasury, treasury_as_of = _read_treasury_from_current(conn, instrument_id)
+    # Unvested-award memo (#844) — overlay only, denominator-independent,
+    # but rendered only on the main (charted) path.
+    nonvested_awards = _read_nonvested_awards(conn, instrument_id, today=_snapshot_today(conn))
     sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)
     def14a_rows = _read_def14a_unmatched_from_current(conn, instrument_id)
     matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates, def14a_rows=def14a_rows)
@@ -3824,6 +3899,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         denominator_cross_check=denominator_cross_check,
         computed_at=datetime.now(tz=UTC),
         def14a_drift=def14a_drift,
+        nonvested_awards=nonvested_awards,
     )
 
 

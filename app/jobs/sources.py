@@ -83,6 +83,7 @@ Lane = Literal[
     "db_cusip",
     "db_ownership_obs",
     "db_raw_sweep",
+    "db_fsnds_notes",
     "db_size_sample",
     "db_thesis_dq",
     "db_thesis_break",
@@ -248,6 +249,10 @@ when one overruns). Scheduled-only, so NOT added to the
   bounded batches and holds its lane for minutes; on the catch-all
   ``db`` lane it would starve ``orchestrator_high_frequency_sync``
   (every-5-min, same lane) — the #1526/#1527 starvation class.
+* ``db_fsnds_notes`` — ``sec_fsnds_notes_ingest`` (#844, manual-only)
+  only. Streams up to 12 FSNDS monthly TSV archives (minutes) — same
+  starvation rationale as ``db_raw_sweep``; no SEC HTTP (archives
+  pre-fetched by ``sec_bulk_download``).
   Write-safety: sole writer of ``payload_sha256``/``payload_swept_at``;
   the raw-row UPDATE re-checks ``payload IS NOT NULL`` under its row
   lock, so concurrent ``store_raw`` upserts (sec_rate / sec_manifest
@@ -433,6 +438,13 @@ class JobSourceRegistryError(RuntimeError):
 #    ``docs/superpowers/specs/2026-05-17-orchestrator-inner-lock-removal.md``).
 
 MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
+    # sec_fsnds_notes_ingest — #844 unvested RSU/PSU counts from the cached
+    # FSNDS monthly archives. Streaming TSV parse + per-accession commits
+    # over ~12 monthlies (minutes) → own lane, NOT the catch-all ``db``
+    # (long-running; the raw_payload_retention_sweep precedent). No SEC
+    # HTTP (archives pre-fetched by sec_bulk_download). Invoker in
+    # app/jobs/runtime.py::_INVOKERS; not a bootstrap stage in v1.
+    "sec_fsnds_notes_ingest": "db_fsnds_notes",
     # filing_events_skip_tier_cleanup — one-shot retroactive delete
     # (#1013). Pure DB operation (no SEC HTTP) → ``db`` lane, matching
     # the other retention sweeps (financial_facts / raw_data). Companion
