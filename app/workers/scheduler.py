@@ -392,6 +392,7 @@ JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
 JOB_SEC_DEF14A_INGEST = "sec_def14a_ingest"
 JOB_SEC_DEF14A_BOOTSTRAP = "sec_def14a_bootstrap"
+JOB_DRS_DISCLOSURE_REFRESH = "drs_disclosure_refresh"
 JOB_SEC_8K_EVENTS_INGEST = "sec_8k_events_ingest"
 JOB_SEC_FILING_DOCUMENTS_INGEST = "sec_filing_documents_ingest"
 JOB_CUSIP_EXTID_SWEEP = "cusip_extid_sweep"
@@ -1211,6 +1212,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.weekly(weekday=6, hour=2, minute=30),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,  # #996 — gated until first-install bootstrap is complete
+    ),
+    ScheduledJob(
+        name=JOB_DRS_DISCLOSURE_REFRESH,
+        display_name="DRS disclosure refresh",
+        source="sec_rate",
+        description=(
+            "Weekly refresh of the issuer-disclosed registered-vs-street "
+            "(DRS) share split for the curated cohort "
+            "(drs_disclosure.DRS_DISCLOSURE_CIKS — GME + AMC at v1, #844). "
+            "Monotone frontier per CIK: parses manifest 10-K/10-K/A/10-Q "
+            "filings newer than the newest stored observation (a "
+            "non-disclosing filing costs at most one re-fetch per run). "
+            "Bounded: ≤ a handful of primary-doc fetches per fire via the "
+            "shared SEC rate budget. Deliberately NOT a manifest parser — "
+            "the sec_10q synth no-op is a defended decision and a "
+            "parser-version bump would rescope the whole 10-K lane for a "
+            "2-issuer feature (spec "
+            "docs/specs/etl/2026-07-23-drs-rsu-issuer-disclosures.md)."
+        ),
+        cadence=Cadence.weekly(weekday=6, hour=5, minute=10),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_RAW_DATA_RETENTION_SWEEP,
@@ -5520,6 +5543,26 @@ def sec_def14a_bootstrap() -> None:
             result.rows_inserted,
             result.rows_updated,
         )
+
+
+def drs_disclosure_refresh() -> None:
+    """Weekly DRS registered-vs-street split refresh (#844 PR-2).
+
+    Frontier-based over the curated cohort; see
+    :func:`app.services.drs_disclosure.refresh_drs_disclosures` for the
+    extraction contract (corpus-verified 18/18 disclosing filings, zero
+    false positives on the 9 non-disclosing era filings).
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.drs_disclosure import refresh_drs_disclosures
+
+    with _tracked_job(JOB_DRS_DISCLOSURE_REFRESH) as tracker:
+        with (
+            connect_job() as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = refresh_drs_disclosures(conn, provider)
+        tracker.row_count = result.filings_extracted
 
 
 def ownership_observations_sync() -> None:

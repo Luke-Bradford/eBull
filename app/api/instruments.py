@@ -4794,6 +4794,19 @@ class _NonvestedAwardsModel(BaseModel):
     source_accession: str
 
 
+class _DrsModel(BaseModel):
+    """Issuer-disclosed DRS registered-vs-street split (#844 PR-2).
+    Present only for the curated cohort with a fresh (≤400d) disclosure."""
+
+    registered_shares: Decimal
+    registered_pct: Decimal | None
+    street_shares: Decimal | None
+    street_pct: Decimal | None
+    holders_of_record: int | None
+    as_of_date: date
+    source_accession: str
+
+
 class _HistoricalSymbolModel(BaseModel):
     symbol: str
     effective_from: date
@@ -4933,6 +4946,9 @@ class OwnershipRollupResponse(BaseModel):
     # Unvested RSU/PSU memo (#844). Null when no award facts, when the
     # read rule abstains, or when the note is stale (548d bound).
     nonvested_awards: _NonvestedAwardsModel | None = None
+    # DRS registered-vs-street overlay (#844 PR-2). Null off-cohort /
+    # absent / stale (400d bound).
+    drs: _DrsModel | None = None
     computed_at: datetime
 
 
@@ -5063,6 +5079,19 @@ def _rollup_to_response(
                 source_accession=rollup.nonvested_awards.source_accession,
             )
             if rollup.nonvested_awards is not None
+            else None
+        ),
+        drs=(
+            _DrsModel(
+                registered_shares=rollup.drs.registered_shares,
+                registered_pct=rollup.drs.registered_pct,
+                street_shares=rollup.drs.street_shares,
+                street_pct=rollup.drs.street_pct,
+                holders_of_record=rollup.drs.holders_of_record,
+                as_of_date=rollup.drs.as_of_date,
+                source_accession=rollup.drs.source_accession,
+            )
+            if rollup.drs is not None
             else None
         ),
         historical_symbols=[

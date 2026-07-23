@@ -246,6 +246,22 @@ export interface OwnershipNonvestedAwards {
   readonly source_accession: string;
 }
 
+/** Issuer-disclosed DRS registered-vs-street split (#844 PR-2).
+ *  Present only for the curated cohort with a fresh disclosure; the
+ *  server owns cohort membership and staleness (400d). */
+export interface OwnershipDrs {
+  /** Decimal-as-string share count. */
+  readonly registered_shares: string;
+  /** Decimal-as-string percent (e.g. ``"15"``), or null. */
+  readonly registered_pct: string | null;
+  readonly street_shares: string | null;
+  readonly street_pct: string | null;
+  readonly holders_of_record: number | null;
+  /** ISO ``YYYY-MM-DD``. */
+  readonly as_of_date: string;
+  readonly source_accession: string;
+}
+
 /** One row of ``instrument_symbol_history``, oldest-first. Frontend
  *  renders a "Filed as X" callout when the chain includes any symbol
  *  other than the current one (Batch 7 of #788). */
@@ -416,6 +432,9 @@ export interface OwnershipRollupResponse {
    *  server read-rule abstains, or when the note is stale. Optional for
    *  back-compat. */
   readonly nonvested_awards?: OwnershipNonvestedAwards | null;
+  /** DRS registered-vs-street overlay (#844 PR-2). Null off-cohort /
+   *  absent / stale. Optional for back-compat. */
+  readonly drs?: OwnershipDrs | null;
   readonly computed_at: string;
 }
 
