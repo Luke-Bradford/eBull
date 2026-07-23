@@ -20,15 +20,18 @@ Coverage:
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.services.scoring import (
+    _WEIGHT_MODES,
     FamilyScores,
     PenaltyRecord,
     ScoreResult,
+    _analytics_inputs,
     _calmar_reward,
     _clip,
     _compute_penalties,
@@ -37,6 +40,7 @@ from app.services.scoring import (
     _momentum_score,
     _quality_score,
     _realized_risk_penalties,
+    _score_from_data,
     _sentiment_score,
     _turnaround_score,
     _value_score,
@@ -1122,6 +1126,70 @@ class TestComputeScore:
 
 
 # ---------------------------------------------------------------------------
+# _score_from_data / _analytics_inputs — the pure scoring core (#2127)
+# ---------------------------------------------------------------------------
+
+
+def _full_data(
+    *,
+    sector_code: str | None = "1",
+    sic: str | None = None,
+    valuation_row: dict[str, object] | None = None,
+    risk_row: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """A loaded-data dict of the shape _load_instrument_data / _bulk_load produce."""
+    return {
+        "sector_code": sector_code,
+        "sic": sic,
+        "fund_rows": [_fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
+        "price_row": _price_row(0.05, 0.20, 0.35, 120.0),
+        "quote_row": _quote_row(False, 120.0, 119.5, 120.5),
+        "thesis_row": _thesis_row(0.75, 180.0, 90.0, _RECENT),
+        "news_rows": [_news_row(0.6, 0.8), _news_row(0.5, 1.0)],
+        "avg_red_flag_score": 0.15,
+        "valuation_row": valuation_row,
+        "risk_row": risk_row,
+        "fund_present": True,
+        "last_10kq_date": None,
+        "price_td_count": 300,
+        "news_90d_count": 3,
+    }
+
+
+class TestScoreFromData:
+    """The pure scoring core takes preloaded data + analytics + now, no conn (#2127)."""
+
+    def test_pure_core_produces_valid_result(self) -> None:
+        result = _score_from_data(
+            7, _full_data(), _WEIGHT_MODES["v1-balanced"], "v1-balanced", _NOW, {"schema": "iar_v1"}
+        )
+        assert isinstance(result, ScoreResult)
+        assert result.instrument_id == 7
+        assert result.model_version == "v1-balanced"
+        assert result.analytics == {"schema": "iar_v1"}  # passed straight through
+        assert result.sector == "1"  # from data["sector_code"]
+        assert 0.0 <= result.total_score <= 1.0
+        assert result.penalties == []  # recent thesis, tight spread, high confidence
+        assert result.total_score == pytest.approx(result.raw_total, abs=1e-6)
+
+    def test_unknown_model_version_raises_via_missing_weights(self) -> None:
+        # weights is resolved by the caller; a bad mode surfaces as KeyError there.
+        with pytest.raises(KeyError):
+            _ = _WEIGHT_MODES["nope"]
+
+    def test_analytics_inputs_pure_extraction(self) -> None:
+        gics, shares = _analytics_inputs(_full_data(sic=None))
+        assert shares == pytest.approx(10_000_000.0)
+        assert gics is None  # sic None -> no SPDR sector
+
+    def test_analytics_inputs_empty_fund_rows(self) -> None:
+        data = _full_data()
+        data["fund_rows"] = []
+        gics, shares = _analytics_inputs(data)
+        assert shares is None
+
+
+# ---------------------------------------------------------------------------
 # compute_rankings — rank assignment and rank_delta via patched compute_score
 # ---------------------------------------------------------------------------
 
@@ -1193,15 +1261,33 @@ def _make_rankings_conn(
     return conn
 
 
+@contextmanager
+def _stub_scoring(results_in_order: list[ScoreResult]):
+    """Stub the load + analytics + pure-core so compute_rankings tests exercise ONLY
+    rank / rank_delta assignment (#2127: compute_rankings now calls
+    _bulk_load_instrument_data + _score_from_data, not compute_score). Stubbing
+    _bulk_load_instrument_data keeps the fake conn's 2-cursor model valid — the only
+    conn use left is the eligible query + the prior-rank fetch + inserts. Results are
+    returned in instrument-id iteration order (matches the prior compute_score stub)."""
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "app.services.scoring._bulk_load_instrument_data",
+                side_effect=lambda conn, ids, now: {iid: {} for iid in ids},
+            )
+        )
+        stack.enter_context(patch("app.services.scoring._analytics_inputs", return_value=(None, None)))
+        stack.enter_context(patch("app.services.scoring.assemble_instrument_analytics", return_value={}))
+        mock_score = stack.enter_context(patch("app.services.scoring._score_from_data"))
+        mock_score.side_effect = results_in_order
+        yield mock_score
+
+
 class TestComputeRankings:
     def test_rank_assigned_descending_by_total_score(self) -> None:
         # Instrument 2 scores higher → should be rank 1
         conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.side_effect = [
-                _make_score_result(1, 0.60),
-                _make_score_result(2, 0.80),
-            ]
+        with _stub_scoring([_make_score_result(1, 0.60), _make_score_result(2, 0.80)]):
             result = compute_rankings(conn, "v1-balanced")
 
         by_id = {r.instrument_id: r for r in result.scored}
@@ -1211,8 +1297,7 @@ class TestComputeRankings:
     def test_rank_delta_positive_when_rank_improved(self) -> None:
         # Instrument 1 was rank 3 last run; this run it becomes rank 1 → delta = +2
         conn = _make_rankings_conn(instrument_ids=[1], prior_rank_rows=[(1, 3)])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.return_value = _make_score_result(1, 0.75)
+        with _stub_scoring([_make_score_result(1, 0.75)]):
             result = compute_rankings(conn, "v1-balanced")
 
         assert result.scored[0].rank == 1
@@ -1221,11 +1306,7 @@ class TestComputeRankings:
     def test_rank_delta_negative_when_rank_worsened(self) -> None:
         # Instrument 1 was rank 1; now rank 2 → delta = -1
         conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[(1, 1), (2, 2)])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.side_effect = [
-                _make_score_result(1, 0.50),  # lower score this run
-                _make_score_result(2, 0.80),  # higher score this run
-            ]
+        with _stub_scoring([_make_score_result(1, 0.50), _make_score_result(2, 0.80)]):
             result = compute_rankings(conn, "v1-balanced")
 
         by_id = {r.instrument_id: r for r in result.scored}
@@ -1237,11 +1318,7 @@ class TestComputeRankings:
     def test_rank_delta_none_on_first_run(self) -> None:
         # No prior rows → rank_delta is None for all instruments
         conn = _make_rankings_conn(instrument_ids=[1, 2], prior_rank_rows=[])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.side_effect = [
-                _make_score_result(1, 0.70),
-                _make_score_result(2, 0.60),
-            ]
+        with _stub_scoring([_make_score_result(1, 0.70), _make_score_result(2, 0.60)]):
             result = compute_rankings(conn, "v1-balanced")
 
         for r in result.scored:
@@ -1265,8 +1342,7 @@ class TestComputeRankings:
         outside the transaction, this test will fail.
         """
         conn = _make_rankings_conn(instrument_ids=[1], prior_rank_rows=[])
-        with patch("app.services.scoring.compute_score") as mock_score:
-            mock_score.return_value = _make_score_result(1, 0.70)
+        with _stub_scoring([_make_score_result(1, 0.70)]):
             compute_rankings(conn, "v1-balanced")
 
         # Collect the names of all calls made on `conn` in order
