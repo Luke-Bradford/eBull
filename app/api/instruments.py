@@ -3848,14 +3848,19 @@ def get_instrument_summary(
     #     when only one class of a multi-class issuer is in our universe)
     # Returns None for instruments without SEC coverage; market cap then stays null
     # on the identity rather than reaching for a non-canonical source.
+    cap_basis: str = "not_multiclass"
     try:
         from app.services.xbrl_derived_stats import compute_market_cap, resolve_market_cap_basis
 
         cap_resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id_int)
+        cap_basis = cap_resolution.basis
         if cap_resolution.basis == "total_company" and cap_resolution.total is not None:
             computed_cap_value: Decimal | None = cap_resolution.total.value
-        elif cap_resolution.basis == "multiclass_unavailable":
-            computed_cap_value = None  # fail closed: known dual-class, no clean total
+        elif cap_resolution.basis in ("multiclass_unavailable", "fpi_adr_unavailable"):
+            # fail closed: known dual-class with no clean total, or an FPI
+            # ADR/ADS whose ordinary-shares × per-ADS-price product is wrong
+            # by the un-ingested ADS ratio (#1939).
+            computed_cap_value = None
         else:
             single_cap = compute_market_cap(conn, instrument_id=instrument_id_int)
             computed_cap_value = single_cap.value if single_cap is not None else None
@@ -3913,6 +3918,24 @@ def get_instrument_summary(
     else:
         stats_block = None
         key_stats_source = "unavailable"
+
+    # #1939: FPI ADR/ADS — the locally derived P/E and P/B (per-ADS price ÷
+    # per-ordinary-share EPS/book) and the dividend yield (per-ordinary-share
+    # DPS ÷ per-ADS price) are wrong by the un-ingested ADS ratio. Null them
+    # here too — this path computes its own ratios and does NOT read the
+    # (already-suppressed) instrument_valuation view (Codex ckpt-2 #1939).
+    if stats_block is not None and cap_basis == "fpi_adr_unavailable":
+        fpi_sources: dict[str, KeyStatsFieldSource] = dict(stats_block.field_source or {})
+        for f in ("pe_ratio", "pb_ratio", "dividend_yield"):
+            fpi_sources[f] = "unavailable"
+        stats_block = stats_block.model_copy(
+            update={
+                "pe_ratio": None,
+                "pb_ratio": None,
+                "dividend_yield": None,
+                "field_source": fpi_sources,
+            }
+        )
 
     source = {
         "identity": "local_db",

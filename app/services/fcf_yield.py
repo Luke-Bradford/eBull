@@ -216,7 +216,11 @@ def fcf_yield_series(
     cap or FX rate can't be sourced cleanly gets a NULL yield (its absolute FCF
     still renders); the series itself is never suppressed (#1745)."""
     basis = resolve_market_cap_basis(conn, instrument_id=instrument_id).basis
-    is_multiclass = basis != "not_multiclass"
+    # #1939: FPI ADR/ADS — no clean cap under any basis (ordinary shares vs
+    # per-ADS price); every period's cap fails closed EXPLICITLY rather than
+    # by the accident of the curated class table not covering the CIK.
+    is_fpi_adr = basis == "fpi_adr_unavailable"
+    is_multiclass = basis != "not_multiclass" and not is_fpi_adr
     cik = _instrument_cik(conn, instrument_id) if is_multiclass else None
 
     trading_ccy = _trading_currency(conn, instrument_id)
@@ -239,8 +243,11 @@ def fcf_yield_series(
         fcf_ttm = r["fcf_ttm"]
 
         # Market cap: per-period total-company cap for a multi-class issuer (#1745),
-        # else the single-class period_end shares × close.
-        if is_multiclass:
+        # else the single-class period_end shares × close. FPI ADR/ADS: no cap
+        # (#1939) — the yield stays NULL, the absolute FCF still renders.
+        if is_fpi_adr:
+            market_cap = None
+        elif is_multiclass:
             cap = (
                 total_company_cap_at_period(conn, cik=cik, target_period_end=period_end, today=today)
                 if cik is not None
