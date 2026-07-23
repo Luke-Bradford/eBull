@@ -63,10 +63,6 @@ from app.services.eight_k_events import (
     parse_8k_filing,
     upsert_8k_filing,
 )
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
 from app.services.manifest_parsers._siblings import (
     CIK_MISSING_SENTINEL as _CIK_MISSING_SENTINEL,
 )
@@ -74,6 +70,10 @@ from app.services.manifest_parsers._siblings import (
     resolve_siblings as _resolve_siblings,
 )
 from app.services.raw_filings import store_raw
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 
 logger = logging.getLogger(__name__)
 

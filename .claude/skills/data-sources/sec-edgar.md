@@ -349,6 +349,8 @@ Archive-URL CIK varies by form type:
 - **Form 4 / Form 3 / Form 5** — `/Archives/edgar/data/{ISSUER_CIK}/{acc_no_dashes}/...`. Insider Form 4 filings for AAPL are submitted by various filer-agent CIKs but stored under Apple's CIK 0000320193.
 - **13F-HR / 13G/D / N-PORT-P** — `/Archives/edgar/data/{FILER_CIK}/{acc_no_dashes}/...`. The filing-manager / blockholder / fund-trust IS the filer; there is no separate "issuer" in those forms. eBull's 13F builder uses the filer CIK at [app/services/sec_13f_dataset_ingest.py:670](../../../app/services/sec_13f_dataset_ingest.py#L670).
 
+**`.txt` full-submission vs primary doc (#2110).** Every filing is ALSO served at `/Archives/edgar/data/{cik}/{accession-dashed}.txt` — the SGML container (`<SEC-DOCUMENT>` wrapper) embedding every document of the submission verbatim. Master/daily-index `filename` fields point at THIS shape, so index-derived discovery stores it. Consumers of a primary document must tolerate it: `insider_transactions._unwrap_sgml_submission` slices the embedded `<ownershipDocument>` at the parser chokepoint (first-close, not rindex). 2026-07-22 full-pop: 14,279 form3/4/5 raws stored SGML; 11,331 were wrongly tombstoned pre-unwrap; the #1591 stored-body reuse pins whatever shape was fetched first, so the parser is the only self-heal path. HTML-kind parsers (def14a/pre14a) tolerate the prefix natively.
+
 ### 3.4 LEI (Legal Entity Identifier) + FIGI
 
 **LEI** — 20-character alphanumeric ISO 17442 code. Present in the **N-PORT** dataset INFOTABLE (`lei`, the issuer of the held security). Resolve via GLEIF API: `https://api.gleif.org/api/v1/lei-records/{lei}`.

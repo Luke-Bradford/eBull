@@ -51,13 +51,13 @@ from app.services.insider_transactions import (
     lookup_sec_filed_at,
     parse_form_3_xml,
 )
-from app.services.manifest_parsers._classify import format_upsert_error, is_transient_upsert_error
 from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
     tombstone_non_sibling_insider_observations,
 )
 from app.services.sec_identity import resolve_insider_writer_routing
+from app.services.upsert_classify import format_upsert_error, is_transient_upsert_error
 
 logger = logging.getLogger(__name__)
 

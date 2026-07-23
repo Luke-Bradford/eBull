@@ -40,7 +40,7 @@ succeeds or raises.
 filer/holdings upsert keeps the manifest in ``failed`` with the 1h
 backoff; deterministic constraint violations write the audit-log
 row with status='failed' and tombstone the manifest. See
-``app/services/manifest_parsers/_classify.py``.
+``app/services/upsert_classify.py``.
 """
 
 from __future__ import annotations
@@ -73,15 +73,15 @@ from app.services.institutional_holdings import (
     parse_archive_index,
     thirteen_f_within_retention,
 )
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
 from app.services.ownership_observations import refresh_institutions_current_batch
 from app.services.raw_filings import store_raw, stored_body
 from app.services.thirteen_f_normalise import (
     merge_resolved_by_instrument,
     normalise_13f_holdings,
+)
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
 )
 
 logger = logging.getLogger(__name__)

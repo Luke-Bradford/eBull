@@ -78,11 +78,11 @@ from app.services.insider_transactions import (
     parse_form_5_xml,
     upsert_filing,
 )
-from app.services.manifest_parsers._classify import (
+from app.services.raw_filings import DocumentKind, store_raw, stored_body
+from app.services.upsert_classify import (
     format_upsert_error,
     is_transient_upsert_error,
 )
-from app.services.raw_filings import DocumentKind, store_raw, stored_body
 
 logger = logging.getLogger(__name__)
 
