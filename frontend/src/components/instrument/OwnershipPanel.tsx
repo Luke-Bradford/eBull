@@ -410,7 +410,12 @@ function DrsMemo({ drs }: { readonly drs: OwnershipDrs | null }): JSX.Element | 
   if (registered === null || registered <= 0) {
     return null;
   }
-  const pct = drs.registered_pct !== null ? ` (${drs.registered_pct}%)` : "";
+  // #2124 — the server sends a raw NUMERIC(8,4) string ("14.0000"); parse
+  // to trim trailing zeros ("14", "99.6", "0.4"). formatPct is not reused:
+  // it expects a fraction and force-fixes 2 decimals ("14.00%").
+  const pctNum =
+    drs.registered_pct !== null ? Number.parseFloat(drs.registered_pct) : NaN;
+  const pct = Number.isFinite(pctNum) ? ` (${pctNum}%)` : "";
   const holders =
     drs.holders_of_record !== null
       ? `; ${drs.holders_of_record.toLocaleString()} holders of record`
