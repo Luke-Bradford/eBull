@@ -353,6 +353,25 @@ class NonvestedAwardsInfo:
 
 
 @dataclass(frozen=True)
+class DrsInfo:
+    """Issuer-disclosed registered-vs-street (DRS) split (#844 PR-2) —
+    overlay chip for the curated cohort (drs_disclosure.DRS_DISCLOSURE_CIKS).
+    Voluntary narrative disclosure: absent for non-cohort instruments (no
+    fabricated "0 DRS" state) and suppressed once the latest disclosure is
+    older than 400 days (annual 10-K cadence + slack) — a parser miss on a
+    newer filing degrades to visible absence, never a silently-stale
+    "current" figure."""
+
+    registered_shares: Decimal
+    registered_pct: Decimal | None
+    street_shares: Decimal | None
+    street_pct: Decimal | None
+    holders_of_record: int | None
+    as_of_date: date
+    source_accession: str
+
+
+@dataclass(frozen=True)
 class SanityChecks:
     """Raw plausibility facts over the pie-wedge slices (#1647 part 4).
 
@@ -592,6 +611,9 @@ class OwnershipRollup:
     # rule abstains, or when the latest note is staler than the 548-day
     # bound. Main assembly only (a no_data page has no chart to memo).
     nonvested_awards: NonvestedAwardsInfo | None = None
+    # DRS registered-vs-street overlay (#844 PR-2). None off-cohort, on
+    # extraction absence, or past the 400-day staleness bound.
+    drs: DrsInfo | None = None
 
     @classmethod
     def no_data(
@@ -1229,6 +1251,44 @@ def _read_nonvested_awards(
         label=memo.label,
         period_end=period_end,
         source_accession=str(rows[0]["source_accession"]),
+    )
+
+
+_DRS_MAX_AGE_DAYS: Final[int] = 400
+
+
+def _read_drs(conn: psycopg.Connection[Any], instrument_id: int, *, today: date) -> DrsInfo | None:
+    """Latest DRS disclosure for the chip (#844 PR-2): newest row by the
+    disclosure's own as-of date (falling back to filed date when the
+    sentence carried none), suppressed past the 400-day bound."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT registered_shares, registered_pct, street_shares, street_pct,
+                   holders_of_record,
+                   COALESCE(as_of_date, (filed_at AT TIME ZONE 'UTC')::date) AS effective_as_of,
+                   source_accession
+              FROM ownership_drs_observations
+             WHERE instrument_id = %(iid)s
+             ORDER BY COALESCE(as_of_date, (filed_at AT TIME ZONE 'UTC')::date) DESC, filed_at DESC
+             LIMIT 1
+            """,
+            {"iid": instrument_id},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    effective: date = row["effective_as_of"]
+    if (today - effective).days > _DRS_MAX_AGE_DAYS:
+        return None
+    return DrsInfo(
+        registered_shares=Decimal(row["registered_shares"]),
+        registered_pct=Decimal(row["registered_pct"]) if row["registered_pct"] is not None else None,
+        street_shares=Decimal(row["street_shares"]) if row["street_shares"] is not None else None,
+        street_pct=Decimal(row["street_pct"]) if row["street_pct"] is not None else None,
+        holders_of_record=row["holders_of_record"],
+        as_of_date=effective,
+        source_accession=str(row["source_accession"]),
     )
 
 
@@ -3720,6 +3780,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # Unvested-award memo (#844) — overlay only, denominator-independent,
     # but rendered only on the main (charted) path.
     nonvested_awards = _read_nonvested_awards(conn, instrument_id, today=_snapshot_today(conn))
+    drs = _read_drs(conn, instrument_id, today=_snapshot_today(conn))
     sql_candidates = _collect_canonical_holders_from_current(conn, instrument_id)
     def14a_rows = _read_def14a_unmatched_from_current(conn, instrument_id)
     matched, unmatched_def14a = _enrich_and_union_def14a(conn, instrument_id, sql_candidates, def14a_rows=def14a_rows)
@@ -3900,6 +3961,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         computed_at=datetime.now(tz=UTC),
         def14a_drift=def14a_drift,
         nonvested_awards=nonvested_awards,
+        drs=drs,
     )
 
 

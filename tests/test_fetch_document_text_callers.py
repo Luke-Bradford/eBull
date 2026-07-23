@@ -51,6 +51,9 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "app/services/institutional_holdings.py",
         "app/services/blockholders.py",
         "app/services/def14a_ingest.py",
+        # #844 PR-2 — DRS split extraction: body routes through
+        # upsert_drs_observation into ownership_drs_observations.
+        "app/services/drs_disclosure.py",
         "app/services/ncen_classifier.py",
         "app/services/n_port_ingest.py",
         # Manifest-worker adapters (#1126 / #1128 / #1129 / #1130 /
@@ -85,6 +88,7 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         # Tests that exercise the ingesters use stub _DocFetcher classes
         # that shadow the method name — these are test-only and don't
         # persist to disk.
+        "tests/test_drs_disclosure.py",
         "tests/test_business_summary_ingest.py",
         "tests/test_dividend_calendar_ingest.py",
         "tests/test_insider_transactions_ingest.py",

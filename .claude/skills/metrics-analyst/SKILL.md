@@ -113,6 +113,7 @@ description: eBull metrics analyst — what we measure, where it comes from, whe
 | TTM DPS | Capital returns | `instrument_dividend_summary.ttm_dps` | `/instruments/{symbol}/dividends` |
 | Universe coverage banner | Ownership | rollup `coverage.state` | `/instruments/{symbol}/ownership-rollup` |
 | Unrealised P&L (per position) | Risk + portfolio | derived from `quotes.last` | `/portfolio` |
+| DRS registered/street split (#844 PR-2) | Ownership | `ownership_drs_observations` (weekly `drs_disclosure_refresh`, curated cohort `DRS_DISCLOSURE_CIKS` — GME+AMC) → rollup `drs`; voluntary Item-5-style narrative, absence ≠ zero, 400d staleness | `/instruments/{symbol}/ownership-rollup` |
 | Unvested RSU/PSU memo (#844) | Ownership | `instrument_dimensional_facts` axis `award_type` (FSNDS notes loader) → rollup `nonvested_awards` — no-sum read rule (default → single-std member → RSU-of-many → abstain), 548d staleness, overlay only (never a wedge) | `/instruments/{symbol}/ownership-rollup` |
 | Volume (daily) | Market data | `price_daily.volume` | `/instruments/{symbol}/candles` |
 | VWAP | Market data | (deferred) | — |

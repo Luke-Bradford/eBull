@@ -88,6 +88,14 @@ holders / ~527.5M (99.6%) Cede @ 2026-02-18. The issue's "~75M historically"
 (GME) has decayed to 66.2M — every stored row carries `as_of_date`; the read
 path serves the latest disclosure, never a remembered constant.
 
+Corpus extraction run (final regex family, 2026-07-23): **18/18 disclosing
+filings extracted, 0 false positives** across the 9 non-disclosing era
+filings (pre-era 10-Qs + Part-III 10-K/As). A third sentence shape surfaced
+(GME FY2022 10-K: "held by record holders" + Cede-side without "were") and
+is covered; the record-holders anchor variant is guarded by
+Cede-or-transfer-agent-in-window so the mandated Item 201(b) holders-count
+sentence alone can never anchor an extraction.
+
 Two extraction landmines the corpus surfaced (both encoded as fixture tests):
 
 - **Decimal split:** "382.4 million" — naive sentence-split on "." severs the
@@ -156,7 +164,15 @@ Two extraction landmines the corpus surfaced (both encoded as fixture tests):
 - **Allowlist:** `DRS_DISCLOSURE_CIKS` single-source constant
   ({GME `0001326380`, AMC `0001411579`} at v1); expand as issuers surface.
 - **Forms:** 10-K, 10-K/A, 10-Q (corpus: GME's freshest figures are
-  quarterly). Manifest-parser hook for allowlisted CIKs only.
+  quarterly). **Delivery: weekly `drs_disclosure_refresh` scheduled job**
+  (Sun 05:10 UTC, `sec_rate` lane), NOT a manifest-parser hook —
+  superseding this spec's earlier hook sketch: the `sec_10q` synth no-op
+  is a defended decision (3 prior Codex BLOCKINGs against fetch designs
+  there) and a 10-K parser-version bump would rescope the whole lane for
+  a 2-issuer feature. The job walks a monotone per-CIK frontier
+  (manifest filings newer than the newest stored observation; a
+  non-disclosing filing costs ≤1 re-fetch per weekly run) and doubles as
+  the backfill path via its `since` override.
 - **Extraction:** normalized whole-doc text (inline/block tag rule above);
   regex family covering both corpus shapes (Cede-first / registered-first,
   "million" suffix optional, parenthesised percent optional, optional

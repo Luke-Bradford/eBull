@@ -40,6 +40,7 @@ import { fetchOwnershipRollup } from "@/api/ownership";
 import type {
   OwnershipDef14ADrift,
   OwnershipNonvestedAwards,
+  OwnershipDrs,
   OwnershipRollupResponse,
   OwnershipSlice,
   OwnershipSliceCategory,
@@ -323,6 +324,7 @@ function PanelBody({ rollup, onWedgeClick }: PanelBodyProps): JSX.Element {
           <SliceTable rollup={rollup} />
           <ResidualLine rollup={rollup} />
           <NonvestedAwardsMemo memo={rollup.nonvested_awards ?? null} />
+          <DrsMemo drs={rollup.drs ?? null} />
           <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
             Click any colored wedge for the per-filer drilldown.
           </p>
@@ -394,6 +396,32 @@ function NonvestedAwardsMemo({
     >
       +{formatShares(shares)} {memo.label} (not outstanding until vested; as of{" "}
       {memo.period_end}).
+    </p>
+  );
+}
+
+function DrsMemo({ drs }: { readonly drs: OwnershipDrs | null }): JSX.Element | null {
+  // #844 PR-2 — issuer-disclosed registered/street split. Server owns
+  // cohort + staleness; absence renders nothing (no fake "0 DRS" state).
+  if (drs === null) {
+    return null;
+  }
+  const registered = parseShareCount(drs.registered_shares);
+  if (registered === null || registered <= 0) {
+    return null;
+  }
+  const pct = drs.registered_pct !== null ? ` (${drs.registered_pct}%)` : "";
+  const holders =
+    drs.holders_of_record !== null
+      ? `; ${drs.holders_of_record.toLocaleString()} holders of record`
+      : "";
+  return (
+    <p
+      className="mt-1 text-xs text-slate-500 dark:text-slate-400"
+      data-test="drs-memo"
+    >
+      {formatShares(registered)}{pct} registered with transfer agent (DRS/book
+      form){holders} · as of {drs.as_of_date}.
     </p>
   );
 }
