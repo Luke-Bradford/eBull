@@ -121,6 +121,18 @@ When a query selects an anchor in one CTE (a winner accession, a target period, 
 
 Self-check: for each CTE that computes a `MAX(...)`/`ORDER BY ... LIMIT 1` anchor, diff its WHERE clause against the final SELECT's — any predicate present in one and not the other needs a reason in a comment. Origin: PR #1588 review WARNING (`target` CTE missing `NOT is_subtotal` carried by winner + main query).
 
+## View recreate — diff the outer SELECT column list old vs new
+
+A `DROP VIEW` + `CREATE VIEW` migration replaces the reader contract wholesale; an accidentally dropped (or reordered-and-renamed) output column breaks every consumer silently at read time, not at migrate time. Before committing a view recreate, diff the two files' outer SELECT lists mechanically, e.g.:
+
+```bash
+for f in sql/OLD_view.sql sql/NEW_view.sql; do
+  sed -n '/^SELECT$/,/^FROM (/p' "$f" | grep -oE "AS [a-z_]+|v\.[a-z_]+" | sed 's/AS //; s/v\.//' | tr '\n' ' '; echo "<- $f"
+done
+```
+
+Identical output ⇒ contract preserved; any delta needs a stated reason in the migration header. Inner-CTE columns (UNION-shape padding like `NULL::numeric AS x`) are NOT part of the contract — a reviewer flagging one as "dropped" is refutable by exactly this diff (PR #2115 review WARNING, sql/236). Origin: PR #2115.
+
 ## Never edit an applied migration — bump to a new NNN+1 file
 
 The runner records each applied file's SHA-256 in `schema_migrations.content_sha256` (#1333) and **raises at boot** if an applied file's content changed. Editing `sql/NNN_*.sql` after any DB recorded it (dev included — drafts applied during PR development count) is therefore a boot-breaker, not a silent no-op. All follow-up changes go into a new `NNN+1` file. If you knowingly replayed an edited file manually (idempotent), reset its hash: `UPDATE schema_migrations SET content_sha256 = NULL WHERE filename = '<file>'` — never DELETE the row. Full RCA in `docs/review-prevention-log.md` ("Migration content drift").
