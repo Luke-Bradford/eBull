@@ -193,6 +193,21 @@ def last_n_quarters(n: int, *, today: date | None = None) -> list[str]:
     return out
 
 
+def last_n_months(n: int, *, today: date | None = None) -> list[str]:
+    """Return ``YYYY_MM`` labels of the last ``n`` completed months,
+    newest-first (excludes the in-progress month — DERA publishes the
+    FSNDS monthly weeks after month end)."""
+    today = today or date.today()
+    year, month = today.year, today.month
+    out: list[str] = []
+    for _ in range(n):
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+        out.append(f"{year}_{month:02d}")
+    return out
+
+
 _FORM13F_START_MONTHS: Final[tuple[int, ...]] = (3, 6, 9, 12)
 """Form 13F rolling-3-month windows start on the 1st of these months.
 
@@ -258,6 +273,7 @@ def build_bulk_archive_inventory(
     n_quarters_insider: int = 8,
     n_quarters_nport: int = 4,
     n_quarters_fsds: int = 4,
+    n_months_fsnds: int = 12,
     today: date | None = None,
 ) -> list[BulkArchive]:
     """Return the full inventory of archives Phase A3 downloads."""
@@ -308,6 +324,20 @@ def build_bulk_archive_inventory(
             BulkArchive(
                 name=f"fsds_{q}.zip",
                 url=f"{SEC_BASE_URL}/files/dera/data/financial-statement-data-sets/{q}.zip",
+                optional=(idx == 0),
+            )
+        )
+    # DERA Financial Statement AND NOTES Data Sets (#844) — the ONLY
+    # pipeline-reachable source for note-level facts (unvested RSU/PSU
+    # counts): companyfacts strips dimensional facts, plain FSDS is
+    # face-statements-only. Monthly; published weeks after month close, so
+    # the newest is optional (mirrors the FSDS #1423 posture). NOTE the
+    # path segment differs from FSDS: financial-statement-notes-data-sets.
+    for idx, m in enumerate(last_n_months(n_months_fsnds, today=today)):
+        archives.append(
+            BulkArchive(
+                name=f"fsnds_{m}_notes.zip",
+                url=f"{SEC_BASE_URL}/files/dera/data/financial-statement-notes-data-sets/{m}_notes.zip",
                 optional=(idx == 0),
             )
         )

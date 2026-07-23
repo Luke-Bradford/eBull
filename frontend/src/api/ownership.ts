@@ -233,6 +233,19 @@ export interface OwnershipDef14ADrift {
   readonly holders: readonly string[];
 }
 
+/** Unvested RSU/PSU memo line (#844) — absolute count from the latest
+ *  10-K ASC 718 note. Overlay only (never a pie wedge — RSUs are not
+ *  outstanding until vested). ``label`` is server-owned copy rendered
+ *  verbatim (e.g. "unvested RSUs"). */
+export interface OwnershipNonvestedAwards {
+  /** Decimal-as-string share count. */
+  readonly shares: string;
+  readonly label: string;
+  /** ISO ``YYYY-MM-DD`` — the note's balance date. */
+  readonly period_end: string;
+  readonly source_accession: string;
+}
+
 /** One row of ``instrument_symbol_history``, oldest-first. Frontend
  *  renders a "Filed as X" callout when the chain includes any symbol
  *  other than the current one (Batch 7 of #788). */
@@ -399,6 +412,10 @@ export interface OwnershipRollupResponse {
    *  drift alerts; present on the no_data path too (denominator-
    *  independent). Optional for back-compat. */
   readonly def14a_drift?: OwnershipDef14ADrift | null;
+  /** Unvested RSU/PSU memo (#844). Null when no award facts, when the
+   *  server read-rule abstains, or when the note is stale. Optional for
+   *  back-compat. */
+  readonly nonvested_awards?: OwnershipNonvestedAwards | null;
   readonly computed_at: string;
 }
 

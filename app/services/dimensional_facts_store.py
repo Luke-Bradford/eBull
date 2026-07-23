@@ -26,6 +26,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.services.dimensional_facts import (
+    PER_FILING_AXES,
     DimensionalAxis,
     DimensionalFact,
     DimensionalMetric,
@@ -67,9 +68,14 @@ def replace_accession_rows(
         "SELECT pg_advisory_xact_lock(hashtext(%s::text || ':' || %s::text)::bigint)",
         (instrument_id, source_accession),
     )
+    # Axis-scoped delete (#844): this writer owns ONLY the segment-family
+    # axes. The FSNDS notes loader writes ``award_type`` rows for the SAME
+    # 10-K accessions — an unscoped delete would silently wipe them on
+    # every rewash.
     conn.execute(
-        "DELETE FROM instrument_dimensional_facts WHERE instrument_id = %s AND source_accession = %s",
-        (instrument_id, source_accession),
+        "DELETE FROM instrument_dimensional_facts"
+        " WHERE instrument_id = %s AND source_accession = %s AND axis = ANY(%s)",
+        (instrument_id, source_accession, list(PER_FILING_AXES)),
     )
     if not facts:
         return 0

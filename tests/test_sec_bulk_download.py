@@ -143,9 +143,16 @@ class TestInventory:
         assert fsds[0].optional is True, "newest FSDS quarter must be optional"
         for a in fsds[1:]:
             assert a.optional is False, f"{a.name} must stay required"
-        # Every non-13F, non-FSDS archive stays required.
+        # FSNDS monthlies (#844) mirror the same posture: newest month
+        # published weeks late → optional; the rest required.
+        fsnds = [a for a in inventory if a.name.startswith("fsnds_")]
+        assert fsnds, "FSNDS monthlies missing from inventory"
+        assert fsnds[0].optional is True, "newest FSNDS month must be optional"
+        for a in fsnds[1:]:
+            assert a.optional is False, f"{a.name} must stay required"
+        # Every non-13F, non-FSDS, non-FSNDS archive stays required.
         for a in inventory:
-            if not a.name.startswith(("form13f_", "fsds_")):
+            if not a.name.startswith(("form13f_", "fsds_", "fsnds_")):
                 assert a.optional is False, f"{a.name} must stay required"
 
     def test_archive_urls_use_correct_path_prefixes(self) -> None:

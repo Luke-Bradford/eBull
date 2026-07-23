@@ -43,6 +43,7 @@ from app.services.dimensional_facts import (
     _AXIS_METRICS,
     _CONCEPT_TO_METRIC,
     _INSTANT_METRICS,
+    PER_FILING_AXES,
     DimensionalAxis,
     DimensionalFact,
     DimensionalMetric,
@@ -218,9 +219,13 @@ def _write_bulk_accession(
         "SELECT pg_advisory_xact_lock(hashtext(%s::text || ':' || %s::text)::bigint)",
         (instrument_id, accession),
     )
+    # Axis-scoped existence check (#844): the FSNDS notes loader writes
+    # ``award_type`` rows for the same 10-K accessions — an unscoped check
+    # would see them and permanently skip this accession's segment facts.
     existing = conn.execute(
-        "SELECT 1 FROM instrument_dimensional_facts WHERE instrument_id = %s AND source_accession = %s LIMIT 1",
-        (instrument_id, accession),
+        "SELECT 1 FROM instrument_dimensional_facts"
+        " WHERE instrument_id = %s AND source_accession = %s AND axis = ANY(%s) LIMIT 1",
+        (instrument_id, accession, list(PER_FILING_AXES)),
     ).fetchone()
     if existing is not None or not facts:
         return 0

@@ -278,6 +278,10 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # the manual-only triangle (source + metadata + invoker) and documents
     # zero-param-by-design (vs the bootstrap-only fallback, also empty).
     "sec_manifest_tombstone_stale": (),
+    # sec_fsnds_notes_ingest — #844 unvested RSU/PSU counts from the cached
+    # FSNDS monthlies. No operator-tunable params (archives on disk are the
+    # input; re-run is idempotent via the axis-scoped convergence guard).
+    "sec_fsnds_notes_ingest": (),
     # raw_payload_retention_sweep — #1014 payload-null sweep.
     # ``batch_size`` stays internal (implementation knob, same call as
     # #1013); ``dry_run`` is operator-facing and DEFAULTS TRUE so a
