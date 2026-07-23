@@ -188,7 +188,7 @@ class TotalCompanyMarketCap:
     legs: tuple[_ClassLeg, ...]
 
 
-MarketCapBasis = Literal["total_company", "multiclass_unavailable", "not_multiclass"]
+MarketCapBasis = Literal["total_company", "multiclass_unavailable", "not_multiclass", "fpi_adr_unavailable"]
 
 
 @dataclass(frozen=True)
@@ -201,7 +201,11 @@ class MarketCapResolution:
       breach). FAIL CLOSED: the caller must suppress market cap (null), never fall
       back to the structurally-wrong combined×price for a known dual-class issuer.
     - ``not_multiclass`` — single-class (or not a curated dual-class issuer): the
-      caller uses the legacy ``compute_market_cap`` (combined × price, exact)."""
+      caller uses the legacy ``compute_market_cap`` (combined × price, exact).
+    - ``fpi_adr_unavailable`` — a Rule 3b-4 foreign-private-issuer ADR/ADS
+      (#1939): the SEC share count is ordinary shares, the price is per-ADS,
+      and the ADS ratio is not ingested. FAIL CLOSED: no cap basis exists;
+      the caller must suppress every ordinary-shares × ADS-price product."""
 
     basis: MarketCapBasis
     total: TotalCompanyMarketCap | None = None
@@ -549,8 +553,31 @@ def resolve_market_cap_basis(
     detector filters with CUSIP gates). For a detected multi-class issuer we either
     return the total-company cap or fail closed; everything else uses the legacy
     single-class product. PURE READ-PATH; see
-    docs/specs/etl/2026-06-17-per-class-market-cap.md."""
+    docs/specs/etl/2026-06-17-per-class-market-cap.md.
+
+    #1939: a Rule 3b-4 FPI ADR/ADS fails closed FIRST — the ordinary-share count
+    cannot meet the per-ADS price under ANY basis until the ADS ratio is ingested.
+    Detection reuses ``coverage.filings_status = 'fpi'`` (the coverage
+    classifier's form fingerprint — single source of truth, do not re-derive)."""
     with conn.cursor() as cur:
+        # Fingerprint ∪ ADR/ADS name marker — the marker catches domestic-form
+        # ADR filers (ONC/TEVA class) the Rule 3b-4 form set cannot. Mirrors
+        # the sql/237 fpi_adr CTE exactly; keep the two in sync.
+        cur.execute(
+            """
+            SELECT 1
+            WHERE EXISTS (
+                SELECT 1 FROM coverage
+                WHERE instrument_id = %(iid)s AND filings_status = 'fpi'
+            ) OR EXISTS (
+                SELECT 1 FROM instruments
+                WHERE instrument_id = %(iid)s AND company_name ~* '\\y(ADR|ADS)\\y'
+            )
+            """,
+            {"iid": instrument_id},
+        )
+        if cur.fetchone() is not None:
+            return MarketCapResolution(basis="fpi_adr_unavailable")
         cur.execute(
             """
             SELECT identifier_value

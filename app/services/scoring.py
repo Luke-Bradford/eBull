@@ -44,7 +44,7 @@ from app.services.xbrl_derived_stats import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL_VERSION = "v1.4-balanced"
+_DEFAULT_MODEL_VERSION = "v1.5-balanced"
 
 # Model-version prefix gates (single source — the next version is a one-line add,
 # not a scattered string edit). TA-enhanced momentum applies from v1.1; the
@@ -52,10 +52,13 @@ _DEFAULT_MODEL_VERSION = "v1.4-balanced"
 # Calmar reward on top — Codex ckpt-1 HIGH: v1.3 must inherit v1.2 behavior).
 # v1.4 inherits ALL v1.3 behavior — the bump marks the #1857 value-input change
 # (instrument_valuation priced off price_daily fallback, sql/236), not a
-# scoring-code change.
-_TA_MOMENTUM_PREFIXES: tuple[str, ...] = ("v1.1", "v1.2", "v1.3", "v1.4")
-_RISK_PENALTY_PREFIXES: tuple[str, ...] = ("v1.2", "v1.3", "v1.4")
-_CALMAR_REWARD_PREFIXES: tuple[str, ...] = ("v1.3", "v1.4")
+# scoring-code change. v1.5 likewise inherits v1.4 — it marks the #1939 FPI
+# ADR/ADS basis suppression (sql/237: price-bearing ratios NULLed for Rule
+# 3b-4 fingerprinted instruments, whose ordinary-shares × per-ADS-price
+# inputs v1.4 had un-masked as garbage).
+_TA_MOMENTUM_PREFIXES: tuple[str, ...] = ("v1.1", "v1.2", "v1.3", "v1.4", "v1.5")
+_RISK_PENALTY_PREFIXES: tuple[str, ...] = ("v1.2", "v1.3", "v1.4", "v1.5")
+_CALMAR_REWARD_PREFIXES: tuple[str, ...] = ("v1.3", "v1.4", "v1.5")
 
 # ---------------------------------------------------------------------------
 # Weight modes  (must sum to 1.0)
@@ -193,6 +196,35 @@ _WEIGHT_MODES: dict[str, dict[str, float]] = {
         "turnaround": 0.05,
     },
     "v1.4-speculative": {
+        "turnaround": 0.30,
+        "value": 0.25,
+        "momentum": 0.15,
+        "confidence": 0.15,
+        "sentiment": 0.10,
+        "quality": 0.05,
+    },
+    # v1.5 — identical family weights to v1.4. The bump marks the #1939 FPI
+    # ADR/ADS suppression (sql/237): fingerprinted instruments lose their
+    # (structurally wrong) price-bearing value inputs, so their value
+    # sub-score honestly degrades to the empty-components default instead
+    # of an ADS-ratio-inflated garbage figure.
+    "v1.5-balanced": {
+        "quality": 0.25,
+        "value": 0.25,
+        "turnaround": 0.20,
+        "confidence": 0.15,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+    },
+    "v1.5-conservative": {
+        "quality": 0.35,
+        "value": 0.25,
+        "confidence": 0.20,
+        "momentum": 0.10,
+        "sentiment": 0.05,
+        "turnaround": 0.05,
+    },
+    "v1.5-speculative": {
         "turnaround": 0.30,
         "value": 0.25,
         "momentum": 0.15,

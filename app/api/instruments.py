@@ -3854,8 +3854,11 @@ def get_instrument_summary(
         cap_resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id_int)
         if cap_resolution.basis == "total_company" and cap_resolution.total is not None:
             computed_cap_value: Decimal | None = cap_resolution.total.value
-        elif cap_resolution.basis == "multiclass_unavailable":
-            computed_cap_value = None  # fail closed: known dual-class, no clean total
+        elif cap_resolution.basis in ("multiclass_unavailable", "fpi_adr_unavailable"):
+            # fail closed: known dual-class with no clean total, or an FPI
+            # ADR/ADS whose ordinary-shares × per-ADS-price product is wrong
+            # by the un-ingested ADS ratio (#1939).
+            computed_cap_value = None
         else:
             single_cap = compute_market_cap(conn, instrument_id=instrument_id_int)
             computed_cap_value = single_cap.value if single_cap is not None else None
