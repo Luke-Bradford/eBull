@@ -595,13 +595,13 @@ def assemble_instrument_analytics(
     insider_asof: date | None = None
     try:
         with conn.transaction():
-            # Prime manifest_parsers BEFORE insider_transactions to avoid the
-            # documented partial-init import cycle (review-prevention-log:
-            # insider_transactions -> manifest_parsers._classify -> insider_345 ->
-            # insider_form3_ingest -> insider_transactions). The app/test
-            # entrypoints import manifest_parsers first by side effect; a fresh
-            # import order (standalone scoring run) would otherwise re-enter.
-            import app.services.manifest_parsers  # noqa: F401
+            # Lazy import keeps scoring importable without the insider
+            # stack. The historical partial-init import cycle
+            # (insider_transactions -> manifest_parsers package init ->
+            # insider_345 -> insider_form3_ingest) is dead: #2110 moved
+            # the shared `_classify` leaf to app/services/upsert_classify,
+            # so importing insider modules no longer fires the parser
+            # registry. Guarded by tests/test_import_order_regression.py.
             from app.services.insider_transactions import get_insider_summary
 
             summary = get_insider_summary(conn, instrument_id=instrument_id)

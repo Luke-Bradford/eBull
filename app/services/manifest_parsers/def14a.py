@@ -72,10 +72,6 @@ from app.services.def14a_ingest import (
     apply_exec_comp_best_effort,
     def14a_within_cap,
 )
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
 from app.services.ownership_observations import (
     refresh_def14a_current,
     refresh_esop_current,
@@ -86,6 +82,10 @@ from app.services.raw_filings import (
     stored_body,
 )
 from app.services.sec_identity import siblings_for_issuer_cik
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 
 logger = logging.getLogger(__name__)
 

@@ -52,16 +52,16 @@ from psycopg.types.json import Jsonb
 from app.providers.concurrent_fetch import FetchOutcome, fetch_document_texts_classified
 from app.services import raw_filings
 from app.services.filings import reconcile_mislinked_ownership_filing_events
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
 from app.services.ownership_observations import (
     record_insider_observation,
     refresh_insiders_current,
     tombstone_non_sibling_insider_observations,
 )
 from app.services.sec_identity import resolve_insider_writer_routing
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
 
 _PARSER_VERSION_FORM4 = "form4-v1"
 # Form 5 (annual statement of changes in beneficial ownership) reuses the
@@ -351,6 +351,40 @@ class ParsedFiling:
 _XMLNS_RE = re.compile(r'\sxmlns="[^"]*"')
 
 
+def _unwrap_sgml_submission(text: str) -> str:
+    """Slice the embedded ``<ownershipDocument>`` XML out of a full
+    SGML submission (``<SEC-DOCUMENT>`` wrapper).
+
+    EDGAR serves every filing at TWO URLs: the per-document primary
+    doc (clean XML) and the ``.txt`` full submission (SGML container
+    embedding every document verbatim). Master/daily-index discovery
+    only knows the ``.txt`` URL, so manifest rows and legacy
+    owner-stream fetches store the SGML shape — 14,279 form3/4/5 raw
+    rows on dev as of 2026-07-22 (#2110 full-pop scan; 11,331 of them
+    tombstoned because the parsers rejected the wrapper). Unwrapping
+    at the parser chokepoint fixes every consumer at once: live
+    ingest, the manifest parser's stored-body reuse (#1591), and
+    rewash — without mutating stored payloads (raw store keeps the
+    fetched bytes verbatim).
+
+    First-close slice, not rindex: a submission carrying two ownership
+    documents must not produce a multi-root slice (Codex ckpt-2 on
+    #828 PR-2, where this exact slice repaired the 758-cohort's 13
+    wrapped rows). Non-SGML input is returned unchanged; a wrapper
+    with no embedded ownership doc falls through to the normal
+    ``ET.fromstring`` failure → ``None``.
+    """
+    if not text.lstrip().startswith("<SEC-DOCUMENT>"):
+        return text
+    start = text.find("<ownershipDocument")
+    if start == -1:
+        return text
+    end = text.find("</ownershipDocument>", start)
+    if end == -1:
+        return text
+    return text[start : end + len("</ownershipDocument>")]
+
+
 def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
     """Extract everything structural from a Form 4 primary document.
 
@@ -380,7 +414,7 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
     """
     if not raw_xml:
         return None
-    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
+    cleaned_xml = _XMLNS_RE.sub("", _unwrap_sgml_submission(raw_xml))
     try:
         root = ET.fromstring(cleaned_xml)
     except ET.ParseError:
@@ -484,7 +518,7 @@ def parse_form_5_xml(raw_xml: str) -> ParsedFiling | None:
     """
     if not raw_xml:
         return None
-    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
+    cleaned_xml = _XMLNS_RE.sub("", _unwrap_sgml_submission(raw_xml))
     try:
         root = ET.fromstring(cleaned_xml)
     except ET.ParseError:
@@ -980,7 +1014,7 @@ def parse_form_3_xml(raw_xml: str) -> ParsedForm3 | None:
     """
     if not raw_xml:
         return None
-    cleaned_xml = _XMLNS_RE.sub("", raw_xml)
+    cleaned_xml = _XMLNS_RE.sub("", _unwrap_sgml_submission(raw_xml))
     try:
         root = ET.fromstring(cleaned_xml)  # noqa: S314 — same trust posture as Form 4 parser.
     except ET.ParseError:

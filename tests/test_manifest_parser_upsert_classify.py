@@ -30,15 +30,15 @@ import psycopg
 import psycopg.errors
 import pytest
 
-from app.services.manifest_parsers._classify import (
-    format_upsert_error,
-    is_transient_upsert_error,
-)
 from app.services.sec_manifest import (
     get_manifest_row,
     record_manifest_entry,
     tombstone_stale_failed_upserts,
     transition_status,
+)
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 

@@ -56,16 +56,11 @@ from datetime import UTC, datetime
 
 import psycopg
 
-# Import order is LOAD-BEARING: the rewash specs' apply_fns lazy-import
-# insider_transactions / insider_form3_ingest, whose module graph cycles
-# through app/services/manifest_parsers/__init__.py (pre-existing on main
-# — direct first-import of either insider module raises ImportError
-# "partially initialized module"). Importing the manifest_parsers package
-# FIRST fully initializes the insider modules along the worker's proven
-# entry order; without it, the first apply_fn calls in a fresh process
-# fail with the cycle (observed: 14/758 failures on the 2026-07-22 run,
-# repaired on re-run after this pre-import).
-import app.services.manifest_parsers  # noqa: F401  (side-effect import)
+# NOTE (#2110): a load-bearing side-effect pre-import of
+# ``app.services.manifest_parsers`` stood here (the insider-module import
+# cycle through the package init; 14/758 first-run failures on 2026-07-22).
+# Dead since ``_classify`` moved to ``app.services.upsert_classify`` —
+# import order is now free. Guarded by tests/test_import_order_regression.py.
 from app.config import settings
 from app.services import raw_filings, rewash_filings
 

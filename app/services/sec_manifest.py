@@ -11,7 +11,7 @@ sweep stops the legacy retry loop that hammered SEC every hour for
 deterministic constraint violations on Form 4 / 8-K / 13D/G / DEF 14A
 ingest before the manifest parsers learned to discriminate transient
 errors from deterministic ones (see
-``app/services/manifest_parsers/_classify.py``).
+``app/services/upsert_classify.py``).
 
 The manifest replaces the per-source bespoke joins against
 ``def14a_ingest_log`` / ``institutional_holdings_ingest_log`` /

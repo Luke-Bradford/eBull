@@ -81,6 +81,22 @@ _FORM_4_BASIC = _wrap(
 
 
 class TestParseForm4Xml:
+    def test_sgml_wrapped_submission_parses(self) -> None:
+        # #2110 — .txt full-submission SGML wrapper embeds the XML
+        # verbatim; the parser unwraps instead of rejecting (1,813
+        # form4_xml raws on dev, 923 tombstoned by the old reject).
+        sgml = (
+            "<SEC-DOCUMENT>0001234567-26-000002.txt : 20240415\n"
+            "<SEC-HEADER>...</SEC-HEADER>\n"
+            "<DOCUMENT>\n<TYPE>4\n<FILENAME>form4.xml\n<TEXT>\n"
+            + _FORM_4_BASIC
+            + "\n</TEXT>\n</DOCUMENT>\n</SEC-DOCUMENT>\n"
+        )
+        parsed = parse_form_4_xml(sgml)
+        assert parsed is not None
+        assert parsed.filers[0].filer_cik == "0001000001"
+        assert len(parsed.transactions) == 1
+
     def test_basic_non_derivative_buy(self) -> None:
         parsed = parse_form_4_xml(_FORM_4_BASIC)
         assert parsed is not None
