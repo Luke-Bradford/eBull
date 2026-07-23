@@ -143,12 +143,19 @@ class TestInventory:
         assert fsds[0].optional is True, "newest FSDS quarter must be optional"
         for a in fsds[1:]:
             assert a.optional is False, f"{a.name} must stay required"
-        # FSNDS monthlies (#844) mirror the same posture: newest month
-        # published weeks late → optional; the rest required.
-        fsnds = [a for a in inventory if a.name.startswith("fsnds_")]
-        assert fsnds, "FSNDS monthlies missing from inventory"
-        assert fsnds[0].optional is True, "newest FSNDS month must be optional"
-        for a in fsnds[1:]:
+        # FSNDS (#844): monthlies mirror the same posture (newest month
+        # published weeks late → optional; the rest required); the
+        # quarterly consolidations cover months 13-24, with the newest
+        # quarterly on the consolidation boundary → optional.
+        fsnds_m = [a for a in inventory if a.name.startswith("fsnds_") and "q" not in a.name.split("_notes")[0][-7:]]
+        fsnds_q = [a for a in inventory if a.name.startswith("fsnds_") and "q" in a.name.split("_notes")[0][-7:]]
+        assert len(fsnds_m) == 12, "FSNDS monthlies missing from inventory"
+        assert len(fsnds_q) == 4, "FSNDS quarterly consolidations missing from inventory"
+        assert fsnds_m[0].optional is True, "newest FSNDS month must be optional"
+        for a in fsnds_m[1:]:
+            assert a.optional is False, f"{a.name} must stay required"
+        assert fsnds_q[0].optional is True, "boundary FSNDS quarter must be optional"
+        for a in fsnds_q[1:]:
             assert a.optional is False, f"{a.name} must stay required"
         # Every non-13F, non-FSDS, non-FSNDS archive stays required.
         for a in inventory:

@@ -670,6 +670,36 @@ So `financial_facts_raw` (sourced from companyfacts JSON, NO dimension/member co
 
 **Rule:** when a task assumes a per-class / per-segment / per-dimension XBRL fact "exists but isn't selected", verify it is actually reachable via our companyfacts ingest BEFORE designing — for multi-class share counts and any other dimensional fact, it is NOT. The combined-vs-per-class detection that ships meanwhile (#1646 `_detect_dual_class_denominator`) keys on the multi-class fingerprint: **the denominator falling back to us-gaap** `CommonStockSharesOutstanding` (taxonomy `us-gaap`, not `dei`) because every per-class DEI cover value was stripped. See data-engineer §Q15 + invariant I18.
 
+### 7.18 Note-level XBRL facts: plain FSDS is FACE-STATEMENTS-ONLY — the notes live in FSNDS (#844)
+
+DERA ships TWO products with near-identical names. The plain **Financial
+Statement Data Sets** (`/files/dera/data/financial-statement-data-sets/{y}q{n}.zip`,
+what #1590/#1623 consume) carries face financials + cover/parenthetical only —
+a note-level fact (RSU rollforward, ASC 718 tables) appears in ~10 filings a
+quarter (odd face-presenters), NOT the population. The full note tagging is in
+**Financial Statement and Notes Data Sets** (FSNDS,
+`/files/dera/data/financial-statement-notes-data-sets/…`). Empirically pinned
+2026-07-23 (nonvested-RSU tag): plain FSDS 2026q1 → 12 filings; FSNDS 2026_03
+→ 1,388.
+
+FSNDS specifics (vs FSDS):
+
+- **Monthly** `{YYYY}_{MM}_notes.zip` for ~the last 12 months, then DERA
+  **consolidates into quarterly** `{y}q{n}_notes.zip` — a rolling-12-monthlies
+  fetch alone leaves months 13-24 unreachable on a fresh install.
+- `num.tsv` keys dimensions by **`dimh`** (hash) → resolve via `dim.tsv`
+  (`dimhash` → `segments`); the null dimension is `dimh='0x00000000'` /
+  `dimn=0` / `segments=''`. An UNRESOLVED dimh is NOT the default — never
+  conflate.
+- `iprx` disambiguates otherwise-identical facts (primary presentation =
+  `iprx=0`); `version` is taxonomy-versioned per row (`us-gaap/2025`) —
+  prefix-match, never equality.
+- Consumer: `app/services/fsnds_notes_facts.py` (award_type axis,
+  spec docs/specs/etl/2026-07-23-drs-rsu-issuer-disclosures.md). The award
+  axis (`AwardTypeAndPlanNameAxis`) is NON-additive — members mix award types
+  with plan names (full-pop 2026_03: 58/91 default-vs-Σmembers disagreements);
+  never sum its members.
+
 ## 8. Operator checklist for new SEC integrations
 
 Before writing code that hits SEC EDGAR:

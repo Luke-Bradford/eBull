@@ -341,6 +341,23 @@ def build_bulk_archive_inventory(
                 optional=(idx == 0),
             )
         )
+    # DERA serves only ~12 months as monthlies, then consolidates into
+    # QUARTERLY {y}q{n}_notes.zip (page-verified 2026-07-23: monthlies
+    # 2025_07→2026_06, quarterlies 2025q2 and older). Quarters 5-8 back
+    # cover the note-freshness window (548d on period_end + filing lag)
+    # for a fresh install — without them a 13-18-month-old 10-K note is
+    # policy-fresh but never ingested (codex ckpt-2 finding). The newest
+    # of the four sits on the consolidation boundary (may still be
+    # monthly-only) → optional; its months are then covered by the
+    # monthly set above.
+    for idx, q in enumerate(last_n_quarters(8, today=today)[4:8]):
+        archives.append(
+            BulkArchive(
+                name=f"fsnds_{q}_notes.zip",
+                url=f"{SEC_BASE_URL}/files/dera/data/financial-statement-notes-data-sets/{q}_notes.zip",
+                optional=(idx == 0),
+            )
+        )
     return archives
 
 
