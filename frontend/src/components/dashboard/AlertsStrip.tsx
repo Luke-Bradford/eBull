@@ -384,7 +384,7 @@ function ThesisStaleCard({ item }: { item: ThesisStaleItem }) {
       </div>
       <div className="flex shrink-0 flex-col items-end gap-1">
         <Link
-          to="/theses?held=true&stale=true"
+          to="/research?view=theses&held=true&stale=true"
           className="text-xs font-medium text-sky-600 dark:text-sky-400 underline hover:text-sky-800 dark:hover:text-sky-300"
         >
           Review in Theses
@@ -676,7 +676,7 @@ export function AlertsStrip(): JSX.Element | null {
       Math.max(0, unseenRank - renderedRank) +
       Math.max(0, unseenThesisChange - renderedThesisChange) +
       Math.max(0, unseenThesisBreak - renderedThesisBreak);
-    const msg = `Dismiss all ${totalUnseen} unseen alerts? ${hiddenCount} are not shown above. Review them at /recommendations (or /theses for thesis alerts) before dismissing if they might matter.`;
+    const msg = `Dismiss all ${totalUnseen} unseen alerts? ${hiddenCount} are not shown above. Review them at /research?view=actioned (or ?view=theses for thesis alerts) before dismissing if they might matter.`;
     if (!window.confirm(msg)) return;
 
     const promises: Promise<void>[] = [];
@@ -740,7 +740,7 @@ export function AlertsStrip(): JSX.Element | null {
               Dismiss all ({totalUnseen}) as acknowledged
             </button>
             <Link
-              to="/recommendations"
+              to="/research?view=actioned"
               className="text-xs text-slate-500 dark:text-slate-400 underline hover:text-slate-700"
             >
               Triage at /recommendations
