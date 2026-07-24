@@ -112,9 +112,20 @@ def changes_are_stale(paths: Iterable[str], spawn_time: float) -> bool:
     return True
 
 
-def _spawn_child() -> subprocess.Popen[bytes]:
+def _spawn_child() -> tuple[subprocess.Popen[bytes], float]:
+    """Spawn the daemon, returning it with the wall-time it was started.
+
+    The timestamp is taken BEFORE ``Popen`` (review nitpick on PR #2156).
+    Reading it afterwards would place it slightly late, so an edit landing
+    in the fork/exec window would compare as older than the child and be
+    suppressed — the daemon would then run code it never read. Sampling
+    early biases the other way: such an edit reads as newer and forces one
+    extra reload. Same principle as the deleted-path case — a redundant
+    restart is always preferable to silently-stale code.
+    """
     logger.info("jobs dev-reload: starting %s", " ".join(_CHILD_ARGV))
-    return subprocess.Popen(_CHILD_ARGV, cwd=_REPO_ROOT)
+    spawn_time = time.time()
+    return subprocess.Popen(_CHILD_ARGV, cwd=_REPO_ROOT), spawn_time
 
 
 def _stop_child(proc: subprocess.Popen[bytes]) -> None:
@@ -172,8 +183,7 @@ def _supervise() -> int:
                 logger.debug("jobs dev-reload: signal %s not registrable on this platform", name)
 
     logger.info("jobs dev-reload: watching %s for *.py changes", _APP_DIR)
-    child = _spawn_child()
-    spawn_time = time.time()
+    child, spawn_time = _spawn_child()
     crash_reported = False
 
     try:
@@ -219,8 +229,7 @@ def _supervise() -> int:
             _stop_child(child)
             if stop_event.is_set():
                 return 0
-            child = _spawn_child()
-            spawn_time = time.time()
+            child, spawn_time = _spawn_child()
             crash_reported = False
     finally:
         _stop_child(child)
