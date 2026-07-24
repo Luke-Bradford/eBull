@@ -88,7 +88,20 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # 402(v) PvP iXBRL PeoName facts) with unanimity + (name, fy)-collision
 # guards. Specs: docs/proposals/etl/2026-07-22-def14a-pvp-neo-name-oracle.md
 # + …-def14a-sct-residual-name-classes.md.
-_PARSER_VERSION_DEF14A = "def14a-v6"
+# v7 (#2140): Item 403 column resolution + role classification. Percent is
+# resolved first, then shares (percent column excluded from the tiering), then
+# name — each excluding the already-claimed indices — and name discriminates on
+# Item 403's name-side captions only, never bare "beneficial" (which appears in
+# BOTH the name and amount captions, so a blank name caption made the SHARES
+# header win name_idx and the share count was persisted as holder_name on
+# 3,209 rows). Spanning-header promotion widened for the Name|Shares|Percent
+# label row. Structural guard: a holder name must carry name evidence. The
+# Item 403(b) "as a group" aggregate now overrides section context (it is
+# NON-ADDITIVE with its constituents). Holder names flatten interior render
+# wraps (holder_name_key is lower(trim(...)), so an interior newline split one
+# person into two identities across 704 rows). Spec:
+# docs/specs/etl/def14a-beneficial-ownership-column-and-role-resolution.md.
+_PARSER_VERSION_DEF14A = "def14a-v7"
 
 logger = logging.getLogger(__name__)
 
