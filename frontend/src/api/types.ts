@@ -1059,6 +1059,27 @@ export interface AuditListResponse {
   limit: number;
 }
 
+/**
+ * One entry of `scores.penalties_json`. Written by
+ * `app/services/scoring.py::_insert_score` — the column carries BOTH penalties
+ * and rewards, disambiguated by `kind` (#1635).
+ *
+ * `kind` is OPTIONAL because rows written before #1635 carry only
+ * `{name, deduction, reason}`. Read the discriminator through
+ * `lib/scoreExplanation.ts::isReward`, never by testing `kind` directly.
+ *
+ * Both magnitudes are POSITIVE: `deduction` is subtracted from the score,
+ * `addition` is added. Keeping rewards out of `deduction` is deliberate — a
+ * negative penalty would corrupt `total_penalty` and the explanation string.
+ */
+export interface ScorePenaltyItem {
+  name: string;
+  reason: string;
+  kind?: string;
+  deduction?: number;
+  addition?: number;
+}
+
 // ---------------------------------------------------------------------------
 // /rankings (app/api/scores.py)
 // ---------------------------------------------------------------------------
@@ -1086,7 +1107,7 @@ export interface RankingItem {
   // visibly flagged (on `scores` since #1820).
   data_completeness: number | null;
   completeness_tier: string | null;
-  penalties_json: Record<string, unknown>[] | null;
+  penalties_json: ScorePenaltyItem[] | null;
   explanation: string | null;
   model_version: string;
   scored_at: string;
@@ -1136,7 +1157,7 @@ export interface ScoreHistoryItem {
   momentum_score: number | null;
   sentiment_score: number | null;
   confidence_score: number | null;
-  penalties_json: Record<string, unknown>[] | null;
+  penalties_json: ScorePenaltyItem[] | null;
   explanation: string | null;
   rank: number | null;
   rank_delta: number | null;
@@ -1234,7 +1255,7 @@ export interface VerdictScore {
   confidence_score: number | null;
   data_completeness: number | null;
   completeness_tier: string | null;
-  penalties_json: Record<string, unknown>[] | null;
+  penalties_json: ScorePenaltyItem[] | null;
   explanation: string | null;
   analytics_json: IarAnalytics | null;
 }
