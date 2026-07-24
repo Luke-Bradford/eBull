@@ -336,6 +336,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "respx" },
     { name = "ruff" },
+    { name = "watchfiles" },
 ]
 
 [package.metadata]
@@ -368,6 +369,7 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.5" },
     { name = "respx", specifier = ">=0.21" },
     { name = "ruff", specifier = ">=0.4.0" },
+    { name = "watchfiles", specifier = ">=1.0" },
 ]
 
 [[package]]

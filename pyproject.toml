@@ -45,6 +45,12 @@ dev = [
   # calls when the sidecar is populated. respx mocks httpx at the
   # transport layer — smallest primitive that satisfies the contract.
   "respx>=0.21",
+  # #2144: app/jobs/dev_reload.py imports watchfiles DIRECTLY for the
+  # dev-only jobs-daemon auto-reload. It already resolves transitively as a
+  # `uvicorn[standard]` extra (uv.lock pins 1.1.1) — declared here so a
+  # direct import is not leaning on somebody else's transitive dep, and in
+  # the dev group because the import is lazy inside the dev-only path.
+  "watchfiles>=1.0",
 ]
 
 [tool.ruff]
