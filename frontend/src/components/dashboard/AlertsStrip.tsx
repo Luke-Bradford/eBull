@@ -743,7 +743,7 @@ export function AlertsStrip(): JSX.Element | null {
               to="/research?view=actioned"
               className="text-xs text-slate-500 dark:text-slate-400 underline hover:text-slate-700"
             >
-              Triage at /recommendations
+              Triage recommendations
             </Link>
           </div>
         ) : null}
