@@ -470,7 +470,10 @@ class TestDemotionT2ToT3:
         snap = _snap(current_tier=2, total_score=DEMOTE_T2_TO_T3_SCORE)
         assert _evaluate_demotion(snap, _NOW) is None
 
-    def test_no_thesis_triggers(self) -> None:
+    def test_no_thesis_does_not_trigger(self) -> None:
+        """#2131: a score-worthy (>=0.45) thesis-less name rests at T2 — it does
+        NOT demote for thesis absence. T3→T2 promotion is thesis-optional, so a
+        "no thesis" demotion trigger made such names flap T2↔T3 daily."""
         snap = InstrumentSnapshot(
             instrument_id=1,
             symbol="X",
@@ -485,9 +488,7 @@ class TestDemotionT2ToT3:
             has_quote=True,
             spread_flag=False,
         )
-        result = _evaluate_demotion(snap, _NOW)
-        assert result is not None
-        assert "no thesis" in result.rationale
+        assert _evaluate_demotion(snap, _NOW) is None
 
     def test_not_tradable_triggers(self) -> None:
         snap = _snap(current_tier=2, is_tradable=False)
