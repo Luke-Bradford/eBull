@@ -4,6 +4,8 @@ import { formatMoney, formatNumber, formatPct, pnlPct } from "@/lib/format";
 import { EmptyState } from "@/components/states/EmptyState";
 import { UnconvertedBadge } from "@/components/portfolio/UnconvertedBadge";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
+import { Avatar } from "@/lib/avatar";
+import { buildSortedRows } from "@/lib/portfolioRows";
 
 /**
  * Positions table — unified view of direct positions and copy-trading mirrors.
@@ -44,21 +46,8 @@ export function PositionsTable({
     );
   }
 
-  // Build a unified sorted list: positions use market_value, mirrors use mirror_equity.
-  type RowItem =
-    | { kind: "position"; data: PositionItem }
-    | { kind: "mirror"; data: PortfolioMirrorItem };
-
-  const rows: RowItem[] = [
-    ...positions.map((p) => ({ kind: "position" as const, data: p })),
-    ...mirrors.map((m) => ({ kind: "mirror" as const, data: m })),
-  ];
-
-  rows.sort((a, b) => {
-    const mvA = a.kind === "position" ? a.data.market_value : a.data.mirror_equity;
-    const mvB = b.kind === "position" ? b.data.market_value : b.data.mirror_equity;
-    return mvB - mvA;
-  });
+  // Positions + mirrors merged, sorted by dollar value (#1901 shared builder).
+  const rows = buildSortedRows(positions, mirrors);
 
   // The live-quote stream is owned by the parent page (Dashboard or
   // Portfolio) so the instrument-id union — held positions + every
@@ -146,22 +135,6 @@ function PositionRow({ p, displayCurrency }: { p: PositionItem; displayCurrency:
   );
 }
 
-/** eToro-style colour derived from the username string. */
-const AVATAR_TONES = [
-  "bg-blue-600",
-  "bg-emerald-600",
-  "bg-amber-600",
-  "bg-rose-600",
-  "bg-violet-600",
-  "bg-cyan-600",
-] as const;
-
-function avatarTone(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
-  return AVATAR_TONES[Math.abs(hash) % AVATAR_TONES.length] ?? "bg-blue-600";
-}
-
 function MirrorRow({
   m,
   currency,
@@ -181,11 +154,7 @@ function MirrorRow({
           to={`/copy-trading/${m.mirror_id}`}
           className="group flex items-center gap-2 hover:no-underline"
         >
-          <span
-            className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white ${avatarTone(m.parent_username)}`}
-          >
-            {m.parent_username.charAt(0).toUpperCase()}
-          </span>
+          <Avatar username={m.parent_username} size="md" />
           <span className="font-medium text-blue-600 group-hover:underline">
             {m.parent_username}
           </span>
