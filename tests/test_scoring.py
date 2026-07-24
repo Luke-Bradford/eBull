@@ -1265,10 +1265,10 @@ def _make_rankings_conn(
 def _stub_scoring(results_in_order: list[ScoreResult]):
     """Stub the load + analytics + pure-core so compute_rankings tests exercise ONLY
     rank / rank_delta assignment (#2127: compute_rankings now calls
-    _bulk_load_instrument_data + _score_from_data, not compute_score). Stubbing
-    _bulk_load_instrument_data keeps the fake conn's 2-cursor model valid — the only
-    conn use left is the eligible query + the prior-rank fetch + inserts. Results are
-    returned in instrument-id iteration order (matches the prior compute_score stub)."""
+    _bulk_load_instrument_data + assemble_instrument_analytics_bulk + _score_from_data,
+    not compute_score). Stubbing the two bulk readers keeps the fake conn's 2-cursor
+    model valid — the only conn use left is the eligible query + the prior-rank fetch +
+    inserts. Results are returned in instrument-id iteration order."""
     with ExitStack() as stack:
         stack.enter_context(
             patch(
@@ -1277,7 +1277,12 @@ def _stub_scoring(results_in_order: list[ScoreResult]):
             )
         )
         stack.enter_context(patch("app.services.scoring._analytics_inputs", return_value=(None, None)))
-        stack.enter_context(patch("app.services.scoring.assemble_instrument_analytics", return_value={}))
+        stack.enter_context(
+            patch(
+                "app.services.scoring.assemble_instrument_analytics_bulk",
+                side_effect=lambda conn, ids, **kw: {iid: {} for iid in ids},
+            )
+        )
         mock_score = stack.enter_context(patch("app.services.scoring._score_from_data"))
         mock_score.side_effect = results_in_order
         yield mock_score
