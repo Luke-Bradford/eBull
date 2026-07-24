@@ -26,7 +26,11 @@ from decimal import Decimal
 
 from app.providers.implementations.sec_def14a import (
     Def14ABeneficialOwnershipTable,
+    _clean_beneficial_holder_name,
+    _clean_holder_name,
+    _looks_like_subheader,
     _parse_percent,
+    _resolve_columns,
     extract_plan_name_and_trustee,
     is_esop_plan,
     parse_beneficial_ownership_table,
@@ -685,3 +689,258 @@ class TestParsePercentRangeClamp:
     def test_infinity_returns_none(self) -> None:
         assert _parse_percent("Infinity") is None
         assert _parse_percent("-Infinity") is None
+
+
+# ---------------------------------------------------------------------------
+# #2140 — column resolution + role classification
+#
+# Each fixture below reproduces the header/row SHAPE of a real filing that the
+# parser got wrong, traced from the stored ``def14a_body`` payload named in the
+# test. Source rule: Reg S-K Item 403 (via Schedule 14A Item 6(d)) prescribes
+# BOTH "Name and address of beneficial owner" / "Name of beneficial owner" AND
+# "Amount and nature of beneficial ownership" — so the token ``beneficial``
+# appears on both sides of the table and cannot discriminate a name column.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveColumnsNeverCollide:
+    """``_resolve_columns`` must return three DISTINCT roles for the real
+    header shapes that previously collapsed onto one index."""
+
+    def test_blank_name_caption_with_total_beneficial_ownership(self) -> None:
+        # LOGI 0001032975-26-000037. "Total Beneficial Ownership" is the SHARES
+        # column; matching bare "beneficial" made it the name column too.
+        headers = (
+            "",
+            "Number of Shares Owned (1)",
+            "Shares that May be Acquired Within 60 Days (2)",
+            "Total Beneficial Ownership",
+            "Total as a Percentage of Shares Outstanding (3)",
+        )
+        name_idx, shares_idx, percent_idx = _resolve_columns(headers)
+        assert name_idx == 0
+        assert shares_idx == 3
+        assert percent_idx == 4
+
+    def test_blank_name_caption_with_shares_beneficially_owned(self) -> None:
+        # MKTX 0001193125-26-191601.
+        headers = ("", "", "Number of Shares Beneficially Owned", "", "Percentage of Stock Owned")
+        name_idx, shares_idx, percent_idx = _resolve_columns(headers)
+        assert name_idx == 0
+        assert shares_idx == 2
+        assert percent_idx == 4
+
+    def test_item_403_prescribed_captions_still_resolve(self) -> None:
+        # HLF 0001213900-26-029131 — the shape that already worked; pinned so
+        # the exclusion-ordered rewrite cannot regress it.
+        headers = (
+            "Name of beneficial owner",
+            "",
+            "Amount and nature of beneficial ownership",
+            "",
+            "Percentage ownership (1)",
+        )
+        assert _resolve_columns(headers) == (0, 2, 4)
+
+    def test_name_never_aliases_shares_for_any_real_header_shape(self) -> None:
+        # The invariant the 3,209-row defect violated: whenever there is more
+        # than one column, the name and shares roles are distinct.
+        for headers in (
+            ("", "Shares Beneficially Owned"),
+            ("", "", "Number of Shares Beneficially Owned", "", "Percentage of Stock Owned"),
+            ("Beneficial Owner", "Amount and Nature of Beneficial Ownership", "Percent"),
+            ("Title of Class", "Name and Address of Beneficial Owner", "Amount and Nature", "Percent of Class"),
+            ("", "Amount and Nature of Beneficial Ownership", "Percent of Class"),
+        ):
+            name_idx, shares_idx, percent_idx = _resolve_columns(headers)
+            assert name_idx != shares_idx, headers
+            assert percent_idx in (-1, name_idx) or percent_idx != shares_idx, headers
+
+    def test_percent_absent_is_reported_as_minus_one_not_an_alias(self) -> None:
+        # A table with no distinguishable percent column must say so — callers
+        # treat a negative index as "absent" and must never index end-relative.
+        _, shares_idx, percent_idx = _resolve_columns(("Shares Beneficially Owned",))
+        assert percent_idx == -1
+        assert shares_idx == 0
+
+
+class TestSpanningHeaderPromotion:
+    """#2140 D2 — a spanning row 0 over the real label row."""
+
+    def test_name_shares_percent_label_row_is_promoted(self) -> None:
+        # UBER 0001308179-26-000125 / CYH 0001193125-26-140269 shape: row 0
+        # spans, row 1 carries the real labels but none of the legacy
+        # Sole/Shared/Total keywords.
+        body = """
+        <table>
+          <tr><th></th><th></th><th>Shares Beneficially Owned</th></tr>
+          <tr><td>Name of Beneficial Owner</td><td></td><td>Shares</td><td></td><td>% of Shares Outstanding</td></tr>
+          <tr><td>Dara Khosrowshahi (1)</td><td></td><td>2,380,203</td><td></td><td>1.2%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Dara Khosrowshahi"]
+        assert parsed.rows[0].shares == Decimal("2380203")
+        assert parsed.rows[0].percent_of_class == Decimal("1.2")
+
+    def test_section_heading_row_is_not_promoted_to_header(self) -> None:
+        # Guard for the substring trap: "Named Executive Officers and
+        # Directors" contains "name", carries no digits, and sits exactly
+        # where a promoted row would. It must stay a section heading.
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Shares</th><th>Percent</th></tr>
+          <tr><td>Named Executive Officers and Directors</td><td></td><td></td></tr>
+          <tr><td>Dara Khosrowshahi</td><td>2,380,203</td><td>1.2%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Dara Khosrowshahi"]
+        assert parsed.rows[0].holder_role == "officer"  # from the heading row
+
+    def test_performance_award_table_is_not_promoted(self) -> None:
+        # CYH regression guard: a PSU vesting row matches percent+amount but
+        # carries no NAME label. Promoting it inflated that table's score
+        # enough to beat the real ownership table.
+        assert not _looks_like_subheader(
+            ("% of Target Achieved", "% of Granted Shares Earned", "", "Percentile Rank", "% of Granted Shares Earned")
+        )
+
+    def test_legacy_sole_shared_total_subheader_still_promotes(self) -> None:
+        assert _looks_like_subheader(("", "Sole", "Shared", "Total", ""))
+
+
+class TestHolderNameStructuralGuard:
+    """#2140 — a holder name must carry name evidence; a share count or a
+    percent marker can never be persisted as one."""
+
+    def test_numeric_cell_falls_back_to_the_named_cell_in_the_row(self) -> None:
+        body = """
+        <table>
+          <tr><th></th><th>Total Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>BlackRock, Inc.</td><td>9,777,832</td><td>6.8%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].holder_name == "BlackRock, Inc."
+        assert parsed.rows[0].shares == Decimal("9777832")
+
+    def test_row_with_no_name_evidence_anywhere_is_dropped(self) -> None:
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Shares</th><th>Percent</th></tr>
+          <tr><td>1,234,567</td><td>1,234,567</td><td>5.0%</td></tr>
+          <tr><td>Jane Smith</td><td>250,000</td><td>1.0%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Jane Smith"]
+
+
+class TestGroupAggregateOverridesSectionContext:
+    """#2140 D4 — Item 403(b)'s "all directors and officers as a group" row is
+    NON-ADDITIVE with its constituents, so it must stay distinguishable even
+    though it sits inside the management block that sets ``current_role``."""
+
+    def test_group_row_under_management_heading_is_tagged_group(self) -> None:
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Shares</th><th>Percent</th></tr>
+          <tr><td>Directors and Executive Officers</td><td></td><td></td></tr>
+          <tr><td>John Doe</td><td>1,000</td><td>*</td></tr>
+          <tr><td>All directors and executive officers as a group (17 persons)</td><td>5,297,686</td><td>5.12%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].holder_role == "officer"
+        assert parsed.rows[-1].holder_role == "group"
+        assert parsed.rows[-1].shares == Decimal("5297686")
+
+    def test_group_heading_does_not_become_a_sticky_section_role(self) -> None:
+        # A group pattern in _ROLE_HEADING_PATTERNS would set current_role for
+        # every SUBSEQUENT row. Rows after a group-shaped heading must keep the
+        # management role, not inherit 'group'.
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Shares</th><th>Percent</th></tr>
+          <tr><td>All directors and executive officers as a group</td><td></td><td></td></tr>
+          <tr><td>John Doe</td><td>1,000</td><td>*</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["John Doe"]
+        assert parsed.rows[0].holder_role != "group"
+
+
+class TestHolderNameNewlineNormalisation:
+    """#2140 D5 — ``holder_name_key`` is ``lower(trim(holder_name))``; ``trim``
+    does not touch INTERIOR whitespace, so a render wrap split one person into
+    two identities across ``ownership_def14a_current``."""
+
+    def test_interior_line_break_is_flattened(self) -> None:
+        body = """
+        <table>
+          <tr><th>Name of beneficial owner</th><th>Amount and nature of beneficial ownership</th>
+              <th>Percentage</th></tr>
+          <tr><td>Michael<br/> O. Johnson</td><td>1,650,489</td><td>1.60%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].holder_name == "Michael O. Johnson"
+
+    def test_unbracketed_trailing_footnote_digit_is_stripped(self) -> None:
+        # MKTX: the superscript carried no parentheses, so it survived
+        # _FOOTNOTE_RE as a bare trailing number once the wrap was flattened.
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Shares</th><th>Percent</th></tr>
+          <tr><td>BlackRock, Inc.<br/> 1</td><td>4,034,537</td><td>11.5%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].holder_name == "BlackRock, Inc."
+
+    def test_sct_name_title_split_is_unaffected(self) -> None:
+        # Blast-radius pin: the newline/footnote cleaning lives in
+        # _clean_beneficial_holder_name, NOT the shared _clean_holder_name,
+        # because _normalize_first_cell feeds SCT title fragments through it.
+        assert _clean_holder_name("EVP,") == "EVP,"
+        assert _clean_beneficial_holder_name("EVP,") == "EVP"
+
+
+class TestRaggedRowPercentRecovery:
+    """#2140 D3 — issuers interleave footnote-only cells, so a data row can be
+    WIDER than its header row and the positional percent cell lands wrong."""
+
+    def test_percent_recovered_from_a_shifted_cell(self) -> None:
+        # CYH 0001193125-26-140269 shape, reproduced in full: spanning row 0,
+        # 5-wide label row 1, and 6-wide data rows carrying an interleaved
+        # footnote-only cell. Values verified against edgartools' independent
+        # extraction of the same filing.
+        body = """
+        <table>
+          <tr><th></th><th></th><th>Shares Beneficially Owned (1)</th></tr>
+          <tr><td>Name</td><td></td><td>Number</td><td></td><td>Percent</td></tr>
+          <tr><td>Apollo Management Holdings GP, LLC</td><td></td><td>11,838,609</td>
+              <td>(2)</td><td></td><td>8.4%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].holder_name == "Apollo Management Holdings GP, LLC"
+        assert parsed.rows[0].shares == Decimal("11838609")
+        assert parsed.rows[0].percent_of_class == Decimal("8.4")
+
+    def test_bare_number_is_not_accepted_as_a_percent(self) -> None:
+        # The fallback must only accept unambiguous percents ('%' or '*') —
+        # a bare small number in another column would otherwise be read as a
+        # percentage, which is the exact misfire class this ticket removes.
+        body = """
+        <table>
+          <tr><th></th><th></th><th>Shares Beneficially Owned (1)</th></tr>
+          <tr><td>Name</td><td></td><td>Number</td><td></td><td>Percent</td></tr>
+          <tr><td>Jane Smith</td><td></td><td>250,000</td><td>(2)</td><td></td><td>42</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].shares == Decimal("250000")
+        assert parsed.rows[0].percent_of_class is None

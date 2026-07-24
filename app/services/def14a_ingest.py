@@ -1010,9 +1010,13 @@ def _ingest_single_accession(
     # Write-through observations + refresh _current (#891 / spec
     # §"Eliminate periodic re-scan jobs"). Replaces nightly
     # ownership_observations_sync.sync_def14a read-from-typed-tables
-    # path. record_def14a_observation is itself UPSERT so re-ingest
-    # of the same accession (parser bump) refreshes existing rows
-    # in place. Fan out across share-class siblings post-#1117.
+    # path. _record_def14a_observations_for_filing replaces this
+    # (instrument, accession)'s prior observation rows before
+    # inserting, so a re-ingest under a bumped parser is corrective
+    # and not merely additive (#2140 D6 — the previous
+    # "UPSERT refreshes in place" claim held only while the parser
+    # kept producing the same holder NAME, which is the row key).
+    # Fan out across share-class siblings post-#1117.
     if parsed.rows:
         for sibling_iid in siblings:
             _record_def14a_observations_for_filing(
@@ -1109,6 +1113,36 @@ def _record_def14a_observations_for_filing(
     period_end: date = as_of_date or fetched_at.date()
     filed_at = fetched_at
     run_id = uuid4()
+
+    # Replace-then-insert (#2140 D6). ``record_def14a_observation`` is an
+    # UPSERT keyed on ``holder_name_key``, so it refreshes a row in place only
+    # while the parser keeps producing the SAME NAME. A parser fix that changes
+    # a name — which is exactly what #2140 does for 3,209 numeric-name rows and
+    # 704 newline-split rows — writes the corrected row under a NEW key and
+    # leaves the broken one live. ``refresh_def14a_current`` prunes via
+    # ``WHEN NOT MATCHED BY SOURCE THEN DELETE``, but its source set is these
+    # observations, so the stale rows keep their ``_current`` row alive
+    # forever. Without this delete a re-wash is additive, not corrective.
+    #
+    # DELETE rather than a ``known_to`` tombstone, mirroring the #953 13F
+    # precedent (``rewash_filings.py``): this module's ON CONFLICT DO UPDATE
+    # never clears ``known_to``, so a tombstoned row re-asserted by a later
+    # re-wash would stay invisible to the _current MERGE forever.
+    #
+    # Scoped to (instrument_id, source_document_id) — NOT the accession alone.
+    # The caller fans this function out ONCE PER SHARE-CLASS SIBLING for the
+    # same accession, so an accession-wide delete would make each sibling's
+    # write wipe the previous sibling's rows.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM ownership_def14a_observations
+            WHERE instrument_id = %(iid)s
+              AND source = 'def14a'
+              AND source_document_id = %(doc_id)s
+            """,
+            {"iid": instrument_id, "doc_id": accession_number},
+        )
     for holder in holders:
         if holder.shares is None:
             continue
