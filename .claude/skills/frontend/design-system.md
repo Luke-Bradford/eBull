@@ -8,12 +8,14 @@ Read before any change to eBull's visual system — surfaces/cards, badges/pills
 
 ## Surface model (the #691 line) — SETTLED
 
-There is **no card/surface decision in `docs/settled-decisions.md`**. The governing history is operator taste in **#691**, which killed *shadowed, elevated "Trello card"* surfaces — it did **not** ban flat surfaces. So the standing surface system is a **hybrid**:
+The base surface is **settled and deliberate**: design-system **v1 is borderless "editorial chrome"** (`components/instrument/Pane.tsx:32-47`). It already replaced the prior rounded card (border + shadow + `bg-white`) with a **single hairline top-rule + small-caps title**, on an explicit rationale — financial operators **scan across panes for cross-pane signal** (revenue trend → dividend yield → insider buying), so the grid must read as **one document, not a Trello-board of separate cards**. That IS the #691 completion. `StatTile.tsx` follows the same rule ("the hairline IS the tile chrome", #1592).
 
-- **Flat-hairline base** — lists, tables, narrative sections. Border/hairline separators, no fill, no elevation. This is the default; most surfaces are this.
-- **One flat card variant** — for **stat tiles and chart tiles only** (the things that otherwise "float in empty space"). Spec: subtle fill (`bg-slate-900/40` dark / `bg-slate-50` light equivalent), `1px` border, `rounded`, **NO shadow, NO elevation**. That last clause IS the #691 line — hold it. Never add `shadow-*` or a raised/Trello look to a card.
+**Do NOT reflexively "add cards".** A bounded/filled card fragments the cross-pane scan the v1 system was built to protect — reversing it inside the instrument grid (or any scanning grid of Panes) is a **settled-decision reversal**: surface it to the operator with a recommendation, don't just ship it.
 
-Decision rule: **narrative/list → flat-hairline; stat/chart tile → the flat card variant.** Nothing else gets a third surface. (Frame any v2 work as "completing #691's surface system," not "reversing a decision.")
+- **Default = editorial chrome** — hairline rule + title, no fill, no border box, no shadow. Panes, stat rows, narrative sections. `Pane` / `StatTile` already encode this; reuse them.
+- **A bounding surface is a narrow, JUSTIFIED exception** — only for a genuinely **standalone** tile that is NOT part of a scanning grid and reads as unanchored on bare page background (e.g. a lone chart with no neighbouring panes). Even then: flat only — subtle fill + `1px` border, `rounded`, **NO shadow, NO elevation** (the #691 line). If in doubt, prefer fixing "floating" with **spacing/grouping/density** (see Density) inside editorial chrome, not a card.
+
+Decision rule: **editorial chrome first.** Reach for a bounding surface only for a standalone unanchored tile, and never retrofit cards onto a Pane scanning grid without operator sign-off — that's reversing v1's documented rationale.
 
 ## Badge / pill — ONE component
 
