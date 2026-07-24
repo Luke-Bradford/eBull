@@ -23,7 +23,9 @@ import type {
   BrokerPositionItem,
   PositionItem,
   PortfolioMirrorItem,
+  PortfolioResponse,
 } from "@/api/types";
+import { portfolioTotals } from "@/lib/portfolioTotals";
 
 type RowItem =
   | { kind: "position"; data: PositionItem }
@@ -273,7 +275,7 @@ export function PortfolioPage() {
       ) : (
         <LiveQuoteProvider instrumentIds={liveQuoteIds}>
         <div className="space-y-3">
-          <SummaryBar data={portfolio.data} displayCurrency={portfolio.data.display_currency} />
+          <SummaryBar data={portfolio.data} />
           {allRows.length === 0 ? (
             <EmptyState
               title="No positions yet"
@@ -360,36 +362,12 @@ export function PortfolioPage() {
 // Summary bar
 // ---------------------------------------------------------------------------
 
-function SummaryBar({
-  data,
-  displayCurrency,
-}: {
-  data: {
-    total_aum: number;
-    cash_balance: number | null;
-    cash_currency: string;
-    positions: PositionItem[];
-    mirrors?: PortfolioMirrorItem[];
-    fx_incomplete: boolean;
-  };
-  // The currency the backend converted the totals to (response.display_currency),
-  // NOT the /config context — those can diverge (#2129).
-  displayCurrency: string;
-}) {
-  const mirrors = data.mirrors ?? [];
-  const totalPnl =
-    data.positions.reduce((s, p) => s + p.unrealized_pnl, 0) +
-    mirrors.reduce((s, m) => s + m.unrealized_pnl, 0);
-  const totalInvested =
-    data.positions.reduce((s, p) => s + p.cost_basis, 0) +
-    mirrors.reduce((s, m) => s + m.funded, 0);
-  const pct = totalInvested !== 0 ? totalPnl / totalInvested : null;
-  const posCount = data.positions.length + mirrors.length;
-  const mirrorCount = mirrors.length;
-  // Totals sum every money source (positions, cash, mirror equity); any left native on
-  // an FX-degrade makes the sum mix currencies (#2129). The backend flags this
-  // (covering cash/mirror) rather than deriving from positions alone.
-  const hasUnconverted = data.fx_incomplete;
+function SummaryBar({ data }: { data: PortfolioResponse }) {
+  // #1901: shared totals + #2129 display-currency labeling (single source, also
+  // used by the Dashboard cockpit's SummaryCards).
+  const { totalPnl, pnlFraction, displayCurrency, hasUnconverted } = portfolioTotals(data);
+  const mirrorCount = (data.mirrors ?? []).length;
+  const posCount = data.positions.length + mirrorCount;
 
   return (
     <div className="flex flex-wrap gap-x-8 gap-y-2 border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-2 text-sm">
@@ -398,7 +376,7 @@ function SummaryBar({
       <Stat
         label="P&L"
         value={formatMoney(totalPnl, displayCurrency)}
-        hint={pct === null ? undefined : formatPct(pct)}
+        hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
         tone={totalPnl >= 0 ? "positive" : "negative"}
       />
       <Stat label="Positions" value={String(posCount)} />
