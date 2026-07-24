@@ -100,6 +100,23 @@ export interface UnderwaterProps {
   readonly points: ReadonlyArray<DrawdownPoint>;
 }
 
+/**
+ * Lower bound of the drawdown y-axis (#1908 PR-3).
+ *
+ * Drawdown is ≤ 0 by construction and is read AGAINST the peak, so 0 is the
+ * anchor the whole series is measured from and must always be the TOP of the
+ * axis. Recharts' auto-domain fits `[dataMin, dataMax]` instead: a series whose
+ * shallowest point is −2% renders with the axis topping out at −2%, which both
+ * pushes the `ReferenceLine y={0}` off-chart AND rescales the shape so a mild
+ * drawdown looks as deep as a severe one.
+ *
+ * Clamps at 0 defensively — a positive value (a bad row) must never lift the
+ * axis above the peak line.
+ */
+export function drawdownDomainMin(dataMin: number): number {
+  return Math.min(dataMin, 0);
+}
+
 export function UnderwaterChart({ points }: UnderwaterProps): JSX.Element {
   const theme = useChartTheme();
   const data = points
@@ -120,7 +137,9 @@ export function UnderwaterChart({ points }: UnderwaterProps): JSX.Element {
             minTickGap={28}
             {...sharedAxis(theme)}
           />
+          {/* Pin the top of the axis to 0 (#1908 PR-3) — see drawdownDomainMin. */}
           <YAxis
+            domain={[drawdownDomainMin, 0]}
             tickFormatter={(v: number) => pct(v, 0)}
             width={48}
             {...sharedAxis(theme)}

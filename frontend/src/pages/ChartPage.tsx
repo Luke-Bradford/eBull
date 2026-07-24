@@ -38,6 +38,7 @@ import {
   type NormalisedChartCandles,
 } from "@/lib/chartData";
 import { useAsync } from "@/lib/useAsync";
+import { useChartTheme } from "@/lib/useChartTheme";
 
 const RANGES: { id: ChartRange; label: string }[] = [
   { id: "1d", label: "1D" },
@@ -72,12 +73,10 @@ const INDICATOR_LABELS: Record<IndicatorId, string> = {
   ema50: "EMA 50",
 };
 
-const INDICATOR_COLORS: Record<IndicatorId, string> = {
-  sma20: "#3b82f6",
-  sma50: "#a855f7",
-  ema20: "#0ea5e9",
-  ema50: "#ec4899",
-};
+// Indicator swatches are NOT declared here — they are `chartTheme.indicator.*`
+// (#1908 PR-3). This file used to re-declare the same four hex values, so the
+// toggle button and the line it draws could drift apart on a palette change,
+// with nothing to catch it. Read them from `useChartTheme()` at the call site.
 
 const MAX_COMPARES = 3;
 
@@ -92,6 +91,10 @@ function parseNum(v: string | null | undefined): number | null {
 
 export function ChartPage(): JSX.Element {
   const { symbol = "" } = useParams<{ symbol: string }>();
+  // Indicator swatches come from the resolved theme, never a local literal —
+  // the toggle button and the plotted line must be the same colour by
+  // construction (#1908 PR-3).
+  const chartTheme = useChartTheme();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Range param
@@ -457,8 +460,11 @@ export function ChartPage(): JSX.Element {
                   }`}
                   style={
                     active
-                      ? { borderColor: INDICATOR_COLORS[id], color: INDICATOR_COLORS[id] }
-                      : { borderColor: "#e2e8f0" }
+                      ? {
+                          borderColor: chartTheme.indicator[id],
+                          color: chartTheme.indicator[id],
+                        }
+                      : { borderColor: chartTheme.borderColor }
                   }
                   data-testid={`indicator-${id}`}
                 >

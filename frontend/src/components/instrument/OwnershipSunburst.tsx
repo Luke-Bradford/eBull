@@ -241,6 +241,12 @@ const SUNBURST_STYLES = [
   // slate-400 outline reads on both light (white) and dark
   // (slate-950) backgrounds. Default ``currentColor`` defaults to
   // black — invisible on dark mode.
+  //
+  // This ONE literal cannot read `chartTheme`: `SUNBURST_STYLES` is a
+  // module-level string injected as a <style> block, outside React, and
+  // importing `lightTheme` directly is forbidden (operator-ui-conventions).
+  // It is deliberately the same value as `chartTheme.textMuted` in the light
+  // palette — if that slot moves, move this with it (#1908 PR-3).
   ".ownership-sunburst .recharts-pie-sector:has(path[data-known='true']) path:focus-visible {",
   "  outline: 2px solid #94a3b8;",
   "  outline-offset: -1px;",
@@ -336,7 +342,15 @@ export function OwnershipSunburst({
             patternUnits="userSpaceOnUse"
             patternTransform="rotate(45)"
           >
-            <line x1={0} y1={0} x2={0} y2={6} stroke="#94a3b8" strokeOpacity={0.45} strokeWidth={1.2} />
+            <line
+              x1={0}
+              y1={0}
+              x2={0}
+              y2={6}
+              stroke={theme.textMuted}
+              strokeOpacity={0.45}
+              strokeWidth={1.2}
+            />
           </pattern>
         </defs>
       </svg>
