@@ -70,7 +70,7 @@ describe("ResearchHubPage — presets", () => {
 
   it("shows the disabled Map affordance on a table lens", () => {
     renderAt("/research?view=ranked");
-    expect(screen.getByText("Map")).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("button", { name: "Map" })).toBeDisabled();
   });
 
   it("hides the Map affordance on a non-mappable lens (Theses)", () => {

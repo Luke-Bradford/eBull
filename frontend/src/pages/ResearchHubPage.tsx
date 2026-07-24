@@ -102,17 +102,26 @@ export function ResearchHubPage(): JSX.Element {
  */
 function RenderModeToggle(): JSX.Element {
   return (
-    <div className="inline-flex gap-0.5 rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-sm dark:border-slate-800 dark:bg-slate-900/40">
-      <span className="rounded-md bg-white px-3 py-1.5 font-medium text-slate-900 dark:bg-slate-800 dark:text-slate-100">
+    <div
+      role="group"
+      aria-label="Render mode"
+      className="inline-flex gap-0.5 rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-sm dark:border-slate-800 dark:bg-slate-900/40"
+    >
+      <button
+        type="button"
+        aria-pressed="true"
+        className="rounded-md bg-white px-3 py-1.5 font-medium text-slate-900 dark:bg-slate-800 dark:text-slate-100"
+      >
         Table
-      </span>
-      <span
+      </button>
+      <button
+        type="button"
+        disabled
         title="Ownership / geography map — coming soon (#1912)"
-        aria-disabled="true"
-        className="cursor-not-allowed rounded-md px-3 py-1.5 font-medium text-slate-400 dark:text-slate-600"
+        className="cursor-not-allowed rounded-md px-3 py-1.5 font-medium text-slate-400 disabled:opacity-100 dark:text-slate-600"
       >
         Map
-      </span>
+      </button>
     </div>
   );
 }
