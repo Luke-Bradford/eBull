@@ -60,7 +60,7 @@ from app.api.tax import router as tax_router
 from app.api.theses import instrument_thesis_router
 from app.api.theses import router as theses_router
 from app.api.watchlist import router as watchlist_router
-from app.config import settings
+from app.config import DEV_LIKE_ENVS, settings
 from app.db import get_conn
 from app.db.migrations import migration_status, run_migrations
 from app.db.pg_settings import API_CREDENTIAL_HEALTH_LISTENER_APPLICATION_NAME
@@ -539,7 +539,7 @@ app.include_router(fundamentals_admin_router)  # #677 fundamentals force-refresh
 # environments like `staging`/`qa`/`uat` are denied by default and
 # never silently expose operator credentials. Add new envs here
 # explicitly when they need diagnostic access. PR #610 review.
-if settings.app_env in {"dev", "test", "local"}:
+if settings.app_env in DEV_LIKE_ENVS:
     app.include_router(debug_ws_router)
 app.include_router(capability_overrides_admin_router)
 app.include_router(filings_router)

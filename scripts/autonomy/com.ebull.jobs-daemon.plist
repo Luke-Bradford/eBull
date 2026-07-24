@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd LaunchAgent for the JOBS DAEMON (the ETL / ingest + scheduler runner,
-  `python -m app.jobs`). Independent of the autonomy loop supervisor — this keeps
+  launchd LaunchAgent for the JOBS DAEMON (the ETL / ingest + scheduler runner).
+  Launches via the `app.jobs.dev_reload` wrapper (#2144), which watches `app/**`
+  and restarts the daemon on source change in a dev-like `app_env`, and is an
+  exact in-process pass-through to `python -m app.jobs` anywhere else — so this
+  plist is unchanged in behaviour outside dev.
+  Independent of the autonomy loop supervisor — this keeps
   DATA fresh unattended (SEC manifest worker, per-CIK poll, orchestrator sync,
   fundamentals, portfolio sync) with the AI loop OFF.
 
@@ -25,7 +29,7 @@
     <string>run</string>
     <string>python</string>
     <string>-m</string>
-    <string>app.jobs</string>
+    <string>app.jobs.dev_reload</string>
   </array>
 
   <key>WorkingDirectory</key>

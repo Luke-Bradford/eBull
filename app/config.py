@@ -30,6 +30,14 @@ _MIN_SERVICE_TOKEN_LEN = 32
 DB_CONNECT_TIMEOUT_S = 10
 os.environ.setdefault("PGCONNECT_TIMEOUT", str(DB_CONNECT_TIMEOUT_S))
 
+# --- dev-like environments (single source) --------------------------------
+# The set of ``app_env`` values that count as "a developer's machine".
+# Allowlist, NOT a denylist on "prod": a future ``staging`` / ``qa`` / ``uat``
+# must be treated as production-like by default and never silently get a
+# dev-only affordance (debug routers, test-DB reaping, jobs auto-reload).
+# Add a new env here explicitly when it genuinely needs one.
+DEV_LIKE_ENVS: frozenset[str] = frozenset({"dev", "test", "local"})
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
