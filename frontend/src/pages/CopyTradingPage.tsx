@@ -8,6 +8,7 @@ import { Section, SectionError, SectionSkeleton } from "@/components/dashboard/S
 import { EmptyState } from "@/components/states/EmptyState";
 import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
+import { Avatar } from "@/lib/avatar";
 import type { MirrorSummary, MirrorPositionItem, MirrorClosedPositionItem } from "@/api/types";
 
 /**
@@ -46,7 +47,7 @@ export function CopyTradingPage() {
         </Link>
         {username ? (
           <h1 className="flex items-center gap-2 text-xl font-semibold text-slate-800 dark:text-slate-100">
-            <TraderAvatar username={username} />
+            <Avatar username={username} size="lg" />
             {username}
           </h1>
         ) : (
@@ -81,35 +82,6 @@ export function CopyTradingPage() {
         </>
       )}
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Trader avatar — eToro-style initials circle
-// ---------------------------------------------------------------------------
-
-const AVATAR_TONES = [
-  "bg-blue-600",
-  "bg-emerald-600",
-  "bg-amber-600",
-  "bg-rose-600",
-  "bg-violet-600",
-  "bg-cyan-600",
-] as const;
-
-function avatarTone(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
-  return AVATAR_TONES[Math.abs(hash) % AVATAR_TONES.length] ?? "bg-blue-600";
-}
-
-function TraderAvatar({ username }: { username: string }) {
-  return (
-    <span
-      className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white ${avatarTone(username)}`}
-    >
-      {username.charAt(0).toUpperCase()}
-    </span>
   );
 }
 

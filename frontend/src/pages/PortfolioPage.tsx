@@ -26,10 +26,12 @@ import type {
   PortfolioResponse,
 } from "@/api/types";
 import { portfolioTotals } from "@/lib/portfolioTotals";
-
-type RowItem =
-  | { kind: "position"; data: PositionItem }
-  | { kind: "mirror"; data: PortfolioMirrorItem };
+import { Avatar } from "@/lib/avatar";
+import {
+  buildSortedRows,
+  matchesRowSearch,
+  type RowItem,
+} from "@/lib/portfolioRows";
 
 interface CloseTarget {
   instrumentId: number;
@@ -95,27 +97,11 @@ export function PortfolioPage() {
   // so they share the same sorted list.
   const allRows: RowItem[] = useMemo(() => {
     if (portfolio.data === null) return [];
-    const positions = portfolio.data.positions.map<RowItem>((p) => ({
-      kind: "position",
-      data: p,
-    }));
-    const mirrors = portfolio.data.mirrors.map<RowItem>((m) => ({
-      kind: "mirror",
-      data: m,
-    }));
-    const combined = [...positions, ...mirrors];
-    combined.sort((a, b) => {
-      const mvA =
-        a.kind === "position" ? a.data.market_value : a.data.mirror_equity;
-      const mvB =
-        b.kind === "position" ? b.data.market_value : b.data.mirror_equity;
-      return mvB - mvA;
-    });
-    return combined;
+    return buildSortedRows(portfolio.data.positions, portfolio.data.mirrors);
   }, [portfolio.data]);
 
   const visible = useMemo(
-    () => allRows.filter((r) => matchesSearch(r, search)),
+    () => allRows.filter((r) => matchesRowSearch(r, search)),
     [allRows, search],
   );
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
@@ -426,34 +412,6 @@ function Stat({
 // Table
 // ---------------------------------------------------------------------------
 
-function matchesSearch(row: RowItem, q: string): boolean {
-  if (!q) return true;
-  const lower = q.toLowerCase();
-  if (row.kind === "position") {
-    return (
-      row.data.symbol.toLowerCase().includes(lower) ||
-      row.data.company_name.toLowerCase().includes(lower)
-    );
-  }
-  return row.data.parent_username.toLowerCase().includes(lower);
-}
-
-const AVATAR_TONES = [
-  "bg-blue-600",
-  "bg-emerald-600",
-  "bg-amber-600",
-  "bg-rose-600",
-  "bg-violet-600",
-  "bg-cyan-600",
-] as const;
-
-function avatarTone(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++)
-    hash = (hash * 31 + name.charCodeAt(i)) | 0;
-  return AVATAR_TONES[Math.abs(hash) % AVATAR_TONES.length] ?? "bg-blue-600";
-}
-
 function PortfolioTable({
   pageRows,
   displayCurrency,
@@ -719,11 +677,7 @@ function MirrorRow({
     >
       <td className="px-4 py-2 text-left">
         <span className="inline-flex items-center gap-2">
-          <span
-            className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white ${avatarTone(m.parent_username)}`}
-          >
-            {m.parent_username.charAt(0).toUpperCase()}
-          </span>
+          <Avatar username={m.parent_username} size="sm" />
           <span className="font-medium text-slate-800 dark:text-slate-100">
             {m.parent_username}
           </span>
