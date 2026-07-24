@@ -63,8 +63,13 @@ export function SummaryCards({
         <StatTile
           label="Unrealized P&L"
           value={formatMoney(totalPnl, displayCurrency)}
+          // The % RESTATES the money delta in another unit, so it carries the
+          // same signal and the same colour — matching the rolling-P&L row
+          // directly below, which is the point of sharing the tile at all.
+          // Contrast the Deployment tile's hint, a caveat that stays muted.
           hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
           tone={totalPnl >= 0 ? "positive" : "negative"}
+          toneHint
         />
         <DeploymentCard budget={budgetData} budgetError={budgetError} currency={currency} />
       </div>

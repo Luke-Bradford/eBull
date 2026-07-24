@@ -124,6 +124,35 @@ describe("RollingPnlStrip", () => {
     expect(value?.className).toContain("dark:text-emerald-400");
   });
 
+  it("tones the percentage with the value — it restates the same signal (review round 1)", async () => {
+    mocked.mockResolvedValue({
+      display_currency: "GBP",
+      periods: [{ period: "1w", pnl: -672.4, pnl_pct: -0.0137, coverage: 5 }],
+    });
+    renderStrip();
+    const pct = await screen.findByText("-1.37%");
+    expect(pct.className).toContain("text-rose-600");
+    expect(pct.className).toContain("dark:text-rose-400");
+    expect(pct.className).not.toContain("text-slate-500");
+  });
+
+  it("renders a zero delta muted, not at full headline strength (review round 1)", async () => {
+    mocked.mockResolvedValue({
+      display_currency: "GBP",
+      periods: [{ period: "1m", pnl: 0, pnl_pct: 0, coverage: 5 }],
+    });
+    const { container } = renderStrip();
+    await waitFor(() => {
+      expect(screen.getByTestId("rolling-pnl-1m")).toBeInTheDocument();
+    });
+    const value = container.querySelector(".tabular-nums.font-semibold");
+    expect(value?.className).toContain("text-slate-600");
+    // Neither a direction nor the full-strength default reserved for
+    // non-directional headline stats.
+    expect(value?.className).not.toContain("text-emerald-600");
+    expect(value?.className).not.toContain("text-slate-900");
+  });
+
   it("hides the strip on fetch error", async () => {
     mocked.mockRejectedValue(new Error("offline"));
     const { container } = renderStrip();

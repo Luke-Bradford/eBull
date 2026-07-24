@@ -23,22 +23,35 @@ export function StatTile({
   hint,
   tone,
   size = "lg",
+  toneHint = false,
 }: {
   label: string;
   value: string;
   hint?: ReactNode;
-  tone?: "positive" | "negative";
+  /** Semantic colour of the value. `muted` is an explicit "no signal here"
+   *  (a zero delta) — distinct from omitting `tone`, which renders the
+   *  full-strength default used by non-directional stats like Total AUM. */
+  tone?: "positive" | "negative" | "muted";
   /** Type scale of the value. `lg` (default) is a headline stat; `md` is a
    *  supporting row that must not compete with the headline above it. */
   size?: "lg" | "md";
+  /** Carry `tone` onto the hint as well. Opt-in, because the hint slot holds
+   *  two different kinds of thing: a RESTATEMENT of the value in another unit
+   *  (a signed %, which shares the value's signal and should share its colour)
+   *  or a CAVEAT / denominator ("vs book vol 12%", "Budget unavailable"),
+   *  which must stay muted so it doesn't read as a second signal. */
+  toneHint?: boolean;
 }) {
   const toneClass =
     tone === "positive"
       ? "text-emerald-600 dark:text-emerald-400"
       : tone === "negative"
         ? "text-rose-600 dark:text-rose-400"
-        : "text-slate-900 dark:text-slate-100";
+        : tone === "muted"
+          ? "text-slate-600 dark:text-slate-400"
+          : "text-slate-900 dark:text-slate-100";
   const sizeClass = size === "md" ? "text-lg" : "text-2xl";
+  const hintToneClass = toneHint ? toneClass : "text-slate-500";
   return (
     <div className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
       <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
@@ -47,7 +60,9 @@ export function StatTile({
       <div className={`mt-1 ${sizeClass} font-semibold tabular-nums ${toneClass}`}>
         {value}
       </div>
-      {hint ? <div className="mt-1 text-xs tabular-nums text-slate-500">{hint}</div> : null}
+      {hint ? (
+        <div className={`mt-1 text-xs tabular-nums ${hintToneClass}`}>{hint}</div>
+      ) : null}
     </div>
   );
 }

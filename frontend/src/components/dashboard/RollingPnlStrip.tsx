@@ -39,8 +39,13 @@ function Pill({
   // `dark:` partner — the dark gate's checks only cover bg/border/hover, so
   // nothing caught it). Reusing StatTile fixes the dark-mode contrast and
   // guarantees this row's hairlines keep aligning with the summary row.
-  // `size="md"` preserves the deliberate hierarchy: supporting row, not
-  // headline.
+  //
+  // Three props carry behaviour the private tile had and must not lose:
+  //   - `size="md"`   — supporting row, must not shout as loud as the headline.
+  //   - `toneHint`    — the % RESTATES the money delta, so it carries the same
+  //                     signal and the same colour (review round 1 WARNING).
+  //   - `tone="muted"` on a zero delta — an explicit "no direction here",
+  //                     not the full-strength default (review round 1 NITPICK).
   return (
     <div data-testid={`rolling-pnl-${period.period}`}>
       <StatTile
@@ -48,8 +53,9 @@ function Pill({
         value={`${sign === "pos" ? "+" : ""}${formatMoney(period.pnl, currency)}`}
         // formatPct already signs positives — don't double-prefix.
         hint={period.pnl_pct === null ? "—" : formatPct(period.pnl_pct)}
-        tone={sign === "pos" ? "positive" : sign === "neg" ? "negative" : undefined}
+        tone={sign === "pos" ? "positive" : sign === "neg" ? "negative" : "muted"}
         size="md"
+        toneHint
       />
     </div>
   );
