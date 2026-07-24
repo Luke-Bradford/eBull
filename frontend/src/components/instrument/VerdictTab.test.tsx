@@ -164,6 +164,69 @@ describe("VerdictTab", () => {
     expect(screen.getByText(/postdates this score/)).toBeInTheDocument();
   });
 
+  it("renders penalties/rewards as humanized chips and hides the raw scorer string behind an expander (#1908 PR-4)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict(
+        {
+          penalties_json: [
+            {
+              name: "high_realized_volatility",
+              reason: "3y annualized vol=0.71 > 0.60",
+              kind: "penalty",
+              deduction: 0.04,
+            },
+            {
+              name: "strong_calmar",
+              reason: "3y total-return Calmar=1.85 > high threshold 0.75",
+              kind: "reward",
+              addition: 0.03,
+            },
+          ],
+          explanation:
+            "value: base_value missing; penalties fired: high_realized_volatility (total deduction: 0.04)",
+        },
+        FULL_IAR,
+      ),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={null} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("0.82")).toBeInTheDocument();
+
+    // Humanized, signed, with the scorer's own reason on hover.
+    expect(screen.getByText("High realized volatility")).toBeInTheDocument();
+    expect(screen.getByText("−0.04")).toBeInTheDocument();
+    expect(screen.getByText("Strong Calmar")).toBeInTheDocument();
+    expect(screen.getByText("+0.03")).toBeInTheDocument();
+    expect(
+      screen.getByTitle("3y annualized vol=0.71 > 0.60"),
+    ).toBeInTheDocument();
+
+    // The raw audit string is still present verbatim — inside a collapsed
+    // <details>, not deleted. Never drop the audit trail to tidy the UI.
+    const detail = screen.getByText(/base_value missing/);
+    expect(detail).toBeInTheDocument();
+    expect(detail.closest("details")).not.toBeNull();
+    expect(detail.closest("details")?.hasAttribute("open")).toBe(false);
+  });
+
+  it("renders no chips when the score row has no penalties (rewards/penalties are optional)", async () => {
+    vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
+      makeVerdict({ penalties_json: null }, FULL_IAR),
+    );
+    render(
+      <MemoryRouter>
+        <VerdictTab instrumentId={1} thesis={null} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("0.82")).toBeInTheDocument();
+    expect(screen.queryByText(/^[−+]\d/)).not.toBeInTheDocument();
+    // The explanation expander still renders — it is independent of chips.
+    expect(screen.getByText("Scorer detail")).toBeInTheDocument();
+  });
+
   it("renders scored-but-no-IAR honestly (pre-#1823 row)", async () => {
     vi.spyOn(verdictApi, "fetchScoreVerdict").mockResolvedValue(
       makeVerdict({}, null),

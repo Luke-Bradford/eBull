@@ -35,6 +35,7 @@ import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { completenessTone } from "@/lib/badgeTone";
+import { toScoreChips } from "@/lib/scoreExplanation";
 
 export interface VerdictTabProps {
   readonly instrumentId: number;
@@ -140,6 +141,7 @@ export function VerdictTab({
 
   const iar = score.analytics_json;
   const peer = iar?.peer_grade;
+  const chips = toScoreChips(score.penalties_json);
 
   // Score-history sparkline values, oldest→newest (the API returns newest first).
   const historyValues = (history.data?.items ?? [])
@@ -200,10 +202,31 @@ export function VerdictTab({
             as of {score.scored_at.slice(0, 10)} · {score.model_version}
           </span>
         </div>
+        {/* Penalties + rewards as chips, from the STRUCTURED `penalties_json`
+            (#1908 PR-4) — not parsed out of the explanation text. The raw
+            explanation is the audit trail, so it stays available verbatim
+            behind the expander below rather than being reworded or dropped. */}
+        {chips.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {chips.map((chip) => (
+              <Badge key={chip.key} tone={chip.tone} title={chip.title}>
+                {chip.label}
+                {chip.delta !== "" && (
+                  <span className="tabular-nums font-semibold">{chip.delta}</span>
+                )}
+              </Badge>
+            ))}
+          </div>
+        )}
         {score.explanation !== null && (
-          <p className="mt-2 max-w-prose text-xs text-slate-600 dark:text-slate-400">
-            {score.explanation}
-          </p>
+          <details className="group mt-2">
+            <summary className="cursor-pointer text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+              Scorer detail
+            </summary>
+            <p className="mt-1 max-w-prose text-xs text-slate-600 dark:text-slate-400">
+              {score.explanation}
+            </p>
+          </details>
         )}
         {thesis !== null && new Date(thesis.created_at) > new Date(score.scored_at) && (
           <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
