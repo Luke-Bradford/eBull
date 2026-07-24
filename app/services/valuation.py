@@ -299,8 +299,13 @@ def compute_portfolio_valuation(conn: psycopg.Connection[Any]) -> PortfolioValua
     positions_degraded = any(h.currency != display_currency for h in holdings)
     usd_component_present = raw_cash is not None or abs(raw_mirror_equity) > 1e-9
     usd_fx_missing = display_currency != "USD" and not _fx_pair_available("USD", display_currency, rates)
-    cash_currency = "USD" if usd_fx_missing else display_currency
-    fx_incomplete = positions_degraded or (usd_component_present and usd_fx_missing)
+    # Gate on `usd_component_present` (matching `fx_incomplete`): only claim cash/mirror
+    # money is "USD" when there is actually a USD component that was left unconverted —
+    # not merely because the rate is absent (a mirror equity is always ≥ 0, so a net of
+    # 0 means every mirror row is 0, i.e. nothing real to mislabel). Review WARNING.
+    cash_degraded = usd_component_present and usd_fx_missing
+    cash_currency = "USD" if cash_degraded else display_currency
+    fx_incomplete = positions_degraded or cash_degraded
 
     return PortfolioValuation(
         display_currency=display_currency,
