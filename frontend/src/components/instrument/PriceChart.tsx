@@ -577,6 +577,14 @@ export function ChartCanvas({
     const volume = chart.addSeries(HistogramSeries, {
       priceScaleId: "volume",
       priceFormat: { type: "volume" },
+      // The volume overlay must NOT draw a last-value badge or price line
+      // (#1908 PR-3). It lives on its own `volume` scale, but lightweight-charts
+      // still paints those onto the VISIBLE right price gutter, where they land
+      // on top of the price ticks — a volume figure rendered in the price axis.
+      // Every sibling series in this file already disables both; the volume
+      // series was the one left on the library defaults.
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     chart
       .priceScale("volume")
