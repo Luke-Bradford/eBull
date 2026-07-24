@@ -28,6 +28,7 @@ from app.providers.implementations.sec_def14a import (
     Def14ABeneficialOwnershipTable,
     _clean_beneficial_holder_name,
     _clean_holder_name,
+    _looks_like_label_row,
     _looks_like_subheader,
     _parse_percent,
     _resolve_columns,
@@ -830,6 +831,83 @@ class TestSpanningHeaderPromotion:
 
     def test_legacy_sole_shared_total_subheader_still_promotes(self) -> None:
         assert _looks_like_subheader(("", "Sole", "Shared", "Total", ""))
+
+
+class TestFullPopulationRegressions:
+    """Shapes surfaced only by the full-population A/B (#2140) — each one lost
+    EVERY row of a real filing until fixed. Sampled from the 159 accessions the
+    first branch scan showed losing rows."""
+
+    def test_shares_column_holding_a_percent_still_yields_a_percent(self) -> None:
+        # 0001308179-25-000615: row 0 is full width and IS kept as the header
+        # ('Name and Address of Beneficial Owner', '', '', '', 'Number of
+        # Shares Beneficially Owned'), so shares_idx lands on a cell holding
+        # '10.2%'. It parses as no share count, and the percent recovery
+        # previously SKIPPED the shares column, so the row lost both values and
+        # was dropped -- 20 real holders (Vanguard/FMR/BlackRock) -> 0.
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th><th></th><th></th><th></th>
+              <th>Number of Shares Beneficially Owned</th></tr>
+          <tr><td>The Vanguard Group (1)</td><td></td><td>7,196,087</td><td></td><td>10.2%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].holder_name == "The Vanguard Group"
+        assert parsed.rows[0].percent_of_class == Decimal("10.2")
+
+    def test_equal_width_parent_header_still_promotes_a_label_row(self) -> None:
+        # The `<` width test only promoted a NARROWER parent, but an issuer can
+        # render a full-width row 0 that is still not the label row.
+        body = """
+        <table>
+          <tr><th>Amount and Nature of Beneficial Ownership</th><th></th><th></th><th></th>
+              <th>Shares Beneficially Owned</th></tr>
+          <tr><td>Name of Beneficial Owner</td><td></td><td>Number</td><td></td><td>Percentage</td></tr>
+          <tr><td>The Vanguard Group (1)</td><td></td><td>7,196,087</td><td></td><td>10.2%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["The Vanguard Group"]
+        assert parsed.rows[0].shares == Decimal("7196087")
+        assert parsed.rows[0].percent_of_class == Decimal("10.2")
+
+    def test_single_cell_section_heading_is_not_a_label_row(self) -> None:
+        # 0001628280-25-020660: '5% Stockholders' matches percent (via '%') and
+        # name (via 'stockholders') at once. Promoting it destroyed the real
+        # header, so an Item 402(f) equity-awards table won selection instead.
+        assert not _looks_like_label_row(("5% Stockholders",))
+        assert not _looks_like_label_row(("5% Stockholders", "", "", ""))
+
+    def test_merged_amount_and_percent_caption_is_the_amount_column(self) -> None:
+        # 0001140361-25-008248: issuers merge Item 403's two captions into one
+        # column. Percent-first must not claim it, or shares never resolves.
+        headers = (
+            "Name of Beneficial Owner (1)",
+            "",
+            "",
+            "Amount and Nature of Beneficial Ownership and Percent of Class (2)",
+        )
+        name_idx, shares_idx, percent_idx = _resolve_columns(headers)
+        assert (name_idx, shares_idx) == (0, 3)
+        assert percent_idx != 3
+
+    def test_non_breaking_spaces_do_not_break_the_item_403_caption(self) -> None:
+        # 0001466593-25-000049: a literal U+00A0 in the markup meant
+        # "amount and nature" never matched, so a "Common Shares of <Issuer>"
+        # title column won the shares tiering and shares_idx landed on the NAME
+        # column. 17 rows -> 0.
+        body = (
+            "<table>"
+            "<tr><th>Common Shares of Otter Tail Corporation</th>"
+            "<th>Amount\xa0and\xa0Nature\xa0of\xa0Beneficial\xa0Ownership 1</th>"
+            "<th>Percent of Class 1</th></tr>"
+            "<tr><td>John S. Abbott 3</td><td>55,494</td><td>*</td></tr>"
+            "</table>"
+        ).replace("\\xa0", "\xa0")
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].holder_name == "John S. Abbott"
+        assert parsed.rows[0].shares == Decimal("55494")
 
 
 class TestHolderNameStructuralGuard:

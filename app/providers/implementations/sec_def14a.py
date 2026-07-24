@@ -181,6 +181,17 @@ def _strip_inline_html(raw: str) -> str:
     no_tags = _HTML_TAG_RE.sub(" ", raw)
     no_nbsp = _NBSP_RE.sub(" ", no_tags)
     decoded = html.unescape(no_nbsp)
+    # Fold unicode spaces to plain spaces (#2140). ``_NBSP_RE`` only catches
+    # the ``&nbsp;`` ENTITY, so a literal U+00A0 in the markup survived — and
+    # Item 403's prescribed caption then failed to match: 'Amount\xa0and\xa0
+    # Nature\xa0of\xa0Beneficial\xa0Ownership' does not contain the substring
+    # "amount and nature", so it scored as a weak generic "amount" and LOST the
+    # shares tiering to a "Common Shares of <Issuer>" title column, putting
+    # shares_idx on the NAME column and dropping all 17 rows of
+    # 0001466593-25-000049 (found by the full-population A/B).
+    # No-op for the Item 402(c) path, which already folds these in ``_sct_norm``
+    # and ``_split_name_position``.
+    decoded = _UNICODE_SPACE_RE.sub(" ", decoded)
     return _INLINE_WHITESPACE_RE.sub(" ", decoded).strip()
 
 
@@ -393,6 +404,19 @@ _NUMERIC_LIKE_RE: Final[re.Pattern[str]] = re.compile(r"\d{2,}")
 # match at least TWO distinct classes to be treated as the real header row —
 # see :func:`_looks_like_subheader` for why substring matching and a
 # single-class match are both unsafe.
+# Item 403's prescribed AMOUNT captions. A header carrying one of these is the
+# share-count column even if it also mentions a percent (issuers merge the two
+# into a single column). Deliberately excludes the generic ``total`` /
+# ``shares`` / ``number`` / ``amount`` tiers, which are too weak to override a
+# percent caption. Kept in sync with the strong tiers of ``SHARES_TIERS`` in
+# :func:`_resolve_columns`.
+_STRONG_SHARES_KEYWORDS: Final[tuple[str, ...]] = (
+    "amount and nature",
+    "shares beneficially",
+    "shares owned",
+    "number of shares",
+)
+
 # Legacy (pre-#2140) trigger, preserved VERBATIM as substring matching so the
 # Sole/Shared/Total merged-header behaviour is unchanged by this ticket.
 _SUBHEADER_SUBDIVISION_KEYWORDS: Final[tuple[str, ...]] = (
@@ -413,65 +437,78 @@ _SUBHEADER_LABEL_CLASSES: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
 
 
 def _looks_like_subheader(cells: tuple[str, ...]) -> bool:
-    """True when a row looks like a sub-header continuation rather
-    than a data row.
+    """True when a row is a header continuation rather than a data row.
 
-    A sub-header row:
-      * Has no cell containing a multi-digit run (data rows have
-        share counts like ``1,500,000``).
-      * Has at least one cell containing a column-label keyword
-        like ``Sole`` / ``Shared`` / ``Total`` / ``Voting`` /
-        ``Dispositive`` — these are the SEC-prescribed subdivisions
-        of the ``Amount and Nature of Beneficial Ownership``
-        merged-header column.
-    Codex pre-push review caught the merged-header case where a
-    proxy uses two header rows and the parser only saw row 0.
+    Two shapes qualify:
+
+      * the pre-#2140 SEC-prescribed subdivisions of the "Amount and Nature of
+        Beneficial Ownership" merged header (``Sole`` / ``Shared`` / ``Total``
+        / ``Voting`` / ``Dispositive``) — :func:`_looks_like_legacy_subheader`;
+      * a genuine column-LABEL row under a spanning row 0 (#2140 D2) —
+        :func:`_looks_like_label_row`.
+
+    Callers that promote a row must keep the two apart: only the legacy arm may
+    fold the promoted row into ``score_headers``. See ``_parse_table_html``.
     """
+    return _looks_like_legacy_subheader(cells) or _looks_like_label_row(cells)
+
+
+def _looks_like_legacy_subheader(cells: tuple[str, ...]) -> bool:
+    """Pre-#2140 sub-header test: an all-text row carrying one of the
+    SEC-prescribed subdivisions of the "Amount and Nature of Beneficial
+    Ownership" merged header. Preserved VERBATIM (substring matching) so this
+    ticket does not move the Sole/Shared/Total behaviour, and kept SEPARATE
+    from :func:`_looks_like_label_row` because only this arm may combine both
+    rows into ``score_headers``."""
     if not cells:
         return False
     for c in cells:
         if _NUMERIC_LIKE_RE.search(c):
             return False
     joined = " ".join(cells).lower()
-    # Sub-header keywords scope tightly to ownership-block subdivisions.
-    # ``common`` / ``preferred`` were originally on this list as share
-    # class indicators but they collide with legitimate holder names
-    # (e.g. ``"Common Fund LLC"``) — Codex / bot review caught the
-    # false positive: a one-cell holder-name row with "common" in the
-    # name AND no numeric cell would be silently promoted to column
-    # headers and dropped from the data set. Removed both.
-    #
-    # #2140 D2 widened this beyond the Sole/Shared/Total subdivisions: UBER
-    # and CYH put a SPANNING row 0 ("", "", "Shares Beneficially Owned") over
-    # the real labels ("Name of Beneficial Owner", "", "Shares", "",
-    # "% of Shares Outstanding"). Those carry none of the original keywords,
-    # so row 1 was left as a data row and all three column indices collapsed
-    # onto the one non-empty spanning cell.
-    #
-    # TWO guards keep the widening safe (Codex ckpt-1 HIGH):
-    #   1. WORD-BOUNDARY matching, never substring — a section heading like
-    #      "Named Executive Officers and Directors" contains "name", has no
-    #      digits, and is exactly the row that sits under UBER's spanning
-    #      header. ``\bname\b`` does not match "Named".
-    #   2. TWO DISTINCT label classes required. A real column-label row labels
-    #      more than one column; a section heading names one thing.
-    # The all-text guard above is retained but is NOT load-bearing on its own —
-    # it is trivially true for any text-only heading row.
-    # Legacy arm: the SEC-prescribed subdivisions of the "Amount and Nature of
-    # Beneficial Ownership" merged header. These rows carry NO name token, so
-    # they cannot go through the name arm below.
-    if any(k in joined for k in _SUBHEADER_SUBDIVISION_KEYWORDS):
-        return True
-    # Spanning-header arm (#2140 D2): the real label row must name the HOLDER
-    # column (Item 403 always has one) AND label at least one value column.
-    #
-    # Requiring the name class specifically is load-bearing, not decoration: a
-    # bare ">= 2 of {name, amount, percent}" test also promotes performance-
-    # award tables — CYH's PSU row ('% of Target Achieved', '% of Granted
-    # Shares Earned', '', 'Percentile Rank', …) matches percent + amount, and
-    # promoting it inflated that table's score_headers enough to beat the real
-    # ownership table, silently swapping which table the parser reads.
-    matched = {cls for cls, pattern in _SUBHEADER_LABEL_CLASSES if pattern.search(joined)}
+    return any(k in joined for k in _SUBHEADER_SUBDIVISION_KEYWORDS)
+
+
+def _looks_like_label_row(cells: tuple[str, ...]) -> bool:
+    """True when ``cells`` is a genuine COLUMN-LABEL row (#2140 D2).
+
+    Stricter than :func:`_looks_like_subheader`'s legacy arm, because this
+    predicate also authorises promotion when the parent header is merely the
+    SAME width as the data rows (see ``_parse_table_html``), where a false
+    positive would silently discard a real data row.
+
+    The real label row must name the HOLDER column (Item 403 always has one)
+    AND label at least one value column.
+
+    Requiring the name class specifically is load-bearing, not decoration: a
+    bare ">= 2 of {name, amount, percent}" test also promotes performance-
+    award tables — CYH's PSU row ('% of Target Achieved', '% of Granted
+    Shares Earned', '', 'Percentile Rank', …) matches percent + amount, and
+    promoting it inflated that table's score_headers enough to beat the real
+    ownership table, silently swapping which table the parser reads.
+    """
+    if not cells:
+        return False
+    for c in cells:
+        if _NUMERIC_LIKE_RE.search(c):
+            return False
+    # A label row labels SEPARATE columns, so it needs at least two non-empty
+    # cells and its label classes must come from DIFFERENT cells. Testing the
+    # joined text instead accepts a single-cell SECTION HEADING: '5% Stockholders'
+    # matches percent (via '%') and name (via 'stockholders') at once, and
+    # promoting it over the real header wrecked the table — column resolution
+    # collapsed, the ownership table stopped scoring, and an Item 402(f)
+    # equity-awards table won selection instead (0001628280-25-020660, found by
+    # the full-population A/B). Single-cell heading rows are already handled by
+    # ``_detect_role_heading`` in the row loop.
+    non_empty = [c for c in cells if c.strip()]
+    if len(non_empty) < 2:
+        return False
+    per_cell = [{cls for cls, pattern in _SUBHEADER_LABEL_CLASSES if pattern.search(c.lower())} for c in non_empty]
+    labelled_cells = [classes for classes in per_cell if classes]
+    if len(labelled_cells) < 2:
+        return False
+    matched = set().union(*labelled_cells)
     return "name" in matched and len(matched) >= 2
 
 
@@ -529,9 +566,45 @@ def _parse_table_html(table_html: str) -> _RawTable | None:
     # pre-push review caught the missing parent-row score combine.
     if body:
         max_data_width = max(len(r) for r in body)
-        if len(parent_headers) < max_data_width and _looks_like_subheader(body[0]):
+        # Two promotion arms (#2140 D2):
+        #   * NARROWER parent + any sub-header shape — the original
+        #     merged-header case (Sole/Shared/Total under a spanning cell).
+        #   * SAME-WIDTH parent + a strict column-LABEL row. An issuer can
+        #     render a header row that is full width yet still not the label
+        #     row: 0001308179-25-000615 has row 0
+        #     ('Name and Address of Beneficial Owner', '', '', '',
+        #     'Number of Shares Beneficially Owned') over row 1
+        #     ('5% or more Stockholders', '', 'Number', '', 'Percentage'),
+        #     both 5 cells. The strict `<` test left row 0 as the header, so
+        #     shares resolved onto the PERCENT column and all 20 real holders
+        #     (Vanguard/FMR/BlackRock…) were dropped. Full-population A/B
+        #     caught this — 159 accessions lost rows, 20 → 0 here.
+        #     `_looks_like_label_row` (name class REQUIRED + a value class +
+        #     no multi-digit cell) is what makes the looser width test safe.
+        # NOTE: the legacy arm tests ``_looks_like_legacy_subheader``, NOT
+        # ``_looks_like_subheader`` — the latter now also delegates to
+        # ``_looks_like_label_row``, so using it here would let a label row
+        # take the legacy path and re-inflate ``score_headers`` with the very
+        # combine this arm exists for, resurrecting the equity-awards
+        # mis-selection (0001628280-25-020660).
+        legacy_arm = len(parent_headers) < max_data_width and _looks_like_legacy_subheader(body[0])
+        label_arm = len(parent_headers) <= max_data_width and _looks_like_label_row(body[0])
+        if legacy_arm or label_arm:
             column_headers = body[0]
-            score_headers = parent_headers + body[0]
+            # The legacy (Sole/Shared/Total) arm combines both rows for
+            # SCORING, because the parent carries the SEC-prescribed keywords
+            # and the sub-row alone would not identify the table.
+            #
+            # The label-row arm must NOT combine: a generic label row
+            # ('Name', 'Grant Date', 'Number of securities underlying
+            # unexercised options…') belongs to the Item 402(f) Outstanding
+            # Equity Awards table just as readily as to Item 403, so folding
+            # it into score_headers lifted that table to a tie with the real
+            # ownership table — and, appearing earlier in the document, it won
+            # (0001628280-25-020660: 20 real holders → 0, found by the
+            # full-population A/B). Whether a table IS the beneficial-ownership
+            # table stays decided by its own parent header.
+            score_headers = parent_headers + body[0] if legacy_arm else parent_headers
             body = body[1:]
 
     return _RawTable(score_headers=score_headers, column_headers=column_headers, rows=tuple(body))
@@ -718,11 +791,22 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
     # so the row parser read "5.0%" as a share count, found no percent, and
     # dropped EVERY row of such a table (Codex pre-push review caught this;
     # the same header shape previously survived with a percent-only row).
+    # ...EXCEPT that a header carrying one of Item 403's strong AMOUNT captions
+    # is the amount column even when it also names a percent, because issuers
+    # merge the two: "Amount and Nature of Beneficial Ownership and Percent of
+    # Class" is ONE column holding the share count. Letting percent claim it
+    # left shares unresolved and dropped all 16 rows of 0001140361-25-008248
+    # (found by the full-population A/B). The generic ``total`` tier is NOT
+    # strong enough to qualify — "Total as a Percentage of Shares Outstanding"
+    # is a real percent column.
     for i, h in enumerate(headers):
         lower = h.lower()
-        if "percent" in lower or "%" in lower:
-            percent_idx = i
-            break
+        if "percent" not in lower and "%" not in lower:
+            continue
+        if any(k in lower for k in _STRONG_SHARES_KEYWORDS):
+            continue
+        percent_idx = i
+        break
 
     # SHARES next, excluding the percent column from the tiering entirely.
     for i, h in enumerate(headers):
@@ -740,16 +824,15 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
         shares_tier_priority.sort(key=lambda x: (-x[1], int(x[0])))
         shares_idx = int(shares_tier_priority[0][0])
 
-    # Fallbacks. Many issuers use a multi-line nested-header style
-    # where the first row is "Name and Address / Amount and Nature
-    # of Beneficial Ownership / Percent of Class" with a sub-row
-    # "Sole / Shared / Total". The scoring pass picks the merged
-    # header row but column resolution can still see ambiguous
-    # entries.
-    if shares_idx == -1:
-        shares_idx = next((i for i in (1, 0) if i < len(headers) and i != percent_idx), 0)
-
-    # Name LAST, with the already-claimed indices excluded (#2140 D1).
+    # NAME next — still before any positional FALLBACK, because a fallback is
+    # a guess and must never outrank real header evidence. Resolving the shares
+    # fallback first let it claim column 1 blindly, and on a table whose name
+    # caption genuinely sits at index 1 ("Name of Beneficial Owner") that stole
+    # the name column and dropped all 18 rows (0001104659-25-025144, found by
+    # the full-population A/B).
+    #
+    # Name LAST of the three EVIDENCE passes, with claimed indices excluded
+    # (#2140 D1).
     #
     # Source rule — Reg S-K Item 403 (via Schedule 14A Item 6(d)) prescribes
     # BOTH "Name and address of beneficial owner" / "Name of beneficial owner"
@@ -779,11 +862,16 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
                 break
         if name_idx != -1:
             break
+    # POSITIONAL FALLBACKS last, for whatever header evidence did not resolve.
     if name_idx == -1:
         # Blank name caption (the common Item 403 layout) — the name sits in
         # column 0 unless that column is already claimed.
-        name_idx = (
-            0 if shares_idx != 0 else next((i for i in range(len(headers)) if i not in (shares_idx, percent_idx)), 0)
+        name_idx = next((i for i in range(max(len(headers), 1)) if i not in (shares_idx, percent_idx)), 0)
+    if shares_idx == -1:
+        # Prefer the column just right of the name, then any other free one.
+        shares_idx = next(
+            (i for i in (name_idx + 1, 1, 0) if i < len(headers) and i not in (name_idx, percent_idx)),
+            name_idx + 1,
         )
     return (name_idx, shares_idx, percent_idx)
 
@@ -1046,8 +1134,19 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
         # dropped. This is what makes a share count landing in holder_name
         # impossible regardless of future header shapes.
         if not _looks_like_name_cell(holder_name_raw):
+            # The shares column is eligible as a name source ONLY when it holds
+            # no share count — a mis-resolved shares_idx can land on the name
+            # column itself, and excluding it unconditionally then leaves the
+            # row with no name at all and drops it.
+            shares_cell_is_numeric = (
+                _parse_share_count(cells[shares_idx] if shares_idx < len(cells) else "") is not None
+            )
             holder_name_raw = next(
-                (c for i, c in enumerate(cells) if i != shares_idx and _looks_like_name_cell(c)),
+                (
+                    c
+                    for i, c in enumerate(cells)
+                    if not (i == shares_idx and shares_cell_is_numeric) and _looks_like_name_cell(c)
+                ),
                 "",
             )
 
@@ -1069,7 +1168,13 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             # share counts but would happily read a small one (e.g. '50') as
             # 50%, which is exactly the misfire this ticket exists to remove.
             for i, cell in enumerate(cells):
-                if i in (name_idx, shares_idx):
+                if i == name_idx:
+                    continue
+                # The shares column is eligible ONLY when it produced no share
+                # count — a header that resolved onto a percent column ("10.2%"
+                # under "Number of Shares Beneficially Owned") would otherwise
+                # lose both values and drop the row.
+                if i == shares_idx and shares is not None:
                     continue
                 text = cell.strip()
                 if "%" in text or text in ("*", "**"):
