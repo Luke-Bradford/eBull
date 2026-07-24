@@ -4,6 +4,7 @@ import { MemoMarkdown } from "@/components/theses/MemoMarkdown";
 import { StanceBadge } from "@/components/theses/StanceBadge";
 import { EmptyState } from "@/components/states/EmptyState";
 import type { ThesisBreakPredicate, ThesisDetail, ThesisDiff } from "@/api/types";
+import { Badge } from "@/components/ui/Badge";
 
 export interface ThesisPaneProps {
   readonly thesis: ThesisDetail | null;
@@ -254,12 +255,12 @@ function ThesisBody({ thesis, currentPrice, currency }: BodyProps): JSX.Element 
             : ""}
         </span>
         {blindPricing && (
-          <span
-            className="rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+          <Badge
+            tone="warn"
             title="Generated before the price anchor (#1987): targets were written without the current market price in context. Regenerate for anchored numbers."
           >
             pre-anchor memo
-          </span>
+          </Badge>
         )}
       </div>
 

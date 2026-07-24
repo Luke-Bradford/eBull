@@ -66,6 +66,7 @@ import {
   type ThesisStaleItem,
   type Tier,
 } from "./alertModel";
+import { Badge } from "@/components/ui/Badge";
 
 type FeedState<T> =
   | { status: "loading" }
@@ -161,9 +162,9 @@ function GuardGroupCard({ item }: { item: GuardGroupItem }) {
             {item.label}
           </span>
           {item.count > 1 ? (
-            <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+            <Badge className="tabular-nums">
               ×{item.count}
-            </span>
+            </Badge>
           ) : null}
         </div>
         <span className="text-xs text-slate-500 dark:text-slate-400">
@@ -232,9 +233,9 @@ function CoverageGroupCard({ item }: { item: CoverageGroupItem }) {
             Coverage {item.transition}
           </span>
           {item.count > 1 ? (
-            <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+            <Badge className="tabular-nums">
               ×{item.count}
-            </span>
+            </Badge>
           ) : null}
         </div>
         <SymbolSummary symbols={item.symbols} count={item.count} />
@@ -272,9 +273,9 @@ function RankMoveCard({ item }: { item: RankMoveItem }) {
               {magnitude}
             </span>
             {item.count > 1 ? (
-              <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+              <Badge className="tabular-nums">
                 ×{item.count}
-              </span>
+              </Badge>
             ) : null}
           </div>
           <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
@@ -304,9 +305,9 @@ function ThesisChangeCard({ item }: { item: ThesisChangeItem }) {
               {item.symbol}
             </span>
             {item.count > 1 ? (
-              <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+              <Badge className="tabular-nums">
                 ×{item.count}
-              </span>
+              </Badge>
             ) : null}
           </div>
           <span
@@ -347,9 +348,9 @@ function ThesisBreakCard({ item }: { item: ThesisBreakItem }) {
               break condition fired
             </span>
             {item.count > 1 ? (
-              <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+              <Badge className="tabular-nums">
                 ×{item.count}
-              </span>
+              </Badge>
             ) : null}
           </div>
           <span

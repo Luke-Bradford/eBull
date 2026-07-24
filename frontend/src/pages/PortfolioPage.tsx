@@ -32,6 +32,7 @@ import {
   matchesRowSearch,
   type RowItem,
 } from "@/lib/portfolioRows";
+import { Badge } from "@/components/ui/Badge";
 
 interface CloseTarget {
   instrumentId: number;
@@ -681,9 +682,7 @@ function MirrorRow({
           <span className="font-medium text-slate-800 dark:text-slate-100">
             {m.parent_username}
           </span>
-          <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
-            COPY
-          </span>
+          <Badge>COPY</Badge>
           <span className="text-[10px] text-slate-400">→</span>
           {unconverted && <UnconvertedBadge currency={currency} displayCurrency={displayCurrency} />}
         </span>

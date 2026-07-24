@@ -4,6 +4,8 @@ import type { RankingsSortField } from "@/api/rankings";
 import type { RankingItem } from "@/api/types";
 import { formatNumber } from "@/lib/format";
 import { RankDeltaCell } from "@/components/rankings/RankDeltaCell";
+import { completenessTone } from "@/lib/badgeTone";
+import { Badge } from "@/components/ui/Badge";
 
 /**
  * Rankings table (#1825 — server-authoritative sort + pagination).
@@ -236,21 +238,12 @@ function CompletenessChip({
   pct: number | null;
 }) {
   if (tier === null) return <span className="text-slate-400">—</span>;
-  const cls =
-    tier === "insufficient_data"
-      ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
-      : tier === "thin_data"
-        ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-        : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
   const label = tier.replace(/_/g, " ");
   const title = pct === null ? label : `${label} · ${(pct * 100).toFixed(0)}% complete`;
   return (
-    <span
-      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${cls}`}
-      title={title}
-    >
+    <Badge tone={completenessTone(tier)} title={title}>
       {label}
-    </span>
+    </Badge>
   );
 }
 

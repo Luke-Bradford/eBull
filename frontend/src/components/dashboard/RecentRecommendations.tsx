@@ -1,21 +1,9 @@
 import { Link } from "react-router-dom";
 import type { RecommendationListItem } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
+import { actionTone, statusTone } from "@/lib/badgeTone";
 import { EmptyState } from "@/components/states/EmptyState";
-
-const ACTION_TONE: Record<string, string> = {
-  BUY: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300",
-  ADD: "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300",
-  HOLD: "bg-slate-100 dark:bg-slate-800 text-slate-600",
-  EXIT: "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300",
-};
-
-const STATUS_TONE: Record<string, string> = {
-  proposed: "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300",
-  approved: "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300",
-  rejected: "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300",
-  executed: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300",
-};
+import { Badge } from "@/components/ui/Badge";
 
 export function RecentRecommendations({ items }: { items: RecommendationListItem[] }) {
   if (items.length === 0) {
@@ -44,12 +32,8 @@ export function RecentRecommendations({ items }: { items: RecommendationListItem
               >
                 {r.symbol}
               </Link>
-              <Badge tone={ACTION_TONE[r.action] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600"}>
-                {r.action}
-              </Badge>
-              <Badge tone={STATUS_TONE[r.status] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600"}>
-                {r.status}
-              </Badge>
+              <Badge tone={actionTone(r.action)}>{r.action}</Badge>
+              <Badge tone={statusTone(r.status)}>{r.status}</Badge>
             </div>
             <p className="mt-1 line-clamp-2 text-xs text-slate-600">{r.rationale}</p>
           </div>
@@ -59,13 +43,5 @@ export function RecentRecommendations({ items }: { items: RecommendationListItem
         </li>
       ))}
     </ul>
-  );
-}
-
-function Badge({ tone, children }: { tone: string; children: React.ReactNode }) {
-  return (
-    <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${tone}`}>
-      {children}
-    </span>
   );
 }

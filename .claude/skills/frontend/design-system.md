@@ -17,9 +17,17 @@ The base surface is **settled and deliberate**: design-system **v1 is borderless
 
 Decision rule: **editorial chrome first.** Reach for a bounding surface only for a standalone unanchored tile, and never retrofit cards onto a Pane scanning grid without operator sign-off — that's reversing v1's documented rationale.
 
+**Answered for visual v2 (#1908, 2026-07-24): NO card variant is introduced into any Pane scanning grid.** The "stats float in empty space" complaint that motivated the card is fixed by **spacing / grouping / density inside editorial chrome** instead. Do not re-open this by adding a card the next time a stat row looks sparse — reach for Density below.
+
 ## Badge / pill — ONE component
 
-One `Badge` component; never hand-roll an inline pill. Meaning is carried by **text, never color alone** (a11y + operator-ui color semantics). Color is the decorative reinforcement of the text, drawn from the `operator-ui-conventions.md` color table (red=risk, amber=warn, emerald=ok, blue=neutral). Consolidate any inline `rounded bg-… px-… text-…` pill into `Badge`. New status chips go through `Badge`, full stop.
+`frontend/src/components/ui/Badge.tsx` (#1908) is the pill. Never hand-roll an inline pill; never re-declare pill geometry.
+
+- **Tones are SEMANTIC, not colours**: `ok | warn | risk | info | neutral`, mapping 1:1 onto the `operator-ui-conventions.md` colour table (emerald / amber / red / blue / slate). A caller passes meaning; it never writes a colour class. Unmapped enum value → `neutral`, never blank (#1808 class).
+- **Meaning lives in the TEXT**, colour is decorative reinforcement (a11y). A badge whose label doesn't say what it means is a bug, regardless of colour.
+- **Domain enum → tone maps are shared**, not per-component: `lib/badgeTone.ts` (recommendation action / status / completeness), `components/instrument/eightKSeverity.ts` (8-K severity), `StanceBadge` / `CriticVerdictBadge` (thesis vocabularies). Two components rendering the same enum share one map.
+- `title` / `data-*` / `className` pass through, so hover copy, test hooks and layout margins survive migration — there is no reason to fall back to a raw `<span>`.
+- **Colour classes must not live in a tone map.** Semantic values only. A tone map holding raw Tailwind is how `eightKSeverity.ts` shipped light-only chips past the dark gate (prevention-log: "A lint gate's file-glob is part of its contract").
 
 ## Chart theming — ONE source
 

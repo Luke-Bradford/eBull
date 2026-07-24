@@ -10,6 +10,8 @@ import type { ActivityRowV2 } from "@/api/reportSnapshot";
 import { Fn, NilLine, ScopeCaveat, type NoteIndex } from "@/components/reports/StatementChrome";
 import { dec } from "@/components/reports/snapshotMath";
 import { formatDateTime, formatMoney, formatNumber } from "@/lib/format";
+import { actionTone } from "@/lib/badgeTone";
+import { Badge } from "@/components/ui/Badge";
 
 const CAP = 20;
 
@@ -61,15 +63,7 @@ export function ActivitySection({
             <tr key={`${r.instrument_id}-${r.filled_at}-${i}`} className="border-t border-slate-100 dark:border-slate-800/60">
               <td className="px-2 py-2 text-slate-500">{formatDateTime(r.filled_at)}</td>
               <td className="px-2 py-2">
-                <span
-                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                    r.action === "BUY"
-                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
-                      : "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-400"
-                  }`}
-                >
-                  {r.action}
-                </span>
+                <Badge tone={actionTone(r.action)}>{r.action}</Badge>
               </td>
               <td className="px-2 py-2">
                 <Link

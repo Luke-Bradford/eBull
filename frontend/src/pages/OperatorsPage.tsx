@@ -24,6 +24,7 @@ import {
   listOperators,
 } from "@/api/operators";
 import { useSession } from "@/lib/session";
+import { Badge } from "@/components/ui/Badge";
 
 const MIN_PASSWORD_LEN = 12;
 
@@ -140,9 +141,9 @@ export function OperatorsPage(): JSX.Element {
                 <div>
                   <span className="font-medium text-slate-800 dark:text-slate-100">{row.username}</span>
                   {row.is_self && (
-                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                    <Badge uppercase className="ml-2">
                       you
-                    </span>
+                    </Badge>
                   )}
                 </div>
                 <button

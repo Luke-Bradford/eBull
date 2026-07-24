@@ -33,6 +33,8 @@ import { Sparkline } from "@/components/instrument/Sparkline";
 import { ThesisPane } from "@/components/instrument/ThesisPane";
 import { EmptyState } from "@/components/states/EmptyState";
 import { useAsync } from "@/lib/useAsync";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
+import { completenessTone } from "@/lib/badgeTone";
 
 export interface VerdictTabProps {
   readonly instrumentId: number;
@@ -188,11 +190,11 @@ export function VerdictTab({
             </span>
           )}
           {score.completeness_tier !== null && (
-            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-400">
+            <Badge tone={completenessTone(score.completeness_tier)}>
               completeness: {score.completeness_tier}
               {score.data_completeness !== null &&
                 ` (${(score.data_completeness * 100).toFixed(0)}%)`}
-            </span>
+            </Badge>
           )}
           <span className="ml-auto text-[10px] text-slate-400">
             as of {score.scored_at.slice(0, 10)} · {score.model_version}
@@ -421,17 +423,13 @@ function AltmanCard({ z }: { z: IarAltmanZ | undefined }): JSX.Element {
 }
 
 function Band({ band }: { band: string }): JSX.Element {
-  const cls =
+  const tone: BadgeTone =
     band === "strong" || band === "safe"
-      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+      ? "ok"
       : band === "weak" || band === "distress"
-        ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
-        : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300";
-  return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
-      {band}
-    </span>
-  );
+        ? "risk"
+        : "warn";
+  return <Badge tone={tone}>{band}</Badge>;
 }
 
 function PositioningCard({

@@ -16,6 +16,7 @@
 import { useEffect, useState } from "react";
 
 import { useConfig } from "@/lib/ConfigContext";
+import { Badge } from "@/components/ui/Badge";
 
 export function DemoLivePill(): JSX.Element {
   const config = useConfig();
@@ -34,19 +35,16 @@ export function DemoLivePill(): JSX.Element {
   const isLive = liveFlag ?? cached ?? false;
 
   return (
-    <span
-      className={
-        isLive
-          ? "inline-flex items-center gap-1 rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-red-700 dark:text-red-300"
-          : "inline-flex items-center gap-1 rounded border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-blue-700 dark:text-blue-300"
-      }
+    <Badge
+      tone={isLive ? "risk" : "info"}
+      uppercase
       data-testid="demo-live-pill"
       data-live={isLive ? "true" : "false"}
     >
       {isLive ? "LIVE" : "DEMO MODE"}
       {!fresh && cached !== null ? (
-        <span className="text-[9px] uppercase text-amber-600">(stale)</span>
+        <span className="text-[9px] uppercase text-amber-600 dark:text-amber-400">(stale)</span>
       ) : null}
-    </span>
+    </Badge>
   );
 }

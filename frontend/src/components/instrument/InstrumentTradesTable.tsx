@@ -15,19 +15,10 @@
 
 import type { NativeTradeItem } from "@/api/types";
 import { formatMoney, formatNumber } from "@/lib/format";
+import { Badge } from "@/components/ui/Badge";
 
 function SideBadge({ isBuy }: { isBuy: boolean }) {
-  return (
-    <span
-      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
-        isBuy
-          ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300"
-          : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300"
-      }`}
-    >
-      {isBuy ? "Buy" : "Sell"}
-    </span>
-  );
+  return <Badge tone={isBuy ? "ok" : "risk"}>{isBuy ? "Buy" : "Sell"}</Badge>;
 }
 
 export function InstrumentTradesTable({

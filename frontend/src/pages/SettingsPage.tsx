@@ -36,6 +36,7 @@ import { LlmProviderSection } from "@/components/settings/LlmProviderSection";
 import { deriveCredentialSetMode, ENVIRONMENT } from "@/lib/credentialSetMode";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { useSession } from "@/lib/session";
+import { Badge } from "@/components/ui/Badge";
 
 const MIN_SECRET_LEN = 4;
 
@@ -440,9 +441,9 @@ function BrokerCredentialsSection(): JSX.Element {
                     {row.provider} · {row.environment} · ••••{row.last_four}
                   </span>
                   {revoked && (
-                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                    <Badge uppercase className="ml-2">
                       revoked
-                    </span>
+                    </Badge>
                   )}
                 </div>
                 <div className="flex gap-2">

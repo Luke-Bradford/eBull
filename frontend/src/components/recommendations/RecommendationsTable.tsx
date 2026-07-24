@@ -4,31 +4,10 @@ import { useAsync } from "@/lib/useAsync";
 import { fetchRecommendation } from "@/api/recommendations";
 import type { RecommendationListItem } from "@/api/types";
 import { formatDateTime, formatNumber, formatPct } from "@/lib/format";
+import { actionTone, completenessTone, statusTone } from "@/lib/badgeTone";
 import { SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
-
-const ACTION_TONE: Record<string, string> = {
-  BUY: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300",
-  ADD: "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300",
-  HOLD: "bg-slate-100 dark:bg-slate-800 text-slate-600",
-  EXIT: "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300",
-  // Informational only — evaluated but blocked from BUY (#1820).
-  CONSIDERED: "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300",
-};
-
-const STATUS_TONE: Record<string, string> = {
-  proposed: "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300",
-  approved: "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300",
-  rejected: "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300",
-  executed: "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300",
-  considered: "bg-slate-100 dark:bg-slate-800 text-slate-500",
-};
-
-const COMPLETENESS_TONE: Record<string, string> = {
-  full: "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300",
-  thin_data: "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300",
-  insufficient_data: "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300",
-};
+import { Badge } from "@/components/ui/Badge";
 
 const COMPLETENESS_LABEL: Record<string, string> = {
   full: "full",
@@ -213,14 +192,10 @@ function RecommendationRow({
           </Link>
         </td>
         <td className="px-2 py-2">
-          <Badge tone={ACTION_TONE[item.action] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600"}>
-            {item.action}
-          </Badge>
+          <Badge tone={actionTone(item.action)}>{item.action}</Badge>
         </td>
         <td className="px-2 py-2">
-          <Badge tone={STATUS_TONE[item.status] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600"}>
-            {item.status}
-          </Badge>
+          <Badge tone={statusTone(item.status)}>{item.status}</Badge>
         </td>
         <td className="px-2 py-2">
           <CompletenessBadge tier={item.completeness_tier} value={item.data_completeness} />
@@ -301,20 +276,11 @@ function ExpandedDetail({
 
 function CompletenessBadge({ tier, value }: { tier: string | null; value: number | null }) {
   if (tier === null) return <span className="text-xs text-slate-400">—</span>;
-  const tone = COMPLETENESS_TONE[tier] ?? "bg-slate-100 dark:bg-slate-800 text-slate-600";
   const label = COMPLETENESS_LABEL[tier] ?? tier;
   const title = value !== null ? `C=${value.toFixed(2)}` : undefined;
   return (
-    <span title={title}>
-      <Badge tone={tone}>{label}</Badge>
-    </span>
-  );
-}
-
-function Badge({ tone, children }: { tone: string; children: React.ReactNode }) {
-  return (
-    <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${tone}`}>
-      {children}
-    </span>
+    <Badge tone={completenessTone(tier)} title={title}>
+      {label}
+    </Badge>
   );
 }
