@@ -569,6 +569,39 @@ const _OVERLAY_TOP_N = 8;
  * ``institution_subset`` slice surfaces here automatically; only the
  * funds-specific double-count copy is keyed on the category.
  */
+/**
+ * A minority of stored DEF 14A rows have a numeric ``holder_name`` (a share
+ * count leaked into the name column — a parser bug tracked separately, ~13% of
+ * proxy rows full-pop). Don't stamp a confident role badge onto a row whose
+ * identity failed to parse: require at least one letter in the name. This
+ * declines to decorate a known-broken row; it does not re-derive the role.
+ */
+export function hasParsedHolderName(name: string): boolean {
+  return /[A-Za-z]/.test(name);
+}
+
+/**
+ * Human label for a DEF 14A proxy role tag (#2121). Purely descriptive — the
+ * SEC Item 403 sub-table each holder appeared in. ``group`` is the 403(b) "all
+ * directors & officers as a group" AGGREGATE row (its shares already contain the
+ * individual officer/director rows), so it is labelled distinctly and never
+ * added to the pie. Unknown values fall through to a title-cased raw string.
+ */
+export function proxyRoleLabel(role: string): string {
+  switch (role) {
+    case "officer":
+      return "Officer";
+    case "director":
+      return "Director";
+    case "principal":
+      return "5% holder";
+    case "group":
+      return "Group total";
+    default:
+      return role.charAt(0).toUpperCase() + role.slice(1);
+  }
+}
+
 function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
   const total = parseShareCount(slice.total_shares) ?? 0;
   const totalPct = parseShareCount(slice.pct_outstanding) ?? 0;
@@ -628,6 +661,14 @@ function OverlaySection({ slice }: OverlaySectionProps): JSX.Element {
                   ) : (
                     h.filer_name
                   )}
+                  {isProxy && h.holder_role && hasParsedHolderName(h.filer_name) ? (
+                    <span
+                      className="ml-1.5 rounded bg-slate-200 px-1 py-0.5 text-[0.5rem] font-medium uppercase tracking-wide text-slate-600 dark:bg-slate-700 dark:text-slate-300"
+                      title="SEC Item 403 proxy role — descriptive only, not added to the pie"
+                    >
+                      {proxyRoleLabel(h.holder_role)}
+                    </span>
+                  ) : null}
                 </td>
                 <td className="py-1 text-right font-mono text-slate-600 dark:text-slate-300">
                   {formatShares(hShares)}

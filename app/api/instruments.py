@@ -4714,6 +4714,9 @@ class _HolderModel(BaseModel):
     # Per-lot breakdown when an owner's additive direct/indirect lots were
     # collapsed to one line (#1942). Empty for single-lot holders.
     lots: list[_HolderLotModel] = []
+    # DEF 14A proxy role tag (#2121) — display label only, present solely on the
+    # non-additive ``def14a_unmatched`` memo overlay; ``None`` everywhere else.
+    holder_role: str | None = None
 
 
 class _SliceModel(BaseModel):
@@ -5029,6 +5032,7 @@ def _rollup_to_response(
                             )
                             for lot in h.lots
                         ],
+                        holder_role=h.holder_role,
                     )
                     for h in s.holders
                 ],
