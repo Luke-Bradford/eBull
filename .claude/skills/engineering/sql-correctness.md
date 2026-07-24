@@ -36,6 +36,12 @@ Any `fetchone()` on a query whose predicate can match more than one row needs an
 
 After fixing a missing ORDER BY: grep the whole file for every `fetchone()` call — a partial fix is worse than none.
 
+## DISTINCT ON / ROW_NUMBER need a UNIQUE final tie-break
+
+`DISTINCT ON (...)` (and `ROW_NUMBER() OVER (... ORDER BY ...)`, and `fetchone()` with `ORDER BY ... LIMIT 1`) pick the FIRST row per group by the `ORDER BY`. If the `ORDER BY` columns are not jointly UNIQUE, the winner among tied rows is arbitrary and **plan-dependent** — a single-key query (`WHERE id = %s`) looks stable because its plan is consistent, but a bulk `WHERE id = ANY(%(ids)s::bigint[])` query has a different plan → different physical row order → picks a DIFFERENT arbitrary winner. So a per-row reader and its bulk twin silently diverge on tied rows even with identical `ORDER BY` clauses.
+
+Prevention: append the surrogate PK (`fact_id DESC`, `id DESC`) as the final `ORDER BY` key on any `DISTINCT ON`/`ROW_NUMBER`/latest-row query whose earlier keys aren't provably unique — for BOTH the per-row and the bulk form, so they agree AND are reproducible run-to-run. When bulking a reader for a batch job, verify equivalence on the FULL population (a same-process A/B), not a sample: the tie only bites the rows that have duplicates. Origin: #2127 P2 — `_read_latest_two_fy_facts` tied on `(concept, fiscal_year, period_end, filed_date, accession_number)` because `financial_facts_raw` co-tags an annual and a Q4 value both `fiscal_period='FY'`; 495 instruments carried ≥1 such tie and the golden silently picked the Q4 stub. Fixed by a domain tie-break (`(period_end - period_start) DESC` prefers the annual) plus `fact_id DESC` as the unique final key.
+
 ## No positional row access
 
 `row[0]`, `row[1]` silently returns wrong data if a column is ever added before the indexed column. Use `row_factory=psycopg.rows.dict_row` and access by name: `row["column_name"]`.

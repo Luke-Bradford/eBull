@@ -3,7 +3,11 @@ is a pure function over fact dicts / populations."""
 
 from __future__ import annotations
 
+from datetime import date
+
 from app.services.instrument_analytics import (
+    _build_analytics_block,
+    _short_interest_from_row,
     altman_z2,
     compute_peer_grades,
     hybrid_grade,
@@ -197,3 +201,96 @@ class TestPeerGrade:
         q = g["families"]["quality"]
         assert q["percentile"] is None
         assert q["hybrid"] == q["absolute"]  # absolute-only when thin
+
+
+class TestShortInterestFromRow:
+    """Shared pure row→signal helper (#2127 Phase 2) — must match the early-return
+    contract of the per-instrument reader exactly."""
+
+    def test_none_row(self) -> None:
+        assert _short_interest_from_row(None, 1000.0) == short_interest_signal(None, None)
+
+    def test_current_none(self) -> None:
+        assert _short_interest_from_row((None, 5.0, 3.0, date(2026, 1, 1)), 1000.0) == short_interest_signal(None, None)
+
+    def test_shares_missing_or_nonpositive(self) -> None:
+        row = (100.0, 90.0, 2.0, date(2026, 1, 1))
+        assert _short_interest_from_row(row, None) == short_interest_signal(None, None)
+        assert _short_interest_from_row(row, 0.0) == short_interest_signal(None, None)
+
+    def test_valid_row_falling_with_days_and_asof(self) -> None:
+        # current < previous → falling; short_pct = 100/1000 = 0.10.
+        out = _short_interest_from_row((100.0, 120.0, 2.5, date(2026, 3, 31)), 1000.0)
+        expected = short_interest_signal(0.10, True)
+        assert out["signal"] == expected["signal"]
+        assert out["falling"] is True
+        assert out["days_to_cover"] == 2.5
+        assert out["asof"] == "2026-03-31"
+
+    def test_valid_row_rising_no_optional_fields(self) -> None:
+        # current > previous → not falling; days_to_cover/settlement absent → no keys.
+        out = _short_interest_from_row((200.0, 100.0, None, None), 1000.0)
+        assert out["falling"] is False
+        assert "days_to_cover" not in out
+        assert "asof" not in out
+
+
+class TestBuildAnalyticsBlock:
+    """Shared pure block builder (#2127 Phase 2). Guarantees the per-instrument and
+    bulk paths emit byte-identical blocks from the same resolved inputs."""
+
+    def _block(self, **kw: object) -> dict:
+        base: dict = dict(
+            gics_sector=None,
+            shares_outstanding=1000.0,
+            curr=None,
+            prior=None,
+            insider_net=None,
+            insider_asof=None,
+            delta_pct=None,
+            inst_asof=None,
+            short_interest=short_interest_signal(None, None),
+        )
+        base.update(kw)
+        return _build_analytics_block(**base)  # type: ignore[arg-type]
+
+    def test_financials_suppressed(self) -> None:
+        b = self._block(gics_sector="Financials", curr=_CURR, prior=_PRIOR)
+        assert b["piotroski"] == {"score": None, "suppressed": True, "reason": "quality_signal_na_financials"}
+        assert b["altman_z"] == {"z": None, "suppressed": True, "reason": "quality_signal_na_financials"}
+
+    def test_no_annual_facts(self) -> None:
+        b = self._block(curr=None)
+        assert b["piotroski"]["reason"] == "no_annual_facts"
+        assert b["piotroski"]["suppressed"] is False
+        assert b["altman_z"]["reason"] == "no_annual_facts"
+
+    def test_computed_quality(self) -> None:
+        b = self._block(curr=_CURR, prior=_PRIOR)
+        assert b["piotroski"]["score"] == piotroski_f(_CURR, _PRIOR).score
+        assert b["piotroski"]["suppressed"] is False
+        assert b["altman_z"]["z"] == altman_z2(_CURR).z
+        assert b["altman_z"]["suppressed"] is False
+
+    def test_positioning_signals_and_asof(self) -> None:
+        b = self._block(
+            insider_net=5000.0,
+            insider_asof=date(2026, 2, 1),
+            delta_pct=0.05,
+            inst_asof=date(2026, 3, 1),
+        )
+        pos = b["positioning"]
+        assert pos["insider_net_90d"] == {**insider_signal(5000.0, 1000.0), "asof": "2026-02-01"}
+        assert pos["inst_13f_qoq"] == {**inst_13f_signal(0.05), "asof": "2026-03-01"}
+
+    def test_insider_none_degrades_not_zero(self) -> None:
+        # insider_net None (missing-schema degrade) → signal None, NOT a 0.0-computed signal.
+        b = self._block(insider_net=None)
+        assert b["positioning"]["insider_net_90d"] == insider_signal(None, 1000.0)
+
+    def test_short_interest_passthrough_and_default_peer_grade(self) -> None:
+        si = short_interest_signal(0.2, False)
+        b = self._block(short_interest=si)
+        assert b["positioning"]["short_interest"] == si
+        assert b["schema"] == "iar_v1"
+        assert b["peer_grade"] == {"basis": "absolute_only", "reason": "no_run_context", "families": {}}

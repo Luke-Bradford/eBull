@@ -34,6 +34,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.instrument_analytics import (
     assemble_instrument_analytics,
+    assemble_instrument_analytics_bulk,
     compute_peer_grades,
 )
 from app.services.sector_classification import resolve_sector_spdr
@@ -2176,18 +2177,33 @@ def compute_rankings(
     # source instead of ~20 per-instrument round-trips × N. One batch `now` so all
     # instruments are scored "as of run start" (replaces the prior per-instrument
     # _utcnow() drift; strictly more consistent, no model_version bump — `now` is an
-    # execution input, not a metric computation). Analytics stays per-instrument in
-    # Phase 1 (bulked in Phase 2). Individual failures are skipped exactly as before.
+    # execution input, not a metric computation). Phase 2 bulks the IAR analytics
+    # block too. Individual failures are skipped exactly as before.
     weights = _WEIGHT_MODES[model_version]  # validated above
     now = _utcnow()
     bulk = _bulk_load_instrument_data(conn, instrument_ids, now)
+
+    # Analytics inputs (gics_sector, shares_outstanding) come from the already-loaded
+    # `bulk` data — no new I/O. _analytics_inputs is pure; the per-id guard preserves
+    # the "one bad id never fails the run" invariant. Then one bulk analytics pass
+    # (#2127 Phase 2) replaces the ~4 per-instrument analytics round-trips × N.
+    gics_by_id: dict[int, str | None] = {}
+    shares_by_id: dict[int, float | None] = {}
+    for iid in instrument_ids:
+        try:
+            g, s = _analytics_inputs(bulk[iid])
+        except Exception:
+            g, s = None, None
+        gics_by_id[iid] = g
+        shares_by_id[iid] = s
+    analytics_by_id = assemble_instrument_analytics_bulk(
+        conn, instrument_ids, gics_sector_by_id=gics_by_id, shares_outstanding_by_id=shares_by_id
+    )
+
     results: list[ScoreResult] = []
     for iid in instrument_ids:
         try:
-            data = bulk[iid]
-            gics_sector, shares_out = _analytics_inputs(data)
-            analytics = assemble_instrument_analytics(iid, conn, gics_sector=gics_sector, shares_outstanding=shares_out)
-            results.append(_score_from_data(iid, data, weights, model_version, now, analytics))
+            results.append(_score_from_data(iid, bulk[iid], weights, model_version, now, analytics_by_id[iid]))
         except Exception:
             logger.warning("compute_rankings: scoring failed for instrument_id=%d, skipping", iid, exc_info=True)
 
