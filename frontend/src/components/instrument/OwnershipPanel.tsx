@@ -570,13 +570,6 @@ const _OVERLAY_TOP_N = 8;
  * funds-specific double-count copy is keyed on the category.
  */
 /**
- * Human label for a DEF 14A proxy role tag (#2121). Purely descriptive — the
- * SEC Item 403 sub-table each holder appeared in. ``group`` is the 403(b) "all
- * directors & officers as a group" AGGREGATE row (its shares already contain the
- * individual officer/director rows), so it is labelled distinctly and never
- * added to the pie. Unknown values fall through to a title-cased raw string.
- */
-/**
  * A minority of stored DEF 14A rows have a numeric ``holder_name`` (a share
  * count leaked into the name column — a parser bug tracked separately, ~13% of
  * proxy rows full-pop). Don't stamp a confident role badge onto a row whose
@@ -587,6 +580,13 @@ export function hasParsedHolderName(name: string): boolean {
   return /[A-Za-z]/.test(name);
 }
 
+/**
+ * Human label for a DEF 14A proxy role tag (#2121). Purely descriptive — the
+ * SEC Item 403 sub-table each holder appeared in. ``group`` is the 403(b) "all
+ * directors & officers as a group" AGGREGATE row (its shares already contain the
+ * individual officer/director rows), so it is labelled distinctly and never
+ * added to the pie. Unknown values fall through to a title-cased raw string.
+ */
 export function proxyRoleLabel(role: string): string {
   switch (role) {
     case "officer":
