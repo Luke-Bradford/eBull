@@ -604,16 +604,37 @@ def resolve_market_cap_basis(
             is_multiclass = bool(exists_row and exists_row[0])
 
         if not is_multiclass:
-            # #2117: a curated ADS ratio corrects the ordinary×ADS-price product.
-            # Catches the domestic-form ADR filer (AKTX — not ``fpi``) AND
-            # un-suppresses the ratio-known fpi names (CRTO/ONC/TEVA/ZLAB).
-            cur.execute("SELECT 1 FROM ads_ratio WHERE instrument_id = %s", (instrument_id,))
-            if cur.fetchone() is not None:
-                # The corrected cap is exactly ``instrument_valuation.market_cap_live``
-                # for a ratio-known name: the view applies metric_price = price/ratio
-                # AND the same quote-else-daily-close price the rest of the identity
-                # uses. (``compute_market_cap`` is quotes-only and returns None for a
-                # daily-close-only ADR, e.g. AKTX.) Read it back so endpoint == view.
+            # #2117: one round-trip for both the curated-ratio flag and the
+            # fail-closed fpi fingerprint (this runs on the scoring path — keep
+            # the query count flat). fpi = Rule 3b-4 fingerprint ∪ ADR/ADS name
+            # marker (the marker catches domestic-form ADR filers the form set
+            # cannot); mirrors the sql/241 fpi_adr CTE — keep in sync.
+            cur.execute(
+                """
+                SELECT
+                    EXISTS (SELECT 1 FROM ads_ratio WHERE instrument_id = %(iid)s) AS has_ratio,
+                    (EXISTS (
+                        SELECT 1 FROM coverage
+                        WHERE instrument_id = %(iid)s AND filings_status = 'fpi'
+                     ) OR EXISTS (
+                        SELECT 1 FROM instruments
+                        WHERE instrument_id = %(iid)s AND company_name ~* '\\y(ADR|ADS)\\y'
+                     )) AS is_fpi_adr
+                """,
+                {"iid": instrument_id},
+            )
+            flags = cur.fetchone()
+            has_ratio = bool(flags and flags[0])
+            is_fpi_adr = bool(flags and flags[1])
+
+            if has_ratio:
+                # #2117: a curated ADS ratio corrects the ordinary×ADS-price product
+                # (catches AKTX — not ``fpi`` — and un-suppresses CRTO/ONC/TEVA/ZLAB).
+                # The corrected cap is exactly ``instrument_valuation.market_cap_live``:
+                # the view applies metric_price = price/ratio AND the same
+                # quote-else-daily-close price the rest of the identity uses
+                # (``compute_market_cap`` is quotes-only and returns None for a
+                # daily-close-only ADR, e.g. AKTX). Read it back so endpoint == view.
                 cur.execute(
                     "SELECT market_cap_live FROM instrument_valuation WHERE instrument_id = %s",
                     (instrument_id,),
@@ -621,23 +642,8 @@ def resolve_market_cap_basis(
                 mc_row = cur.fetchone()
                 return MarketCapResolution(basis="fpi_adr_ratio", value=mc_row[0] if mc_row is not None else None)
 
-            # #1939: Rule 3b-4 FPI ADR/ADS WITHOUT a ratio → fail closed. Fingerprint
-            # ∪ ADR/ADS name marker — the marker catches domestic-form ADR filers the
-            # Rule 3b-4 form set cannot. Mirrors the sql/241 fpi_adr CTE; keep in sync.
-            cur.execute(
-                """
-                SELECT 1
-                WHERE EXISTS (
-                    SELECT 1 FROM coverage
-                    WHERE instrument_id = %(iid)s AND filings_status = 'fpi'
-                ) OR EXISTS (
-                    SELECT 1 FROM instruments
-                    WHERE instrument_id = %(iid)s AND company_name ~* '\\y(ADR|ADS)\\y'
-                )
-                """,
-                {"iid": instrument_id},
-            )
-            if cur.fetchone() is not None:
+            if is_fpi_adr:
+                # #1939: Rule 3b-4 FPI ADR/ADS WITHOUT a ratio → fail closed.
                 return MarketCapResolution(basis="fpi_adr_unavailable")
 
             # Not a curated multiclass issuer and no ADS ratio → legacy single-class.
