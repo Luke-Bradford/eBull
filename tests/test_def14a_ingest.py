@@ -411,6 +411,87 @@ class TestIngestDef14a:
         assert row is not None
         assert row[0] == 3
 
+    def test_re_ingest_supersedes_renamed_holders_and_revives_the_rest(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#2140 D6 — the observations conflict key is DERIVED from the parsed
+        name (``holder_name_key = lower(trim(holder_name))``), so a parser fix
+        that changes a name writes the corrected row under a NEW key. Unless
+        the filing's prior rows are superseded first, the broken row stays
+        live and ``refresh_def14a_current`` — which prunes from that same set —
+        keeps its ``_current`` row alive forever.
+
+        Asserts BOTH halves of the mechanism: a holder the re-parse no longer
+        emits stays tombstoned, and one it still emits is REVIVED (the
+        ``known_to = NULL`` clause in ``record_def14a_observation``).
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000009"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _live_names() -> set[str]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT holder_name FROM ownership_def14a_observations
+                     WHERE source_document_id = %s AND known_to IS NULL
+                    """,
+                    (accession,),
+                )
+                return {r[0] for r in cur.fetchall()}
+
+        first_names = _live_names()
+        assert first_names, "first ingest wrote no observations"
+
+        # Simulate a parser fix that RENAMES one holder: rewrite one stored
+        # observation under a broken key, as the pre-#2140 parser would have.
+        broken, *rest = sorted(first_names)
+        conn.execute(
+            """
+            UPDATE ownership_def14a_observations
+               SET holder_name = %s
+             WHERE source_document_id = %s AND holder_name = %s
+            """,
+            ("999,999", accession, broken),
+        )
+        conn.execute("DELETE FROM def14a_ingest_log WHERE accession_number = %s", (accession,))
+        conn.commit()
+        assert "999,999" in _live_names()
+
+        # Re-ingest under the current (fixed) parser.
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        live = _live_names()
+        # The broken key is no longer emitted -> superseded, not resurrected.
+        assert "999,999" not in live
+        # Every name the parse still emits is live again, including the one
+        # whose row had been rewritten (revive clause) and the untouched rest.
+        assert live == first_names, f"expected {first_names}, got {live}"
+        # I6: superseded, never hard-deleted — the audit row survives.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT known_to IS NOT NULL FROM ownership_def14a_observations
+                 WHERE source_document_id = %s AND holder_name = %s
+                """,
+                (accession, "999,999"),
+            )
+            row = cur.fetchone()
+        assert row is not None and row[0] is True
+
     def test_unrecognisable_table_tombstones_partial(
         self,
         _setup: psycopg.Connection[tuple],

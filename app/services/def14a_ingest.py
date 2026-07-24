@@ -1114,7 +1114,7 @@ def _record_def14a_observations_for_filing(
     filed_at = fetched_at
     run_id = uuid4()
 
-    # Replace-then-insert (#2140 D6). ``record_def14a_observation`` is an
+    # Supersede-then-reassert (#2140 D6). ``record_def14a_observation`` is an
     # UPSERT keyed on ``holder_name_key``, so it refreshes a row in place only
     # while the parser keeps producing the SAME NAME. A parser fix that changes
     # a name — which is exactly what #2140 does for 3,209 numeric-name rows and
@@ -1122,24 +1122,31 @@ def _record_def14a_observations_for_filing(
     # leaves the broken one live. ``refresh_def14a_current`` prunes via
     # ``WHEN NOT MATCHED BY SOURCE THEN DELETE``, but its source set is these
     # observations, so the stale rows keep their ``_current`` row alive
-    # forever. Without this delete a re-wash is additive, not corrective.
+    # forever. Without this step a re-wash is additive, not corrective.
     #
-    # DELETE rather than a ``known_to`` tombstone, mirroring the #953 13F
-    # precedent (``rewash_filings.py``): this module's ON CONFLICT DO UPDATE
-    # never clears ``known_to``, so a tombstoned row re-asserted by a later
-    # re-wash would stay invisible to the _current MERGE forever.
+    # Tombstone rather than DELETE, per invariant I6 (never hard-delete
+    # observations). The #953 13F precedent chose DELETE for a purely
+    # MECHANICAL reason — its writer's ON CONFLICT DO UPDATE never cleared
+    # ``known_to``, so a re-asserted row would have stayed invisible forever.
+    # ``record_def14a_observation`` clears ``known_to`` on conflict, which
+    # removes that objection: every holder the new parse still emits is
+    # revived by the INSERT below (same transaction), and only the rows the
+    # new parse NO LONGER emits stay superseded — with their audit history
+    # intact. That is precisely the desired semantics.
     #
     # Scoped to (instrument_id, source_document_id) — NOT the accession alone.
     # The caller fans this function out ONCE PER SHARE-CLASS SIBLING for the
-    # same accession, so an accession-wide delete would make each sibling's
-    # write wipe the previous sibling's rows.
+    # same accession, so an accession-wide sweep would make each sibling's
+    # write supersede the previous sibling's rows.
     with conn.cursor() as cur:
         cur.execute(
             """
-            DELETE FROM ownership_def14a_observations
-            WHERE instrument_id = %(iid)s
-              AND source = 'def14a'
-              AND source_document_id = %(doc_id)s
+            UPDATE ownership_def14a_observations
+               SET known_to = NOW()
+             WHERE instrument_id = %(iid)s
+               AND source = 'def14a'
+               AND source_document_id = %(doc_id)s
+               AND known_to IS NULL
             """,
             {"iid": instrument_id, "doc_id": accession_number},
         )

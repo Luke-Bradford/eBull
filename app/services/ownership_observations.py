@@ -1145,7 +1145,17 @@ def record_def14a_observation(
                 shares = EXCLUDED.shares,
                 percent_of_class = EXCLUDED.percent_of_class,
                 ingest_run_id = EXCLUDED.ingest_run_id,
-                ingested_at = clock_timestamp()
+                ingested_at = clock_timestamp(),
+                -- Revive a superseded row when the parser re-asserts it
+                -- (#2140). ``_record_def14a_observations_for_filing``
+                -- tombstones the filing's prior rows and then re-inserts what
+                -- the current parse produces, so a holder the new parse still
+                -- reports must come back live; only the rows it no longer
+                -- reports stay superseded. Without this clause the tombstone
+                -- would be permanent and the re-asserted row invisible to
+                -- ``refresh_def14a_current`` (which filters known_to IS NULL)
+                -- forever — the exact trap that made #953 use a hard DELETE.
+                known_to = NULL
             """,
             {
                 "iid": instrument_id,

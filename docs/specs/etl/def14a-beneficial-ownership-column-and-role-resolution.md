@@ -252,13 +252,24 @@ unchanged — asserted by the A/B in §Verification.
 
 ### 6. Accession-scoped supersession (unblocks D6)
 
-Mirror the **#953 13F precedent** (`rewash_filings.py:1362-1385`): before
-re-recording a filing's holders, delete that filing's prior def14a
-observation rows. That precedent chose DELETE over a `known_to` tombstone for
-a documented reason that applies verbatim here —
-`record_def14a_observation`'s `ON CONFLICT DO UPDATE` never clears `known_to`,
-so a tombstoned row re-asserted by a later rewash would stay invisible to the
-`_current` MERGE forever.
+Before re-recording a filing's holders, supersede that filing's prior def14a
+observation rows (`known_to = NOW()`), then insert what the current parse
+produces.
+
+**Supersede, not DELETE** — invariant **I6** (`data-engineer` skill) is
+"soft-delete via tombstones, never hard-delete observations". The #953 13F
+precedent (`rewash_filings.py:1362-1385`) used a hard DELETE, but its stated
+reason is purely mechanical: *its* writer's `ON CONFLICT DO UPDATE` never
+cleared `known_to`, so a re-asserted row would have stayed invisible to the
+`_current` MERGE forever. That is a gap to close, not grounds to destroy
+observations. So this change also adds `known_to = NULL` to
+`record_def14a_observation`'s `ON CONFLICT DO UPDATE`: every holder the new
+parse still emits is revived in the same transaction, and only the rows it no
+longer emits stay tombstoned — with their audit history intact. Verified that
+every real reader of `ownership_def14a_observations` already filters
+`known_to IS NULL` (`refresh_def14a_current`, `refresh_def14a_current_batch`,
+`ownership_history`); the only unfiltered reads are the `MAX(ingested_at)`
+watermark queries, which should span superseded rows.
 
 **Placement: inside `_record_def14a_observations_for_filing` itself**, not at
 the rewash call site. Codex ckpt-1 flagged that stale-key reassertion can occur
