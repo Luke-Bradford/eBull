@@ -1,6 +1,7 @@
 import type { BudgetStateResponse, PortfolioResponse } from "@/api/types";
 import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
-import { formatMoney, formatPct, pnlPct } from "@/lib/format";
+import { formatMoney, formatPct } from "@/lib/format";
+import { portfolioTotals } from "@/lib/portfolioTotals";
 import { SectionSkeleton } from "@/components/dashboard/Section";
 import { StatTile } from "@/components/dashboard/StatTile";
 
@@ -44,30 +45,11 @@ export function SummaryCards({
     );
   }
 
-  let totalPnl = 0;
-  let totalCost = 0;
-  for (const p of data.positions) {
-    totalPnl += p.unrealized_pnl;
-    totalCost += p.cost_basis;
-  }
-  // Include mirror P&L in the total: mirrors contribute both to the
-  // unrealized total and to the cost basis denominator (via funded amount).
-  for (const m of data.mirrors ?? []) {
-    totalPnl += m.unrealized_pnl;
-    totalCost += m.funded;
-  }
-  const pnlFraction = pnlPct(totalPnl, totalCost);
-
-  // Label the portfolio totals with the currency the backend actually converted to
-  // (response.display_currency), NOT the /config context — those can observe
-  // different config states (#2129). The budget card keeps the config currency: its
-  // `available_for_deployment` is separate budget math with no per-response currency.
-  const displayCurrency = data.display_currency;
-  // The totals sum every money source (positions, cash, mirror equity); if any stayed
-  // in a non-display currency on an FX-degrade, the sum mixes currencies under one
-  // symbol. The backend flags this (covering cash/mirror, which carry no per-row
-  // currency) rather than the FE deriving it from positions alone (#2129).
-  const hasUnconverted = data.fx_incomplete;
+  // #1901: shared totals + #2129 display-currency labeling (single source, also
+  // used by the Portfolio workstation's SummaryBar). The budget card keeps the
+  // /config currency: its `available_for_deployment` is separate budget math with
+  // no per-response currency.
+  const { totalPnl, pnlFraction, displayCurrency, hasUnconverted } = portfolioTotals(data);
 
   return (
     <>
