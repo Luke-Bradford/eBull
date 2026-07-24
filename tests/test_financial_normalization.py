@@ -8,6 +8,7 @@ from decimal import Decimal
 from app.services.fundamentals import (
     FactRow,
     _derive_periods_from_facts,
+    _resolve_period_fiscal_year,
 )
 
 
@@ -663,22 +664,33 @@ class TestPriorYearComparativeMisattribution:
         ]
 
     def test_canonical_fy_value_comes_from_max_period_end(self) -> None:
-        """Acceptance criterion from issue #682: only the
-        ``period_end=2025-12-31`` row drives the canonical FY 2025 row.
+        """#682 invariant: the FY2025 row's value comes ONLY from its own
+        ``period_end=2025-12-31`` ($2.00), never the earliest comparative.
+
+        #1914: the comparative FY2023/FY2024 rows are now ALSO recovered as
+        their own rows (their own period_end + own value), instead of being
+        discarded — so multi-year views no longer show blank prior years.
         """
         periods = _derive_periods_from_facts(
             self._ten_k_with_three_comparative_years(),
             reported_currency="USD",
         )
 
-        fy_rows = [p for p in periods if p.period_type == "FY"]
-        assert len(fy_rows) == 1
-        fy = fy_rows[0]
-        assert fy.fiscal_year == 2025
-        assert fy.period_end_date == date(2025, 12, 31)
-        assert fy.period_start_date == date(2025, 1, 1)
-        assert fy.dps_declared == Decimal("2.00")
-        assert fy.months_covered == 12
+        fy_rows = {p.fiscal_year: p for p in periods if p.period_type == "FY"}
+        # #1914 — all three comparative years recovered from the one 10-K.
+        assert set(fy_rows) == {2023, 2024, 2025}
+        # #682 — the primary FY2025 row keeps its OWN value, not the earliest
+        # comparative ($6.00 from 2023).
+        fy25 = fy_rows[2025]
+        assert fy25.period_end_date == date(2025, 12, 31)
+        assert fy25.period_start_date == date(2025, 1, 1)
+        assert fy25.dps_declared == Decimal("2.00")
+        assert fy25.months_covered == 12
+        # #1914 — each comparative carries its own year's value + period_end.
+        assert fy_rows[2024].period_end_date == date(2024, 12, 31)
+        assert fy_rows[2024].dps_declared == Decimal("3.50")
+        assert fy_rows[2023].period_end_date == date(2023, 12, 31)
+        assert fy_rows[2023].dps_declared == Decimal("6.00")
 
     def test_comparative_year_facts_do_not_pollute_source_ref(self) -> None:
         """Provenance for the FY row comes only from the accession that
@@ -707,7 +719,11 @@ class TestPriorYearComparativeMisattribution:
         )
 
         periods = _derive_periods_from_facts(facts, reported_currency="USD")
-        fy = next(p for p in periods if p.period_type == "FY")
+        # The PRIMARY FY row (period_end 2025-12-31) draws provenance only from the
+        # accession that contributed its value — the comparative's accession never
+        # leaks in. (#1914: the comparative is now its own row, so target the
+        # primary end explicitly.)
+        fy = next(p for p in periods if p.period_type == "FY" and p.period_end_date == date(2025, 12, 31))
         assert "prior-10k-accn" not in fy.source_ref
         assert fy.source_ref == "0001104659-26-019821"
 
@@ -802,10 +818,14 @@ class TestPriorYearComparativeWithFrame:
         ]
 
         periods = _derive_periods_from_facts(facts, reported_currency="USD")
-        fy = next(p for p in periods if p.period_type == "FY")
-        assert fy.fiscal_year == 2025
-        assert fy.period_end_date == date(2025, 12, 31)
-        assert fy.revenue == Decimal("3000")  # NOT 1000 (would be the bug)
+        fy_rows = {p.fiscal_year: p for p in periods if p.period_type == "FY"}
+        # #682 — the primary FY2025 row takes its OWN period_end's value (3000),
+        # never the earliest framed comparative (1000).
+        assert fy_rows[2025].period_end_date == date(2025, 12, 31)
+        assert fy_rows[2025].revenue == Decimal("3000")  # NOT 1000 (would be the bug)
+        # #1914 — the framed comparatives are recovered as their own FY rows.
+        assert fy_rows[2024].revenue == Decimal("2000")
+        assert fy_rows[2023].revenue == Decimal("1000")
 
 
 class TestRestatementSameFiledDateTieBreaker:
@@ -1956,3 +1976,117 @@ class TestDaComponentSum2036:
         assert "Depreciation" in RAW_ONLY_CONCEPTS
         assert "Depreciation" in _ALL_TRACKED_TAGS
         assert "Depreciation" not in _TAG_TO_COLUMN
+
+
+class TestFiscalYearGapFill1914:
+    """#1914 — comparative prior-year annual periods are recovered as their own
+    rows, with fiscal_year re-derived from each period's own primary filing."""
+
+    def test_resolve_exact_anchor(self) -> None:
+        anchor = {("FY", date(2023, 9, 30)): 2023, ("FY", date(2024, 9, 28)): 2024}
+        assert _resolve_period_fiscal_year(anchor, "FY", date(2023, 9, 30), 9999) == 2023
+
+    def test_resolve_year_delta_fallback_sept_ender(self) -> None:
+        # 2021-09-25 is a comparative-only end (no anchor); nearest anchor is
+        # 2023-09-30 (fy 2023) → 2023 - (2023 - 2021) = 2021.
+        anchor = {("FY", date(2023, 9, 30)): 2023}
+        assert _resolve_period_fiscal_year(anchor, "FY", date(2021, 9, 25), 2023) == 2021
+
+    def test_resolve_year_delta_fallback_feb_ender(self) -> None:
+        # Off-December fiscal-year-end: anchor 2025-02-01 → fy 2024.
+        anchor = {("FY", date(2025, 2, 1)): 2024}
+        assert _resolve_period_fiscal_year(anchor, "FY", date(2024, 2, 3), 2025) == 2023
+        assert _resolve_period_fiscal_year(anchor, "FY", date(2023, 1, 28), 2025) == 2022
+
+    def test_resolve_no_anchor_falls_back_to_stamp(self) -> None:
+        assert _resolve_period_fiscal_year({}, "FY", date(2024, 12, 31), 2024) == 2024
+
+    def _fy_fact(self, *, val: str, end: str, start: str, fy: int, acc: str, filed: str) -> FactRow:
+        return _fact(
+            concept="Revenues",
+            val=Decimal(val),
+            period_end=end,
+            period_start=start,
+            frame=f"CY{end[:4]}",
+            fiscal_year=fy,
+            fiscal_period="FY",
+            form_type="10-K",
+            accession_number=acc,
+            filed_date=filed,
+        )
+
+    def test_comparatives_recovered_across_two_filings(self) -> None:
+        """Two 10-Ks (FY2024 + FY2025), each carrying two comparatives. The
+        FY2023 end is a comparative in BOTH filings (its own 10-K aged out), so it
+        is recovered; FY2024 is a primary of its own filing, not duplicated."""
+        facts = [
+            # FY2025 10-K: comparatives 2023, 2024 + primary 2025.
+            self._fy_fact(val="300", end="2023-09-30", start="2022-10-01", fy=2025, acc="A", filed="2025-11-01"),
+            self._fy_fact(val="391", end="2024-09-28", start="2023-10-01", fy=2025, acc="A", filed="2025-11-01"),
+            self._fy_fact(val="416", end="2025-09-27", start="2024-09-29", fy=2025, acc="A", filed="2025-11-01"),
+            # FY2024 10-K: comparatives 2022, 2023 + primary 2024.
+            self._fy_fact(val="274", end="2022-09-24", start="2021-09-26", fy=2024, acc="B", filed="2024-11-01"),
+            self._fy_fact(val="300", end="2023-09-30", start="2022-10-01", fy=2024, acc="B", filed="2024-11-01"),
+            self._fy_fact(val="391", end="2024-09-28", start="2023-10-01", fy=2024, acc="B", filed="2024-11-01"),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        # Every distinct FY end is emitted (from each filing carrying it); the SQL
+        # best-source merge keeps the latest-filed row per fiscal_year. Replicate
+        # that winner order (filed_date DESC, period_end DESC) to check the
+        # canonical outcome.
+        canon: dict[int, object] = {}
+        for p in periods:
+            if p.period_type != "FY":
+                continue
+            key = (p.filed_date, p.period_end_date)
+            if p.fiscal_year not in canon or key > canon[p.fiscal_year][0]:  # type: ignore[index]
+                canon[p.fiscal_year] = (key, p)
+        fy_rows = {y: v[1] for y, v in canon.items()}  # type: ignore[index]
+        # Continuous FY2022–FY2025 recovered from two filings.
+        assert set(fy_rows) == {2022, 2023, 2024, 2025}
+        assert fy_rows[2022].revenue == Decimal("274")
+        assert fy_rows[2023].revenue == Decimal("300")
+        assert fy_rows[2024].revenue == Decimal("391")
+        assert fy_rows[2025].revenue == Decimal("416")
+        # FY2024 (2024-09-28) is reported by BOTH filings (primary in B, comparative
+        # in A) — the row merges them, with A's later filing driving provenance
+        # (#682 restatement priority) and both accessions cited.
+        assert fy_rows[2024].period_end_date == date(2024, 9, 28)
+        assert fy_rows[2024].filed_date == date(2025, 11, 1)
+        assert "A" in fy_rows[2024].source_ref and "B" in fy_rows[2024].source_ref
+
+    def test_anchor_conflict_resolves_to_latest_filed(self) -> None:
+        """When two filings each treat the same period_end as their primary but
+        stamp it with different fy (a re-label / source error), the latest-filed
+        accession's stamp wins — deterministic, not DB read-order dependent."""
+        facts = [
+            # Original stamps 2024-06-30 as fy=2024.
+            self._fy_fact(val="100", end="2024-06-30", start="2023-07-01", fy=2024, acc="OLD", filed="2024-08-01"),
+            # Later re-label stamps the SAME period_end as fy=2025.
+            self._fy_fact(val="105", end="2024-06-30", start="2023-07-01", fy=2025, acc="NEW", filed="2025-08-01"),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        fy_rows = [p for p in periods if p.period_type == "FY"]
+        # One merged FY row for the shared period_end, labelled by the latest filing.
+        assert len(fy_rows) == 1
+        assert fy_rows[0].fiscal_year == 2025
+        assert fy_rows[0].period_end_date == date(2024, 6, 30)
+
+    def test_collision_is_logged_not_silent(self, caplog) -> None:
+        """A fiscal-year-end change makes two distinct annual ends both anchor to
+        fy=2024 (both are their own filing's primary). Part-1 keeps one via the SQL
+        merge; the drop must be logged (#1914/#541), never silent."""
+        import logging
+
+        facts = [
+            # Old June fiscal-year-end 10-K stamped fy=2024 (full year).
+            self._fy_fact(val="100", end="2024-06-30", start="2023-07-01", fy=2024, acc="OLD", filed="2024-08-01"),
+            # New Dec fiscal-year-end 10-K also stamped fy=2024 (full year) — a
+            # genuine collision: two full annual periods on one integer fy label.
+            self._fy_fact(val="120", end="2024-12-31", start="2024-01-01", fy=2024, acc="NEW", filed="2025-02-01"),
+        ]
+        with caplog.at_level(logging.WARNING, logger="app.services.fundamentals"):
+            periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        collided = [p for p in periods if p.period_type == "FY" and p.fiscal_year == 2024]
+        assert {p.period_end_date for p in collided} == {date(2024, 6, 30), date(2024, 12, 31)}
+        assert any("fiscal_year collision" in r.message for r in caplog.records)
