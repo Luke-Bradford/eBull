@@ -2193,6 +2193,11 @@ def compute_rankings(
         try:
             g, s = _analytics_inputs(bulk[iid])
         except Exception:
+            logger.warning(
+                "compute_rankings: analytics-input derivation failed for instrument_id=%d; degrading to (None, None)",
+                iid,
+                exc_info=True,
+            )
             g, s = None, None
         gics_by_id[iid] = g
         shares_by_id[iid] = s
