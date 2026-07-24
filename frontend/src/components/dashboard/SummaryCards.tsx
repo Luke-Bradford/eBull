@@ -58,22 +58,41 @@ export function SummaryCards({
   }
   const pnlFraction = pnlPct(totalPnl, totalCost);
 
+  // Label the portfolio totals with the currency the backend actually converted to
+  // (response.display_currency), NOT the /config context — those can observe
+  // different config states (#2129). The budget card keeps the config currency: its
+  // `available_for_deployment` is separate budget math with no per-response currency.
+  const displayCurrency = data.display_currency;
+  // The totals sum every money source (positions, cash, mirror equity); if any stayed
+  // in a non-display currency on an FX-degrade, the sum mixes currencies under one
+  // symbol. The backend flags this (covering cash/mirror, which carry no per-row
+  // currency) rather than the FE deriving it from positions alone (#2129).
+  const hasUnconverted = data.fx_incomplete;
+
   return (
-    <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
-      <StatTile label="Total AUM" value={formatMoney(data.total_aum, currency)} />
-      <StatTile
-        label="Cash balance"
-        value={formatMoney(data.cash_balance, currency)}
-        hint={data.cash_balance === null ? "unknown" : undefined}
-      />
-      <StatTile
-        label="Unrealized P&L"
-        value={formatMoney(totalPnl, currency)}
-        hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
-        tone={totalPnl >= 0 ? "positive" : "negative"}
-      />
-      <DeploymentCard budget={budgetData} budgetError={budgetError} currency={currency} />
-    </div>
+    <>
+      <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile label="Total AUM" value={formatMoney(data.total_aum, displayCurrency)} />
+        <StatTile
+          label="Cash balance"
+          value={formatMoney(data.cash_balance, data.cash_currency)}
+          hint={data.cash_balance === null ? "unknown" : undefined}
+        />
+        <StatTile
+          label="Unrealized P&L"
+          value={formatMoney(totalPnl, displayCurrency)}
+          hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
+          tone={totalPnl >= 0 ? "positive" : "negative"}
+        />
+        <DeploymentCard budget={budgetData} budgetError={budgetError} currency={currency} />
+      </div>
+      {hasUnconverted && (
+        <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+          ⚠ Some positions couldn&apos;t be converted to {displayCurrency}; totals may mix
+          currencies.
+        </p>
+      )}
+    </>
   );
 }
 

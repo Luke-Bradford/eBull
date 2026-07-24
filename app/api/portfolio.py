@@ -80,7 +80,11 @@ class BrokerPositionItem(BaseModel):
     take_profit_rate: float | None
     is_tsl_enabled: bool
     leverage: int
-    total_fees: float
+    total_fees: float  # broker/account-side; NOT in `currency` (see below), not rendered
+    # Currency of the instrument-price-derived money fields (amount / open_rate /
+    # current_price / market_value / unrealized_pnl / SL / TP) (#2129): display
+    # currency normally, native on an FX-rate-missing degrade. `total_fees` is excluded.
+    currency: str
 
 
 class PositionItem(BaseModel):
@@ -97,6 +101,10 @@ class PositionItem(BaseModel):
     valuation_source: str  # "quote", "daily_close", or "cost_basis"
     source: PositionSource
     updated_at: datetime
+    # Currency the money fields above are actually denominated in (#2129): the
+    # display currency normally, or the native currency on an FX-rate-missing degrade.
+    # The FE labels each money cell with this and flags rows where it != display_currency.
+    currency: str
     trades: list[BrokerPositionItem] = []
 
 
@@ -119,7 +127,16 @@ class PortfolioResponse(BaseModel):
     cash_balance: float | None
     mirror_equity: float = 0.0
     display_currency: str = "GBP"
+    # Currency that cash_balance AND mirror money (funded / mirror_equity / P&L) are
+    # actually in (#2129) — both are USD-base and share one USD→display conversion, so
+    # one field labels the cash tile and every mirror row: display_currency normally,
+    # "USD" on an FX-degrade. Positions carry their own per-row `currency`.
+    cash_currency: str = "GBP"
     fx_rates_used: dict[str, dict[str, object]] = {}
+    # True when a position, cash, or mirror value was left in a non-display currency
+    # on an FX-degrade (#2129): the totals mix currencies under one symbol. The FE
+    # shows a "mixed currencies" warning rather than imply a clean total.
+    fx_incomplete: bool = False
     # Union of every instrument_id rendered (or contributing to a
     # rendered total) on the portfolio page: held positions plus the
     # underlying instruments inside every active mirror. The frontend
@@ -220,6 +237,7 @@ def _position_item(h: HoldingValuation) -> PositionItem:
         valuation_source=h.valuation_source,
         source=h.source,
         updated_at=h.updated_at,
+        currency=h.currency,
     )
 
 
@@ -376,6 +394,14 @@ def get_portfolio(
         sl = parse_optional_float(br, "stop_loss_rate")
         tp = parse_optional_float(br, "take_profit_rate")
         open_rate = open_rate_raw
+        # `trade_currency` labels the trade's INSTRUMENT-PRICE-derived money (amount /
+        # market_value / unrealized_pnl / current_price / open_rate / SL / TP), which are
+        # all in the instrument's native currency (#2129): display on success/no-op,
+        # native on an FX-degrade. `total_fees` is broker/account-side money in an
+        # unknown currency and is NOT rendered as money anywhere in the FE, so it is
+        # passed through unconverted and is deliberately outside the `currency` contract
+        # (Codex ckpt-2: converting it native→display would risk a wrong fee amount).
+        trade_currency = display_currency
         if native_ccy != display_currency:
             try:
                 mv_display = float(convert(Decimal(str(mv_native)), native_ccy, display_currency, rates))
@@ -389,7 +415,7 @@ def get_portfolio(
                 if tp is not None:
                     tp = float(convert(Decimal(str(tp)), native_ccy, display_currency, rates))
             except FxRateNotFound:
-                pass
+                trade_currency = native_ccy  # money fields left in native currency
 
         trades_by_instrument[iid].append(
             BrokerPositionItem(
@@ -407,6 +433,7 @@ def get_portfolio(
                 is_tsl_enabled=br["is_tsl_enabled"],
                 leverage=br["leverage"],
                 total_fees=float(br["total_fees"]),
+                currency=trade_currency,
             )
         )
 
@@ -467,7 +494,9 @@ def get_portfolio(
         cash_balance=cash_balance,
         mirror_equity=mirror_equity,
         display_currency=display_currency,
+        cash_currency=val.cash_currency,
         fx_rates_used=fx_rates_used,
+        fx_incomplete=val.fx_incomplete,
         live_quote_instrument_ids=live_quote_instrument_ids,
     )
 

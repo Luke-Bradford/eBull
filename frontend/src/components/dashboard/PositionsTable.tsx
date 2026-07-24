@@ -1,8 +1,8 @@
 import { Link } from "react-router-dom";
 import type { PositionItem, PortfolioMirrorItem } from "@/api/types";
-import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, pnlPct } from "@/lib/format";
 import { EmptyState } from "@/components/states/EmptyState";
+import { UnconvertedBadge } from "@/components/portfolio/UnconvertedBadge";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 
 /**
@@ -18,11 +18,19 @@ import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 export function PositionsTable({
   positions,
   mirrors = [],
+  displayCurrency,
+  cashCurrency,
 }: {
   positions: PositionItem[];
   mirrors?: PortfolioMirrorItem[];
+  /** The currency the backend converted to (PortfolioResponse.display_currency).
+   *  Per-position money is labelled with `position.currency` (which may be native
+   *  on an FX-degrade). (#2129) */
+  displayCurrency: string;
+  /** Currency of mirror money (PortfolioResponse.cash_currency; USD-base, may be
+   *  native "USD" on an FX-degrade). (#2129) */
+  cashCurrency: string;
 }) {
-  const currency = useDisplayCurrency();
   if (positions.length === 0 && mirrors.length === 0) {
     return (
       <EmptyState
@@ -75,9 +83,18 @@ export function PositionsTable({
         <tbody>
           {rows.map((row) =>
             row.kind === "position" ? (
-              <PositionRow key={`pos-${row.data.instrument_id}`} p={row.data} currency={currency} />
+              <PositionRow
+                key={`pos-${row.data.instrument_id}`}
+                p={row.data}
+                displayCurrency={displayCurrency}
+              />
             ) : (
-              <MirrorRow key={`mir-${row.data.mirror_id}`} m={row.data} currency={currency} />
+              <MirrorRow
+                key={`mir-${row.data.mirror_id}`}
+                m={row.data}
+                currency={cashCurrency}
+                displayCurrency={displayCurrency}
+              />
             ),
           )}
         </tbody>
@@ -86,9 +103,15 @@ export function PositionsTable({
   );
 }
 
-function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
+function PositionRow({ p, displayCurrency }: { p: PositionItem; displayCurrency: string }) {
   const pct = pnlPct(p.unrealized_pnl, p.cost_basis);
   const positive = p.unrealized_pnl >= 0;
+  // Money is denominated in the position's own currency — the display currency
+  // normally, or the native currency when the FX rate was missing (#2129). Label
+  // every cell with it (not the account display currency) so a native magnitude is
+  // never stamped with the display symbol.
+  const rowCurrency = p.currency;
+  const unconverted = rowCurrency !== displayCurrency;
   return (
     <tr className="border-t border-slate-100">
       <Td>
@@ -98,23 +121,24 @@ function PositionRow({ p, currency }: { p: PositionItem; currency: string }) {
         >
           {p.symbol}
         </Link>
+        {unconverted && <UnconvertedBadge currency={rowCurrency} displayCurrency={displayCurrency} />}
       </Td>
       <Td className="hidden sm:table-cell">
         <span className="text-slate-700">{p.company_name}</span>
       </Td>
       <Td align="right">{formatNumber(p.current_units)}</Td>
-      <Td align="right">{formatMoney(p.cost_basis, currency)}</Td>
+      <Td align="right">{formatMoney(p.cost_basis, rowCurrency)}</Td>
       <Td align="right">
         <LivePriceCell
           instrumentId={p.instrument_id}
           fallback={p.current_price}
-          currency={currency}
+          currency={rowCurrency}
         />
       </Td>
-      <Td align="right">{formatMoney(p.market_value, currency)}</Td>
+      <Td align="right">{formatMoney(p.market_value, rowCurrency)}</Td>
       <Td align="right">
         <span className={positive ? "text-emerald-600" : "text-red-600"}>
-          {formatMoney(p.unrealized_pnl, currency)}
+          {formatMoney(p.unrealized_pnl, rowCurrency)}
           {pct === null ? "" : ` (${formatPct(pct)})`}
         </span>
       </Td>
@@ -138,9 +162,18 @@ function avatarTone(name: string): string {
   return AVATAR_TONES[Math.abs(hash) % AVATAR_TONES.length] ?? "bg-blue-600";
 }
 
-function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }) {
+function MirrorRow({
+  m,
+  currency,
+  displayCurrency,
+}: {
+  m: PortfolioMirrorItem;
+  currency: string;
+  displayCurrency: string;
+}) {
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
+  const unconverted = currency !== displayCurrency;
   return (
     <tr className="border-t border-slate-100">
       <Td>
@@ -157,6 +190,7 @@ function MirrorRow({ m, currency }: { m: PortfolioMirrorItem; currency: string }
             {m.parent_username}
           </span>
         </Link>
+        {unconverted && <UnconvertedBadge currency={currency} displayCurrency={displayCurrency} />}
       </Td>
       <Td className="hidden sm:table-cell">
         <span className="text-slate-500 dark:text-slate-400">

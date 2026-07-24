@@ -732,6 +732,9 @@ export interface BrokerPositionItem {
   is_tsl_enabled: boolean;
   leverage: number;
   total_fees: number;
+  /** Currency the money fields above are actually in (#2129): the display
+   *  currency normally, or the native currency on an FX-rate-missing degrade. */
+  currency: string;
 }
 
 export interface PositionItem {
@@ -748,6 +751,11 @@ export interface PositionItem {
   valuation_source: "quote" | "daily_close" | "cost_basis";
   source: string;
   updated_at: string;
+  /** Currency the money fields above are actually in (#2129): the display
+   *  currency normally, or the native currency on an FX-rate-missing degrade.
+   *  Label each money cell with this; a row where it !== response.display_currency
+   *  was left unconverted. */
+  currency: string;
   trades: BrokerPositionItem[];
 }
 
@@ -775,7 +783,15 @@ export interface PortfolioResponse {
   cash_balance: number | null;
   mirror_equity: number;
   display_currency: string;
+  /** Currency of cash_balance AND mirror money (both USD-base, one conversion):
+   *  display_currency normally, "USD" on an FX-degrade (#2129). Label the cash tile
+   *  and mirror rows with this; positions carry their own per-row `currency`. */
+  cash_currency: string;
   fx_rates_used: Record<string, FxRateUsed>;
+  /** True when a position, cash, or mirror value was left in a non-display
+   *  currency on an FX-degrade (#2129): totals mix currencies under one symbol.
+   *  Drives the "mixed currencies" warning on the summary totals. */
+  fx_incomplete: boolean;
   /** Held position ids ∪ active-mirror underlying ids. Drives the
    *  page-level LiveQuoteProvider so mirror equity recomputes as
    *  underlyings tick. */
