@@ -710,10 +710,25 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
         ("amount", 1),
     )
 
+    # PERCENT first. A percent caption is the least ambiguous of the three —
+    # "percent"/"%" appears in no legitimate name or amount caption — whereas
+    # the shares tiering's generic ``total`` keyword happily matches
+    # "Total as a Percentage of Shares Outstanding". Resolving shares first
+    # and then dropping the collision let that percent column win shares_idx,
+    # so the row parser read "5.0%" as a share count, found no percent, and
+    # dropped EVERY row of such a table (Codex pre-push review caught this;
+    # the same header shape previously survived with a percent-only row).
     for i, h in enumerate(headers):
         lower = h.lower()
-        if percent_idx == -1 and ("percent" in lower or "%" in lower):
+        if "percent" in lower or "%" in lower:
             percent_idx = i
+            break
+
+    # SHARES next, excluding the percent column from the tiering entirely.
+    for i, h in enumerate(headers):
+        if i == percent_idx:
+            continue
+        lower = h.lower()
         for keyword, weight in SHARES_TIERS:
             if keyword in lower:
                 shares_tier_priority.append((str(i), weight))
@@ -732,16 +747,7 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
     # header row but column resolution can still see ambiguous
     # entries.
     if shares_idx == -1:
-        shares_idx = 1 if len(headers) >= 2 else 0
-    if percent_idx == shares_idx:
-        # A percent caption that also won the shares tiering (e.g. a lone
-        # "Total as a Percentage of Shares Outstanding") is a shares
-        # false-positive, not a percent one — shares is resolved first.
-        percent_idx = -1
-    if percent_idx == -1:
-        percent_idx = len(headers) - 1
-    if percent_idx == shares_idx:
-        percent_idx = -1
+        shares_idx = next((i for i in (1, 0) if i < len(headers) and i != percent_idx), 0)
 
     # Name LAST, with the already-claimed indices excluded (#2140 D1).
     #

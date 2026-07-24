@@ -756,6 +756,28 @@ class TestResolveColumnsNeverCollide:
             assert name_idx != shares_idx, headers
             assert percent_idx in (-1, name_idx) or percent_idx != shares_idx, headers
 
+    def test_total_as_a_percentage_header_does_not_steal_the_shares_column(self) -> None:
+        # Codex pre-push review: the shares tiering's generic ``total`` keyword
+        # matches "Total as a Percentage of Shares Outstanding", so resolving
+        # shares BEFORE percent let the percent column win shares_idx. The row
+        # parser then read "5.0%" as a share count and dropped every row.
+        # Percent is resolved first and excluded from the shares tiering.
+        headers = ("Name", "Shares Beneficially Owned", "Total as a Percentage of Shares Outstanding")
+        assert _resolve_columns(headers) == (0, 1, 2)
+
+    def test_total_as_a_percentage_table_still_yields_rows(self) -> None:
+        body = """
+        <table>
+          <tr><th>Name</th><th>Shares Beneficially Owned</th>
+              <th>Total as a Percentage of Shares Outstanding</th></tr>
+          <tr><td>Jane Smith</td><td>250,000</td><td>5.0%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows[0].holder_name == "Jane Smith"
+        assert parsed.rows[0].shares == Decimal("250000")
+        assert parsed.rows[0].percent_of_class == Decimal("5.0")
+
     def test_percent_absent_is_reported_as_minus_one_not_an_alias(self) -> None:
         # A table with no distinguishable percent column must say so — callers
         # treat a negative index as "absent" and must never index end-relative.
