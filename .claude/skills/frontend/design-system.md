@@ -37,6 +37,10 @@ Charts read colors, axes, gridlines, and tooltip styling from a single `chartThe
 
 eBull is an operator dashboard, not a consumer app — **dense by default**. Grid/table surfaces get tight spacing + line-height. When in doubt, tighter. (See `operator-ui-conventions.md` density grid prefs.)
 
+**Adjacent stat rows share ONE column grid** (`STAT_ROW_GRID` in `components/dashboard/StatTile.tsx`, #1908 PR-5). In editorial chrome the hairline rule is the only grouping signal there is, so two stacked stat rows on different column counts break their rules at different x-positions and the spread stops reading as one document — that, not "too much whitespace", is what "stats float in empty space" actually was on the dashboard (a 4-column summary row above a 3-column rolling-P&L row). A row with fewer tiles fills from the left and leaves trailing columns empty; it does NOT redistribute. Verify by measuring, not by eye: every tile's `getBoundingClientRect().x` must match column-for-column between the rows.
+
+**Every stat tile is `StatTile`.** A near-copy drifts: the rolling-P&L strip had its own tile with different padding and light-only tone colours (bare `text-*` classes are invisible to the dark gate, which only checks bg / border / hover pairs). `size="md"` is how a supporting row stays subordinate to the headline row — not a re-implementation.
+
 ## Tokens + type scale
 
 Design tokens (surface fills, border colors, the type scale) live in `tailwind.config` — extract once, reference everywhere. No magic hex/px in components. A new spacing/type value that isn't a token is a smell: add the token.
