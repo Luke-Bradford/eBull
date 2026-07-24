@@ -456,8 +456,12 @@ def _evaluate_demotion(snap: InstrumentSnapshot, now: datetime) -> TierChange | 
         if snap.total_score is not None and snap.total_score < DEMOTE_T2_TO_T3_SCORE:
             triggers_t3.append(f"score={snap.total_score:.3f} < {DEMOTE_T2_TO_T3_SCORE}")
 
-        if snap.thesis_created_at is None:
-            triggers_t3.append("no thesis")
+        # NB (#2131): thesis absence is deliberately NOT a T2→T3 trigger.
+        # T3→T2 promotion is thesis-optional (score>=0.55 alone, L348-352), so
+        # demoting on "no thesis" made every score-worthy-but-thesis-less name
+        # ping-pong T2↔T3 daily. T2 = "analysable + score-worthy"; a thesis is a
+        # held/top-20 concern (wide first-mint is operator-gated) and only gates
+        # the T2→T1 promotion. Do not re-add a thesis-absence demotion here.
 
         if not snap.is_tradable:
             triggers_t3.append("instrument not tradable")
