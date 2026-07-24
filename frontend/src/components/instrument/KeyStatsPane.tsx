@@ -3,6 +3,7 @@ import { Term } from "@/components/Term";
 import { EmptyState } from "@/components/states/EmptyState";
 import { lookupTerm } from "@/lib/glossary";
 import type { InstrumentSummary, KeyStatsFieldSource } from "@/api/types";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 
 function formatDecimal(
   value: string | null | undefined,
@@ -35,30 +36,30 @@ function formatMarketCap(value: string | null): string | null {
 
 function FieldSourceTag({ source }: { source: KeyStatsFieldSource | undefined }) {
   if (!source) return null;
-  let tone = "bg-slate-100 dark:bg-slate-800 text-slate-600";
+  let tone: BadgeTone = "neutral";
   let label: string = source;
   switch (source) {
     case "sec_xbrl":
-      tone = "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300";
+      tone = "ok";
       label = "SEC";
       break;
     case "sec_dividend_summary":
-      tone = "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300";
+      tone = "ok";
       label = "SEC · div";
       break;
     case "sec_xbrl_price_missing":
-      tone = "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300";
+      tone = "warn";
       label = "SEC · price?";
       break;
     case "unavailable":
-      tone = "bg-slate-100 dark:bg-slate-800 text-slate-500";
+      tone = "neutral";
       label = "—";
       break;
   }
   return (
-    <span className={`ml-2 rounded px-1.5 py-0.5 text-[10px] uppercase ${tone}`}>
+    <Badge tone={tone} uppercase className="ml-2">
       {label}
-    </span>
+    </Badge>
   );
 }
 

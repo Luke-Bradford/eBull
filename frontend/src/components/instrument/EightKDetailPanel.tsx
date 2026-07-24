@@ -13,7 +13,8 @@
 
 import type { EightKFiling } from "@/api/instruments";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
-import { SEVERITY_TONE } from "@/components/instrument/eightKSeverity";
+import { severityTone } from "@/components/instrument/eightKSeverity";
+import { Badge } from "@/components/ui/Badge";
 
 export interface EightKDetailPanelProps {
   readonly filing: EightKFiling | null;
@@ -62,13 +63,7 @@ export function EightKDetailPanel({
         filing.items.map((item) => (
         <section key={item.item_code}>
           <header className="flex items-baseline gap-2">
-            <span
-              className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                SEVERITY_TONE[item.severity ?? ""] ?? SEVERITY_TONE.low
-              }`}
-            >
-              Item {item.item_code}
-            </span>
+            <Badge tone={severityTone(item.severity)}>Item {item.item_code}</Badge>
             <span className="text-xs font-medium text-slate-800 dark:text-slate-100">
               {item.item_label}
             </span>

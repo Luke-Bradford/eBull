@@ -33,6 +33,7 @@ import { CriticVerdictBadge } from "@/components/theses/CriticVerdictBadge";
 import { StanceBadge } from "@/components/theses/StanceBadge";
 import { formatNumber, formatRelativeTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
+import { Badge } from "@/components/ui/Badge";
 
 const PAGE_SIZE = 50;
 const POLL_MS = 20_000;
@@ -106,22 +107,19 @@ function ChangeChip({ row }: { row: ThesisLibraryItem }) {
 function RunStatusCell({ row }: { row: ThesisLibraryItem }) {
   if (row.run_status === "running") {
     return (
-      <span
-        className="inline-block rounded border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300"
+      <Badge
+        tone="info"
         title={`trigger: ${row.run_trigger ?? "—"}, started ${formatRelativeTime(row.run_started_at)}`}
       >
         running
-      </span>
+      </Badge>
     );
   }
   if (row.run_status === "failed") {
     return (
-      <span
-        className="inline-block rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300"
-        title={row.run_error ?? "generation failed"}
-      >
+      <Badge tone="risk" title={row.run_error ?? "generation failed"}>
         failed
-      </span>
+      </Badge>
     );
   }
   if (row.run_status === "ok") {

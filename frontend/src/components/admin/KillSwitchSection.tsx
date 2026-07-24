@@ -27,6 +27,7 @@ import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { useConfig } from "@/lib/ConfigContext";
 import { formatDateTime } from "@/lib/format";
 import { useSession } from "@/lib/session";
+import { Badge } from "@/components/ui/Badge";
 
 // Pre-fill options for the required reason field (ticket #1231). The
 // operator can edit the text after selecting, or type their own.
@@ -246,14 +247,8 @@ export function KillSwitchSection(): JSX.Element {
 
 function KillSwitchPill({ active }: { active: boolean }): JSX.Element {
   return (
-    <span
-      className={
-        active
-          ? "rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300"
-          : "rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300"
-      }
-    >
+    <Badge tone={active ? "risk" : "ok"} uppercase>
       {active ? "Active" : "Inactive"}
-    </span>
+    </Badge>
   );
 }

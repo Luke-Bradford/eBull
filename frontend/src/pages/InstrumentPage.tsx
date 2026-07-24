@@ -55,6 +55,7 @@ import { VerdictTab } from "@/components/instrument/VerdictTab";
 import { RightRail } from "@/components/instrument/RightRail";
 import { SummaryStrip } from "@/components/instrument/SummaryStrip";
 import { useAsync } from "@/lib/useAsync";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 
 function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const message = error instanceof Error ? error.message : "Request failed.";
@@ -345,17 +346,13 @@ function sentimentBadge(score: number | null) {
   // shows a "+" prefix (Codex feedback).
   const positive = score > 0.2;
   const negative = score < -0.2;
-  const color = positive
-    ? "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300"
-    : negative
-      ? "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300"
-      : "bg-slate-100 dark:bg-slate-800 text-slate-600";
+  const tone: BadgeTone = positive ? "ok" : negative ? "risk" : "neutral";
   const prefix = positive ? "+" : negative ? "" : "";
   return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
+    <Badge tone={tone}>
       {prefix}
       {score.toFixed(2)}
-    </span>
+    </Badge>
   );
 }
 
@@ -388,9 +385,7 @@ function NewsTab({ instrumentId }: { instrumentId: number }) {
               {n.source && <span className="text-xs text-slate-500">· {n.source}</span>}
               {sentimentBadge(n.sentiment_score)}
               {n.category && (
-                <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-600">
-                  {n.category}
-                </span>
+                <Badge>{n.category}</Badge>
               )}
             </div>
             <div className="mt-0.5">
@@ -421,17 +416,8 @@ function NewsTab({ instrumentId }: { instrumentId: number }) {
 
 function redFlagBadge(score: number | null) {
   if (score === null) return null;
-  const color =
-    score > 0.5
-      ? "bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300"
-      : score > 0.2
-        ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300"
-        : "bg-slate-100 dark:bg-slate-800 text-slate-600";
-  return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
-      red-flag {score.toFixed(2)}
-    </span>
-  );
+  const tone: BadgeTone = score > 0.5 ? "risk" : score > 0.2 ? "warn" : "neutral";
+  return <Badge tone={tone}>red-flag {score.toFixed(2)}</Badge>;
 }
 
 const FILINGS_PAGE_SIZE = 25;
@@ -473,9 +459,7 @@ function FilingsTab({ instrumentId }: { instrumentId: number }) {
           <li key={f.filing_event_id} className="border-b border-slate-100 pb-2 last:border-0">
             <div className="flex items-baseline gap-2">
               <span className="text-xs text-slate-500">{f.filing_date}</span>
-              <span className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-600">
-                {f.filing_type ?? "?"}
-              </span>
+              <Badge>{f.filing_type ?? "?"}</Badge>
               <span className="text-xs text-slate-500">{f.provider}</span>
               {redFlagBadge(f.red_flag_score)}
             </div>

@@ -2,7 +2,8 @@
 /**
  * Dark-mode class hygiene gate (#708).
  *
- * Six checks run line-by-line over every .tsx in frontend/src:
+ * Six checks run line-by-line over every .ts / .tsx in frontend/src
+ * (`.ts` added in #1908 — see the walk):
  *
  *   A. Duplicate Tailwind variant utility on the same line. Catches
  *      the PR #707 case where two independent sweeps (#706 + #703)
@@ -61,7 +62,13 @@ function walk(dir) {
     if (st.isDirectory()) {
       if (SKIP_DIRS.has(entry)) continue;
       out.push(...walk(full));
-    } else if (entry.endsWith(".tsx")) {
+      // `.ts` is walked as well as `.tsx` (#1908): tone maps and class-string
+      // constants live in plain `.ts` modules too, and a `.tsx`-only walk left
+      // them structurally unguarded — `eightKSeverity.ts` carried light-only
+      // tinted chip backgrounds for exactly that reason. Note the checks are
+      // textual and line-based, so a doc comment that quotes a Tailwind class
+      // will trip them; describe classes in prose inside comments.
+    } else if (entry.endsWith(".tsx") || entry.endsWith(".ts")) {
       out.push(full);
     }
   }

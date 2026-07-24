@@ -10,6 +10,7 @@ import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
 import { LivePriceCell } from "@/components/quotes/LivePriceCell";
 import { Avatar } from "@/lib/avatar";
 import type { MirrorSummary, MirrorPositionItem, MirrorClosedPositionItem } from "@/api/types";
+import { Badge } from "@/components/ui/Badge";
 
 /**
  * Mirror detail page (#221 — mirrors as positions).
@@ -357,13 +358,9 @@ function SubPositionRow({
   return (
     <tr className="border-t border-slate-50 bg-slate-50/60 text-xs text-slate-600">
       <td className="py-1.5 pl-6 pr-2 text-left">
-        <span
-          className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
-            position.is_buy ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300"
-          }`}
-        >
+        <Badge tone={position.is_buy ? "ok" : "risk"}>
           {position.is_buy ? "LONG" : "SHORT"}
-        </span>
+        </Badge>
         <span className="ml-2 text-slate-400">
           entry {formatNumber(position.open_rate, 2)}
         </span>
