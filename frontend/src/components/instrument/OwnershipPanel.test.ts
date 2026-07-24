@@ -23,7 +23,11 @@ import { describe, expect, it } from "vitest";
 
 import type { OwnershipRollupResponse } from "@/api/ownership";
 
-import { rollupToSunburstInputs } from "./OwnershipPanel";
+import {
+  hasParsedHolderName,
+  proxyRoleLabel,
+  rollupToSunburstInputs,
+} from "./OwnershipPanel";
 
 function _baseRollup(
   overrides: Partial<OwnershipRollupResponse> = {},
@@ -446,5 +450,33 @@ describe("rollupToSunburstInputs — source_url threading (#921)", () => {
       source_url:
         "https://www.sec.gov/Archives/edgar/data/1000010/000100001026000010-index.html",
     });
+  });
+});
+
+describe("proxyRoleLabel — DEF 14A role display label (#2121)", () => {
+  it("maps the known SEC Item 403 role tags", () => {
+    expect(proxyRoleLabel("officer")).toBe("Officer");
+    expect(proxyRoleLabel("director")).toBe("Director");
+    expect(proxyRoleLabel("principal")).toBe("5% holder");
+    // The 403(b) aggregate row is labelled distinctly so its large,
+    // non-additive share count reads as a group total, not a person.
+    expect(proxyRoleLabel("group")).toBe("Group total");
+  });
+
+  it("title-cases an unknown tag rather than dropping it", () => {
+    expect(proxyRoleLabel("trustee")).toBe("Trustee");
+  });
+});
+
+describe("hasParsedHolderName — role badge suppressed on unparsed names (#2121)", () => {
+  it("true for real holder names", () => {
+    expect(hasParsedHolderName("The Baupost Group, L.L.C.")).toBe(true);
+    expect(hasParsedHolderName("Jane Officer")).toBe(true);
+  });
+
+  it("false for numeric-only names (share count leaked into the name column)", () => {
+    expect(hasParsedHolderName("11,005,001")).toBe(false);
+    expect(hasParsedHolderName("1,234.56")).toBe(false);
+    expect(hasParsedHolderName("  190,827,921  ")).toBe(false);
   });
 });

@@ -229,6 +229,15 @@ class Holder:
     # indirect) were collapsed to one display line (#1942). Display-only; the
     # lots SUM to ``shares`` (already counted once). Empty for single-lot owners.
     lots: tuple[HolderLot, ...] = ()
+    # DEF 14A proxy role tag (``officer`` / ``director`` / ``principal`` /
+    # ``group``), parser-derived from the SEC Item 403 sub-table the holder
+    # appeared in (#2121). DISPLAY-LABEL ONLY — populated solely on the
+    # non-additive ``def14a_unmatched`` memo overlay (never on matched holders
+    # that land in insiders/blockholders), and never used in additive math: the
+    # ``group`` row is the Item 403(b) "all directors & officers as a group"
+    # aggregate of the individual rows, so summing it double-counts (I21/#1659).
+    # ``None`` for every non-DEF-14A holder and for unlabelled proxy rows.
+    holder_role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -723,6 +732,10 @@ class _Candidate:
     accession_number: str
     source_row_id: int
     ownership_nature: str | None = None
+    # DEF 14A proxy role tag carried from ``ownership_def14a_current`` so the
+    # unmatched slice-build can surface it as a display label (#2121). Only the
+    # DEF 14A read path sets it; every other source leaves it ``None``.
+    holder_role: str | None = None
 
 
 def edgar_archive_url(accession_number: str | None) -> str | None:
@@ -1148,6 +1161,7 @@ def _read_def14a_unmatched_from_current(conn: psycopg.Connection[Any], instrumen
             SELECT
                 row_number() OVER (ORDER BY holder_name_key, ownership_nature) AS holding_id,
                 holder_name,
+                holder_role,
                 ownership_nature,
                 shares,
                 period_end AS as_of_date,
@@ -1314,8 +1328,8 @@ def _enrich_and_union_def14a(
     against. These are mostly named officers in the proxy who never
     filed a Form 4 / Form 3.
 
-    ``def14a_rows`` shape: ``{holding_id, holder_name, ownership_nature,
-    shares, as_of_date, accession_number}`` — supplied by
+    ``def14a_rows`` shape: ``{holding_id, holder_name, holder_role,
+    ownership_nature, shares, as_of_date, accession_number}`` — supplied by
     :func:`_read_def14a_unmatched_from_current`. Codex pre-push review
     for #905 caught the prior shape that omitted ``ownership_nature``:
     ``ownership_def14a_current`` PK is
@@ -1343,6 +1357,7 @@ def _enrich_and_union_def14a(
             accession_number=str(row["accession_number"]),  # type: ignore[arg-type]
             source_row_id=int(row["holding_id"]),  # type: ignore[arg-type]
             ownership_nature=str(row["ownership_nature"]) if row.get("ownership_nature") else None,
+            holder_role=str(row["holder_role"]) if row.get("holder_role") else None,
         )
         # Use the resolver's ``matched`` flag, not just ``cik is not
         # None``. The resolver returns ``matched=True, cik=None`` for a
@@ -2535,6 +2550,11 @@ def _bucket_into_slices(
                 as_of_date=c.as_of_date,
                 filer_type=None,
                 dropped_sources=(),
+                # #2121: display-label only. Populated here on the non-additive
+                # memo overlay ALONE — matched DEF 14A rows go through
+                # ``_dedup_by_priority`` into insiders/blockholders and leave
+                # ``holder_role`` at its ``None`` default (I21/#1659 guarantee).
+                holder_role=c.holder_role,
             )
             for c in unmatched_def14a
         ]
@@ -2763,6 +2783,7 @@ def _build_slice(
             dropped_sources=h.dropped_sources,
             family_members=h.family_members,  # display breakdown of a collapsed family (#1644/#1649)
             lots=h.lots,  # per-lot breakdown of a collapsed direct/indirect owner (#1942)
+            holder_role=h.holder_role,  # DEF 14A proxy display label (#2121); None off the overlay
         )
         for h in holders
     )

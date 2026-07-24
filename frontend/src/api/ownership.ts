@@ -123,6 +123,14 @@ export interface OwnershipHolder {
    * Empty/absent for single-lot holders.
    */
   readonly lots?: readonly OwnershipLot[];
+  /**
+   * DEF 14A proxy role tag (#2121) — ``officer`` / ``director`` / ``principal``
+   * / ``group``, or null. Parser-derived from the SEC Item 403 sub-table the
+   * holder appeared in. DISPLAY LABEL ONLY: present solely on the non-additive
+   * ``def14a_unmatched`` memo overlay; the ``group`` row is the Item 403(b)
+   * "directors & officers as a group" aggregate, so it is never summed.
+   */
+  readonly holder_role?: string | null;
 }
 
 /** One additive Section-16 lot (direct / indirect) of a collapsed owner
