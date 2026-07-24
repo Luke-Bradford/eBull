@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
 import { RollingPnlStrip } from "@/components/dashboard/RollingPnlStrip";
+import { STAT_ROW_GRID } from "@/components/dashboard/StatTile";
 import { DisplayCurrencyProvider } from "@/lib/DisplayCurrencyContext";
 import { TestConfigProvider } from "@/lib/ConfigContext";
 import type { ConfigResponse } from "@/api/types";
@@ -84,6 +85,43 @@ describe("RollingPnlStrip", () => {
     });
     // All three pills show em-dash rather than NaN%.
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("lays its tiles on the SHARED stat-row grid so the hairlines align with the summary row above (#1908 PR-5)", async () => {
+    mocked.mockResolvedValue({
+      display_currency: "GBP",
+      periods: [
+        { period: "1d", pnl: 150, pnl_pct: 0.015, coverage: 5 },
+        { period: "1w", pnl: 850, pnl_pct: 0.082, coverage: 5 },
+        { period: "1m", pnl: 1200, pnl_pct: 0.115, coverage: 5 },
+      ],
+    });
+    const { container } = renderStrip();
+    await waitFor(() => {
+      expect(screen.getByTestId("rolling-pnl-1d")).toBeInTheDocument();
+    });
+    // jsdom has no layout, so assert the invariant that GUARANTEES alignment:
+    // this row is on the same grid constant as SummaryCards. A 3-column grid
+    // here would spread the tiles across the full width and break every
+    // hairline out of alignment with the 4-column row above.
+    const grid = container.querySelector(`.${CSS.escape("lg:grid-cols-4")}`);
+    expect(grid).not.toBeNull();
+    expect(grid?.className).toBe(STAT_ROW_GRID);
+    expect(grid?.className).not.toContain("grid-cols-3");
+  });
+
+  it("renders a positive delta with a dark-mode tone partner, not a light-only text colour", async () => {
+    mocked.mockResolvedValue({
+      display_currency: "GBP",
+      periods: [{ period: "1d", pnl: 150, pnl_pct: 0.015, coverage: 5 }],
+    });
+    const { container } = renderStrip();
+    await waitFor(() => {
+      expect(screen.getByTestId("rolling-pnl-1d")).toBeInTheDocument();
+    });
+    const value = container.querySelector(".tabular-nums.font-semibold");
+    expect(value?.className).toContain("text-emerald-600");
+    expect(value?.className).toContain("dark:text-emerald-400");
   });
 
   it("hides the strip on fetch error", async () => {

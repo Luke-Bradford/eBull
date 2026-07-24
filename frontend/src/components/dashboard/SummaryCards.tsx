@@ -3,7 +3,7 @@ import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatPct } from "@/lib/format";
 import { portfolioTotals } from "@/lib/portfolioTotals";
 import { SectionSkeleton } from "@/components/dashboard/Section";
-import { StatTile } from "@/components/dashboard/StatTile";
+import { STAT_ROW_GRID, StatTile } from "@/components/dashboard/StatTile";
 
 /**
  * Four top-level cards: Total AUM, Cash, Unrealized P&L, Available for
@@ -35,7 +35,7 @@ export function SummaryCards({
   const currency = useDisplayCurrency();
   if (data === null) {
     return (
-      <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
+      <div className={STAT_ROW_GRID}>
         {[0, 1, 2, 3].map((i) => (
           <div key={i} className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
             <SectionSkeleton rows={2} />
@@ -53,7 +53,7 @@ export function SummaryCards({
 
   return (
     <>
-      <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2 lg:grid-cols-4">
+      <div className={STAT_ROW_GRID}>
         <StatTile label="Total AUM" value={formatMoney(data.total_aum, displayCurrency)} />
         <StatTile
           label="Cash balance"
