@@ -326,11 +326,16 @@ def select_multiples(t: TargetInputs) -> list[str]:
     else:
         selected = []
 
-    if t.target_basis == "fpi_adr_unavailable":
+    if t.target_basis in ("fpi_adr_unavailable", "fpi_adr_ratio"):
         # #1939: FPI ADR/ADS — even the per-share pe leg is wrong (per-ADS
-        # price vs per-ordinary-share EPS differ by the un-ingested ADS
-        # ratio). No multiple is basis-safe; the band goes absent rather
-        # than publishing an ordinary-share target as an ADS target.
+        # price vs per-ordinary-share EPS differ by the ADS ratio). No multiple
+        # is basis-safe; the band goes absent rather than publishing an
+        # ordinary-share target as an ADS target.
+        # #2117: `fpi_adr_ratio` (a curated-ratio ADR) also fails closed here —
+        # `instrument_valuation` corrects the market-cap surface via metric_price,
+        # but FVB's current + own-history bases still use raw price_daily.close ×
+        # ordinary basis, so a band would reintroduce the ratio error. Tracked as
+        # #2136 (apply the ratio inside FVB, then drop it from this set).
         return []
     if t.target_basis != "not_multiclass":
         selected = [m for m in selected if m == "pe"]

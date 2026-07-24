@@ -78,6 +78,15 @@ def test_dual_class_financial_keeps_pe_drops_pb():
     assert select_multiples(t) == ["pe"]
 
 
+@pytest.mark.parametrize("basis", ["fpi_adr_unavailable", "fpi_adr_ratio"])
+def test_fpi_adr_bases_fail_closed_no_band(basis: str):
+    # #1939/#2117: an FPI ADR/ADS target yields NO multiples — even the pe leg
+    # is wrong (per-ADS price vs per-ordinary EPS differ by the ADS ratio) and
+    # FVB's own price bases are not ADS-adjusted (#2136). Band absent.
+    t = _t(net_income_ttm=500.0, eps_diluted_ttm=2.0, revenue_ttm=9_000.0, target_basis=basis)
+    assert select_multiples(t) == []
+
+
 def test_eligibility_gate_drops_multiple_with_nonpositive_denominator():
     # profitable but eps not positive -> pe dropped, ps kept
     t = _t(net_income_ttm=500.0, eps_diluted_ttm=0.0, revenue_ttm=9_000.0)
