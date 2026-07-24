@@ -794,7 +794,9 @@ describe("AlertsStrip — thesis staleness", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/AAPL, GME/)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /Review in Theses/i });
-    expect(link).toHaveAttribute("href", "/theses?held=true&stale=true");
+    // #1917 — Theses is now a Research-hub preset; the deep link forwards the
+    // held/stale query so the Theses lens still lands pre-filtered.
+    expect(link).toHaveAttribute("href", "/research?view=theses&held=true&stale=true");
     // Standing condition: never counted as unseen — no "new" pill.
     expect(screen.queryByText(/new$/)).not.toBeInTheDocument();
   });

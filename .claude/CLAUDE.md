@@ -295,6 +295,8 @@ Read and apply these before pushing:
 - `.claude/skills/frontend/safety-state-ui.md`
 - `.claude/skills/frontend/api-shape-and-types.md`
 - `.claude/skills/frontend/operator-ui-conventions.md`
+- `.claude/skills/frontend/design-system.md` — standing surface/card/badge/chart/density decisions (visual v2). Assembling the system is engineering, NOT a taste-gate.
+- `.claude/skills/frontend/information-architecture.md` — standing nav/page-consolidation decisions (lens hub + view presets). Consolidating existing pages is engineering, NOT a taste-gate.
 
 ### Data foundation skills (read before SEC ingest / schema / parser / metric work)
 

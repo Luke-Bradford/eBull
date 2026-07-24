@@ -57,8 +57,15 @@ function readFilters(p: URLSearchParams): LibraryFilters {
   };
 }
 
-function writeFilters(f: LibraryFilters): URLSearchParams {
-  const out = new URLSearchParams();
+const _OWNED_FILTER_KEYS = ["held", "stale", "stance", "offset"] as const;
+
+function writeFilters(f: LibraryFilters, base: URLSearchParams): URLSearchParams {
+  // Preserve any param this page does NOT own — e.g. the Research hub's `view`
+  // (#1917): rebuilding from scratch dropped it, bouncing the operator off the
+  // Theses lens back to Ranked on any filter/pager click. Manage only the
+  // library-filter keys (clear then set, so toggling a filter off removes it).
+  const out = new URLSearchParams(base);
+  for (const k of _OWNED_FILTER_KEYS) out.delete(k);
   if (f.held) out.set("held", "true");
   if (f.stale) out.set("stale", "true");
   if (f.stance !== "") out.set("stance", f.stance);
@@ -200,7 +207,7 @@ export function ThesesPage(): JSX.Element {
       offset: 0,
       ...next,
     };
-    setSearchParams(writeFilters(merged), { replace: true });
+    setSearchParams((prev) => writeFilters(merged, prev), { replace: true });
   }
 
   async function onRequestFresh(row: ThesisLibraryItem): Promise<void> {

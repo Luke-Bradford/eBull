@@ -268,7 +268,7 @@ export function PortfolioPage() {
               description="Open a position from the rankings page to see it here."
             >
               <Link
-                to="/rankings"
+                to="/research?view=ranked"
                 className="text-sm font-medium text-blue-600 hover:underline"
               >
                 Go to rankings →

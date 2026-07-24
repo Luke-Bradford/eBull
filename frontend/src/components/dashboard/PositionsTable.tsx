@@ -39,7 +39,7 @@ export function PositionsTable({
         title="No positions yet"
         description="Open a position from the rankings page to see it here."
       >
-        <Link to="/rankings" className="text-sm font-medium text-blue-600 hover:underline">
+        <Link to="/research?view=ranked" className="text-sm font-medium text-blue-600 hover:underline">
           Go to rankings →
         </Link>
       </EmptyState>

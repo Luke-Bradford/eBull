@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { ThesesPage } from "@/pages/ThesesPage";
@@ -49,10 +49,15 @@ function respond(items: ThesisLibraryItem[], total = items.length): ThesisLibrar
   return { items, total, offset: 0, limit: 50 };
 }
 
+function LocationProbe() {
+  return <div data-testid="search">{useLocation().search}</div>;
+}
+
 function renderPage(initialEntry = "/theses") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <ThesesPage />
+      <LocationProbe />
     </MemoryRouter>,
   );
 }
@@ -101,6 +106,21 @@ describe("ThesesPage", () => {
       "href",
       "/instrument/AAPL?tab=verdict",
     );
+  });
+
+  it("preserves the Research hub's view param when a filter is toggled (#1917)", async () => {
+    // Under the hub the URL is /research?view=theses; a filter click must NOT drop
+    // `view` (else the hub falls back to Ranked mid-filtering — Codex ckpt-2).
+    mockedFetch.mockResolvedValue(respond([makeItem()]));
+    const user = userEvent.setup();
+    renderPage("/theses?view=theses");
+    await screen.findByText("AAPL");
+    await user.click(screen.getByRole("checkbox", { name: "Held only" }));
+    await waitFor(() => {
+      const search = screen.getByTestId("search").textContent ?? "";
+      expect(search).toContain("view=theses");
+      expect(search).toContain("held=true");
+    });
   });
 
   it("shows the guiding empty state when no theses exist", async () => {

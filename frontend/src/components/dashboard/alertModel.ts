@@ -50,13 +50,13 @@ export interface GuardReasonMeta {
 }
 
 const ADMIN = { label: "Manage in Admin", to: "/admin" };
-const TRIAGE = { label: "Triage", to: "/recommendations" };
+const TRIAGE = { label: "Triage", to: "/research?view=actioned" };
 
 /**
  * One entry per execution-guard RuleName (app/services/execution_guard.py:89-107).
  * Config / safety-layer rejections point at /admin (where the operator acts — e.g. the
  * kill switch is deactivated there, NOT from this strip). Data / per-instrument rejections
- * point at /recommendations for triage. Unknown codes fall back to a humanized label.
+ * point at /research?view=actioned for triage. Unknown codes fall back to a humanized label.
  */
 export const GUARD_REASON_META: Record<string, GuardReasonMeta> = {
   kill_switch: {
