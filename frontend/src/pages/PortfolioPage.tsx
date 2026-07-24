@@ -9,10 +9,10 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import { fetchPortfolio } from "@/api/portfolio";
 import { useAsync } from "@/lib/useAsync";
-import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
 import { formatMoney, formatNumber, formatPct, pnlPct } from "@/lib/format";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { EmptyState } from "@/components/states/EmptyState";
+import { UnconvertedBadge } from "@/components/portfolio/UnconvertedBadge";
 import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
 import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
 import { ActivitySection } from "@/components/portfolio/ActivitySection";
@@ -57,7 +57,6 @@ const PAGE_SIZE = 50;
  */
 export function PortfolioPage() {
   const portfolio = useAsync(fetchPortfolio, []);
-  const currency = useDisplayCurrency();
   const navigate = useNavigate();
 
   const [tab, setTab] = useState<"positions" | "activity">("positions");
@@ -274,7 +273,7 @@ export function PortfolioPage() {
       ) : (
         <LiveQuoteProvider instrumentIds={liveQuoteIds}>
         <div className="space-y-3">
-          <SummaryBar data={portfolio.data} currency={currency} />
+          <SummaryBar data={portfolio.data} displayCurrency={portfolio.data.display_currency} />
           {allRows.length === 0 ? (
             <EmptyState
               title="No positions yet"
@@ -291,7 +290,8 @@ export function PortfolioPage() {
             <>
               <PortfolioTable
                 pageRows={pageRows}
-                currency={currency}
+                displayCurrency={portfolio.data.display_currency}
+                cashCurrency={portfolio.data.cash_currency}
                 search={search}
                 onSearchChange={(v) => {
                   setSearch(v);
@@ -362,15 +362,19 @@ export function PortfolioPage() {
 
 function SummaryBar({
   data,
-  currency,
+  displayCurrency,
 }: {
   data: {
     total_aum: number;
     cash_balance: number | null;
+    cash_currency: string;
     positions: PositionItem[];
     mirrors?: PortfolioMirrorItem[];
+    fx_incomplete: boolean;
   };
-  currency: string;
+  // The currency the backend converted the totals to (response.display_currency),
+  // NOT the /config context — those can diverge (#2129).
+  displayCurrency: string;
 }) {
   const mirrors = data.mirrors ?? [];
   const totalPnl =
@@ -382,22 +386,32 @@ function SummaryBar({
   const pct = totalInvested !== 0 ? totalPnl / totalInvested : null;
   const posCount = data.positions.length + mirrors.length;
   const mirrorCount = mirrors.length;
+  // Totals sum every money source (positions, cash, mirror equity); any left native on
+  // an FX-degrade makes the sum mix currencies (#2129). The backend flags this
+  // (covering cash/mirror) rather than deriving from positions alone.
+  const hasUnconverted = data.fx_incomplete;
 
   return (
     <div className="flex flex-wrap gap-x-8 gap-y-2 border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-2 text-sm">
-      <Stat label="AUM" value={formatMoney(data.total_aum, currency)} />
-      <Stat label="Cash" value={formatMoney(data.cash_balance, currency)} />
+      <Stat label="AUM" value={formatMoney(data.total_aum, displayCurrency)} />
+      <Stat label="Cash" value={formatMoney(data.cash_balance, data.cash_currency)} />
       <Stat
         label="P&L"
-        value={formatMoney(totalPnl, currency)}
+        value={formatMoney(totalPnl, displayCurrency)}
         hint={pct === null ? undefined : formatPct(pct)}
         tone={totalPnl >= 0 ? "positive" : "negative"}
       />
       <Stat label="Positions" value={String(posCount)} />
       <Stat label="Instruments" value={String(data.positions.length)} />
-      {mirrorCount > 0 ? (
-        <Stat label="Mirrors" value={String(mirrorCount)} />
-      ) : null}
+      {mirrorCount > 0 ? <Stat label="Mirrors" value={String(mirrorCount)} /> : null}
+      {hasUnconverted && (
+        <span
+          title={`Some positions couldn't be converted to ${displayCurrency}; totals may mix currencies.`}
+          className="self-center text-xs font-medium text-amber-700 dark:text-amber-300"
+        >
+          ⚠ mixed currencies
+        </span>
+      )}
     </div>
   );
 }
@@ -464,7 +478,8 @@ function avatarTone(name: string): string {
 
 function PortfolioTable({
   pageRows,
-  currency,
+  displayCurrency,
+  cashCurrency,
   search,
   onSearchChange,
   searchRef,
@@ -474,7 +489,8 @@ function PortfolioTable({
   onClose,
 }: {
   pageRows: RowItem[];
-  currency: string;
+  displayCurrency: string;
+  cashCurrency: string;
   search: string;
   onSearchChange: (v: string) => void;
   searchRef: React.MutableRefObject<HTMLInputElement | null>;
@@ -522,7 +538,7 @@ function PortfolioTable({
                 <PositionRow
                   key={`pos-${row.data.instrument_id}`}
                   p={row.data}
-                  currency={currency}
+                  displayCurrency={displayCurrency}
                   focused={idx === focusedIdx}
                   onDrill={() => onDrill(row)}
                   onAdd={onAdd}
@@ -532,7 +548,8 @@ function PortfolioTable({
                 <MirrorRow
                   key={`mir-${row.data.mirror_id}`}
                   m={row.data}
-                  currency={currency}
+                  currency={cashCurrency}
+                  displayCurrency={displayCurrency}
                   focused={idx === focusedIdx}
                   onDrill={() => onDrill(row)}
                 />
@@ -587,14 +604,14 @@ function PaginationBar({
 
 function PositionRow({
   p,
-  currency,
+  displayCurrency,
   focused,
   onDrill,
   onAdd,
   onClose,
 }: {
   p: PositionItem;
-  currency: string;
+  displayCurrency: string;
   focused: boolean;
   onDrill: () => void;
   onAdd: (p: PositionItem) => void;
@@ -602,6 +619,10 @@ function PositionRow({
 }) {
   const pct = pnlPct(p.unrealized_pnl, p.cost_basis);
   const positive = p.unrealized_pnl >= 0;
+  // Money is in the position's own currency — display normally, or native on an
+  // FX-degrade (#2129). Label each cell with it; badge the row when it diverges.
+  const rowCurrency = p.currency;
+  const unconverted = rowCurrency !== displayCurrency;
   const trades = p.trades;
   const singleTrade: BrokerPositionItem | null =
     trades.length === 1 && trades[0] !== undefined ? trades[0] : null;
@@ -622,6 +643,7 @@ function PositionRow({
       <td className="px-4 py-2 text-left">
         <span className="font-medium text-slate-800 dark:text-slate-100">{p.symbol}</span>
         <span className="ml-1.5 text-xs text-slate-500">{p.company_name}</span>
+        {unconverted && <UnconvertedBadge currency={rowCurrency} displayCurrency={displayCurrency} />}
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-600">
         {trades.length || "—"}
@@ -630,24 +652,24 @@ function PositionRow({
         {formatNumber(p.current_units)}
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-500">
-        {p.avg_cost != null ? formatMoney(p.avg_cost, currency) : "—"}
+        {p.avg_cost != null ? formatMoney(p.avg_cost, rowCurrency) : "—"}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
         <LivePriceCell
           instrumentId={p.instrument_id}
           fallback={p.current_price}
-          currency={currency}
+          currency={rowCurrency}
         />
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-600">
-        {formatMoney(p.cost_basis, currency)}
+        {formatMoney(p.cost_basis, rowCurrency)}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
-        {formatMoney(p.market_value, currency)}
+        {formatMoney(p.market_value, rowCurrency)}
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
         <span className={positive ? "text-emerald-600" : "text-red-600"}>
-          {formatMoney(p.unrealized_pnl, currency)}
+          {formatMoney(p.unrealized_pnl, rowCurrency)}
         </span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums">
@@ -692,16 +714,19 @@ function PositionRow({
 function MirrorRow({
   m,
   currency,
+  displayCurrency,
   focused,
   onDrill,
 }: {
   m: PortfolioMirrorItem;
   currency: string;
+  displayCurrency: string;
   focused: boolean;
   onDrill: () => void;
 }) {
   const pct = pnlPct(m.unrealized_pnl, m.funded);
   const positive = m.unrealized_pnl >= 0;
+  const unconverted = currency !== displayCurrency;
 
   const rowClass = [
     "cursor-pointer border-t border-slate-100 transition-colors",
@@ -728,6 +753,7 @@ function MirrorRow({
             COPY
           </span>
           <span className="text-[10px] text-slate-400">→</span>
+          {unconverted && <UnconvertedBadge currency={currency} displayCurrency={displayCurrency} />}
         </span>
       </td>
       <td className="px-2 py-2 text-right tabular-nums text-slate-600">

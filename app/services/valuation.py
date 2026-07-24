@@ -73,7 +73,9 @@ def resolve_quote_price(
 
 @dataclass(frozen=True)
 class HoldingValuation:
-    """One open position, marked and converted to display currency."""
+    """One open position, marked and converted to display currency where an FX rate
+    exists. On FX-degrade (rate missing) the money fields stay in ``native_currency``;
+    ``currency`` records which currency the money fields are ACTUALLY in (#2129)."""
 
     instrument_id: int
     symbol: str
@@ -81,6 +83,10 @@ class HoldingValuation:
     sector: str | None  # eToro numeric industry id, as text (provider contract)
     sector_name: str | None  # resolved via etoro_stocks_industries; None if unmapped
     native_currency: str
+    # The currency the money fields below are actually denominated in: the display
+    # currency when conversion succeeded (or was a no-op), else native_currency on an
+    # FX-rate-missing degrade (#2129). The FE labels each money cell with this.
+    currency: str
     open_date: date | None
     source: PositionSource  # positions.source is NOT NULL + CHECK-constrained
     updated_at: datetime  # positions.updated_at is NOT NULL
@@ -103,6 +109,15 @@ class PortfolioValuation:
     cash_balance: float | None  # None = empty cash_ledger (unknown)
     mirror_equity: float
     total_aum: float
+    # Currency that cash_balance AND mirror_equity are actually in (#2129). Both are
+    # USD-base and share the same USD→display conversion, so one field labels both:
+    # display_currency when USD→display converted (or IS USD), else "USD" on a degrade.
+    cash_currency: str
+    # True when ANY money source (a position, cash, or mirror equity) was left in a
+    # non-display currency because its FX rate was missing (#2129). The totals then
+    # sum mixed currencies under one symbol — the FE surfaces a warning rather than
+    # imply a clean total.
+    fx_incomplete: bool
     # Raw position rows (dict_row) in the same order as `holdings`, for
     # callers that need columns beyond the valuation (the dashboard's
     # broker-trade price lookup + fx_rates_used derivation).
@@ -157,6 +172,13 @@ def _convert_value(
         return value
 
 
+def _fx_pair_available(from_ccy: str, to_ccy: str, rates: dict[tuple[str, str], Decimal]) -> bool:
+    """Whether `convert` can move from_ccy→to_ccy — same rule as `fx.convert`
+    (equal, direct, or inverse; no triangulation). Used to detect a silent
+    cash/mirror FX-degrade for the totals-mixed flag (#2129)."""
+    return from_ccy == to_ccy or (from_ccy, to_ccy) in rates or (to_ccy, from_ccy) in rates
+
+
 def _holding_from_row(
     row: dict[str, Any],
     display_currency: str,
@@ -190,8 +212,11 @@ def _holding_from_row(
         valuation_source = "cost_basis"
 
     # Convert all monetary values to display currency in a single block
-    # so they either all convert or all stay in native currency.
+    # so they either all convert or all stay in native currency. `value_currency`
+    # records which currency the money fields end up in (#2129): display_currency on
+    # success or when no conversion is needed, native_currency on an FX-degrade.
     avg_cost = parse_optional_float(row, "avg_cost")
+    value_currency = display_currency
     if native_currency != display_currency:
         try:
             market_value = float(convert(Decimal(str(market_value)), native_currency, display_currency, rates))
@@ -202,6 +227,7 @@ def _holding_from_row(
             if avg_cost is not None:
                 avg_cost = float(convert(Decimal(str(avg_cost)), native_currency, display_currency, rates))
         except FxRateNotFound:
+            value_currency = native_currency  # money fields left in native currency
             logger.warning(
                 "FX rate %s→%s not found; skipping conversion for position",
                 native_currency,
@@ -215,6 +241,7 @@ def _holding_from_row(
         sector=row.get("sector"),
         sector_name=row.get("sector_name"),
         native_currency=native_currency,
+        currency=value_currency,
         open_date=row["open_date"],
         source=row["source"],
         updated_at=row["updated_at"],
@@ -265,6 +292,21 @@ def compute_portfolio_valuation(conn: psycopg.Connection[Any]) -> PortfolioValua
 
     total_aum = total_market + (cash_balance if cash_balance is not None else 0.0) + mirror_equity
 
+    # #2129: flag totals that mix currencies. A position degrades when its own
+    # `currency` stayed native; cash + mirror equity are USD, so they degrade when
+    # USD→display has no rate (`convert` is direct/inverse only) and a USD component
+    # is present.
+    positions_degraded = any(h.currency != display_currency for h in holdings)
+    usd_component_present = raw_cash is not None or abs(raw_mirror_equity) > 1e-9
+    usd_fx_missing = display_currency != "USD" and not _fx_pair_available("USD", display_currency, rates)
+    # Gate on `usd_component_present` (matching `fx_incomplete`): only claim cash/mirror
+    # money is "USD" when there is actually a USD component that was left unconverted —
+    # not merely because the rate is absent (a mirror equity is always ≥ 0, so a net of
+    # 0 means every mirror row is 0, i.e. nothing real to mislabel). Review WARNING.
+    cash_degraded = usd_component_present and usd_fx_missing
+    cash_currency = "USD" if cash_degraded else display_currency
+    fx_incomplete = positions_degraded or cash_degraded
+
     return PortfolioValuation(
         display_currency=display_currency,
         holdings=holdings,
@@ -272,6 +314,8 @@ def compute_portfolio_valuation(conn: psycopg.Connection[Any]) -> PortfolioValua
         cash_balance=cash_balance,
         mirror_equity=mirror_equity,
         total_aum=total_aum,
+        cash_currency=cash_currency,
+        fx_incomplete=fx_incomplete,
         raw_rows=tuple(pos_rows),
         rates=rates,
         rates_meta=rates_meta,

@@ -39,7 +39,9 @@ export async function fetchPortfolioMock(): Promise<PortfolioResponse> {
     cash_balance: null,
     mirror_equity: 0,
     display_currency: "USD",
+    cash_currency: "USD",
     fx_rates_used: {},
+    fx_incomplete: false,
     live_quote_instrument_ids: [],
   };
 }
