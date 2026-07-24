@@ -1136,8 +1136,11 @@ def _derive_periods_from_facts(
     # When two accessions each treat the same period_end as their primary but stamp
     # it with different ``fy`` (a fiscal-year re-label / source error), the
     # latest-filed accession's stamp wins — deterministic + restatement-priority
-    # aligned, not DB read-order dependent (Codex ckpt-2). Track (filed_date,
-    # accession) as the tie-break key.
+    # aligned, not DB read-order dependent (Codex ckpt-2). Tie-break key is
+    # (filed_date, accession_number): on an identical filed_date the
+    # lexicographically-larger accession wins — the same "lex-larger accession =
+    # later in the filer-year sequence" rule the #682 canonical merge uses, so a
+    # same-day 10-K/A amendment beats the original it corrects.
     _anchor_best: dict[tuple[str, date], tuple[date, str, int]] = {}
     for (_acc, fp), fs in _acc_fp_facts.items():
         primary = max(fs, key=lambda f: f.period_end)
@@ -1243,18 +1246,28 @@ def _derive_periods_from_facts(
 
     # #1914 collision log — two DISTINCT period_ends re-deriving to the same
     # (fiscal_year, fiscal_quarter, period_type) are collapsed by the SQL
-    # best-source merge (DISTINCT ON, winner = source priority → filed_date DESC →
-    # period_end DESC). These are the ~137 genuine fiscal-year-change / stub-year
-    # collisions deferred to #541 (integer fiscal_year cannot key two real periods).
-    # Surface the dropped period so nothing collapses silently; winner selection
-    # itself stays in the SQL layer, this only mirrors its order to name the loser.
+    # best-source merge (DISTINCT ON). These are the ~137 genuine fiscal-year-change
+    # / stub-year collisions deferred to #541 (integer fiscal_year cannot key two
+    # real periods). Surface the dropped period so nothing collapses silently;
+    # winner selection itself stays in the SQL layer, this only mirrors its order
+    # to name the loser. The SQL winner order is: source priority → filed_date DESC
+    # → period_end DESC → source_ref ASC. Source priority is CONSTANT here (this
+    # derivation emits only source='sec_edgar'), so it drops out; mirror the
+    # remaining three keys exactly via negated ordinals (DESC) + source_ref (ASC).
     _collision_groups: dict[tuple[int, int | None, str], list[PeriodRow]] = defaultdict(list)
     for p in periods:
         _collision_groups[(p.fiscal_year, p.fiscal_quarter, p.period_type)].append(p)
     for (c_fy, _c_fq, c_type), group in _collision_groups.items():
         ends = {p.period_end_date for p in group}
         if len(ends) > 1:
-            winner = max(group, key=lambda p: (p.filed_date or date.min, p.period_end_date))
+            winner = min(
+                group,
+                key=lambda p: (
+                    -(p.filed_date or date.min).toordinal(),
+                    -p.period_end_date.toordinal(),
+                    p.source_ref,
+                ),
+            )
             dropped = sorted(e for e in ends if e != winner.period_end_date)
             logger.warning(
                 "financial_periods fiscal_year collision (#1914/#541): fy=%s %s maps "
