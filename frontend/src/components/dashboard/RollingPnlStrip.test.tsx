@@ -136,6 +136,19 @@ describe("RollingPnlStrip", () => {
     expect(pct.className).not.toContain("text-slate-500");
   });
 
+  it("leaves the em-dash placeholder untoned — a missing percentage is not a signal (review round 2)", async () => {
+    mocked.mockResolvedValue({
+      display_currency: "GBP",
+      periods: [{ period: "1d", pnl: 150, pnl_pct: null, coverage: 0 }],
+    });
+    renderStrip();
+    const dash = await screen.findByText("—");
+    // The value beside it IS emerald (the pnl is genuinely positive); the
+    // no-data placeholder must not borrow that colour.
+    expect(dash.className).toContain("text-slate-500");
+    expect(dash.className).not.toContain("text-emerald-600");
+  });
+
   it("renders a zero delta muted, not at full headline strength (review round 1)", async () => {
     mocked.mockResolvedValue({
       display_currency: "GBP",

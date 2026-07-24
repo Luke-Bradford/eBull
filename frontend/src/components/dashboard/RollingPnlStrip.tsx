@@ -43,7 +43,11 @@ function Pill({
   // Three props carry behaviour the private tile had and must not lose:
   //   - `size="md"`   — supporting row, must not shout as loud as the headline.
   //   - `toneHint`    — the % RESTATES the money delta, so it carries the same
-  //                     signal and the same colour (review round 1 WARNING).
+  //                     signal and the same colour (review round 1 WARNING) —
+  //                     but ONLY when there IS a percentage. A null pnl_pct
+  //                     renders the em-dash no-data placeholder, and a dash
+  //                     painted emerald/rose reads as a signal that does not
+  //                     exist (review round 2 NITPICK).
   //   - `tone="muted"` on a zero delta — an explicit "no direction here",
   //                     not the full-strength default (review round 1 NITPICK).
   return (
@@ -55,7 +59,7 @@ function Pill({
         hint={period.pnl_pct === null ? "—" : formatPct(period.pnl_pct)}
         tone={sign === "pos" ? "positive" : sign === "neg" ? "negative" : "muted"}
         size="md"
-        toneHint
+        toneHint={period.pnl_pct !== null}
       />
     </div>
   );
