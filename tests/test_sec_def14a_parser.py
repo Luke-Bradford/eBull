@@ -31,7 +31,9 @@ from app.providers.implementations.sec_def14a import (
     _looks_like_label_row,
     _looks_like_subheader,
     _parse_percent,
+    _parse_share_count,
     _resolve_columns,
+    _score_table_headers,
     extract_plan_name_and_trustee,
     is_esop_plan,
     parse_beneficial_ownership_table,
@@ -908,6 +910,72 @@ class TestFullPopulationRegressions:
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
         assert parsed.rows[0].holder_name == "John S. Abbott"
         assert parsed.rows[0].shares == Decimal("55494")
+
+
+class TestItem403SiblingTables:
+    """Item 403 has TWO subsections — 403(a) >5% owners and 403(b) management
+    plus the group aggregate — and issuers render them as separate tables."""
+
+    def test_both_item_403_tables_are_collected(self) -> None:
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>BlackRock, Inc.</td><td>52,606,862</td><td>9.0%</td></tr>
+        </table>
+        <table>
+          <tr><th>Name</th><th>Total Common Shares Beneficially Owned</th><th>Percent of Class</th></tr>
+          <tr><td>Karen B. Bailo</td><td>32,345</td><td>*</td></tr>
+          <tr><td>All directors and executive officers as a group (5 persons)</td><td>90,000</td><td>1.1%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        names = [r.holder_name for r in parsed.rows]
+        assert "BlackRock, Inc." in names
+        assert "Karen B. Bailo" in names
+        assert parsed.rows[-1].holder_role == "group"
+
+    def test_a_breakdown_table_does_not_duplicate_its_holders(self) -> None:
+        # 0000080661-25-000018 renders the SAME 16 people twice: a totals table
+        # and, below it, the split into restricted/equivalent/other. Keying the
+        # dedup on (name, shares, percent) kept both and put everyone in twice,
+        # reintroducing the duplicate-holder defect this ticket removes.
+        body = """
+        <table>
+          <tr><th>Name</th><th>Total Common Shares Beneficially Owned</th><th>Percent of Class</th></tr>
+          <tr><td>Karen B. Bailo</td><td>32,345</td><td>*</td></tr>
+          <tr><td>Philip Bleser</td><td>21,325</td><td>*</td></tr>
+        </table>
+        <table>
+          <tr><th>Name</th><th>Common Shares Subject to Restricted Stock</th>
+              <th>Other Common Shares Beneficially Owned</th></tr>
+          <tr><td>Karen B. Bailo</td><td>—</td><td>32,345</td></tr>
+          <tr><td>Philip Bleser</td><td>974</td><td>20,351</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        names = [r.holder_name for r in parsed.rows]
+        assert names.count("Karen B. Bailo") == 1
+        assert names.count("Philip Bleser") == 1
+        # The strongest Item 403 caption wins the figures.
+        assert parsed.rows[0].shares == Decimal("32345")
+
+    def test_item_402_award_table_is_disqualified(self) -> None:
+        # Item 402(d)/(f) captions share "number of shares" with Item 403, so an
+        # award table could out-score a real ownership table on keyword weight.
+        assert _score_table_headers(("Name", "Grant Date", "Number of Shares of Stock or Units")) == 0
+        assert _score_table_headers(("Name", "Option Exercise Price ($)", "Number of Shares")) == 0
+        # A real Item 403 header is unaffected.
+        assert _score_table_headers(("Name of Beneficial Owner", "Number of Shares", "Percent of Class")) > 0
+
+
+class TestShareCountFootnote:
+    def test_unbracketed_trailing_footnote_digit_does_not_inflate_shares(self) -> None:
+        # '52,606,862 1' -> removing the space first produced 526,068,621:
+        # a 10x overstatement of BlackRock's holding (0000080661-25-000018).
+        assert _parse_share_count("52,606,862 1") == Decimal("52606862")
+        assert _parse_share_count("52,606,862 (1)") == Decimal("52606862")
+        assert _parse_share_count("1,650,489") == Decimal("1650489")
 
 
 class TestHolderNameStructuralGuard:

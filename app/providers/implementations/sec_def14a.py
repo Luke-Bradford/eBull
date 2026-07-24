@@ -362,11 +362,46 @@ _HEADER_KEYWORDS: Final[tuple[tuple[str, int], ...]] = (
 )
 
 
+# Captions PRESCRIBED by Reg S-K Item 402 for the equity-award tables —
+# 402(d) Grants of Plan-Based Awards and 402(f) Outstanding Equity Awards at
+# Fiscal Year-End — and used by NO Item 403 beneficial-ownership table. A
+# header carrying one of these is disqualified outright (#2140).
+#
+# Why a hard disqualifier rather than a penalty: the two table families share
+# the phrase "number of shares", so an award table can out-score a genuine
+# ownership table on keyword weight alone. That is not hypothetical — folding
+# unicode spaces (also #2140) made "Number\xa0of\xa0Shares of Stock or Units"
+# start matching, which lifted Hershey's 402(d) grants table from 2 to 5 and
+# beat the real ownership table at 4, taking 26 holders down to 7 rows of
+# grant data (0000047111-25-000035, found by the full-population A/B).
+#
+# Deliberately narrow — every marker is a multi-word Item 402 caption with no
+# Item 403 collision. "exercise price" is safe where a bare "exercisable"
+# would NOT be: Hershey's real ownership table has an "Exercisable Stock
+# Options" column.
+_ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
+    "grant date",
+    "estimated future payouts",
+    "exercise price",
+    "expiration date",
+    "unexercised",
+    "incentive plan award",
+    "payout value",
+    "market value of shares",
+)
+
+
 def _score_table_headers(headers: tuple[str, ...]) -> int:
-    """Score a candidate table's header row. Higher is better."""
+    """Score a candidate table's header row. Higher is better.
+
+    Returns 0 for a table carrying an Item 402 EQUITY-AWARD caption, however
+    well it otherwise scores — see :data:`_ITEM_402_AWARD_MARKERS`.
+    """
     if not headers:
         return 0
     joined = " ".join(headers).lower()
+    if any(marker in joined for marker in _ITEM_402_AWARD_MARKERS):
+        return 0
     score = 0
     for keyword, weight in _HEADER_KEYWORDS:
         if keyword in joined:
@@ -678,7 +713,12 @@ def _parse_share_count(raw: str) -> Decimal | None:
     ``"1234567"`` / ``"1,234,567(1)"`` / dash / em-dash / empty."""
     if not raw:
         return None
-    cleaned = _FOOTNOTE_RE.sub("", raw).strip().replace(",", "").replace(" ", "")
+    # Strip an unbracketed trailing footnote superscript BEFORE spaces are
+    # removed (#2140): "52,606,862 1" is BlackRock's 52.6M holding with a
+    # footnote marker, and collapsing the space first turned it into
+    # 526,068,621 — a 10x overstatement (0000080661-25-000018).
+    cleaned = _TRAILING_FOOTNOTE_RE.sub("", _FOOTNOTE_RE.sub("", raw).strip())
+    cleaned = cleaned.strip().replace(",", "").replace(" ", "")
     if cleaned in ("", "-", "—", "–", "N/A", "n/a"):
         return None
     try:
@@ -1065,10 +1105,21 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
 
     # Multi-pass: try each priority window in order; the first one
     # whose best table meets the floor wins.
+    # Item 403 has TWO subsections — 403(a) >5% owners and 403(b) management +
+    # the group aggregate — and issuers routinely render them as TWO SEPARATE
+    # TABLES in the same section. Taking only the single best-scoring table
+    # therefore drops one subsection outright, and which one survives is
+    # decided by incidental header wording: 0001193125-26-119922 has a 2-row
+    # 403(a) table scoring 14 and a 14-row 403(b) table scoring 12, and any
+    # scoring tweak flips which is kept (the full-population A/B caught this as
+    # 14 rows -> 0). So keep EVERY qualifying table in the winning window and
+    # concatenate their rows; ``best_score`` stays the best single score for
+    # tombstone diagnostics.
+    qualifying: list[_RawTable] = []
     for window_start, window_end in candidate_windows:
         candidate_tables = _scan_outer_tables(html_text, start=window_start, end=window_end)
         window_best_score = 0
-        window_best_table: _RawTable | None = None
+        window_qualifying: list[_RawTable] = []
         for start, end in candidate_tables:
             parsed = _parse_table_html(html_text[start:end])
             if parsed is None:
@@ -1076,10 +1127,12 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             score = _score_table_headers(parsed.score_headers)
             if score > window_best_score:
                 window_best_score = score
-                window_best_table = parsed
-        if window_best_table is not None and window_best_score >= SCORE_FLOOR:
+            if score >= SCORE_FLOOR:
+                window_qualifying.append(parsed)
+        if window_qualifying and window_best_score >= SCORE_FLOOR:
             best_score = window_best_score
-            best_table = window_best_table
+            qualifying = window_qualifying
+            best_table = window_qualifying[0]
             chosen_window = (window_start, window_end)
             break
         # Also track the global best in case no window meets floor —
@@ -1099,11 +1152,44 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     window_start, window_end = chosen_window
     as_of_date = _extract_as_of_date(html_text, window_start=window_start, window_end=window_end)
 
-    name_idx, shares_idx, percent_idx = _resolve_columns(best_table.column_headers)
     rows: list[Def14ABeneficialHolder] = []
-    current_role: str | None = None
+    seen: set[str] = set()
+    # Best-captioned table first, so when two tables report the same holder the
+    # figures from the one with the strongest Item 403 header survive. Stable,
+    # so document order breaks ties.
+    for table in sorted(qualifying, key=lambda t: -_score_table_headers(t.score_headers)):
+        name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
+        _extract_holder_rows(
+            table,
+            name_idx=name_idx,
+            shares_idx=shares_idx,
+            percent_idx=percent_idx,
+            rows=rows,
+            seen=seen,
+        )
+    return Def14ABeneficialOwnershipTable(
+        as_of_date=as_of_date,
+        rows=rows,
+        raw_table_score=best_score,
+    )
 
-    for raw_row in best_table.rows:
+
+def _extract_holder_rows(
+    table: _RawTable,
+    *,
+    name_idx: int,
+    shares_idx: int,
+    percent_idx: int,
+    rows: list[Def14ABeneficialHolder],
+    seen: set[str],
+) -> None:
+    """Append one :class:`Def14ABeneficialHolder` per data row of ONE Item 403
+    table, skipping rows already collected from a sibling table.
+
+    Section-heading role context is local to ``table`` — each Item 403 table
+    re-establishes its own headings."""
+    current_role: str | None = None
+    for raw_row in table.rows:
         # Single-cell heading rows flip the role tag.
         heading_role = _detect_role_heading(raw_row)
         if heading_role is not None:
@@ -1221,6 +1307,22 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
         if is_esop_plan(holder_name_raw) or is_esop_plan(holder_name):
             role = "esop"
 
+        # Dedup across sibling tables on HOLDER IDENTITY alone — the same key
+        # the observations layer uses, ``lower(trim(holder_name))``.
+        #
+        # Not (name, shares, percent): a filing often renders a BREAKDOWN table
+        # beside the real one (0000080661-25-000018 has "Total Common Shares
+        # Beneficially Owned" for 16 people and, below it, the same 16 split
+        # into "Restricted Stock Awards / Equivalent Units / Other"). Keying on
+        # the figures too would keep both and put every one of those people in
+        # twice — reintroducing exactly the duplicate-holder defect this ticket
+        # removes. Item 403 counts a beneficial owner ONCE, and the def14a
+        # slice is a non-additive memo overlay (data-engineer I21), so
+        # collapsing to one row per holder is both safer and more correct.
+        key = holder_name.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
         rows.append(
             Def14ABeneficialHolder(
                 holder_name=holder_name,
@@ -1229,12 +1331,6 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
                 percent_of_class=percent,
             )
         )
-
-    return Def14ABeneficialOwnershipTable(
-        as_of_date=as_of_date,
-        rows=rows,
-        raw_table_score=best_score,
-    )
 
 
 # ===========================================================================
