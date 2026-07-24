@@ -104,14 +104,18 @@ export interface UnderwaterProps {
  * Lower bound of the drawdown y-axis (#1908 PR-3).
  *
  * Drawdown is ≤ 0 by construction and is read AGAINST the peak, so 0 is the
- * anchor the whole series is measured from and must always be the TOP of the
- * axis. Recharts' auto-domain fits `[dataMin, dataMax]` instead: a series whose
+ * anchor the whole series is measured from and belongs at the TOP of the axis.
+ * Recharts' auto-domain fits `[dataMin, dataMax]` instead: a series whose
  * shallowest point is −2% renders with the axis topping out at −2%, which both
  * pushes the `ReferenceLine y={0}` off-chart AND rescales the shape so a mild
  * drawdown looks as deep as a severe one.
  *
- * Clamps at 0 defensively — a positive value (a bad row) must never lift the
- * axis above the peak line.
+ * The `0` upper bound is NOT paired with `allowDataOverflow` on purpose. A
+ * numeric domain entry in recharts is expanded to cover the data unless that
+ * flag is set, so a malformed POSITIVE row would still push the axis above 0 —
+ * and that is the behaviour we want: an impossible drawdown should be visible
+ * as an anomaly, not silently clipped out of the viewport. For every
+ * well-formed series (all values ≤ 0) `dataMax` is 0 and the anchor holds.
  */
 export function drawdownDomainMin(dataMin: number): number {
   return Math.min(dataMin, 0);

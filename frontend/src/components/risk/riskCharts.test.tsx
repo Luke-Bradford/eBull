@@ -17,7 +17,10 @@ describe("drawdownDomainMin", () => {
     expect(drawdownDomainMin(0)).toBe(0);
   });
 
-  it("never lifts the axis above the peak line, even on a bad positive row", () => {
+  it("still returns 0 as the LOWER bound when a malformed row makes even the minimum positive", () => {
+    // Note this is only the lower bound. The `0` upper bound is deliberately
+    // left expandable (no `allowDataOverflow`), so such a row shows up as a
+    // visible anomaly above the peak line rather than being clipped away.
     expect(drawdownDomainMin(0.05)).toBe(0);
   });
 });
