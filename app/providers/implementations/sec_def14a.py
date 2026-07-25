@@ -1271,6 +1271,14 @@ def _extract_holder_rows(
             continue
         shares = _parse_share_count(shares_raw)
         shares_src_idx = shares_idx if shares is not None else -1
+        # Parse the positional percent BEFORE recovering shares, so the
+        # recovery knows whether percent_idx actually yielded a percent. When
+        # it did, that cell is off limits; when it did not (a header narrower
+        # than its data rows puts a SHARE COUNT at percent_idx — 5,439,432
+        # under "Percent of Total (%)" on 0002077096-26-000092), the cell is
+        # fair game and skipping it unconditionally loses the row.
+        percent = _parse_percent(percent_raw)
+        percent_src_idx = percent_idx if percent is not None else -1
         if shares is None:
             # Ragged/narrow header (#2140): a 3-cell header row over 5-cell
             # data rows leaves shares_idx pointing at the NAME column
@@ -1279,13 +1287,19 @@ def _extract_holder_rows(
             # '24.3']). Recover the share count from the first cell that
             # parses as one, skipping the cell the holder name came from.
             for i, cell in enumerate(cells):
-                if i == name_src_idx:
+                if i in (name_src_idx, percent_src_idx):
+                    continue
+                if "%" in cell:
                     continue
                 candidate = _parse_share_count(cell)
-                if candidate is not None:
+                # Share counts are WHOLE shares. Requiring an integer stops the
+                # scan reading a bare percent as a holding — a row with
+                # ``Shares = —`` and ``Percent = 8.4`` would otherwise store
+                # shares=8.4 (Codex pre-push review). Leaving shares NULL is the
+                # safe fallback; _parse_percent already handles bare percents.
+                if candidate is not None and candidate == candidate.to_integral_value():
                     shares, shares_src_idx = candidate, i
                     break
-        percent = _parse_percent(percent_raw)
         if percent is None:
             # Ragged row (#2140 D3): issuers interleave footnote-only cells
             # ('(2)') mid-row, so a data row can be WIDER than its header row

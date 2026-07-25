@@ -970,6 +970,27 @@ class TestItem403SiblingTables:
         assert _score_table_headers(("Name of Beneficial Owner", "Number of Shares", "Percent of Class")) > 0
 
 
+class TestSharesRecoveryDoesNotEatPercents:
+    def test_bare_percent_is_not_stored_as_a_share_count(self) -> None:
+        # Codex pre-push: the shares recovery scanned every non-name cell, and
+        # _parse_share_count("8.4") succeeds — so a row reporting
+        # ``Shares = -`` with ``Percent = 8.4`` stored shares=8.4. Leaving
+        # shares NULL is the safe fallback.
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>Acme Fund LP</td><td>&#8212;</td><td>8.4</td></tr>
+          <tr><td>Jane Smith</td><td>250,000</td><td>1.2%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        by_name = {r.holder_name: r for r in parsed.rows}
+        assert by_name["Acme Fund LP"].shares is None
+        assert by_name["Acme Fund LP"].percent_of_class == Decimal("8.4")
+        assert by_name["Jane Smith"].shares == Decimal("250000")
+
+
 class TestShareCountFootnote:
     def test_unbracketed_trailing_footnote_digit_does_not_inflate_shares(self) -> None:
         # '52,606,862 1' -> removing the space first produced 526,068,621:
