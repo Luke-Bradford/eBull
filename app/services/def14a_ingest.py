@@ -107,7 +107,15 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # best, address-only holder cells are dropped, and Item 402(d)/(f) award tables
 # are disqualified from selection. Bumped separately from v7 so the corpus
 # re-drives against the parser that actually shipped.
-_PARSER_VERSION_DEF14A = "def14a-v8"
+# v9 (#2158): a promoted column-label row is now folded into ``score_headers``
+# in BOTH arms, so Item 403's prescribed captions score the table even when the
+# issuer puts a share-class row above them (181 accessions returned zero rows);
+# Item 402(g)'s "Option Exercises and Stock Vested" captions join the award
+# disqualifier; a Rule 13d-3(d)(1)(i) "within 60 days" caption counts as a label
+# rather than data; and a table with no data rows can no longer win selection.
+# Full-population A/B: +11,652 distinct holders, Item 402(c) SCT +997 rows with
+# zero losses.
+_PARSER_VERSION_DEF14A = "def14a-v9"
 
 logger = logging.getLogger(__name__)
 
