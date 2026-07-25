@@ -101,7 +101,13 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # wraps (holder_name_key is lower(trim(...)), so an interior newline split one
 # person into two identities across 704 rows). Spec:
 # docs/specs/etl/def14a-beneficial-ownership-column-and-role-resolution.md.
-_PARSER_VERSION_DEF14A = "def14a-v7"
+# v8 (#2140, post-A/B): the shares recovery no longer reads a bare percent as a
+# share count (whole-number check + skip the cell percent actually came from),
+# the Item 403 sibling gate is an absolute score rather than proximity to the
+# best, address-only holder cells are dropped, and Item 402(d)/(f) award tables
+# are disqualified from selection. Bumped separately from v7 so the corpus
+# re-drives against the parser that actually shipped.
+_PARSER_VERSION_DEF14A = "def14a-v8"
 
 logger = logging.getLogger(__name__)
 
