@@ -680,7 +680,15 @@ def _supersede_dropped_holdings(
     so re-ingesting unchanged content stays a pure UPSERT (no churn in the
     inserted/updated counters, no row-version bump for identical data).
     """
-    if not instrument_ids:
+    if not instrument_ids or not holder_names:
+        # ``holder_name <> ALL('{}')`` is VACUOUSLY TRUE in Postgres (verified:
+        # SELECT 'x' <> ALL(ARRAY[]::text[]) -> true), so an empty name list
+        # would delete EVERY row for the accession instead of preserving them —
+        # turning a zero-row re-parse into silent data loss. A parse that finds
+        # nothing must supersede nothing; the rewash guard
+        # (``RewashParseError``) and the manifest tombstone path own that case.
+        # Guarding HERE rather than at the call sites so every future caller
+        # inherits it. Review bot BLOCKING on PR #2159.
         return 0
     with conn.cursor() as cur:
         cur.execute(

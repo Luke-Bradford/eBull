@@ -22,6 +22,7 @@ import pytest
 
 from app.services.def14a_ingest import (
     _PARSER_VERSION_DEF14A,
+    _supersede_dropped_holdings,
     bootstrap_def14a,
     discover_pending_def14a,
     ingest_def14a,
@@ -549,6 +550,55 @@ class TestIngestDef14a:
         after = _typed_names()
         assert "999,999" not in after, "renamed row survived the reparse"
         assert after == first
+
+    def test_zero_row_reparse_preserves_existing_typed_rows(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Review bot BLOCKING on PR #2159 — ``holder_name <> ALL('{}')`` is
+        VACUOUSLY TRUE in Postgres, so an empty holder-name list would delete
+        every typed row for the accession instead of preserving them, turning a
+        zero-row re-parse into silent data loss.
+
+        Exercises ``_supersede_dropped_holdings`` directly: the call sites pass
+        the parse's names unconditionally, so the guard has to live in the
+        helper.
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000012"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _typed_count() -> int:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM def14a_beneficial_holdings WHERE accession_number = %s",
+                    (accession,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+        before = _typed_count()
+        assert before > 0
+
+        deleted = _supersede_dropped_holdings(
+            conn,
+            accession_number=accession,
+            instrument_ids=[769_100],
+            holder_names=[],
+        )
+        conn.commit()
+        assert deleted == 0
+        assert _typed_count() == before, "a zero-row re-parse wiped the accession's typed rows"
 
     def test_unrecognisable_table_tombstones_partial(
         self,
