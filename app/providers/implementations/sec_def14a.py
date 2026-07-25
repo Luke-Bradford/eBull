@@ -379,6 +379,23 @@ _HEADER_KEYWORDS: Final[tuple[tuple[str, int], ...]] = (
 # Item 403 collision. "exercise price" is safe where a bare "exercisable"
 # would NOT be: Hershey's real ownership table has an "Exercisable Stock
 # Options" column.
+#
+# 402(g) added by #2158. Item 402(g)(2) (17 CFR § 229.402(g)(2)) prescribes the
+# "Option Exercises and Stock Vested" captions "Number of Shares Acquired on
+# Exercise", "Value Realized on Exercise", "Number of Shares Acquired on
+# Vesting", "Value Realized on Vesting". Those tables were previously invisible
+# to the scorer because their column labels sit under a spanning "Option Awards
+# | Stock Awards" row and #2140's label-arm promotion left them unscored; once
+# that row is folded in (this ticket's D14) they score 5 on "number of shares"
+# + "name" + "shares", clearing the floor of 3 and able to outrank a genuine
+# Item 403 table. The full-population promotion audit found this class in 47 of
+# the first 125 promoted header shapes — a hazard created by D14, so it is
+# fixed in the same change.
+#
+# No Item 403 collision: Item 403 reports a HOLDING as of a date, never an
+# exercise or vesting EVENT, so it has no occasion to caption a column with
+# either phrase. "acquired on exercise" is the safe form where a bare "exercise"
+# would not be (see the "Exercisable Stock Options" note above).
 _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
     "grant date",
     "estimated future payouts",
@@ -388,6 +405,9 @@ _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
     "incentive plan award",
     "payout value",
     "market value of shares",
+    "acquired on exercise",
+    "acquired on vesting",
+    "value realized",
 )
 
 
@@ -645,7 +665,7 @@ def _parse_table_html(table_html: str) -> _RawTable | None:
             # (0001628280-25-020660: 20 real holders → 0, found by the
             # full-population A/B). Whether a table IS the beneficial-ownership
             # table stays decided by its own parent header.
-            score_headers = parent_headers + body[0] if legacy_arm else parent_headers
+            score_headers = parent_headers + body[0]
             body = body[1:]
 
     return _RawTable(score_headers=score_headers, column_headers=column_headers, rows=tuple(body))

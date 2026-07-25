@@ -1,4 +1,4 @@
-"""#2140 full-population A/B for the DEF 14A beneficial-ownership parser.
+"""Full-population A/B for the DEF 14A beneficial-ownership parser (#2140, #2158).
 
 Re-parses EVERY stored ``def14a_body`` payload under the current working tree
 and writes a JSON summary. Run once on ``main`` and once on the branch, then
@@ -9,6 +9,19 @@ Offline — reads ``filing_raw_documents``, never fetches from EDGAR.
     PYTHONPATH=. uv run python scripts/ab_2140_def14a_parser.py --out /tmp/ab-main.json
     PYTHONPATH=. uv run python scripts/ab_2140_def14a_parser.py --out /tmp/ab-branch.json
     PYTHONPATH=. uv run python scripts/ab_2140_def14a_parser.py --diff /tmp/ab-main.json /tmp/ab-branch.json
+
+The diff reports **distinct holders lost**, not row-count deltas: #2140 twice
+found a row-count drop to be the OLD code losing garbage (an Item 402 award
+table) or the identity dedup working as intended, and chasing the count would
+have made the parser worse. Gains are enumerated for the same reason — #2140's
+last real defect (address fragments parsed as holders) only appeared on the
+gain side.
+
+#2158 added ``--stored``, which compares a scan against the holder names
+actually PERSISTED in ``def14a_beneficial_holdings``. The A/B proper compares
+parse-to-parse and is therefore blind to filings where BOTH sides return
+nothing — exactly the class the rewash guard blocks. Only a stored-row
+comparison sees those.
 """
 
 from __future__ import annotations
@@ -60,6 +73,11 @@ def _scan(limit: int | None) -> dict[str, Any]:
         "sct_rows": 0,
     }
     per_accession: dict[str, int] = {}
+    # Holder IDENTITIES per accession, so the diff can report distinct holders
+    # lost/gained rather than row counts. Keyed exactly as the database keys
+    # them — ``holder_name_key`` is ``lower(trim(holder_name))`` (sql/116:110) —
+    # so "lost" here means the same thing it means in the rollup.
+    per_accession_holders: dict[str, list[str]] = {}
     sct_fingerprints: dict[str, str] = {}
 
     # ``LIMIT %s`` as a bound parameter, never string-composed — Postgres
@@ -93,6 +111,7 @@ def _scan(limit: int | None) -> dict[str, Any]:
 
                 rows = parsed.rows
                 per_accession[accession] = len(rows)
+                per_accession_holders[accession] = sorted({r.holder_name.strip().lower() for r in rows})
                 if rows:
                     totals["accessions_with_rows"] += 1
                 for holder in rows:
@@ -125,6 +144,7 @@ def _scan(limit: int | None) -> dict[str, Any]:
     return {
         "totals": totals,
         "per_accession": per_accession,
+        "per_accession_holders": per_accession_holders,
         "sct_fingerprints": sct_fingerprints,
         "promoted_rows": promoted,
     }
@@ -158,6 +178,26 @@ def _diff(before: dict[str, Any], after: dict[str, Any]) -> int:
     for acc, b, a in sorted(gained, key=lambda x: x[2] - x[1], reverse=True)[:25]:
         print(f"    {acc}  {b} -> {a}")
 
+    print("\n== DISTINCT HOLDERS lost / gained (the metric that matters) ==")
+    before_h = before.get("per_accession_holders", {})
+    after_h = after.get("per_accession_holders", {})
+    holders_lost: list[tuple[str, list[str]]] = []
+    holders_gained: list[tuple[str, list[str]]] = []
+    for acc, names in before_h.items():
+        b_set, a_set = set(names), set(after_h.get(acc, []))
+        if b_set - a_set:
+            holders_lost.append((acc, sorted(b_set - a_set)))
+        if a_set - b_set:
+            holders_gained.append((acc, sorted(a_set - b_set)))
+    print(f"  accessions losing >=1 distinct holder: {len(holders_lost)}")
+    print(f"  distinct holders lost (total):         {sum(len(n) for _, n in holders_lost)}")
+    for acc, names in sorted(holders_lost, key=lambda x: -len(x[1]))[:25]:
+        print(f"    {acc}  -{len(names)}  {names[:6]}")
+    print(f"  accessions gaining >=1 distinct holder: {len(holders_gained)}")
+    print(f"  distinct holders gained (total):        {sum(len(n) for _, n in holders_gained)}")
+    for acc, names in sorted(holders_gained, key=lambda x: -len(x[1]))[:25]:
+        print(f"    {acc}  +{len(names)}  {names[:6]}")
+
     print("\n== promoted header rows (audit) ==")
     print(f"  before: {len(before['promoted_rows'])}   after: {len(after['promoted_rows'])}")
     seen = {json.dumps(p["headers"]) for p in before["promoted_rows"]}
@@ -168,12 +208,236 @@ def _diff(before: dict[str, Any], after: dict[str, Any]) -> int:
     return 0
 
 
+def _audit(limit: int | None) -> int:
+    """#2158 Codex ckpt-1: full-population provenance for the ``score_headers``
+    fold, in ONE process so both scoring modes are measured on identical input.
+
+    Two things the parse-to-parse A/B cannot establish:
+
+    * **Every** label-arm promotion changes ``score_headers``, not just newly
+      promoted shapes — so a "new shapes" audit misses the risk entirely. This
+      enumerates each promotion with its unfolded score, folded score, and
+      whether the folded text trips ``_ITEM_402_AWARD_MARKERS`` (the fold is
+      only safe if it strengthens, never weakens, the Item 402 rejection).
+    * A compressed SCT fingerprint can match across a *table swap*. This
+      compares the FULL emitted Item 402(c) rows plus the selected table's score
+      under both modes.
+
+    Run on the branch only — the unfolded mode reproduces ``main``'s behaviour
+    exactly, because ``main`` differs from the branch by this fold alone.
+    """
+    promos: list[dict[str, Any]] = []
+    sct_drift: list[dict[str, Any]] = []
+    original_parse_table = parser_mod._parse_table_html
+    seen_shapes: dict[str, dict[str, Any]] = {}
+    mode = {"fold": True}
+    current_accession = {"acc": ""}
+
+    def unfolded_headers(table: Any) -> tuple[str, ...]:
+        """The ``score_headers`` ``main`` would have produced for this table."""
+        cols = tuple(table.column_headers)
+        score = tuple(table.score_headers)
+        if score == cols or len(score) <= len(cols) or score[-len(cols) :] != cols:
+            return score  # no promotion happened
+        parent = score[: len(score) - len(cols)]
+        # The legacy arm folded on ``main`` too — only the label arm changed.
+        return score if parser_mod._looks_like_legacy_subheader(cols) else parent
+
+    def patched(table_html: str) -> Any:
+        table = original_parse_table(table_html)
+        if table is None:
+            return None
+        unfolded = unfolded_headers(table)
+        if unfolded != table.score_headers:
+            folded = tuple(table.score_headers)
+            key = json.dumps([list(unfolded), list(folded)])
+            joined = " ".join(folded).lower()
+            entry = seen_shapes.setdefault(
+                key,
+                {
+                    "unfolded": list(unfolded),
+                    "promoted": list(table.column_headers),
+                    "score_unfolded": parser_mod._score_table_headers(unfolded),
+                    "score_folded": parser_mod._score_table_headers(folded),
+                    "item402_marker_after_fold": [m for m in parser_mod._ITEM_402_AWARD_MARKERS if m in joined],
+                    "count": 0,
+                    "example": current_accession["acc"],
+                },
+            )
+            entry["count"] += 1
+        if not mode["fold"]:
+            return parser_mod._RawTable(
+                score_headers=unfolded,
+                column_headers=table.column_headers,
+                rows=table.rows,
+            )
+        return table
+
+    parser_mod._parse_table_html = patched
+    sql = """
+        SELECT accession_number, payload
+        FROM filing_raw_documents
+        WHERE document_kind = 'def14a_body'
+        ORDER BY accession_number
+        LIMIT %(limit)s
+    """
+    scanned = 0
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute("SET statement_timeout = 0")
+        with conn.cursor(name="def14a_audit") as cur:
+            cur.itersize = 20
+            cur.execute(sql, {"limit": limit})
+            for accession, body in cur:
+                scanned += 1
+                current_accession["acc"] = accession
+                rendered = {}
+                for fold in (False, True):
+                    mode["fold"] = fold
+                    try:
+                        sct = parser_mod.parse_summary_compensation_table(body)
+                    except Exception as exc:  # noqa: BLE001 — audit must not abort
+                        rendered[fold] = f"ERROR {type(exc).__name__}: {exc}"
+                        continue
+                    rendered[fold] = {
+                        "score": sct.raw_table_score,
+                        "rows": [
+                            (r.executive_name, r.principal_position, r.fiscal_year, str(r.total_comp)) for r in sct.rows
+                        ],
+                    }
+                if rendered[False] != rendered[True]:
+                    sct_drift.append({"accession": accession, "main": rendered[False], "branch": rendered[True]})
+
+    parser_mod._parse_table_html = original_parse_table
+    promos = sorted(seen_shapes.values(), key=lambda e: -e["count"])
+
+    print(f"== label-arm promotions whose score_headers CHANGE (scanned {scanned} bodies) ==")
+    print(f"  distinct header shapes: {len(promos)}   total tables: {sum(p['count'] for p in promos)}")
+    worse = [p for p in promos if p["score_folded"] < p["score_unfolded"]]
+    newly_disqualified = [p for p in promos if p["item402_marker_after_fold"] and p["score_unfolded"] > 0]
+    # The inverse hazard, and the one that actually costs holders: a table that
+    # was BELOW the score floor unfolded and clears it folded. An Item 402(g)
+    # "Option Exercises and Stock Vested" table ('Number of Shares Acquired on
+    # Vesting', 'Value Realized on Vesting') is the live example — it carries
+    # none of the _ITEM_402_AWARD_MARKERS, so nothing disqualifies it, and at 5
+    # it can outrank a genuine Item 403 table.
+    newly_qualifying = [p for p in promos if p["score_unfolded"] < 3 <= p["score_folded"]]
+    print(f"  shapes where the fold LOWERS the score:      {len(worse)}")
+    print(f"  shapes newly disqualified as Item 402 award: {len(newly_disqualified)}")
+    print(f"  shapes newly CLEARING the floor (hazard):    {len(newly_qualifying)}")
+    for p in newly_disqualified[:20]:
+        print(f"    x{p['count']:<5} {p['score_unfolded']:>3} -> 0  markers={p['item402_marker_after_fold']}")
+        print(f"           promoted={p['promoted'][:6]}")
+    print("  newly-clearing shapes:")
+    for p in sorted(newly_qualifying, key=lambda e: -e["count"])[:30]:
+        print(f"    x{p['count']:<5} {p['score_unfolded']:>3} -> {p['score_folded']:<3} example={p['example']}")
+        print(f"           promoted={[c[:45] for c in p['promoted']][:5]}")
+    print("  top shapes by frequency:")
+    for p in promos[:25]:
+        print(f"    x{p['count']:<5} {p['score_unfolded']:>3} -> {p['score_folded']:<3} example={p['example']}")
+        print(f"           parent={[c[:40] for c in p['unfolded']][:5]}")
+        print(f"           promoted={[c[:40] for c in p['promoted']][:5]}")
+
+    print(f"\n== Item 402(c) SCT drift, FULL rows + selected-table score: {len(sct_drift)} accessions ==")
+    for d in sct_drift[:25]:
+        print(f"    {d['accession']}")
+        print(f"      main  : {str(d['main'])[:300]}")
+        print(f"      branch: {str(d['branch'])[:300]}")
+    return 0
+
+
+def _stored(summaries: list[dict[str, Any]]) -> int:
+    """Compare one or two scans against the holder names PERSISTED in
+    ``def14a_beneficial_holdings``.
+
+    The parse-to-parse A/B cannot see a filing where both sides return nothing —
+    the stored rows survive only because nothing force-rewashed them, and any
+    unconditional rewash deletes them (#2158). This arm is the only one that
+    does see them.
+
+    With TWO summaries (main, branch) it also reports the regression invariant
+    the single-summary form cannot express: **stored holders that ``main``
+    reproduced and the branch does not**. "Real" is decided by the parser's own
+    name-evidence predicate ``_looks_like_name_cell`` — the invariant #2140 §3
+    settled ("a holder name must carry name evidence") — not by an ad-hoc
+    classifier written for this diff.
+    """
+    stored: dict[str, set[str]] = {}
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute("SET statement_timeout = 0")
+        with conn.cursor(name="def14a_stored") as cur:
+            cur.itersize = 5000
+            cur.execute("SELECT accession_number, lower(trim(holder_name)) FROM def14a_beneficial_holdings")
+            for accession, name in cur:
+                stored.setdefault(accession, set()).add(name)
+
+    def unreproduced(summary: dict[str, Any]) -> dict[str, set[str]]:
+        scanned: dict[str, list[str]] = summary.get("per_accession_holders", {})
+        out: dict[str, set[str]] = {}
+        for accession, names in stored.items():
+            missing = names - set(scanned.get(accession, []))
+            if missing:
+                out[accession] = missing
+        return out
+
+    def split_real(names: set[str]) -> tuple[list[str], list[str]]:
+        real = sorted(n for n in names if parser_mod._looks_like_name_cell(n))
+        return real, sorted(names - set(real))
+
+    last = unreproduced(summaries[-1])
+    print("== stored rows the scanned parser does NOT reproduce ==")
+    print(f"  accessions with stored rows:         {len(stored)}")
+    print(f"  accessions with >=1 unreproduced:    {len(last)}")
+    total_real = sum(len(split_real(v)[0]) for v in last.values())
+    print(f"  unreproduced stored holders (total): {sum(len(v) for v in last.values())}")
+    print(f"    ...carrying name evidence:         {total_real}")
+    for accession, names in sorted(last.items(), key=lambda x: -len(x[1]))[:40]:
+        real, junk = split_real(names)
+        print(f"    {accession}  -{len(names)}  real={real[:4]}  no-name-evidence={junk[:4]}")
+
+    if len(summaries) == 2:
+        first = unreproduced(summaries[0])
+        regressed: list[tuple[str, list[str]]] = []
+        for accession, names in last.items():
+            lost = names - first.get(accession, set())
+            if lost:
+                regressed.append((accession, sorted(lost)))
+        print("\n== REGRESSION: stored holders main reproduced and the branch does not ==")
+        print(f"  accessions: {len(regressed)}   holders: {sum(len(n) for _, n in regressed)}")
+        real_total = sum(len(split_real(set(n))[0]) for _, n in regressed)
+        print(f"  ...carrying name evidence: {real_total}")
+        for accession, names in sorted(regressed, key=lambda x: -len(x[1]))[:40]:
+            real, junk = split_real(set(names))
+            print(f"    {accession}  -{len(names)}  real={real[:4]}  no-name-evidence={junk[:4]}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", help="write a scan summary to this path")
     p.add_argument("--limit", type=int, default=None, help="scan only the first N bodies (smoke)")
     p.add_argument("--diff", nargs=2, metavar=("BEFORE", "AFTER"), help="diff two summaries")
+    p.add_argument(
+        "--stored",
+        nargs="+",
+        metavar="SUMMARY",
+        help="compare summaries against stored typed rows; pass MAIN BRANCH for the regression arm",
+    )
+    p.add_argument(
+        "--audit",
+        action="store_true",
+        help="full-population score_headers-fold provenance + full-row SCT drift (branch only)",
+    )
     args = p.parse_args(argv if argv is not None else sys.argv[1:])
+
+    if args.audit:
+        return _audit(args.limit)
+
+    if args.stored:
+        loaded = []
+        for path in args.stored:
+            with open(path) as f:
+                loaded.append(json.load(f))
+        return _stored(loaded)
 
     if args.diff:
         with open(args.diff[0]) as f:
@@ -183,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         return _diff(before, after)
 
     if not args.out:
-        p.error("one of --out or --diff is required")
+        p.error("one of --out, --diff, --stored or --audit is required")
     result = _scan(args.limit)
     with open(args.out, "w") as f:
         json.dump(result, f)
