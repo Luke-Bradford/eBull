@@ -100,6 +100,36 @@ Follow this order unless the user explicitly says otherwise:
 11. Write a complete PR description.
 12. Follow the branch and PR workflow below — push, poll, wait, resolve, repeat until APPROVE on the most recent commit with CI green.
 
+## Terminal step of a ticket — never leave state to reconstruct
+
+`/insights` (2026-07-25) found most fires ended with "a PR still awaiting CI or a
+batch half-drained, leaving you to reconstruct state next session". That
+reconstruction is pure re-paid cost.
+
+A ticket is finished only when one of these is true:
+
+1. merged, with CI green on the merged commit and the branch deleted; or
+2. **a handoff comment is posted on the PR** giving the exact remaining
+   commands, the acceptance queries with their expected values, and any
+   prerequisite (a migration that must be applied first, a job that must be
+   running). Written so the next session runs it without re-deriving anything.
+
+"PR opened" and "backfill started" are not terminal states. If credits or time
+run out mid-drain, spend the last of them on the handoff note, not on one more
+poll — the note is what makes the remaining work cheap.
+
+## Long-running work belongs in a worktree
+
+Anything long-running or experimental — full-population A/B runs, corpus
+backfills, flaky-test discrimination, anything a sibling session might race —
+goes in `git worktree add`, not the shared `~/Dev/eBull` checkout. Concurrent
+edits otherwise contaminate the run, and a subagent or sibling can clobber
+uncommitted work (`/insights` 2026-07-25; the 07-16 race).
+
+Exception: work that must be exercised against the running dev stack, which
+serves `~/Dev/eBull` only. Branch in the main checkout for the dev-verify step,
+and re-detach at `origin/main` afterwards.
+
 ## Standing retrospective checkpoint (#2075)
 
 After each epic close, or every ~10 merged PRs, run one "inheriting-team

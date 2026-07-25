@@ -264,3 +264,28 @@ guarded by a prior `assert len(periods) >= 1`.
 Origin: PR #1837 (#1835) review WARNING — `test_fy_rejects_quarter_duration_mislabeled_fy`
 asserted `all(p.revenue is None for p in fy)` where the expected outcome was an
 empty `fy`, so the assertion was vacuously true and did not cover the rejection.
+
+## Revert-probe every regression test — a test that never failed proves nothing
+
+A test written alongside its fix has never been observed to fail. It may assert
+something the fix does not control, or something that was already true. `/insights`
+(2026-07-25) names "vacuous tests that survive deleting the code under test" as a
+recurring self-introduced defect class, caught only by a later gate.
+
+**Before claiming a regression test pins a bug: revert the fix, run the test,
+watch it fail, restore the fix.** For a one-line change, temporarily invert it;
+for an ordering bug, restore the old order. `git stash` is NOT the tool for this
+on a shared checkout — a clean tree makes `stash pop` restore an unrelated
+pre-existing stash (#2140). Copy the file aside and copy it back, or work in a
+worktree.
+
+Worked example (#2157): the fan-out test seeded a typed sibling and an
+observation-only sibling and passed — but it could not detect the real bug,
+because the instrument-set resolution ran after an accession-wide DELETE. Adding
+a **typed-rows-only** sibling (absent from the resolver and from observations)
+made it a real probe. Moving the DELETE back to its pre-fix position produced
+`1 failed`; restoring it produced `1 passed`. Without that check the test would
+have shipped as decoration.
+
+State the probe in the PR — "verified the test fails against the pre-fix
+ordering and passes after" — so a reviewer knows the assertion is load-bearing.
