@@ -179,8 +179,21 @@ def _diff(before: dict[str, Any], after: dict[str, Any]) -> int:
         print(f"    {acc}  {b} -> {a}")
 
     print("\n== DISTINCT HOLDERS lost / gained (the metric that matters) ==")
-    before_h = before.get("per_accession_holders", {})
-    after_h = after.get("per_accession_holders", {})
+    # Fail loudly rather than diff against an absent key. ``per_accession_holders``
+    # is newer than some summaries on disk, and defaulting it to {} makes this
+    # section report ZERO holders lost and gained — indistinguishable from a
+    # clean run, which is the exact false-negative class the #2158 prevention-log
+    # entry on simulated controls was written about (Codex ckpt-2 P2).
+    for label, summary in (("BEFORE", before), ("AFTER", after)):
+        if "per_accession_holders" not in summary:
+            raise SystemExit(
+                f"{label} summary predates the distinct-holder metric "
+                "(no 'per_accession_holders'). Regenerate BOTH sides with the "
+                "current script — a row-count-only diff is not an acceptable "
+                "substitute (#2140, #2158)."
+            )
+    before_h = before["per_accession_holders"]
+    after_h = after["per_accession_holders"]
     holders_lost: list[tuple[str, list[str]]] = []
     holders_gained: list[tuple[str, list[str]]] = []
     for acc, names in before_h.items():

@@ -671,19 +671,26 @@ def _parse_table_html(table_html: str) -> _RawTable | None:
         label_arm = len(parent_headers) <= max_data_width and _looks_like_label_row(body[0])
         if legacy_arm or label_arm:
             column_headers = body[0]
-            # The legacy (Sole/Shared/Total) arm combines both rows for
-            # SCORING, because the parent carries the SEC-prescribed keywords
-            # and the sub-row alone would not identify the table.
+            # BOTH arms combine the two rows for SCORING (#2158). Item 403
+            # prescribes the CAPTIONS, not a layout, so wherever the issuer puts
+            # them is the row that identifies the table — and when row 0 is the
+            # share-class row that 403(a)'s "any class" disclosure produces, the
+            # captions are entirely in row 1. Scoring row 0 alone took
+            # 0000908311-26-000065 to 0 where its caption row scores 13, and 181
+            # accessions returned zero rows as a result.
             #
-            # The label-row arm must NOT combine: a generic label row
-            # ('Name', 'Grant Date', 'Number of securities underlying
-            # unexercised options…') belongs to the Item 402(f) Outstanding
-            # Equity Awards table just as readily as to Item 403, so folding
-            # it into score_headers lifted that table to a tie with the real
-            # ownership table — and, appearing earlier in the document, it won
-            # (0001628280-25-020660: 20 real holders → 0, found by the
-            # full-population A/B). Whether a table IS the beneficial-ownership
-            # table stays decided by its own parent header.
+            # #2140 deliberately did NOT combine on the label arm, because a
+            # generic label row ('Name', 'Grant Date', 'Number of securities
+            # underlying unexercised options…') belongs to the Item 402(f)
+            # Outstanding Equity Awards table as readily as to Item 403, and
+            # folding it lifted that table to a tie with the real ownership
+            # table (0001628280-25-020660: 20 real holders → 0). That is
+            # INVERTED by ``_ITEM_402_AWARD_MARKERS``, which #2140 itself added
+            # later: the fold now feeds the disqualifier the very text that
+            # identifies an award table, so the cited counter-example scores 0
+            # rather than tying. Do not restore the split without re-checking
+            # that disqualifier — see the #2158 prevention-log entry on
+            # promoted rows and scorer identity evidence.
             score_headers = parent_headers + body[0]
             body = body[1:]
 
