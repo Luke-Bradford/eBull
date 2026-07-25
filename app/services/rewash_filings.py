@@ -611,15 +611,6 @@ def _apply_def14a(
         )
         return comp_written > 0
 
-    # Replace-then-insert: clear all existing holders for the
-    # accession so a holder dropped by the new parser cannot
-    # linger.
-    with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM def14a_beneficial_holdings WHERE accession_number = %s",
-            (raw_doc.accession_number,),
-        )
-
     # #2157 — fan out over share-class siblings. Item 403(a) requires the
     # REGISTRANT to disclose ownership of "any class" of its voting securities,
     # so one accession legitimately owns rows under EVERY sibling instrument of
@@ -637,6 +628,21 @@ def _apply_def14a(
         issuer_cik=str(issuer_cik),
         resolved_instrument_id=int(instrument_id),
     )
+
+    # Replace-then-insert: clear all existing holders for the accession so a
+    # holder dropped by the new parser cannot linger.
+    #
+    # MUST run AFTER the instrument-set resolution above, never before: the
+    # DELETE is accession-wide, so a resolution that reads
+    # ``def14a_beneficial_holdings`` sees an EMPTY table if it runs second, and
+    # any sibling known only from typed rows — not returned by
+    # ``_resolve_siblings`` and holding no live observations — would be
+    # hard-deleted and never rewritten (Codex ckpt-2 HIGH).
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM def14a_beneficial_holdings WHERE accession_number = %s",
+            (raw_doc.accession_number,),
+        )
 
     from app.services.def14a_ingest import (
         _record_def14a_observations_for_filing,

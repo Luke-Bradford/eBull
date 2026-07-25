@@ -2673,8 +2673,13 @@ def test_def14a_rewash_fans_out_over_every_instrument_holding_the_accession(
     conn = ebull_test_conn
     typed_iid = 950_061  # class A — keeps its typed rows
     orphan_iid = 950_062  # class B — typed rows already gone, observation live
+    # class C — typed rows ONLY: no live observation, and no sibling link for
+    # the resolver to find. The accession-wide DELETE would hard-delete it and
+    # never rewrite it if the instrument set were resolved AFTER the delete
+    # (Codex ckpt-2 HIGH). It is here purely to pin that ordering.
+    typed_only_iid = 950_063
     accession = "0001234567-26-000061"
-    for iid, symbol in ((typed_iid, "D14SA"), (orphan_iid, "D14SB")):
+    for iid, symbol in ((typed_iid, "D14SA"), (orphan_iid, "D14SB"), (typed_only_iid, "D14SC")):
         conn.execute(
             """
             INSERT INTO instruments (
@@ -2684,15 +2689,16 @@ def test_def14a_rewash_fans_out_over_every_instrument_holding_the_accession(
             """,
             (iid, symbol),
         )
-    conn.execute(
-        """
-        INSERT INTO def14a_beneficial_holdings (
-            instrument_id, accession_number, issuer_cik,
-            holder_name, holder_role, shares, percent_of_class, as_of_date
-        ) VALUES (%s, %s, '0000999061', 'Stale Name', 'officer', 100, 5.0, '2025-01-01')
-        """,
-        (typed_iid, accession),
-    )
+    for iid in (typed_iid, typed_only_iid):
+        conn.execute(
+            """
+            INSERT INTO def14a_beneficial_holdings (
+                instrument_id, accession_number, issuer_cik,
+                holder_name, holder_role, shares, percent_of_class, as_of_date
+            ) VALUES (%s, %s, '0000999061', 'Stale Name', 'officer', 100, 5.0, '2025-01-01')
+            """,
+            (iid, accession),
+        )
     # The orphaned sibling: no typed row, but a live observation under the old
     # parser's name. A typed-table-only union would never find it.
     record_def14a_observation(
@@ -2753,7 +2759,11 @@ def test_def14a_rewash_fans_out_over_every_instrument_holding_the_accession(
             (accession,),
         )
         typed = cur.fetchall()
-    assert typed == [(typed_iid, "Corrected Name"), (orphan_iid, "Corrected Name")]
+    assert typed == [
+        (typed_iid, "Corrected Name"),
+        (orphan_iid, "Corrected Name"),
+        (typed_only_iid, "Corrected Name"),
+    ]
 
     with conn.cursor() as cur:
         cur.execute(
@@ -2766,7 +2776,11 @@ def test_def14a_rewash_fans_out_over_every_instrument_holding_the_accession(
         live = cur.fetchall()
     # The orphan's stale observation is superseded, not left live beside the
     # corrected one — that is what kept ownership_def14a_current dirty.
-    assert live == [(typed_iid, "Corrected Name"), (orphan_iid, "Corrected Name")]
+    assert live == [
+        (typed_iid, "Corrected Name"),
+        (orphan_iid, "Corrected Name"),
+        (typed_only_iid, "Corrected Name"),
+    ]
 
     with conn.cursor() as cur:
         cur.execute(
@@ -2775,4 +2789,8 @@ def test_def14a_rewash_fans_out_over_every_instrument_holding_the_accession(
             (accession,),
         )
         current = cur.fetchall()
-    assert current == [(typed_iid, "Corrected Name"), (orphan_iid, "Corrected Name")]
+    assert current == [
+        (typed_iid, "Corrected Name"),
+        (orphan_iid, "Corrected Name"),
+        (typed_only_iid, "Corrected Name"),
+    ]

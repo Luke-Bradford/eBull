@@ -1283,10 +1283,13 @@ def _record_esop_observations_for_filing(
     """Record one ``ownership_esop_observations`` row per
     ``holder_role='esop'`` row from this DEF 14A accession (#843).
 
-    Returns the number of ESOP rows written so the caller can decide
-    whether to call ``refresh_esop_current`` (skip the refresh + its
-    advisory lock when the filing has zero ESOP rows — the common case
-    for large-cap issuers whose plans don't cross the 5% threshold).
+    Returns the number of ESOP rows AFFECTED — written plus superseded — so the
+    caller can decide whether to call ``refresh_esop_current`` (skipping the
+    refresh + its advisory lock when the filing has no ESOP rows and never had
+    any, the common case for large-cap issuers whose plans don't cross the 5%
+    threshold). "Affected", not "written": a re-parse that legitimately drops a
+    plan to zero rows still needs the refresh, or the superseded plan keeps its
+    ``ownership_esop_current`` row alive forever (#2157, Codex ckpt-2).
 
     ``plan_trustee_cik`` is left NULL — DEF 14A's trustee name (e.g.
     ``"Vanguard Fiduciary Trust Company"``) is a SEPARATE corporate
@@ -1304,6 +1307,31 @@ def _record_esop_observations_for_filing(
     period_end: date = as_of_date or fetched_at.date()
     filed_at = fetched_at
     run_id = uuid4()
+
+    # Supersede-then-reassert, same contract as
+    # ``_record_def14a_observations_for_filing`` (#2140 D6) and for the same
+    # reason: ``record_esop_observation`` conflicts on
+    # ``(instrument_id, plan_name, period_end, source_document_id)`` and
+    # ``plan_name`` is a PARSED value, so a parser fix that renames a plan
+    # writes the corrected row under a NEW key and leaves the broken one live —
+    # ``refresh_esop_current``'s source set is these observations, so its
+    # ``NOT MATCHED BY SOURCE`` prune never sees it. Scoped to
+    # ``(instrument_id, source_document_id)``, never the accession alone,
+    # because the caller fans out over share-class siblings (#2157).
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ownership_esop_observations
+               SET known_to = NOW()
+             WHERE instrument_id = %(iid)s
+               AND source = 'def14a'
+               AND source_document_id = %(doc_id)s
+               AND known_to IS NULL
+            """,
+            {"iid": instrument_id, "doc_id": accession_number},
+        )
+        superseded = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
     written = 0
     for holder in holders:
         if holder.holder_role != "esop":
@@ -1331,7 +1359,9 @@ def _record_esop_observations_for_filing(
             percent_of_class=Decimal(holder.percent_of_class) if holder.percent_of_class is not None else None,
         )
         written += 1
-    return written
+    # ``superseded`` keeps a zero-ESOP re-parse of a filing that previously HAD
+    # plans from silently skipping the refresh — see the docstring.
+    return written + superseded
 
 
 # ---------------------------------------------------------------------------
