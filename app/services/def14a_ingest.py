@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError; no untrusted input parsed here.
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -88,7 +88,26 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # 402(v) PvP iXBRL PeoName facts) with unanimity + (name, fy)-collision
 # guards. Specs: docs/proposals/etl/2026-07-22-def14a-pvp-neo-name-oracle.md
 # + …-def14a-sct-residual-name-classes.md.
-_PARSER_VERSION_DEF14A = "def14a-v6"
+# v7 (#2140): Item 403 column resolution + role classification. Percent is
+# resolved first, then shares (percent column excluded from the tiering), then
+# name — each excluding the already-claimed indices — and name discriminates on
+# Item 403's name-side captions only, never bare "beneficial" (which appears in
+# BOTH the name and amount captions, so a blank name caption made the SHARES
+# header win name_idx and the share count was persisted as holder_name on
+# 3,209 rows). Spanning-header promotion widened for the Name|Shares|Percent
+# label row. Structural guard: a holder name must carry name evidence. The
+# Item 403(b) "as a group" aggregate now overrides section context (it is
+# NON-ADDITIVE with its constituents). Holder names flatten interior render
+# wraps (holder_name_key is lower(trim(...)), so an interior newline split one
+# person into two identities across 704 rows). Spec:
+# docs/specs/etl/def14a-beneficial-ownership-column-and-role-resolution.md.
+# v8 (#2140, post-A/B): the shares recovery no longer reads a bare percent as a
+# share count (whole-number check + skip the cell percent actually came from),
+# the Item 403 sibling gate is an absolute score rather than proximity to the
+# best, address-only holder cells are dropped, and Item 402(d)/(f) award tables
+# are disqualified from selection. Bumped separately from v7 so the corpus
+# re-drives against the parser that actually shipped.
+_PARSER_VERSION_DEF14A = "def14a-v8"
 
 logger = logging.getLogger(__name__)
 
@@ -638,6 +657,52 @@ def _record_ingest_attempt(
     )
 
 
+def _supersede_dropped_holdings(
+    conn: psycopg.Connection[Any],
+    *,
+    accession_number: str,
+    instrument_ids: Sequence[int],
+    holder_names: Sequence[str],
+) -> int:
+    """Remove this filing's typed rows that the CURRENT parse no longer emits.
+
+    ``_upsert_holding`` is keyed on ``(instrument_id, accession_number,
+    holder_name)``, so a parser bump that CHANGES a holder name writes the
+    corrected row under a new key and leaves the old one live — the same
+    additive-reparse defect #2140 fixes on the observations layer (D6), but on
+    the typed table that ``ownership_rollup`` / ``ownership_drillthrough`` /
+    ``def14a_drift`` / the instruments API read. ``rewash_filings`` already
+    deletes the accession's typed rows wholesale, but the MANIFEST re-drive
+    path (which the v6->v7 bump triggers, invariant I9) did not. Codex pre-push
+    review caught the gap.
+
+    Deletes only the DROPPED names rather than replacing the whole accession,
+    so re-ingesting unchanged content stays a pure UPSERT (no churn in the
+    inserted/updated counters, no row-version bump for identical data).
+    """
+    if not instrument_ids or not holder_names:
+        # ``holder_name <> ALL('{}')`` is VACUOUSLY TRUE in Postgres (verified:
+        # SELECT 'x' <> ALL(ARRAY[]::text[]) -> true), so an empty name list
+        # would delete EVERY row for the accession instead of preserving them —
+        # turning a zero-row re-parse into silent data loss. A parse that finds
+        # nothing must supersede nothing; the rewash guard
+        # (``RewashParseError``) and the manifest tombstone path own that case.
+        # Guarding HERE rather than at the call sites so every future caller
+        # inherits it. Review bot BLOCKING on PR #2159.
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM def14a_beneficial_holdings
+            WHERE accession_number = %(acc)s
+              AND instrument_id = ANY(%(ids)s::bigint[])
+              AND holder_name <> ALL(%(names)s::text[])
+            """,
+            {"acc": accession_number, "ids": list(instrument_ids), "names": list(holder_names)},
+        )
+        return cur.rowcount
+
+
 def _upsert_holding(
     conn: psycopg.Connection[tuple],
     *,
@@ -1007,12 +1072,26 @@ def _ingest_single_accession(
             else:
                 updated += 1
 
+    # Drop typed rows this parse no longer emits (#2140) — see
+    # _supersede_dropped_holdings; without it a parser bump that RENAMES a
+    # holder leaves the old name live beside the corrected one.
+    _supersede_dropped_holdings(
+        conn,
+        accession_number=ref.accession_number,
+        instrument_ids=siblings,
+        holder_names=[h.holder_name for h in parsed.rows],
+    )
+
     # Write-through observations + refresh _current (#891 / spec
     # §"Eliminate periodic re-scan jobs"). Replaces nightly
     # ownership_observations_sync.sync_def14a read-from-typed-tables
-    # path. record_def14a_observation is itself UPSERT so re-ingest
-    # of the same accession (parser bump) refreshes existing rows
-    # in place. Fan out across share-class siblings post-#1117.
+    # path. _record_def14a_observations_for_filing replaces this
+    # (instrument, accession)'s prior observation rows before
+    # inserting, so a re-ingest under a bumped parser is corrective
+    # and not merely additive (#2140 D6 — the previous
+    # "UPSERT refreshes in place" claim held only while the parser
+    # kept producing the same holder NAME, which is the row key).
+    # Fan out across share-class siblings post-#1117.
     if parsed.rows:
         for sibling_iid in siblings:
             _record_def14a_observations_for_filing(
@@ -1109,6 +1188,43 @@ def _record_def14a_observations_for_filing(
     period_end: date = as_of_date or fetched_at.date()
     filed_at = fetched_at
     run_id = uuid4()
+
+    # Supersede-then-reassert (#2140 D6). ``record_def14a_observation`` is an
+    # UPSERT keyed on ``holder_name_key``, so it refreshes a row in place only
+    # while the parser keeps producing the SAME NAME. A parser fix that changes
+    # a name — which is exactly what #2140 does for 3,209 numeric-name rows and
+    # 704 newline-split rows — writes the corrected row under a NEW key and
+    # leaves the broken one live. ``refresh_def14a_current`` prunes via
+    # ``WHEN NOT MATCHED BY SOURCE THEN DELETE``, but its source set is these
+    # observations, so the stale rows keep their ``_current`` row alive
+    # forever. Without this step a re-wash is additive, not corrective.
+    #
+    # Tombstone rather than DELETE, per invariant I6 (never hard-delete
+    # observations). The #953 13F precedent chose DELETE for a purely
+    # MECHANICAL reason — its writer's ON CONFLICT DO UPDATE never cleared
+    # ``known_to``, so a re-asserted row would have stayed invisible forever.
+    # ``record_def14a_observation`` clears ``known_to`` on conflict, which
+    # removes that objection: every holder the new parse still emits is
+    # revived by the INSERT below (same transaction), and only the rows the
+    # new parse NO LONGER emits stay superseded — with their audit history
+    # intact. That is precisely the desired semantics.
+    #
+    # Scoped to (instrument_id, source_document_id) — NOT the accession alone.
+    # The caller fans this function out ONCE PER SHARE-CLASS SIBLING for the
+    # same accession, so an accession-wide sweep would make each sibling's
+    # write supersede the previous sibling's rows.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ownership_def14a_observations
+               SET known_to = NOW()
+             WHERE instrument_id = %(iid)s
+               AND source = 'def14a'
+               AND source_document_id = %(doc_id)s
+               AND known_to IS NULL
+            """,
+            {"iid": instrument_id, "doc_id": accession_number},
+        )
     for holder in holders:
         if holder.shares is None:
             continue

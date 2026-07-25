@@ -181,6 +181,17 @@ def _strip_inline_html(raw: str) -> str:
     no_tags = _HTML_TAG_RE.sub(" ", raw)
     no_nbsp = _NBSP_RE.sub(" ", no_tags)
     decoded = html.unescape(no_nbsp)
+    # Fold unicode spaces to plain spaces (#2140). ``_NBSP_RE`` only catches
+    # the ``&nbsp;`` ENTITY, so a literal U+00A0 in the markup survived — and
+    # Item 403's prescribed caption then failed to match: 'Amount\xa0and\xa0
+    # Nature\xa0of\xa0Beneficial\xa0Ownership' does not contain the substring
+    # "amount and nature", so it scored as a weak generic "amount" and LOST the
+    # shares tiering to a "Common Shares of <Issuer>" title column, putting
+    # shares_idx on the NAME column and dropping all 17 rows of
+    # 0001466593-25-000049 (found by the full-population A/B).
+    # No-op for the Item 402(c) path, which already folds these in ``_sct_norm``
+    # and ``_split_name_position``.
+    decoded = _UNICODE_SPACE_RE.sub(" ", decoded)
     return _INLINE_WHITESPACE_RE.sub(" ", decoded).strip()
 
 
@@ -351,11 +362,52 @@ _HEADER_KEYWORDS: Final[tuple[tuple[str, int], ...]] = (
 )
 
 
+# Captions PRESCRIBED by Reg S-K Item 402 for the equity-award tables —
+# 402(d) Grants of Plan-Based Awards and 402(f) Outstanding Equity Awards at
+# Fiscal Year-End — and used by NO Item 403 beneficial-ownership table. A
+# header carrying one of these is disqualified outright (#2140).
+#
+# Why a hard disqualifier rather than a penalty: the two table families share
+# the phrase "number of shares", so an award table can out-score a genuine
+# ownership table on keyword weight alone. That is not hypothetical — folding
+# unicode spaces (also #2140) made "Number\xa0of\xa0Shares of Stock or Units"
+# start matching, which lifted Hershey's 402(d) grants table from 2 to 5 and
+# beat the real ownership table at 4, taking 26 holders down to 7 rows of
+# grant data (0000047111-25-000035, found by the full-population A/B).
+#
+# Deliberately narrow — every marker is a multi-word Item 402 caption with no
+# Item 403 collision. "exercise price" is safe where a bare "exercisable"
+# would NOT be: Hershey's real ownership table has an "Exercisable Stock
+# Options" column.
+_ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
+    "grant date",
+    "estimated future payouts",
+    "exercise price",
+    "expiration date",
+    "unexercised",
+    "incentive plan award",
+    "payout value",
+    "market value of shares",
+)
+
+
+# Minimum score for a NON-best table to be merged as an Item 403 sibling.
+# 6 is what a header with SEC-prescribed wording reaches (see SCORE_FLOOR's
+# note in ``parse_beneficial_ownership_table``); 3-5 is bare or incidental.
+_SIBLING_SCORE_FLOOR: Final[int] = 6
+
+
 def _score_table_headers(headers: tuple[str, ...]) -> int:
-    """Score a candidate table's header row. Higher is better."""
+    """Score a candidate table's header row. Higher is better.
+
+    Returns 0 for a table carrying an Item 402 EQUITY-AWARD caption, however
+    well it otherwise scores — see :data:`_ITEM_402_AWARD_MARKERS`.
+    """
     if not headers:
         return 0
     joined = " ".join(headers).lower()
+    if any(marker in joined for marker in _ITEM_402_AWARD_MARKERS):
+        return 0
     score = 0
     for keyword, weight in _HEADER_KEYWORDS:
         if keyword in joined:
@@ -389,37 +441,116 @@ class _RawTable:
 
 _NUMERIC_LIKE_RE: Final[re.Pattern[str]] = re.compile(r"\d{2,}")
 
+# Column-label classes for two-row-header detection (#2140 D2). A row must
+# match at least TWO distinct classes to be treated as the real header row —
+# see :func:`_looks_like_subheader` for why substring matching and a
+# single-class match are both unsafe.
+# Item 403's prescribed AMOUNT captions. A header carrying one of these is the
+# share-count column even if it also mentions a percent (issuers merge the two
+# into a single column). Deliberately excludes the generic ``total`` /
+# ``shares`` / ``number`` / ``amount`` tiers, which are too weak to override a
+# percent caption. Kept in sync with the strong tiers of ``SHARES_TIERS`` in
+# :func:`_resolve_columns`.
+_STRONG_SHARES_KEYWORDS: Final[tuple[str, ...]] = (
+    "amount and nature",
+    "shares beneficially",
+    "shares owned",
+    "number of shares",
+)
+
+# Legacy (pre-#2140) trigger, preserved VERBATIM as substring matching so the
+# Sole/Shared/Total merged-header behaviour is unchanged by this ticket.
+_SUBHEADER_SUBDIVISION_KEYWORDS: Final[tuple[str, ...]] = (
+    "sole",
+    "shared",
+    "total",
+    "voting",
+    "dispositive",
+)
+_SUBHEADER_LABEL_CLASSES: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    ("name", re.compile(r"\b(?:name|owner|stockholder|shareholder|holder)\b", re.IGNORECASE)),
+    (
+        "amount",
+        re.compile(r"\b(?:shares?|number|amount|sole|shared|total|voting|dispositive)\b", re.IGNORECASE),
+    ),
+    ("percent", re.compile(r"\bpercent(?:age)?\b|%", re.IGNORECASE)),
+)
+
 
 def _looks_like_subheader(cells: tuple[str, ...]) -> bool:
-    """True when a row looks like a sub-header continuation rather
-    than a data row.
+    """True when a row is a header continuation rather than a data row.
 
-    A sub-header row:
-      * Has no cell containing a multi-digit run (data rows have
-        share counts like ``1,500,000``).
-      * Has at least one cell containing a column-label keyword
-        like ``Sole`` / ``Shared`` / ``Total`` / ``Voting`` /
-        ``Dispositive`` — these are the SEC-prescribed subdivisions
-        of the ``Amount and Nature of Beneficial Ownership``
-        merged-header column.
-    Codex pre-push review caught the merged-header case where a
-    proxy uses two header rows and the parser only saw row 0.
+    Two shapes qualify:
+
+      * the pre-#2140 SEC-prescribed subdivisions of the "Amount and Nature of
+        Beneficial Ownership" merged header (``Sole`` / ``Shared`` / ``Total``
+        / ``Voting`` / ``Dispositive``) — :func:`_looks_like_legacy_subheader`;
+      * a genuine column-LABEL row under a spanning row 0 (#2140 D2) —
+        :func:`_looks_like_label_row`.
+
+    Callers that promote a row must keep the two apart: only the legacy arm may
+    fold the promoted row into ``score_headers``. See ``_parse_table_html``.
     """
+    return _looks_like_legacy_subheader(cells) or _looks_like_label_row(cells)
+
+
+def _looks_like_legacy_subheader(cells: tuple[str, ...]) -> bool:
+    """Pre-#2140 sub-header test: an all-text row carrying one of the
+    SEC-prescribed subdivisions of the "Amount and Nature of Beneficial
+    Ownership" merged header. Preserved VERBATIM (substring matching) so this
+    ticket does not move the Sole/Shared/Total behaviour, and kept SEPARATE
+    from :func:`_looks_like_label_row` because only this arm may combine both
+    rows into ``score_headers``."""
     if not cells:
         return False
     for c in cells:
         if _NUMERIC_LIKE_RE.search(c):
             return False
     joined = " ".join(cells).lower()
-    # Sub-header keywords scope tightly to ownership-block subdivisions.
-    # ``common`` / ``preferred`` were originally on this list as share
-    # class indicators but they collide with legitimate holder names
-    # (e.g. ``"Common Fund LLC"``) — Codex / bot review caught the
-    # false positive: a one-cell holder-name row with "common" in the
-    # name AND no numeric cell would be silently promoted to column
-    # headers and dropped from the data set. Removed both.
-    sub_keywords = ("sole", "shared", "total", "voting", "dispositive")
-    return any(k in joined for k in sub_keywords)
+    return any(k in joined for k in _SUBHEADER_SUBDIVISION_KEYWORDS)
+
+
+def _looks_like_label_row(cells: tuple[str, ...]) -> bool:
+    """True when ``cells`` is a genuine COLUMN-LABEL row (#2140 D2).
+
+    Stricter than :func:`_looks_like_subheader`'s legacy arm, because this
+    predicate also authorises promotion when the parent header is merely the
+    SAME width as the data rows (see ``_parse_table_html``), where a false
+    positive would silently discard a real data row.
+
+    The real label row must name the HOLDER column (Item 403 always has one)
+    AND label at least one value column.
+
+    Requiring the name class specifically is load-bearing, not decoration: a
+    bare ">= 2 of {name, amount, percent}" test also promotes performance-
+    award tables — CYH's PSU row ('% of Target Achieved', '% of Granted
+    Shares Earned', '', 'Percentile Rank', …) matches percent + amount, and
+    promoting it inflated that table's score_headers enough to beat the real
+    ownership table, silently swapping which table the parser reads.
+    """
+    if not cells:
+        return False
+    for c in cells:
+        if _NUMERIC_LIKE_RE.search(c):
+            return False
+    # A label row labels SEPARATE columns, so it needs at least two non-empty
+    # cells and its label classes must come from DIFFERENT cells. Testing the
+    # joined text instead accepts a single-cell SECTION HEADING: '5% Stockholders'
+    # matches percent (via '%') and name (via 'stockholders') at once, and
+    # promoting it over the real header wrecked the table — column resolution
+    # collapsed, the ownership table stopped scoring, and an Item 402(f)
+    # equity-awards table won selection instead (0001628280-25-020660, found by
+    # the full-population A/B). Single-cell heading rows are already handled by
+    # ``_detect_role_heading`` in the row loop.
+    non_empty = [c for c in cells if c.strip()]
+    if len(non_empty) < 2:
+        return False
+    per_cell = [{cls for cls, pattern in _SUBHEADER_LABEL_CLASSES if pattern.search(c.lower())} for c in non_empty]
+    labelled_cells = [classes for classes in per_cell if classes]
+    if len(labelled_cells) < 2:
+        return False
+    matched = set().union(*labelled_cells)
+    return "name" in matched and len(matched) >= 2
 
 
 def _parse_table_html(table_html: str) -> _RawTable | None:
@@ -476,9 +607,45 @@ def _parse_table_html(table_html: str) -> _RawTable | None:
     # pre-push review caught the missing parent-row score combine.
     if body:
         max_data_width = max(len(r) for r in body)
-        if len(parent_headers) < max_data_width and _looks_like_subheader(body[0]):
+        # Two promotion arms (#2140 D2):
+        #   * NARROWER parent + any sub-header shape — the original
+        #     merged-header case (Sole/Shared/Total under a spanning cell).
+        #   * SAME-WIDTH parent + a strict column-LABEL row. An issuer can
+        #     render a header row that is full width yet still not the label
+        #     row: 0001308179-25-000615 has row 0
+        #     ('Name and Address of Beneficial Owner', '', '', '',
+        #     'Number of Shares Beneficially Owned') over row 1
+        #     ('5% or more Stockholders', '', 'Number', '', 'Percentage'),
+        #     both 5 cells. The strict `<` test left row 0 as the header, so
+        #     shares resolved onto the PERCENT column and all 20 real holders
+        #     (Vanguard/FMR/BlackRock…) were dropped. Full-population A/B
+        #     caught this — 159 accessions lost rows, 20 → 0 here.
+        #     `_looks_like_label_row` (name class REQUIRED + a value class +
+        #     no multi-digit cell) is what makes the looser width test safe.
+        # NOTE: the legacy arm tests ``_looks_like_legacy_subheader``, NOT
+        # ``_looks_like_subheader`` — the latter now also delegates to
+        # ``_looks_like_label_row``, so using it here would let a label row
+        # take the legacy path and re-inflate ``score_headers`` with the very
+        # combine this arm exists for, resurrecting the equity-awards
+        # mis-selection (0001628280-25-020660).
+        legacy_arm = len(parent_headers) < max_data_width and _looks_like_legacy_subheader(body[0])
+        label_arm = len(parent_headers) <= max_data_width and _looks_like_label_row(body[0])
+        if legacy_arm or label_arm:
             column_headers = body[0]
-            score_headers = parent_headers + body[0]
+            # The legacy (Sole/Shared/Total) arm combines both rows for
+            # SCORING, because the parent carries the SEC-prescribed keywords
+            # and the sub-row alone would not identify the table.
+            #
+            # The label-row arm must NOT combine: a generic label row
+            # ('Name', 'Grant Date', 'Number of securities underlying
+            # unexercised options…') belongs to the Item 402(f) Outstanding
+            # Equity Awards table just as readily as to Item 403, so folding
+            # it into score_headers lifted that table to a tie with the real
+            # ownership table — and, appearing earlier in the document, it won
+            # (0001628280-25-020660: 20 real holders → 0, found by the
+            # full-population A/B). Whether a table IS the beneficial-ownership
+            # table stays decided by its own parent header.
+            score_headers = parent_headers + body[0] if legacy_arm else parent_headers
             body = body[1:]
 
     return _RawTable(score_headers=score_headers, column_headers=column_headers, rows=tuple(body))
@@ -506,8 +673,45 @@ _LESS_THAN_ONE_PERCENT_VALUE: Final[Decimal] = Decimal("0.5")
 
 
 def _clean_holder_name(raw: str) -> str:
-    """Strip footnote markers from the holder name; keep the rest."""
+    """Strip footnote markers from the holder name; keep the rest.
+
+    SHARED with the Item 402(c) SCT path (``_split_name_position``,
+    ``_normalize_first_cell``, ``_looks_like_name_cell``) — do NOT add
+    ownership-specific cleaning here. #2140 initially did, and
+    ``_normalize_first_cell`` then fed a de-punctuated ``'EVP'`` into the
+    stacked-title fragment join, turning HBNC's
+    ``'EVP, Chief Financial Officer'`` into ``'EVP Chief Financial Officer'``
+    (caught by ``test_hbnc_non_lexicon_second_row_fragment``). Beneficial-
+    ownership-only cleaning belongs in
+    :func:`_clean_beneficial_holder_name`.
+    """
     return _FOOTNOTE_RE.sub("", raw).strip()
+
+
+def _clean_beneficial_holder_name(raw: str) -> str:
+    """Clean an Item 403 beneficial-ownership holder name.
+
+    ``_clean_holder_name`` plus two repairs that must NOT reach the Item 402(c)
+    path (see that function's docstring):
+
+    1. **Flatten interior line breaks** (#2140 D5). ``_INLINE_WHITESPACE_RE``
+       deliberately excludes ``\\n`` because the SCT name/title split needs it,
+       but ``ownership_def14a_observations.holder_name_key`` is
+       ``lower(trim(holder_name))`` and ``trim`` does not touch INTERIOR
+       whitespace. A render wrap inside the cell therefore made
+       ``'Michael\\n O. Johnson'`` and ``'Michael O. Johnson'`` two different
+       holder identities, splitting one person across two rows of
+       ``ownership_def14a_current`` — 704 rows / 117 instruments full-pop,
+       51 of them Item 403(b) group rows.
+    2. **Strip an unbracketed trailing footnote digit.** A superscript that
+       carried no parentheses survives ``_FOOTNOTE_RE`` as a bare trailing
+       number once the line break around it is flattened (MKTX:
+       ``'BlackRock, Inc. 1'``, ``'The Vanguard Group 2'``).
+       ``_clean_name_footnote`` is the repair the SCT path already applies to
+       NEO names (#2094) — reused, not re-derived.
+    """
+    flattened = _INLINE_WHITESPACE_RE.sub(" ", _clean_holder_name(raw).replace("\n", " ")).strip()
+    return _clean_name_footnote(flattened)
 
 
 def _parse_share_count(raw: str) -> Decimal | None:
@@ -515,7 +719,12 @@ def _parse_share_count(raw: str) -> Decimal | None:
     ``"1234567"`` / ``"1,234,567(1)"`` / dash / em-dash / empty."""
     if not raw:
         return None
-    cleaned = _FOOTNOTE_RE.sub("", raw).strip().replace(",", "").replace(" ", "")
+    # Strip an unbracketed trailing footnote superscript BEFORE spaces are
+    # removed (#2140): "52,606,862 1" is BlackRock's 52.6M holding with a
+    # footnote marker, and collapsing the space first turned it into
+    # 526,068,621 — a 10x overstatement (0000080661-25-000018).
+    cleaned = _TRAILING_FOOTNOTE_RE.sub("", _FOOTNOTE_RE.sub("", raw).strip())
+    cleaned = cleaned.strip().replace(",", "").replace(" ", "")
     if cleaned in ("", "-", "—", "–", "N/A", "n/a"):
         return None
     try:
@@ -596,10 +805,15 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
     preference, a Sole/Shared/Total/Percent layout reads ``Sole`` as
     shares and ``Shared`` as percent.
 
+    Resolution order is ``shares`` → ``percent`` → ``name``, each step
+    EXCLUDING the indices already claimed, so two columns can never collide
+    (#2140 D1). ``percent_idx`` is ``-1`` when the table has no percent column
+    distinguishable from the shares column — callers must treat a negative
+    index as "absent", never as a Python end-relative index.
+
     Defaults to ``(0, 1, len(headers) - 1)`` when no header match
     fires.
     """
-    name_idx = -1
     percent_idx = -1
     # Tiered shares search — try strongest signal first, fall back.
     shares_idx = -1
@@ -615,12 +829,36 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
         ("amount", 1),
     )
 
+    # PERCENT first. A percent caption is the least ambiguous of the three —
+    # "percent"/"%" appears in no legitimate name or amount caption — whereas
+    # the shares tiering's generic ``total`` keyword happily matches
+    # "Total as a Percentage of Shares Outstanding". Resolving shares first
+    # and then dropping the collision let that percent column win shares_idx,
+    # so the row parser read "5.0%" as a share count, found no percent, and
+    # dropped EVERY row of such a table (Codex pre-push review caught this;
+    # the same header shape previously survived with a percent-only row).
+    # ...EXCEPT that a header carrying one of Item 403's strong AMOUNT captions
+    # is the amount column even when it also names a percent, because issuers
+    # merge the two: "Amount and Nature of Beneficial Ownership and Percent of
+    # Class" is ONE column holding the share count. Letting percent claim it
+    # left shares unresolved and dropped all 16 rows of 0001140361-25-008248
+    # (found by the full-population A/B). The generic ``total`` tier is NOT
+    # strong enough to qualify — "Total as a Percentage of Shares Outstanding"
+    # is a real percent column.
     for i, h in enumerate(headers):
         lower = h.lower()
-        if name_idx == -1 and ("name" in lower or "beneficial" in lower):
-            name_idx = i
-        if percent_idx == -1 and ("percent" in lower or "%" in lower):
-            percent_idx = i
+        if "percent" not in lower and "%" not in lower:
+            continue
+        if any(k in lower for k in _STRONG_SHARES_KEYWORDS):
+            continue
+        percent_idx = i
+        break
+
+    # SHARES next, excluding the percent column from the tiering entirely.
+    for i, h in enumerate(headers):
+        if i == percent_idx:
+            continue
+        lower = h.lower()
         for keyword, weight in SHARES_TIERS:
             if keyword in lower:
                 shares_tier_priority.append((str(i), weight))
@@ -632,18 +870,64 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
         shares_tier_priority.sort(key=lambda x: (-x[1], int(x[0])))
         shares_idx = int(shares_tier_priority[0][0])
 
-    # Fallbacks. Many issuers use a multi-line nested-header style
-    # where the first row is "Name and Address / Amount and Nature
-    # of Beneficial Ownership / Percent of Class" with a sub-row
-    # "Sole / Shared / Total". The scoring pass picks the merged
-    # header row but column resolution can still see ambiguous
-    # entries.
+    # NAME next — still before any positional FALLBACK, because a fallback is
+    # a guess and must never outrank real header evidence. Resolving the shares
+    # fallback first let it claim column 1 blindly, and on a table whose name
+    # caption genuinely sits at index 1 ("Name of Beneficial Owner") that stole
+    # the name column and dropped all 18 rows (0001104659-25-025144, found by
+    # the full-population A/B).
+    #
+    # Name LAST of the three EVIDENCE passes, with claimed indices excluded
+    # (#2140 D1).
+    #
+    # Source rule — Reg S-K Item 403 (via Schedule 14A Item 6(d)) prescribes
+    # BOTH "Name and address of beneficial owner" / "Name of beneficial owner"
+    # (403(a)/(b)) AND "Amount and nature of beneficial ownership". The token
+    # ``beneficial`` therefore appears in every caption on both sides of the
+    # table and carries NO discriminating signal. Matching it (as this
+    # function used to) makes the SHARES column win ``name_idx`` whenever the
+    # issuer leaves the name caption blank — very common — so the share count
+    # was persisted as ``holder_name`` on 3,209 rows (13.4% of the corpus).
+    # Discriminate on the name-side tokens only.
+    name_idx = -1
+    NAME_KEYWORDS: Final[tuple[str, ...]] = (
+        "name and address",
+        "name of",
+        "name",
+        "beneficial owner",
+        "stockholder",
+        "shareholder",
+        "holder",
+    )
+    for keyword in NAME_KEYWORDS:
+        for i, h in enumerate(headers):
+            if i in (shares_idx, percent_idx):
+                continue
+            if keyword in h.lower():
+                name_idx = i
+                break
+        if name_idx != -1:
+            break
+    # POSITIONAL FALLBACKS last, for whatever header evidence did not resolve.
     if name_idx == -1:
-        name_idx = 0
+        # Blank name caption (the common Item 403 layout) — the name sits in
+        # column 0 unless that column is already claimed.
+        name_idx = next((i for i in range(max(len(headers), 1)) if i not in (shares_idx, percent_idx)), 0)
     if shares_idx == -1:
-        shares_idx = 1 if len(headers) >= 2 else 0
+        # Prefer the column just right of the name, then any other free one.
+        shares_idx = next(
+            (i for i in (name_idx + 1, 1, 0) if i < len(headers) and i not in (name_idx, percent_idx)),
+            name_idx + 1,
+        )
     if percent_idx == -1:
-        percent_idx = len(headers) - 1
+        # Positional fallback: the percent is conventionally the LAST column.
+        # Pre-#2140 this was unconditional (`len(headers) - 1`) and could alias
+        # the shares column; it is now guarded, but dropping it entirely lost
+        # real percents whose caption lives in an unpromoted sub-header row
+        # (0001437749-25-013824: 15 rows -> 4).
+        last = len(headers) - 1
+        if last >= 0 and last not in (name_idx, shares_idx):
+            percent_idx = last
     return (name_idx, shares_idx, percent_idx)
 
 
@@ -659,8 +943,15 @@ _ROLE_HEADING_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     (re.compile(r"\bofficers?\b", re.IGNORECASE), "officer"),
     (re.compile(r"5\s*%.*holders?", re.IGNORECASE), "principal"),
     (re.compile(r"principal\s+(?:share|stock)holders?", re.IGNORECASE), "principal"),
-    (re.compile(r"all\s+(?:directors?\s+and\s+)?executive\s+officers?\s+as\s+a\s+group", re.IGNORECASE), "group"),
 )
+# NO ``group`` pattern here, deliberately (#2140 D4). Per Item 403(b) the
+# "all directors and executive officers as a group" aggregate is a ROW, not a
+# section: it carries its own share count and sits inside the management block.
+# A heading match sets ``current_role`` for EVERY SUBSEQUENT ROW, so making a
+# group pattern reachable here would turn that one row into a sticky 'group'
+# context that mislabels the rest of the table — strictly worse than the
+# unreachable-pattern state it replaced. Group detection is inline-only, in the
+# row loop of :func:`parse_beneficial_ownership_table`.
 
 
 def _detect_role_heading(cells: tuple[str, ...]) -> str | None:
@@ -829,10 +1120,21 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
 
     # Multi-pass: try each priority window in order; the first one
     # whose best table meets the floor wins.
+    # Item 403 has TWO subsections — 403(a) >5% owners and 403(b) management +
+    # the group aggregate — and issuers routinely render them as TWO SEPARATE
+    # TABLES in the same section. Taking only the single best-scoring table
+    # therefore drops one subsection outright, and which one survives is
+    # decided by incidental header wording: 0001193125-26-119922 has a 2-row
+    # 403(a) table scoring 14 and a 14-row 403(b) table scoring 12, and any
+    # scoring tweak flips which is kept (the full-population A/B caught this as
+    # 14 rows -> 0). So keep EVERY qualifying table in the winning window and
+    # concatenate their rows; ``best_score`` stays the best single score for
+    # tombstone diagnostics.
+    qualifying: list[_RawTable] = []
     for window_start, window_end in candidate_windows:
         candidate_tables = _scan_outer_tables(html_text, start=window_start, end=window_end)
         window_best_score = 0
-        window_best_table: _RawTable | None = None
+        window_qualifying: list[tuple[int, _RawTable]] = []
         for start, end in candidate_tables:
             parsed = _parse_table_html(html_text[start:end])
             if parsed is None:
@@ -840,10 +1142,26 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             score = _score_table_headers(parsed.score_headers)
             if score > window_best_score:
                 window_best_score = score
-                window_best_table = parsed
-        if window_best_table is not None and window_best_score >= SCORE_FLOOR:
+            if score >= SCORE_FLOOR:
+                window_qualifying.append((score, parsed))
+        if window_qualifying and window_best_score >= SCORE_FLOOR:
             best_score = window_best_score
-            best_table = window_best_table
+            # Sibling tables need SEC-PRESCRIBED wording, not merely the
+            # floor. The floor is 3 — a bare Name|Shares|Percent header — so
+            # merging everything above it sweeps in prose and summary tables
+            # that happen to mention shares.
+            #
+            # An ABSOLUTE floor, not proximity to the best score: the two
+            # genuine Item 403 tables can score far apart, because whichever
+            # one happens to use the prescribed "Amount and Nature of
+            # Beneficial Ownership" caption scores much higher than a sibling
+            # headed "Common Stock" (12 vs 7 on 0001193125-25-245150 — a
+            # `best - 2` gate dropped that filing's 18-row 403(b) table and
+            # kept only 2 rows). Breakdown tables do not need a score gate:
+            # they restate the SAME HOLDERS, so the identity dedup in
+            # ``_extract_holder_rows`` already collapses them.
+            qualifying = [t for sc, t in window_qualifying if sc >= _SIBLING_SCORE_FLOOR or sc == window_best_score]
+            best_table = qualifying[0] if qualifying else None
             chosen_window = (window_start, window_end)
             break
         # Also track the global best in case no window meets floor —
@@ -863,11 +1181,44 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     window_start, window_end = chosen_window
     as_of_date = _extract_as_of_date(html_text, window_start=window_start, window_end=window_end)
 
-    name_idx, shares_idx, percent_idx = _resolve_columns(best_table.column_headers)
     rows: list[Def14ABeneficialHolder] = []
-    current_role: str | None = None
+    seen: set[str] = set()
+    # Best-captioned table first, so when two tables report the same holder the
+    # figures from the one with the strongest Item 403 header survive. Stable,
+    # so document order breaks ties.
+    for table in sorted(qualifying, key=lambda t: -_score_table_headers(t.score_headers)):
+        name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
+        _extract_holder_rows(
+            table,
+            name_idx=name_idx,
+            shares_idx=shares_idx,
+            percent_idx=percent_idx,
+            rows=rows,
+            seen=seen,
+        )
+    return Def14ABeneficialOwnershipTable(
+        as_of_date=as_of_date,
+        rows=rows,
+        raw_table_score=best_score,
+    )
 
-    for raw_row in best_table.rows:
+
+def _extract_holder_rows(
+    table: _RawTable,
+    *,
+    name_idx: int,
+    shares_idx: int,
+    percent_idx: int,
+    rows: list[Def14ABeneficialHolder],
+    seen: set[str],
+) -> None:
+    """Append one :class:`Def14ABeneficialHolder` per data row of ONE Item 403
+    table, skipping rows already collected from a sibling table.
+
+    Section-heading role context is local to ``table`` — each Item 403 table
+    re-establishes its own headings."""
+    current_role: str | None = None
+    for raw_row in table.rows:
         # Single-cell heading rows flip the role tag.
         heading_role = _detect_role_heading(raw_row)
         if heading_role is not None:
@@ -882,17 +1233,105 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
 
         # Pad short rows (some issuers omit trailing cells when the
         # value is blank) so positional access doesn't IndexError.
-        cells = list(raw_row) + [""] * max(0, percent_idx + 1 - len(raw_row))
+        cells = list(raw_row) + [""] * max(0, max(name_idx, shares_idx, percent_idx) + 1 - len(raw_row))
 
         holder_name_raw = cells[name_idx] if name_idx < len(cells) else ""
         shares_raw = cells[shares_idx] if shares_idx < len(cells) else ""
-        percent_raw = cells[percent_idx] if percent_idx < len(cells) else ""
+        # percent_idx < 0 means "no distinguishable percent column" — never
+        # index end-relative into the row (that would read a footnote cell).
+        percent_raw = cells[percent_idx] if 0 <= percent_idx < len(cells) else ""
 
-        holder_name = _clean_holder_name(holder_name_raw)
-        if not holder_name:
+        # Structural guard (#2140): a holder name must carry NAME evidence.
+        # Stated as a positive invariant rather than a numeric blacklist so it
+        # also rejects '*', '<1%', '—' and footnote-only cells. When the
+        # resolved cell has no name evidence, fall back to the leftmost cell in
+        # THIS row that does; if none does, the row has no holder and is
+        # dropped. This is what makes a share count landing in holder_name
+        # impossible regardless of future header shapes.
+        name_src_idx = name_idx
+        if not _looks_like_name_cell(holder_name_raw):
+            # The shares column is eligible as a name source ONLY when it holds
+            # no share count — a mis-resolved shares_idx can land on the name
+            # column itself, and excluding it unconditionally then leaves the
+            # row with no name at all and drops it.
+            shares_cell_is_numeric = (
+                _parse_share_count(cells[shares_idx] if shares_idx < len(cells) else "") is not None
+            )
+            name_src_idx, holder_name_raw = next(
+                (
+                    (i, c)
+                    for i, c in enumerate(cells)
+                    if not (i == shares_idx and shares_cell_is_numeric) and _looks_like_name_cell(c)
+                ),
+                (-1, ""),
+            )
+
+        holder_name = _clean_beneficial_holder_name(holder_name_raw)
+        if not holder_name or _is_address_fragment(holder_name):
             continue
         shares = _parse_share_count(shares_raw)
+        shares_src_idx = shares_idx if shares is not None else -1
+        # Parse the positional percent BEFORE recovering shares, so the
+        # recovery knows whether percent_idx actually yielded a percent. When
+        # it did, that cell is off limits; when it did not (a header narrower
+        # than its data rows puts a SHARE COUNT at percent_idx — 5,439,432
+        # under "Percent of Total (%)" on 0002077096-26-000092), the cell is
+        # fair game and skipping it unconditionally loses the row.
         percent = _parse_percent(percent_raw)
+        percent_src_idx = percent_idx if percent is not None else -1
+        if shares is None:
+            # Ragged/narrow header (#2140): a 3-cell header row over 5-cell
+            # data rows leaves shares_idx pointing at the NAME column
+            # (0002077096-26-000092 headers ('Number of Shares (#)', '',
+            # 'Percent of Total (%)') over rows [name, '', '5,439,432', '',
+            # '24.3']). Recover the share count from the first cell that
+            # parses as one, skipping the cell the holder name came from.
+            for i, cell in enumerate(cells):
+                if i in (name_src_idx, percent_src_idx):
+                    continue
+                if "%" in cell:
+                    continue
+                candidate = _parse_share_count(cell)
+                # Share counts are WHOLE shares. Requiring an integer stops the
+                # scan reading a bare percent as a holding — a row with
+                # ``Shares = —`` and ``Percent = 8.4`` would otherwise store
+                # shares=8.4 (Codex pre-push review). Leaving shares NULL is the
+                # safe fallback; _parse_percent already handles bare percents.
+                if candidate is not None and candidate == candidate.to_integral_value():
+                    shares, shares_src_idx = candidate, i
+                    break
+        if percent is None:
+            # Ragged row (#2140 D3): issuers interleave footnote-only cells
+            # ('(2)') mid-row, so a data row can be WIDER than its header row
+            # and the positionally-resolved percent cell lands on the wrong
+            # column — CYH stored percent NULL on every row while the filing
+            # plainly shows 8.4 / 6.9 / 6.0.
+            #
+            # Only cells that are UNAMBIGUOUSLY a percent are eligible: they
+            # carry a '%' or are the industry '*' (<1%) marker. A bare number
+            # is NOT accepted — _parse_percent's [0,100] clamp rejects large
+            # share counts but would happily read a small one (e.g. '50') as
+            # 50%, which is exactly the misfire this ticket exists to remove.
+            for i, cell in enumerate(cells):
+                # Skip the cells the name and the share COUNT actually came
+                # from — not the resolved indices. When a header resolves onto
+                # a percent column ("10.2%" under "Number of Shares
+                # Beneficially Owned") the share count is recovered from
+                # elsewhere in the row, and that percent cell must stay
+                # eligible or the row loses both values.
+                if i in (name_src_idx, shares_src_idx):
+                    continue
+                text = cell.strip()
+                # A value and its '%' sign are often SEPARATE cells ('17.1', '%'),
+                # so a bare number immediately followed by a lone '%' is just as
+                # unambiguous as '17.1%' in one cell.
+                followed_by_percent_sign = any(c.strip() for c in cells[i + 1 : i + 3]) and next(
+                    (c.strip() for c in cells[i + 1 :] if c.strip()), ""
+                ) in ("%", "(%)")
+                if "%" in text or text in ("*", "**") or (text and followed_by_percent_sign):
+                    percent = _parse_percent(text)
+                    if percent is not None:
+                        break
 
         # Drop rows where neither shares nor percent parsed — that's
         # almost always a free-text annotation row ("Notes:",
@@ -901,6 +1340,22 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             continue
 
         role = current_role or _detect_inline_role(holder_name)
+
+        # Item 403(b) group-aggregate override (#2140 D4). The "all directors
+        # and executive officers as a group" row is the ONE row that must stay
+        # distinguishable — its share count already contains every individual
+        # management row above it, so it is NON-ADDITIVE with them and a
+        # sum over a table that tags it 'officer' double-counts management.
+        #
+        # It sits INSIDE the 403(b) management block, so section context has
+        # already set current_role='officer' by the time it is read and the
+        # ``or`` above short-circuits _detect_inline_role (which does detect
+        # it). Hence the override — same shape as the ESOP override below,
+        # deliberately scoped to the aggregate row only: for individuals a
+        # section heading is better evidence than an inline job title, so the
+        # rest of _detect_inline_role keeps its current precedence.
+        if "as a group" in holder_name.lower():
+            role = "group"
 
         # ESOP override (#843): name-pattern detection wins over
         # section-derived role. ESOP plans routinely land in the
@@ -917,6 +1372,22 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
         if is_esop_plan(holder_name_raw) or is_esop_plan(holder_name):
             role = "esop"
 
+        # Dedup across sibling tables on HOLDER IDENTITY alone — the same key
+        # the observations layer uses, ``lower(trim(holder_name))``.
+        #
+        # Not (name, shares, percent): a filing often renders a BREAKDOWN table
+        # beside the real one (0000080661-25-000018 has "Total Common Shares
+        # Beneficially Owned" for 16 people and, below it, the same 16 split
+        # into "Restricted Stock Awards / Equivalent Units / Other"). Keying on
+        # the figures too would keep both and put every one of those people in
+        # twice — reintroducing exactly the duplicate-holder defect this ticket
+        # removes. Item 403 counts a beneficial owner ONCE, and the def14a
+        # slice is a non-additive memo overlay (data-engineer I21), so
+        # collapsing to one row per holder is both safer and more correct.
+        key = holder_name.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
         rows.append(
             Def14ABeneficialHolder(
                 holder_name=holder_name,
@@ -925,12 +1396,6 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
                 percent_of_class=percent,
             )
         )
-
-    return Def14ABeneficialOwnershipTable(
-        as_of_date=as_of_date,
-        rows=rows,
-        raw_table_score=best_score,
-    )
 
 
 # ===========================================================================
@@ -1203,6 +1668,46 @@ def _clean_name_footnote(name: str) -> str:
     name endings."""
     cleaned = _TRAILING_FOOTNOTE_RE.sub("", name.strip()).strip()
     return re.sub(r"[,;&–—/-]+\s*$", "", cleaned).strip()
+
+
+# Item 403's name column is "Name AND ADDRESS of beneficial owner", so issuers
+# put the address in the same cell — and when they split it across sibling <tr>
+# rows, the continuation lines land in the name column of their own row and
+# parse as holders with real share numbers ("c/o Dolan Family Office" @
+# 11,484,408 / 100%, "P.O. Box 420" @ 2,010,611 on 0001193125-25-095068).
+#
+# Only ADDRESS-ONLY cells are rejected — a leading c/o / PO box / attn / street
+# number. A combined name+address cell still passes because it LEADS with the
+# holder ("BlackRock, Inc. 55 East 52nd Street New York, NY 10055"). Anchored
+# so a company name starting with a digit is unaffected: "3M Company" and
+# "1st Source Corp" have no whitespace after the digits.
+_STREET_TYPE = (
+    r"street|st\.|avenue|ave\.?|road|rd\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|place|pl\.?"
+    r"|court|ct\.?|plaza|parkway|pkwy\.?|circle|highway|hwy\.?|terrace|square|yards|center|centre"
+    r"|suite|floor|building"
+)
+# A LEADING street number is only an address when a street-type token follows
+# within a few words. Without that constraint the rule eats real entities whose
+# name starts with digits — "325 Capital LLC", "2025 Acquisition Corp",
+# "2025 Irrevocable Two-Year Grantor Retained Annuity Trust" were all dropped
+# (caught by the full-population A/B's distinct-holder check). The window also
+# keeps a name that LEADS with the holder and merely carries an address after
+# it ("325 Capital LLC 200 Park Avenue, 17th Floor"), while still catching
+# "462 S. 4 th Street, Suite 2000".
+_ADDRESS_ONLY_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:c/o\b"
+    r"|p\.?\s*o\.?\s*box\b"
+    r"|post\s+office\s+box\b"
+    r"|attn\b|attention\b"
+    r"|\d{1,6}\s+(?:[A-Za-z0-9.'-]+\s+){0,3}(?:" + _STREET_TYPE + r")\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_address_fragment(name: str) -> bool:
+    """True when a holder-name cell holds only address material (#2140)."""
+    return bool(_ADDRESS_ONLY_RE.match(name.strip()))
 
 
 def _looks_like_name_cell(cell: str) -> bool:
