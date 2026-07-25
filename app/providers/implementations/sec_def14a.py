@@ -913,6 +913,15 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
             (i for i in (name_idx + 1, 1, 0) if i < len(headers) and i not in (name_idx, percent_idx)),
             name_idx + 1,
         )
+    if percent_idx == -1:
+        # Positional fallback: the percent is conventionally the LAST column.
+        # Pre-#2140 this was unconditional (`len(headers) - 1`) and could alias
+        # the shares column; it is now guarded, but dropping it entirely lost
+        # real percents whose caption lives in an unpromoted sub-header row
+        # (0001437749-25-013824: 15 rows -> 4).
+        last = len(headers) - 1
+        if last >= 0 and last not in (name_idx, shares_idx):
+            percent_idx = last
     return (name_idx, shares_idx, percent_idx)
 
 
@@ -1119,7 +1128,7 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     for window_start, window_end in candidate_windows:
         candidate_tables = _scan_outer_tables(html_text, start=window_start, end=window_end)
         window_best_score = 0
-        window_qualifying: list[_RawTable] = []
+        window_qualifying: list[tuple[int, _RawTable]] = []
         for start, end in candidate_tables:
             parsed = _parse_table_html(html_text[start:end])
             if parsed is None:
@@ -1128,11 +1137,19 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             if score > window_best_score:
                 window_best_score = score
             if score >= SCORE_FLOOR:
-                window_qualifying.append(parsed)
+                window_qualifying.append((score, parsed))
         if window_qualifying and window_best_score >= SCORE_FLOOR:
             best_score = window_best_score
-            qualifying = window_qualifying
-            best_table = window_qualifying[0]
+            # Sibling tables must be NEAR-BEST, not merely above the floor.
+            # The floor is 3 — a bare Name|Shares|Percent header — so merging
+            # everything above it sweeps in decomposition and summary tables
+            # that happen to mention shares. The genuine 403(a) and 403(b)
+            # tables both carry Item 403 captions and score within a couple of
+            # points of each other (14 vs 12 on 0001193125-26-119922), whereas
+            # 0000080661-25-000018's breakdown table sits at 9 against 14.
+            cutoff = max(SCORE_FLOOR, window_best_score - 2)
+            qualifying = [t for sc, t in window_qualifying if sc >= cutoff]
+            best_table = qualifying[0] if qualifying else None
             chosen_window = (window_start, window_end)
             break
         # Also track the global best in case no window meets floor —
@@ -1219,6 +1236,7 @@ def _extract_holder_rows(
         # THIS row that does; if none does, the row has no holder and is
         # dropped. This is what makes a share count landing in holder_name
         # impossible regardless of future header shapes.
+        name_src_idx = name_idx
         if not _looks_like_name_cell(holder_name_raw):
             # The shares column is eligible as a name source ONLY when it holds
             # no share count — a mis-resolved shares_idx can land on the name
@@ -1227,19 +1245,34 @@ def _extract_holder_rows(
             shares_cell_is_numeric = (
                 _parse_share_count(cells[shares_idx] if shares_idx < len(cells) else "") is not None
             )
-            holder_name_raw = next(
+            name_src_idx, holder_name_raw = next(
                 (
-                    c
+                    (i, c)
                     for i, c in enumerate(cells)
                     if not (i == shares_idx and shares_cell_is_numeric) and _looks_like_name_cell(c)
                 ),
-                "",
+                (-1, ""),
             )
 
         holder_name = _clean_beneficial_holder_name(holder_name_raw)
         if not holder_name:
             continue
         shares = _parse_share_count(shares_raw)
+        shares_src_idx = shares_idx if shares is not None else -1
+        if shares is None:
+            # Ragged/narrow header (#2140): a 3-cell header row over 5-cell
+            # data rows leaves shares_idx pointing at the NAME column
+            # (0002077096-26-000092 headers ('Number of Shares (#)', '',
+            # 'Percent of Total (%)') over rows [name, '', '5,439,432', '',
+            # '24.3']). Recover the share count from the first cell that
+            # parses as one, skipping the cell the holder name came from.
+            for i, cell in enumerate(cells):
+                if i == name_src_idx:
+                    continue
+                candidate = _parse_share_count(cell)
+                if candidate is not None:
+                    shares, shares_src_idx = candidate, i
+                    break
         percent = _parse_percent(percent_raw)
         if percent is None:
             # Ragged row (#2140 D3): issuers interleave footnote-only cells
@@ -1254,16 +1287,22 @@ def _extract_holder_rows(
             # share counts but would happily read a small one (e.g. '50') as
             # 50%, which is exactly the misfire this ticket exists to remove.
             for i, cell in enumerate(cells):
-                if i == name_idx:
-                    continue
-                # The shares column is eligible ONLY when it produced no share
-                # count — a header that resolved onto a percent column ("10.2%"
-                # under "Number of Shares Beneficially Owned") would otherwise
-                # lose both values and drop the row.
-                if i == shares_idx and shares is not None:
+                # Skip the cells the name and the share COUNT actually came
+                # from — not the resolved indices. When a header resolves onto
+                # a percent column ("10.2%" under "Number of Shares
+                # Beneficially Owned") the share count is recovered from
+                # elsewhere in the row, and that percent cell must stay
+                # eligible or the row loses both values.
+                if i in (name_src_idx, shares_src_idx):
                     continue
                 text = cell.strip()
-                if "%" in text or text in ("*", "**"):
+                # A value and its '%' sign are often SEPARATE cells ('17.1', '%'),
+                # so a bare number immediately followed by a lone '%' is just as
+                # unambiguous as '17.1%' in one cell.
+                followed_by_percent_sign = any(c.strip() for c in cells[i + 1 : i + 3]) and next(
+                    (c.strip() for c in cells[i + 1 :] if c.strip()), ""
+                ) in ("%", "(%)")
+                if "%" in text or text in ("*", "**") or (text and followed_by_percent_sign):
                     percent = _parse_percent(text)
                     if percent is not None:
                         break
