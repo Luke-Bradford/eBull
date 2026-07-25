@@ -1267,7 +1267,7 @@ def _extract_holder_rows(
             )
 
         holder_name = _clean_beneficial_holder_name(holder_name_raw)
-        if not holder_name:
+        if not holder_name or _is_address_fragment(holder_name):
             continue
         shares = _parse_share_count(shares_raw)
         shares_src_idx = shares_idx if shares is not None else -1
@@ -1654,6 +1654,28 @@ def _clean_name_footnote(name: str) -> str:
     name endings."""
     cleaned = _TRAILING_FOOTNOTE_RE.sub("", name.strip()).strip()
     return re.sub(r"[,;&–—/-]+\s*$", "", cleaned).strip()
+
+
+# Item 403's name column is "Name AND ADDRESS of beneficial owner", so issuers
+# put the address in the same cell — and when they split it across sibling <tr>
+# rows, the continuation lines land in the name column of their own row and
+# parse as holders with real share numbers ("c/o Dolan Family Office" @
+# 11,484,408 / 100%, "P.O. Box 420" @ 2,010,611 on 0001193125-25-095068).
+#
+# Only ADDRESS-ONLY cells are rejected — a leading c/o / PO box / attn / street
+# number. A combined name+address cell still passes because it LEADS with the
+# holder ("BlackRock, Inc. 55 East 52nd Street New York, NY 10055"). Anchored
+# so a company name starting with a digit is unaffected: "3M Company" and
+# "1st Source Corp" have no whitespace after the digits.
+_ADDRESS_ONLY_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:c/o\b|p\.?\s*o\.?\s*box\b|post\s+office\s+box\b|attn\b|attention\b|\d{1,6}\s+[A-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def _is_address_fragment(name: str) -> bool:
+    """True when a holder-name cell holds only address material (#2140)."""
+    return bool(_ADDRESS_ONLY_RE.match(name.strip()))
 
 
 def _looks_like_name_cell(cell: str) -> bool:

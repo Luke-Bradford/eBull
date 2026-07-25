@@ -28,6 +28,7 @@ from app.providers.implementations.sec_def14a import (
     Def14ABeneficialOwnershipTable,
     _clean_beneficial_holder_name,
     _clean_holder_name,
+    _is_address_fragment,
     _looks_like_label_row,
     _looks_like_subheader,
     _parse_percent,
@@ -976,6 +977,45 @@ class TestShareCountFootnote:
         assert _parse_share_count("52,606,862 1") == Decimal("52606862")
         assert _parse_share_count("52,606,862 (1)") == Decimal("52606862")
         assert _parse_share_count("1,650,489") == Decimal("1650489")
+
+
+class TestAddressFragmentsAreNotHolders:
+    """Item 403's column is "Name AND ADDRESS of beneficial owner". When an
+    issuer splits the address across sibling <tr> rows, the continuation lines
+    land in the name column of their own row and parse as holders carrying real
+    share numbers (0001193125-25-095068)."""
+
+    def test_address_only_cells_are_rejected(self) -> None:
+        for text in (
+            "c/o Dolan Family Office",
+            "P.O. Box 420",
+            "620 Eighth Avenue New York, NY 10018",
+            "Attn: Legal Department",
+        ):
+            assert _is_address_fragment(text), text
+
+    def test_a_name_leading_its_address_is_kept(self) -> None:
+        for text in (
+            "BlackRock, Inc. 55 East 52nd Street New York, NY 10055",
+            "The Vanguard Group",
+            "3M Company",
+            "1st Source Corp",
+            "All directors and executive officers as a group (5 persons)",
+        ):
+            assert not _is_address_fragment(text), text
+
+    def test_address_continuation_row_is_dropped(self) -> None:
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>Dolan Family Group</td><td>1,074,594</td><td>3.19%</td></tr>
+          <tr><td>c/o Dolan Family Office</td><td>11,484,408</td><td>100%</td></tr>
+          <tr><td>P.O. Box 420</td><td>2,010,611</td><td>17.51%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Dolan Family Group"]
 
 
 class TestHolderNameStructuralGuard:
