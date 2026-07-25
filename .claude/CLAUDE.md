@@ -161,6 +161,8 @@ When Codex is NOT required:
 - Routine edits after Codex already reviewed the plan + first diff and there is no rebuttal-only round pending.
 
 Invocation rule: always use `codex exec` (non-interactive). Never bare `codex` with no subcommand (requires interactive terminal).
+`codex exec review` needs a target — `codex exec review --base origin/main` for a branch diff. Bare `review` errors with
+"Specify --uncommitted, --base, --commit, or provide custom review instructions".
 
 ## Review decision tree — who to consult in what order
 
@@ -221,6 +223,11 @@ uv run pyright
 uv run pytest -m "not db"        # fast tier: pure-logic, no Postgres (~60-90s under load)
 uv run pytest tests/smoke        # app boots against the dev DB
 ```
+
+Long-running corpus jobs (rewash, full-population A/B) must be launched with the tool's own
+background mode. A `nohup … &` started inside an ordinary tool call is killed when that call's
+process group is cleaned up — a 45-minute backfill silently dies part-way and the version
+distribution is the only tell.
 
 A repo pre-push hook at `.githooks/pre-push` enforces all of these plus
 the chokepoint-lint scripts automatically. Wire once per clone:
@@ -285,6 +292,7 @@ Read and apply these before pushing:
 - `.claude/skills/engineering/python-hygiene.md`
 - `.claude/skills/engineering/sql-correctness.md`
 - `.claude/skills/engineering/test-quality.md`
+- `.claude/skills/engineering/full-population-ab.md` — MANDATORY before claiming any parser / ETL / scoring change is safe. Distinct-entity metric (never row count), inspect the gain side, parse-vs-STORED as a separate arm, never simulate the control. #2140 ran 8 rounds; #2158 ran 3.
 - `.claude/skills/engineering/pre-push-checklist.md` — the canonical pre-push gate list (SQL/Python/test checks + review-comment handling); mirrors `.githooks/pre-push`.
 - `.claude/skills/engineering/bash-script-hygiene.md` — read when editing any `scripts/*.sh`, especially the chokepoint-lint guards (shellcheck `-S warning` floor, `set -e` in `$(…)`).
 
