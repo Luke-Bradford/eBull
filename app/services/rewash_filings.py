@@ -749,6 +749,16 @@ def _def14a_holdings_instrument_ids(
         # the comp helper: surface the DQ issue but still refresh the rows we
         # KNOW about — total failure would freeze them on the old parser, the
         # exact bug this helper exists to fix.
+        #
+        # ValueError ONLY, deliberately (review round 1 NITPICK asked for a
+        # broader catch). A DB error here has already aborted the surrounding
+        # transaction, so "degrading gracefully" is not available: every later
+        # statement on this non-autocommit connection raises
+        # InFailedSqlTransaction anyway, and swallowing the original error would
+        # replace a clear failure with a confusing one three calls later
+        # (prevention log, #1700 prefetch isolation). Per-accession isolation is
+        # the rewash runner's job — it catches, records rows_failed, and moves
+        # on — not this helper's.
         logger.warning(
             "def14a rewash: non-numeric issuer_cik=%r for accession=%s; "
             "sibling resolution skipped, refreshing known holdings instruments only",
