@@ -298,6 +298,56 @@ in the same change.
 This makes the def14a re-ingest **idempotent and self-cleaning**, which is what
 turns the rewash into a real backfill rather than an additive one.
 
+## Defects found by the full-population A/B (not in the original report)
+
+Six full-corpus runs. Each surfaced mechanisms the five-filing panel passed
+over; the panel was green on every run that was not yet clean.
+
+- **D7 — Item 403 has TWO tables.** 403(a) >5% owners and 403(b) management are
+  routinely separate tables, and only one was ever read. Which one survived
+  turned on incidental header wording, so any scoring change flipped it
+  (0001193125-26-119922: 14 rows → 0). All qualifying tables in the winning
+  window are now collected, deduped on **holder identity** — not
+  `(name, shares, percent)`, which kept a filing's *breakdown* table and put
+  all 16 of its people in twice (0000080661-25-000018).
+- **D8 — Item 402 award tables outscoring Item 403.** Both families use
+  "number of shares", so a 402(d)/(f) grants table can win on keyword weight —
+  and folding unicode spaces (D11) made those captions start matching, taking
+  Hershey from 26 holders to 7 rows of grant data. Disqualified outright.
+- **D9 — share count inflated 10×.** `'52,606,862 1'` → **526,068,621**: an
+  unbracketed footnote survived and the space was collapsed into the number.
+  Pre-existing on `main`.
+- **D10 — merged Item 403 caption.** "Amount and Nature of Beneficial Ownership
+  **and Percent of Class**" is ONE column holding the share count; percent-first
+  resolution stole it and shares never resolved.
+- **D11 — literal U+00A0 in captions.** `_NBSP_RE` only caught the `&nbsp;`
+  *entity*, so "Amount\xa0and\xa0Nature" never matched its own prescribed
+  caption and a "Common Shares of <Issuer>" title column won the shares tiering,
+  putting `shares_idx` on the name column.
+- **D12 — address fragments as holders.** Item 403's column is "Name **and
+  address**"; when the address is split across sibling `<tr>` rows each
+  continuation line becomes a row with a real share count
+  (`'c/o Dolan Family Office'` @ 11,484,408 / 100%).
+- **D13 — typed table additive on rename.** Same shape as D6 but on
+  `def14a_beneficial_holdings`, which the rollup / drillthrough / drift readers
+  use. `rewash_filings` deleted those rows; the manifest re-drive that the
+  v6→v7 bump triggers did not. (Codex pre-push.)
+
+### Measuring the A/B correctly
+
+Row count is the WRONG metric twice over, and both errors pointed at fixes that
+would have made the parser worse:
+
+1. A row-count drop is often `main` losing **garbage** — 48 accessions where it
+   was parsing an Item 402 award table (dates as holder names), 23 with
+   majority-garbage names. Chasing the count would have re-admitted them.
+2. A drop is also the **identity dedup working** (61 accessions) — which is what
+   D5 exists to do.
+
+The metric that matters is **distinct holders lost**. Under it the final run
+shows **zero**. Gains must be inspected too: losses were clean before D12 was
+found, and D12 only appears on the gain side.
+
 ## Verification
 
 ### Full-population A/B (offline — no EDGAR fetch)
