@@ -990,9 +990,27 @@ class TestAddressFragmentsAreNotHolders:
             "c/o Dolan Family Office",
             "P.O. Box 420",
             "620 Eighth Avenue New York, NY 10018",
+            "100 Vanguard Blvd, Malvern, PA 19355",
+            "50 Hudson Yards, New York, NY 10001",
+            "2000 Avenue of the Stars, Suite 1110",
+            "462 S. 4 th Street, Suite 2000",
+            "6300 Bee Cave Road, Austin, TX 78746",
             "Attn: Legal Department",
         ):
             assert _is_address_fragment(text), text
+
+    def test_entities_whose_name_starts_with_digits_are_kept(self) -> None:
+        # A leading street NUMBER alone is not an address — requiring a
+        # street-type token nearby is what stops the rule eating real holders.
+        # The full-population distinct-holder check caught all three of these.
+        for text in (
+            "325 Capital LLC",
+            "2025 Acquisition Corp",
+            "2025 Irrevocable Two-Year Grantor Retained Annuity Trust",
+            # Leads with the holder, address trails — still a holder.
+            "325 Capital LLC 200 Park Avenue, 17th Floor",
+        ):
+            assert not _is_address_fragment(text), text
 
     def test_a_name_leading_its_address_is_kept(self) -> None:
         for text in (

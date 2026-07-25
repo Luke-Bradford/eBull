@@ -1667,8 +1667,26 @@ def _clean_name_footnote(name: str) -> str:
 # holder ("BlackRock, Inc. 55 East 52nd Street New York, NY 10055"). Anchored
 # so a company name starting with a digit is unaffected: "3M Company" and
 # "1st Source Corp" have no whitespace after the digits.
+_STREET_TYPE = (
+    r"street|st\.|avenue|ave\.?|road|rd\.?|boulevard|blvd\.?|drive|dr\.?|lane|ln\.?|way|place|pl\.?"
+    r"|court|ct\.?|plaza|parkway|pkwy\.?|circle|highway|hwy\.?|terrace|square|yards|center|centre"
+    r"|suite|floor|building"
+)
+# A LEADING street number is only an address when a street-type token follows
+# within a few words. Without that constraint the rule eats real entities whose
+# name starts with digits — "325 Capital LLC", "2025 Acquisition Corp",
+# "2025 Irrevocable Two-Year Grantor Retained Annuity Trust" were all dropped
+# (caught by the full-population A/B's distinct-holder check). The window also
+# keeps a name that LEADS with the holder and merely carries an address after
+# it ("325 Capital LLC 200 Park Avenue, 17th Floor"), while still catching
+# "462 S. 4 th Street, Suite 2000".
 _ADDRESS_ONLY_RE: Final[re.Pattern[str]] = re.compile(
-    r"^(?:c/o\b|p\.?\s*o\.?\s*box\b|post\s+office\s+box\b|attn\b|attention\b|\d{1,6}\s+[A-Za-z])",
+    r"^(?:c/o\b"
+    r"|p\.?\s*o\.?\s*box\b"
+    r"|post\s+office\s+box\b"
+    r"|attn\b|attention\b"
+    r"|\d{1,6}\s+(?:[A-Za-z0-9.'-]+\s+){0,3}(?:" + _STREET_TYPE + r")\b"
+    r")",
     re.IGNORECASE,
 )
 
