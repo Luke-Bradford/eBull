@@ -391,6 +391,12 @@ _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
 )
 
 
+# Minimum score for a NON-best table to be merged as an Item 403 sibling.
+# 6 is what a header with SEC-prescribed wording reaches (see SCORE_FLOOR's
+# note in ``parse_beneficial_ownership_table``); 3-5 is bare or incidental.
+_SIBLING_SCORE_FLOOR: Final[int] = 6
+
+
 def _score_table_headers(headers: tuple[str, ...]) -> int:
     """Score a candidate table's header row. Higher is better.
 
@@ -1140,15 +1146,21 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
                 window_qualifying.append((score, parsed))
         if window_qualifying and window_best_score >= SCORE_FLOOR:
             best_score = window_best_score
-            # Sibling tables must be NEAR-BEST, not merely above the floor.
-            # The floor is 3 — a bare Name|Shares|Percent header — so merging
-            # everything above it sweeps in decomposition and summary tables
-            # that happen to mention shares. The genuine 403(a) and 403(b)
-            # tables both carry Item 403 captions and score within a couple of
-            # points of each other (14 vs 12 on 0001193125-26-119922), whereas
-            # 0000080661-25-000018's breakdown table sits at 9 against 14.
-            cutoff = max(SCORE_FLOOR, window_best_score - 2)
-            qualifying = [t for sc, t in window_qualifying if sc >= cutoff]
+            # Sibling tables need SEC-PRESCRIBED wording, not merely the
+            # floor. The floor is 3 — a bare Name|Shares|Percent header — so
+            # merging everything above it sweeps in prose and summary tables
+            # that happen to mention shares.
+            #
+            # An ABSOLUTE floor, not proximity to the best score: the two
+            # genuine Item 403 tables can score far apart, because whichever
+            # one happens to use the prescribed "Amount and Nature of
+            # Beneficial Ownership" caption scores much higher than a sibling
+            # headed "Common Stock" (12 vs 7 on 0001193125-25-245150 — a
+            # `best - 2` gate dropped that filing's 18-row 403(b) table and
+            # kept only 2 rows). Breakdown tables do not need a score gate:
+            # they restate the SAME HOLDERS, so the identity dedup in
+            # ``_extract_holder_rows`` already collapses them.
+            qualifying = [t for sc, t in window_qualifying if sc >= _SIBLING_SCORE_FLOOR or sc == window_best_score]
             best_table = qualifying[0] if qualifying else None
             chosen_window = (window_start, window_end)
             break
