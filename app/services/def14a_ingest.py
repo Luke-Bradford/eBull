@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET  # noqa: S405 — only used to catch ET.ParseError; no untrusted input parsed here.
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -651,6 +651,44 @@ def _record_ingest_attempt(
     )
 
 
+def _supersede_dropped_holdings(
+    conn: psycopg.Connection[Any],
+    *,
+    accession_number: str,
+    instrument_ids: Sequence[int],
+    holder_names: Sequence[str],
+) -> int:
+    """Remove this filing's typed rows that the CURRENT parse no longer emits.
+
+    ``_upsert_holding`` is keyed on ``(instrument_id, accession_number,
+    holder_name)``, so a parser bump that CHANGES a holder name writes the
+    corrected row under a new key and leaves the old one live — the same
+    additive-reparse defect #2140 fixes on the observations layer (D6), but on
+    the typed table that ``ownership_rollup`` / ``ownership_drillthrough`` /
+    ``def14a_drift`` / the instruments API read. ``rewash_filings`` already
+    deletes the accession's typed rows wholesale, but the MANIFEST re-drive
+    path (which the v6->v7 bump triggers, invariant I9) did not. Codex pre-push
+    review caught the gap.
+
+    Deletes only the DROPPED names rather than replacing the whole accession,
+    so re-ingesting unchanged content stays a pure UPSERT (no churn in the
+    inserted/updated counters, no row-version bump for identical data).
+    """
+    if not instrument_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM def14a_beneficial_holdings
+            WHERE accession_number = %(acc)s
+              AND instrument_id = ANY(%(ids)s::bigint[])
+              AND holder_name <> ALL(%(names)s::text[])
+            """,
+            {"acc": accession_number, "ids": list(instrument_ids), "names": list(holder_names)},
+        )
+        return cur.rowcount
+
+
 def _upsert_holding(
     conn: psycopg.Connection[tuple],
     *,
@@ -1019,6 +1057,16 @@ def _ingest_single_accession(
                 inserted += 1
             else:
                 updated += 1
+
+    # Drop typed rows this parse no longer emits (#2140) — see
+    # _supersede_dropped_holdings; without it a parser bump that RENAMES a
+    # holder leaves the old name live beside the corrected one.
+    _supersede_dropped_holdings(
+        conn,
+        accession_number=ref.accession_number,
+        instrument_ids=siblings,
+        holder_names=[h.holder_name for h in parsed.rows],
+    )
 
     # Write-through observations + refresh _current (#891 / spec
     # §"Eliminate periodic re-scan jobs"). Replaces nightly

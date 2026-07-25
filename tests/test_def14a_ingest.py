@@ -492,6 +492,64 @@ class TestIngestDef14a:
             row = cur.fetchone()
         assert row is not None and row[0] is True
 
+    def test_reparse_drops_typed_rows_the_new_parse_no_longer_emits(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#2140 (Codex pre-push) — ``_upsert_holding`` is keyed on
+        ``(instrument_id, accession_number, holder_name)``, so a parser bump
+        that RENAMES a holder writes the corrected row under a new key and
+        leaves the old one live in ``def14a_beneficial_holdings``, which the
+        rollup / drillthrough / drift readers use. ``rewash_filings`` already
+        deleted the accession's typed rows, but the MANIFEST re-drive path that
+        the v6->v7 bump triggers did not.
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000011"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _typed_names() -> set[str]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT holder_name FROM def14a_beneficial_holdings WHERE accession_number = %s",
+                    (accession,),
+                )
+                return {r[0] for r in cur.fetchall()}
+
+        first = _typed_names()
+        assert first
+
+        # Simulate the pre-fix parser output: rename one stored holder.
+        stale = sorted(first)[0]
+        conn.execute(
+            """
+            UPDATE def14a_beneficial_holdings
+               SET holder_name = %s
+             WHERE accession_number = %s AND holder_name = %s
+            """,
+            ("999,999", accession, stale),
+        )
+        conn.execute("DELETE FROM def14a_ingest_log WHERE accession_number = %s", (accession,))
+        conn.commit()
+        assert "999,999" in _typed_names()
+
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        after = _typed_names()
+        assert "999,999" not in after, "renamed row survived the reparse"
+        assert after == first
+
     def test_unrecognisable_table_tombstones_partial(
         self,
         _setup: psycopg.Connection[tuple],

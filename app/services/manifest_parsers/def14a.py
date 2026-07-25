@@ -68,6 +68,7 @@ from app.services.def14a_ingest import (
     _record_esop_observations_for_filing,
     _record_ingest_attempt,
     _resolve_issuer_cik,
+    _supersede_dropped_holdings,
     _upsert_holding,
     apply_exec_comp_best_effort,
     def14a_within_cap,
@@ -417,6 +418,16 @@ def _parse_def14a(
             # pre-#1735 batch-txn rewash-vs-live deadlock no longer arises.
             acquire_filing_accession_write_lock(conn, accession)
             siblings = _resolve_siblings(conn, instrument_id=instrument_id, issuer_cik=issuer_cik)
+            # Drop typed rows this parse no longer emits (#2140). This is the
+            # path the v6->v7 parser-version re-drive takes (invariant I9), so
+            # without it the re-drive is additive on the typed table that the
+            # rollup / drillthrough / drift readers use.
+            _supersede_dropped_holdings(
+                conn,
+                accession_number=accession,
+                instrument_ids=siblings,
+                holder_names=[h.holder_name for h in parsed.rows],
+            )
             for sibling_iid in siblings:
                 for holder in parsed.rows:
                     outcome = _upsert_holding(
