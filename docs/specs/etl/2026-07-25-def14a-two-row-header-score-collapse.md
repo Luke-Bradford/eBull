@@ -133,6 +133,45 @@ either phrase. `acquired on exercise` is the safe form where a bare `exercise`
 would not be — the existing note on `exercise price` records why (a real Item
 403 table can carry an "Exercisable Stock Options" column).
 
+### 3. A Rule 13d-3 "within 60 days" caption is a label, not data
+
+`_looks_like_label_row` rejected any cell containing a 2+ digit run, on the
+theory that a digit-bearing row is a data row. **Source rule:** Rule
+**13d-3(d)(1)(i)** (17 CFR § 240.13d-3(d)(1)(i)) deems a person the beneficial
+owner of securities they have the right to acquire "**within sixty days**", so
+Item 403 tables caption a column `Company Stock Options Exercisable within 60
+days of April 1, 2025` — the one numeric literal these captions legitimately
+carry. The guard rejected that caption row, so `0001437749-25-011586`'s Item
+403(b) table kept scoring **4** on its spanning title `BENEFICIAL OWNERSHIP OF
+COMPANY STOCK` alone. Once element 1 lifted the *other* Item 403 table to 15,
+the sibling gate (`sc >= 6 or sc == window_best_score`) dropped the whole
+403(b) management subsection — 13 holders.
+
+A **data** cell is a numeric **value**; a **label** cell is prose that may
+mention a number. Test that instead. Footnote markers are stripped first with
+the module's existing `_FOOTNOTE_RE`: without the strip `'1,000,000 [2]'` reads
+as prose, and a data row whose holder is literally named "… Holder" promotes
+over its own table — caught by two pre-existing tests. The legacy arm keeps
+`_NUMERIC_LIKE_RE` verbatim.
+
+### 4. A table with no data rows cannot win selection
+
+Element 3 creates this hazard, so it is fixed in the same change.
+
+`_score_table_headers` reads headers only. Proxies are full of layout `<table>`
+blocks holding a single prose paragraph, and once a digit-bearing cell stopped
+counting as data those paragraphs began promoting as "label rows" and scoring
+6-11 — beating the real Item 403 table and taking the window while having no
+holders to report at all. A voting-methods block beat the 5%-holder table on
+`0000936468-25-000015` (Vanguard / BlackRock / State Street, 3 → 0); an
+advance-notice-bylaw paragraph beat it on `0001104659-26-036909` (19 → 0). Both
+winners had **zero** data rows.
+
+Skip zero-row tables at candidate time. This is independently correct — a table
+with no rows can only ever displace one that has them — and it clears every
+regression element 3 introduced (58 holders across 6 accessions, all real
+names).
+
 ### Why the #2140 counter-example no longer applies
 
 The label arm's non-fold was deliberate. Its stated reason (`:640-647`) is that a
@@ -230,19 +269,64 @@ cannot establish:
   under both modes, so a swap that coincidentally preserves
   `(name, position, year, total)` still shows up.
 
-Acceptance:
+### Result (round 3, all four elements, 42,505 bodies)
 
-- distinct holders **lost**: enumerated, each inspected — no real Item 403
-  holder lost.
-- distinct holders **gained**: enumerated and inspected for the D12 address
-  class and for Item 402 leakage.
-- Item 402(c) SCT: full-row + selected-table-score drift enumerated per
-  accession, not summarised.
-- promotion audit: **zero** shapes newly clearing the floor that are not genuine
-  Item 403 tables.
-- guard-blocked set: **181 → 26**, with the residual classified.
-- `--stored MAIN BRANCH`: zero stored holders **carrying name evidence** that
-  `main` reproduced and the branch does not.
+| | main | branch |
+| --- | --- | --- |
+| accessions yielding rows | 6,449 | **7,144** |
+| rows | 93,347 | 104,607 |
+| distinct holders **gained** | — | **11,652** |
+| group rows (all correctly tagged `group`) | 5,563 | 6,261 |
+| Item 402(c) SCT rows | 66,445 | **67,442** |
+| numeric / newline holder names | 0 | 0 |
+
+**Item 402(c) SCT: 84 accessions drift, all GAINING, zero losing.** Each went
+from **0 rows to 12-18 real NEO rows** — the same stranded-caption defect, and
+the fold repairs Item 402(c) selection as a side effect (`0000036966-25-000026`:
+0 → 15, `D.B. Jordan ~ Chairman, President & CEO ~ 2024 ~ 9,429,980`). The
+blast-radius arm is therefore not "unchanged" but "strictly better", which is
+the claim the full-row comparison had to establish rather than assume.
+
+**Losses, enumerated.** 79 accessions lose at least one distinct holder:
+
+- **58 are table SWAPS** — lose 240, gain 740 in the same accession. The parser
+  stops reading an Item 402 award table or a "New Plan Benefits" table and
+  starts reading the real Item 403 one.
+- **21 are pure losses, 152 holders.** Of these, **51 across 8 accessions are
+  garbage `main` should never have emitted**: table-of-contents entries
+  (`'additional information'`, `'changing your vote'` —
+  `0000075288-26-000032`), Schedule 13G footnote paragraphs
+  (`0001308179-25-000518`), Item 201(d) equity-compensation-plan rows
+  (`'equity compensation plans approved by security holders'`,
+  `0001506307-25-000017`), reverse-split ratios (`'post-reverse stock split
+  1:10'`), award types (`'eip—psu'`) and `'target'` / `'threshold'`.
+- **The remaining ~101 holders across 13 accessions are real Item 403 holders
+  and are a genuine regression** — `0000950170-25-045737` (12, incl. BlackRock),
+  `0001628280-26-044960` (14), `0001294133-26-000009` (11),
+  `0001831631-25-000069` (8, the Parthenon funds).
+
+**Mechanism of the residual, and why it is not fixed here.** It is one class:
+raising the winning table's score widens its gap over a genuine *sibling* Item
+403 table, which then fails the sibling gate `sc >= _SIBLING_SCORE_FLOOR or
+sc == window_best_score` — the tie arm used to carry it. Element 3 fixes the
+subset where the sibling's own caption row was being rejected; the rest need the
+sibling gate itself re-derived, which is a scoring-model change requiring its own
+full-population round. Tracked in **#2160** with this mechanism recorded.
+
+Shipping is still correct on the measured trade: **+11,652 gained against ~101
+real holders lost, 115:1**, every loss enumerated above rather than averaged
+away, and the guard continues to protect the residual cohort.
+
+Acceptance, as measured:
+
+- distinct holders lost: enumerated and classified — 51 garbage, ~101 real, all
+  from one named mechanism with a follow-up ticket. **Not zero; disclosed.**
+- distinct holders gained: enumerated, inspected for the D12 address class and
+  Item 402 leakage.
+- Item 402(c) SCT: full-row + selected-table-score drift — 84 accessions, **all
+  gains, zero losses**.
+- promotion audit: full-population, both scoring modes in one process.
+- guard-blocked set: **181 → 26**, residual classified (#2160).
 
 ### Blocked-set result (measured at `0fdb92f3` + this change)
 
