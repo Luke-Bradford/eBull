@@ -100,6 +100,36 @@ Follow this order unless the user explicitly says otherwise:
 11. Write a complete PR description.
 12. Follow the branch and PR workflow below — push, poll, wait, resolve, repeat until APPROVE on the most recent commit with CI green.
 
+## Terminal step of a ticket — never leave state to reconstruct
+
+`/insights` (2026-07-25) found most fires ended with "a PR still awaiting CI or a
+batch half-drained, leaving you to reconstruct state next session". That
+reconstruction is pure re-paid cost.
+
+A ticket is finished only when one of these is true:
+
+1. merged, with CI green on the merged commit and the branch deleted; or
+2. **a handoff comment is posted on the PR** giving the exact remaining
+   commands, the acceptance queries with their expected values, and any
+   prerequisite (a migration that must be applied first, a job that must be
+   running). Written so the next session runs it without re-deriving anything.
+
+"PR opened" and "backfill started" are not terminal states. If credits or time
+run out mid-drain, spend the last of them on the handoff note, not on one more
+poll — the note is what makes the remaining work cheap.
+
+## Long-running work belongs in a worktree
+
+Anything long-running or experimental — full-population A/B runs, corpus
+backfills, flaky-test discrimination, anything a sibling session might race —
+goes in `git worktree add`, not the shared `~/Dev/eBull` checkout. Concurrent
+edits otherwise contaminate the run, and a subagent or sibling can clobber
+uncommitted work (`/insights` 2026-07-25; the 07-16 race).
+
+Exception: work that must be exercised against the running dev stack, which
+serves `~/Dev/eBull` only. Branch in the main checkout for the dev-verify step,
+and re-detach at `origin/main` afterwards.
+
 ## Standing retrospective checkpoint (#2075)
 
 After each epic close, or every ~10 merged PRs, run one "inheriting-team
@@ -161,6 +191,8 @@ When Codex is NOT required:
 - Routine edits after Codex already reviewed the plan + first diff and there is no rebuttal-only round pending.
 
 Invocation rule: always use `codex exec` (non-interactive). Never bare `codex` with no subcommand (requires interactive terminal).
+`codex exec review` needs a target — `codex exec review --base origin/main` for a branch diff. Bare `review` errors with
+"Specify --uncommitted, --base, --commit, or provide custom review instructions".
 
 ## Review decision tree — who to consult in what order
 
@@ -221,6 +253,11 @@ uv run pyright
 uv run pytest -m "not db"        # fast tier: pure-logic, no Postgres (~60-90s under load)
 uv run pytest tests/smoke        # app boots against the dev DB
 ```
+
+Long-running corpus jobs (rewash, full-population A/B) must be launched with the tool's own
+background mode. A `nohup … &` started inside an ordinary tool call is killed when that call's
+process group is cleaned up — a 45-minute backfill silently dies part-way and the version
+distribution is the only tell.
 
 A repo pre-push hook at `.githooks/pre-push` enforces all of these plus
 the chokepoint-lint scripts automatically. Wire once per clone:
@@ -285,6 +322,7 @@ Read and apply these before pushing:
 - `.claude/skills/engineering/python-hygiene.md`
 - `.claude/skills/engineering/sql-correctness.md`
 - `.claude/skills/engineering/test-quality.md`
+- `.claude/skills/engineering/full-population-ab.md` — MANDATORY before claiming any parser / ETL / scoring change is safe. Distinct-entity metric (never row count), inspect the gain side, parse-vs-STORED as a separate arm, never simulate the control. #2140 ran 8 rounds; #2158 ran 3.
 - `.claude/skills/engineering/pre-push-checklist.md` — the canonical pre-push gate list (SQL/Python/test checks + review-comment handling); mirrors `.githooks/pre-push`.
 - `.claude/skills/engineering/bash-script-hygiene.md` — read when editing any `scripts/*.sh`, especially the chokepoint-lint guards (shellcheck `-S warning` floor, `set -e` in `$(…)`).
 

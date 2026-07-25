@@ -611,41 +611,82 @@ def _apply_def14a(
         )
         return comp_written > 0
 
-    # Replace-then-insert: clear all existing holders for the
-    # accession so a holder dropped by the new parser cannot
-    # linger.
+    # #2157 — fan out over share-class siblings. Item 403(a) requires the
+    # REGISTRANT to disclose ownership of "any class" of its voting securities,
+    # so one accession legitimately owns rows under EVERY sibling instrument of
+    # the issuer, and the live path writes them that way
+    # (def14a_ingest.py:1061-1119). This arm wrote only the ONE instrument the
+    # LIMIT 1 resolution above happened to pick, while the DELETE it follows
+    # clears the accession's rows for ALL of them — so each rewash silently
+    # dropped every other sibling's typed rows and left their observations live
+    # under the OLD parser's names, which refresh_def14a_current then keeps
+    # alive forever. 41 (accession, instrument) pairs / 31 instruments / 457
+    # live observation rows full-pop.
+    instrument_ids = _def14a_holdings_instrument_ids(
+        conn,
+        raw_doc=raw_doc,
+        issuer_cik=str(issuer_cik),
+        resolved_instrument_id=int(instrument_id),
+    )
+
+    # Replace-then-insert: clear all existing holders for the accession so a
+    # holder dropped by the new parser cannot linger.
+    #
+    # MUST run AFTER the instrument-set resolution above, never before: the
+    # DELETE is accession-wide, so a resolution that reads
+    # ``def14a_beneficial_holdings`` sees an EMPTY table if it runs second, and
+    # any sibling known only from typed rows — not returned by
+    # ``_resolve_siblings`` and holding no live observations — would be
+    # hard-deleted and never rewritten (Codex ckpt-2 HIGH).
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM def14a_beneficial_holdings WHERE accession_number = %s",
             (raw_doc.accession_number,),
         )
 
-    for holder in parsed.rows:
-        _upsert_holding(
-            conn,
-            accession_number=raw_doc.accession_number,
-            issuer_cik=str(issuer_cik),
-            instrument_id=int(instrument_id),
-            as_of_date=parsed.as_of_date,
-            holder=holder,
-        )
-
-    # Write-through to ownership_def14a_observations + refresh
-    # ownership_def14a_current. Mirrors the first-ingest path at
-    # app/services/def14a_ingest.py:463-471. Without this, the rewash
-    # writes typed rows but leaves the rollup (#905 read-path) stale
-    # against the new parser output (#945 same-pattern as 13F).
-    from app.services.def14a_ingest import _record_def14a_observations_for_filing
-    from app.services.ownership_observations import refresh_def14a_current
-
-    _record_def14a_observations_for_filing(
-        conn,
-        instrument_id=int(instrument_id),
-        accession_number=raw_doc.accession_number,
-        as_of_date=parsed.as_of_date,
-        holders=parsed.rows,
+    from app.services.def14a_ingest import (
+        _record_def14a_observations_for_filing,
+        _record_esop_observations_for_filing,
     )
-    refresh_def14a_current(conn, instrument_id=int(instrument_id))
+    from app.services.ownership_observations import refresh_def14a_current, refresh_esop_current
+
+    for iid in instrument_ids:
+        for holder in parsed.rows:
+            _upsert_holding(
+                conn,
+                accession_number=raw_doc.accession_number,
+                issuer_cik=str(issuer_cik),
+                instrument_id=iid,
+                as_of_date=parsed.as_of_date,
+                holder=holder,
+            )
+
+        # Write-through to ownership_def14a_observations + refresh
+        # ownership_def14a_current. Mirrors the first-ingest path at
+        # app/services/def14a_ingest.py:463-471. Without this, the rewash
+        # writes typed rows but leaves the rollup (#905 read-path) stale
+        # against the new parser output (#945 same-pattern as 13F).
+        _record_def14a_observations_for_filing(
+            conn,
+            instrument_id=iid,
+            accession_number=raw_doc.accession_number,
+            as_of_date=parsed.as_of_date,
+            holders=parsed.rows,
+        )
+        refresh_def14a_current(conn, instrument_id=iid)
+
+        # ESOP write-through (#843). The live path runs this per sibling
+        # (def14a_ingest.py:1105); rewash carried NO esop call at all, so a
+        # plan renamed by a parser fix stayed stale under every instrument and
+        # a newly-detected plan was never recorded (#2157, Codex ckpt-1).
+        if _record_esop_observations_for_filing(
+            conn,
+            instrument_id=iid,
+            accession_number=raw_doc.accession_number,
+            as_of_date=parsed.as_of_date,
+            holders=parsed.rows,
+        ):
+            refresh_esop_current(conn, instrument_id=iid)
 
     # Item 402(c) exec-comp rewash (#1945; helper shared with the
     # rescue-cohort branch above since #2086).
@@ -662,12 +703,89 @@ def _apply_def14a(
     # best-effort contract; never changes the rewash outcome.
     from app.services.def14a_ingest import run_drift_detection_best_effort
 
+    # Sibling-wide, matching the live paths (def14a_ingest.py:1134, manifest
+    # parser :528). Single-instrument here left def14a_drift_alerts holding the
+    # same sibling stale state #2157 removes everywhere else (Codex ckpt-1).
     run_drift_detection_best_effort(
         conn,
-        instrument_ids=[int(instrument_id)],
+        instrument_ids=instrument_ids,
         accession_number=raw_doc.accession_number,
     )
     return True
+
+
+def _def14a_holdings_instrument_ids(
+    conn: psycopg.Connection[Any],
+    *,
+    raw_doc: RawFilingDocument,
+    issuer_cik: str,
+    resolved_instrument_id: int,
+) -> list[int]:
+    """#2157 — every instrument this accession's Item 403 rows belong under.
+
+    Same shape as :func:`_rewash_exec_comp_all_instruments`'s set, and for the
+    same reason: ``_apply_def14a`` resolves ONE instrument via ``LIMIT 1``, so a
+    per-instrument write freezes every share-class sibling on the old parser.
+
+    Set = ``_resolve_siblings`` (the SAME resolver the live manifest ingest fans
+    out with, so rewash output converges on what a fresh first-ingest under the
+    current parser would write) UNION every instrument that already holds rows
+    for this accession, UNION the resolved instrument.
+
+    The union is read from BOTH ``def14a_beneficial_holdings`` AND live
+    ``ownership_def14a_observations``. The observations half is what reaches the
+    already-damaged rows: the accession-wide DELETE in ``_rewash_def14a``
+    removed the orphaned siblings' typed rows, so a typed-table-only union
+    cannot see them and the repair rewash would not repair them. Their live
+    observations are the only surviving evidence the instrument was ever
+    written (41 such pairs full-pop).
+    """
+    from app.services.manifest_parsers.def14a import _resolve_siblings
+
+    try:
+        instrument_ids = set(_resolve_siblings(conn, instrument_id=resolved_instrument_id, issuer_cik=issuer_cik))
+    except ValueError:
+        # Garbage non-numeric CIK (siblings_for_issuer_cik fail-fast). Mirror
+        # the comp helper: surface the DQ issue but still refresh the rows we
+        # KNOW about — total failure would freeze them on the old parser, the
+        # exact bug this helper exists to fix.
+        #
+        # ValueError ONLY, deliberately (review round 1 NITPICK asked for a
+        # broader catch). A DB error here has already aborted the surrounding
+        # transaction, so "degrading gracefully" is not available: every later
+        # statement on this non-autocommit connection raises
+        # InFailedSqlTransaction anyway, and swallowing the original error would
+        # replace a clear failure with a confusing one three calls later
+        # (prevention log, #1700 prefetch isolation). Per-accession isolation is
+        # the rewash runner's job — it catches, records rows_failed, and moves
+        # on — not this helper's.
+        logger.warning(
+            "def14a rewash: non-numeric issuer_cik=%r for accession=%s; "
+            "sibling resolution skipped, refreshing known holdings instruments only",
+            issuer_cik,
+            raw_doc.accession_number,
+        )
+        instrument_ids = set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT instrument_id
+            FROM def14a_beneficial_holdings
+            WHERE accession_number = %(acc)s
+              AND instrument_id IS NOT NULL
+            UNION
+            SELECT DISTINCT instrument_id
+            FROM ownership_def14a_observations
+            WHERE source_document_id = %(acc)s
+              AND source = 'def14a'
+              AND known_to IS NULL
+              AND instrument_id IS NOT NULL
+            """,
+            {"acc": raw_doc.accession_number},
+        )
+        instrument_ids.update(int(row[0]) for row in cur.fetchall())
+    instrument_ids.add(resolved_instrument_id)
+    return sorted(instrument_ids)
 
 
 def _rewash_exec_comp_all_instruments(

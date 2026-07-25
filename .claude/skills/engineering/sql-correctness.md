@@ -234,3 +234,28 @@ sentinel (`min(ratio, SENTINEL)`) chosen so the consumer's thresholds
 still classify correctly, and document the sentinel where it's defined.
 Do not widen the column instead — the next pathological row outgrows
 that too, and a saturated sentinel is honest about "beyond measurable".
+
+## A new WHERE predicate in a per-row chokepoint needs an index check BEFORE the backfill
+
+Adding a lookup to a function that runs once per row of a corpus sweep is a
+performance decision, not just a correctness one. Check that an index actually
+leads with the column you filter on — "the table has four indexes" means nothing
+if all four lead with something else.
+
+#2157 added an instrument-set lookup filtering `source_document_id` **alone** —
+by construction there was no `instrument_id` to lead with, since finding the
+instruments was the point. Every index on the table led with `instrument_id` or
+`holder_name_key`, so the lookup sequentially scanned 111,867 rows per accession
+and the full-corpus backfill dropped to **~28 accessions/min against a ~145/min
+baseline**. With `CREATE INDEX … (source_document_id)`: **~300/min**.
+
+- `EXPLAIN` the new query once against the dev DB before starting the sweep. It
+  costs seconds and the sweep costs hours.
+- Compare against the *previous* sweep's throughput, not against nothing. A
+  5× slowdown is obvious next to a baseline and invisible on its own.
+- On a **partitioned** table, `CREATE INDEX` on the parent cascades to existing
+  and future partitions — no per-partition follow-up. It cannot be
+  `CONCURRENTLY` if the migration runner wraps each file in a transaction, so
+  create it while the sweep is paused rather than fighting the lock.
+- Ship the index in the same PR as the predicate. A backfill that only runs fast
+  on the author's machine because they added the index by hand is not reproducible.

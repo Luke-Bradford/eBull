@@ -1640,7 +1640,15 @@ def record_esop_observation(
                 shares = EXCLUDED.shares,
                 percent_of_class = EXCLUDED.percent_of_class,
                 ingest_run_id = EXCLUDED.ingest_run_id,
-                ingested_at = clock_timestamp()
+                ingested_at = clock_timestamp(),
+                -- Revive: the caller supersedes this filing's prior ESOP rows
+                -- before re-asserting, so a plan the new parse STILL emits must
+                -- come back live in the same transaction and only the plans it
+                -- no longer emits stay tombstoned (#2157, mirrors the def14a
+                -- clause added by #2140 D6). Without this the conflict key —
+                -- which contains the PARSED plan_name — leaves a renamed plan
+                -- live beside its correction forever.
+                known_to = NULL
             """,
             {
                 "iid": instrument_id,
