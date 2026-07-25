@@ -461,6 +461,12 @@ class _RawTable:
 
 _NUMERIC_LIKE_RE: Final[re.Pattern[str]] = re.compile(r"\d{2,}")
 
+# A cell that IS a numeric value — share count, percent, dash-with-footnote —
+# as opposed to a caption that merely mentions a number. Used by
+# :func:`_looks_like_label_row`; the legacy arm keeps ``_NUMERIC_LIKE_RE``
+# verbatim so #2140's Sole/Shared/Total behaviour does not move.
+_NUMERIC_VALUE_CELL_RE: Final[re.Pattern[str]] = re.compile(r"^[\s$(\[<*—–-]*\d[\d,.\s%]*[\s$)\]>*%—–-]*$")
+
 # Column-label classes for two-row-header detection (#2140 D2). A row must
 # match at least TWO distinct classes to be treated as the real header row —
 # see :func:`_looks_like_subheader` for why substring matching and a
@@ -550,8 +556,21 @@ def _looks_like_label_row(cells: tuple[str, ...]) -> bool:
     """
     if not cells:
         return False
+    # A DATA cell is a numeric VALUE; a LABEL cell is prose that may happen to
+    # contain a number. Testing "contains a 2+ digit run" (#2140's guard,
+    # retained verbatim on the legacy arm) conflates the two and rejects the one
+    # numeric literal Item 403 captions legitimately carry: Rule 13d-3(d)(1)(i)
+    # deems a person the beneficial owner of securities acquirable "within sixty
+    # days", so issuers caption a column "Options Exercisable within 60 days of
+    # April 1, 2025". That caption row scores 15 once promoted — but the digit
+    # guard rejected it, the table stayed at 4 on its spanning title alone, and
+    # the sibling gate then dropped the entire Item 403(b) management
+    # subsection (#2158: 13 holders on 0001437749-25-011586, 48 full-pop).
+    # Footnote markers are stripped first — ``'1,000,000 [2]'`` is a share
+    # count, and without the strip it reads as prose and a data row whose
+    # holder is literally named "… Holder" gets promoted over its own table.
     for c in cells:
-        if _NUMERIC_LIKE_RE.search(c):
+        if _NUMERIC_VALUE_CELL_RE.match(_FOOTNOTE_RE.sub("", c).strip()):
             return False
     # A label row labels SEPARATE columns, so it needs at least two non-empty
     # cells and its label classes must come from DIFFERENT cells. Testing the

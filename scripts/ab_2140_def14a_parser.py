@@ -240,8 +240,21 @@ def _audit(limit: int | None) -> int:
         if score == cols or len(score) <= len(cols) or score[-len(cols) :] != cols:
             return score  # no promotion happened
         parent = score[: len(score) - len(cols)]
-        # The legacy arm folded on ``main`` too — only the label arm changed.
-        return score if parser_mod._looks_like_legacy_subheader(cols) else parent
+        # The legacy arm folded on ``main`` too — only the label arm changed, so
+        # only the label arm's promotions are drift.
+        #
+        # The arm test must reproduce ``_parse_table_html``'s BOTH conditions,
+        # not just the keyword one. A keyword-only test silently mislabels every
+        # label-arm promotion whose promoted row happens to contain a legacy
+        # keyword — and an Item 402(c) SCT label row always does, because
+        # § 229.402(c)(2)(x) prescribes a "Total" column. That made this audit
+        # report ZERO SCT drift while the real main-vs-branch A/B showed 75
+        # accessions going from 0 rows to 12-18. ``max_data_width`` is
+        # recoverable exactly: the promoted row was ``cols`` wide and the rest
+        # of the body survives as ``table.rows``.
+        max_data_width = max([len(cols)] + [len(r) for r in table.rows])
+        legacy_arm = len(parent) < max_data_width and parser_mod._looks_like_legacy_subheader(cols)
+        return score if legacy_arm else parent
 
     def patched(table_html: str) -> Any:
         table = original_parse_table(table_html)
