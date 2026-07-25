@@ -1178,6 +1178,18 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             parsed = _parse_table_html(html_text[start:end])
             if parsed is None:
                 continue
+            if not parsed.rows:
+                # A table with no DATA rows cannot be the Item 403 table — it
+                # has no holders to report — but it can still out-score one and
+                # take the window, because ``_score_table_headers`` reads
+                # headers only. Proxies are full of layout ``<table>`` blocks
+                # holding a single prose paragraph, and once #2158 stopped
+                # treating a digit-bearing cell as data those paragraphs began
+                # promoting as "label rows" and scoring 6-11: a voting-methods
+                # block beat the real 5%-holder table on 0000936468-25-000015
+                # (3 holders -> 0) and an advance-notice-bylaw paragraph beat it
+                # on 0001104659-26-036909 (19 -> 0). Both had zero rows.
+                continue
             score = _score_table_headers(parsed.score_headers)
             if score > window_best_score:
                 window_best_score = score

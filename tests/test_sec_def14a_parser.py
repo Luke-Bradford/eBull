@@ -1320,3 +1320,76 @@ class TestItem402gOptionExercisesAndStockVested:
         """
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
         assert parsed.rows == []
+
+
+class TestRule13d3DaysCaptionIsALabelNotData:
+    """#2158 — `_looks_like_label_row` rejected any cell with a 2+ digit run.
+    Rule 13d-3(d)(1)(i) deems a person the beneficial owner of securities
+    acquirable "within sixty days", so Item 403 tables caption a column
+    "Options Exercisable within 60 days of April 1, 2025" — the one numeric
+    literal these captions legitimately carry."""
+
+    def test_within_60_days_caption_row_is_promoted(self) -> None:
+        # 0001437749-25-011586: the caption row scores 15 once promoted. Left
+        # unpromoted the table scored 4 on its spanning title alone, and the
+        # sibling gate then dropped the whole Item 403(b) subsection.
+        row = (
+            "Name",
+            "",
+            "Company Stock Beneficially Owned Excluding Options",
+            "",
+            "Company Stock Options Exercisable within 60 days of April 1, 2025",
+            "",
+            "Percent of Class (1)",
+        )
+        assert _looks_like_label_row(row)
+
+    def test_a_share_count_row_is_still_data(self) -> None:
+        assert not _looks_like_label_row(("Elliot Noss", "", "633,945", "", "3.5%"))
+
+    def test_footnoted_share_count_is_still_data(self) -> None:
+        # Without stripping footnote markers first, '1,000,000 [2]' reads as
+        # prose and a data row whose holder is literally named "… Holder"
+        # promotes over its own table.
+        assert not _looks_like_label_row(("Bracketed Holder [1]", "1,000,000 [2]", "3.5%[3]"))
+
+    def test_promoted_caption_row_lifts_the_table_over_the_sibling_gate(self) -> None:
+        body = """
+        <table>
+          <tr><th></th><th></th><th>BENEFICIAL OWNERSHIP OF COMPANY STOCK</th><th></th></tr>
+          <tr><td>Name</td><td></td><td>Company Stock Beneficially Owned</td><td></td>
+              <td>Company Stock Options Exercisable within 60 days of April 1, 2025</td>
+              <td></td><td>Percent of Class</td></tr>
+          <tr><td>Allen Karp</td><td></td><td>633,945</td><td></td><td>1,000</td>
+              <td></td><td>5.7%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Allen Karp"]
+        assert parsed.raw_table_score >= 6
+
+
+class TestEmptyTableCannotWinSelection:
+    """#2158 — `_score_table_headers` reads headers only, so a layout <table>
+    holding one prose paragraph can out-score the real Item 403 table and take
+    the window while having no holders to report at all."""
+
+    def test_prose_block_with_no_data_rows_does_not_displace_the_real_table(self) -> None:
+        # 0000936468-25-000015 shape: a voting-methods prose block promoted its
+        # own sentences as a "label row", scored 6, and left 0 data rows —
+        # beating the real 5%-holder table at 5 and taking it to zero.
+        body = """
+        <table>
+          <tr><th>Voting Methods</th><th>Registered Stockholder</th><th>Beneficial Owner</th></tr>
+          <tr><td>Your shares are registered directly in your name with our transfer agent</td>
+              <td>Your shares are allocated to a Company savings plan account</td>
+              <td>Your shares are held in a stock brokerage account by a bank or broker</td></tr>
+        </table>
+        <table>
+          <tr><th>Name and Address</th><th>Amount of Common Stock</th><th>Percent of Outstanding Shares</th></tr>
+          <tr><td>The Vanguard Group</td><td>49,224,906</td><td>9.22%</td></tr>
+          <tr><td>BlackRock, Inc.</td><td>44,982,057</td><td>8.43%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["The Vanguard Group", "BlackRock, Inc."]
