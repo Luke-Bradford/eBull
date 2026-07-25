@@ -379,6 +379,36 @@ _HEADER_KEYWORDS: Final[tuple[tuple[str, int], ...]] = (
 # Item 403 collision. "exercise price" is safe where a bare "exercisable"
 # would NOT be: Hershey's real ownership table has an "Exercisable Stock
 # Options" column.
+#
+# 402(g) added by #2158. Item 402(g)(2) (17 CFR § 229.402(g)(2)) prescribes the
+# "Option Exercises and Stock Vested" captions "Number of Shares Acquired on
+# Exercise", "Value Realized on Exercise", "Number of Shares Acquired on
+# Vesting", "Value Realized on Vesting". Those tables were previously invisible
+# to the scorer because their column labels sit under a spanning "Option Awards
+# | Stock Awards" row and #2140's label-arm promotion left them unscored; once
+# that row is folded in (this ticket's D14) they score 5 on "number of shares"
+# + "name" + "shares", clearing the floor of 3 and able to outrank a genuine
+# Item 403 table. The full-population promotion audit found this class in 47 of
+# the first 125 promoted header shapes — a hazard created by D14, so it is
+# fixed in the same change.
+#
+# No Item 403 collision: Item 403 reports a HOLDING as of a date, never an
+# exercise or vesting EVENT, so it has no occasion to caption a column with
+# either phrase. "acquired on exercise" is the safe form where a bare "exercise"
+# would not be (see the "Exercisable Stock Options" note above).
+#
+# ``value realized`` is deliberately left BROADER than the two paired markers
+# (review round 1 WARNING). Full-population check over all 42,505 stored bodies:
+# it fires on 227 tables / 135 distinct header shapes that carry NEITHER paired
+# marker, and **zero** of those shapes contain any Item 403 caption
+# ("beneficial owner" / "name and address" / "percent of class" / "amount and
+# nature"). They are the phrase's other Item 402 homes — 402(g) wordings the
+# prescribed captions do not cover ("Value Realized Upon Exercise", "Value
+# Realized Upon Acceleration") and 402(j) termination / change-in-control tables
+# ("Cash Severance", "Value Realized from Equity Acceleration"). Narrowing it to
+# "value realized on" would re-admit all of them. Note also that scoring reads
+# ``score_headers`` only, so a footnote or data cell mentioning the phrase can
+# never reach this check.
 _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
     "grant date",
     "estimated future payouts",
@@ -388,6 +418,9 @@ _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
     "incentive plan award",
     "payout value",
     "market value of shares",
+    "acquired on exercise",
+    "acquired on vesting",
+    "value realized",
 )
 
 
@@ -440,6 +473,12 @@ class _RawTable:
 
 
 _NUMERIC_LIKE_RE: Final[re.Pattern[str]] = re.compile(r"\d{2,}")
+
+# A cell that IS a numeric value — share count, percent, dash-with-footnote —
+# as opposed to a caption that merely mentions a number. Used by
+# :func:`_looks_like_label_row`; the legacy arm keeps ``_NUMERIC_LIKE_RE``
+# verbatim so #2140's Sole/Shared/Total behaviour does not move.
+_NUMERIC_VALUE_CELL_RE: Final[re.Pattern[str]] = re.compile(r"^[\s$(\[<*—–-]*\d[\d,.\s%]*[\s$)\]>*%—–-]*$")
 
 # Column-label classes for two-row-header detection (#2140 D2). A row must
 # match at least TWO distinct classes to be treated as the real header row —
@@ -530,8 +569,21 @@ def _looks_like_label_row(cells: tuple[str, ...]) -> bool:
     """
     if not cells:
         return False
+    # A DATA cell is a numeric VALUE; a LABEL cell is prose that may happen to
+    # contain a number. Testing "contains a 2+ digit run" (#2140's guard,
+    # retained verbatim on the legacy arm) conflates the two and rejects the one
+    # numeric literal Item 403 captions legitimately carry: Rule 13d-3(d)(1)(i)
+    # deems a person the beneficial owner of securities acquirable "within sixty
+    # days", so issuers caption a column "Options Exercisable within 60 days of
+    # April 1, 2025". That caption row scores 15 once promoted — but the digit
+    # guard rejected it, the table stayed at 4 on its spanning title alone, and
+    # the sibling gate then dropped the entire Item 403(b) management
+    # subsection (#2158: 13 holders on 0001437749-25-011586, 48 full-pop).
+    # Footnote markers are stripped first — ``'1,000,000 [2]'`` is a share
+    # count, and without the strip it reads as prose and a data row whose
+    # holder is literally named "… Holder" gets promoted over its own table.
     for c in cells:
-        if _NUMERIC_LIKE_RE.search(c):
+        if _NUMERIC_VALUE_CELL_RE.match(_FOOTNOTE_RE.sub("", c).strip()):
             return False
     # A label row labels SEPARATE columns, so it needs at least two non-empty
     # cells and its label classes must come from DIFFERENT cells. Testing the
@@ -632,20 +684,27 @@ def _parse_table_html(table_html: str) -> _RawTable | None:
         label_arm = len(parent_headers) <= max_data_width and _looks_like_label_row(body[0])
         if legacy_arm or label_arm:
             column_headers = body[0]
-            # The legacy (Sole/Shared/Total) arm combines both rows for
-            # SCORING, because the parent carries the SEC-prescribed keywords
-            # and the sub-row alone would not identify the table.
+            # BOTH arms combine the two rows for SCORING (#2158). Item 403
+            # prescribes the CAPTIONS, not a layout, so wherever the issuer puts
+            # them is the row that identifies the table — and when row 0 is the
+            # share-class row that 403(a)'s "any class" disclosure produces, the
+            # captions are entirely in row 1. Scoring row 0 alone took
+            # 0000908311-26-000065 to 0 where its caption row scores 13, and 181
+            # accessions returned zero rows as a result.
             #
-            # The label-row arm must NOT combine: a generic label row
-            # ('Name', 'Grant Date', 'Number of securities underlying
-            # unexercised options…') belongs to the Item 402(f) Outstanding
-            # Equity Awards table just as readily as to Item 403, so folding
-            # it into score_headers lifted that table to a tie with the real
-            # ownership table — and, appearing earlier in the document, it won
-            # (0001628280-25-020660: 20 real holders → 0, found by the
-            # full-population A/B). Whether a table IS the beneficial-ownership
-            # table stays decided by its own parent header.
-            score_headers = parent_headers + body[0] if legacy_arm else parent_headers
+            # #2140 deliberately did NOT combine on the label arm, because a
+            # generic label row ('Name', 'Grant Date', 'Number of securities
+            # underlying unexercised options…') belongs to the Item 402(f)
+            # Outstanding Equity Awards table as readily as to Item 403, and
+            # folding it lifted that table to a tie with the real ownership
+            # table (0001628280-25-020660: 20 real holders → 0). That is
+            # INVERTED by ``_ITEM_402_AWARD_MARKERS``, which #2140 itself added
+            # later: the fold now feeds the disqualifier the very text that
+            # identifies an award table, so the cited counter-example scores 0
+            # rather than tying. Do not restore the split without re-checking
+            # that disqualifier — see the #2158 prevention-log entry on
+            # promoted rows and scorer identity evidence.
+            score_headers = parent_headers + body[0]
             body = body[1:]
 
     return _RawTable(score_headers=score_headers, column_headers=column_headers, rows=tuple(body))
@@ -1138,6 +1197,18 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
         for start, end in candidate_tables:
             parsed = _parse_table_html(html_text[start:end])
             if parsed is None:
+                continue
+            if not parsed.rows:
+                # A table with no DATA rows cannot be the Item 403 table — it
+                # has no holders to report — but it can still out-score one and
+                # take the window, because ``_score_table_headers`` reads
+                # headers only. Proxies are full of layout ``<table>`` blocks
+                # holding a single prose paragraph, and once #2158 stopped
+                # treating a digit-bearing cell as data those paragraphs began
+                # promoting as "label rows" and scoring 6-11: a voting-methods
+                # block beat the real 5%-holder table on 0000936468-25-000015
+                # (3 holders -> 0) and an advance-notice-bylaw paragraph beat it
+                # on 0001104659-26-036909 (19 -> 0). Both had zero rows.
                 continue
             score = _score_table_headers(parsed.score_headers)
             if score > window_best_score:
