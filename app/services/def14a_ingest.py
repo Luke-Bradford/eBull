@@ -115,7 +115,12 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # rather than data; and a table with no data rows can no longer win selection.
 # Full-population A/B: +11,652 distinct holders, Item 402(c) SCT +997 rows with
 # zero losses.
-_PARSER_VERSION_DEF14A = "def14a-v9"
+# v10 (#2157): no parser change — the Item 403 REWASH arm now fans out over
+# share-class siblings, so the corpus must re-drive to repair the 41
+# (accession, instrument) pairs / 457 live observation rows a per-instrument
+# rewash orphaned. A version bump is the only mechanism that re-drives
+# rewash_filings, so the constant moves even though parse output is identical.
+_PARSER_VERSION_DEF14A = "def14a-v10"
 
 logger = logging.getLogger(__name__)
 
