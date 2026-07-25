@@ -396,6 +396,19 @@ _HEADER_KEYWORDS: Final[tuple[tuple[str, int], ...]] = (
 # exercise or vesting EVENT, so it has no occasion to caption a column with
 # either phrase. "acquired on exercise" is the safe form where a bare "exercise"
 # would not be (see the "Exercisable Stock Options" note above).
+#
+# ``value realized`` is deliberately left BROADER than the two paired markers
+# (review round 1 WARNING). Full-population check over all 42,505 stored bodies:
+# it fires on 227 tables / 135 distinct header shapes that carry NEITHER paired
+# marker, and **zero** of those shapes contain any Item 403 caption
+# ("beneficial owner" / "name and address" / "percent of class" / "amount and
+# nature"). They are the phrase's other Item 402 homes — 402(g) wordings the
+# prescribed captions do not cover ("Value Realized Upon Exercise", "Value
+# Realized Upon Acceleration") and 402(j) termination / change-in-control tables
+# ("Cash Severance", "Value Realized from Equity Acceleration"). Narrowing it to
+# "value realized on" would re-admit all of them. Note also that scoring reads
+# ``score_headers`` only, so a footnote or data cell mentioning the phrase can
+# never reach this check.
 _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
     "grant date",
     "estimated future payouts",
