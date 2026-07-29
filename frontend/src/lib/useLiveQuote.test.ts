@@ -13,6 +13,7 @@ import {
   liveTickDisplayCompanion,
   liveTickDisplayPrice,
   liveTickNativePrice,
+  liveTickPriceIn,
   useLiveQuote,
   type LiveTickPayload,
 } from "@/lib/useLiveQuote";
@@ -287,5 +288,52 @@ describe("liveTickDisplayCompanion (#1906 display companion)", () => {
 
   it("returns null for a null tick", () => {
     expect(liveTickDisplayCompanion(null)).toBeNull();
+  });
+});
+
+describe("liveTickPriceIn (#2133 one currency per row)", () => {
+  const converted = makeTick({
+    last: "100.5",
+    bid: "100",
+    display: { currency: "GBP", bid: "75", ask: "76", last: "75.5" },
+  });
+
+  it("returns the display figure when the row is in display currency", () => {
+    expect(liveTickPriceIn(converted, "GBP")).toEqual({ value: "75.5", currency: "GBP" });
+  });
+
+  it("returns the NATIVE figure when the row was left native by an FX-degrade", () => {
+    // The tick converted fine, but this row's money is in USD (#2129). Taking
+    // the display block here is the #2133 bug: Price would read GBP while
+    // Invested / Value / P&L stayed USD.
+    expect(liveTickPriceIn(converted, "USD")).toEqual({ value: "100.5", currency: "USD" });
+  });
+
+  it("returns the native figure when the tick has no display block and the row is native", () => {
+    const out = liveTickPriceIn(makeTick({ display: null, last: "100.5" }), "USD");
+    expect(out).toEqual({ value: "100.5", currency: "USD" });
+  });
+
+  it("returns null when the row is in display currency but the tick could not convert", () => {
+    // No display block => nothing on this tick is denominated in GBP. The cell
+    // must keep its correctly-labelled REST fallback rather than stamp £ on a
+    // dollar number.
+    expect(liveTickPriceIn(makeTick({ display: null, last: "100.5" }), "GBP")).toBeNull();
+  });
+
+  it("returns null when the tick cannot name its native currency", () => {
+    const out = liveTickPriceIn(
+      makeTick({ native_currency: null, display: null, last: "100.5" }),
+      "USD",
+    );
+    expect(out).toBeNull();
+  });
+
+  it("falls back to the currency-agnostic pick when the caller passes no currency", () => {
+    expect(liveTickPriceIn(converted, null)).toEqual({ value: "75.5", currency: "GBP" });
+  });
+
+  it("returns null for a null tick", () => {
+    expect(liveTickPriceIn(null, "GBP")).toBeNull();
   });
 });

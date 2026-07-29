@@ -50,6 +50,23 @@ quiet-machine).
 
 Adopt the reviewer's posture: read what is there, not what you intended.
 
+**First, check the branch SCOPE — one command, catches silent reverts:**
+
+```bash
+git diff --name-only origin/main...HEAD    # every file must be one you meant to touch
+```
+
+A file you never opened appearing in that list means the branch is carrying
+someone else's change — usually backwards. The common cause is squashing a
+scratch commit with `git reset --soft origin/main` after `origin/main` advanced:
+`--soft` keeps your OLD worktree while re-parenting onto the NEW base, so the
+commit reverts everything that landed in between. Squash against the immutable
+sha you branched from (or `HEAD~1`), never a moving ref; to move onto a newer
+base, `git rebase` — not `reset --soft`. Confirming tell:
+`git merge-base HEAD origin/main` returns main's own HEAD while your branch
+lacks main's latest content. (prevention-log → "`git reset --soft origin/main`
+to squash a WIP commit silently REVERTS…", #2148.)
+
 ---
 
 ## SQL checks
