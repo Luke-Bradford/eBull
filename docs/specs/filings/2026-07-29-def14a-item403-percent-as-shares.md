@@ -97,12 +97,28 @@ A share count is a whole number of securities; a value bearing a percent
 signature under a column that is not column 3 is column 4's value.
 `_shares_cell_percent_signature` classifies the cell resolved at `shares_idx`:
 
+The split is **semantic vs positional evidence**, not "how many signals fired":
+
 | signature | test | treatment |
 |---|---|---|
 | — | value `> 100` or `< 0` | never held back — cannot be a 229.403 column-4 percent (#1228) |
-| `marker` | next non-empty sibling cell is a lone `%` / `(%)` | decisive: held back, and read AS the percent |
-| `marker` | caption at `shares_idx` names a percent and carries none of `_STRONG_SHARES_KEYWORDS` | same |
-| `fractional` | value is not an integer | suggestive: held back, but **restored** if the row offers no whole-number alternative |
+| `decisive` | caption at `shares_idx` names a percent and carries none of `_STRONG_SHARES_KEYWORDS` | the column states what it holds; held back and never restored |
+| `weak` | next non-empty sibling cell is a lone `%` / `(%)`, **or** value is not an integer | circumstantial; held back, but **restored** if the row offers no whole-number alternative |
+
+A lone `%` sibling was `marker` (decisive) in the first draft. Codex ckpt-2
+falsified that: when an issuer renders the sign in its own column, a genuine
+small holding sits immediately to its left — `[name, '50', '%', '0.1']` — and a
+decisive reading drops the 50 shares. Column ORDER is not evidence about a
+cell's meaning; the column CAPTION is.
+
+Order matters as well as strength. The held-back cell is a **last-resort**
+percent source, applied only after #2140's ragged-row scan, which accepts solely
+cells carrying a `%` or the `*` marker and is therefore stronger evidence.
+Multi-class tables carry several percent columns and `_resolve_columns`' `total`
+tier matches `'Percent of Total Voting Rights'`; pre-empting the scan on
+`0000950170-24-100030` (Richardson Electronics, 16 headers over 19-cell rows)
+overwrote the real `Percent of Common Stock Class` value 14.8 with 98.1.
+Found by arm 3 in A/B round 2.
 
 Held back means `shares = None`, which lets #2140's existing recovery scan run
 and find the real count elsewhere in the row. That scan already required

@@ -960,14 +960,19 @@ def _shares_cell_percent_signature(cells: list[str], shares_idx: int, headers: t
     rejects it. The defect needs the value and its sign in SEPARATE cells, which
     is what HTML table rendering produces.
 
-    Two signature strengths, deliberately:
+    Two signature strengths, split on SEMANTIC vs POSITIONAL evidence:
 
-    * ``"marker"`` — the cell's next non-empty sibling is a lone percent sign,
-      or the resolved caption itself names a percent. UNAMBIGUOUS: the value is
-      a percent and must be read as one.
-    * ``"fractional"`` — the value merely is not a whole number. Suggestive
-      (shares are whole) but a fractional holding is not impossible, so the
-      caller restores the original reading when the row offers nothing better.
+    * ``"decisive"`` — the resolved CAPTION names a percent and carries none of
+      ``_STRONG_SHARES_KEYWORDS``. The column says what it holds; that is not
+      an artefact of anything else in the row, so the value is a percent and is
+      never restored as a share count.
+    * ``"weak"`` — a lone ``%`` sibling cell, or a non-integral value. Both are
+      suggestive but circumstantial: a fractional holding is unusual and not
+      impossible, and a ``%`` sign rendered in its OWN cell can sit to the right
+      of a genuine small holding (``[name, '50', '%', '0.1']`` — Codex ckpt-2).
+      The caller restores the original reading when the row offers no
+      whole-number alternative, so a real count is never dropped on positional
+      evidence alone.
     """
     raw = cells[shares_idx] if 0 <= shares_idx < len(cells) else ""
     value = _parse_share_count(raw)
@@ -985,14 +990,12 @@ def _shares_cell_percent_signature(cells: list[str], shares_idx: int, headers: t
     # drop the count entirely.
     if value.is_nan() or value.is_infinite() or value > Decimal(100) or value < Decimal(0):
         return None
-    nxt = next((c.strip() for c in cells[shares_idx + 1 :] if c.strip()), "")
-    if nxt in ("%", "(%)"):
-        return "marker"
     caption = headers[shares_idx].lower() if 0 <= shares_idx < len(headers) else ""
     if ("percent" in caption or "%" in caption) and not any(k in caption for k in _STRONG_SHARES_KEYWORDS):
-        return "marker"
-    if value != value.to_integral_value():
-        return "fractional"
+        return "decisive"
+    nxt = next((c.strip() for c in cells[shares_idx + 1 :] if c.strip()), "")
+    if nxt in ("%", "(%)") or value != value.to_integral_value():
+        return "weak"
     return None
 
 
@@ -1638,13 +1641,15 @@ def _extract_holder_rows(
                     continue
                 shares, shares_src_idx = candidate, i
                 break
-        if shares is None and percent_signature == "fractional":
-            # Nothing whole anywhere in the row, and the only evidence against
-            # the cell was that it is not an integer. A fractional beneficial
-            # holding is unusual but not impossible (DRIP/plan fractions), so
-            # restore the original reading rather than drop the row's only
-            # number on a suggestive signal. ``"marker"`` is deliberately NOT
-            # restored — a lone '%' sibling or a percent caption is decisive.
+        if shares is None and percent_signature == "weak":
+            # Nothing whole anywhere in the row, and the evidence against the
+            # cell was only circumstantial — a non-integral value (a fractional
+            # DRIP/plan holding is unusual but real) or a lone '%' sibling cell,
+            # which can sit to the RIGHT of a genuine small holding when the
+            # issuer renders the sign in its own column (Codex ckpt-2:
+            # ``[name, '50', '%', '0.1']`` would otherwise lose the 50 shares).
+            # Restore rather than drop the row's only number. ``"decisive"`` is
+            # NOT restored — a percent CAPTION states what the column holds.
             shares = _parse_share_count(shares_raw)
             shares_src_idx = shares_idx if shares is not None else -1
         if percent is None:
@@ -1689,7 +1694,7 @@ def _extract_holder_rows(
         # 0000950170-24-100030 'Edward J. Richardson' has 98.1 at shares_idx and
         # 14.8 under 'Percent of Class'; pre-empting stored 98.1.
         held_back_succeeded = percent_signature is not None and shares is not None and shares_src_idx != shares_idx
-        if percent is None and (percent_signature == "marker" or held_back_succeeded):
+        if percent is None and (percent_signature == "decisive" or held_back_succeeded):
             percent = _parse_percent(shares_raw)
             if percent is not None:
                 percent_src_idx = shares_idx

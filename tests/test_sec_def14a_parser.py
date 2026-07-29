@@ -1742,3 +1742,25 @@ class TestTwoPercentColumnsOrdering:
         cells = ["Dennis Polk", "30.0", "100.0", "%"]
         headers = ("Name", "Target as a Percentage of Base Salary", "Maximum", "")
         assert _shares_cell_percent_signature(cells, 2, headers) is not None
+
+    def test_a_small_holding_before_a_lone_percent_sign_is_not_dropped(self) -> None:
+        # Codex ckpt-2. When the issuer renders the '%' sign in its OWN column,
+        # a genuine small holding sits immediately to its left and trips the
+        # sibling test. That evidence is POSITIONAL, so it is "weak": with no
+        # whole-number alternative in the row the original reading is restored
+        # rather than the row losing its share count.
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Shares Beneficially Owned</th>
+              <th></th><th>Percent of Class</th></tr>
+          <tr><td>Jane Q. Director</td><td>50</td><td>%</td><td>0.1</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares) for r in parsed.rows] == [("Jane Q. Director", Decimal("50"))]
+
+    def test_a_percent_CAPTION_is_still_decisive(self) -> None:
+        # The complement: caption evidence is SEMANTIC, so it is never restored.
+        cells = ["Simon Leung", "29.6"]
+        headers = ("Name", "Minimum Payment (if Threshold is Met) as Percentage of Base Salary")
+        assert _shares_cell_percent_signature(cells, 1, headers) == "decisive"
