@@ -51,7 +51,7 @@ export function StatTile({
           ? "text-slate-600 dark:text-slate-400"
           : "text-slate-900 dark:text-slate-100";
   const sizeClass = size === "md" ? "text-lg" : "text-2xl";
-  const hintToneClass = toneHint ? toneClass : "text-slate-500";
+  const hintToneClass = toneHint ? toneClass : "text-slate-500 dark:text-slate-400";
   return (
     <div className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
       <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
