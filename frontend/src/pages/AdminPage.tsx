@@ -31,7 +31,6 @@ import type {
   JobOverviewResponse,
 } from "@/api/types";
 import { CollapsibleSection } from "@/components/admin/CollapsibleSection";
-import { Badge } from "@/components/ui/Badge";
 import { FundDataRow } from "@/components/admin/FundDataRow";
 import { KillSwitchSection } from "@/components/admin/KillSwitchSection";
 import { ProblemsPanel } from "@/components/admin/ProblemsPanel";
@@ -41,6 +40,7 @@ import {
   SectionError,
   SectionSkeleton,
 } from "@/components/dashboard/Section";
+import { Badge } from "@/components/ui/Badge";
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
 import { useProcesses } from "@/lib/useProcesses";
