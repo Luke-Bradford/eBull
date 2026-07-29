@@ -402,7 +402,7 @@ D3 admits.
 - Cross-source: one 5% holder verified against SEC EDGAR direct.
 - `POST /jobs/sec_rebuild/run` scoped `{"source": "sec_def14a"}`, executed.
 - `/instruments/{symbol}/ownership-rollup` verified post-backfill.
-- Parser version bumped v10 -> v11 (forces re-ingest; the conflict key is
+- Parser version bumped v12 -> v13 (forces re-ingest; the conflict key is
   derived from the parsed value, so a corrected row lands under a NEW key and
   the stale row must be superseded — prevention-log #2140 entry).
 - `_supersede_dropped_holdings`' empty-set guard preserved (`holder_name <> ALL('{}')`
