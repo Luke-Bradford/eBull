@@ -41,6 +41,7 @@ import {
   SectionError,
   SectionSkeleton,
 } from "@/components/dashboard/Section";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { AdvancedParamsForm } from "@/components/admin/AdvancedParamsForm";
 import {
@@ -653,11 +654,9 @@ function OverviewTab({
         <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
           Status
         </span>
-        <span
-          className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${visual.toneClass}`}
-        >
+        <Badge tone={visual.tone} uppercase className={visual.extraClass}>
           {visual.label}
-        </span>
+        </Badge>
       </div>
       <KeyValueRow label="Cadence" value={row.cadence_human} />
       <KeyValueRow
@@ -807,14 +806,17 @@ function ErrorsTab({
 // DAG drill-in tab (#1078 — orchestrator_full_sync only)
 // ---------------------------------------------------------------------------
 
-const LAYER_STATUS_TONE: Record<string, string> = {
-  pending: "border-slate-300 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300",
-  running: "border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300",
-  complete: "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300",
-  failed: "border-red-300 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300",
-  skipped: "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
-  partial: "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
-  cancelled: "border-slate-300 bg-slate-50 text-slate-500 line-through dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
+/** Layer status → Badge tone (#2148). Semantic values only; no colour here. */
+const LAYER_STATUS_TONE: Record<string, { tone: BadgeTone; extraClass?: string }> = {
+  pending: { tone: "neutral" },
+  // `running` was sky; folded onto the colour table's `info` slot with the
+  // other in-progress states (#2148).
+  running: { tone: "info" },
+  complete: { tone: "ok" },
+  failed: { tone: "risk" },
+  skipped: { tone: "neutral" },
+  partial: { tone: "warn" },
+  cancelled: { tone: "neutral", extraClass: "line-through" },
 };
 
 function AdvancedTab({
@@ -974,9 +976,9 @@ function DagLayerTable({ layers }: { layers: OrchestratorDagLayerResponse[] }) {
       </thead>
       <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
         {sorted.map((layer) => {
-          const tone =
-            LAYER_STATUS_TONE[layer.status] ??
-            "border-slate-300 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300";
+          // An unmapped status degrades to a visible neutral badge, never to a
+          // blank (design-system.md, #1808 class).
+          const visual = LAYER_STATUS_TONE[layer.status] ?? { tone: "neutral" as const };
           const items =
             layer.items_total === null && layer.items_done === null
               ? "—"
@@ -997,11 +999,9 @@ function DagLayerTable({ layers }: { layers: OrchestratorDagLayerResponse[] }) {
                 {layer.tier === null ? "—" : `T${layer.tier}`}
               </td>
               <td className="px-2 py-2">
-                <span
-                  className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tone}`}
-                >
+                <Badge tone={visual.tone} uppercase className={visual.extraClass}>
                   {layer.status}
-                </span>
+                </Badge>
               </td>
               <td className="px-2 py-2 tabular-nums text-slate-600 dark:text-slate-400">
                 {items}
@@ -1026,27 +1026,22 @@ function DagLayerTable({ layers }: { layers: OrchestratorDagLayerResponse[] }) {
 // Bootstrap timeline drill-in tab (#1080 — bootstrap process_id only)
 // ---------------------------------------------------------------------------
 
-const STAGE_STATUS_TONE: Record<string, string> = {
-  pending:
-    "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
-  running:
-    "border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300",
-  success:
-    "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300",
-  error:
-    "border-red-300 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300",
-  skipped:
-    "border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400",
-  blocked:
-    "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
-  // PR3c #1093: operator-cancelled stage. Gray tone — visually
-  // distinct from red (genuine failure) so the operator can tell at a
-  // glance which stages were stopped by their own cancel vs which
-  // failed on their own. Slightly darker than ``pending`` / ``skipped``
-  // gray so the cancelled stage doesn't look interchangeable with
-  // not-yet-attempted.
-  cancelled:
-    "border-slate-400 bg-slate-100 text-slate-700 dark:border-slate-600 dark:bg-slate-800/60 dark:text-slate-300 italic",
+/** Stage status → Badge tone (#2148). Semantic values only; no colour here. */
+const STAGE_STATUS_TONE: Record<string, { tone: BadgeTone; extraClass?: string }> = {
+  pending: { tone: "neutral" },
+  // `running` was sky; folded onto the colour table's `info` slot (#2148).
+  running: { tone: "info" },
+  success: { tone: "ok" },
+  error: { tone: "risk" },
+  skipped: { tone: "neutral" },
+  blocked: { tone: "warn" },
+  // PR3c #1093: operator-cancelled stage. Neutral — visually distinct from red
+  // (genuine failure) so the operator can tell at a glance which stages were
+  // stopped by their own cancel vs which failed on their own. Italic keeps it
+  // from looking interchangeable with not-yet-attempted `pending` / `skipped`,
+  // which the old map did with a slightly darker grey (#2148: the tone table
+  // has one neutral, so the distinction moves to the non-colour decoration).
+  cancelled: { tone: "neutral", extraClass: "italic" },
 };
 
 // #1266 — `last_error` doubles as the skip/cancel REASON for deliberate
@@ -1257,8 +1252,8 @@ function TimelineStageRow({
   stage: BootstrapTimelineStageResponse;
   onArchiveClick: (archive: BootstrapTimelineArchiveResponse) => void;
 }) {
-  const tone =
-    STAGE_STATUS_TONE[stage.status] ?? STAGE_STATUS_TONE["pending"];
+  const visual =
+    STAGE_STATUS_TONE[stage.status] ?? STAGE_STATUS_TONE["pending"]!;
   const archiveTone =
     ARCHIVE_TONE[stage.status] ??
     "bg-sky-200 dark:bg-sky-900/60 hover:bg-sky-300 dark:hover:bg-sky-900";
@@ -1267,33 +1262,33 @@ function TimelineStageRow({
       <div className="flex items-start gap-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2">
-            <span
-              className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tone}`}
-            >
+            <Badge tone={visual.tone} uppercase className={visual.extraClass}>
               {stage.status}
-            </span>
+            </Badge>
             {stage.warning ? (
-              <span
-                className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800 dark:border-amber-400/30 dark:bg-amber-950/60 dark:text-amber-200"
+              <Badge
+                tone="warn"
+                uppercase
                 title={stage.warning}
                 aria-label={`Warning: ${stage.warning}`}
                 data-testid="stage-warning-chip"
               >
                 warning
-              </span>
+              </Badge>
             ) : null}
             {/* #1409 P5 — stale chip. Server flags a running stage whose
                 heartbeat exceeds the 1800s threshold; distinguishes a
                 wedged stage from one that is simply slow. */}
             {stage.is_stale ? (
-              <span
-                className="inline-flex items-center rounded-full border border-red-500/40 bg-red-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-red-800 dark:border-red-400/30 dark:bg-red-950/60 dark:text-red-200"
+              <Badge
+                tone="risk"
+                uppercase
                 title={`No progress for ${formatHeartbeatAge(stage.heartbeat_age_seconds).replace("updated ", "").replace(" ago", "")} — exceeds the 30-minute stall threshold`}
                 aria-label="Stage appears stalled — no recent progress"
                 data-testid="stage-stale-chip"
               >
                 stalled
-              </span>
+              </Badge>
             ) : null}
             <span
               className="truncate font-medium text-slate-700 dark:text-slate-200"

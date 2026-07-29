@@ -40,6 +40,7 @@ import {
   SectionError,
   SectionSkeleton,
 } from "@/components/dashboard/Section";
+import { Badge } from "@/components/ui/Badge";
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
 import { useProcesses } from "@/lib/useProcesses";
@@ -401,13 +402,15 @@ function JobStatusCell({ job }: { job: JobOverviewResponse }) {
       : job.verdict_reason;
   return (
     <div className="flex flex-col gap-0.5">
-      <span
+      <Badge
+        tone={visual.tone}
+        uppercase
+        className={`w-fit${visual.extraClass ? ` ${visual.extraClass}` : ""}`}
         data-testid="job-verdict-pill"
         data-verdict={job.health_verdict}
-        className={`inline-flex w-fit items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${visual.toneClass}`}
       >
         {visual.label}
-      </span>
+      </Badge>
       {detail ? <span className="text-[10px] text-slate-500">{detail}</span> : null}
     </div>
   );
