@@ -1468,18 +1468,24 @@ def _extract_holder_rows(
         # The diversions below are gated on the NEXT row actually being an
         # address row, so the behaviour change is bounded to the stacked shape
         # rather than applying to every value-less row in the corpus.
-        stacked_next = _row_name_is_address(
-            raw_rows[idx + 1] if idx + 1 < len(raw_rows) else None,
-            name_idx=name_idx,
-            shares_idx=shares_idx,
-            percent_idx=percent_idx,
-        )
+        #
+        # Evaluated LAZILY (review NITPICK on PR #2170): only the two diversion
+        # branches consult it, and most rows reach neither — the empty-row and
+        # ordinary-data paths would otherwise pay for a full name resolution of
+        # the following row on every iteration.
+        def stacked_next(idx: int = idx) -> bool:
+            return _row_name_is_address(
+                raw_rows[idx + 1] if idx + 1 < len(raw_rows) else None,
+                name_idx=name_idx,
+                shares_idx=shares_idx,
+                percent_idx=percent_idx,
+            )
 
         # Single-cell heading rows flip the role tag.
         heading_role = _detect_role_heading(raw_row)
         if heading_role is not None:
             heading_text = _clean_beneficial_holder_name(next((c for c in raw_row if c.strip()), ""))
-            if stacked_next and _is_owner_identity(heading_text):
+            if _is_owner_identity(heading_text) and stacked_next():
                 # Not a section heading — the NAME half of a stacked pair whose
                 # inline title ('Mr. Michael J. Gerdin, Chief Executive
                 # Officer, …, and Director') happens to match a role pattern.
@@ -1590,7 +1596,7 @@ def _extract_holder_rows(
             # name to the address row that follows and carries the values. The
             # identity test is what keeps section headings ('Directors and
             # Executive Officers:', '5% Stockholders') out of holder_name.
-            pending_owner_name = holder_name if (stacked_next and _is_owner_identity(holder_name)) else None
+            pending_owner_name = holder_name if (_is_owner_identity(holder_name) and stacked_next()) else None
             continue
         pending_owner_name = None
 
