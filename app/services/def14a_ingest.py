@@ -120,7 +120,17 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # (accession, instrument) pairs / 457 live observation rows a per-instrument
 # rewash orphaned. A version bump is the only mechanism that re-drives
 # rewash_filings, so the constant moves even though parse output is identical.
-_PARSER_VERSION_DEF14A = "def14a-v10"
+# v11 (#2164): Item 403 rows recovered from three defects on tables that were
+# already being selected correctly. (a) Zero-width spacers (U+200B et al) are
+# now stripped in ``_strip_inline_html`` — the Item 402(c) path has scrubbed
+# them since #1945, the Item 403 path never learned, and a '<ZWSP> 17,464' value
+# cell failed both value parsers so the whole table dropped. (b) 17 CFR
+# 229.403(a)'s single "Name and address of beneficial owner" column rendered as
+# two STACKED ROWS now merges — neither row survived alone. (c) A 5%-holder
+# section heading whose noun precedes the threshold ('Other Shareowners that
+# Beneficially Own More than 5%') now sets the 'principal' role instead of
+# letting the management block's role leak onto the holders below it.
+_PARSER_VERSION_DEF14A = "def14a-v11"
 
 logger = logging.getLogger(__name__)
 
