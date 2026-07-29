@@ -293,23 +293,63 @@ the survivors are the genuine shapes:
 'Name | Number of Shares | Approximate Percentage of Outstanding Common'
 ```
 
-**Two known over-drops to fix before implementation** (enumerated from the
-dropped set, not assumed):
+### D4 final form (resolved and measured — implement exactly this)
 
-1. `Beneficial Ownership | Sole Voting Power | Shared Voting Power` (8
-   occurrences) — a genuine Item 403 table. Item 403 column 3 is "Amount and
-   nature of beneficial ownership"; Rule 13d-3 defines beneficial ownership as
-   voting **or** investment power, so issuers legitimately subdivide that column
-   into Sole/Shared voting and dispositive power and carry no separate percent
-   column. `_resolve_columns` already knows this subdivision (its tiered
-   `Sole | Shared | Total` handling). The signature must accept it.
-2. `Number of shares of Class A common stock | % of all shares` (4) — "% of all
-   shares" is class-denominated but the noun after "of" is `all`, which the
-   draft pattern's alternation misses.
+Signature = a **class-denominated percent** column OR the **amount-and-nature
+voting/dispositive-power subdivision**, and never a comp-denominated percent.
 
-So the signature is: a class-denominated percent column **OR** the
-amount-and-nature voting/dispositive-power subdivision, and never a
-salary/target/payout/vesting-denominated percent.
+```python
+CLASS_PCT = r"(percent|percentage|%)\s*(of\s+)?(the\s+)?(all\s+|total\s+|outstanding\s+)*" \
+            r"(class|common|shares|stock|voting|ownership|beneficial|equity|units)"
+AMOUNT_NATURE = r"(amount\s+and\s+nature)|((sole|shared)\s+(voting|dispositive|investment))"
+COMP_PCT = r"(base\s+salary|of\s+target|target\s+bonus|payout|vesting" \
+           r"|bonus\s+opportunity|salary|earned|performance)"
+# signature := not COMP_PCT and (CLASS_PCT or AMOUNT_NATURE)
+```
+
+`AMOUNT_NATURE` is what recovers the `Sole Voting Power | Shared Voting Power`
+shape: Item 403 column 3 is "Amount and nature of beneficial ownership", and
+Rule 13d-3 defines beneficial ownership as voting **or** investment power, so
+issuers legitimately subdivide that column and carry no separate percent column.
+`_resolve_columns` already tiers `Sole | Shared | Total`. The `all\s+` alternate
+recovers `% of all shares`.
+
+### D1 final form (three corrections found by measurement)
+
+The draft predicate admitted three junk classes. All three are fixed and
+re-measured:
+
+1. **Length cap 120 chars.** Without it, Schedule 13G footnote paragraphs
+   ("Based solely on an amendment to a Schedule 13G filed by BlackRock…",
+   "Consists of 10,500 shares held directly…") are extracted as holder names and
+   pass the person-name test. 120 is sized for an Item 403(a) name **and
+   address** cell, which is the longest legitimate form.
+2. **Entity designators are case-SENSITIVE.** `trust interests` and
+   `allocation interests` are instrument types; case-insensitive `\btrust\b`
+   admitted them. An Item 403 owner is a proper noun — `Smith Family Trust`
+   matches, `trust interests` does not.
+3. **Instrument-type vocabulary guard.** A name composed *entirely* of equity /
+   award nouns (`Equity`, `Stock Options`, `Restricted Share Units`) is an
+   instrument, not a beneficial owner under Rule 13d-3. This is a closed ~40-word
+   vocabulary set, deliberately not a table-shape blocklist — the prevention-log
+   rule on hand-enumerated tuples targets the latter.
+
+### Measured outcome — the D3 admit population
+
+```text
+score 3-5 non-winning tables extracting rows        2,091
+  clearing row identity, DRAFT predicate            1,668   (79.8%)
+  clearing row identity, FINAL predicate            1,615
+  surviving D4 signature -> newly admitted by D3       73   (3.5%)
+```
+
+All 73 enumerated and hand-classified. They are genuine Item 403 tables —
+BlackRock, The Vanguard Group, FMR LLC, Plains GP Holdings L.P., named directors
+and officers. **One questionable:** `0001193125-25-064881`
+(`C-Suite Executives, members of our Investor Relations, Legal, Finance and
+Human Resources Departments`) is a stock-ownership-guidelines table, not Item
+403. Verify against the body during implementation; if genuine junk, it is one
+accession and does not change the design.
 
 ### Evidence gap — census pass 2 (RESOLVED; findings above)
 
