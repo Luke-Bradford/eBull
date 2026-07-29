@@ -264,7 +264,54 @@ Acceptance — every item is blocking:
   `percent_of_class`-resolvable column, which Item 403 prescribes and Item 402
   tables do not have. (Codex ckpt-1 HIGH.)
 
-### Evidence gap — census pass 2 (blocks implementation)
+### D4 — Item 403 value-column signature (required; row identity is NOT sufficient)
+
+Census pass 2 result: row identity alone admits **1,668** score-3-5 non-winning
+tables, and they are dominated by Item 402 compensation tables whose rows *are*
+people:
+
+```text
+'Named Executive Officer | Shares at Target | Final PSU Payout %'
+'Named Executive Officer | Annual Base Salary | Target Bonus Opportunity'
+'Name | Threshold (Percentage of Base Salary) | Target (Percentage of Base Salary)'
+'Name of Individual or Identity of Group and Position | Shares Underlying Options'
+'Beneficial Owner | Number of RSUs'
+'Position | Minimum Dollar Value | Minimum Number of Shares'      (ownership guidelines)
+```
+
+D3 therefore does **not** ship on row identity alone. A table joins the winning
+window's sibling set only if it ALSO carries Item 403's prescribed value
+signature — 229.403 column 4 is **"Percent of class"**, class-denominated. A
+compensation table's percent is of *salary*, *target*, *payout* or *vesting*.
+
+Measured on the full admit cohort: the gate takes **1,668 -> 45 (2.7%)**, and
+the survivors are the genuine shapes:
+
+```text
+'Name | Shares (1) | Percent of Outstanding Shares of Common Stock'
+'Name | Number of Common Shares | Percent of Common Shares'
+'Name | Number of Shares | Approximate Percentage of Outstanding Common'
+```
+
+**Two known over-drops to fix before implementation** (enumerated from the
+dropped set, not assumed):
+
+1. `Beneficial Ownership | Sole Voting Power | Shared Voting Power` (8
+   occurrences) — a genuine Item 403 table. Item 403 column 3 is "Amount and
+   nature of beneficial ownership"; Rule 13d-3 defines beneficial ownership as
+   voting **or** investment power, so issuers legitimately subdivide that column
+   into Sole/Shared voting and dispositive power and carry no separate percent
+   column. `_resolve_columns` already knows this subdivision (its tiered
+   `Sole | Shared | Total` handling). The signature must accept it.
+2. `Number of shares of Class A common stock | % of all shares` (4) — "% of all
+   shares" is class-denominated but the noun after "of" is `all`, which the
+   draft pattern's alternation misses.
+
+So the signature is: a class-denominated percent column **OR** the
+amount-and-nature voting/dispositive-power subdivision, and never a
+salary/target/payout/vesting-denominated percent.
+
+### Evidence gap — census pass 2 (RESOLVED; findings above)
 
 Pass 1 measured row identity on **winning tables only**. D3 applies the signal
 to **every table in the winning window**, including low-score tables never
