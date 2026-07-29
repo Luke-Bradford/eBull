@@ -1701,6 +1701,10 @@ class TestEmbeddedSchedule13DCoverPage:
 
     def test_the_label_test_is_anchored_and_spares_real_holders(self) -> None:
         assert _SCHEDULE_13D_COVER_LABEL_RE.match("SHARED VOTING POWER -0")
+        # Rule 13d-3 says voting OR INVESTMENT power; 0001308179-25-000114
+        # renders a TRANSPOSED table whose rows are the four power types.
+        assert _SCHEDULE_13D_COVER_LABEL_RE.match("Sole investment power")
+        assert _SCHEDULE_13D_COVER_LABEL_RE.match("Shared investment power")
         assert _SCHEDULE_13D_COVER_LABEL_RE.match("Aggregate Amount Beneficially Owned by Each Reporting Person")
         assert _SCHEDULE_13D_COVER_LABEL_RE.match("TYPE OF REPORTING PERSON")
         assert not _SCHEDULE_13D_COVER_LABEL_RE.match("BlackRock, Inc.")

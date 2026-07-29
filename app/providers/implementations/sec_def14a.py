@@ -2078,7 +2078,15 @@ def _is_address_fragment(name: str) -> bool:
 # owner-identity test nor an address test rejects it.
 _SCHEDULE_13D_COVER_LABEL_RE: Final[re.Pattern[str]] = re.compile(
     r"^(?:"
-    r"(?:sole|shared)\s+(?:voting|dispositive)\s+power\b"  # rows 7-10
+    # Rows 7-10. ``investment`` is included alongside the cover page's own
+    # ``dispositive`` because Rule 13d-3 defines beneficial ownership as voting
+    # OR INVESTMENT power and issuers paraphrase the cover page with it
+    # (0001308179-25-000114 renders a TRANSPOSED table — holders are COLUMNS,
+    # rows are the four power types — and stored 'Sole investment power' as a
+    # holder holding 82,447,476 shares). Note this matches resolved HOLDER
+    # NAMES; #2160's D4 matches the same vocabulary in HEADERS, where it is a
+    # POSITIVE Item 403 signal. Different surfaces, no contradiction.
+    r"(?:sole|shared)\s+(?:voting|dispositive|investment)\s+power\b"
     r"|aggregate\s+amount\s+beneficially\s+owned\b"  # row 11
     r"|percent\s+of\s+class\s+represented\s+by\s+amount\s+in\s+row\b"  # row 13
     r"|type\s+of\s+reporting\s+person\b"  # row 14
