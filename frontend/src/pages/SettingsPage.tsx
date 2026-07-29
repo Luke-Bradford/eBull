@@ -403,7 +403,7 @@ function BrokerCredentialsSection(): JSX.Element {
       </div>
 
       {loadError !== null && (
-        <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+        <div role="alert" className="rounded bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
           {loadError}
         </div>
       )}
@@ -462,7 +462,7 @@ function BrokerCredentialsSection(): JSX.Element {
                       type="button"
                       onClick={() => void handleRevoke(row)}
                       disabled={busyId === row.id}
-                      className="rounded border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                      className="rounded border border-red-300 dark:border-red-700 px-2 py-1 text-xs text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
                     >
                       {busyId === row.id ? "Revoking…" : "Revoke"}
                     </button>
@@ -474,7 +474,7 @@ function BrokerCredentialsSection(): JSX.Element {
         </ul>
       )}
       {actionError !== null && (
-        <p role="alert" className="text-xs text-rose-700">
+        <p role="alert" className="text-xs text-red-700 dark:text-red-300">
           {actionError}
         </p>
       )}
@@ -534,7 +534,7 @@ function BrokerCredentialsSection(): JSX.Element {
             />
           </label>
           {editError !== null && (
-            <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
+            <div role="alert" className="rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300">
               {editError}
             </div>
           )}
@@ -617,7 +617,7 @@ function BrokerCredentialsSection(): JSX.Element {
           />
 
           {editError !== null && (
-            <div role="alert" className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
+            <div role="alert" className="rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300">
               {editError}
             </div>
           )}
@@ -718,7 +718,7 @@ function BrokerCredentialsSection(): JSX.Element {
           {createError !== null && (
             <div
               role="alert"
-              className="rounded bg-rose-50 dark:bg-rose-950/40 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300"
+              className="rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300"
             >
               {createError}
             </div>

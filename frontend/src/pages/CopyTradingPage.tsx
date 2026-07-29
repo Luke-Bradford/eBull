@@ -256,7 +256,7 @@ function ClosedExitsTable({
                 ) : null}
               </td>
               <td className="px-2 py-2 text-left">
-                <span className={e.is_buy ? "text-emerald-600" : "text-rose-600"}>
+                <span className={e.is_buy ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}>
                   {e.is_buy ? "Buy" : "Sell"}
                 </span>
               </td>

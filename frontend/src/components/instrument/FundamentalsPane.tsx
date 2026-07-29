@@ -396,7 +396,7 @@ function FundamentalCell({
       : delta.pct > 0
         ? "text-emerald-600"
         : delta.pct < 0
-          ? "text-rose-600"
+          ? "text-red-600 dark:text-red-400"
           : "text-slate-500";
   // Per-instance + per-label gradient id (Codex review): two
   // FundamentalsPane instances in the same DOM previously collided.

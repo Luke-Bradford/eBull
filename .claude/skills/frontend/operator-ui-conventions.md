@@ -42,6 +42,15 @@ Restrained palette. Each color has one job. Mixing them dilutes the signal.
 
 Do not introduce new color families (purple, pink, cyan, etc.) without a documented reason. Do not use red for "in progress" or amber for "ok".
 
+**`rose-*` is NOT a second red (#2152, settled 2026-07-29).** It had drifted into ~28 sites as a de-facto parallel error/negative family — every negative money figure on the dashboard (`StatTile`), most error alert surfaces, and several severity tones — so a `risk` badge and the negative figure beside it rendered two different reds. All semantic sites are swept to `red-*`. The sweep went this way, not the other, because the table above is the settled decision, `Badge`'s `risk` tone was taken from it in #1908 PR-2, and `red-*` already had ~450 occurrences to rose's 31. Reach for `red-*` for error / risk / breached / EXIT / negative money; never `rose-*`.
+
+Two surviving `rose-` references are deliberate and must NOT be swept — neither is a status colour:
+
+- `lib/avatar.tsx` — the 6-tone deterministic **identity-hash** palette (blue/emerald/amber/rose/violet/cyan). Categorical, not semantic: it exists to make the same trader the same colour everywhere. Recolouring rose→red here would make one in six avatars read as an error. The same reasoning covers its violet and cyan.
+- `components/instrument/OwnershipSunburst.tsx` — a **comment** naming the hue of `ChartTheme.accent[4]`. Chart series read the resolved theme (see Chart colours below); there is no Tailwind class here to sweep.
+
+**Semantic colour carried by TEXT needs its `dark:` partner written by hand** — `check-dark-classes.mjs` keys off background / border / hover tokens only, so a bare `text-red-700` passes the gate while rendering low-contrast in dark (prevention-log → "A bare `text-<color>` class has no dark-mode gate"). Prefer reusing `Badge` / `StatTile`, which already carry both.
+
 **Chart colours:** in any component that calls `useChartTheme()`, read the returned `theme` for ALL colours — series fills/strokes included — never import `lightTheme` directly. The dark palette aliases the saturated slots (`up`/`down`/`accent`/`regression`) to the light values today, so `lightTheme.down` happens to render identically, but referencing `theme` is the fragility-free form (prevention-log → "Chart series colours should read the resolved `theme`").
 
 ## Status pill vocabulary

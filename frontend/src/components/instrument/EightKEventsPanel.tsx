@@ -45,7 +45,7 @@ export interface EightKEventsPanelProps {
 function severityTone(severity: string | null): string {
   switch (severity) {
     case "critical":
-      return "bg-rose-100 dark:bg-rose-900/40 text-rose-800 dark:text-rose-200";
+      return "bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200";
     case "material":
       return "bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200";
     case "informational":
