@@ -191,8 +191,38 @@ Must additionally accept, per the 6 measured false negatives:
 `_ROW_IDENTITY_FLOOR: Final[float] = 0.5`.
 
 In `parse_beneficial_ownership_table`'s window loop, a parsed table is
-**ineligible to win its window** when
-`owner_identity_fraction(parsed.rows) < _ROW_IDENTITY_FLOOR`.
+**ineligible to win its window** when it fails **either** limb of the Item 403
+eligibility test:
+
+```python
+eligible := owner_identity_fraction(holders) >= _ROW_IDENTITY_FLOOR
+            and item403_value_signature(table.column_headers)   # D4
+```
+
+**Both limbs gate WINNER selection, not only sibling membership** (correction
+of 2026-07-29b; measured, see below). The draft applied D4 to D3's sibling set
+only, which leaves the ticket's central case untouched: an Item 402 compensation
+table's rows **are people** — `Kevin R.M. Smith`, `Dr. Hou`,
+`Jennifer F. Scanlon` — so it scores `owner_identity_fraction = 1.00`, passes
+the identity limb, and still wins its window.
+
+Measured against #2163's 23-accession junk cohort:
+
+```text
+D2 identity limb kills          6
+D4 value-signature limb kills  13     <- would NOT fire under a sibling-only D4
+neither (3 unrelated defects)   3     <- stay on #2163
+```
+
+Worked cases that pass identity at 1.00 and are rejected only by D4:
+
+```text
+0000950170-25-045737  ['Name', '', '(%)', '', '', '($) (1)']
+0001193125-25-093573  ['Named Executive Officer', 'Target Annual Cash Incentive as Percentage of Base Salary']
+0001193125-26-140022  ['Named Executive Officer', '', 'Target 2025 Award (As a Percentage of Base Salary)', …]
+0001193125-24-202132  ['Named Executive Officer', '', 'Pre-Separation Fiscal 2024 Bonus Opportunities (percentage of base salary)']
+0001539497-26-000784  ['Name and Address', '', 'Age', '', 'Position', '']
+```
 
 It is a **selection** gate, deliberately not a row-level filter. ~6 of the 61
 sub-floor accessions carry genuine holders; a row-level filter would delete
