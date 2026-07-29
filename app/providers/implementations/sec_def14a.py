@@ -192,17 +192,21 @@ def _strip_inline_html(raw: str) -> str:
     # No-op for the Item 402(c) path, which already folds these in ``_sct_norm``
     # and ``_split_name_position``.
     decoded = _UNICODE_SPACE_RE.sub(" ", decoded)
-    # Zero-width spacers (#2164). ``_sct_norm`` has scrubbed these on the Item
-    # 402(c) path since #1945, but the Item 403 path reaches cell text through
-    # THIS function and never learned it — so a U+200B-prefixed value cell
-    # ('​ 17,464 (2)', '​ *') failed BOTH ``_parse_share_count`` and
-    # ``_parse_percent``, and every row of the table was dropped by the
-    # "neither shares nor percent parsed" guard. 0001140361-26-008786 scored 15
-    # on a textbook 'Name of Beneficial Owner | Shares Beneficially Owned |
-    # Percentage of Total Voting Power' header and extracted 0 of 18 holders.
-    # Stripping rather than folding to a space: these are not separators, they
-    # are iXBRL layout artefacts INSIDE a value token.
-    decoded = _ZERO_WIDTH_RE.sub("", decoded)
+    # Zero-width spacers are deliberately NOT stripped here (#2164). They are
+    # scrubbed at the three points that consume a cell's MEANING —
+    # ``_parse_share_count``, ``_parse_percent`` and
+    # ``_clean_beneficial_holder_name`` — and nowhere upstream of table
+    # SELECTION. This function feeds header text into ``_score_table_headers``,
+    # ``_looks_like_label_row`` and the two-row-header promotion, so scrubbing
+    # here changes which table wins: on 0001558370-25-003243 the Item 403(b)
+    # table's header row is ENTIRELY U+200B, scores 0, and its window falls
+    # below the floor, so the loop moves on to the window holding the 403(a)
+    # 5%-holder table at 15. Emptying that header promoted the caption row, the
+    # table scored 4, the EARLIER window then cleared the floor and won first,
+    # and Vanguard / BlackRock / Dimensional / Harris / Victory were lost. The
+    # full-population A/B measured 35 such genuine holders lost across ~12
+    # accessions. The window loop takes the FIRST qualifying window rather than
+    # the best — that is #2160's subject, and this ticket must not perturb it.
     return _INLINE_WHITESPACE_RE.sub(" ", decoded).strip()
 
 
@@ -780,7 +784,8 @@ def _clean_beneficial_holder_name(raw: str) -> str:
        ``_clean_name_footnote`` is the repair the SCT path already applies to
        NEO names (#2094) — reused, not re-derived.
     """
-    flattened = _INLINE_WHITESPACE_RE.sub(" ", _clean_holder_name(raw).replace("\n", " ")).strip()
+    scrubbed = _ZERO_WIDTH_RE.sub("", raw)
+    flattened = _INLINE_WHITESPACE_RE.sub(" ", _clean_holder_name(scrubbed).replace("\n", " ")).strip()
     return _clean_name_footnote(flattened)
 
 
@@ -857,6 +862,13 @@ def _parse_share_count(raw: str) -> Decimal | None:
     ``"1234567"`` / ``"1,234,567(1)"`` / dash / em-dash / empty."""
     if not raw:
         return None
+    # Zero-width spacers (#2164). iXBRL-rendered proxies pad value cells with
+    # U+200B et al; ``str.strip()`` does not treat them as whitespace, so
+    # '<ZWSP> 17,464 (2)' failed to parse and the row died on the "neither
+    # shares nor percent parsed" guard (0001140361-26-008786: 18 raw rows, 0
+    # holders). Scrubbed HERE and not in ``_strip_inline_html`` — see that
+    # function for why touching header text changes table selection.
+    raw = _ZERO_WIDTH_RE.sub("", raw)
     # Strip an unbracketed trailing footnote superscript BEFORE spaces are
     # removed (#2140): "52,606,862 1" is BlackRock's 52.6M holding with a
     # footnote marker, and collapsing the space first turned it into
@@ -894,7 +906,10 @@ def _parse_percent(raw: str) -> Decimal | None:
     """
     if not raw:
         return None
-    cleaned = raw.strip().replace("%", "").replace(",", "").strip()
+    # Zero-width spacers (#2164) — '<ZWSP> *' is the less-than-1% marker and
+    # must reach the lone-asterisk check below. Scrubbed here rather than in
+    # ``_strip_inline_html``; see that function.
+    cleaned = _ZERO_WIDTH_RE.sub("", raw).strip().replace("%", "").replace(",", "").strip()
     if cleaned in ("*", "**"):
         # Industry convention: ``*`` denotes "less than 1%" in the
         # proxy footnote. Persist as 0.5 so the cell is non-NULL but

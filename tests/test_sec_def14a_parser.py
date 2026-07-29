@@ -1423,10 +1423,22 @@ class TestZeroWidthSpacersInValueCells:
             ("William G. Smith, Jr.", Decimal("2970720"), Decimal("17.3")),
         ]
 
-    def test_zero_width_is_stripped_not_folded_to_a_space(self) -> None:
-        # Folding to a space would split the thousands group ('1 234,567') and
-        # the share count would parse to the wrong value or not at all.
-        assert _strip_inline_html("<td>1​234,567</td>") == "1234,567"
+    def test_zero_width_is_stripped_at_the_value_parsers_not_upstream(self) -> None:
+        # Stripping must NOT happen in _strip_inline_html: that feeds header
+        # text into scoring / label-row promotion / window selection, and
+        # emptying an all-U+200B header row on 0001558370-25-003243 promoted a
+        # caption row, let an EARLIER window clear the floor, and lost
+        # Vanguard / BlackRock / Dimensional / Harris / Victory. 35 genuine
+        # holders across ~12 accessions, found by the full-population A/B.
+        assert _strip_inline_html("<td>1​234,567</td>") == "1​234,567"
+        # …and it MUST happen where a cell's meaning is read.
+        assert _parse_share_count("​ 17,464 (2)") == Decimal("17464")
+        assert _parse_percent("​ *") == Decimal("0.5")
+        assert _parse_percent("﻿ 12.76%") == Decimal("12.76")
+        # Holder identity too: holder_name_key is lower(trim(...)) and trim()
+        # does not remove U+200B, so a zero-width suffix made one person two
+        # identities — the #2140 D5 class. 554 holders re-keyed full-population.
+        assert _clean_beneficial_holder_name("Abraham Ceesay​") == "Abraham Ceesay"
 
 
 class TestStackedNameAddressRows:
