@@ -390,14 +390,17 @@ function FundamentalCell({
   const delta = yoyDelta(points);
   const lastIdx = lastNonNullIndex(points);
   const latestVal = lastIdx >= 0 ? points[lastIdx]!.value : null;
+  // Every branch carries its dark partner (#2152 review): a bare text colour
+  // has no lint gate, so a ternary themed on only one arm renders half its
+  // states washed out in dark and stays green on `dark:check`.
   const deltaClass =
     delta === null
-      ? "text-slate-400"
+      ? "text-slate-400 dark:text-slate-500"
       : delta.pct > 0
-        ? "text-emerald-600"
+        ? "text-emerald-600 dark:text-emerald-400"
         : delta.pct < 0
-          ? "text-rose-600"
-          : "text-slate-500";
+          ? "text-red-600 dark:text-red-400"
+          : "text-slate-500 dark:text-slate-400";
   // Per-instance + per-label gradient id (Codex review): two
   // FundamentalsPane instances in the same DOM previously collided.
   const gradId = `fund-grad-${idPrefix}-${label.replace(/[^a-z]/gi, "")}`;

@@ -131,8 +131,8 @@ describe("RollingPnlStrip", () => {
     });
     renderStrip();
     const pct = await screen.findByText("-1.37%");
-    expect(pct.className).toContain("text-rose-600");
-    expect(pct.className).toContain("dark:text-rose-400");
+    expect(pct.className).toContain("text-red-600");
+    expect(pct.className).toContain("dark:text-red-400");
     expect(pct.className).not.toContain("text-slate-500");
   });
 
