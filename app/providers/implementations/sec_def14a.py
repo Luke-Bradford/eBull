@@ -1103,7 +1103,16 @@ _ROLE_HEADING_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     # (0001140361-26-008786). Two lookaheads rather than an alternation so the
     # two tokens may appear in either order.
     (
-        re.compile(r"(?=.*5\s*%)(?=.*\b(?:share|stock)?(?:holders?|owners?)\b)", re.IGNORECASE),
+        # No LEADING word boundary, deliberately: issuers compound the noun —
+        # '5% Equityholders', 'Unitholders', 'Noteholders' — and a leading \b
+        # cannot match inside 'Equityholders', so anchoring it dropped the
+        # 'principal' role from 40 holders (BlackRock, The Vanguard Group,
+        # State Street on 0001193125-26-170704 / -25-096950 / -26-173833). The
+        # pre-#2164 pattern was `5\s*%.*holders?`, which matched the suffix;
+        # that behaviour must survive the order-insensitivity change. Found by
+        # the full-population role audit (A/B arm 3), not by review.
+        # The TRAILING \b is kept so 'ownership' does not match.
+        re.compile(r"(?=.*5\s*%)(?=.*(?:holder|owner)s?\b)", re.IGNORECASE),
         "principal",
     ),
     (re.compile(r"principal\s+(?:share|stock)holders?", re.IGNORECASE), "principal"),

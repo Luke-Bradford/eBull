@@ -28,6 +28,7 @@ from app.providers.implementations.sec_def14a import (
     Def14ABeneficialOwnershipTable,
     _clean_beneficial_holder_name,
     _clean_holder_name,
+    _detect_role_heading,
     _is_address_fragment,
     _is_owner_identity,
     _looks_like_label_row,
@@ -1570,6 +1571,24 @@ class TestFivePercentHeadingIsOrderInsensitive:
     and did not know 'shareowners', so 'Other Shareowners that Beneficially Own
     More than 5%' matched nothing, `current_role` stayed on the management
     block above, and BlackRock at 9.96% was tagged 'director'."""
+
+    def test_compound_holder_nouns_still_match(self) -> None:
+        # A leading \b cannot match inside 'Equityholders'. Anchoring it dropped
+        # the 'principal' role from 40 holders (BlackRock / The Vanguard Group /
+        # State Street on 0001193125-26-170704 and siblings) — found by the
+        # full-population role audit, A/B arm 3.
+        for heading in (
+            "5% Equityholders",
+            "5% Unitholders",
+            "5% Noteholders",
+            "5% Stockholders",
+            "Other Shareowners that Beneficially Own More than 5%:",
+        ):
+            assert _detect_role_heading((heading, "")) == "principal", heading
+
+    def test_ownership_is_not_a_holder_noun(self) -> None:
+        # The TRAILING \b keeps 'ownership' out.
+        assert _detect_role_heading(("Percentage Ownership of more than 5%", "")) != "principal"
 
     def test_noun_before_threshold_sets_the_principal_role(self) -> None:
         body = """
