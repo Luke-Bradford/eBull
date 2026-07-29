@@ -29,12 +29,14 @@ from app.providers.implementations.sec_def14a import (
     _clean_beneficial_holder_name,
     _clean_holder_name,
     _is_address_fragment,
+    _is_owner_identity,
     _looks_like_label_row,
     _looks_like_subheader,
     _parse_percent,
     _parse_share_count,
     _resolve_columns,
     _score_table_headers,
+    _strip_inline_html,
     extract_plan_name_and_trustee,
     is_esop_plan,
     parse_beneficial_ownership_table,
@@ -1393,3 +1395,183 @@ class TestEmptyTableCannotWinSelection:
         """
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
         assert [r.holder_name for r in parsed.rows] == ["The Vanguard Group", "BlackRock, Inc."]
+
+
+class TestZeroWidthSpacersInValueCells:
+    """#2164 — `_sct_norm` has scrubbed U+200B/U+200C/U+200D/U+2060/U+FEFF on
+    the Item 402(c) path since #1945, but the Item 403 path reaches cell text
+    through `_strip_inline_html`, which folded unicode SPACES and never learned
+    zero-width. `str.strip()` does not treat these as whitespace, so a
+    '​ 17,464 (2)' cell failed both `_parse_share_count` and
+    `_parse_percent` and the row died on the 'neither parsed' guard."""
+
+    def test_zero_width_prefixed_values_still_parse(self) -> None:
+        # 0001140361-26-008786 shape: score 15, 18 raw rows, 0 holders on main.
+        body = """
+        <table>
+          <tr><th></th><th>Name of Beneficial Owner</th><th></th>
+              <th>Shares Beneficially Owned</th><th>Percentage of Total Voting Power (1)</th></tr>
+          <tr><td></td><td>Robert Antoine</td><td></td>
+              <td>​ 17,464 (2)</td><td>​ *</td></tr>
+          <tr><td></td><td>William G. Smith, Jr.</td><td></td>
+              <td>​ 2,970,720 (4)</td><td>​ 17.3%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.percent_of_class) for r in parsed.rows] == [
+            ("Robert Antoine", Decimal("17464"), Decimal("0.5")),
+            ("William G. Smith, Jr.", Decimal("2970720"), Decimal("17.3")),
+        ]
+
+    def test_zero_width_is_stripped_not_folded_to_a_space(self) -> None:
+        # Folding to a space would split the thousands group ('1 234,567') and
+        # the share count would parse to the wrong value or not at all.
+        assert _strip_inline_html("<td>1​234,567</td>") == "1234,567"
+
+
+class TestStackedNameAddressRows:
+    """#2164 — 17 CFR 229.403(a) prescribes ONE column, "Name and address of
+    beneficial owner". Issuers routinely render it as TWO STACKED ROWS: the
+    name on row N, the address plus the share count and percent on row N+1.
+    Neither row survives alone, so every holder of such a table was lost."""
+
+    def test_name_row_above_an_address_row_yields_one_holder(self) -> None:
+        # 0000950170-25-048978 shape: 4 raw rows, 0 holders on main.
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>The Vanguard Group, Inc. (9)</td><td></td><td></td></tr>
+          <tr><td>100 Vanguard Blvd. Malvern, PA 19355</td><td>94,052,723</td><td>12.76%</td></tr>
+          <tr><td>BlackRock, Inc. (10)</td><td></td><td></td></tr>
+          <tr><td>50 Hudson Yards New York, NY 10001</td><td>64,137,817</td><td>8.70%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.percent_of_class) for r in parsed.rows] == [
+            ("The Vanguard Group, Inc.", Decimal("94052723"), Decimal("12.76")),
+            ("BlackRock, Inc.", Decimal("64137817"), Decimal("8.70")),
+        ]
+
+    def test_single_cell_name_row_carrying_a_title_is_not_a_section_heading(self) -> None:
+        # 0000799233-25-000020 shape: the name row is colspan-collapsed to one
+        # cell and its inline title matches the director/officer role patterns,
+        # so `_detect_role_heading` ate it. Diverting it must NOT set
+        # current_role — otherwise the 5% holders below inherit 'director'.
+        body = """
+        <table>
+          <tr><th>Title of Class</th><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>Mr. Michael J. Gerdin, Chief Executive Officer, Chairman, President and Director</td></tr>
+          <tr><td>Common Stock</td><td>901 Heartland Way, North Liberty, Iowa 52317</td>
+              <td>31,805,618 (1)</td><td>40.5%</td></tr>
+          <tr><td>Ms. Angela K. Janssen</td></tr>
+          <tr><td>Common Stock</td><td>901 Heartland Way, North Liberty, Iowa 52317</td>
+              <td>21,662,653 (3)</td><td>27.6%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.holder_role) for r in parsed.rows] == [
+            (
+                "Mr. Michael J. Gerdin, Chief Executive Officer, Chairman, President and Director",
+                Decimal("31805618"),
+                "director",
+            ),
+            # No sticky role leaked from the holder above — she is not an officer.
+            ("Ms. Angela K. Janssen", Decimal("21662653"), None),
+        ]
+
+    def test_a_section_heading_is_never_promoted_to_a_holder_name(self) -> None:
+        # The name half and a genuine section heading share the same single-cell
+        # row shape. The positive owner-identity test is what separates them.
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>Directors and Executive Officers:</td></tr>
+          <tr><td>c/o Acme Corporate Secretary</td><td>1,234,567</td><td>4.1%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == []
+
+    def test_carry_requires_the_next_row_to_be_an_address_row(self) -> None:
+        # A value-less name row followed by an ordinary data row must stay
+        # dropped — the carry is gated on the stacked shape, not on "any row
+        # with no values", so the behaviour change is bounded.
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>Some Annotation Row</td><td></td><td></td></tr>
+          <tr><td>The Vanguard Group</td><td>49,224,906</td><td>9.22%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["The Vanguard Group"]
+
+    def test_address_row_after_a_holder_that_had_values_is_still_dropped(self) -> None:
+        # #2140's Dolan case (0001193125-25-095068) must not regress: the
+        # preceding row emitted, so there is no pending name to attach and the
+        # address continuation rows carrying real numbers stay dropped.
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>Dolan Family Group</td><td>1,074,594</td><td>3.19%</td></tr>
+          <tr><td>c/o Dolan Family Office</td><td>11,484,408</td><td>100%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Dolan Family Group"]
+
+
+class TestOwnerIdentitySeparatesNamesFromHeadings:
+    """#2164 — the positive test that decides whether a value-less single-cell
+    row is a holder NAME or a section heading."""
+
+    def test_owner_identities_are_recognised(self) -> None:
+        for text in (
+            "Mr. Michael J. Gerdin, Chief Executive Officer, Chairman, President and Director",
+            "Ms. Angela K. Janssen",
+            "Ann S. Gerdin Revocable Trust",
+            "The Vanguard Group, Inc.",
+            "BlackRock, Inc.",
+            "2009 Gerdin Heartland Trust, UTA July 15, 2009",
+            "All directors and executive officers as a group (14 persons)",
+        ):
+            assert _is_owner_identity(text), text
+
+    def test_section_headings_are_rejected(self) -> None:
+        for text in (
+            "Directors and Executive Officers:",
+            "Other Shareowners that Beneficially Own More than 5%:",
+            "5% Stockholders",
+            "",
+            "   ",
+        ):
+            assert not _is_owner_identity(text), text
+
+
+class TestFivePercentHeadingIsOrderInsensitive:
+    """#2164 — the old `5\\s*%.*holders?` required the noun AFTER the threshold
+    and did not know 'shareowners', so 'Other Shareowners that Beneficially Own
+    More than 5%' matched nothing, `current_role` stayed on the management
+    block above, and BlackRock at 9.96% was tagged 'director'."""
+
+    def test_noun_before_threshold_sets_the_principal_role(self) -> None:
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Shares Beneficially Owned</th>
+              <th>Percentage of Total Voting Power</th></tr>
+          <tr><td>Directors and Executive Officers:</td></tr>
+          <tr><td>Ashbel C. Williams</td><td>6,242</td><td>*</td></tr>
+          <tr><td>Other Shareowners that Beneficially Own More than 5%:</td></tr>
+          <tr><td>BlackRock, Inc. (5)</td><td>1,707,759</td><td>9.96%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.holder_role) for r in parsed.rows] == [
+            ("Ashbel C. Williams", "officer"),
+            ("BlackRock, Inc.", "principal"),
+        ]

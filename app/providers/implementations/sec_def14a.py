@@ -809,6 +809,24 @@ _OWNER_ENTITY_RE: Final[re.Pattern[str]] = re.compile(
 _OWNER_PERSON_RE: Final[re.Pattern[str]] = re.compile(
     r"^[A-Z][A-Za-z.'’-]*,?(?:\s+(?:[A-Z][A-Za-z.'’-]*|[A-Z]\.|van|von|de|del|der|di|la|le),?)+"
 )
+# Item 403's own subsection wording. 403(a) covers "any person … who is known
+# to the registrant to be the beneficial owner of more than five percent";
+# 403(b) covers "each of the registrant's directors … each of the named
+# executive officers". Issuers head the two blocks with exactly those CLASS
+# nouns, PLURALISED — and a member of the class is named individually. That is
+# the discriminator: 'Directors and Executive Officers:' names the class,
+# 'Mr. Michael J. Gerdin, …, and Director' names one member of it.
+#
+# Necessary because a Title-Cased heading matches ``_OWNER_PERSON_RE`` —
+# 'Other Shareowners that Beneficially Own More than 5%:' reads as the
+# two-token name 'Other Shareowners' (caught by this ticket's own unit test,
+# not in review). Checked BEFORE the entity arm, so 'Directors and Executive
+# Officers of the Company' cannot be rescued by its trailing 'Company'.
+_HOLDER_CLASS_PLURAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:share(?:holders|owners)|stockholders|holders|owners|directors|trustees"
+    r"|officers|executives|nominees|persons)\b",
+    re.IGNORECASE,
+)
 
 
 def _is_owner_identity(text: str) -> bool:
@@ -816,14 +834,19 @@ def _is_owner_identity(text: str) -> bool:
     Instruction 5's directors-and-officers-as-a-group aggregate).
 
     Rejects the section headings that share the same single-cell row shape —
-    'Directors and Executive Officers:', '5% Stockholders' — because neither
-    carries a person-name run or an entity designator.
+    'Directors and Executive Officers:', 'Other Shareowners that Beneficially
+    Own More than 5%:', '5% Stockholders' — which name the CLASS rather than a
+    member of it.
     """
     stripped = text.strip()
     if not stripped:
         return False
+    # Instruction 5's aggregate row legitimately carries the plural class nouns,
+    # so it is settled before the class-noun rejection below.
     if "as a group" in stripped.lower():
         return True
+    if _HOLDER_CLASS_PLURAL_RE.search(stripped):
+        return False
     if _OWNER_ENTITY_RE.search(stripped):
         return True
     return bool(_OWNER_PERSON_RE.match(stripped))
