@@ -152,8 +152,10 @@ export function useLiveQuote(instrumentId: number | null | undefined): LiveQuote
  * display currency when available and falling back to native. Returns
  * null when no useful value exists.
  *
- * Used by compact table cells (LivePriceCell) where a single
- * display-currency figure is the convention.
+ * This is the currency-agnostic pick: it answers "the best number this
+ * tick has", labelled with whatever currency that number is in. Callers
+ * that already know which currency their surface is denominated in must
+ * use ``liveTickPriceIn`` instead (#2133).
  */
 export function liveTickDisplayPrice(tick: LiveTickPayload | null): {
   value: string;
@@ -195,4 +197,40 @@ export function liveTickDisplayCompanion(tick: LiveTickPayload | null): {
   if (tick === null || tick.display === null) return null;
   const v = tick.display.last ?? tick.display.bid;
   return { value: v, currency: tick.display.currency };
+}
+
+/**
+ * Pick the live-tick figure that is denominated in ``currency`` (#2133).
+ *
+ * A portfolio row is labelled with ONE currency — the operator's display
+ * currency normally, or the instrument's native currency when the FX rate was
+ * missing (#2129, `app/api/portfolio.py` `trade_currency`). Every other money
+ * cell in that row honours it, so the live price must too: a tick carries both
+ * a native triple and (when convertible) a display triple, and picking the
+ * wrong one makes the row disagree with itself mid-tick.
+ *
+ * Both codes originate from the same two sources — `instruments.currency` and
+ * `runtime_config.display_currency` (`app/api/sse_quotes.py::_load_display_context`)
+ * — so an exact string compare is a lookup, not a heuristic.
+ *
+ * Returns null when NEITHER block is denominated in ``currency`` (e.g. the tick
+ * could not name its native currency, or carries no display block while the row
+ * is in display currency). The caller then keeps its correctly-labelled REST
+ * fallback: a stale-but-true number beats a live number stamped with a currency
+ * symbol it is not in.
+ *
+ * ``currency`` null means the caller does not know what it is rendering; fall
+ * back to the currency-agnostic pick and let the tick label itself.
+ */
+export function liveTickPriceIn(
+  tick: LiveTickPayload | null,
+  currency: string | null,
+): { value: string; currency: string | null } | null {
+  if (tick === null) return null;
+  if (currency === null) return liveTickDisplayPrice(tick);
+  if (tick.display !== null && tick.display.currency === currency) {
+    return liveTickDisplayCompanion(tick);
+  }
+  if (tick.native_currency === currency) return liveTickNativePrice(tick);
+  return null;
 }
