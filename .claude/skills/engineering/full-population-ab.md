@@ -95,6 +95,42 @@ Corollaries:
   makes the section report zero lost *and* zero gained — indistinguishable from
   a clean run. Raise instead.
 
+## Arm 3 must cover fields the harness does NOT key on
+
+Arms 1 and 2 key on the ENTITY identity — for DEF 14A, `holder_name`. Any
+other column the change can move is invisible to both, and the diff will look
+clean while the column is wrong.
+
+#2164 changed a role-heading regex. Arms 1 and 2 were green; a separate
+role audit — re-parsing BOTH trees and diffing `{accession: {name: role}}` —
+found **40 holders whose `holder_role` regressed** from `principal` to `None`.
+Nothing in the name-keyed arms could have shown it.
+
+Before running, list every column the change can write, and confirm the harness
+keys on each one or that an arm-3 audit covers it. Roles, flags, denominator
+bases, source tags and `as_of` dates are the usual blind spots.
+
+The audit is a real two-checkout run like the others. Do not reconstruct the
+control's roles from the branch's output.
+
+## Normalise identity BEFORE calling anything "lost"
+
+When the change deliberately alters the identity key, the raw diff reports the
+whole re-keyed population as loss, and it looks catastrophic.
+
+#2164's arm 1 reported **606 distinct holders lost**. Every one was a re-key:
+the fix strips zero-width characters and footnote markers from `holder_name`,
+and `holder_name_key` is `lower(trim(...))` — `trim()` removes neither. After
+normalising BOTH sides by the same two transforms, genuine loss was **0**.
+
+So: apply the transforms the change intends, to both arms, then diff. Whatever
+still disappears is the real regression list. State the normalisation explicitly
+in the PR — "0 lost after normalising away zero-width and footnote markers" is a
+different and much stronger claim than "606 lost, but they're fine".
+
+The same run had **624** arm-2 non-reproductions, also all re-keys. Verify that
+programmatically over the whole set; eyeballing the first 20 is not verification.
+
 ## Self-inflicted defects are normal — budget for them
 
 3 of #2140's 14 defects, and 2 of #2158's 4 elements, were defects created by an
@@ -104,6 +140,12 @@ a bad merge reaching stored data.
 
 Plan for 3+ rounds on any real parser change. One round means you have not
 looked hard enough.
+
+#2164 ran three rounds and found a real defect in each of the first two — 35
+genuine holders lost in round 1, 40 role regressions in round 2. **Codex, 114
+unit tests and the 5-filing panel all passed the round-1 design.** Treat a clean
+Codex review as weak evidence about corpus behaviour; it reads the diff, not the
+data.
 
 ## Before the backfill
 
