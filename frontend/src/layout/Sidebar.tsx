@@ -39,6 +39,29 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+      {/* Lightweight Charts attribution (#2151). The library is Apache-2.0,
+          and TradingView's terms (node_modules/lightweight-charts/README.md
+          §License) require the attribution notice plus "a link to
+          https://www.tradingview.com/ to the page of your website ... that is
+          available to your users". The per-chart `attributionLogo` option is
+          documented as ONE sufficient way to meet that link requirement —
+          "if you already fulfill this requirement then you can disable this
+          attribution logo" (LayoutOptions.attributionLogo). This shell-level
+          link is how we fulfil it, so the charts set the option false. The
+          notice itself lives in the repo-root NOTICE file.
+          Keep this link on every authenticated page; removing it while the
+          charts have the logo disabled would put us out of compliance. */}
+      <div className="mt-auto px-5 py-4 text-xs text-slate-500 dark:text-slate-400">
+        Charts by{" "}
+        <a
+          href="https://www.tradingview.com/"
+          target="_blank"
+          rel="noreferrer noopener"
+          className="text-blue-600 hover:underline dark:text-blue-400"
+        >
+          TradingView
+        </a>
+      </div>
     </aside>
   );
 }

@@ -341,6 +341,7 @@ export function VerdictTab({
               values={historyValues}
               width={240}
               height={48}
+              showLastValue
               className="text-blue-600 dark:text-blue-400"
             />
             <span className="text-[10px] text-slate-400">
