@@ -25,6 +25,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.providers.implementations.sec_def14a import (
+    _SCHEDULE_13D_COVER_LABEL_RE,
     Def14ABeneficialOwnershipTable,
     _clean_beneficial_holder_name,
     _clean_holder_name,
@@ -37,6 +38,7 @@ from app.providers.implementations.sec_def14a import (
     _parse_share_count,
     _resolve_columns,
     _score_table_headers,
+    _shares_cell_percent_signature,
     _strip_inline_html,
     extract_plan_name_and_trustee,
     is_esop_plan,
@@ -1606,3 +1608,101 @@ class TestFivePercentHeadingIsOrderInsensitive:
             ("Ashbel C. Williams", "officer"),
             ("BlackRock, Inc.", "principal"),
         ]
+
+
+class TestPercentStoredAsShareCount:
+    """#2163 — 17 CFR 229.403 column 3 ("Amount and nature of beneficial
+    ownership") is a COUNT of shares; column 4 ("Percent of class") is a
+    percentage. A header row carrying empty SPACER cells its data rows do not
+    carry is WIDER than the data, so ``shares_idx`` lands on the percent column.
+    ``_parse_share_count('17.4')`` succeeds, so the ragged-row recovery never
+    fires and the real count one cell to the left is discarded."""
+
+    def test_spacer_widened_header_does_not_store_the_percent_as_shares(self) -> None:
+        # 0001308179-24-000672 shape: headers ('Name and address of beneficial
+        # owner', '', 'Number of shares', '', 'Percent of class*') — 5 cells
+        # over 4-cell data rows — resolved (name=0, shares=2, percent=4), so
+        # BlackRock stored shares=17.4 / percent=NULL and 6,236,345 was lost.
+        body = """
+        <table>
+          <tr><th>Name and address of beneficial owner</th><th></th><th>Number of shares</th>
+              <th></th><th>Percent of class*</th></tr>
+          <tr><td>BlackRock, Inc.</td><td>6,236,345</td><td>17.4</td><td>%</td></tr>
+          <tr><td>Vanguard Group, Inc.</td><td>3,761,632</td><td>10.5</td><td>%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.percent_of_class) for r in parsed.rows] == [
+            ("BlackRock, Inc.", Decimal("6236345"), Decimal("17.4")),
+            ("Vanguard Group, Inc.", Decimal("3761632"), Decimal("10.5")),
+        ]
+
+    def test_a_whole_percent_is_caught_too(self) -> None:
+        # The SQL proxy for this class (`shares <> trunc(shares)`) is a FLOOR: a
+        # percent of exactly 5 is stored as 5 shares and is invisible to it. The
+        # lone '%' sibling cell is what makes it detectable.
+        body = """
+        <table>
+          <tr><th>Name and address of beneficial owner</th><th></th><th>Number of shares</th>
+              <th></th><th>Percent of class</th></tr>
+          <tr><td>State Street Corporation</td><td>1,904,790</td><td>5</td><td>%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.percent_of_class) for r in parsed.rows] == [
+            ("State Street Corporation", Decimal("1904790"), Decimal("5"))
+        ]
+
+    def test_a_share_count_above_the_percent_ceiling_is_never_held_back(self) -> None:
+        # A percent of class is bounded by definition; _parse_percent has
+        # clamped to [0, 100] since #1228. Without that ceiling a row rendering
+        # the sign cell BEFORE the percent value would read the '%' sibling as
+        # decisive and drop a genuine 1.2M-share holding.
+        cells = ["Ninepoint Partners LP", "1,234,567", "%", "5.6"]
+        headers = ("Name of Beneficial Owner", "Shares", "", "Percent")
+        assert _shares_cell_percent_signature(cells, 1, headers) is None
+
+    def test_a_fractional_value_with_nothing_better_in_the_row_is_kept(self) -> None:
+        # 'fractional' alone is suggestive, not decisive — a fractional holding
+        # is unusual but not impossible. With no whole candidate anywhere in the
+        # row the original reading is restored rather than the row losing its
+        # only number.
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Amount and Nature of Beneficial Ownership</th></tr>
+          <tr><td>Jane Q. Holder</td><td>1,234.5</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares) for r in parsed.rows] == [("Jane Q. Holder", Decimal("1234.5"))]
+
+
+class TestEmbeddedSchedule13DCoverPage:
+    """#2163 — 17 CFR 240.13d-101 / -102 prescribe a NUMBERED cover page for
+    Schedules 13D / 13G. Proxies embed those cover pages as exhibits, and the
+    numbered layout parses as a table whose holder names are the item labels and
+    whose share counts are the ROW NUMBERS. 229.403 column 2 is a beneficial
+    owner (a person or entity, per Rule 13d-3); an item label is not."""
+
+    def test_cover_page_power_rows_are_not_holders(self) -> None:
+        # 0001104659-17-023458 stored 'SHARED VOTING POWER -0' with shares=8,
+        # 'SOLE DISPOSITIVE POWER 32,005,260 shares…' with shares=9, etc.
+        body = """
+        <table>
+          <tr><th>NUMBER OF SHARES BENEFICIALLY OWNED BY EACH REPORTING PERSON WITH</th><th></th>
+              <th>7.</th><th></th><th>SOLE VOTING POWER 32,005,260 shares of Common Stock</th></tr>
+          <tr><td></td><td></td><td>8.</td><td></td><td>SHARED VOTING POWER -0-</td></tr>
+          <tr><td></td><td></td><td>9.</td><td></td><td>SOLE DISPOSITIVE POWER 32,005,260 shares</td></tr>
+          <tr><td></td><td></td><td>10.</td><td></td><td>SHARED DISPOSITIVE POWER -0-</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert parsed.rows == []
+
+    def test_the_label_test_is_anchored_and_spares_real_holders(self) -> None:
+        assert _SCHEDULE_13D_COVER_LABEL_RE.match("SHARED VOTING POWER -0")
+        assert _SCHEDULE_13D_COVER_LABEL_RE.match("Aggregate Amount Beneficially Owned by Each Reporting Person")
+        assert _SCHEDULE_13D_COVER_LABEL_RE.match("TYPE OF REPORTING PERSON")
+        assert not _SCHEDULE_13D_COVER_LABEL_RE.match("BlackRock, Inc.")
+        assert not _SCHEDULE_13D_COVER_LABEL_RE.match("Power Corporation of Canada")
+        assert not _SCHEDULE_13D_COVER_LABEL_RE.match("Sole Proprietor Holdings LLC")
