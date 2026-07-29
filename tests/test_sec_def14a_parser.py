@@ -1710,3 +1710,35 @@ class TestEmbeddedSchedule13DCoverPage:
         assert not _SCHEDULE_13D_COVER_LABEL_RE.match("BlackRock, Inc.")
         assert not _SCHEDULE_13D_COVER_LABEL_RE.match("Power Corporation of Canada")
         assert not _SCHEDULE_13D_COVER_LABEL_RE.match("Sole Proprietor Holdings LLC")
+
+
+class TestTwoPercentColumnsOrdering:
+    """#2163 A/B round 3. Multi-class Item 403 tables carry SEVERAL percent
+    columns, and `_resolve_columns`' `total` shares-tier happily matches
+    'Percent of Total Voting Rights'. The held-back cell is therefore only a
+    LAST-resort percent source: it must never pre-empt the ragged-row scan,
+    which accepts only cells carrying a '%' or the '*' marker."""
+
+    def test_an_unambiguous_percent_cell_beats_the_held_back_cell(self) -> None:
+        # 0000950170-24-100030 (Richardson Electronics) shape. On main this
+        # stored shares=98.1 / percent=14.8; pre-empting the scan stored
+        # percent=98.1 and lost the real 14.8.
+        body = """
+        <table>
+          <tr><th>Name of Beneficial Owner</th><th>Shares of Common Stock</th>
+              <th>Percent of Common Stock Class</th><th>Percent of Total Voting Rights</th></tr>
+          <tr><td>Edward J. Richardson</td><td>2,129,271</td><td>14.8%</td><td>98.1</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.percent_of_class) for r in parsed.rows] == [
+            ("Edward J. Richardson", Decimal("2129271"), Decimal("14.8"))
+        ]
+
+    def test_the_recovery_scan_will_not_take_another_percent_as_the_count(self) -> None:
+        # Regression B: when the primary cell was held back as a percent, the
+        # recovery must not simply grab the next percent along
+        # (0001177394-25-000016 held back 30.0 then recovered 100.0).
+        cells = ["Dennis Polk", "30.0", "100.0", "%"]
+        headers = ("Name", "Target as a Percentage of Base Salary", "Maximum", "")
+        assert _shares_cell_percent_signature(cells, 2, headers) is not None

@@ -1626,9 +1626,18 @@ def _extract_holder_rows(
                 # ``Shares = —`` and ``Percent = 8.4`` would otherwise store
                 # shares=8.4 (Codex pre-push review). Leaving shares NULL is the
                 # safe fallback; _parse_percent already handles bare percents.
-                if candidate is not None and candidate == candidate.to_integral_value():
-                    shares, shares_src_idx = candidate, i
-                    break
+                if candidate is None or candidate != candidate.to_integral_value():
+                    continue
+                # #2163 A/B round 2: when the PRIMARY cell was held back as a
+                # percent, the recovery must not simply grab the next percent
+                # along. 0001177394-25-000016 ('Minimum Payment … as Percentage
+                # of Base Salary') held back 30.0 and then recovered '100.0'
+                # from the next column — still a percent, now stored as a share
+                # count. Apply the same signature test to the candidate.
+                if percent_signature is not None and _shares_cell_percent_signature(cells, i, table.column_headers):
+                    continue
+                shares, shares_src_idx = candidate, i
+                break
         if shares is None and percent_signature == "fractional":
             # Nothing whole anywhere in the row, and the only evidence against
             # the cell was that it is not an integer. A fractional beneficial
@@ -1638,14 +1647,6 @@ def _extract_holder_rows(
             # restored — a lone '%' sibling or a percent caption is decisive.
             shares = _parse_share_count(shares_raw)
             shares_src_idx = shares_idx if shares is not None else -1
-        if percent is None and percent_signature == "marker":
-            # The cell IS the percent (229.403 column 4). Read it as one
-            # directly: the recovery scan below only accepts cells carrying a
-            # '%' or the '*' marker, so a percent identified by its CAPTION
-            # would otherwise be dropped and the row would lose both values.
-            percent = _parse_percent(shares_raw)
-            if percent is not None:
-                percent_src_idx = shares_idx
         if percent is None:
             # Ragged row (#2140 D3): issuers interleave footnote-only cells
             # ('(2)') mid-row, so a data row can be WIDER than its header row
@@ -1678,6 +1679,20 @@ def _extract_holder_rows(
                     percent = _parse_percent(text)
                     if percent is not None:
                         break
+
+        # LAST resort, and deliberately after the scan above (#2163 A/B round
+        # 3): a hold-back that SUCCEEDED — the real whole count was found at a
+        # DIFFERENT index — proves the held-back cell was 229.403 column 4.
+        # But it is weaker evidence than an unambiguous '%'-bearing cell, so it
+        # must not pre-empt the scan. Running it FIRST cost the row its real
+        # percent on tables carrying two percent-ish columns:
+        # 0000950170-24-100030 'Edward J. Richardson' has 98.1 at shares_idx and
+        # 14.8 under 'Percent of Class'; pre-empting stored 98.1.
+        held_back_succeeded = percent_signature is not None and shares is not None and shares_src_idx != shares_idx
+        if percent is None and (percent_signature == "marker" or held_back_succeeded):
+            percent = _parse_percent(shares_raw)
+            if percent is not None:
+                percent_src_idx = shares_idx
 
         # Drop rows where neither shares nor percent parsed — that's
         # almost always a free-text annotation row ("Notes:",
