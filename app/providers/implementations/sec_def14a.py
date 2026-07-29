@@ -192,6 +192,17 @@ def _strip_inline_html(raw: str) -> str:
     # No-op for the Item 402(c) path, which already folds these in ``_sct_norm``
     # and ``_split_name_position``.
     decoded = _UNICODE_SPACE_RE.sub(" ", decoded)
+    # Zero-width spacers (#2164). ``_sct_norm`` has scrubbed these on the Item
+    # 402(c) path since #1945, but the Item 403 path reaches cell text through
+    # THIS function and never learned it — so a U+200B-prefixed value cell
+    # ('​ 17,464 (2)', '​ *') failed BOTH ``_parse_share_count`` and
+    # ``_parse_percent``, and every row of the table was dropped by the
+    # "neither shares nor percent parsed" guard. 0001140361-26-008786 scored 15
+    # on a textbook 'Name of Beneficial Owner | Shares Beneficially Owned |
+    # Percentage of Total Voting Power' header and extracted 0 of 18 holders.
+    # Stripping rather than folding to a space: these are not separators, they
+    # are iXBRL layout artefacts INSIDE a value token.
+    decoded = _ZERO_WIDTH_RE.sub("", decoded)
     return _INLINE_WHITESPACE_RE.sub(" ", decoded).strip()
 
 
@@ -773,6 +784,51 @@ def _clean_beneficial_holder_name(raw: str) -> str:
     return _clean_name_footnote(flattened)
 
 
+# Beneficial-owner identity, POSITIVE test (#2164). Used ONLY to decide whether
+# a value-less row that precedes an address row is a HOLDER NAME or a section
+# heading — see :func:`_extract_holder_rows`'s stacked name/address recovery.
+#
+# Positive rather than a heading blocklist: a blocklist needs an entry per new
+# heading wording, and the prevention log's rule on hand-enumerated tuples
+# applies. This is deliberately narrow and scoped to that one decision; #2160
+# generalises row identity into the table-SELECTION path.
+_OWNER_ENTITY_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b("
+    r"LLC|L\.L\.C|LP|L\.P|LLP|Inc|Incorporated|Corp|Corporation|Company|Ltd|Limited"
+    r"|Trust|Fund|Funds|Partners|Partnership|Capital|Management|Advisers|Advisors"
+    r"|Holdings|Associates|Ventures|Bank|N\.A|plc|GmbH|S\.A|AG|NV|PLC"
+    r"|Foundation|Insurance|Investments?|Securities|Financial"
+    r")\b",
+    re.IGNORECASE,
+)
+# A person name at the START of the cell — NOT anchored at the end, because
+# Item 403(a)'s column legitimately continues into an address, and issuers
+# append titles ('Mr. Michael J. Gerdin, Chief Executive Officer, Chairman,
+# President and Director'). The trailing optional comma covers the
+# surname-first rendering issuers use for alphabetised management tables.
+_OWNER_PERSON_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Z][A-Za-z.'’-]*,?(?:\s+(?:[A-Z][A-Za-z.'’-]*|[A-Z]\.|van|von|de|del|der|di|la|le),?)+"
+)
+
+
+def _is_owner_identity(text: str) -> bool:
+    """True when TEXT names a beneficial owner (person, entity, or Item 403(b)
+    Instruction 5's directors-and-officers-as-a-group aggregate).
+
+    Rejects the section headings that share the same single-cell row shape —
+    'Directors and Executive Officers:', '5% Stockholders' — because neither
+    carries a person-name run or an entity designator.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if "as a group" in stripped.lower():
+        return True
+    if _OWNER_ENTITY_RE.search(stripped):
+        return True
+    return bool(_OWNER_PERSON_RE.match(stripped))
+
+
 def _parse_share_count(raw: str) -> Decimal | None:
     """Parse a share-count cell. Accepts ``"1,234,567"`` /
     ``"1234567"`` / ``"1,234,567(1)"`` / dash / em-dash / empty."""
@@ -1000,7 +1056,18 @@ _ROLE_HEADING_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     (re.compile(r"\bofficers?\s+and\s+directors?\b", re.IGNORECASE), "officer"),
     (re.compile(r"\bdirectors?\b", re.IGNORECASE), "director"),
     (re.compile(r"\bofficers?\b", re.IGNORECASE), "officer"),
-    (re.compile(r"5\s*%.*holders?", re.IGNORECASE), "principal"),
+    # Order-insensitive (#2164): the noun can precede the threshold. 'Other
+    # Shareowners that Beneficially Own More than 5%:' matched nothing under the
+    # old ``5\s*%.*holders?`` (noun first, and 'shareowners' not 'holders'), so
+    # it fell through as a value-less data row, ``current_role`` stayed on the
+    # management block above it, and the 403(a) 5% holder beneath inherited
+    # 'director' — BlackRock at 9.96% filed into the insiders slice
+    # (0001140361-26-008786). Two lookaheads rather than an alternation so the
+    # two tokens may appear in either order.
+    (
+        re.compile(r"(?=.*5\s*%)(?=.*\b(?:share|stock)?(?:holders?|owners?)\b)", re.IGNORECASE),
+        "principal",
+    ),
     (re.compile(r"principal\s+(?:share|stock)holders?", re.IGNORECASE), "principal"),
 )
 # NO ``group`` pattern here, deliberately (#2140 D4). Per Item 403(b) the
@@ -1274,6 +1341,51 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     )
 
 
+def _pad_row(raw_row: tuple[str, ...], *, name_idx: int, shares_idx: int, percent_idx: int) -> list[str]:
+    """Pad short rows (some issuers omit trailing cells when the value is
+    blank) so positional access doesn't IndexError."""
+    return list(raw_row) + [""] * max(0, max(name_idx, shares_idx, percent_idx) + 1 - len(raw_row))
+
+
+def _resolve_row_name(cells: list[str], *, name_idx: int, shares_idx: int) -> tuple[int, str]:
+    """Return ``(source_index, raw_name_cell)`` for one data row.
+
+    Structural guard (#2140): a holder name must carry NAME evidence. Stated as
+    a positive invariant rather than a numeric blacklist so it also rejects
+    '*', '<1%', '—' and footnote-only cells. When the resolved cell has no name
+    evidence, fall back to the leftmost cell in THIS row that does; if none
+    does, return ``(-1, "")`` and the row has no holder. This is what makes a
+    share count landing in ``holder_name`` impossible regardless of future
+    header shapes.
+    """
+    raw = cells[name_idx] if 0 <= name_idx < len(cells) else ""
+    if _looks_like_name_cell(raw):
+        return (name_idx, raw)
+    # The shares column is eligible as a name source ONLY when it holds no
+    # share count — a mis-resolved shares_idx can land on the name column
+    # itself, and excluding it unconditionally then leaves the row with no name
+    # at all and drops it.
+    shares_cell_is_numeric = _parse_share_count(cells[shares_idx] if 0 <= shares_idx < len(cells) else "") is not None
+    return next(
+        (
+            (i, c)
+            for i, c in enumerate(cells)
+            if not (i == shares_idx and shares_cell_is_numeric) and _looks_like_name_cell(c)
+        ),
+        (-1, ""),
+    )
+
+
+def _row_name_is_address(raw_row: tuple[str, ...] | None, *, name_idx: int, shares_idx: int, percent_idx: int) -> bool:
+    """True when RAW_ROW's resolved name cell holds only address material — the
+    ADDRESS half of a stacked Item 403(a) "Name and address" pair (#2164)."""
+    if raw_row is None:
+        return False
+    cells = _pad_row(raw_row, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx)
+    _, raw_name = _resolve_row_name(cells, name_idx=name_idx, shares_idx=shares_idx)
+    return _is_address_fragment(_clean_beneficial_holder_name(raw_name))
+
+
 def _extract_holder_rows(
     table: _RawTable,
     *,
@@ -1289,11 +1401,48 @@ def _extract_holder_rows(
     Section-heading role context is local to ``table`` — each Item 403 table
     re-establishes its own headings."""
     current_role: str | None = None
-    for raw_row in table.rows:
+    # Stacked name/address recovery (#2164). Source rule: 17 CFR 229.403(a)
+    # prescribes ONE column — "Name and address of beneficial owner" — and
+    # issuers routinely render it as TWO STACKED ROWS: the name (often
+    # colspan-collapsed to a single cell) on row N, the address plus the share
+    # count and percent on row N+1. Neither row survives alone. Row N has no
+    # values and dies on the "neither shares nor percent parsed" guard (or is
+    # eaten as a role heading, because a name carrying a title matches the
+    # director/officer patterns); row N+1's name cell is a pure address and
+    # dies on ``_is_address_fragment``. Every holder of 0000799233-25-000020
+    # (16), -26-000017 (17) and 0000950170-25-048978 (2: Vanguard 94,052,723 /
+    # 12.76%, BlackRock 64,137,817 / 8.70%) was lost this way.
+    #
+    # Carrying the name forward is purely ADDITIVE at the row level: it fires
+    # only on a pair where BOTH rows are already being dropped.
+    pending_owner_name: str | None = None
+    raw_rows = list(table.rows)
+    for idx, raw_row in enumerate(raw_rows):
+        # The diversions below are gated on the NEXT row actually being an
+        # address row, so the behaviour change is bounded to the stacked shape
+        # rather than applying to every value-less row in the corpus.
+        stacked_next = _row_name_is_address(
+            raw_rows[idx + 1] if idx + 1 < len(raw_rows) else None,
+            name_idx=name_idx,
+            shares_idx=shares_idx,
+            percent_idx=percent_idx,
+        )
+
         # Single-cell heading rows flip the role tag.
         heading_role = _detect_role_heading(raw_row)
         if heading_role is not None:
-            current_role = heading_role
+            heading_text = _clean_beneficial_holder_name(next((c for c in raw_row if c.strip()), ""))
+            if stacked_next and _is_owner_identity(heading_text):
+                # Not a section heading — the NAME half of a stacked pair whose
+                # inline title ('Mr. Michael J. Gerdin, Chief Executive
+                # Officer, …, and Director') happens to match a role pattern.
+                # Deliberately does NOT set current_role: tagging every
+                # subsequent 5% holder 'director' off one holder's own title
+                # would mis-file them into the insiders slice.
+                pending_owner_name = heading_text
+            else:
+                current_role = heading_role
+                pending_owner_name = None
             continue
 
         # Skip totally-empty rows defensively (the regex above
@@ -1302,43 +1451,25 @@ def _extract_holder_rows(
         if not any(c.strip() for c in raw_row):
             continue
 
-        # Pad short rows (some issuers omit trailing cells when the
-        # value is blank) so positional access doesn't IndexError.
-        cells = list(raw_row) + [""] * max(0, max(name_idx, shares_idx, percent_idx) + 1 - len(raw_row))
+        cells = _pad_row(raw_row, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx)
 
-        holder_name_raw = cells[name_idx] if name_idx < len(cells) else ""
         shares_raw = cells[shares_idx] if shares_idx < len(cells) else ""
         # percent_idx < 0 means "no distinguishable percent column" — never
         # index end-relative into the row (that would read a footnote cell).
         percent_raw = cells[percent_idx] if 0 <= percent_idx < len(cells) else ""
 
-        # Structural guard (#2140): a holder name must carry NAME evidence.
-        # Stated as a positive invariant rather than a numeric blacklist so it
-        # also rejects '*', '<1%', '—' and footnote-only cells. When the
-        # resolved cell has no name evidence, fall back to the leftmost cell in
-        # THIS row that does; if none does, the row has no holder and is
-        # dropped. This is what makes a share count landing in holder_name
-        # impossible regardless of future header shapes.
-        name_src_idx = name_idx
-        if not _looks_like_name_cell(holder_name_raw):
-            # The shares column is eligible as a name source ONLY when it holds
-            # no share count — a mis-resolved shares_idx can land on the name
-            # column itself, and excluding it unconditionally then leaves the
-            # row with no name at all and drops it.
-            shares_cell_is_numeric = (
-                _parse_share_count(cells[shares_idx] if shares_idx < len(cells) else "") is not None
-            )
-            name_src_idx, holder_name_raw = next(
-                (
-                    (i, c)
-                    for i, c in enumerate(cells)
-                    if not (i == shares_idx and shares_cell_is_numeric) and _looks_like_name_cell(c)
-                ),
-                (-1, ""),
-            )
+        name_src_idx, holder_name_raw = _resolve_row_name(cells, name_idx=name_idx, shares_idx=shares_idx)
 
         holder_name = _clean_beneficial_holder_name(holder_name_raw)
-        if not holder_name or _is_address_fragment(holder_name):
+        if _is_address_fragment(holder_name):
+            # ADDRESS half of a stacked pair — take the name carried from the
+            # preceding row. ``name_src_idx`` deliberately keeps pointing at
+            # the address cell so the value-recovery scans below still exclude
+            # it; an address is never a share count or a percent.
+            holder_name = pending_owner_name or ""
+            pending_owner_name = None
+        if not holder_name:
+            pending_owner_name = None
             continue
         shares = _parse_share_count(shares_raw)
         shares_src_idx = shares_idx if shares is not None else -1
@@ -1408,7 +1539,13 @@ def _extract_holder_rows(
         # almost always a free-text annotation row ("Notes:",
         # "(continued from previous page)") and not real data.
         if shares is None and percent is None:
+            # …unless it is the NAME half of a stacked pair (#2164): carry the
+            # name to the address row that follows and carries the values. The
+            # identity test is what keeps section headings ('Directors and
+            # Executive Officers:', '5% Stockholders') out of holder_name.
+            pending_owner_name = holder_name if (stacked_next and _is_owner_identity(holder_name)) else None
             continue
+        pending_owner_name = None
 
         role = current_role or _detect_inline_role(holder_name)
 
