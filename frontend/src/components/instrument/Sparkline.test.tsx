@@ -96,3 +96,58 @@ describe("Sparkline — hover tooltip", () => {
     expect(screen.queryByTestId("sparkline-tooltip")).toBeNull();
   });
 });
+
+describe("Sparkline — last-value label + height floor (#2151)", () => {
+  it("renders no last-value label by default", () => {
+    render(<Sparkline values={[10, 20, 30]} />);
+    expect(screen.queryByTestId("sparkline-last-value")).toBeNull();
+  });
+
+  it("renders the FINAL value when showLastValue is set", () => {
+    render(<Sparkline values={[10, 20, 30]} showLastValue />);
+    const label = screen.getByTestId("sparkline-last-value");
+    // The last point, not the max and not the first.
+    expect(label.textContent).toBe("30");
+  });
+
+  it("formats the last value through formatValue", () => {
+    render(
+      <Sparkline
+        values={[1, 2, 3.14159]}
+        showLastValue
+        formatValue={(v) => `${v.toFixed(1)}x`}
+      />,
+    );
+    expect(screen.getByTestId("sparkline-last-value").textContent).toBe("3.1x");
+  });
+
+  it("clamps a below-floor height up to the 24px minimum", () => {
+    const { container } = render(<Sparkline values={[1, 2, 3]} height={4} />);
+    expect(container.querySelector("svg")?.getAttribute("height")).toBe("24");
+  });
+
+  it("honours a height above the floor", () => {
+    const { container } = render(<Sparkline values={[1, 2, 3]} height={48} />);
+    expect(container.querySelector("svg")?.getAttribute("height")).toBe("48");
+  });
+
+  it("reserves the same floored box when the series is too short to plot", () => {
+    // The empty branch must not collapse the row differently from the plotted
+    // one, or a series dropping to <2 points shifts the layout around it.
+    const { container } = render(<Sparkline values={[42]} height={4} />);
+    expect(container.querySelector("polyline")).toBeNull();
+    expect(container.querySelector("svg")?.getAttribute("height")).toBe("24");
+  });
+
+  it("puts className on the wrapper so the label inherits the line colour", () => {
+    const { container } = render(
+      <Sparkline values={[1, 2, 3]} showLastValue className="text-blue-600" />,
+    );
+    const wrapper = container.firstElementChild as HTMLElement;
+    expect(wrapper.className).toContain("text-blue-600");
+    // currentColor still resolves for the stroke, inherited from the wrapper.
+    expect(container.querySelector("polyline")?.getAttribute("stroke")).toBe(
+      "currentColor",
+    );
+  });
+});
