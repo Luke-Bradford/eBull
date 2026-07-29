@@ -90,17 +90,18 @@ function staleLabel(reason: string): string {
  *  a non-material tweak. Absent for v1 / gap rows / unchanged regens. */
 function ChangeChip({ row }: { row: ThesisLibraryItem }) {
   if (row.last_change_summary === null) return null;
-  const cls = row.last_change_material
-    ? "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300"
-    : "border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 text-slate-500 dark:text-slate-400";
   return (
-    <span
+    <Badge
+      tone={row.last_change_material ? "warn" : "neutral"}
+      className="max-w-48 align-bottom"
       data-testid="thesis-change-chip"
-      className={`inline-block max-w-48 truncate rounded border px-1.5 py-0.5 align-bottom text-[10px] font-medium ${cls}`}
       title={row.last_change_summary}
     >
-      Δ {row.last_change_summary}
-    </span>
+      {/* Badge is inline-flex, so the ellipsis lives on the child, not the
+          container — a flex item needs its own min-w-0 to shrink below its
+          content width. */}
+      <span className="min-w-0 truncate">Δ {row.last_change_summary}</span>
+    </Badge>
   );
 }
 

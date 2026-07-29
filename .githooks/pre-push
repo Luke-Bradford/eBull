@@ -359,6 +359,9 @@ trap - EXIT
 if [[ -d frontend && -f frontend/package.json ]] && command -v pnpm >/dev/null 2>&1; then
   echo "==> Pre-push gate: dark-mode class check"
   pnpm --dir frontend dark:check
+  # Hand-rolled status pills (#2148) — Badge is the one pill primitive.
+  echo "==> Pre-push gate: hand-rolled status pill check"
+  pnpm --dir frontend pills:check
 fi
 
 # #1208 Phase 4 — dev DB bloat warning (non-blocking).
