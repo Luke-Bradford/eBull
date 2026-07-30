@@ -453,7 +453,13 @@ _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
 # 1,668 -> 45 candidate tables, and the survivors are the genuine shapes.
 _ITEM403_CLASS_PCT_RE: Final[re.Pattern[str]] = re.compile(
     r"(percent|percentage|%)\s*(of\s+)?(the\s+)?(all\s+|total\s+|outstanding\s+)*"
-    r"(class|common|shares|stock|voting|ownership|beneficial|equity|units)",
+    r"(class|common|shares|stock|voting|ownership|beneficial|equity|units)"
+    # 229.403 column 4 is "Percent of CLASS". An AWARD noun after the class noun
+    # makes it a percent of a grant, not of a class -- 'Percentage of Stock
+    # Options Vesting', 'Percentage of total stock incentive awards'. This arm is
+    # STRONG (it bypasses the Item 402 veto), so its precision is load-bearing:
+    # those two shapes were admitted as beneficial ownership.
+    r"(?!\s*\w*\s*(option|award|incentive|grant|vesting|payout|settl))",
     re.IGNORECASE,
 )
 # Column 3 subdivided. Rule 13d-3 (17 CFR 240.13d-3) defines beneficial
@@ -535,7 +541,10 @@ _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
     # Added when the data-row fallback (weak evidence) began admitting
     # 'Percentage of Annual Total Direct Compensation' and
     # 'Attendance Percentage of All Meetings'.
-    r"|compensation|attendance|meetings?\s+attended|dilution)",
+    r"|compensation|attendance|meetings?\s+attended|dilution"
+    r"|\bpsus?\b|\bltip\b|incentive\s+award|as\s+settled"
+    r"|long.?term\s+incentive|incentive\s+(program|opportunity)|base\s+pay|\bbonus\b"
+    r"|option\s+awards?|stock\s+option\s+awards?)",
     re.IGNORECASE,
 )
 # Item 402(a)(3) DEFINES "named executive officer"; Item 403 says "name of
