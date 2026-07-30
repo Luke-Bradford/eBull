@@ -105,6 +105,8 @@ def scan(limit: int | None) -> dict[str, Any]:
             print(f"INSPECT-ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return original(table, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx, rows=rows, seen=seen)
 
+    # Restored in the ``finally`` below (Codex ckpt-3): an exception escaping the
+    # loop would otherwise leave the module patched for the rest of the process.
     P._extract_holder_rows = traced
 
     sql = """
@@ -116,31 +118,35 @@ def scan(limit: int | None) -> dict[str, Any]:
     """
     hits: dict[str, list[dict[str, Any]]] = {}
     n_acc = 0
-    with psycopg.connect(settings.database_url) as conn:
-        conn.execute("SET statement_timeout = 0")
-        with conn.cursor(name="c2163") as cur:
-            cur.itersize = 20
-            cur.execute(sql, {"limit": limit})
-            for accession, body in cur:
-                n_acc += 1
-                if n_acc % 2000 == 0:
-                    print(f"  ... {n_acc} accessions, {len(hits)} hit", file=sys.stderr)
-                bucket.clear()
-                try:
-                    parsed = P.parse_beneficial_ownership_table(body)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"PARSE-ERROR {accession}: {type(exc).__name__}: {exc}", file=sys.stderr)
-                    continue
-                if not bucket:
-                    continue
-                # Only count suspects that actually SURVIVED into stored rows
-                # with that value as their share count.
-                stored = {(r.holder_name.strip().lower(), str(r.shares)) for r in parsed.rows if r.shares is not None}
-                live = [b for b in bucket if (b["holder"], b["value"]) in stored]
-                if live:
-                    hits[accession] = live
+    try:
+        with psycopg.connect(settings.database_url) as conn:
+            conn.execute("SET statement_timeout = 0")
+            with conn.cursor(name="c2163") as cur:
+                cur.itersize = 20
+                cur.execute(sql, {"limit": limit})
+                for accession, body in cur:
+                    n_acc += 1
+                    if n_acc % 2000 == 0:
+                        print(f"  ... {n_acc} accessions, {len(hits)} hit", file=sys.stderr)
+                    bucket.clear()
+                    try:
+                        parsed = P.parse_beneficial_ownership_table(body)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"PARSE-ERROR {accession}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                        continue
+                    if not bucket:
+                        continue
+                    # Only count suspects that actually SURVIVED into stored rows
+                    # with that value as their share count.
+                    stored = {
+                        (r.holder_name.strip().lower(), str(r.shares)) for r in parsed.rows if r.shares is not None
+                    }
+                    live = [b for b in bucket if (b["holder"], b["value"]) in stored]
+                    if live:
+                        hits[accession] = live
 
-    P._extract_holder_rows = original
+    finally:
+        P._extract_holder_rows = original
     return {"accessions_scanned": n_acc, "hits": hits}
 
 
