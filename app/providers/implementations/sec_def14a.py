@@ -1138,7 +1138,7 @@ _IDENTITY_DEBRIS_RE: Final[re.Pattern[str]] = re.compile(r"[.…]{3,}")
 # ``_is_address_fragment`` so it can share ``_STREET_TYPE``, which this module
 # declares further down.
 _OWNER_NAME_THEN_ADDRESS_RE: Final[re.Pattern[str]] = re.compile(
-    r"^[A-Z][\w&.'’-]*(?:\s+[A-Z][\w&.'’-]*){0,3}\s+\d(?P<tail>.*)$",
+    r"^[A-Z][\w&.'’-]*(?:\s+(?:[A-Z][\w&.'’-]*|&|and)){0,4}\s+\d(?P<tail>.*)$",
     re.DOTALL,
 )
 
@@ -1231,6 +1231,16 @@ _PERSONAL_INITIAL_RE: Final[re.Pattern[str]] = re.compile(r"\b[A-Z]\.")
 _ALLCAPS_ENTITY_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\b[A-Z]{3,}\b")
 
 
+# A partnership-style firm name joined by '&' -- 'Dodge & Cox', 'Cohen & Steers',
+# 'Ruane, Cunniff & Goldfarb'. These carry no corporate suffix, so the entity arm
+# misses them, and the start-anchored person arm stops at the '&' (Codex ckpt-2
+# P2). Common enough in Item 403(a) to matter: the corpus holds Cohen & Steers,
+# Cooke & Bieler, Cede & Co, Bill & Melinda Gates Foundation Trust.
+_AMPERSAND_FIRM_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Z][\w.'’-]*(?:,?\s+[A-Z][\w.'’-]*)*,?\s+&\s+[A-Z]",
+)
+
+
 def _contains_specific_name(text: str) -> bool:
     """True when TEXT carries a run of >=2 capitalised tokens that name someone.
 
@@ -1291,6 +1301,8 @@ def _is_beneficial_owner_identity(text: str) -> bool:
             return False
         return True
     if _OWNER_ENTITY_CASED_RE.search(stripped):
+        return True
+    if _AMPERSAND_FIRM_RE.match(stripped):
         return True
     if _OWNER_PERSON_RE.match(stripped):
         return True

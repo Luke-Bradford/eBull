@@ -2050,3 +2050,29 @@ class TestHeadingTestDoesNotRejectNamedHolders:
         entity token, or a corporate designator must also be present."""
         assert not _contains_specific_name("Directors and Executive Officers of the Company")
         assert _contains_specific_name("Trustees of the Thomas J. Pritzker Family Trusts")
+
+
+class TestAmpersandFirmNames:
+    """#2160 Codex ckpt-2 P2 — partnership-style firm names joined by '&'.
+
+    They carry no corporate suffix, so the entity arm misses them, and the
+    start-anchored person arm stops dead at the '&'. Under the new selection
+    gate that made a small 5%-holder table ineligible outright. Common in Item
+    403(a): the corpus holds Cohen & Steers, Cooke & Bieler, Cede & Co and
+    Bill & Melinda Gates Foundation Trust.
+    """
+
+    def test_ampersand_firms_are_owner_identities(self) -> None:
+        for text in (
+            "Dodge & Cox 555 California Street San Francisco, CA 94104",
+            "Brown & Brown 220 South Ridgewood Avenue Daytona Beach, FL 32114",
+            "Cohen & Steers",
+            "Cede & Co",
+            "Ruane, Cunniff & Goldfarb 9 West 57th Street New York, NY 10019",
+            "Bill & Melinda Gates Foundation Trust",
+        ):
+            assert _is_beneficial_owner_identity(text), text
+
+    def test_ampersand_does_not_rescue_a_heading(self) -> None:
+        for text in ("Directors and Executive Officers:", "5% Stockholders"):
+            assert not _is_beneficial_owner_identity(text), text
