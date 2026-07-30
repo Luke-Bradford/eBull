@@ -1919,15 +1919,7 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     # figures from the one with the strongest Item 403 header survive. Stable,
     # so document order breaks ties.
     for table in sorted(qualifying, key=lambda t: -_score_table_headers(t.score_headers)):
-        name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
-        _extract_holder_rows(
-            table,
-            name_idx=name_idx,
-            shares_idx=shares_idx,
-            percent_idx=percent_idx,
-            rows=rows,
-            seen=seen,
-        )
+        _extract_table_holders(table, rows=rows, seen=seen)
     return Def14ABeneficialOwnershipTable(
         as_of_date=as_of_date,
         rows=rows,
@@ -2013,6 +2005,41 @@ def _owner_identity_fraction(holders: list[Def14ABeneficialHolder]) -> float:
     return hits / len(holders)
 
 
+def _extract_table_holders(
+    table: _RawTable,
+    *,
+    rows: list[Def14ABeneficialHolder] | None = None,
+    seen: set[str] | None = None,
+) -> list[Def14ABeneficialHolder]:
+    """Resolve TABLE's columns and extract its holders into ROWS.
+
+    The single place ``_resolve_columns`` is paired with ``_extract_holder_rows``.
+    Two callers, with deliberately different dedup semantics, which is why the
+    ``rows`` / ``seen`` handles are parameters rather than locals:
+
+    - ``parse_beneficial_ownership_table``'s concatenation loop passes a SHARED
+      ``rows`` and ``seen`` so sibling Item 403 tables dedup against each other
+      (a holder reported in both keeps the better-captioned table's figures).
+    - ``_is_item403_eligible`` passes neither, judging one table in isolation —
+      a fresh ``seen`` per table, because eligibility is a property of that
+      table alone and must not depend on what a sibling already contributed.
+
+    Review NITPICK on PR #2177 flagged the paired calls as duplication. They are
+    not the same operation, but they are the same five lines, so they live here.
+    """
+    name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
+    out = [] if rows is None else rows
+    _extract_holder_rows(
+        table,
+        name_idx=name_idx,
+        shares_idx=shares_idx,
+        percent_idx=percent_idx,
+        rows=out,
+        seen=set() if seen is None else seen,
+    )
+    return out
+
+
 def _is_item403_eligible(table: _RawTable) -> bool:
     """True when TABLE may win its window / join the Item 403 sibling set.
 
@@ -2034,16 +2061,7 @@ def _is_item403_eligible(table: _RawTable) -> bool:
     only in ``score_headers`` — so reading the narrower tuple rejected the most
     prescribed shape the reg has, at scores 14 and 16.
     """
-    name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
-    holders: list[Def14ABeneficialHolder] = []
-    _extract_holder_rows(
-        table,
-        name_idx=name_idx,
-        shares_idx=shares_idx,
-        percent_idx=percent_idx,
-        rows=holders,
-        seen=set(),
-    )
+    holders = _extract_table_holders(table)
     if not holders:
         return False
     headers = tuple(table.score_headers) + tuple(table.column_headers)
