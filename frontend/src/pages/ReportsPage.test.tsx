@@ -149,8 +149,13 @@ describe("ReportsPage — v2 monthly statement", () => {
       expect(screen.getByText("Sector exposure")).toBeInTheDocument();
     });
     // Named sector appears in both the holdings table and the exposure
-    // bars — both render the resolved name, never a numeric id.
-    expect(screen.getAllByText("Technology").length).toBeGreaterThanOrEqual(2);
+    // bars — both render the resolved name, never a numeric id. The
+    // name is the canonical SIC-derived GICS label (#1634/#1851/#1951),
+    // not eToro's coarse "Technology"; the fixture carried the stale
+    // coarse value until it was regenerated (#2178).
+    expect(
+      screen.getAllByText("Information Technology").length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("footer carries generated_at and the benchmark basis", async () => {
@@ -240,6 +245,9 @@ describe("ReportsPage — unbounded-payload defences (#2178)", () => {
   function monthlyWithMovers(count: number): Record<string, unknown> {
     return {
       ...(monthlyFixture as Record<string, unknown>),
+      // Override the fixture's own total (0) so the header stays
+      // coherent with the array this helper builds.
+      score_changes_total: count,
       score_changes: Array.from({ length: count }, (_, i) => ({
         instrument_id: i + 1,
         symbol: `S${i + 1}`,
@@ -274,9 +282,12 @@ describe("ReportsPage — unbounded-payload defences (#2178)", () => {
   });
 
   it("falls back to the array length when a pre-#2178 snapshot has no total", async () => {
-    // No score_changes_total key: the array IS the full set there, so
-    // claiming a different number would invent data.
-    mockedMonthly.mockResolvedValue([row(monthlyWithMovers(12))]);
+    // A genuinely pre-#2178 snapshot has no score_changes_total at all —
+    // strip the key the current builder now always writes. The array IS
+    // the full set there, so claiming a different number invents data.
+    const legacy = { ...monthlyWithMovers(12) };
+    delete legacy["score_changes_total"];
+    mockedMonthly.mockResolvedValue([row(legacy)]);
     renderPage();
     await waitFor(() => {
       expect(screen.getByText(/12 of 12 shown/)).toBeInTheDocument();

@@ -61,6 +61,7 @@ const WEEKLY_KEYS = [
   "report_type",
   "schema_version",
   "score_changes",
+  "score_changes_total",
   "top_performers",
   "upcoming_earnings",
 ].sort();
@@ -88,6 +89,7 @@ const MONTHLY_KEYS = [
   "rolling_returns",
   "schema_version",
   "score_changes",
+  "score_changes_total",
   "tax_provision",
   "thesis_accuracy",
   "thesis_summary",
