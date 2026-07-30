@@ -323,26 +323,122 @@ the survivors are the genuine shapes:
 'Name | Number of Shares | Approximate Percentage of Outstanding Common'
 ```
 
-### D4 final form (resolved and measured — implement exactly this)
-
-Signature = a **class-denominated percent** column OR the **amount-and-nature
-voting/dispositive-power subdivision**, and never a comp-denominated percent.
+### D4 — SUPERSEDED first form (kept for the record)
 
 ```python
-CLASS_PCT = r"(percent|percentage|%)\s*(of\s+)?(the\s+)?(all\s+|total\s+|outstanding\s+)*" \
-            r"(class|common|shares|stock|voting|ownership|beneficial|equity|units)"
-AMOUNT_NATURE = r"(amount\s+and\s+nature)|((sole|shared)\s+(voting|dispositive|investment))"
-COMP_PCT = r"(base\s+salary|of\s+target|target\s+bonus|payout|vesting" \
-           r"|bonus\s+opportunity|salary|earned|performance)"
 # signature := not COMP_PCT and (CLASS_PCT or AMOUNT_NATURE)
 ```
 
-`AMOUNT_NATURE` is what recovers the `Sole Voting Power | Shared Voting Power`
-shape: Item 403 column 3 is "Amount and nature of beneficial ownership", and
-Rule 13d-3 defines beneficial ownership as voting **or** investment power, so
-issuers legitimately subdivide that column and carry no separate percent column.
-`_resolve_columns` already tiers `Sole | Shared | Total`. The `all\s+` alternate
-recovers `% of all shares`.
+Measured full-population it empties **1,897 accessions — 4.5% of the corpus**.
+Do not implement it. Why it read clean is the subject of the next section.
+
+### Full-population verification — pass 3, BOTH directions (2026-07-30)
+
+Census pass 2 measured the gate **only on the 1,668 score-3-5 non-winning tables
+D3 newly ADMITS**. It never re-measured the tables that already WIN. The
+`1,668 -> 45` figure is therefore sound for what it measured and silent on the
+regression — and D2/D4 gate winner selection, so the narrowing side is the side
+that can destroy stored data.
+
+This is the directionality rule in `.claude/skills/engineering/full-population-ab.md`
+applied to a **narrowing** change: enumerate what the gate now REJECTS, not only
+what it admits.
+
+Pass 3 dumps every candidate table in every window across all **42,577** stored
+`def14a_body` payloads (`scripts/census_def14a_window_tables.py`), so any gate
+variant is evaluated offline in both directions with no re-parse per variant
+(`scripts/analyse_def14a_window_tables.py`). The enumeration path is
+byte-identical on `main` and this branch — only the selector changed — so one
+dump is a valid substrate for replaying both rules. The harness imports the
+SHIPPED `_item403_value_signature` as its `final` variant rather than
+re-expressing it, so the measurement cannot describe a gate nobody merges.
+
+| gate | accessions emptied | winning tables dropped | newly admitted |
+|---|---|---|---|
+| D4 first form, on `column_headers` | 1,897 | 2,479 | 172 |
+| first form, on both header tuples | 1,816 | 2,377 | 175 |
+| pair `(AMOUNT and PERCENT)` | 610 | 1,049 | 254 |
+| **final form (below)** | **196** | **419** | **304** |
+| loosest reference (any value vocabulary) | 176 | 402 | 561 |
+
+### D4 final form — precedence, not vocabulary
+
+Six defects, each found by the narrowing enumeration and none visible to pass 2.
+
+1. **Wrong header tuple.** The signature was applied to `column_headers`; pass 2
+   measured `score_headers`. They differ whenever a two-row header promotes the
+   SUB row — `column_headers` becomes `('', 'Sole', 'Shared', 'Total', '')`
+   while the parent `Amount and Nature of Beneficial Ownership | Percent of
+   Class` survives only in `score_headers`. Reading the narrower tuple rejected
+   the most prescribed shape the reg has, at scores 14 and 16. Read **both**.
+2. **Bare percent caption.** `CLASS_PCT` required a class noun after the percent
+   token, so `Name | Shares | Percent` was rejected — contradicting D3's own
+   rationale in this spec.
+3. **The comp veto cannot span the whole header.** Rule 13d-3(d)(1)(i) DEEMS a
+   person the beneficial owner of shares acquirable **within 60 days**, so a
+   genuine Item 403 table legitimately captions columns `Options Exercisable or
+   Vesting Within 60 Days` and `Number of Performance Shares Granted`. A blanket
+   `vesting` / `performance` veto deleted 18-, 22- and 10-holder Vanguard /
+   BlackRock / First Eagle tables.
+4. **Columns 1 and 2 have literal prescribed captions.** `Title of class` and
+   `Name and address of beneficial owner` are 229.403's own words and nothing
+   else in a proxy uses them. They are what recover a table whose VALUE column
+   is merely the class name (`Name and Address of Beneficial Owner | Common
+   Stock`). Bare `Beneficial Owner` is NOT sufficient — it admits
+   `Beneficial Owner | Number of RSUs`, so the column-3 arm keys on
+   `own(ed|ership)`, never on `owner`.
+5. **Column 4 is often absent entirely.** Dual-class and direct/indirect tables
+   caption their value columns `Class A Common Stock Owned | Class B Common
+   Stock Owned | Total Voting Power` and carry no percent anywhere.
+6. **Item 402 needs its own term of art.** Item 402(a)(3) DEFINES "named
+   executive officer"; Item 403 says "name of beneficial owner". Without it,
+   `Named Executive Officer | PSU Shares Granted (#) | Final Achievement %`
+   leaked through the generic pair.
+
+The resulting rule is an ORDERING. Reg-literal wording admits outright; only the
+weak generic evidence is subject to the Item 402 vetoes:
+
+```python
+# 1. 229.403's own captions, or Rule 13d-3's acquisition window -> Item 403 on its face
+STRONG = (BENEFICIAL          # 'shares beneficially owned', 'beneficial stock ownership'
+          or OWNER_CAPTION    # col 2: 'name [and address] of beneficial owner'
+          or AMOUNT_NATURE    # col 3: 'amount and nature' / sole|shared voting|dispositive
+          or CLASS_PCT        # col 4: 'percent of class'
+          or TITLE_OF_CLASS   # col 1: 'title of class'
+          or RULE_13D3_60_DAY)# 'within 60 days' -- 240.13d-3(d)(1)(i)
+# 2. otherwise Item 402 vocabulary vetoes
+# 3. otherwise a weak pair admits
+WEAK = AMOUNT_IND and (PERCENT_IND or OWNED_IND or BENEFICIALLY)
+```
+
+Ordering the reg's wording ABOVE the veto is what lets the veto stay broad.
+
+`PERCENT_IND` is word-bounded so `Percentile` (TSR payout ladders) does not read
+as a percent-of-class column.
+
+**Residual, hand-classified (196 accessions emptied):** payout curves, TSR
+percentile ladders, vest-date and reverse-split tables, ownership-guideline
+multiples, private-placement participation tables and plan-amendment prose — all
+correctly dropped — plus a small tail whose headers have degraded to empty cells.
+Distinct-holder loss is arm 1's question and is reported there, not here.
+
+### D1 — two further corrections found by the pass-3 narrowing enumeration
+
+4. **Strip presentation debris BEFORE the length cap.** Issuers pad the name
+   column with HTML leader dots to rule across to the figures —
+   `Hotchkis & Wiley Capital Management, LLC` plus 63 dots. Testing the raw cell
+   blew the 120-char cap, rejected the holder, took the table under
+   `_ROW_IDENTITY_FLOOR` and dropped a genuine `Amount and Nature of Beneficial
+   Ownership | Percent of Class` table (`0000074303-25-000056`). The clause
+   below already said to strip debris first; the implementation did not.
+5. **Clauses 4-5 below were specified and never implemented.** Item 403(a)
+   prescribes name AND ADDRESS in ONE column, so an entity with no corporate
+   suffix is identified by the address that follows it: `MUFG 4-5, Marunouchi
+   1-chome Chiyoda-ku, Tokyo`, `Vanguard 100 Vanguard Boulevard`, `BlackRock 50
+   Hudson Yards`. The second token is a street number, so none reaches the
+   two-capitalised-token person pattern. `0001140361-25-012302` scored 0.25 on
+   identity and was emptied. Matched on the reg's one-column name-and-address
+   FORM — not a hardcoded issuer list.
 
 ### D1 final form (three corrections found by measurement)
 
