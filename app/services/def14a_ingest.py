@@ -141,7 +141,19 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # Also: embedded Schedule 13D/G cover pages (17 CFR 240.13d-101/-102) are no
 # longer parsed as Item 403 tables — their numbered rows stored the cover-page
 # item labels as holder names and the ROW NUMBERS as share counts.
-_PARSER_VERSION_DEF14A = "def14a-v12"
+# v13 (#2160): Item 403 table SELECTION no longer turns on header score. A score
+# is a sum of keyword weights and cannot separate a genuine Item 403 table from a
+# comp / prose / capitalisation table that hits the same keywords. A table may now
+# win its window, and join the sibling set, only if it passes BOTH limbs of the
+# 17 CFR 229.403 eligibility test: >=50% of its extracted rows name a beneficial
+# owner (Rule 13d-3), AND its headers carry Item 403's prescribed value columns —
+# a CLASS-denominated percent (column 4) or the amount-and-nature
+# voting/dispositive subdivision (column 3), never a comp-denominated percent.
+# Both limbs gate WINNER selection, not only sibling membership: Item 402 comp
+# tables' rows are people, so row identity alone scores them 1.00.
+# `_SIBLING_SCORE_FLOOR` is deleted; header score is retained for window RANKING
+# only.
+_PARSER_VERSION_DEF14A = "def14a-v13"
 
 logger = logging.getLogger(__name__)
 

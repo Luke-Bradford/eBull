@@ -439,10 +439,52 @@ _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
 )
 
 
-# Minimum score for a NON-best table to be merged as an Item 403 sibling.
-# 6 is what a header with SEC-prescribed wording reaches (see SCORE_FLOOR's
-# note in ``parse_beneficial_ownership_table``); 3-5 is bare or incidental.
-_SIBLING_SCORE_FLOOR: Final[int] = 6
+# D4 (#2160) — Item 403's VALUE-column signature.
+#
+# Source rule: 17 CFR 229.403 prescribes column 3 "Amount and nature of
+# beneficial ownership" and column 4 "Percent of class". Column 4 is
+# CLASS-denominated by definition — a fraction of a class of securities. An
+# Item 402 compensation table's percent is of *salary*, *target*, *payout* or
+# *vesting*, never of a class. That is the discriminator row identity cannot
+# supply: comp-table rows ARE people ('Kevin R.M. Smith', 'Dr. Hou'), so they
+# score owner_identity_fraction = 1.00 and pass D2 untouched.
+#
+# Measured on the full admit cohort (spec, census pass 2): the gate takes
+# 1,668 -> 45 candidate tables, and the survivors are the genuine shapes.
+_ITEM403_CLASS_PCT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(percent|percentage|%)\s*(of\s+)?(the\s+)?(all\s+|total\s+|outstanding\s+)*"
+    r"(class|common|shares|stock|voting|ownership|beneficial|equity|units)",
+    re.IGNORECASE,
+)
+# Column 3 subdivided. Rule 13d-3 (17 CFR 240.13d-3) defines beneficial
+# ownership as voting OR investment power, so issuers legitimately split
+# "Amount and nature" into Sole/Shared voting and dispositive power columns and
+# carry no separate percent column at all. ``_resolve_columns`` already tiers
+# Sole|Shared|Total. Without this arm those tables fail D4 and are rejected.
+_ITEM403_AMOUNT_NATURE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(amount\s+and\s+nature)|((sole|shared)\s+(voting|dispositive|investment))",
+    re.IGNORECASE,
+)
+# Comp-denominated percents — Item 402, not Item 403. Checked FIRST: a comp
+# table can also say "shares", so the positive arms alone would admit it.
+_COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(base\s+salary|of\s+target|target\s+bonus|payout|vesting"
+    r"|bonus\s+opportunity|salary|earned|performance)",
+    re.IGNORECASE,
+)
+
+
+def _item403_value_signature(headers: tuple[str, ...]) -> bool:
+    """True when HEADERS carry Item 403's prescribed VALUE columns.
+
+    Signature = a **class-denominated percent** column OR the
+    **amount-and-nature** voting/dispositive-power subdivision, and never a
+    comp-denominated percent. See the regexes above for the governing reg.
+    """
+    joined = " | ".join(headers)
+    if _COMP_PCT_RE.search(joined):
+        return False
+    return bool(_ITEM403_CLASS_PCT_RE.search(joined) or _ITEM403_AMOUNT_NATURE_RE.search(joined))
 
 
 def _score_table_headers(headers: tuple[str, ...]) -> int:
@@ -832,6 +874,137 @@ _HOLDER_CLASS_PLURAL_RE: Final[re.Pattern[str]] = re.compile(
     r"|officers|executives|nominees|persons)\b",
     re.IGNORECASE,
 )
+
+
+# D1 (#2160) — corrections the spec's measurement forced on the row-identity
+# predicate when it moved from #2164's single-cell use into table SELECTION.
+#
+# 1. LENGTH CAP. Sized for an Item 403(a) "name AND address" cell, the longest
+#    legitimate form. Without it, Schedule 13G footnote PARAGRAPHS ("Based
+#    solely on an amendment to a Schedule 13G filed by BlackRock…", "Consists of
+#    10,500 shares held directly…") pass the person-name test and were extracted
+#    as holder names.
+_OWNER_IDENTITY_MAX_LEN: Final[int] = 120
+# 2. Entity designators, CASE-SENSITIVE. An Item 403 owner is a proper noun:
+#    'Smith Family Trust' matches, the instrument types 'trust interests' and
+#    'allocation interests' do not. ``_OWNER_ENTITY_RE`` is deliberately
+#    IGNORECASE and load-bearing for #2164's stacked-pair path, so selection
+#    gets its own stricter variant rather than tightening that one.
+_OWNER_ENTITY_CASED_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b("
+    r"LLC|L\.L\.C|LP|L\.P|LLP|Inc|Incorporated|Corp|Corporation|Company|Ltd|Limited"
+    r"|Trust|Fund|Funds|Partners|Partnership|Capital|Management|Advisers|Advisors"
+    r"|Holdings|Associates|Ventures|Bank|N\.A|plc|PLC|GmbH|S\.A|AG|NV"
+    r"|Foundation|Insurance|Investments?|Securities|Financial"
+    r")\b"
+)
+# 3. INSTRUMENT-TYPE vocabulary. A name composed ENTIRELY of equity/award nouns
+#    is a security, not a beneficial owner under Rule 13d-3. A closed
+#    vocabulary set, deliberately not a table-shape blocklist — the
+#    prevention-log rule on hand-enumerated tuples targets the latter.
+_INSTRUMENT_VOCAB: Final[frozenset[str]] = frozenset(
+    {
+        "equity",
+        "equities",
+        "stock",
+        "stocks",
+        "share",
+        "shares",
+        "option",
+        "options",
+        "warrant",
+        "warrants",
+        "unit",
+        "units",
+        "restricted",
+        "unrestricted",
+        "deferred",
+        "performance",
+        "incentive",
+        "award",
+        "awards",
+        "grant",
+        "grants",
+        "rsu",
+        "rsus",
+        "psu",
+        "psus",
+        "sar",
+        "sars",
+        "appreciation",
+        "right",
+        "rights",
+        "common",
+        "preferred",
+        "ordinary",
+        "class",
+        "series",
+        "voting",
+        "nonvoting",
+        "convertible",
+        "note",
+        "notes",
+        "debenture",
+        "debentures",
+        "interest",
+        "interests",
+        "plan",
+        "plans",
+        "total",
+        "subtotal",
+        "authorized",
+        "unissued",
+        "issued",
+        "outstanding",
+        "treasury",
+        "reserved",
+        "available",
+        "and",
+        "or",
+        "the",
+        "of",
+        "for",
+        "but",
+        "a",
+    }
+)
+_WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z]+")
+
+
+def _is_instrument_not_owner(text: str) -> bool:
+    """True when every word in TEXT is equity/award vocabulary.
+
+    'Authorized But Unissued' is Title-Cased and matches the two-capitalised-
+    token person pattern, so neither D1's person arm nor an address test rejects
+    it. Rule 13d-3 makes the test principled: a beneficial owner is a person or
+    entity holding voting or investment power, and an instrument is neither.
+    """
+    words = _WORD_RE.findall(text.lower())
+    if not words:
+        return False
+    return all(w in _INSTRUMENT_VOCAB for w in words)
+
+
+def _is_beneficial_owner_identity(text: str) -> bool:
+    """D1 (#2160) — row-identity test used to gate table SELECTION.
+
+    Stricter than :func:`_is_owner_identity`, which #2164 uses for the
+    single-cell stacked-pair decision. Both share the class-noun rejection; this
+    one adds the three corrections the full-population census forced (length
+    cap, case-sensitive entity designators, instrument vocabulary).
+    """
+    stripped = text.strip()
+    if not stripped or len(stripped) > _OWNER_IDENTITY_MAX_LEN:
+        return False
+    if _is_instrument_not_owner(stripped):
+        return False
+    if "as a group" in stripped.lower():
+        return True
+    if _HOLDER_CLASS_PLURAL_RE.search(stripped):
+        return False
+    if _OWNER_ENTITY_CASED_RE.search(stripped):
+        return True
+    return bool(_OWNER_PERSON_RE.match(stripped))
 
 
 def _is_owner_identity(text: str) -> bool:
@@ -1389,24 +1562,36 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
                 window_best_score = score
             if score >= SCORE_FLOOR:
                 window_qualifying.append((score, parsed))
-        if window_qualifying and window_best_score >= SCORE_FLOOR:
+        # D2 / D3 (#2160) — ELIGIBILITY decides both which table wins the window
+        # and which tables join it as Item 403 siblings. Header score no longer
+        # decides either; it is retained for RANKING only (the sort at the
+        # concatenation loop below, so the best-captioned table's figures win a
+        # holder reported twice).
+        #
+        # Header score is a SUM OF KEYWORD WEIGHTS and cannot separate a genuine
+        # Item 403 table from a comp / prose / capitalisation table that hits the
+        # same keywords: 0001628280-26-044960's genuine 403(a) table
+        # (Name and Address | Number | Percent) scores 4 while a
+        # Delaware-vs-Texas charter prose block scores 5 and takes the window.
+        #
+        # Row identity ALONE is also insufficient, which is why eligibility has
+        # two limbs. Item 402 compensation tables' rows ARE people
+        # ('Kevin R.M. Smith', 'Dr. Hou', 'Jennifer F. Scanlon'), so they score
+        # owner_identity_fraction = 1.00 and would pass a row-identity gate
+        # untouched. D4's value signature is what rejects them. Both limbs gate
+        # WINNER selection as well as sibling membership — correction of
+        # 2026-07-29b, measured: the draft applied D4 to the sibling set only,
+        # which left this ticket's central case untouched.
+        #
+        # ``_SIBLING_SCORE_FLOOR`` is deleted. Its absolute 6 existed only
+        # because header score was the sole signal; a genuine 403(b) table on a
+        # bare Name|Shares|Percent header scores 3 and is now admitted on its
+        # rows and value columns instead.
+        eligible = [t for _, t in window_qualifying if _is_item403_eligible(t)]
+        if eligible:
             best_score = window_best_score
-            # Sibling tables need SEC-PRESCRIBED wording, not merely the
-            # floor. The floor is 3 — a bare Name|Shares|Percent header — so
-            # merging everything above it sweeps in prose and summary tables
-            # that happen to mention shares.
-            #
-            # An ABSOLUTE floor, not proximity to the best score: the two
-            # genuine Item 403 tables can score far apart, because whichever
-            # one happens to use the prescribed "Amount and Nature of
-            # Beneficial Ownership" caption scores much higher than a sibling
-            # headed "Common Stock" (12 vs 7 on 0001193125-25-245150 — a
-            # `best - 2` gate dropped that filing's 18-row 403(b) table and
-            # kept only 2 rows). Breakdown tables do not need a score gate:
-            # they restate the SAME HOLDERS, so the identity dedup in
-            # ``_extract_holder_rows`` already collapses them.
-            qualifying = [t for sc, t in window_qualifying if sc >= _SIBLING_SCORE_FLOOR or sc == window_best_score]
-            best_table = qualifying[0] if qualifying else None
+            qualifying = eligible
+            best_table = eligible[0]
             chosen_window = (window_start, window_end)
             break
         # Also track the global best in case no window meets floor —
@@ -1491,6 +1676,56 @@ def _row_name_is_address(raw_row: tuple[str, ...] | None, *, name_idx: int, shar
     cells = _pad_row(raw_row, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx)
     _, raw_name = _resolve_row_name(cells, name_idx=name_idx, shares_idx=shares_idx)
     return _is_address_fragment(_clean_beneficial_holder_name(raw_name))
+
+
+_ROW_IDENTITY_FLOOR: Final[float] = 0.5
+
+
+def _owner_identity_fraction(table: _RawTable) -> float:
+    """D0 (#2160) — fraction of TABLE's extracted rows that name a beneficial owner.
+
+    Computed on the **resolved name column**, reached through the same path
+    extraction uses. Not the raw first cell: Item 403's prescribed column 1 is
+    ``Title of class``, so a genuine table rendering
+    ``Common Stock | The Vanguard Group | 5,799,197 | 5.3%`` would fail a
+    first-cell test outright (Codex ckpt-1 BLOCKING on the spec).
+
+    Sharing ``_extract_holder_rows`` is required, not incidental: it already
+    drops section headings, address-continuation fragments and value-less rows,
+    and recovers ragged cells. Measuring on raw rows would count a
+    ``Named Executive Officers`` heading as an identity and would penalise a
+    genuine table whose rows are address continuations.
+
+    Denominator is the extracted holder count. A table extracting zero holders
+    cannot win its window anyway (#2158 element 4), so it scores 0.0.
+    """
+    name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
+    holders: list[Def14ABeneficialHolder] = []
+    _extract_holder_rows(
+        table,
+        name_idx=name_idx,
+        shares_idx=shares_idx,
+        percent_idx=percent_idx,
+        rows=holders,
+        seen=set(),
+    )
+    if not holders:
+        return 0.0
+    hits = sum(1 for h in holders if _is_beneficial_owner_identity(h.holder_name))
+    return hits / len(holders)
+
+
+def _is_item403_eligible(table: _RawTable) -> bool:
+    """True when TABLE may win its window / join the Item 403 sibling set.
+
+    Both limbs required — see the call site for why row identity alone admits
+    Item 402 compensation tables. The cheap header regex is evaluated FIRST so
+    the full extraction is skipped for tables the value signature already
+    rejects.
+    """
+    if not _item403_value_signature(table.column_headers):
+        return False
+    return _owner_identity_fraction(table) >= _ROW_IDENTITY_FLOOR
 
 
 def _extract_holder_rows(
