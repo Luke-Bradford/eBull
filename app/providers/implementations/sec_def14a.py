@@ -529,7 +529,13 @@ _RULE_13D3_60_DAY_RE: Final[re.Pattern[str]] = re.compile(
 # Comp-denominated percents — Item 402, not Item 403.
 _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
     r"(base\s+salary|of\s+target|target\s+bonus|payout|vesting"
-    r"|bonus\s+opportunity|salary|earned|performance)",
+    r"|bonus\s+opportunity|salary|earned|performance"
+    # Item 402 is titled "Executive COMPENSATION"; 229.403 column 4 is a percent
+    # OF CLASS, never of compensation. Board-attendance tables are Item 407.
+    # Added when the data-row fallback (weak evidence) began admitting
+    # 'Percentage of Annual Total Direct Compensation' and
+    # 'Attendance Percentage of All Meetings'.
+    r"|compensation|attendance|meetings?\s+attended|dilution)",
     re.IGNORECASE,
 )
 # Item 402(a)(3) DEFINES "named executive officer"; Item 403 says "name of
@@ -538,7 +544,7 @@ _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
 _ITEM402_NEO_CAPTION_RE: Final[re.Pattern[str]] = re.compile(r"named\s+executive\s+officer", re.IGNORECASE)
 
 
-def _item403_value_signature(headers: tuple[str, ...]) -> bool:
+def _item403_value_signature(headers: tuple[str, ...], *, data_row_evidence: bool = False) -> bool:
     """True when HEADERS carry Item 403's prescribed VALUE columns.
 
     Precedence, not a flat vocabulary match — and the ordering is the whole
@@ -578,6 +584,10 @@ def _item403_value_signature(headers: tuple[str, ...]) -> bool:
         return True
     if _COMP_PCT_RE.search(joined) or _ITEM402_NEO_CAPTION_RE.search(joined):
         return False
+    if data_row_evidence:
+        # Step 3b — the captions carry nothing, but the ROWS show both of
+        # 229.403's value columns parsing. Below the vetoes by construction.
+        return True
     return bool(
         _ITEM403_AMOUNT_IND_RE.search(joined)
         and (
@@ -1865,9 +1875,54 @@ def _is_item403_eligible(table: _RawTable) -> bool:
     only in ``score_headers`` — so reading the narrower tuple rejected the most
     prescribed shape the reg has, at scores 14 and 16.
     """
-    if not _item403_value_signature(tuple(table.score_headers) + tuple(table.column_headers)):
+    name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
+    holders: list[Def14ABeneficialHolder] = []
+    _extract_holder_rows(
+        table,
+        name_idx=name_idx,
+        shares_idx=shares_idx,
+        percent_idx=percent_idx,
+        rows=holders,
+        seen=set(),
+    )
+    if not holders:
         return False
-    return _owner_identity_fraction(table) >= _ROW_IDENTITY_FLOOR
+    headers = tuple(table.score_headers) + tuple(table.column_headers)
+    if not _item403_value_signature(headers, data_row_evidence=_has_item403_value_rows(holders)):
+        return False
+    hits = sum(1 for h in holders if _is_beneficial_owner_identity(h.holder_name))
+    return hits / len(holders) >= _ROW_IDENTITY_FLOOR
+
+
+_VALUE_ROW_EVIDENCE_FLOOR: Final[float] = 0.5
+
+
+def _has_item403_value_rows(holders: list[Def14ABeneficialHolder]) -> bool:
+    """D4 data-row fallback (#2160) — Item 403's value columns, evidenced by the ROWS.
+
+    Technique borrowed from ``edgar.proxy.html_extractor._build_column_map``,
+    which falls back to classifying the first DATA ROWS when the headers
+    classify too few columns (skill G17). Our gate was header-only, and that is
+    exactly why a genuine table rendering
+    ``| | | Number of Shares | | | | | | Number of Shares | |`` over
+    BlackRock / First Light / Soleus rows was emptied: the captions had degraded
+    to blank cells and carried no percent token at all.
+
+    17 CFR 229.403 prescribes column 3 (amount) AND column 4 (percent of class).
+    When the CAPTIONS are gone, both columns PARSING for a majority of extracted
+    rows is the remaining evidence that both exist. Deliberately requires BOTH —
+    an Item 402 award table routinely has an amount column and no percent.
+
+    Ranks BELOW the Item 402 vetoes on purpose: this is weak evidence, and a
+    comp table with a payout-percent column also satisfies it.
+    """
+    if not holders:
+        return False
+    n = len(holders)
+    shares = sum(1 for h in holders if h.shares is not None)
+    percents = sum(1 for h in holders if h.percent_of_class is not None)
+    floor = _VALUE_ROW_EVIDENCE_FLOOR * n
+    return shares >= floor and percents >= floor
 
 
 def _extract_holder_rows(

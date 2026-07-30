@@ -26,10 +26,12 @@ from decimal import Decimal
 
 from app.providers.implementations.sec_def14a import (
     _SCHEDULE_13D_COVER_LABEL_RE,
+    Def14ABeneficialHolder,
     Def14ABeneficialOwnershipTable,
     _clean_beneficial_holder_name,
     _clean_holder_name,
     _detect_role_heading,
+    _has_item403_value_rows,
     _is_address_fragment,
     _is_beneficial_owner_identity,
     _is_name_then_address,
@@ -1908,3 +1910,57 @@ class TestGateArmsCannotOverreach:
             assert _is_name_then_address(text), text
         for text in ("Adjusted EBITDA 2024", "Net Sales 2025", "Retail Adjusted EBITDA 2024"):
             assert not _is_name_then_address(text), text
+
+
+class TestItem403DataRowValueFallback:
+    """#2160 — D4's data-row fallback, borrowed from edgartools'
+    ``_build_column_map`` (skill G17).
+
+    A header-only gate empties genuine Item 403 tables whose captions have
+    degraded to blank cells. 17 CFR 229.403 prescribes column 3 (amount) AND
+    column 4 (percent of class); when the captions are gone, both columns
+    PARSING for a majority of rows is the remaining evidence that both exist.
+    """
+
+    @staticmethod
+    def _holder(name: str, shares: str | None, percent: str | None) -> Def14ABeneficialHolder:
+        return Def14ABeneficialHolder(
+            holder_name=name,
+            shares=Decimal(shares) if shares is not None else None,
+            percent_of_class=Decimal(percent) if percent is not None else None,
+            holder_role=None,
+        )
+
+    def test_both_value_columns_parsing_is_evidence(self) -> None:
+        holders = [
+            self._holder("BlackRock, Inc.", "1000", "5.1"),
+            self._holder("First Light Asset Management, LLC", "900", "4.2"),
+            self._holder("Soleus Capital Master Fund, L.P.", "800", "3.9"),
+        ]
+        assert _has_item403_value_rows(holders)
+
+    def test_an_amount_column_alone_is_NOT_evidence(self) -> None:
+        """An Item 402 award table has an amount column and no percent. Requiring
+        BOTH is what keeps this from becoming a bypass."""
+        holders = [
+            self._holder("Kevin R.M. Smith", "1000", None),
+            self._holder("Jennifer F. Scanlon", "900", None),
+            self._holder("Dr. Hou", "800", None),
+        ]
+        assert not _has_item403_value_rows(holders)
+
+    def test_empty_holder_set_is_not_evidence(self) -> None:
+        assert not _has_item403_value_rows([])
+
+    def test_the_fallback_ranks_BELOW_the_item_402_vetoes(self) -> None:
+        """Weak evidence must not bypass the veto — a comp table with a payout
+        percent column also satisfies the data-row test."""
+        comp = ("Named Executive Officer", "Shares at Target", "Final PSU Payout %")
+        assert not _item403_value_signature(comp, data_row_evidence=True)
+        salary = ("Name", "Percentage of Annual Total Direct Compensation")
+        assert not _item403_value_signature(salary, data_row_evidence=True)
+
+    def test_the_fallback_admits_a_caption_less_table(self) -> None:
+        bare = ("", "", "", "Number of Shares", "", "", "", "", "", "Number of Shares", "", "")
+        assert not _item403_value_signature(bare)
+        assert _item403_value_signature(bare, data_row_evidence=True)
