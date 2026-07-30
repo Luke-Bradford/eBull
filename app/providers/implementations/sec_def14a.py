@@ -488,6 +488,12 @@ _ITEM403_AMOUNT_IND_RE: Final[re.Pattern[str]] = re.compile(
 # percent-of-class column.
 _ITEM403_PERCENT_IND_RE: Final[re.Pattern[str]] = re.compile(r"\bpercent(age|ages)?\b|%", re.IGNORECASE)
 _ITEM403_OWNED_IND_RE: Final[re.Pattern[str]] = re.compile(r"\bown(ed|ership)\b", re.IGNORECASE)
+# Rule 13d-3(d)(1)(i) (17 CFR 240.13d-3) DEEMS a person the beneficial owner of
+# securities they have the right to acquire "within sixty days". A column
+# captioned "Options Exercisable or Vesting Within 60 Days" is therefore quoting
+# the ownership rule, NOT Item 402 — so this is STRONG Item 403 evidence and
+# must outrank the comp veto, which would otherwise fire on "vesting".
+_RULE_13D3_60_DAY_RE: Final[re.Pattern[str]] = re.compile(r"within\s+(\d{1,3}|sixty)\s+days", re.IGNORECASE)
 # Comp-denominated percents — Item 402, not Item 403.
 _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
     r"(base\s+salary|of\s+target|target\s+bonus|payout|vesting"
@@ -507,8 +513,9 @@ def _item403_value_signature(headers: tuple[str, ...]) -> bool:
     design (#2160, measured in both directions over all 42,566 stored bodies):
 
     1. A header quoting 229.403's own column 3 ("amount and nature of beneficial
-       ownership", "shares beneficially owned") or column 4 ("percent of class")
-       is an Item 403 table **on its face** and is admitted outright.
+       ownership", "shares beneficially owned") or column 4 ("percent of class"),
+       or Rule 13d-3(d)(1)(i)'s "within 60 days" acquisition window, is an
+       Item 403 table **on its face** and is admitted outright.
     2. Otherwise Item 402 vocabulary vetoes.
     3. Otherwise the weak generic pair — an amount column plus either a percent
        column or an "owned" column — admits.
@@ -532,6 +539,7 @@ def _item403_value_signature(headers: tuple[str, ...]) -> bool:
         _ITEM403_BENEFICIAL_RE.search(joined)
         or _ITEM403_AMOUNT_NATURE_RE.search(joined)
         or _ITEM403_CLASS_PCT_RE.search(joined)
+        or _RULE_13D3_60_DAY_RE.search(joined)
     ):
         return True
     if _COMP_PCT_RE.search(joined) or _ITEM402_NEO_CAPTION_RE.search(joined):

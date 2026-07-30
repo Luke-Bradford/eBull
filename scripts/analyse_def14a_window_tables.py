@@ -27,7 +27,23 @@ import re
 import sys
 from collections import Counter
 
-from app.providers.implementations.sec_def14a import _is_beneficial_owner_identity
+from app.providers.implementations.sec_def14a import (
+    _is_beneficial_owner_identity,
+    _item403_value_signature,
+)
+
+
+def sig_final(joined: str) -> bool:
+    """The gate as SHIPPED — imported, not re-expressed.
+
+    The v0..v6 ladder below exists to justify the choice; this variant is what
+    actually runs in ``parse_beneficial_ownership_table``. Keeping it a direct
+    import is deliberate harness integrity: a re-typed copy drifts from the
+    implementation, and then the measurement describes a gate nobody ships
+    (`.claude/skills/engineering/full-population-ab.md`, "never simulate").
+    """
+    return _item403_value_signature((joined,))
+
 
 SCORE_FLOOR = 3
 MAIN_SIBLING_FLOOR = 6
@@ -184,6 +200,7 @@ VARIANTS = {
     "v4": (sig_v4, "both"),  # v2, but reg wording OUTRANKS the comp veto
     "v5": (sig_v5, "both"),  # v4 + amount-and-owned weak pair
     "v6": (sig_v6, "both"),  # v5 + Item 402 NEO-caption veto
+    "final": (sig_final, "both"),  # the gate as SHIPPED (imported)
     "v3": (sig_v3, "both"),  # loosest reference point
 }
 
@@ -220,9 +237,7 @@ def branch_selection(windows: list[list[dict]], sig, source: str) -> tuple[int, 
     for wi, tables in enumerate(windows):
         qualifying = [t for t in tables if t["s"] >= SCORE_FLOOR]
         eligible = [
-            t
-            for t in qualifying
-            if sig(joined_headers(t, source)) and identity_fraction(t) >= ROW_IDENTITY_FLOOR
+            t for t in qualifying if sig(joined_headers(t, source)) and identity_fraction(t) >= ROW_IDENTITY_FLOOR
         ]
         if eligible:
             return wi, eligible
@@ -288,7 +303,9 @@ def main() -> int:
         print(f"extracted-row total   main={n_main_rows}  branch={n_branch_rows}")
         print(f"accessions main->rows, branch->ZERO : {len(lost_all)}")
         print(f"distinct main-selected tables dropped: {sum(lost_tables.values())} ({len(lost_tables)} header shapes)")
-        print(f"distinct tables newly admitted       : {sum(gained_tables.values())} ({len(gained_tables)} header shapes)")
+        print(
+            f"distinct tables newly admitted       : {sum(gained_tables.values())} ({len(gained_tables)} header shapes)"
+        )
         print("\n-- NARROWING: top dropped header shapes --")
         for h, c in lost_tables.most_common(30):
             print(f"  {c:>5}  {h}")

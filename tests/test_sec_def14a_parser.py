@@ -31,7 +31,9 @@ from app.providers.implementations.sec_def14a import (
     _clean_holder_name,
     _detect_role_heading,
     _is_address_fragment,
+    _is_beneficial_owner_identity,
     _is_owner_identity,
+    _item403_value_signature,
     _looks_like_label_row,
     _looks_like_subheader,
     _parse_percent,
@@ -1764,3 +1766,116 @@ class TestTwoPercentColumnsOrdering:
         cells = ["Simon Leung", "29.6"]
         headers = ("Name", "Minimum Payment (if Threshold is Met) as Percentage of Base Salary")
         assert _shares_cell_percent_signature(cells, 1, headers) == "decisive"
+
+
+class TestItem403ValueSignature:
+    """#2160 D4 — the Item 403 VALUE-column gate.
+
+    The first cut of this gate emptied 14 of the regression fixtures below and
+    3.6% of the corpus. Each group here pins one of the four defects that
+    measuring the NARROWING direction exposed.
+    """
+
+    def test_bare_percent_caption_is_admitted(self) -> None:
+        """229.403 column 4 is 'Percent of class', but issuers caption it bare
+        and leave the class implied by the neighbouring amount column. The
+        first cut required a class noun AFTER the percent token and rejected
+        every one of these."""
+        for headers in (
+            ("Name", "", "Number", "", "Percent"),  # CYH 0001193125-26-140269
+            ("Name of Beneficial Owner", "Shares Beneficially Owned", "Percent"),
+            ("Name of Beneficial Owner", "Shares Beneficially Owned", "%"),
+            ("Name", "Shares", "Percent"),
+            ("Beneficial Owner", "Shares Owned", "Percent"),
+            ("Name of Beneficial Owner", "", "Number", "", "Percentage"),
+        ):
+            assert _item403_value_signature(headers), headers
+
+    def test_prescribed_wording_outranks_the_compensation_veto(self) -> None:
+        """Rule 13d-3(d)(1)(i) DEEMS a person the beneficial owner of shares
+        acquirable within 60 days, so a genuine Item 403 table legitimately
+        carries 'vesting' and 'performance' columns. A blanket comp veto over
+        the whole header deleted 18-, 22- and 10-holder Vanguard / BlackRock /
+        First Eagle tables."""
+        for headers in (
+            (
+                "Name and Address",
+                "Number of Outstanding Shares Beneficially Owned",
+                "Number of Shares Underlying RSUs/MSUs vesting within 60 days",
+            ),
+            (
+                "Number of Shares Beneficially Owned (1)",
+                "Percentage of Outstanding Shares",
+                "Number of Performance Shares Granted",
+            ),
+            (
+                "NAME OF BENEFICIAL OWNER",
+                "COMMON STOCK",
+                "OPTIONS EXERCISABLE OR VESTING WITHIN 60 DAYS",
+                "AMOUNT OWNED",
+            ),
+        ):
+            assert _item403_value_signature(headers), headers
+
+    def test_value_columns_saying_owned_need_no_percent_column(self) -> None:
+        """Dual-class and direct/indirect tables omit column 4 outright. The
+        word 'Beneficial' sits in the NAME column, a '|' away, so the strong
+        arm cannot reach it and the amount+percent pair rejects them."""
+        for headers in (
+            (
+                "Name of Beneficial Owner",
+                "Class A Common Stock Owned",
+                "Class B Common Stock Owned",
+                "Total Voting Power",
+            ),
+            (
+                "Name of Beneficial Owner",
+                "Directly Owned (a)",
+                "Indirectly Owned",
+                "Options to Acquire Stock (b)",
+            ),
+        ):
+            assert _item403_value_signature(headers), headers
+
+    def test_item_402_tables_are_still_rejected(self) -> None:
+        """The gate must not be loosened into a no-op. 'Named Executive
+        Officer' is Item 402(a)(3)'s own term of art and vetoes the weak pair;
+        'Beneficial Owner | Number of RSUs' is why the column-3 arm keys on
+        own(ed|ership) and not on 'owner'."""
+        for headers in (
+            ("Named Executive Officer", "Shares at Target", "Final PSU Payout %"),
+            ("Named Executive Officer", "2022 Fiscal Year PSU Shares Granted (#)", "Final Achievement %"),
+            ("Name", "Threshold (Percentage of Base Salary)", "Target (Percentage of Base Salary)"),
+            ("Name of Individual or Identity of Group and Position", "Shares Underlying Options"),
+            ("Beneficial Owner", "Number of RSUs"),
+            ("Position", "Minimum Dollar Value", "Minimum Number of Shares"),
+            ("", "Authorized for issuance", "Issued and outstanding"),
+            ("50 th Percentile", "25 th Percentile"),
+        ):
+            assert not _item403_value_signature(headers), headers
+
+
+class TestBeneficialOwnerIdentityIgnoresLeaderDots:
+    """#2160 D1 — presentation debris is stripped BEFORE the length cap.
+
+    Issuers pad the name column with HTML leader dots to rule across to the
+    figures. Testing the raw cell blew the 120-char cap, rejected the holder,
+    took the table under ``_ROW_IDENTITY_FLOOR`` and dropped a genuine
+    'Amount and Nature of Beneficial Ownership | Percent of Class' table
+    (0000074303-25-000056).
+    """
+
+    def test_a_name_padded_with_leader_dots_is_still_an_identity(self) -> None:
+        padded = "Hotchkis & Wiley Capital Management, LLC " + "." * 100
+        assert len(padded) > 120
+        assert _is_beneficial_owner_identity(padded)
+        assert _is_beneficial_owner_identity("BlackRock, Inc. " + "." * 90)
+
+    def test_the_length_cap_still_rejects_a_footnote_paragraph(self) -> None:
+        """The cap exists to keep Schedule 13G footnote PARAGRAPHS out of the
+        holder set; stripping debris must not defeat it."""
+        assert not _is_beneficial_owner_identity(
+            "Based solely on an amendment to a Schedule 13G filed by BlackRock, Inc. "
+            "with the SEC on January 29, 2025, reporting sole voting power over "
+            "12,312,184 shares of our common stock."
+        )
