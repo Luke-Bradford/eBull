@@ -32,6 +32,7 @@ from app.providers.implementations.sec_def14a import (
     _detect_role_heading,
     _is_address_fragment,
     _is_beneficial_owner_identity,
+    _is_name_then_address,
     _is_owner_identity,
     _item403_value_signature,
     _looks_like_label_row,
@@ -1879,3 +1880,31 @@ class TestBeneficialOwnerIdentityIgnoresLeaderDots:
             "with the SEC on January 29, 2025, reporting sole voting power over "
             "12,312,184 shares of our common stock."
         )
+
+
+class TestGateArmsCannotOverreach:
+    """#2160 — Codex ckpt-1 findings. Each strong arm admits OUTRIGHT, ahead of
+    the Item 402 vetoes, so each one's precision is load-bearing."""
+
+    def test_the_60_day_window_needs_an_acquisition_verb(self) -> None:
+        """Rule 13d-3(d)(1)(i) is about securities a person has the right to
+        ACQUIRE within sixty days. The bare phrase also appears in
+        change-in-control and termination tables, and admitting those ahead of
+        the comp veto would emit severance data as beneficial ownership."""
+        assert _item403_value_signature(("Name", "Options Exercisable or Vesting Within 60 Days", "Common Stock"))
+        assert _item403_value_signature(("Name", "Subject to Rights to Acquire Within 60 Days"))
+        assert not _item403_value_signature(
+            ("Named Executive Officer", "Payments upon Termination within 60 Days", "Cash Severance ($)")
+        )
+
+    def test_the_name_and_address_arm_needs_address_evidence(self) -> None:
+        """Item 403(a) prescribes name AND address in one column. A proper-noun
+        run followed by any digit is not that -- it also matches metric rows."""
+        for text in (
+            "MUFG 4-5, Marunouchi 1-chome Chiyoda-ku, Tokyo 100-8330, Japan",
+            "Vanguard 100 Vanguard Boulevard Malvern, PA 19355",
+            "BlackRock 50 Hudson Yards New York, NY 10001",
+        ):
+            assert _is_name_then_address(text), text
+        for text in ("Adjusted EBITDA 2024", "Net Sales 2025", "Retail Adjusted EBITDA 2024"):
+            assert not _is_name_then_address(text), text

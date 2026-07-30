@@ -416,11 +416,78 @@ Ordering the reg's wording ABOVE the veto is what lets the veto stay broad.
 `PERCENT_IND` is word-bounded so `Percentile` (TSR payout ladders) does not read
 as a percent-of-class column.
 
-**Residual, hand-classified (196 accessions emptied):** payout curves, TSR
-percentile ladders, vest-date and reverse-split tables, ownership-guideline
-multiples, private-placement participation tables and plan-amendment prose — all
-correctly dropped — plus a small tail whose headers have degraded to empty cells.
-Distinct-holder loss is arm 1's question and is reported there, not here.
+**Residual, hand-classified (199 accessions emptied, 423 winning tables
+dropped):** payout curves, TSR percentile ladders, vest-date and reverse-split
+tables, ownership-guideline multiples, private-placement participation tables and
+plan-amendment prose — all correctly dropped — plus a small tail whose headers
+have degraded to empty cells. Distinct-holder loss is arm 1's question and is
+reported there, not here.
+
+### Codex ckpt-1 resolutions — measured, not asserted
+
+`scripts/audit_def14a_gate_arms.py`, full population.
+
+**The score floor of 3 stays, and it is LOAD-BEARING (HIGH).** D3 says header
+score no longer decides sibling membership; that is true only ABOVE the floor.
+`window_qualifying` still filters `score >= SCORE_FLOOR`, so
+`_is_item403_eligible` is never evaluated on a score 0-2 table and the pass-3
+admit census covers score 3-5 only. Removing the floor was measured rather than
+argued: it would newly admit **704 tables / 5,794 rows**, dominated by Item 402
+option-grant tables —
+
+```text
+'Name | Grant Date | Number of securities underlying the award |
+ Exercise price of the award ($/Sh) | Grant Date Fair Value'      14 + 9 + 8 + 8 + 6 + 5 + 4 …
+```
+
+— which is precisely the leak this spec's acceptance forbids. The floor is
+retained deliberately. It has a cost: a genuine
+`Directors, Nominees and Named Executive Officers | Options Exercisable Within
+60 Days` table scores below it and stays excluded. That cost is accepted; the
+alternative admits Item 402 grant data as beneficial ownership.
+
+**Strong-arm precision (MED).** "Nothing else in a proxy uses this caption" is a
+safety claim, so each arm's SOLE admits — tables it and no other arm admits —
+were enumerated and classified:
+
+| arm | tables | shapes | classification of the sample |
+|---|---|---|---|
+| col3 `beneficially owned` | 643 | 372 | genuine Item 403 throughout |
+| col4 `percent of class` | 369 | 252 | genuine |
+| col2 `name … of beneficial owner` | 329 | 213 | genuine (Vanguard, BlackRock, Perceptive, Hercules) |
+| col3 `amount and nature` | 16 | 9 | genuine (FMR, Macquarie, Dimensional) |
+| Rule 13d-3 `within 60 days` | 11 | 11 | genuine |
+| col1 `title of class` | 4 | 3 | genuine |
+
+No compensation, plan or metric table appears among them.
+
+The 60-day arm was tightened on this finding: it now requires an ACQUISITION
+VERB (`exercisable` / `acquire` / `issuable` / `vest` / `convert` / `settle`) in
+the same header cell as the window. 13d-3(d)(1)(i) is about securities a person
+has the right to *acquire* within sixty days; the bare phrase also appears in
+change-in-control and termination tables, and those would otherwise be admitted
+ahead of the Item 402 veto.
+
+**The 120-char D1 cap is EMPIRICAL, not a documented SEC limit (MED).** No reg
+bounds the length of a 403(a) name-and-address cell. Sensitivity, full
+population:
+
+```text
+cap=120  emptied=199  winning tables dropped=423
+cap=160  emptied=198  winning tables dropped=417
+cap=200  emptied=198  winning tables dropped=417
+cap=300  emptied=198  winning tables dropped=417
+```
+
+The cap is very nearly inert on selection — raising it 120 → 300 moves the whole
+corpus by one accession and six tables. Of the 209 over-cap occurrences (163
+distinct), roughly half are genuine long name-and-address cells (Wellington,
+Kayne Anderson Rudnick, Hershey Trust) and half are director-BIO paragraphs,
+which are what the cap exists to reject. It is retained at 120.
+
+Note the cap can never drop a holder from OUTPUT: it feeds the identity
+FRACTION that gates table selection, so an over-cap holder merely fails to vote
+for its own table's eligibility. `_extract_holder_rows` still emits it.
 
 ### D1 — two further corrections found by the pass-3 narrowing enumeration
 

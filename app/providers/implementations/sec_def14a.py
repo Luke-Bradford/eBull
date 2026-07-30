@@ -515,7 +515,17 @@ _ITEM403_OWNED_IND_RE: Final[re.Pattern[str]] = re.compile(r"\bown(ed|ership)\b"
 # captioned "Options Exercisable or Vesting Within 60 Days" is therefore quoting
 # the ownership rule, NOT Item 402 — so this is STRONG Item 403 evidence and
 # must outrank the comp veto, which would otherwise fire on "vesting".
-_RULE_13D3_60_DAY_RE: Final[re.Pattern[str]] = re.compile(r"within\s+(\d{1,3}|sixty)\s+days", re.IGNORECASE)
+#
+# The ACQUISITION VERB is required, not just the phrase. 13d-3(d)(1)(i) is about
+# securities a person has "the right to acquire" within sixty days; the bare
+# phrase also appears in change-in-control and termination tables, and admitting
+# those before the Item 402 veto would emit severance data as ownership (Codex
+# ckpt-1 HIGH). Verb and window must sit in the SAME header cell.
+_RULE_13D3_60_DAY_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:(?:exercisab|acquir|issuab|vest|convert|settl)\w*[^|]{0,40}?within\s+(?:\d{1,3}|sixty)\s+days"
+    r"|within\s+(?:\d{1,3}|sixty)\s+days[^|]{0,40}?(?:exercisab|acquir|issuab|vest|convert|settl)\w*)",
+    re.IGNORECASE,
+)
 # Comp-denominated percents — Item 402, not Item 403.
 _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
     r"(base\s+salary|of\s+target|target\s+bonus|payout|vesting"
@@ -1076,8 +1086,12 @@ _IDENTITY_DEBRIS_RE: Final[re.Pattern[str]] = re.compile(r"[.…]{3,}")
 # A proper-noun run followed by a NUMBER, which is the name/street-number seam.
 # Deliberately not a hardcoded issuer list (the spec's clause 5): the signal is
 # the reg's own one-column name-and-address form, not who the filer is.
+# ``_is_name_then_address`` implements this; it is defined next to
+# ``_is_address_fragment`` so it can share ``_STREET_TYPE``, which this module
+# declares further down.
 _OWNER_NAME_THEN_ADDRESS_RE: Final[re.Pattern[str]] = re.compile(
-    r"^[A-Z][\w&.'’-]*(?:\s+[A-Z][\w&.'’-]*){0,3}\s+\d",
+    r"^[A-Z][\w&.'’-]*(?:\s+[A-Z][\w&.'’-]*){0,3}\s+\d(?P<tail>.*)$",
+    re.DOTALL,
 )
 
 
@@ -1125,7 +1139,7 @@ def _is_beneficial_owner_identity(text: str) -> bool:
         return True
     if _OWNER_PERSON_RE.match(stripped):
         return True
-    return bool(_OWNER_NAME_THEN_ADDRESS_RE.match(stripped))
+    return _is_name_then_address(stripped)
 
 
 def _is_owner_identity(text: str) -> bool:
@@ -2443,6 +2457,28 @@ _ADDRESS_ONLY_RE: Final[re.Pattern[str]] = re.compile(
 def _is_address_fragment(name: str) -> bool:
     """True when a holder-name cell holds only address material (#2140)."""
     return bool(_ADDRESS_ONLY_RE.match(name.strip()))
+
+
+# D1 clause 4-5 (#2160) — the tail after the name must carry ADDRESS evidence,
+# not merely a number: a proper-noun run followed by any digit also matches
+# metric rows like 'Adjusted EBITDA 2024' (Codex ckpt-1 MED). Accepted evidence
+# is a US street type, a 5-digit ZIP, or the multi-comma locality chain a
+# non-US address uses ('4-5, Marunouchi 1-chome Chiyoda-ku, Tokyo 100-8330,
+# Japan') — the last is what carries the international filers, which have
+# neither a street type nor a ZIP.
+_ADDRESS_TAIL_EVIDENCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:" + _STREET_TYPE + r")\b|\b\d{5}\b",
+    re.IGNORECASE,
+)
+
+
+def _is_name_then_address(text: str) -> bool:
+    """True when TEXT is Item 403(a)'s one-column 'name AND address' form."""
+    m = _OWNER_NAME_THEN_ADDRESS_RE.match(text)
+    if m is None:
+        return False
+    tail = m.group("tail")
+    return bool(_ADDRESS_TAIL_EVIDENCE_RE.search(tail) or tail.count(",") >= 2)
 
 
 # Schedule 13D/G COVER-PAGE item labels (#2163).
