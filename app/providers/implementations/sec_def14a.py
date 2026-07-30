@@ -453,13 +453,22 @@ _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
 # 1,668 -> 45 candidate tables, and the survivors are the genuine shapes.
 _ITEM403_CLASS_PCT_RE: Final[re.Pattern[str]] = re.compile(
     r"(percent|percentage|%)\s*(of\s+)?(the\s+)?(all\s+|total\s+|outstanding\s+)*"
-    r"(class|common|shares|stock|voting|ownership|beneficial|equity|units)"
-    # 229.403 column 4 is "Percent of CLASS". An AWARD noun after the class noun
-    # makes it a percent of a grant, not of a class -- 'Percentage of Stock
-    # Options Vesting', 'Percentage of total stock incentive awards'. This arm is
-    # STRONG (it bypasses the Item 402 veto), so its precision is load-bearing:
-    # those two shapes were admitted as beneficial ownership.
-    r"(?!\s*\w*\s*(option|award|incentive|grant|vesting|payout|settl))",
+    # The class-noun RUN is possessive (``*+``) so the engine cannot backtrack
+    # into it: without that, 'Percentage of Common Stock Earned' matches by
+    # consuming only 'Common', seeing 'Stock' in the allowed-follow set, and
+    # succeeding -- the exact leak this lookahead exists to close.
+    r"(?:class|common|shares?|stock|voting|ownership|beneficial|equity|units?)"
+    r"(?:\s+(?:class|common|shares?|stock|voting|ownership|beneficial|equity|units?"
+    r"|rights?|power|securities|interests?))*+"
+    # 229.403 column 4 is "Percent of CLASS" -- the denominator is a CLASS OF
+    # SECURITIES, so the class-noun run ENDS the denominator phrase. A CLOSED
+    # rule, not a blocklist: only punctuation, a footnote marker, or a
+    # continuation preposition may follow. Any trailing participle makes it a
+    # percent of an OUTCOME -- 'Percentage of Shares Earned', 'Percentage of
+    # Stock Options Vesting' (Codex ckpt-1 HIGH). This arm is STRONG, admitting
+    # ahead of the Item 402 veto, so its precision is load-bearing: every one of
+    # those shapes was being emitted as beneficial ownership.
+    r"(?=\s*($|[|(),.;:%*†#\d]|of\b|outstanding\b|beneficially\b|owned\b))",
     re.IGNORECASE,
 )
 # Column 3 subdivided. Rule 13d-3 (17 CFR 240.13d-3) defines beneficial
@@ -548,7 +557,10 @@ _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
     # Ownership GUIDELINES (a policy multiple, not a holding) and deferred-comp
     # ALLOCATION tables (a percent of a dollar deferral across funds) were the
     # only junk left riding the data-row fallback.
-    r"|ownership\s+guidelines|amount\s+deferred|deferred\s+amount)",
+    r"|ownership\s+guidelines|amount\s+deferred|deferred\s+amount"
+    # Item 402 OUTCOME words. A percent of an outcome (earned / vested /
+    # achieved / at target) is 402, never 229.403 col 4 (Codex ckpt-1 HIGH).
+    r"|\bearned\b|\bvested\b|achievement|attained|achieved|at\s+target)",
     re.IGNORECASE,
 )
 # Item 402(a)(3) DEFINES "named executive officer"; Item 403 says "name of

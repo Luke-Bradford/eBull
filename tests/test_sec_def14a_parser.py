@@ -1964,3 +1964,50 @@ class TestItem403DataRowValueFallback:
         bare = ("", "", "", "Number of Shares", "", "", "", "", "", "Number of Shares", "", "")
         assert not _item403_value_signature(bare)
         assert _item403_value_signature(bare, data_row_evidence=True)
+
+
+class TestStrongArmsCannotAdmitItem402Outcomes:
+    """#2160 Codex ckpt-1 HIGH — the precedence design is only sound if every
+    STRONG arm is near-perfect, because a strong arm admits AHEAD of the Item 402
+    veto. ``_ITEM403_CLASS_PCT_RE`` was not.
+
+    229.403 column 4 is "Percent of CLASS": the denominator is a class of
+    securities, so the class-noun run ENDS the denominator phrase. A trailing
+    participle makes it a percent of an OUTCOME, which is Item 402.
+    """
+
+    def test_a_percent_of_an_outcome_is_not_a_percent_of_class(self) -> None:
+        for headers in (
+            ("Name", "Percentage of Shares Earned"),
+            ("Name", "Percentage of Shares Vested"),
+            ("Name", "Percentage of Common Stock Earned"),
+            ("Name", "Percentage of Total Stock Earned"),
+            ("Name", "Percentage of Stock Options Vesting"),
+            ("Name", "Percentage of total stock incentive awards (%)"),
+        ):
+            assert not _item403_value_signature(headers), headers
+
+    def test_the_class_noun_run_does_not_backtrack(self) -> None:
+        """'Percentage of Common Stock Earned' matched by consuming only
+        'Common' and seeing 'Stock' in the allowed-follow set. The run is
+        possessive so that path is closed."""
+        assert not _item403_value_signature(("Name", "Percentage of Common Stock Earned"))
+        assert _item403_value_signature(("Name", "Percentage of Common Stock"))
+
+    def test_genuine_class_denominators_still_admit(self) -> None:
+        for headers in (
+            ("Name of Beneficial Owner", "Shares", "Percent of Class (1)"),
+            ("Name", "Shares (1)", "Percent of Outstanding Shares of Common Stock"),
+            ("Shareholder", "Number of Voting Rights (#)", "Percentage of Voting Rights (%)"),
+            ("Name", "Number of Shares", "Percent of Total Voting Power"),
+            ("Name", "Shares (1)", "% of all shares of Class A common stock"),
+            ("Name", "Number of Common Shares", "Approximate Percentage of Outstanding Common"),
+        ):
+            assert _item403_value_signature(headers), headers
+
+    def test_the_data_row_fallback_cannot_admit_an_award_outcome_table(self) -> None:
+        """Codex ckpt-1 HIGH-2: 'Shares at Target | Final Achievement %' parses
+        both a share count and a percent for every NEO row, so the data-row
+        evidence is TRUE. The Item 402 outcome vocabulary is what rejects it."""
+        headers = ("Name", "Shares at Target", "Final Achievement %")
+        assert not _item403_value_signature(headers, data_row_evidence=True)

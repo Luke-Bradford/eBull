@@ -450,7 +450,7 @@ alternative admits Item 402 grant data as beneficial ownership.
 safety claim, so each arm's SOLE admits — tables it and no other arm admits —
 were enumerated and classified:
 
-| arm | tables | shapes | classification of the sample |
+| arm | tables | shapes | classification (FULL population, hand-checked) |
 |---|---|---|---|
 | col3 `beneficially owned` | 643 | 372 | genuine Item 403 throughout |
 | col4 `percent of class` | 369 | 252 | genuine |
@@ -459,7 +459,19 @@ were enumerated and classified:
 | Rule 13d-3 `within 60 days` | 11 | 11 | genuine |
 | col1 `title of class` | 4 | 3 | genuine |
 
-No compensation, plan or metric table appears among them.
+No compensation, plan or metric table appears among them. This is a
+full-population enumeration, not a sample: a STRONG arm admits AHEAD of the
+Item 402 veto, so sample evidence would not be sufficient (Codex ckpt-1 MED).
+
+**And the arms were not near-perfect on first measurement.** Codex ckpt-1 found
+`CLASS_PCT` admitting `Percentage of Shares Earned`, `Percentage of Shares
+Vested` and `Percentage of Common Stock Earned` — all Item 402 outcomes, all
+bypassing the veto. Fixed with a CLOSED rule rather than another blocklist:
+229.403 column 4's denominator is a class of securities, so the class-noun run
+ENDS the phrase, and only punctuation, a footnote marker or a continuation
+preposition may follow it. The run is POSSESSIVE (`*+`) because otherwise the
+engine backtracks — `Percentage of Common Stock Earned` matched by consuming
+only `Common` and finding `Stock` in the allowed-follow set.
 
 The 60-day arm was tightened on this finding: it now requires an ACQUISITION
 VERB (`exercisable` / `acquire` / `issuable` / `vest` / `convert` / `settle`) in
