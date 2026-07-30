@@ -33,7 +33,7 @@ from app.providers.implementations.sec_def14a import (
 )
 
 
-def sig_final(joined: str) -> bool:
+def sig_final(joined: str, table: dict | None = None) -> bool:
     """The gate as SHIPPED — imported, not re-expressed.
 
     The v0..v6 ladder below exists to justify the choice; this variant is what
@@ -42,7 +42,14 @@ def sig_final(joined: str) -> bool:
     implementation, and then the measurement describes a gate nobody ships
     (`.claude/skills/engineering/full-population-ab.md`, "never simulate").
     """
-    return _item403_value_signature((joined,))
+    # MUST pass the data-row evidence too, or this measures a header-only gate
+    # nobody ships. `_is_item403_eligible` derives it from the extracted holders;
+    # the dump carries the same counts as `nsh` / `npc`.
+    evidence = False
+    if table is not None and table.get("n"):
+        n = table["n"]
+        evidence = table.get("nsh", 0) >= 0.5 * n and table.get("npc", 0) >= 0.5 * n
+    return _item403_value_signature((joined,), data_row_evidence=evidence)
 
 
 SCORE_FLOOR = 3
@@ -232,12 +239,22 @@ def main_selection(windows: list[list[dict]]) -> tuple[int, list[dict]]:
     return -1, []
 
 
+def _apply_sig(sig, joined: str, table: dict) -> bool:
+    """Call a variant, passing the table only to variants that accept it."""
+    try:
+        return sig(joined, table)
+    except TypeError:
+        return sig(joined)
+
+
 def branch_selection(windows: list[list[dict]], sig, source: str) -> tuple[int, list[dict]]:
     """Replay the branch: first window with an ELIGIBLE table (D2/D3/D4)."""
     for wi, tables in enumerate(windows):
         qualifying = [t for t in tables if t["s"] >= SCORE_FLOOR]
         eligible = [
-            t for t in qualifying if sig(joined_headers(t, source)) and identity_fraction(t) >= ROW_IDENTITY_FLOOR
+            t
+            for t in qualifying
+            if _apply_sig(sig, joined_headers(t, source), t) and identity_fraction(t) >= ROW_IDENTITY_FLOOR
         ]
         if eligible:
             return wi, eligible
