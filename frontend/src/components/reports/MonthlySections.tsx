@@ -309,10 +309,13 @@ export function ModelThesisSection({
 
       <div>
         <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Rank movers{" "}
-          <span className="normal-case text-slate-400">
-            (largest single move per name; {shown.length} of {moverTotal} shown)
-          </span>
+          Rank movers
+          {shown.length > 0 ? (
+            <span className="normal-case text-slate-400">
+              {" "}
+              (largest single move per name; {shown.length} of {moverTotal} shown)
+            </span>
+          ) : null}
         </h3>
         {scoreChanges.length === 0 ? (
           <NilLine>No significant rank movements this period.</NilLine>
