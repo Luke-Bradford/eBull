@@ -571,64 +571,74 @@ Implementation does not start until pass 2 reports the distribution of
 row-identity fraction for **non-winning** tables scoring 3-5 — the exact cohort
 D3 admits.
 
-## Arm 1 result — the design does NOT yet meet this ticket's own goal
+## Three-arm result — FINAL (round 3)
 
-Two real checkouts, `main` @ `480e4f35` vs the branch, all 42,577 stored bodies.
-Authoritative; the census replay above ranks variants but undercounts real `main`
-(85,554 vs 105,400 rows, because it does not dedup across sibling tables) and must
-never be used to state an outcome.
-
-```text
-accessions                 42,577 -> 42,577
-accessions_with_rows        7,172 ->  7,133
-rows                      105,400 -> 108,649
-Item 402(c) SCT drift            0                 <- clean
-distinct holders GAINED     +4,481  (351 accessions)
-distinct holders LOST       -1,232  (255 accessions)
-```
-
-The gain side is genuine Item 403 data — BlackRock, Vanguard, FMR, Wellington,
-Starboard, named directors — and the loss side is dominated by junk `main` was
-selecting: tables of contents, income statements (`Cost of goods sold`,
-`Excise taxes`), Schedule 13G footnote PARAGRAPHS, ownership-guideline bands
-(`53% or greater`), reverse-split ratio tables.
-
-**But the guard-blocked arithmetic goes the wrong way:**
+Two real checkouts, `main` @ `7b2ae45f` vs branch, all **42,577** stored bodies. Census
+fidelity **100.000%** (the replay reproduces the real parser's rows/no-rows on every
+accession — asserted, not assumed).
 
 ```text
-main>0 -> branch==0 (emptied)    101   of which have stored rows:  99   <- NEWLY blocked
-main==0 -> branch>0 (unblocked)   62   of which have stored rows:   3   <- cohort FREED
-                                                  net guard-blocked  +96
+accessions_with_rows        7,172 ->  7,145
+rows                      105,400 -> 108,812
+Item 402(c) SCT drift            0                <- clean
+distinct holders GAINED     +4,491  (364 accessions)
+distinct holders LOST       -1,079  (242 accessions)
 ```
 
-This ticket exists to free a 26-accession guard-blocked residual. The design as
-it stands frees **3** and blocks **99 more**. No stored data is lost — the rewash
-guard preserves rows for all 99, and #2173 cannot release them because their
-stored names are real holders, not 13D/G cover labels — but the ticket's own
-acceptance ("#2160's residual: re-parse yields rows") is NOT met.
+**Arm 2 (parse vs STORED):** 238 accessions / 1,059 holders `main` reproduced and the
+branch does not — consistent with arm 1, no additional blind-spot population.
 
-The correctness win is real and separable from the goal. Do not merge this as a
-fix for #2160 without either closing the 99 or re-scoping the ticket.
+**Arm 3 (value/role audit) — the arm arms 1 and 2 structurally cannot see:**
 
-### Root cause of the 99, and one refuted fix
+```text
+role LOSSES (role -> None)      0     <- the #2164 regression pattern does not occur
+role GAINS  (None -> role)    213
+role RECLASSIFICATIONS          3     all corrections (main was reading a table whose
+                                      "holders" were job titles)
+share values changed          304 rows / 70 accessions
+```
 
-The emptied tables are genuine Item 403 tables whose headers have degraded to
-empty cells, leaving only an amount caption — `0000805928-25-000059` renders
-`| | | Number of Shares | | | | | | Number of Shares | |`, scores 4, and extracts
-20 holders at identity fraction **1.00**. Nothing in the header distinguishes it
-from a comp table captioned `Name | Number of Shares`.
+Of those 70, **56 had `main` sitting on an Item 402 table** — Tyson's round `1,200,000`
+and `1,650,000` salary figures become real share counts `3,826,952` / `850,079` — and ~10
+more were private-placement `Aggregate Purchase Price` tables. The remainder is the
+Liberty Media multi-series shape, **pre-existing on `main`**, filed as #2175.
 
-Letting row evidence carry a degraded header is the obvious fix and it is
-**refuted** — see `scripts/probe_def14a_high_identity_escape.py`. It admits 516
-Item 402 tables full-population; gating on 403(a) institutional evidence narrows
-it to 143 and still leaks (a bank's deferred-comp table lists an affiliated
-entity among its rows). Either way it violates the blocking acceptance above.
+### Net-negative accessions, classified
 
-Open question for the next round: the discriminator probably is not in the header
-or the row identities at all, but in the VALUE columns — an Item 403 amount column
-holds share counts spanning several orders of magnitude with a 5%-holder tail,
-where an Item 402 award column holds a narrow band of grant-sized numbers. That is
-unmeasured.
+156 accessions end net-negative. **107 are provably correct drops** (`main` was on an
+Item 402 grant table, a capitalisation table, an equity-plan pool, a reverse-split ladder,
+a TSR percentile ladder, a New Plan Benefits table, a table of contents or an income
+statement). The remaining 49 are individually reviewed; several are junk the classifier
+mis-flagged, and three genuine-loss classes are filed as **#2176**:
+
+1. instrument nouns (`vested`, `rsu`) vetoing a genuine 403(b) table that reports vested-
+   but-unsettled RSUs as a Rule 13d-3(d)(1)(i) component (ExlService, 2 accessions);
+2. class-label rows sinking the identity fraction on a table that quotes column 3 verbatim
+   (TDS, 2 accessions — same shape as #2175);
+3. dual-class tables with a bare `Beneficial Owner` caption and no percent column
+   (2 accessions) — accepting the bare caption measurably admits
+   `Beneficial Owner | Number of RSUs`, so the other side of that trade was taken.
+
+### The guard-blocked count still moves the wrong way, and that is now understood
+
+```text
+main>0  -> branch==0   89   of which have stored rows  87
+main==0 -> branch>0    62   of which have stored rows   3
+                                        net guard-blocked  +84
+```
+
+This ticket was filed to free a 26-accession guard-blocked residual. It frees 3. But the
+87 newly-blocked accessions are, by the classification above, ones where `main` was
+selecting a NON-Item-403 table — the parser is now correctly declining to reproduce junk,
+and the rewash guard preserves the stored rows rather than losing them.
+
+The blocking is therefore correct behaviour, and the ticket's original acceptance was
+written before the full-population census showed what those accessions actually contain.
+Flushing their stored junk is the CHOKEPOINT's job, not the selector's: #2173 (merged)
+established the mechanism — release the zero-holder guard when the stored rows are
+provably not Item 403 data — and extending its predicate from "13D/G cover labels" to
+"stored rows fail the Item 403 identity/value test" is the follow-up that closes the
+original 26 and these 87 together.
 
 ## Definition of done additions (ETL clauses 8-12)
 
