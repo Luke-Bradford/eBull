@@ -14,7 +14,7 @@
  * Period navigation is URL-backed (?type=&period=) with PUSH so the
  * back button walks periods (§6.6).
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { fetchMonthlyReports, fetchWeeklyReports } from "@/api/reports";
@@ -67,6 +67,36 @@ function PageSkeleton() {
           <SectionSkeleton rows={4} />
         </div>
       ))}
+    </div>
+  );
+}
+
+/** Raw-snapshot appendix, gated on STATE rather than `<details>`.
+ *
+ *  `<details>` collapses visually only — React still builds the
+ *  pretty-printed string and commits the `<pre>` on every render. A
+ *  monthly snapshot is ~4.4 MB, so `JSON.stringify(snap, null, 2)` was
+ *  materialising ~9 MB of text and a giant text node on a page the
+ *  operator had not asked to expand (#2178). Rendering nothing until
+ *  the operator opts in keeps the cost where the intent is.
+ */
+function RawJsonAppendix({ snap }: { snap: SnapshotV2 }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+        className="cursor-pointer text-slate-500 hover:underline"
+      >
+        Raw JSON
+      </button>
+      {open ? (
+        <pre className="mt-2 overflow-x-auto rounded bg-slate-50 p-2 dark:bg-slate-900/40">
+          {JSON.stringify(snap, null, 2)}
+        </pre>
+      ) : null}
     </div>
   );
 }
@@ -183,6 +213,7 @@ function StatementV2({
                 attribution={monthly.attribution_summary}
                 thesis={monthly.thesis_summary}
                 scoreChanges={monthly.score_changes}
+                scoreChangesTotal={monthly.score_changes_total}
               />
             </Section>
           </div>
@@ -194,12 +225,7 @@ function StatementV2({
       </Section>
 
       <Section title="Appendix: snapshot data">
-        <details className="text-xs">
-          <summary className="cursor-pointer text-slate-500">Raw JSON</summary>
-          <pre className="mt-2 overflow-x-auto rounded bg-slate-50 p-2 dark:bg-slate-900/40">
-            {JSON.stringify(snap, null, 2)}
-          </pre>
-        </details>
+        <RawJsonAppendix snap={snap} />
       </Section>
 
       <StatementFooter generatedAt={snap.generated_at} benchmarkLabel={benchmarkLabel} />

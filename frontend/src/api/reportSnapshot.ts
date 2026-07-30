@@ -256,6 +256,11 @@ interface SnapshotV2Base {
   positions: PositionRowV2[];
   pnl: PnlV2;
   score_changes: ScoreChangeV2[];
+  /** Pre-cap mover count. `score_changes` is a top-N exhibit, not the
+   *  full set (#2178). Optional: snapshots generated before #2178 carry
+   *  the uncapped array and no total, so the FE falls back to the array
+   *  length rather than claiming a count it does not have. */
+  score_changes_total?: number;
 }
 
 export interface WeeklySnapshotV2 extends SnapshotV2Base {

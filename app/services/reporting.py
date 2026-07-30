@@ -227,21 +227,70 @@ def _positions_opened_closed(
     return opened, closed
 
 
+def _select_rank_movers(
+    rows: list[dict[str, Any]],
+    *,
+    top_n: int = 10,
+) -> list[dict[str, Any]]:
+    """Pick the rows that belong on the statement, from one row per instrument.
+
+    `rows` is already collapsed to one row per instrument (its single
+    largest move in the period) and sorted by `rank_delta` DESC, so
+    risers lead and fallers trail.
+
+    Takes `top_n` from EACH direction rather than the top `2 * top_n` by
+    magnitude — the same shape `_compute_contributors` uses for
+    contributors/drags. Pure magnitude skews hard in practice: for June
+    2026 the top 20 by `ABS(rank_delta)` are 4 risers and 16 fallers, so
+    a section titled "Rank movers" would read as a market-wide collapse.
+    The pre-cap total travels alongside as `score_changes_total`, so the
+    exhibit never claims to be the whole set.
+    """
+    risers = [r for r in rows if r["rank_delta"] > 0][:top_n]
+    fallers = [r for r in rows if r["rank_delta"] < 0]
+    # `rows` is DESC, so fallers trail with the most-negative last. Take
+    # them from the tail via an index, NOT `[-top_n:]` — a negative slice
+    # turns `top_n=0` into `[-0:]`, which is the whole list.
+    return risers + fallers[max(len(fallers) - top_n, 0) :]
+
+
 def _score_changes(
     conn: psycopg.Connection[Any],
     period_start: date,
     period_end: date,
     min_rank_delta: int = 5,
-) -> list[dict[str, Any]]:
-    """Significant rank movements in the report period.
+    *,
+    top_n: int = 10,
+) -> tuple[list[dict[str, Any]], int]:
+    """Biggest rank movers in the report period — capped for the statement.
 
-    Filters to rows where ABS(rank_delta) >= min_rank_delta.
+    Returns `(movers, total)`. One row per instrument — its single
+    largest-magnitude `rank_delta` in the window — then
+    `_select_rank_movers` caps each direction at `top_n`. `total` is the
+    pre-cap instrument count, stored as `score_changes_total` so the
+    exhibit never reads as the full movement set.
+
+    **Why per-row `rank_delta` and never a start-vs-end rank diff:** a
+    report period routinely spans a `model_version` bump (June 2026 spans
+    v1.1/v1.2/v1.3-balanced), and settled-decisions "Rank delta
+    comparison" holds that ranks are only comparable within one
+    model_version. `scoring._fetch_prior_ranks` filters
+    `model_version = %(mv)s`, so every STORED `rank_delta` is
+    version-safe by construction; subtracting two ranks across the
+    window is not, and would report the model change as instrument
+    movement.
+
+    `ABS(rank_delta) >= min_rank_delta` is retained but near-inert on the
+    live universe (June median |rank_delta| = 301 across ~3,900 names) —
+    `top_n` is what actually bounds the payload.
+
     rank and rank_delta were added to scores in migration 007.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT s.instrument_id,
+            SELECT DISTINCT ON (s.instrument_id)
+                   s.instrument_id,
                    i.symbol,
                    s.total_score,
                    s.rank,
@@ -253,22 +302,26 @@ def _score_changes(
               AND s.scored_at < %(end)s::date + 1
               AND s.rank_delta IS NOT NULL
               AND ABS(s.rank_delta) >= %(min_delta)s
-            ORDER BY ABS(s.rank_delta) DESC
+            ORDER BY s.instrument_id, ABS(s.rank_delta) DESC, s.scored_at DESC
             """,
             {"start": period_start, "end": period_end, "min_delta": min_rank_delta},
         )
         rows = cur.fetchall()
-    return [
+    movers: list[dict[str, Any]] = [
         {
             "instrument_id": r["instrument_id"],
             "symbol": r["symbol"],
             "total_score": _dec(r["total_score"]),
             "rank": r["rank"],
-            "rank_delta": r["rank_delta"],
+            "rank_delta": int(r["rank_delta"]),
             "scored_at": r["scored_at"].isoformat() if r["scored_at"] is not None else None,
         }
         for r in rows
     ]
+    # SQL orders by instrument_id (DISTINCT ON requires it), so re-sort
+    # by signed delta: risers first, fallers last.
+    collapsed = sorted(movers, key=lambda r: int(r["rank_delta"]), reverse=True)
+    return _select_rank_movers(collapsed, top_n=top_n), len(collapsed)
 
 
 def _budget_snapshot(conn: psycopg.Connection[Any]) -> dict[str, Any]:
@@ -1646,7 +1699,7 @@ def generate_weekly_report(
     # remains in the snapshot shape as an empty list so existing
     # readers (frontend, downstream report consumers) don't NPE.
     upcoming_earnings: list[dict[str, Any]] = []
-    score_changes = _score_changes(conn, period_start, period_end)
+    score_changes, score_changes_total = _score_changes(conn, period_start, period_end)
     budget = _budget_snapshot(conn)
     positions_now = _positions_snapshot(conn)
     prior = _load_prior_snapshot(conn, report_type="weekly", period_start=period_start)
@@ -1696,6 +1749,9 @@ def generate_weekly_report(
         "positions_closed": positions_closed,
         "upcoming_earnings": upcoming_earnings,
         "score_changes": score_changes,
+        # Pre-cap mover count — `score_changes` is a top-N exhibit, and
+        # the statement must not imply it is the full set (#2178).
+        "score_changes_total": score_changes_total,
         "budget": budget,
         # Per-instrument position snapshot so the *next* weekly
         # snapshot can compute period contribution against it.
@@ -1737,7 +1793,7 @@ def generate_monthly_report(
     # Rank movers were weekly-only pre-#1596 (committee finding: the
     # monthly model-review section cited a key the monthly builder
     # never wrote).
-    score_changes = _score_changes(conn, period_start, period_end)
+    score_changes, score_changes_total = _score_changes(conn, period_start, period_end)
     prior = _load_prior_snapshot(conn, report_type="monthly", period_start=period_start)
     # When `prior` is absent OR lacks the `positions` key (pre-feature
     # snapshots from before Slice 4), pass `None` so
@@ -1803,6 +1859,9 @@ def generate_monthly_report(
         "risk": risk,
         "thesis_summary": thesis_summary,
         "score_changes": score_changes,
+        # Pre-cap mover count — `score_changes` is a top-N exhibit, and
+        # the statement must not imply it is the full set (#2178).
+        "score_changes_total": score_changes_total,
         "pnl": pnl,
         "position_pnl": position_pnl,
         "win_rate": win_rate_data["win_rate_pct"],
