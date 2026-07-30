@@ -465,26 +465,81 @@ _ITEM403_AMOUNT_NATURE_RE: Final[re.Pattern[str]] = re.compile(
     r"(amount\s+and\s+nature)|((sole|shared)\s+(voting|dispositive|investment))",
     re.IGNORECASE,
 )
-# Comp-denominated percents — Item 402, not Item 403. Checked FIRST: a comp
-# table can also say "shares", so the positive arms alone would admit it.
+# Column 3's ordinary caption — issuers writing "Shares Beneficially Owned" or
+# "Beneficial Stock Ownership" are quoting 229.403's own noun phrase.
+#
+# Keyed on own(ed|ership), NOT owner. "Name of Beneficial OWNER" is column 2's
+# caption and says nothing about the VALUE columns, so accepting it as Item 403
+# evidence admits 'Beneficial Owner | Number of RSUs' — a junk shape from this
+# spec's own probe list. Gap-tolerant but confined within a single header cell
+# (no "|"), so it cannot bridge two unrelated captions.
+_ITEM403_BENEFICIAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"beneficial(ly)?\b[^|]{0,30}?\bown(ed|ership)\b",
+    re.IGNORECASE,
+)
+# WEAK evidence — some amount column, some percent column, something "owned".
+# Individually meaningless; an Item 402 payout table has them too. Only used in
+# combination, and only under the vetoes below.
+_ITEM403_AMOUNT_IND_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(shares?|number|amount|units?|stock)\b",
+    re.IGNORECASE,
+)
+# Word-bounded so "Percentile" (TSR payout-curve tables) does not read as a
+# percent-of-class column.
+_ITEM403_PERCENT_IND_RE: Final[re.Pattern[str]] = re.compile(r"\bpercent(age|ages)?\b|%", re.IGNORECASE)
+_ITEM403_OWNED_IND_RE: Final[re.Pattern[str]] = re.compile(r"\bown(ed|ership)\b", re.IGNORECASE)
+# Comp-denominated percents — Item 402, not Item 403.
 _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
     r"(base\s+salary|of\s+target|target\s+bonus|payout|vesting"
     r"|bonus\s+opportunity|salary|earned|performance)",
     re.IGNORECASE,
 )
+# Item 402(a)(3) DEFINES "named executive officer"; Item 403 says "name of
+# beneficial owner". A header captioning its name column with Item 402's term of
+# art, carrying none of Item 403's column-3/4 wording, is an Item 402 table.
+_ITEM402_NEO_CAPTION_RE: Final[re.Pattern[str]] = re.compile(r"named\s+executive\s+officer", re.IGNORECASE)
 
 
 def _item403_value_signature(headers: tuple[str, ...]) -> bool:
     """True when HEADERS carry Item 403's prescribed VALUE columns.
 
-    Signature = a **class-denominated percent** column OR the
-    **amount-and-nature** voting/dispositive-power subdivision, and never a
-    comp-denominated percent. See the regexes above for the governing reg.
+    Precedence, not a flat vocabulary match — and the ordering is the whole
+    design (#2160, measured in both directions over all 42,566 stored bodies):
+
+    1. A header quoting 229.403's own column 3 ("amount and nature of beneficial
+       ownership", "shares beneficially owned") or column 4 ("percent of class")
+       is an Item 403 table **on its face** and is admitted outright.
+    2. Otherwise Item 402 vocabulary vetoes.
+    3. Otherwise the weak generic pair — an amount column plus either a percent
+       column or an "owned" column — admits.
+
+    The comp veto CANNOT be applied over the whole header, which is what the
+    first cut did. Rule 13d-3(d)(1)(i) DEEMS a person the beneficial owner of
+    shares acquirable within 60 days, so a genuine Item 403 table legitimately
+    captions columns "Options Exercisable or Vesting Within 60 Days" and
+    "Number of Performance Shares Granted". A blanket veto on "vesting" /
+    "performance" deleted 18-, 22- and 10-holder Vanguard / BlackRock / First
+    Eagle tables. Ordering the reg's own wording above the veto is what fixes
+    it, and it is why the veto can safely stay broad.
+
+    Step 3's two pairs both exist because issuers omit column 4 outright:
+    dual-class and direct/indirect tables caption their value columns
+    "Class A Common Stock Owned | Class B Common Stock Owned | Total Voting
+    Power" with no percent anywhere.
     """
     joined = " | ".join(headers)
-    if _COMP_PCT_RE.search(joined):
+    if (
+        _ITEM403_BENEFICIAL_RE.search(joined)
+        or _ITEM403_AMOUNT_NATURE_RE.search(joined)
+        or _ITEM403_CLASS_PCT_RE.search(joined)
+    ):
+        return True
+    if _COMP_PCT_RE.search(joined) or _ITEM402_NEO_CAPTION_RE.search(joined):
         return False
-    return bool(_ITEM403_CLASS_PCT_RE.search(joined) or _ITEM403_AMOUNT_NATURE_RE.search(joined))
+    return bool(
+        _ITEM403_AMOUNT_IND_RE.search(joined)
+        and (_ITEM403_PERCENT_IND_RE.search(joined) or _ITEM403_OWNED_IND_RE.search(joined))
+    )
 
 
 def _score_table_headers(headers: tuple[str, ...]) -> int:
@@ -969,6 +1024,10 @@ _INSTRUMENT_VOCAB: Final[frozenset[str]] = frozenset(
     }
 )
 _WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z]+")
+# Presentation debris the identity test must look through. Leader dots are an
+# HTML table-of-contents/figure-rule artefact and land INSIDE the name cell, so
+# they inflate its length without being part of the name.
+_IDENTITY_DEBRIS_RE: Final[re.Pattern[str]] = re.compile(r"[.…]{3,}")
 
 
 def _is_instrument_not_owner(text: str) -> bool:
@@ -992,8 +1051,17 @@ def _is_beneficial_owner_identity(text: str) -> bool:
     single-cell stacked-pair decision. Both share the class-noun rejection; this
     one adds the three corrections the full-population census forced (length
     cap, case-sensitive entity designators, instrument vocabulary).
+
+    Presentation debris is stripped BEFORE the length cap, not after. Issuers
+    pad the name column with HTML leader dots to draw a dotted rule across to
+    the figures, and the run is far longer than the name: 'Hotchkis & Wiley
+    Capital Management, LLC ....(63 dots)' is 104 characters of dots on a
+    40-character name. Testing the raw cell blew the 120-char cap and rejected
+    the holder, which took the whole table below ``_ROW_IDENTITY_FLOOR`` and
+    dropped a genuine ``Amount and Nature of Beneficial Ownership | Percent of
+    Class`` table (0000074303-25-000056, 3 holders including BlackRock).
     """
-    stripped = text.strip()
+    stripped = _IDENTITY_DEBRIS_RE.sub(" ", text).strip(" .,​﻿*†#")
     if not stripped or len(stripped) > _OWNER_IDENTITY_MAX_LEN:
         return False
     if _is_instrument_not_owner(stripped):
@@ -1722,8 +1790,15 @@ def _is_item403_eligible(table: _RawTable) -> bool:
     Item 402 compensation tables. The cheap header regex is evaluated FIRST so
     the full extraction is skipped for tables the value signature already
     rejects.
+
+    The signature reads BOTH header tuples. ``column_headers`` alone is wrong:
+    when a two-row header promotes the SUB-header row, ``column_headers``
+    becomes ``('', 'Sole', 'Shared', 'Total', '')`` and the parent caption
+    ``Amount and Nature of Beneficial Ownership | Percent of Class`` survives
+    only in ``score_headers`` — so reading the narrower tuple rejected the most
+    prescribed shape the reg has, at scores 14 and 16.
     """
-    if not _item403_value_signature(table.column_headers):
+    if not _item403_value_signature(tuple(table.score_headers) + tuple(table.column_headers)):
         return False
     return _owner_identity_fraction(table) >= _ROW_IDENTITY_FLOOR
 
