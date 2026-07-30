@@ -544,7 +544,11 @@ _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
     r"|compensation|attendance|meetings?\s+attended|dilution"
     r"|\bpsus?\b|\bltip\b|incentive\s+award|as\s+settled"
     r"|long.?term\s+incentive|incentive\s+(program|opportunity)|base\s+pay|\bbonus\b"
-    r"|option\s+awards?|stock\s+option\s+awards?)",
+    r"|option\s+awards?|stock\s+option\s+awards?"
+    # Ownership GUIDELINES (a policy multiple, not a holding) and deferred-comp
+    # ALLOCATION tables (a percent of a dollar deferral across funds) were the
+    # only junk left riding the data-row fallback.
+    r"|ownership\s+guidelines|amount\s+deferred|deferred\s+amount)",
     re.IGNORECASE,
 )
 # Item 402(a)(3) DEFINES "named executive officer"; Item 403 says "name of
