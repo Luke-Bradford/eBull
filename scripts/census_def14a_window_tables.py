@@ -38,9 +38,13 @@ import app.providers.implementations.sec_def14a as parser_mod
 from app.config import settings
 
 _MAX_WINDOWS = 4
-# Was 80. #2160 round 1 found accessions whose winning window holds more tables
-# than that, so the dump silently truncated the very table the parser selects.
-_MAX_TABLES_PER_WINDOW = 400
+# NO per-window table cap. It was 80, then 400, and both silently truncated the
+# very table the parser selects: when ``_find_section_windows`` finds no heading
+# it falls back to a WHOLE-DOCUMENT window, and a merger proxy (Kenvue
+# 0001140361-25-045607) then yields thousands of spans with Item 403 far past any
+# cap. The fidelity gate caught it at 400 -- 42 accessions, replay 0 rows vs real
+# 41 -- which is exactly what the gate is for. Cost is parse time on a handful of
+# huge documents; the DUMP stays small because only tables WITH rows are kept.
 _MAX_NAMES = 40
 _MAX_HEADERS = 12
 _NAME_CLIP = 160
@@ -112,7 +116,7 @@ def main() -> int:
                     for window_start, window_end in windows[:_MAX_WINDOWS]:
                         spans = parser_mod._scan_outer_tables(payload, start=window_start, end=window_end)
                         tables = []
-                        for start, end in spans[:_MAX_TABLES_PER_WINDOW]:
+                        for start, end in spans:
                             rec = _table_record(payload, start, end)
                             if rec is not None:
                                 tables.append(rec)
