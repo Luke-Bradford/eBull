@@ -38,7 +38,9 @@ import app.providers.implementations.sec_def14a as parser_mod
 from app.config import settings
 
 _MAX_WINDOWS = 4
-_MAX_TABLES_PER_WINDOW = 80
+# Was 80. #2160 round 1 found accessions whose winning window holds more tables
+# than that, so the dump silently truncated the very table the parser selects.
+_MAX_TABLES_PER_WINDOW = 400
 _MAX_NAMES = 40
 _MAX_HEADERS = 12
 _NAME_CLIP = 160
@@ -52,6 +54,7 @@ def _table_record(html_text: str, start: int, end: int) -> dict | None:
         return None
     score = parser_mod._score_table_headers(parsed.score_headers)
     names: list[str] = []
+    n_shares = n_percent = 0
     try:
         name_idx, shares_idx, percent_idx = parser_mod._resolve_columns(parsed.column_headers)
         holders: list = []
@@ -64,7 +67,14 @@ def _table_record(html_text: str, start: int, end: int) -> dict | None:
             seen=set(),
         )
         names = [h.holder_name[:_NAME_CLIP] for h in holders]
-    except Exception:  # noqa: BLE001 -- a table we cannot extract scores 0 identity
+        # VALUE-side evidence, for the data-row column signal borrowed from
+        # edgartools' ``_build_column_map`` (skill G17). Item 403 prescribes an
+        # amount column AND a percent-of-class column; when the CAPTIONS have
+        # degraded to empty cells the only remaining evidence that both exist is
+        # that both PARSED for the rows.
+        n_shares = sum(1 for h in holders if h.shares is not None)
+        n_percent = sum(1 for h in holders if h.percent_of_class is not None)
+    except Exception:  # noqa: BLE001 -- a table we cannot extract scores 0 identity and 0 value evidence
         holders = []
     return {
         "s": score,
@@ -73,6 +83,8 @@ def _table_record(html_text: str, start: int, end: int) -> dict | None:
         "nr": len(parsed.rows),
         "n": len(names),
         "nm": names[:_MAX_NAMES],
+        "nsh": n_shares,
+        "npc": n_percent,
     }
 
 
@@ -108,7 +120,19 @@ def main() -> int:
                 except Exception as exc:  # noqa: BLE001
                     print(json.dumps({"accession": accession, "error": repr(exc)[:200]}), flush=True)
                     continue
-                print(json.dumps({"accession": accession, "windows": out}), flush=True)
+                # Ground truth for the analyser's FIDELITY GATE: what the REAL
+                # parser returns for this body, same checkout, same payload.
+                #
+                # #2160 round 1 found 28 accessions where the dump implied "no
+                # table scores >=3 with rows" while real ``main`` produced rows.
+                # The replay silently disagreed with the control it was standing
+                # in for, and every variant ranking rested on it. Recording the
+                # truth per accession turns that into an assertion.
+                try:
+                    truth = len(parser_mod.parse_beneficial_ownership_table(payload).rows)
+                except Exception:  # noqa: BLE001
+                    truth = -1
+                print(json.dumps({"accession": accession, "windows": out, "real_rows": truth}), flush=True)
                 if n % 250 == 0:
                     print(f"... {n}", file=sys.stderr, flush=True)
     print(f"DONE {n}", file=sys.stderr, flush=True)

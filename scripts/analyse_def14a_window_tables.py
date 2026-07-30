@@ -267,6 +267,36 @@ def main() -> int:
                 recs.append(r)
     print(f"accessions parsed from dump: {len(recs)}\n")
 
+    # FIDELITY GATE. The replay stands in for the real parser; if it disagrees
+    # with it, every variant ranking below is measuring a selector nobody runs.
+    #
+    # #2160 round 1 shipped a whole analysis before noticing 28 accessions where
+    # the dump said "no table scores >=3 with rows" while real ``main`` produced
+    # rows. Silence is not agreement -- assert it, and say so out loud when the
+    # dump predates the check (`real_rows` absent).
+    checked = [r for r in recs if "real_rows" in r]
+    if not checked:
+        print(
+            "!! FIDELITY UNVERIFIED — this dump carries no `real_rows` field.\n"
+            "   Re-run scripts/census_def14a_window_tables.py before trusting any\n"
+            "   number below. Rankings only; never state an outcome from this.\n"
+        )
+    else:
+        mismatched = []
+        for r in checked:
+            _, sel = main_selection(r["windows"])
+            replay_has = any(t["n"] > 0 for t in sel)
+            real_has = r["real_rows"] > 0
+            if replay_has != real_has:
+                mismatched.append((r["accession"], sum(t["n"] for t in sel), r["real_rows"]))
+        rate = 100 * (1 - len(mismatched) / len(checked))
+        print(f"fidelity: replay reproduces real `main` rows/no-rows on {rate:.3f}% of {len(checked)} accessions")
+        if mismatched:
+            print(f"!! {len(mismatched)} DIVERGENT — the replay is not a faithful control. First 15:")
+            for acc, rep, real in mismatched[:15]:
+                print(f"     {acc}  replay_rows={rep}  real_rows={real}")
+        print()
+
     for vname, (sig, source) in variants.items():
         lost_all: list[tuple[str, list[dict]]] = []  # main had holders, branch has none
         lost_tables: Counter[str] = Counter()  # main-selected tables now ineligible

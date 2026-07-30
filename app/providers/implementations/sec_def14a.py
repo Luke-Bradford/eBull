@@ -522,8 +522,8 @@ _ITEM403_OWNED_IND_RE: Final[re.Pattern[str]] = re.compile(r"\bown(ed|ership)\b"
 # those before the Item 402 veto would emit severance data as ownership (Codex
 # ckpt-1 HIGH). Verb and window must sit in the SAME header cell.
 _RULE_13D3_60_DAY_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:(?:exercisab|acquir|issuab|vest|convert|settl)\w*[^|]{0,40}?within\s+(?:\d{1,3}|sixty)\s+days"
-    r"|within\s+(?:\d{1,3}|sixty)\s+days[^|]{0,40}?(?:exercisab|acquir|issuab|vest|convert|settl)\w*)",
+    r"(?:(?:exercisab|acquir|issuab|vest|convert|settl)\w*[^|]{0,40}?(?:with)?in\s+(?:\d{1,3}|sixty)\s+days"
+    r"|(?:with)?in\s+(?:\d{1,3}|sixty)\s+days[^|]{0,40}?(?:exercisab|acquir|issuab|vest|convert|settl)\w*)",
     re.IGNORECASE,
 )
 # Comp-denominated percents — Item 402, not Item 403.
