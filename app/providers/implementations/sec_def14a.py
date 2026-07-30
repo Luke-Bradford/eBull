@@ -939,6 +939,66 @@ def _parse_percent(raw: str) -> Decimal | None:
 # the parser locates each canonical column by header substring and
 # falls back to positional defaults (col 0 = name, col 1 = shares,
 # col -1 = percent) when the headers are missing or ambiguous.
+def _shares_cell_percent_signature(cells: list[str], shares_idx: int, headers: tuple[str, ...]) -> str | None:
+    """Return the signature by which the cell resolved at ``shares_idx`` is a
+    PERCENT rather than a share count, or ``None`` when it reads as a count.
+
+    Source rule — 17 CFR 229.403 (Reg S-K Item 403) prescribes column 3 as
+    "Amount and nature of beneficial ownership" (a COUNT of shares) and column 4
+    as "Percent of class" (a percentage). They are two distinct columns, and the
+    reg's own captions are the discriminator.
+
+    The failure this guards (#2163): a header row carrying empty SPACER cells
+    that its data rows do not carry is WIDER than the data, so ``shares_idx``
+    lands one or more columns to the right — on the percent. The value still
+    parses (``_parse_share_count('17.4')`` is a valid ``Decimal``), so the
+    ``if shares is None`` recovery below never fires and the real count one cell
+    to the left is discarded. 0001308179-24-000672 stored BlackRock at 17.4
+    shares and threw away 6,236,345.
+
+    ``'17.4%'`` in ONE cell is NOT this bug — ``_parse_share_count`` already
+    rejects it. The defect needs the value and its sign in SEPARATE cells, which
+    is what HTML table rendering produces.
+
+    Two signature strengths, split on SEMANTIC vs POSITIONAL evidence:
+
+    * ``"decisive"`` — the resolved CAPTION names a percent and carries none of
+      ``_STRONG_SHARES_KEYWORDS``. The column says what it holds; that is not
+      an artefact of anything else in the row, so the value is a percent and is
+      never restored as a share count.
+    * ``"weak"`` — a lone ``%`` sibling cell, or a non-integral value. Both are
+      suggestive but circumstantial: a fractional holding is unusual and not
+      impossible, and a ``%`` sign rendered in its OWN cell can sit to the right
+      of a genuine small holding (``[name, '50', '%', '0.1']`` — Codex ckpt-2).
+      The caller restores the original reading when the row offers no
+      whole-number alternative, so a real count is never dropped on positional
+      evidence alone.
+    """
+    raw = cells[shares_idx] if 0 <= shares_idx < len(cells) else ""
+    value = _parse_share_count(raw)
+    if value is None:
+        return None
+    # A percent of class is bounded by definition — ownership is a fraction of a
+    # class — and ``_parse_percent`` has clamped to [0, 100] since #1228. A value
+    # above that ceiling therefore CANNOT be the 229.403 column-4 percent no
+    # matter what the surrounding cells look like, so it is never held back.
+    #
+    # Load-bearing, not defensive: without it a row rendered
+    # ``[name, '1,234,567', '%', '5.6']`` — the sign cell BEFORE the percent
+    # value — would read the sibling '%' as decisive, hold back a genuine
+    # 1.2M-share holding, find no whole alternative (5.6 is fractional), and
+    # drop the count entirely.
+    if value.is_nan() or value.is_infinite() or value > Decimal(100) or value < Decimal(0):
+        return None
+    caption = headers[shares_idx].lower() if 0 <= shares_idx < len(headers) else ""
+    if ("percent" in caption or "%" in caption) and not any(k in caption for k in _STRONG_SHARES_KEYWORDS):
+        return "decisive"
+    nxt = next((c.strip() for c in cells[shares_idx + 1 :] if c.strip()), "")
+    if nxt in ("%", "(%)") or value != value.to_integral_value():
+        return "weak"
+    return None
+
+
 def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
     """Return ``(name_idx, shares_idx, percent_idx)``.
 
@@ -1514,6 +1574,14 @@ def _extract_holder_rows(
         name_src_idx, holder_name_raw = _resolve_row_name(cells, name_idx=name_idx, shares_idx=shares_idx)
 
         holder_name = _clean_beneficial_holder_name(holder_name_raw)
+        if _SCHEDULE_13D_COVER_LABEL_RE.match(holder_name):
+            # Proxies embed Schedule 13D/G COVER PAGES as exhibits. Their
+            # numbered rows read as a table whose "names" are the cover-page
+            # item labels and whose "share counts" are the ROW NUMBERS
+            # (0001104659-17-023458 stored 'SHARED VOTING POWER -0' with
+            # shares=8). Not an Item 403 table — see the regex for the rule.
+            pending_owner_name = None
+            continue
         if _is_address_fragment(holder_name):
             # ADDRESS half of a stacked pair — take the name carried from the
             # preceding row. ``name_src_idx`` deliberately keeps pointing at
@@ -1525,6 +1593,15 @@ def _extract_holder_rows(
             pending_owner_name = None
             continue
         shares = _parse_share_count(shares_raw)
+        # #2163 — 17 CFR 229.403 column 3 is a COUNT, column 4 is a PERCENT.
+        # A percent-signatured value at shares_idx is not a holding; hold it
+        # back so the recovery scan below runs and finds the real count. See
+        # ``_shares_cell_percent_signature`` for the two signature strengths.
+        percent_signature = (
+            _shares_cell_percent_signature(cells, shares_idx, table.column_headers) if shares is not None else None
+        )
+        if percent_signature is not None:
+            shares = None
         shares_src_idx = shares_idx if shares is not None else -1
         # Parse the positional percent BEFORE recovering shares, so the
         # recovery knows whether percent_idx actually yielded a percent. When
@@ -1552,9 +1629,29 @@ def _extract_holder_rows(
                 # ``Shares = —`` and ``Percent = 8.4`` would otherwise store
                 # shares=8.4 (Codex pre-push review). Leaving shares NULL is the
                 # safe fallback; _parse_percent already handles bare percents.
-                if candidate is not None and candidate == candidate.to_integral_value():
-                    shares, shares_src_idx = candidate, i
-                    break
+                if candidate is None or candidate != candidate.to_integral_value():
+                    continue
+                # #2163 A/B round 2: when the PRIMARY cell was held back as a
+                # percent, the recovery must not simply grab the next percent
+                # along. 0001177394-25-000016 ('Minimum Payment … as Percentage
+                # of Base Salary') held back 30.0 and then recovered '100.0'
+                # from the next column — still a percent, now stored as a share
+                # count. Apply the same signature test to the candidate.
+                if percent_signature is not None and _shares_cell_percent_signature(cells, i, table.column_headers):
+                    continue
+                shares, shares_src_idx = candidate, i
+                break
+        if shares is None and percent_signature == "weak":
+            # Nothing whole anywhere in the row, and the evidence against the
+            # cell was only circumstantial — a non-integral value (a fractional
+            # DRIP/plan holding is unusual but real) or a lone '%' sibling cell,
+            # which can sit to the RIGHT of a genuine small holding when the
+            # issuer renders the sign in its own column (Codex ckpt-2:
+            # ``[name, '50', '%', '0.1']`` would otherwise lose the 50 shares).
+            # Restore rather than drop the row's only number. ``"decisive"`` is
+            # NOT restored — a percent CAPTION states what the column holds.
+            shares = _parse_share_count(shares_raw)
+            shares_src_idx = shares_idx if shares is not None else -1
         if percent is None:
             # Ragged row (#2140 D3): issuers interleave footnote-only cells
             # ('(2)') mid-row, so a data row can be WIDER than its header row
@@ -1587,6 +1684,20 @@ def _extract_holder_rows(
                     percent = _parse_percent(text)
                     if percent is not None:
                         break
+
+        # LAST resort, and deliberately after the scan above (#2163 A/B round
+        # 3): a hold-back that SUCCEEDED — the real whole count was found at a
+        # DIFFERENT index — proves the held-back cell was 229.403 column 4.
+        # But it is weaker evidence than an unambiguous '%'-bearing cell, so it
+        # must not pre-empt the scan. Running it FIRST cost the row its real
+        # percent on tables carrying two percent-ish columns:
+        # 0000950170-24-100030 'Edward J. Richardson' has 98.1 at shares_idx and
+        # 14.8 under 'Percent of Class'; pre-empting stored 98.1.
+        held_back_succeeded = percent_signature is not None and shares is not None and shares_src_idx != shares_idx
+        if percent is None and (percent_signature == "decisive" or held_back_succeeded):
+            percent = _parse_percent(shares_raw)
+            if percent is not None:
+                percent_src_idx = shares_idx
 
         # Drop rows where neither shares nor percent parsed — that's
         # almost always a free-text annotation row ("Notes:",
@@ -1969,6 +2080,44 @@ _ADDRESS_ONLY_RE: Final[re.Pattern[str]] = re.compile(
 def _is_address_fragment(name: str) -> bool:
     """True when a holder-name cell holds only address material (#2140)."""
     return bool(_ADDRESS_ONLY_RE.match(name.strip()))
+
+
+# Schedule 13D/G COVER-PAGE item labels (#2163).
+#
+# Source rule — 17 CFR 240.13d-101 (Schedule 13D) and 240.13d-102 (Schedule 13G)
+# prescribe a numbered cover page. Rows 7-11 are the voting/dispositive power
+# and aggregate-amount lines; rows 1-6 and 12-14 are the reporting-person,
+# funding, citizenship and type-of-person lines. Proxies embed these cover pages
+# as exhibits, and the numbered layout parses as a table whose "holder names"
+# are these labels and whose "share counts" are the ROW NUMBERS.
+#
+# They are not Item 403 rows: 229.403 column 2 is a *beneficial owner*, which
+# Rule 13d-3 (17 CFR 240.13d-3) defines as a person or entity holding voting or
+# investment power. A cover-page item label is neither. The all-caps two-token
+# shape ('SHARED VOTING POWER') otherwise reads as a person name, so neither the
+# owner-identity test nor an address test rejects it.
+_SCHEDULE_13D_COVER_LABEL_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:"
+    # Rows 7-10. ``investment`` is included alongside the cover page's own
+    # ``dispositive`` because Rule 13d-3 defines beneficial ownership as voting
+    # OR INVESTMENT power and issuers paraphrase the cover page with it
+    # (0001308179-25-000114 renders a TRANSPOSED table — holders are COLUMNS,
+    # rows are the four power types — and stored 'Sole investment power' as a
+    # holder holding 82,447,476 shares). Note this matches resolved HOLDER
+    # NAMES; #2160's D4 matches the same vocabulary in HEADERS, where it is a
+    # POSITIVE Item 403 signal. Different surfaces, no contradiction.
+    r"(?:sole|shared)\s+(?:voting|dispositive|investment)\s+power\b"
+    r"|aggregate\s+amount\s+beneficially\s+owned\b"  # row 11
+    r"|percent\s+of\s+class\s+represented\s+by\s+amount\s+in\s+row\b"  # row 13
+    r"|type\s+of\s+reporting\s+person\b"  # row 14
+    r"|name[s]?\s+of\s+reporting\s+person\b"  # row 1
+    r"|check\s+(?:the\s+appropriate\s+)?box\b"  # rows 2, 5, 12
+    r"|sec\s+use\s+only\b"  # row 3
+    r"|source\s+of\s+funds\b"  # row 4
+    r"|citizenship\s+or\s+place\s+of\s+organization\b"  # row 6
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_name_cell(cell: str) -> bool:

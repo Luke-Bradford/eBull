@@ -130,7 +130,18 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # section heading whose noun precedes the threshold ('Other Shareowners that
 # Beneficially Own More than 5%') now sets the 'principal' role instead of
 # letting the management block's role leak onto the holders below it.
-_PARSER_VERSION_DEF14A = "def14a-v11"
+# v12 (#2163): 17 CFR 229.403 column 3 ("Amount and nature of beneficial
+# ownership") is a COUNT, column 4 ("Percent of class") is a PERCENT. A header
+# row carrying empty SPACER cells its data rows do not carry is wider than the
+# data, so shares_idx lands on the percent column; the value still parses, the
+# ragged-row recovery never fires, and the real count one cell to the left is
+# discarded (0001308179-24-000672 stored BlackRock at 17.4 shares and threw away
+# 6,236,345). A percent-signatured value at shares_idx is now held back so the
+# recovery runs, and is read as the percent when the signature is decisive.
+# Also: embedded Schedule 13D/G cover pages (17 CFR 240.13d-101/-102) are no
+# longer parsed as Item 403 tables — their numbered rows stored the cover-page
+# item labels as holder names and the ROW NUMBERS as share counts.
+_PARSER_VERSION_DEF14A = "def14a-v12"
 
 logger = logging.getLogger(__name__)
 
