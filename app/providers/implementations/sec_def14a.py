@@ -477,6 +477,28 @@ _ITEM403_BENEFICIAL_RE: Final[re.Pattern[str]] = re.compile(
     r"beneficial(ly)?\b[^|]{0,30}?\bown(ed|ership)\b",
     re.IGNORECASE,
 )
+# 229.403 column 2's LITERAL prescribed caption — "Name and address of
+# beneficial owner" (403(a)) / "Name of beneficial owner" (403(b)).
+#
+# Bare "Beneficial Owner" is deliberately NOT enough (it admits 'Beneficial
+# Owner | Number of RSUs'), but the full prescribed phrase is Item 403's own
+# and no Item 402 table uses it. This arm is what recovers tables whose VALUE
+# column is just the class name — 'Name and Address of Beneficial Owner |
+# Common Stock' carries no percent and no "owned" anywhere, yet it is the
+# reg's own shape with column 1 (Title of class) as the value caption.
+_ITEM403_OWNER_CAPTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"name\s+(and\s+address(es)?\s+)?of\s+(the\s+)?beneficial\s+owner",
+    re.IGNORECASE,
+)
+# 229.403 column 1's literal prescribed caption. Both subsections prescribe it
+# and nothing else in a proxy uses the phrase, so it is Item 403 on its face —
+# it recovers tables whose remaining captions are degraded to empty cells
+# ('| Title of Class | ... | Name and Address of | Class A Common Stock (2) |').
+_ITEM403_TITLE_OF_CLASS_RE: Final[re.Pattern[str]] = re.compile(r"title\s+of\s+class", re.IGNORECASE)
+# The reg's adverb on its own. Issuers truncate column 3 to 'Shares
+# Beneficially' when the header wraps, losing 'Owned' to the next cell. Weak,
+# so it is paired with an amount indicator and stays under the vetoes.
+_ITEM403_BENEFICIALLY_RE: Final[re.Pattern[str]] = re.compile(r"\bbeneficially\b", re.IGNORECASE)
 # WEAK evidence — some amount column, some percent column, something "owned".
 # Individually meaningless; an Item 402 payout table has them too. Only used in
 # combination, and only under the vetoes below.
@@ -537,8 +559,10 @@ def _item403_value_signature(headers: tuple[str, ...]) -> bool:
     joined = " | ".join(headers)
     if (
         _ITEM403_BENEFICIAL_RE.search(joined)
+        or _ITEM403_OWNER_CAPTION_RE.search(joined)
         or _ITEM403_AMOUNT_NATURE_RE.search(joined)
         or _ITEM403_CLASS_PCT_RE.search(joined)
+        or _ITEM403_TITLE_OF_CLASS_RE.search(joined)
         or _RULE_13D3_60_DAY_RE.search(joined)
     ):
         return True
@@ -546,7 +570,11 @@ def _item403_value_signature(headers: tuple[str, ...]) -> bool:
         return False
     return bool(
         _ITEM403_AMOUNT_IND_RE.search(joined)
-        and (_ITEM403_PERCENT_IND_RE.search(joined) or _ITEM403_OWNED_IND_RE.search(joined))
+        and (
+            _ITEM403_PERCENT_IND_RE.search(joined)
+            or _ITEM403_OWNED_IND_RE.search(joined)
+            or _ITEM403_BENEFICIALLY_RE.search(joined)
+        )
     )
 
 
@@ -1036,6 +1064,21 @@ _WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z]+")
 # HTML table-of-contents/figure-rule artefact and land INSIDE the name cell, so
 # they inflate its length without being part of the name.
 _IDENTITY_DEBRIS_RE: Final[re.Pattern[str]] = re.compile(r"[.…]{3,}")
+# D1 clauses 4-5 — Item 403(a) prescribes "Name AND ADDRESS of beneficial owner"
+# in ONE column, so an entity that carries no corporate suffix is identified by
+# the address that follows it: 'MUFG 4-5, Marunouchi 1-chome Chiyoda-ku, Tokyo',
+# 'Vanguard 100 Vanguard Boulevard Malvern, PA', 'BlackRock 50 Hudson Yards'.
+# None of them reach the two-capitalised-token person pattern (the second token
+# is a street number) and none carry LLC/Inc/Trust, so without this arm all
+# three are rejected and their table falls under _ROW_IDENTITY_FLOOR —
+# 0001140361-25-012302 scored 0.25 and was emptied.
+#
+# A proper-noun run followed by a NUMBER, which is the name/street-number seam.
+# Deliberately not a hardcoded issuer list (the spec's clause 5): the signal is
+# the reg's own one-column name-and-address form, not who the filer is.
+_OWNER_NAME_THEN_ADDRESS_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Z][\w&.'’-]*(?:\s+[A-Z][\w&.'’-]*){0,3}\s+\d",
+)
 
 
 def _is_instrument_not_owner(text: str) -> bool:
@@ -1080,7 +1123,9 @@ def _is_beneficial_owner_identity(text: str) -> bool:
         return False
     if _OWNER_ENTITY_CASED_RE.search(stripped):
         return True
-    return bool(_OWNER_PERSON_RE.match(stripped))
+    if _OWNER_PERSON_RE.match(stripped):
+        return True
+    return bool(_OWNER_NAME_THEN_ADDRESS_RE.match(stripped))
 
 
 def _is_owner_identity(text: str) -> bool:
