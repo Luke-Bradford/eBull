@@ -1983,34 +1983,30 @@ def _row_name_is_address(raw_row: tuple[str, ...] | None, *, name_idx: int, shar
 _ROW_IDENTITY_FLOOR: Final[float] = 0.5
 
 
-def _owner_identity_fraction(table: _RawTable) -> float:
-    """D0 (#2160) — fraction of TABLE's extracted rows that name a beneficial owner.
+def _owner_identity_fraction(holders: list[Def14ABeneficialHolder]) -> float:
+    """D0 (#2160) — fraction of HOLDERS that name a beneficial owner.
 
-    Computed on the **resolved name column**, reached through the same path
-    extraction uses. Not the raw first cell: Item 403's prescribed column 1 is
-    ``Title of class``, so a genuine table rendering
+    Takes the ALREADY-EXTRACTED holders rather than the table, so there is
+    exactly one place this fraction is computed. It previously took the table
+    and re-ran the extraction itself, which left it orphaned once
+    ``_is_item403_eligible`` started extracting once and deriving both the
+    fraction and the value evidence from the same list (review WARNING on
+    PR #2177: a future fix to one would silently not reach the other).
+
+    The caller must extract through the real ``_resolve_columns`` +
+    ``_extract_holder_rows`` path, NOT the raw first cell: Item 403's prescribed
+    column 1 is ``Title of class``, so a genuine table rendering
     ``Common Stock | The Vanguard Group | 5,799,197 | 5.3%`` would fail a
-    first-cell test outright (Codex ckpt-1 BLOCKING on the spec).
-
-    Sharing ``_extract_holder_rows`` is required, not incidental: it already
-    drops section headings, address-continuation fragments and value-less rows,
-    and recovers ragged cells. Measuring on raw rows would count a
+    first-cell test outright (Codex ckpt-1 BLOCKING on the spec). Sharing
+    ``_extract_holder_rows`` is required, not incidental: it already drops
+    section headings, address-continuation fragments and value-less rows, and
+    recovers ragged cells. Measuring on raw rows would count a
     ``Named Executive Officers`` heading as an identity and would penalise a
     genuine table whose rows are address continuations.
 
     Denominator is the extracted holder count. A table extracting zero holders
     cannot win its window anyway (#2158 element 4), so it scores 0.0.
     """
-    name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
-    holders: list[Def14ABeneficialHolder] = []
-    _extract_holder_rows(
-        table,
-        name_idx=name_idx,
-        shares_idx=shares_idx,
-        percent_idx=percent_idx,
-        rows=holders,
-        seen=set(),
-    )
     if not holders:
         return 0.0
     hits = sum(1 for h in holders if _is_beneficial_owner_identity(h.holder_name))
@@ -2021,9 +2017,15 @@ def _is_item403_eligible(table: _RawTable) -> bool:
     """True when TABLE may win its window / join the Item 403 sibling set.
 
     Both limbs required — see the call site for why row identity alone admits
-    Item 402 compensation tables. The cheap header regex is evaluated FIRST so
-    the full extraction is skipped for tables the value signature already
-    rejects.
+    Item 402 compensation tables.
+
+    The holders are extracted FIRST, before the header signature is consulted.
+    That ordering is necessary, not accidental: D4's data-row fallback needs the
+    parsed values, and the identity fraction needs the same list, so extracting
+    once and deriving both is the only way to avoid running the extraction
+    twice. (An earlier revision claimed the cheap header regex ran first and
+    short-circuited the extraction; that stopped being true when the fallback
+    landed — review NITPICK on PR #2177.)
 
     The signature reads BOTH header tuples. ``column_headers`` alone is wrong:
     when a two-row header promotes the SUB-header row, ``column_headers``
@@ -2047,8 +2049,7 @@ def _is_item403_eligible(table: _RawTable) -> bool:
     headers = tuple(table.score_headers) + tuple(table.column_headers)
     if not _item403_value_signature(headers, data_row_evidence=_has_item403_value_rows(holders)):
         return False
-    hits = sum(1 for h in holders if _is_beneficial_owner_identity(h.holder_name))
-    return hits / len(holders) >= _ROW_IDENTITY_FLOOR
+    return _owner_identity_fraction(holders) >= _ROW_IDENTITY_FLOOR
 
 
 _VALUE_ROW_EVIDENCE_FLOOR: Final[float] = 0.5
