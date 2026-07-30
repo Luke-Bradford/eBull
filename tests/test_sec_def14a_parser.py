@@ -30,6 +30,7 @@ from app.providers.implementations.sec_def14a import (
     Def14ABeneficialOwnershipTable,
     _clean_beneficial_holder_name,
     _clean_holder_name,
+    _contains_specific_name,
     _detect_role_heading,
     _has_item403_value_rows,
     _is_address_fragment,
@@ -2011,3 +2012,41 @@ class TestStrongArmsCannotAdmitItem402Outcomes:
         evidence is TRUE. The Item 402 outcome vocabulary is what rejects it."""
         headers = ("Name", "Shares at Target", "Final Achievement %")
         assert not _item403_value_signature(headers, data_row_evidence=True)
+
+
+class TestHeadingTestDoesNotRejectNamedHolders:
+    """#2160 arm-1/arm-2 round 2 — ``_HOLDER_CLASS_PLURAL_RE`` is a SECTION-HEADING
+    test (#2164) and it outranks the entity arm on purpose, so that 'Directors and
+    Executive Officers of the Company' cannot be rescued by its trailing 'Company'.
+
+    But Schedule 13D/G joint-filer names legitimately contain those same class
+    nouns. Hyatt 0001104659-26-038759 lost an 11-holder sibling table this way,
+    taking the Pritzker family trusts, CIBC Caribbean, Massachusetts Financial
+    Services and Baron Capital with it.
+
+    A heading names a class abstractly; a holder carries a SPECIFIC proper name.
+    """
+
+    def test_joint_filer_holder_names_survive(self) -> None:
+        for text in (
+            "CIBC Caribbean and Other Reporting Persons",
+            "Trustees of the Thomas J. Pritzker Family Trusts and Other Reporting Persons",
+            "Trustees of the Karen L. Pritzker Family Trusts",
+        ):
+            assert _is_beneficial_owner_identity(text), text
+
+    def test_section_headings_are_still_rejected(self) -> None:
+        for text in (
+            "Directors and Executive Officers:",
+            "Directors and Executive Officers of the Company",
+            "Other Shareowners that Beneficially Own More than 5%:",
+            "5% Stockholders",
+            "Named Executive Officers",
+        ):
+            assert not _is_beneficial_owner_identity(text), text
+
+    def test_the_rescue_needs_hard_proper_noun_evidence(self) -> None:
+        """A qualifying name RUN alone is not enough — an initial, an all-caps
+        entity token, or a corporate designator must also be present."""
+        assert not _contains_specific_name("Directors and Executive Officers of the Company")
+        assert _contains_specific_name("Trustees of the Thomas J. Pritzker Family Trusts")

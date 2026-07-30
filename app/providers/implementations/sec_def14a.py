@@ -1157,6 +1157,99 @@ def _is_instrument_not_owner(text: str) -> bool:
     return all(w in _INSTRUMENT_VOCAB for w in words)
 
 
+# Heading vocabulary. A HEADING names a class in the abstract; a HOLDER carries a
+# SPECIFIC proper name. That is the discriminator ``_HOLDER_CLASS_PLURAL_RE``
+# lacks on its own -- it is a heading test (#2164: '5% Stockholders', 'Other
+# Shareowners that Beneficially Own More than 5%') and it outranks the entity
+# arm, so it was rejecting genuine 403(a) holders named in Schedule 13D/G
+# joint-filer form: 'Trustees of the Thomas J. Pritzker Family Trusts and Other
+# Reporting Persons', 'CIBC Caribbean and Other Reporting Persons'. Hyatt
+# (0001104659-26-038759) lost an 11-holder sibling table that way, taking MFS,
+# Baron Capital and the Pritzker trusts with it.
+_HEADING_STOPWORDS: Final[frozenset[str]] = frozenset(
+    {
+        # class nouns already in _HOLDER_CLASS_PLURAL_RE
+        "shareholders",
+        "shareowners",
+        "stockholders",
+        "holders",
+        "owners",
+        "directors",
+        "trustees",
+        "officers",
+        "executives",
+        "nominees",
+        "persons",
+        # generic heading connectives and qualifiers
+        "other",
+        "certain",
+        "all",
+        "total",
+        "more",
+        "than",
+        "and",
+        "the",
+        "of",
+        "family",
+        "trusts",
+        "trust",
+        "reporting",
+        "beneficially",
+        "own",
+        "owned",
+        "ownership",
+        "group",
+        "each",
+        "who",
+        "that",
+        "are",
+        "not",
+        "as",
+        "a",
+        "current",
+        "former",
+        "named",
+        "executive",
+        "non",
+        "employee",
+        "employees",
+        "affiliated",
+        "entities",
+        "associates",
+        "including",
+        "our",
+        "its",
+    }
+)
+
+
+# 'Thomas J. Pritzker' / 'Karen L. Pritzker' -- a middle initial is strong
+# evidence of a personal name; 'CIBC' -- an all-caps token is strong evidence of
+# an entity. Both survive inside a 13D/G joint-filer phrase where the
+# start-anchored person pattern cannot reach.
+_PERSONAL_INITIAL_RE: Final[re.Pattern[str]] = re.compile(r"\b[A-Z]\.")
+_ALLCAPS_ENTITY_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\b[A-Z]{3,}\b")
+
+
+def _contains_specific_name(text: str) -> bool:
+    """True when TEXT carries a run of >=2 capitalised tokens that name someone.
+
+    Tokens drawn from :data:`_HEADING_STOPWORDS` do not count, so
+    'Directors and Executive Officers of the Company' has no qualifying run while
+    'Trustees of the Thomas J. Pritzker Family Trusts' has 'Thomas J. Pritzker'
+    and 'CIBC Caribbean and Other Reporting Persons' has 'CIBC Caribbean'.
+    """
+    run = 0
+    for token in re.findall(r"[A-Za-z][\w.'\u2019-]*", text):
+        if token[:1].isupper() and token.lower().strip(".") not in _HEADING_STOPWORDS:
+            run += 1
+            if run >= 2:
+                return True
+        else:
+            run = 0
+    return False
+
+
 def _is_beneficial_owner_identity(text: str) -> bool:
     """D1 (#2160) — row-identity test used to gate table SELECTION.
 
@@ -1182,7 +1275,21 @@ def _is_beneficial_owner_identity(text: str) -> bool:
     if "as a group" in stripped.lower():
         return True
     if _HOLDER_CLASS_PLURAL_RE.search(stripped):
-        return False
+        # A heading names a class abstractly; a HOLDER carries a specific proper
+        # name. Rescue only on BOTH a qualifying name run AND hard proper-noun
+        # evidence -- a personal initial, an all-caps entity token, or a
+        # corporate designator. Without the second test 'Compensation Discussion
+        # and Analysis' (a table-of-contents row) reads as a name run.
+        if not (
+            _contains_specific_name(stripped)
+            and (
+                _PERSONAL_INITIAL_RE.search(stripped)
+                or _ALLCAPS_ENTITY_TOKEN_RE.search(stripped)
+                or _OWNER_ENTITY_CASED_RE.search(stripped)
+            )
+        ):
+            return False
+        return True
     if _OWNER_ENTITY_CASED_RE.search(stripped):
         return True
     if _OWNER_PERSON_RE.match(stripped):
