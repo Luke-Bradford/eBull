@@ -40,7 +40,7 @@ current spec.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -490,6 +490,53 @@ register_parser(
 # ---------------------------------------------------------------------------
 
 
+def _stored_rows_are_all_13d_cover_labels(conn: psycopg.Connection[Any], accession_number: str) -> bool:
+    """True when EVERY stored holder for ACCESSION_NUMBER is a 13D/G form field.
+
+    Source rule: 17 CFR 240.13d-101 (Schedule 13D) and 240.13d-102 (Schedule
+    13G) prescribe a numbered cover page whose rows 7-11 are the voting and
+    dispositive-power lines. Proxies embed those cover pages as exhibits, and
+    before #2163 the numbered layout parsed as a table whose "holder names"
+    were the item labels and whose "share counts" were the ROW NUMBERS.
+
+    17 CFR 229.403 column 2 is a *beneficial owner*, which Rule 13d-3 (17 CFR
+    240.13d-3) defines as a person or entity holding voting or investment
+    power. A cover-page item label is neither, so an accession whose every
+    stored row is one of them holds no Item 403 data at all and zero rows is
+    the reg-correct outcome.
+
+    ALL, not ANY: a mixed accession has at least one row that may be a genuine
+    holder, and superseding those is the data loss the guard exists to prevent.
+    Measured full-population — 2 of 7,141 accessions with stored holdings are
+    all-cover-label, and NONE is mixed.
+
+    Returns ``False`` for an accession with no stored rows, so it can never be
+    the reason an empty parse is accepted.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT holder_name FROM def14a_beneficial_holdings WHERE accession_number = %s",
+            (accession_number,),
+        )
+        names = [row[0] for row in cur.fetchall()]
+    return all_names_are_13d_cover_labels(names)
+
+
+def all_names_are_13d_cover_labels(names: Sequence[str | None]) -> bool:
+    """The DECISION behind :func:`_stored_rows_are_all_13d_cover_labels`, pure.
+
+    Split out so the release rule is table-testable without a database — the
+    SQL above is a plain read and carries none of the judgement.
+    """
+    from app.providers.implementations.sec_def14a import _SCHEDULE_13D_COVER_LABEL_RE
+
+    cleaned = [(name or "").strip() for name in names]
+    if not cleaned or any(not name for name in cleaned):
+        # An empty or blank-bearing set is never proof of a correct zero.
+        return False
+    return all(_SCHEDULE_13D_COVER_LABEL_RE.match(name) for name in cleaned)
+
+
 def _apply_def14a(
     conn: psycopg.Connection[Any],
     raw_doc: RawFilingDocument,
@@ -585,7 +632,37 @@ def _apply_def14a(
             f"parse_beneficial_ownership_table failed for accession={raw_doc.accession_number}: {exc}"
         ) from exc
 
-    if not parsed.rows:
+    # #2173 — the zero-holder guard cannot, on its own, tell "the parser broke"
+    # from "zero is the RIGHT answer", so it pins the latter forever with the
+    # junk still live. Release it on exactly one provable case: every stored row
+    # is a Schedule 13D/G COVER-PAGE item label (17 CFR 240.13d-101 / -102).
+    # 229.403 column 2 is a beneficial owner, which Rule 13d-3 defines as a
+    # person or entity holding voting or investment power; a cover-page item
+    # label is a FORM FIELD and is neither. Superseding those rows is the
+    # correction, not data loss.
+    #
+    # Keyed on what is STORED, deliberately, rather than on a reason threaded
+    # out of the parser: the test can then only ever release rows that are
+    # provably not Item 403 data, so a genuine table that the parser stops
+    # finding still raises. Full population: 2 of 7,141 accessions with stored
+    # holdings qualify — exactly the two #2163 created — and none is mixed.
+    supersede_correct_zero = (
+        not parsed.rows and had_existing_rows and _stored_rows_are_all_13d_cover_labels(conn, raw_doc.accession_number)
+    )
+    if supersede_correct_zero:
+        # Falls through to the replace-then-insert path below, which with zero
+        # rows deletes the typed rows, tombstones the accession's observations
+        # (``_record_def14a_observations_for_filing`` with an empty holder list
+        # runs its supersede UPDATE and then writes nothing) and lets
+        # ``refresh_def14a_current`` prune ``_current`` via WHEN NOT MATCHED BY
+        # SOURCE. No special-case SQL, and in particular no empty-array
+        # ``<> ALL('{}')`` path — ``_supersede_dropped_holdings`` is not on it.
+        logger.info(
+            "DEF 14A accession=%s re-parses to zero holders and every stored row is a "
+            "Schedule 13D/G cover-page label — superseding rather than failing the rewash",
+            raw_doc.accession_number,
+        )
+    if not parsed.rows and not supersede_correct_zero:
         if had_existing_rows:
             # Parser regression on a populated accession — raise
             # so the operator sees the gap in rows_failed rather
