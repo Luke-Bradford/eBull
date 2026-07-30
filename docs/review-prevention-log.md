@@ -2306,3 +2306,37 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Prevention: when replacing a regex, enumerate what the OLD one matched that the new one does not, not only the new cases you set out to add — an unanchored `.*noun` accepts compounds (`equityholders`, `unitholders`, `noteholders`) that `\bnoun\b` rejects. Issuers compound these freely. Keep a trailing `\b` where you need to exclude a longer word (`ownership`), and drop the leading one. Table-test the compounds explicitly rather than trusting the intent of the edit.
 - First seen in: #2164 (2026-07-29), A/B round 2, found by the role audit (arm 3) — invisible to arms 1 and 2, which key on holder NAME.
 - Enforced in: this prevention log; `app/providers/implementations/sec_def14a.py::_ROLE_HEADING_PATTERNS` (no-leading-boundary comment); `tests/test_sec_def14a_parser.py::TestFivePercentHeadingIsOrderInsensitive::test_compound_holder_nouns_still_match` + `test_ownership_is_not_a_holder_noun`.
+
+## The Nth-consecutive-patch trigger is only useful if you act on it — the spec was literally counting the patches while a fifth was written
+
+- First seen in: #2160 (DEF 14A Item 403 table selection). CLAUDE.md's
+  "Standard-filing reuse check" mandates checking edgartools + structured
+  sources before patching a parser for a standard filing, and names the trigger:
+  **"A recurring per-case patch is the trigger to run this check."** The spec
+  being edited said, in its own prose, that the selector "has now needed four
+  consecutive per-case patches (#2140 D7, #2158 element 4, #2157, #2160)". A
+  fifth was designed, measured across the full corpus, and taken to a pushed
+  branch without the check ever being run.
+- When it was finally run, it took ~10 minutes and changed the design input:
+  `edgar.proxy.html_extractor.extract_beneficial_ownership` exists, is NOT a
+  drop-in (returns `None` on 4 of our 8 genuine failures and under-extracts a
+  fifth: 2 rows where `main` found 16), but it solves the two largest losses
+  outright WITH percentages — and its `_build_column_map` carries the technique
+  our gate lacks: **when headers classify too few columns, classify the first
+  two DATA ROWS instead.** Our D4 is header-only, which is exactly why the
+  44-accession "degraded header" bucket fails. That technique had been written
+  off in my own notes as a novel unmeasured idea.
+- Prevention: treat the trigger as MECHANICAL, not a judgement call. If a spec,
+  commit message or issue names a count of prior per-case patches to the same
+  function, the reuse check is DUE before the next one — run it and record the
+  outcome in the spec's Source-rule section, including a negative result
+  ("edgartools tested on accessions X/Y/Z, returns None on N of them"). A
+  reuse check that is skipped costs a whole design round; #2160 burned one.
+- Also: "I found no prior art" is not a licence to keep patching. Item 403 is
+  unstructured BY REGULATION (17 CFR 240.14a-101 mandates content, not form),
+  so no dedicated parser exists — but the same issuer data IS machine-readable
+  elsewhere (Schedule 13D/G structured XML since 2024-12-18, Forms 3/4/5), and
+  this repo already ingests both. Ask what the STRUCTURED arbiter is before
+  writing another HTML heuristic.
+- Enforced in: this log; `.claude/skills/data-sources/edgartools.md` (DEF 14A
+  row now names `extract_beneficial_ownership` and the data-row fallback).

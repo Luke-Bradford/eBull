@@ -26,12 +26,18 @@ from decimal import Decimal
 
 from app.providers.implementations.sec_def14a import (
     _SCHEDULE_13D_COVER_LABEL_RE,
+    Def14ABeneficialHolder,
     Def14ABeneficialOwnershipTable,
     _clean_beneficial_holder_name,
     _clean_holder_name,
+    _contains_specific_name,
     _detect_role_heading,
+    _has_item403_value_rows,
     _is_address_fragment,
+    _is_beneficial_owner_identity,
+    _is_name_then_address,
     _is_owner_identity,
+    _item403_value_signature,
     _looks_like_label_row,
     _looks_like_subheader,
     _parse_percent,
@@ -1764,3 +1770,309 @@ class TestTwoPercentColumnsOrdering:
         cells = ["Simon Leung", "29.6"]
         headers = ("Name", "Minimum Payment (if Threshold is Met) as Percentage of Base Salary")
         assert _shares_cell_percent_signature(cells, 1, headers) == "decisive"
+
+
+class TestItem403ValueSignature:
+    """#2160 D4 — the Item 403 VALUE-column gate.
+
+    The first cut of this gate emptied 14 of the regression fixtures below and
+    3.6% of the corpus. Each group here pins one of the four defects that
+    measuring the NARROWING direction exposed.
+    """
+
+    def test_bare_percent_caption_is_admitted(self) -> None:
+        """229.403 column 4 is 'Percent of class', but issuers caption it bare
+        and leave the class implied by the neighbouring amount column. The
+        first cut required a class noun AFTER the percent token and rejected
+        every one of these."""
+        for headers in (
+            ("Name", "", "Number", "", "Percent"),  # CYH 0001193125-26-140269
+            ("Name of Beneficial Owner", "Shares Beneficially Owned", "Percent"),
+            ("Name of Beneficial Owner", "Shares Beneficially Owned", "%"),
+            ("Name", "Shares", "Percent"),
+            ("Beneficial Owner", "Shares Owned", "Percent"),
+            ("Name of Beneficial Owner", "", "Number", "", "Percentage"),
+        ):
+            assert _item403_value_signature(headers), headers
+
+    def test_prescribed_wording_outranks_the_compensation_veto(self) -> None:
+        """Rule 13d-3(d)(1)(i) DEEMS a person the beneficial owner of shares
+        acquirable within 60 days, so a genuine Item 403 table legitimately
+        carries 'vesting' and 'performance' columns. A blanket comp veto over
+        the whole header deleted 18-, 22- and 10-holder Vanguard / BlackRock /
+        First Eagle tables."""
+        for headers in (
+            (
+                "Name and Address",
+                "Number of Outstanding Shares Beneficially Owned",
+                "Number of Shares Underlying RSUs/MSUs vesting within 60 days",
+            ),
+            (
+                "Number of Shares Beneficially Owned (1)",
+                "Percentage of Outstanding Shares",
+                "Number of Performance Shares Granted",
+            ),
+            (
+                "NAME OF BENEFICIAL OWNER",
+                "COMMON STOCK",
+                "OPTIONS EXERCISABLE OR VESTING WITHIN 60 DAYS",
+                "AMOUNT OWNED",
+            ),
+        ):
+            assert _item403_value_signature(headers), headers
+
+    def test_value_columns_saying_owned_need_no_percent_column(self) -> None:
+        """Dual-class and direct/indirect tables omit column 4 outright. The
+        word 'Beneficial' sits in the NAME column, a '|' away, so the strong
+        arm cannot reach it and the amount+percent pair rejects them."""
+        for headers in (
+            (
+                "Name of Beneficial Owner",
+                "Class A Common Stock Owned",
+                "Class B Common Stock Owned",
+                "Total Voting Power",
+            ),
+            (
+                "Name of Beneficial Owner",
+                "Directly Owned (a)",
+                "Indirectly Owned",
+                "Options to Acquire Stock (b)",
+            ),
+        ):
+            assert _item403_value_signature(headers), headers
+
+    def test_item_402_tables_are_still_rejected(self) -> None:
+        """The gate must not be loosened into a no-op. 'Named Executive
+        Officer' is Item 402(a)(3)'s own term of art and vetoes the weak pair;
+        'Beneficial Owner | Number of RSUs' is why the column-3 arm keys on
+        own(ed|ership) and not on 'owner'."""
+        for headers in (
+            ("Named Executive Officer", "Shares at Target", "Final PSU Payout %"),
+            ("Named Executive Officer", "2022 Fiscal Year PSU Shares Granted (#)", "Final Achievement %"),
+            ("Name", "Threshold (Percentage of Base Salary)", "Target (Percentage of Base Salary)"),
+            ("Name of Individual or Identity of Group and Position", "Shares Underlying Options"),
+            ("Beneficial Owner", "Number of RSUs"),
+            ("Position", "Minimum Dollar Value", "Minimum Number of Shares"),
+            ("", "Authorized for issuance", "Issued and outstanding"),
+            ("50 th Percentile", "25 th Percentile"),
+        ):
+            assert not _item403_value_signature(headers), headers
+
+
+class TestBeneficialOwnerIdentityIgnoresLeaderDots:
+    """#2160 D1 — presentation debris is stripped BEFORE the length cap.
+
+    Issuers pad the name column with HTML leader dots to rule across to the
+    figures. Testing the raw cell blew the 120-char cap, rejected the holder,
+    took the table under ``_ROW_IDENTITY_FLOOR`` and dropped a genuine
+    'Amount and Nature of Beneficial Ownership | Percent of Class' table
+    (0000074303-25-000056).
+    """
+
+    def test_a_name_padded_with_leader_dots_is_still_an_identity(self) -> None:
+        padded = "Hotchkis & Wiley Capital Management, LLC " + "." * 100
+        assert len(padded) > 120
+        assert _is_beneficial_owner_identity(padded)
+        assert _is_beneficial_owner_identity("BlackRock, Inc. " + "." * 90)
+
+    def test_the_length_cap_still_rejects_a_footnote_paragraph(self) -> None:
+        """The cap exists to keep Schedule 13G footnote PARAGRAPHS out of the
+        holder set; stripping debris must not defeat it."""
+        assert not _is_beneficial_owner_identity(
+            "Based solely on an amendment to a Schedule 13G filed by BlackRock, Inc. "
+            "with the SEC on January 29, 2025, reporting sole voting power over "
+            "12,312,184 shares of our common stock."
+        )
+
+
+class TestGateArmsCannotOverreach:
+    """#2160 — Codex ckpt-1 findings. Each strong arm admits OUTRIGHT, ahead of
+    the Item 402 vetoes, so each one's precision is load-bearing."""
+
+    def test_the_60_day_window_needs_an_acquisition_verb(self) -> None:
+        """Rule 13d-3(d)(1)(i) is about securities a person has the right to
+        ACQUIRE within sixty days. The bare phrase also appears in
+        change-in-control and termination tables, and admitting those ahead of
+        the comp veto would emit severance data as beneficial ownership."""
+        assert _item403_value_signature(("Name", "Options Exercisable or Vesting Within 60 Days", "Common Stock"))
+        assert _item403_value_signature(("Name", "Subject to Rights to Acquire Within 60 Days"))
+        assert not _item403_value_signature(
+            ("Named Executive Officer", "Payments upon Termination within 60 Days", "Cash Severance ($)")
+        )
+
+    def test_the_name_and_address_arm_needs_address_evidence(self) -> None:
+        """Item 403(a) prescribes name AND address in one column. A proper-noun
+        run followed by any digit is not that -- it also matches metric rows."""
+        for text in (
+            "MUFG 4-5, Marunouchi 1-chome Chiyoda-ku, Tokyo 100-8330, Japan",
+            "Vanguard 100 Vanguard Boulevard Malvern, PA 19355",
+            "BlackRock 50 Hudson Yards New York, NY 10001",
+        ):
+            assert _is_name_then_address(text), text
+        for text in ("Adjusted EBITDA 2024", "Net Sales 2025", "Retail Adjusted EBITDA 2024"):
+            assert not _is_name_then_address(text), text
+
+
+class TestItem403DataRowValueFallback:
+    """#2160 — D4's data-row fallback, borrowed from edgartools'
+    ``_build_column_map`` (skill G17).
+
+    A header-only gate empties genuine Item 403 tables whose captions have
+    degraded to blank cells. 17 CFR 229.403 prescribes column 3 (amount) AND
+    column 4 (percent of class); when the captions are gone, both columns
+    PARSING for a majority of rows is the remaining evidence that both exist.
+    """
+
+    @staticmethod
+    def _holder(name: str, shares: str | None, percent: str | None) -> Def14ABeneficialHolder:
+        return Def14ABeneficialHolder(
+            holder_name=name,
+            shares=Decimal(shares) if shares is not None else None,
+            percent_of_class=Decimal(percent) if percent is not None else None,
+            holder_role=None,
+        )
+
+    def test_both_value_columns_parsing_is_evidence(self) -> None:
+        holders = [
+            self._holder("BlackRock, Inc.", "1000", "5.1"),
+            self._holder("First Light Asset Management, LLC", "900", "4.2"),
+            self._holder("Soleus Capital Master Fund, L.P.", "800", "3.9"),
+        ]
+        assert _has_item403_value_rows(holders)
+
+    def test_an_amount_column_alone_is_NOT_evidence(self) -> None:
+        """An Item 402 award table has an amount column and no percent. Requiring
+        BOTH is what keeps this from becoming a bypass."""
+        holders = [
+            self._holder("Kevin R.M. Smith", "1000", None),
+            self._holder("Jennifer F. Scanlon", "900", None),
+            self._holder("Dr. Hou", "800", None),
+        ]
+        assert not _has_item403_value_rows(holders)
+
+    def test_empty_holder_set_is_not_evidence(self) -> None:
+        assert not _has_item403_value_rows([])
+
+    def test_the_fallback_ranks_BELOW_the_item_402_vetoes(self) -> None:
+        """Weak evidence must not bypass the veto — a comp table with a payout
+        percent column also satisfies the data-row test."""
+        comp = ("Named Executive Officer", "Shares at Target", "Final PSU Payout %")
+        assert not _item403_value_signature(comp, data_row_evidence=True)
+        salary = ("Name", "Percentage of Annual Total Direct Compensation")
+        assert not _item403_value_signature(salary, data_row_evidence=True)
+
+    def test_the_fallback_admits_a_caption_less_table(self) -> None:
+        bare = ("", "", "", "Number of Shares", "", "", "", "", "", "Number of Shares", "", "")
+        assert not _item403_value_signature(bare)
+        assert _item403_value_signature(bare, data_row_evidence=True)
+
+
+class TestStrongArmsCannotAdmitItem402Outcomes:
+    """#2160 Codex ckpt-1 HIGH — the precedence design is only sound if every
+    STRONG arm is near-perfect, because a strong arm admits AHEAD of the Item 402
+    veto. ``_ITEM403_CLASS_PCT_RE`` was not.
+
+    229.403 column 4 is "Percent of CLASS": the denominator is a class of
+    securities, so the class-noun run ENDS the denominator phrase. A trailing
+    participle makes it a percent of an OUTCOME, which is Item 402.
+    """
+
+    def test_a_percent_of_an_outcome_is_not_a_percent_of_class(self) -> None:
+        for headers in (
+            ("Name", "Percentage of Shares Earned"),
+            ("Name", "Percentage of Shares Vested"),
+            ("Name", "Percentage of Common Stock Earned"),
+            ("Name", "Percentage of Total Stock Earned"),
+            ("Name", "Percentage of Stock Options Vesting"),
+            ("Name", "Percentage of total stock incentive awards (%)"),
+        ):
+            assert not _item403_value_signature(headers), headers
+
+    def test_the_class_noun_run_does_not_backtrack(self) -> None:
+        """'Percentage of Common Stock Earned' matched by consuming only
+        'Common' and seeing 'Stock' in the allowed-follow set. The run is
+        possessive so that path is closed."""
+        assert not _item403_value_signature(("Name", "Percentage of Common Stock Earned"))
+        assert _item403_value_signature(("Name", "Percentage of Common Stock"))
+
+    def test_genuine_class_denominators_still_admit(self) -> None:
+        for headers in (
+            ("Name of Beneficial Owner", "Shares", "Percent of Class (1)"),
+            ("Name", "Shares (1)", "Percent of Outstanding Shares of Common Stock"),
+            ("Shareholder", "Number of Voting Rights (#)", "Percentage of Voting Rights (%)"),
+            ("Name", "Number of Shares", "Percent of Total Voting Power"),
+            ("Name", "Shares (1)", "% of all shares of Class A common stock"),
+            ("Name", "Number of Common Shares", "Approximate Percentage of Outstanding Common"),
+        ):
+            assert _item403_value_signature(headers), headers
+
+    def test_the_data_row_fallback_cannot_admit_an_award_outcome_table(self) -> None:
+        """Codex ckpt-1 HIGH-2: 'Shares at Target | Final Achievement %' parses
+        both a share count and a percent for every NEO row, so the data-row
+        evidence is TRUE. The Item 402 outcome vocabulary is what rejects it."""
+        headers = ("Name", "Shares at Target", "Final Achievement %")
+        assert not _item403_value_signature(headers, data_row_evidence=True)
+
+
+class TestHeadingTestDoesNotRejectNamedHolders:
+    """#2160 arm-1/arm-2 round 2 — ``_HOLDER_CLASS_PLURAL_RE`` is a SECTION-HEADING
+    test (#2164) and it outranks the entity arm on purpose, so that 'Directors and
+    Executive Officers of the Company' cannot be rescued by its trailing 'Company'.
+
+    But Schedule 13D/G joint-filer names legitimately contain those same class
+    nouns. Hyatt 0001104659-26-038759 lost an 11-holder sibling table this way,
+    taking the Pritzker family trusts, CIBC Caribbean, Massachusetts Financial
+    Services and Baron Capital with it.
+
+    A heading names a class abstractly; a holder carries a SPECIFIC proper name.
+    """
+
+    def test_joint_filer_holder_names_survive(self) -> None:
+        for text in (
+            "CIBC Caribbean and Other Reporting Persons",
+            "Trustees of the Thomas J. Pritzker Family Trusts and Other Reporting Persons",
+            "Trustees of the Karen L. Pritzker Family Trusts",
+        ):
+            assert _is_beneficial_owner_identity(text), text
+
+    def test_section_headings_are_still_rejected(self) -> None:
+        for text in (
+            "Directors and Executive Officers:",
+            "Directors and Executive Officers of the Company",
+            "Other Shareowners that Beneficially Own More than 5%:",
+            "5% Stockholders",
+            "Named Executive Officers",
+        ):
+            assert not _is_beneficial_owner_identity(text), text
+
+    def test_the_rescue_needs_hard_proper_noun_evidence(self) -> None:
+        """A qualifying name RUN alone is not enough — an initial, an all-caps
+        entity token, or a corporate designator must also be present."""
+        assert not _contains_specific_name("Directors and Executive Officers of the Company")
+        assert _contains_specific_name("Trustees of the Thomas J. Pritzker Family Trusts")
+
+
+class TestAmpersandFirmNames:
+    """#2160 Codex ckpt-2 P2 — partnership-style firm names joined by '&'.
+
+    They carry no corporate suffix, so the entity arm misses them, and the
+    start-anchored person arm stops dead at the '&'. Under the new selection
+    gate that made a small 5%-holder table ineligible outright. Common in Item
+    403(a): the corpus holds Cohen & Steers, Cooke & Bieler, Cede & Co and
+    Bill & Melinda Gates Foundation Trust.
+    """
+
+    def test_ampersand_firms_are_owner_identities(self) -> None:
+        for text in (
+            "Dodge & Cox 555 California Street San Francisco, CA 94104",
+            "Brown & Brown 220 South Ridgewood Avenue Daytona Beach, FL 32114",
+            "Cohen & Steers",
+            "Cede & Co",
+            "Ruane, Cunniff & Goldfarb 9 West 57th Street New York, NY 10019",
+            "Bill & Melinda Gates Foundation Trust",
+        ):
+            assert _is_beneficial_owner_identity(text), text
+
+    def test_ampersand_does_not_rescue_a_heading(self) -> None:
+        for text in ("Directors and Executive Officers:", "5% Stockholders"):
+            assert not _is_beneficial_owner_identity(text), text

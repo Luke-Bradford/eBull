@@ -25,7 +25,7 @@ Network-required (live filing fetch + identity required):
 | N-CEN | `FundCensus.from_filing(filing)` | structured census |
 | N-MFP2/3 | `MoneyMarketFund.from_filing(filing)` | money-market holdings |
 | N-PX | `NPX.from_filing(filing)` | proxy voting record |
-| DEF 14A family | `ProxyStatement.from_filing(filing)`; `Company.proxy_season(0)` | HTML extraction; quality variable |
+| DEF 14A family | `ProxyStatement.from_filing(filing)`; `Company.proxy_season(0)`; `edgar.proxy.html_extractor.extract_beneficial_ownership(tree)` / `extract_summary_compensation` / `extract_director_compensation` / `extract_ceo_pay_ratio` / `extract_audit_fees` / `extract_voting_proposals` | HTML extraction; quality variable. See **G16** (SCT — ours wins) and **G17** (Item 403 — complementary, and the source of the data-row column-classification technique). |
 | S-1 / F-1 / S-3 / 424B / 497K / CORRESP | `RegistrationS1.from_filing(filing)` etc. | added in 5.23-5.27 |
 | Filings index walk | `get_filings(year, quarter, form=..., index=...)` | calendar year, NOT fiscal |
 | Submissions API per CIK | `get_entity_submissions(cik)` → `EntityData` | wraps `data.sec.gov` |
@@ -218,6 +218,57 @@ parsed["signatures"]                   # list[Signature dataclass]
 **Pin against drift**: a contract test (e.g. `tests/test_edgartools_schedule13_shape.py`) that exercises BOTH top-level dict keys AND nested dataclass attribute access on a real EDGAR fixture catches any `edgartools` upgrade that renames either layer at CI time.
 
 **Codex 1d/1e/1f on the PR11 spec all caught this in sequence** — the documentation gap cost three review rounds. This entry exists so the next PR adopting `parse_xml` gets it right on the first pass.
+
+### G17 — DEF 14A Item 403 `extract_beneficial_ownership`: complementary, NOT a drop-in — but borrow its data-row column fallback
+
+`edgar.proxy.html_extractor.extract_beneficial_ownership(tree)` -> `list[BeneficialOwner(name, holder_type, shares, percent_of_class)]`,
+where `holder_type` is `5pct_holder` / `director_officer` / `group`. Architecture
+mirrors ours: section-heading anchors (`_OWNERSHIP_HEADING_ANCHORS` +
+`_OWNERSHIP_HEADING_REJECTS`), a table scorer (`_score_ownership_table`), then a
+column map.
+
+Measured offline on our stored bodies (#2160, edgartools 5.30.2), against the 8
+accessions our `def14a-v13` branch emptied and hand-classified as GENUINE losses:
+
+```text
+0001193125-25-075693   ours 0   edgartools 20 rows WITH percentages
+0001104659-25-031699   ours 0   edgartools 18 rows WITH percentages
+0001213900-26-047155   ours 0   edgartools  4 rows
+0000816956-26-000047   ours 0   edgartools  2 rows   <- main found 16; UNDER-extracts
+0000805928-25-000059   ours 0   edgartools None
+0000805928-26-000057   ours 0   edgartools None
+0001437749-25-009904   ours 0   edgartools None
+0001104659-26-036909   ours 0   edgartools None
+```
+
+**Verdict: do not swap.** It returns `None` on half our failing set and
+under-extracts a fifth. Same shape of answer as G16 — the value is the
+TECHNIQUE, not the function.
+
+**The technique worth taking** (`_build_column_map`, html_extractor.py:775):
+
+```python
+for i, header in enumerate(headers):          # header pass
+    if (t := classifier(header)): col_map[t] = i
+if len(col_map) < min_columns:                # DATA-ROW FALLBACK
+    for row in data_rows[:2]:
+        for i, cell in enumerate(row):
+            if (t := classifier(cell)) and t not in col_map: col_map[t] = i
+```
+
+When headers classify too few columns, it classifies the first two DATA ROWS
+instead. Our Item 403 gate is header-only, which is precisely why a genuine
+table rendering `| | | Number of Shares | | | | | | Number of Shares | |` over
+BlackRock / First Light / Soleus rows is rejected (44 accessions full-pop).
+
+⚠ Call it with **bytes**: `lxml.html.fromstring(payload.encode())`. A `str`
+carrying an encoding declaration raises
+`ValueError: Unicode strings with encoding declaration are not supported`.
+
+Note also that no dedicated open-source Item 403 parser exists anywhere — Item
+403 is unstructured BY REGULATION (17 CFR 240.14a-101 mandates content, not
+form). The structured arbiters for the same facts are Schedule 13D/G (XML
+mandate 2024-12-18) and Forms 3/4/5, both already ingested here.
 
 ### G16 — DEF 14A SCT name/title split leaks the title into the name (do NOT drop-in for exec comp)
 `edgar.proxy.html_extractor.extract_summary_compensation(tree)` returns `list[ExecutiveCompEntry(name, title, year, salary…total)]` and DOES flatten intra-cell newlines first (`_split_name_title`, `html_extractor.py:551` — `re.sub(r'\s+',' ',cell)`; the later `\n`-split at :554 is dead code). But it then **comma-splits before role-keyword-splits** (:554 vs :570), so a multi-clause NEO cell leaks the first title phrase into `name`. Verified empirically on Alphabet `0001308179-25-000511` (edgartools 5.30.2, offline via `lxml.html.fromstring(body_bytes)`):

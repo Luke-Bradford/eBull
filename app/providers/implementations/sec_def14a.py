@@ -439,10 +439,201 @@ _ITEM_402_AWARD_MARKERS: Final[tuple[str, ...]] = (
 )
 
 
-# Minimum score for a NON-best table to be merged as an Item 403 sibling.
-# 6 is what a header with SEC-prescribed wording reaches (see SCORE_FLOOR's
-# note in ``parse_beneficial_ownership_table``); 3-5 is bare or incidental.
-_SIBLING_SCORE_FLOOR: Final[int] = 6
+# D4 (#2160) — Item 403's VALUE-column signature.
+#
+# Source rule: 17 CFR 229.403 prescribes column 3 "Amount and nature of
+# beneficial ownership" and column 4 "Percent of class". Column 4 is
+# CLASS-denominated by definition — a fraction of a class of securities. An
+# Item 402 compensation table's percent is of *salary*, *target*, *payout* or
+# *vesting*, never of a class. That is the discriminator row identity cannot
+# supply: comp-table rows ARE people ('Kevin R.M. Smith', 'Dr. Hou'), so they
+# score owner_identity_fraction = 1.00 and pass D2 untouched.
+#
+# Measured on the full admit cohort (spec, census pass 2): the gate takes
+# 1,668 -> 45 candidate tables, and the survivors are the genuine shapes.
+_ITEM403_CLASS_PCT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(percent|percentage|%)\s*(of\s+)?(the\s+)?(all\s+|total\s+|outstanding\s+)*"
+    # The class-noun RUN is possessive (``*+``) so the engine cannot backtrack
+    # into it: without that, 'Percentage of Common Stock Earned' matches by
+    # consuming only 'Common', seeing 'Stock' in the allowed-follow set, and
+    # succeeding -- the exact leak this lookahead exists to close.
+    r"(?:class|common|shares?|stock|voting|ownership|beneficial|equity|units?)"
+    r"(?:\s+(?:class|common|shares?|stock|voting|ownership|beneficial|equity|units?"
+    r"|rights?|power|securities|interests?))*+"
+    # 229.403 column 4 is "Percent of CLASS" -- the denominator is a CLASS OF
+    # SECURITIES, so the class-noun run ENDS the denominator phrase. A CLOSED
+    # rule, not a blocklist: only punctuation, a footnote marker, or a
+    # continuation preposition may follow. Any trailing participle makes it a
+    # percent of an OUTCOME -- 'Percentage of Shares Earned', 'Percentage of
+    # Stock Options Vesting' (Codex ckpt-1 HIGH). This arm is STRONG, admitting
+    # ahead of the Item 402 veto, so its precision is load-bearing: every one of
+    # those shapes was being emitted as beneficial ownership.
+    r"(?=\s*($|[|(),.;:%*†#\d]|of\b|outstanding\b|beneficially\b|owned\b))",
+    re.IGNORECASE,
+)
+# Column 3 subdivided. Rule 13d-3 (17 CFR 240.13d-3) defines beneficial
+# ownership as voting OR investment power, so issuers legitimately split
+# "Amount and nature" into Sole/Shared voting and dispositive power columns and
+# carry no separate percent column at all. ``_resolve_columns`` already tiers
+# Sole|Shared|Total. Without this arm those tables fail D4 and are rejected.
+_ITEM403_AMOUNT_NATURE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(amount\s+and\s+nature)|((sole|shared)\s+(voting|dispositive|investment))",
+    re.IGNORECASE,
+)
+# Column 3's ordinary caption — issuers writing "Shares Beneficially Owned" or
+# "Beneficial Stock Ownership" are quoting 229.403's own noun phrase.
+#
+# Keyed on own(ed|ership), NOT owner. "Name of Beneficial OWNER" is column 2's
+# caption and says nothing about the VALUE columns, so accepting it as Item 403
+# evidence admits 'Beneficial Owner | Number of RSUs' — a junk shape from this
+# spec's own probe list. Gap-tolerant but confined within a single header cell
+# (no "|"), so it cannot bridge two unrelated captions.
+_ITEM403_BENEFICIAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"beneficial(ly)?\b[^|]{0,30}?\bown(ed|ership)\b",
+    re.IGNORECASE,
+)
+# 229.403 column 2's LITERAL prescribed caption — "Name and address of
+# beneficial owner" (403(a)) / "Name of beneficial owner" (403(b)).
+#
+# Bare "Beneficial Owner" is deliberately NOT enough (it admits 'Beneficial
+# Owner | Number of RSUs'), but the full prescribed phrase is Item 403's own
+# and no Item 402 table uses it. This arm is what recovers tables whose VALUE
+# column is just the class name — 'Name and Address of Beneficial Owner |
+# Common Stock' carries no percent and no "owned" anywhere, yet it is the
+# reg's own shape with column 1 (Title of class) as the value caption.
+_ITEM403_OWNER_CAPTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"name\s+(and\s+address(es)?\s+)?of\s+(the\s+)?beneficial\s+owner",
+    re.IGNORECASE,
+)
+# 229.403 column 1's literal prescribed caption. Both subsections prescribe it
+# and nothing else in a proxy uses the phrase, so it is Item 403 on its face —
+# it recovers tables whose remaining captions are degraded to empty cells
+# ('| Title of Class | ... | Name and Address of | Class A Common Stock (2) |').
+_ITEM403_TITLE_OF_CLASS_RE: Final[re.Pattern[str]] = re.compile(r"title\s+of\s+class", re.IGNORECASE)
+# The reg's adverb on its own. Issuers truncate column 3 to 'Shares
+# Beneficially' when the header wraps, losing 'Owned' to the next cell. Weak,
+# so it is paired with an amount indicator and stays under the vetoes.
+_ITEM403_BENEFICIALLY_RE: Final[re.Pattern[str]] = re.compile(r"\bbeneficially\b", re.IGNORECASE)
+# WEAK evidence — some amount column, some percent column, something "owned".
+# Individually meaningless; an Item 402 payout table has them too. Only used in
+# combination, and only under the vetoes below.
+_ITEM403_AMOUNT_IND_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(shares?|number|amount|units?|stock)\b",
+    re.IGNORECASE,
+)
+# Word-bounded so "Percentile" (TSR payout-curve tables) does not read as a
+# percent-of-class column.
+_ITEM403_PERCENT_IND_RE: Final[re.Pattern[str]] = re.compile(r"\bpercent(age|ages)?\b|%", re.IGNORECASE)
+_ITEM403_OWNED_IND_RE: Final[re.Pattern[str]] = re.compile(r"\bown(ed|ership)\b", re.IGNORECASE)
+# Rule 13d-3(d)(1)(i) (17 CFR 240.13d-3) DEEMS a person the beneficial owner of
+# securities they have the right to acquire "within sixty days". A column
+# captioned "Options Exercisable or Vesting Within 60 Days" is therefore quoting
+# the ownership rule, NOT Item 402 — so this is STRONG Item 403 evidence and
+# must outrank the comp veto, which would otherwise fire on "vesting".
+#
+# The ACQUISITION VERB is required, not just the phrase. 13d-3(d)(1)(i) is about
+# securities a person has "the right to acquire" within sixty days; the bare
+# phrase also appears in change-in-control and termination tables, and admitting
+# those before the Item 402 veto would emit severance data as ownership (Codex
+# ckpt-1 HIGH). Verb and window must sit in the SAME header cell.
+_RULE_13D3_60_DAY_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:(?:exercisab|acquir|issuab|vest|convert|settl)\w*[^|]{0,40}?(?:with)?in\s+(?:\d{1,3}|sixty)\s+days"
+    r"|(?:with)?in\s+(?:\d{1,3}|sixty)\s+days[^|]{0,40}?(?:exercisab|acquir|issuab|vest|convert|settl)\w*)",
+    re.IGNORECASE,
+)
+# Comp-denominated percents — Item 402, not Item 403.
+_COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(base\s+salary|of\s+target|target\s+bonus|payout|vesting"
+    r"|bonus\s+opportunity|salary|earned|performance"
+    # Item 402 is titled "Executive COMPENSATION"; 229.403 column 4 is a percent
+    # OF CLASS, never of compensation. Board-attendance tables are Item 407.
+    # Added when the data-row fallback (weak evidence) began admitting
+    # 'Percentage of Annual Total Direct Compensation' and
+    # 'Attendance Percentage of All Meetings'.
+    r"|compensation|attendance|meetings?\s+attended|dilution"
+    r"|\bpsus?\b|\bltip\b|incentive\s+award|as\s+settled"
+    r"|long.?term\s+incentive|incentive\s+(program|opportunity)|base\s+pay|\bbonus\b"
+    r"|option\s+awards?|stock\s+option\s+awards?"
+    # Ownership GUIDELINES (a policy multiple, not a holding) and deferred-comp
+    # ALLOCATION tables (a percent of a dollar deferral across funds) were the
+    # only junk left riding the data-row fallback.
+    r"|ownership\s+guidelines|amount\s+deferred|deferred\s+amount"
+    # Item 402 OUTCOME words. A percent of an outcome (earned / vested /
+    # achieved / at target) is 402, never 229.403 col 4 (Codex ckpt-1 HIGH).
+    r"|\bearned\b|\bvested\b|achievement|attained|achieved|at\s+target)",
+    re.IGNORECASE,
+)
+# Item 402(a)(3) DEFINES "named executive officer"; Item 403 says "name of
+# beneficial owner". A header captioning its name column with Item 402's term of
+# art, carrying none of Item 403's column-3/4 wording, is an Item 402 table.
+_ITEM402_NEO_CAPTION_RE: Final[re.Pattern[str]] = re.compile(r"named\s+executive\s+officer", re.IGNORECASE)
+# ...but 229.403(b) itself requires the table to cover "each of the registrant's
+# directors, each of the nominees for election as a director, each of the named
+# executive officers ... and directors and executive officers as a group". So a
+# caption naming DIRECTORS alongside NEOs is Item 403(b)'s OWN wording and must
+# not be vetoed: 'Directors and Named Executive Officers (1) | Number of shares
+# of Common Stock | %' is a genuine 403(b) table this veto was emptying.
+# Only a caption naming NEOs and nobody else is Item 402's term of art.
+_ITEM403B_DIRECTOR_CAPTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"\bdirectors?\b|\bnominees?\b|as\s+a\s+group",
+    re.IGNORECASE,
+)
+
+
+def _item403_value_signature(headers: tuple[str, ...], *, data_row_evidence: bool = False) -> bool:
+    """True when HEADERS carry Item 403's prescribed VALUE columns.
+
+    Precedence, not a flat vocabulary match — and the ordering is the whole
+    design (#2160, measured in both directions over all 42,566 stored bodies):
+
+    1. A header quoting 229.403's own column 3 ("amount and nature of beneficial
+       ownership", "shares beneficially owned") or column 4 ("percent of class"),
+       or Rule 13d-3(d)(1)(i)'s "within 60 days" acquisition window, is an
+       Item 403 table **on its face** and is admitted outright.
+    2. Otherwise Item 402 vocabulary vetoes.
+    3. Otherwise the weak generic pair — an amount column plus either a percent
+       column or an "owned" column — admits.
+
+    The comp veto CANNOT be applied over the whole header, which is what the
+    first cut did. Rule 13d-3(d)(1)(i) DEEMS a person the beneficial owner of
+    shares acquirable within 60 days, so a genuine Item 403 table legitimately
+    captions columns "Options Exercisable or Vesting Within 60 Days" and
+    "Number of Performance Shares Granted". A blanket veto on "vesting" /
+    "performance" deleted 18-, 22- and 10-holder Vanguard / BlackRock / First
+    Eagle tables. Ordering the reg's own wording above the veto is what fixes
+    it, and it is why the veto can safely stay broad.
+
+    Step 3's two pairs both exist because issuers omit column 4 outright:
+    dual-class and direct/indirect tables caption their value columns
+    "Class A Common Stock Owned | Class B Common Stock Owned | Total Voting
+    Power" with no percent anywhere.
+    """
+    joined = " | ".join(headers)
+    if (
+        _ITEM403_BENEFICIAL_RE.search(joined)
+        or _ITEM403_OWNER_CAPTION_RE.search(joined)
+        or _ITEM403_AMOUNT_NATURE_RE.search(joined)
+        or _ITEM403_CLASS_PCT_RE.search(joined)
+        or _ITEM403_TITLE_OF_CLASS_RE.search(joined)
+        or _RULE_13D3_60_DAY_RE.search(joined)
+    ):
+        return True
+    if _COMP_PCT_RE.search(joined) or (
+        _ITEM402_NEO_CAPTION_RE.search(joined) and not _ITEM403B_DIRECTOR_CAPTION_RE.search(joined)
+    ):
+        return False
+    if data_row_evidence:
+        # Step 3b — the captions carry nothing, but the ROWS show both of
+        # 229.403's value columns parsing. Below the vetoes by construction.
+        return True
+    return bool(
+        _ITEM403_AMOUNT_IND_RE.search(joined)
+        and (
+            _ITEM403_PERCENT_IND_RE.search(joined)
+            or _ITEM403_OWNED_IND_RE.search(joined)
+            or _ITEM403_BENEFICIALLY_RE.search(joined)
+        )
+    )
 
 
 def _score_table_headers(headers: tuple[str, ...]) -> int:
@@ -832,6 +1023,290 @@ _HOLDER_CLASS_PLURAL_RE: Final[re.Pattern[str]] = re.compile(
     r"|officers|executives|nominees|persons)\b",
     re.IGNORECASE,
 )
+
+
+# D1 (#2160) — corrections the spec's measurement forced on the row-identity
+# predicate when it moved from #2164's single-cell use into table SELECTION.
+#
+# 1. LENGTH CAP. Sized for an Item 403(a) "name AND address" cell, the longest
+#    legitimate form. Without it, Schedule 13G footnote PARAGRAPHS ("Based
+#    solely on an amendment to a Schedule 13G filed by BlackRock…", "Consists of
+#    10,500 shares held directly…") pass the person-name test and were extracted
+#    as holder names.
+_OWNER_IDENTITY_MAX_LEN: Final[int] = 120
+# 2. Entity designators, CASE-SENSITIVE. An Item 403 owner is a proper noun:
+#    'Smith Family Trust' matches, the instrument types 'trust interests' and
+#    'allocation interests' do not. ``_OWNER_ENTITY_RE`` is deliberately
+#    IGNORECASE and load-bearing for #2164's stacked-pair path, so selection
+#    gets its own stricter variant rather than tightening that one.
+_OWNER_ENTITY_CASED_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b("
+    r"LLC|L\.L\.C|LP|L\.P|LLP|Inc|Incorporated|Corp|Corporation|Company|Ltd|Limited"
+    r"|Trust|Fund|Funds|Partners|Partnership|Capital|Management|Advisers|Advisors"
+    r"|Holdings|Associates|Ventures|Bank|N\.A|plc|PLC|GmbH|S\.A|AG|NV"
+    r"|Foundation|Insurance|Investments?|Securities|Financial"
+    r")\b"
+)
+# 3. INSTRUMENT-TYPE vocabulary. A name composed ENTIRELY of equity/award nouns
+#    is a security, not a beneficial owner under Rule 13d-3. A closed
+#    vocabulary set, deliberately not a table-shape blocklist — the
+#    prevention-log rule on hand-enumerated tuples targets the latter.
+_INSTRUMENT_VOCAB: Final[frozenset[str]] = frozenset(
+    {
+        "equity",
+        "equities",
+        "stock",
+        "stocks",
+        "share",
+        "shares",
+        "option",
+        "options",
+        "warrant",
+        "warrants",
+        "unit",
+        "units",
+        "restricted",
+        "unrestricted",
+        "deferred",
+        "performance",
+        "incentive",
+        "award",
+        "awards",
+        "grant",
+        "grants",
+        "rsu",
+        "rsus",
+        "psu",
+        "psus",
+        "sar",
+        "sars",
+        "appreciation",
+        "right",
+        "rights",
+        "common",
+        "preferred",
+        "ordinary",
+        "class",
+        "series",
+        "voting",
+        "nonvoting",
+        "convertible",
+        "note",
+        "notes",
+        "debenture",
+        "debentures",
+        "interest",
+        "interests",
+        "plan",
+        "plans",
+        "total",
+        "subtotal",
+        "authorized",
+        "unissued",
+        "issued",
+        "outstanding",
+        "treasury",
+        "reserved",
+        "available",
+        "and",
+        "or",
+        "the",
+        "of",
+        "for",
+        "but",
+        "a",
+    }
+)
+_WORD_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z]+")
+# Presentation debris the identity test must look through. Leader dots are an
+# HTML table-of-contents/figure-rule artefact and land INSIDE the name cell, so
+# they inflate its length without being part of the name.
+_IDENTITY_DEBRIS_RE: Final[re.Pattern[str]] = re.compile(r"[.…]{3,}")
+# D1 clauses 4-5 — Item 403(a) prescribes "Name AND ADDRESS of beneficial owner"
+# in ONE column, so an entity that carries no corporate suffix is identified by
+# the address that follows it: 'MUFG 4-5, Marunouchi 1-chome Chiyoda-ku, Tokyo',
+# 'Vanguard 100 Vanguard Boulevard Malvern, PA', 'BlackRock 50 Hudson Yards'.
+# None of them reach the two-capitalised-token person pattern (the second token
+# is a street number) and none carry LLC/Inc/Trust, so without this arm all
+# three are rejected and their table falls under _ROW_IDENTITY_FLOOR —
+# 0001140361-25-012302 scored 0.25 and was emptied.
+#
+# A proper-noun run followed by a NUMBER, which is the name/street-number seam.
+# Deliberately not a hardcoded issuer list (the spec's clause 5): the signal is
+# the reg's own one-column name-and-address form, not who the filer is.
+# ``_is_name_then_address`` implements this; it is defined next to
+# ``_is_address_fragment`` so it can share ``_STREET_TYPE``, which this module
+# declares further down.
+_OWNER_NAME_THEN_ADDRESS_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Z][\w&.'’-]*(?:\s+(?:[A-Z][\w&.'’-]*|&|and)){0,4}\s+\d(?P<tail>.*)$",
+    re.DOTALL,
+)
+
+
+def _is_instrument_not_owner(text: str) -> bool:
+    """True when every word in TEXT is equity/award vocabulary.
+
+    'Authorized But Unissued' is Title-Cased and matches the two-capitalised-
+    token person pattern, so neither D1's person arm nor an address test rejects
+    it. Rule 13d-3 makes the test principled: a beneficial owner is a person or
+    entity holding voting or investment power, and an instrument is neither.
+    """
+    words = _WORD_RE.findall(text.lower())
+    if not words:
+        return False
+    return all(w in _INSTRUMENT_VOCAB for w in words)
+
+
+# Heading vocabulary. A HEADING names a class in the abstract; a HOLDER carries a
+# SPECIFIC proper name. That is the discriminator ``_HOLDER_CLASS_PLURAL_RE``
+# lacks on its own -- it is a heading test (#2164: '5% Stockholders', 'Other
+# Shareowners that Beneficially Own More than 5%') and it outranks the entity
+# arm, so it was rejecting genuine 403(a) holders named in Schedule 13D/G
+# joint-filer form: 'Trustees of the Thomas J. Pritzker Family Trusts and Other
+# Reporting Persons', 'CIBC Caribbean and Other Reporting Persons'. Hyatt
+# (0001104659-26-038759) lost an 11-holder sibling table that way, taking MFS,
+# Baron Capital and the Pritzker trusts with it.
+_HEADING_STOPWORDS: Final[frozenset[str]] = frozenset(
+    {
+        # class nouns already in _HOLDER_CLASS_PLURAL_RE
+        "shareholders",
+        "shareowners",
+        "stockholders",
+        "holders",
+        "owners",
+        "directors",
+        "trustees",
+        "officers",
+        "executives",
+        "nominees",
+        "persons",
+        # generic heading connectives and qualifiers
+        "other",
+        "certain",
+        "all",
+        "total",
+        "more",
+        "than",
+        "and",
+        "the",
+        "of",
+        "family",
+        "trusts",
+        "trust",
+        "reporting",
+        "beneficially",
+        "own",
+        "owned",
+        "ownership",
+        "group",
+        "each",
+        "who",
+        "that",
+        "are",
+        "not",
+        "as",
+        "a",
+        "current",
+        "former",
+        "named",
+        "executive",
+        "non",
+        "employee",
+        "employees",
+        "affiliated",
+        "entities",
+        "associates",
+        "including",
+        "our",
+        "its",
+    }
+)
+
+
+# 'Thomas J. Pritzker' / 'Karen L. Pritzker' -- a middle initial is strong
+# evidence of a personal name; 'CIBC' -- an all-caps token is strong evidence of
+# an entity. Both survive inside a 13D/G joint-filer phrase where the
+# start-anchored person pattern cannot reach.
+_PERSONAL_INITIAL_RE: Final[re.Pattern[str]] = re.compile(r"\b[A-Z]\.")
+_ALLCAPS_ENTITY_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\b[A-Z]{3,}\b")
+
+
+# A partnership-style firm name joined by '&' -- 'Dodge & Cox', 'Cohen & Steers',
+# 'Ruane, Cunniff & Goldfarb'. These carry no corporate suffix, so the entity arm
+# misses them, and the start-anchored person arm stops at the '&' (Codex ckpt-2
+# P2). Common enough in Item 403(a) to matter: the corpus holds Cohen & Steers,
+# Cooke & Bieler, Cede & Co, Bill & Melinda Gates Foundation Trust.
+_AMPERSAND_FIRM_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Z][\w.'’-]*(?:,?\s+[A-Z][\w.'’-]*)*,?\s+&\s+[A-Z]",
+)
+
+
+def _contains_specific_name(text: str) -> bool:
+    """True when TEXT carries a run of >=2 capitalised tokens that name someone.
+
+    Tokens drawn from :data:`_HEADING_STOPWORDS` do not count, so
+    'Directors and Executive Officers of the Company' has no qualifying run while
+    'Trustees of the Thomas J. Pritzker Family Trusts' has 'Thomas J. Pritzker'
+    and 'CIBC Caribbean and Other Reporting Persons' has 'CIBC Caribbean'.
+    """
+    run = 0
+    for token in re.findall(r"[A-Za-z][\w.'\u2019-]*", text):
+        if token[:1].isupper() and token.lower().strip(".") not in _HEADING_STOPWORDS:
+            run += 1
+            if run >= 2:
+                return True
+        else:
+            run = 0
+    return False
+
+
+def _is_beneficial_owner_identity(text: str) -> bool:
+    """D1 (#2160) — row-identity test used to gate table SELECTION.
+
+    Stricter than :func:`_is_owner_identity`, which #2164 uses for the
+    single-cell stacked-pair decision. Both share the class-noun rejection; this
+    one adds the three corrections the full-population census forced (length
+    cap, case-sensitive entity designators, instrument vocabulary).
+
+    Presentation debris is stripped BEFORE the length cap, not after. Issuers
+    pad the name column with HTML leader dots to draw a dotted rule across to
+    the figures, and the run is far longer than the name: 'Hotchkis & Wiley
+    Capital Management, LLC ....(63 dots)' is 104 characters of dots on a
+    40-character name. Testing the raw cell blew the 120-char cap and rejected
+    the holder, which took the whole table below ``_ROW_IDENTITY_FLOOR`` and
+    dropped a genuine ``Amount and Nature of Beneficial Ownership | Percent of
+    Class`` table (0000074303-25-000056, 3 holders including BlackRock).
+    """
+    stripped = _IDENTITY_DEBRIS_RE.sub(" ", text).strip(" .,​﻿*†#")
+    if not stripped or len(stripped) > _OWNER_IDENTITY_MAX_LEN:
+        return False
+    if _is_instrument_not_owner(stripped):
+        return False
+    if "as a group" in stripped.lower():
+        return True
+    if _HOLDER_CLASS_PLURAL_RE.search(stripped):
+        # A heading names a class abstractly; a HOLDER carries a specific proper
+        # name. Rescue only on BOTH a qualifying name run AND hard proper-noun
+        # evidence -- a personal initial, an all-caps entity token, or a
+        # corporate designator. Without the second test 'Compensation Discussion
+        # and Analysis' (a table-of-contents row) reads as a name run.
+        if not (
+            _contains_specific_name(stripped)
+            and (
+                _PERSONAL_INITIAL_RE.search(stripped)
+                or _ALLCAPS_ENTITY_TOKEN_RE.search(stripped)
+                or _OWNER_ENTITY_CASED_RE.search(stripped)
+            )
+        ):
+            return False
+        return True
+    if _OWNER_ENTITY_CASED_RE.search(stripped):
+        return True
+    if _AMPERSAND_FIRM_RE.match(stripped):
+        return True
+    if _OWNER_PERSON_RE.match(stripped):
+        return True
+    return _is_name_then_address(stripped)
 
 
 def _is_owner_identity(text: str) -> bool:
@@ -1389,24 +1864,36 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
                 window_best_score = score
             if score >= SCORE_FLOOR:
                 window_qualifying.append((score, parsed))
-        if window_qualifying and window_best_score >= SCORE_FLOOR:
+        # D2 / D3 (#2160) — ELIGIBILITY decides both which table wins the window
+        # and which tables join it as Item 403 siblings. Header score no longer
+        # decides either; it is retained for RANKING only (the sort at the
+        # concatenation loop below, so the best-captioned table's figures win a
+        # holder reported twice).
+        #
+        # Header score is a SUM OF KEYWORD WEIGHTS and cannot separate a genuine
+        # Item 403 table from a comp / prose / capitalisation table that hits the
+        # same keywords: 0001628280-26-044960's genuine 403(a) table
+        # (Name and Address | Number | Percent) scores 4 while a
+        # Delaware-vs-Texas charter prose block scores 5 and takes the window.
+        #
+        # Row identity ALONE is also insufficient, which is why eligibility has
+        # two limbs. Item 402 compensation tables' rows ARE people
+        # ('Kevin R.M. Smith', 'Dr. Hou', 'Jennifer F. Scanlon'), so they score
+        # owner_identity_fraction = 1.00 and would pass a row-identity gate
+        # untouched. D4's value signature is what rejects them. Both limbs gate
+        # WINNER selection as well as sibling membership — correction of
+        # 2026-07-29b, measured: the draft applied D4 to the sibling set only,
+        # which left this ticket's central case untouched.
+        #
+        # ``_SIBLING_SCORE_FLOOR`` is deleted. Its absolute 6 existed only
+        # because header score was the sole signal; a genuine 403(b) table on a
+        # bare Name|Shares|Percent header scores 3 and is now admitted on its
+        # rows and value columns instead.
+        eligible = [t for _, t in window_qualifying if _is_item403_eligible(t)]
+        if eligible:
             best_score = window_best_score
-            # Sibling tables need SEC-PRESCRIBED wording, not merely the
-            # floor. The floor is 3 — a bare Name|Shares|Percent header — so
-            # merging everything above it sweeps in prose and summary tables
-            # that happen to mention shares.
-            #
-            # An ABSOLUTE floor, not proximity to the best score: the two
-            # genuine Item 403 tables can score far apart, because whichever
-            # one happens to use the prescribed "Amount and Nature of
-            # Beneficial Ownership" caption scores much higher than a sibling
-            # headed "Common Stock" (12 vs 7 on 0001193125-25-245150 — a
-            # `best - 2` gate dropped that filing's 18-row 403(b) table and
-            # kept only 2 rows). Breakdown tables do not need a score gate:
-            # they restate the SAME HOLDERS, so the identity dedup in
-            # ``_extract_holder_rows`` already collapses them.
-            qualifying = [t for sc, t in window_qualifying if sc >= _SIBLING_SCORE_FLOOR or sc == window_best_score]
-            best_table = qualifying[0] if qualifying else None
+            qualifying = eligible
+            best_table = eligible[0]
             chosen_window = (window_start, window_end)
             break
         # Also track the global best in case no window meets floor —
@@ -1432,15 +1919,7 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     # figures from the one with the strongest Item 403 header survive. Stable,
     # so document order breaks ties.
     for table in sorted(qualifying, key=lambda t: -_score_table_headers(t.score_headers)):
-        name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
-        _extract_holder_rows(
-            table,
-            name_idx=name_idx,
-            shares_idx=shares_idx,
-            percent_idx=percent_idx,
-            rows=rows,
-            seen=seen,
-        )
+        _extract_table_holders(table, rows=rows, seen=seen)
     return Def14ABeneficialOwnershipTable(
         as_of_date=as_of_date,
         rows=rows,
@@ -1491,6 +1970,135 @@ def _row_name_is_address(raw_row: tuple[str, ...] | None, *, name_idx: int, shar
     cells = _pad_row(raw_row, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx)
     _, raw_name = _resolve_row_name(cells, name_idx=name_idx, shares_idx=shares_idx)
     return _is_address_fragment(_clean_beneficial_holder_name(raw_name))
+
+
+_ROW_IDENTITY_FLOOR: Final[float] = 0.5
+
+
+def _owner_identity_fraction(holders: list[Def14ABeneficialHolder]) -> float:
+    """D0 (#2160) — fraction of HOLDERS that name a beneficial owner.
+
+    Takes the ALREADY-EXTRACTED holders rather than the table, so there is
+    exactly one place this fraction is computed. It previously took the table
+    and re-ran the extraction itself, which left it orphaned once
+    ``_is_item403_eligible`` started extracting once and deriving both the
+    fraction and the value evidence from the same list (review WARNING on
+    PR #2177: a future fix to one would silently not reach the other).
+
+    The caller must extract through the real ``_resolve_columns`` +
+    ``_extract_holder_rows`` path, NOT the raw first cell: Item 403's prescribed
+    column 1 is ``Title of class``, so a genuine table rendering
+    ``Common Stock | The Vanguard Group | 5,799,197 | 5.3%`` would fail a
+    first-cell test outright (Codex ckpt-1 BLOCKING on the spec). Sharing
+    ``_extract_holder_rows`` is required, not incidental: it already drops
+    section headings, address-continuation fragments and value-less rows, and
+    recovers ragged cells. Measuring on raw rows would count a
+    ``Named Executive Officers`` heading as an identity and would penalise a
+    genuine table whose rows are address continuations.
+
+    Denominator is the extracted holder count. A table extracting zero holders
+    cannot win its window anyway (#2158 element 4), so it scores 0.0.
+    """
+    if not holders:
+        return 0.0
+    hits = sum(1 for h in holders if _is_beneficial_owner_identity(h.holder_name))
+    return hits / len(holders)
+
+
+def _extract_table_holders(
+    table: _RawTable,
+    *,
+    rows: list[Def14ABeneficialHolder] | None = None,
+    seen: set[str] | None = None,
+) -> list[Def14ABeneficialHolder]:
+    """Resolve TABLE's columns and extract its holders into ROWS.
+
+    The single place ``_resolve_columns`` is paired with ``_extract_holder_rows``.
+    Two callers, with deliberately different dedup semantics, which is why the
+    ``rows`` / ``seen`` handles are parameters rather than locals:
+
+    - ``parse_beneficial_ownership_table``'s concatenation loop passes a SHARED
+      ``rows`` and ``seen`` so sibling Item 403 tables dedup against each other
+      (a holder reported in both keeps the better-captioned table's figures).
+    - ``_is_item403_eligible`` passes neither, judging one table in isolation —
+      a fresh ``seen`` per table, because eligibility is a property of that
+      table alone and must not depend on what a sibling already contributed.
+
+    Review NITPICK on PR #2177 flagged the paired calls as duplication. They are
+    not the same operation, but they are the same five lines, so they live here.
+    """
+    name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
+    out = [] if rows is None else rows
+    _extract_holder_rows(
+        table,
+        name_idx=name_idx,
+        shares_idx=shares_idx,
+        percent_idx=percent_idx,
+        rows=out,
+        seen=set() if seen is None else seen,
+    )
+    return out
+
+
+def _is_item403_eligible(table: _RawTable) -> bool:
+    """True when TABLE may win its window / join the Item 403 sibling set.
+
+    Both limbs required — see the call site for why row identity alone admits
+    Item 402 compensation tables.
+
+    The holders are extracted FIRST, before the header signature is consulted.
+    That ordering is necessary, not accidental: D4's data-row fallback needs the
+    parsed values, and the identity fraction needs the same list, so extracting
+    once and deriving both is the only way to avoid running the extraction
+    twice. (An earlier revision claimed the cheap header regex ran first and
+    short-circuited the extraction; that stopped being true when the fallback
+    landed — review NITPICK on PR #2177.)
+
+    The signature reads BOTH header tuples. ``column_headers`` alone is wrong:
+    when a two-row header promotes the SUB-header row, ``column_headers``
+    becomes ``('', 'Sole', 'Shared', 'Total', '')`` and the parent caption
+    ``Amount and Nature of Beneficial Ownership | Percent of Class`` survives
+    only in ``score_headers`` — so reading the narrower tuple rejected the most
+    prescribed shape the reg has, at scores 14 and 16.
+    """
+    holders = _extract_table_holders(table)
+    if not holders:
+        return False
+    headers = tuple(table.score_headers) + tuple(table.column_headers)
+    if not _item403_value_signature(headers, data_row_evidence=_has_item403_value_rows(holders)):
+        return False
+    return _owner_identity_fraction(holders) >= _ROW_IDENTITY_FLOOR
+
+
+_VALUE_ROW_EVIDENCE_FLOOR: Final[float] = 0.5
+
+
+def _has_item403_value_rows(holders: list[Def14ABeneficialHolder]) -> bool:
+    """D4 data-row fallback (#2160) — Item 403's value columns, evidenced by the ROWS.
+
+    Technique borrowed from ``edgar.proxy.html_extractor._build_column_map``,
+    which falls back to classifying the first DATA ROWS when the headers
+    classify too few columns (skill G17). Our gate was header-only, and that is
+    exactly why a genuine table rendering
+    ``| | | Number of Shares | | | | | | Number of Shares | |`` over
+    BlackRock / First Light / Soleus rows was emptied: the captions had degraded
+    to blank cells and carried no percent token at all.
+
+    17 CFR 229.403 prescribes column 3 (amount) AND column 4 (percent of class).
+    When the CAPTIONS are gone, both columns PARSING for a majority of extracted
+    rows is the remaining evidence that both exist. Deliberately requires BOTH —
+    an Item 402 award table routinely has an amount column and no percent.
+
+    Ranks BELOW the Item 402 vetoes on purpose: this is weak evidence, and a
+    comp table with a payout-percent column also satisfies it.
+    """
+    if not holders:
+        return False
+    n = len(holders)
+    shares = sum(1 for h in holders if h.shares is not None)
+    percents = sum(1 for h in holders if h.percent_of_class is not None)
+    floor = _VALUE_ROW_EVIDENCE_FLOOR * n
+    return shares >= floor and percents >= floor
 
 
 def _extract_holder_rows(
@@ -2080,6 +2688,28 @@ _ADDRESS_ONLY_RE: Final[re.Pattern[str]] = re.compile(
 def _is_address_fragment(name: str) -> bool:
     """True when a holder-name cell holds only address material (#2140)."""
     return bool(_ADDRESS_ONLY_RE.match(name.strip()))
+
+
+# D1 clause 4-5 (#2160) — the tail after the name must carry ADDRESS evidence,
+# not merely a number: a proper-noun run followed by any digit also matches
+# metric rows like 'Adjusted EBITDA 2024' (Codex ckpt-1 MED). Accepted evidence
+# is a US street type, a 5-digit ZIP, or the multi-comma locality chain a
+# non-US address uses ('4-5, Marunouchi 1-chome Chiyoda-ku, Tokyo 100-8330,
+# Japan') — the last is what carries the international filers, which have
+# neither a street type nor a ZIP.
+_ADDRESS_TAIL_EVIDENCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:" + _STREET_TYPE + r")\b|\b\d{5}\b",
+    re.IGNORECASE,
+)
+
+
+def _is_name_then_address(text: str) -> bool:
+    """True when TEXT is Item 403(a)'s one-column 'name AND address' form."""
+    m = _OWNER_NAME_THEN_ADDRESS_RE.match(text)
+    if m is None:
+        return False
+    tail = m.group("tail")
+    return bool(_ADDRESS_TAIL_EVIDENCE_RE.search(tail) or tail.count(",") >= 2)
 
 
 # Schedule 13D/G COVER-PAGE item labels (#2163).
