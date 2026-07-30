@@ -567,6 +567,17 @@ _COMP_PCT_RE: Final[re.Pattern[str]] = re.compile(
 # beneficial owner". A header captioning its name column with Item 402's term of
 # art, carrying none of Item 403's column-3/4 wording, is an Item 402 table.
 _ITEM402_NEO_CAPTION_RE: Final[re.Pattern[str]] = re.compile(r"named\s+executive\s+officer", re.IGNORECASE)
+# ...but 229.403(b) itself requires the table to cover "each of the registrant's
+# directors, each of the nominees for election as a director, each of the named
+# executive officers ... and directors and executive officers as a group". So a
+# caption naming DIRECTORS alongside NEOs is Item 403(b)'s OWN wording and must
+# not be vetoed: 'Directors and Named Executive Officers (1) | Number of shares
+# of Common Stock | %' is a genuine 403(b) table this veto was emptying.
+# Only a caption naming NEOs and nobody else is Item 402's term of art.
+_ITEM403B_DIRECTOR_CAPTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"\bdirectors?\b|\bnominees?\b|as\s+a\s+group",
+    re.IGNORECASE,
+)
 
 
 def _item403_value_signature(headers: tuple[str, ...], *, data_row_evidence: bool = False) -> bool:
@@ -607,7 +618,9 @@ def _item403_value_signature(headers: tuple[str, ...], *, data_row_evidence: boo
         or _RULE_13D3_60_DAY_RE.search(joined)
     ):
         return True
-    if _COMP_PCT_RE.search(joined) or _ITEM402_NEO_CAPTION_RE.search(joined):
+    if _COMP_PCT_RE.search(joined) or (
+        _ITEM402_NEO_CAPTION_RE.search(joined) and not _ITEM403B_DIRECTOR_CAPTION_RE.search(joined)
+    ):
         return False
     if data_row_evidence:
         # Step 3b — the captions carry nothing, but the ROWS show both of
