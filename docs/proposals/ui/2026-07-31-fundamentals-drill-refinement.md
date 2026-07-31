@@ -101,8 +101,8 @@ strongest defect in 6-12 — drop/replace."* Replace with a chart that has varia
 
 | proposal | author | why rejected |
 |---|---|---|
-| Single stacked-area P&L over time | agent | 8% coverage. Also: stacked areas make non-baseline bands hard to compare and break on negative values (tax/interest swings). |
-| Expense mix as 100% stacked bars | Codex | Same 8% coverage. |
+| Single stacked-area P&L over time | agent | Stacked areas make non-baseline bands hard to compare and break on negative values (tax/interest swings). Rejected on that ground alone — the coverage argument originally given (an 8% row-level figure) was itself wrong; see §0.1. |
+| Expense mix as 100% stacked bars | Codex | Needs a true R&D/SG&A decomposition. Use the §3.2 residual instead, which sums to revenue by construction. |
 | Full `charts/primitives` wrapper layer | agent | Codex: *"framework-building before you know the right chart grammar."* Reduced to §4. |
 | Waterfall connector lines | agent | Codex: defer; totals/deltas are legible without them. Real but low value against the data work. |
 | Second charting library | agent (considered) | Codex: stay on recharts. Bundle weight, theming duplication, two mental models. Specialised engines only for OHLC. |
@@ -145,10 +145,15 @@ reliably supply.
 Three lines (gross/operating/net) is within the 1–3 line guidance. Fix interpolation + theme colours
 per §1.2/§1.3. Add a faint band showing each margin's own 5-year range so a value has a reference.
 
-### 3.4 Earnings quality — NEW, position 4 — JUDGEMENT, 49% coverage
+### 3.4 Earnings quality — NEW, position 4 — JUDGEMENT, 86% coverage
 Net income vs operating cash flow vs FCF over time. Codex named this a gap; it is the classic
 accrual/cash divergence check and the single most useful "is this real?" chart for a long-horizon
-investor. Two lines (NI, OCF) plus FCF where computable (37%).
+investor.
+
+**Gating (per §0.2, not re-derived):** NI + OCF together = **86%** of instruments at ≥3 periods.
+FCF uses the settled `operating_cf − ABS(COALESCE(capex, 0))` rule and therefore gates on OCF
+alone = **89%** — it does NOT require capex. Any implementation that gates the FCF line on
+`capex IS NOT NULL` is wrong.
 Replaces the current standalone single-period cash-flow waterfall in reading order; the waterfall
 moves down as period detail.
 
