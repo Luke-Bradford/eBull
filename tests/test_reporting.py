@@ -1073,3 +1073,84 @@ class TestRollingWindowContiguity:
         from app.services.reporting import _is_contiguous_monthly
 
         assert _is_contiguous_monthly([], date(2026, 5, 1)) is True
+
+
+class TestSelectRankMovers:
+    """Rank movers is a capped statement exhibit (#2178).
+
+    Pre-#2178 the builder shipped every scored row in the period —
+    29,281 for June 2026, 4.38 MB of a 4.39 MB snapshot — and the
+    frontend rendered one router `<Link>` per row, freezing the page.
+    """
+
+    @staticmethod
+    def _rows(deltas: list[int]) -> list[dict[str, Any]]:
+        """Rows as `_score_changes` hands them over: one per instrument,
+        already sorted by `rank_delta` DESC."""
+        return [
+            {"instrument_id": i, "symbol": f"S{i}", "rank_delta": d}
+            for i, d in enumerate(sorted(deltas, reverse=True), start=1)
+        ]
+
+    def test_caps_each_direction_independently(self) -> None:
+        """Both directions survive even when one dominates by magnitude.
+
+        The June 2026 shape: the top 20 by ABS(rank_delta) are 4 risers
+        and 16 fallers. Selecting by pure magnitude would render "Rank
+        movers" as an almost-uniform collapse. Here the fallers are
+        strictly larger in magnitude than every riser, so a magnitude
+        cut would return zero risers.
+        """
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([10, 20, 30, 40] + [-100, -200, -300, -400, -500])
+        result = _select_rank_movers(rows, top_n=2)
+
+        assert [r["rank_delta"] for r in result] == [40, 30, -400, -500]
+
+    def test_keeps_biggest_movers_not_the_first_encountered(self) -> None:
+        """Fallers trail a DESC list, so the biggest sit at the END."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([-1, -2, -3, -50, -60])
+        result = _select_rank_movers(rows, top_n=2)
+
+        assert [r["rank_delta"] for r in result] == [-50, -60]
+
+    def test_output_stays_descending(self) -> None:
+        """The statement list reads risers-first; the FE does no sorting."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([5, -5, 900, -900, 1, -1])
+        result = _select_rank_movers(rows, top_n=3)
+        deltas = [r["rank_delta"] for r in result]
+
+        assert deltas == sorted(deltas, reverse=True)
+
+    def test_fewer_movers_than_cap_returns_all(self) -> None:
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([7, -7])
+        assert len(_select_rank_movers(rows, top_n=10)) == 2
+
+    def test_one_sided_period_returns_only_that_side(self) -> None:
+        """A period where every mover fell must not fabricate risers."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([-3, -4, -5])
+        result = _select_rank_movers(rows, top_n=2)
+
+        assert [r["rank_delta"] for r in result] == [-4, -5]
+
+    def test_zero_cap_selects_nothing(self) -> None:
+        """Guards the negative-slice trap: `[-0:]` is the WHOLE list, so
+        a naive tail slice would turn the tightest cap into no cap."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = self._rows([10, 20, -10, -20])
+        assert _select_rank_movers(rows, top_n=0) == []
+
+    def test_empty_input(self) -> None:
+        from app.services.reporting import _select_rank_movers
+
+        assert _select_rank_movers([], top_n=10) == []

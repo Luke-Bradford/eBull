@@ -226,15 +226,32 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
+/** Hard render cap on "Rank movers", independent of payload size.
+ *
+ *  Snapshots generated before #2178 carry the UNCAPPED array — the June
+ *  2026 monthly holds 29,281 rows (4.38 MB of a 4.39 MB snapshot), and
+ *  rendering a react-router `<Link>` per row froze the page. Those rows
+ *  are already stored, so the builder fix alone does not rescue them;
+ *  this cap is what makes a pre-#2178 snapshot renderable without a
+ *  regen. Sits above the builder's own top-N so a future `top_n` bump
+ *  is not silently truncated here. */
+const MOVER_RENDER_CAP = 50;
+
 export function ModelThesisSection({
   attribution,
   thesis,
   scoreChanges,
+  scoreChangesTotal,
 }: {
   attribution: AttributionSummaryV2;
   thesis: ThesisSummaryV2;
   scoreChanges: MonthlySnapshotV2["score_changes"];
+  scoreChangesTotal: MonthlySnapshotV2["score_changes_total"];
 }) {
+  const shown = scoreChanges.slice(0, MOVER_RENDER_CAP);
+  // Pre-#2178 snapshots have no total; the array IS the full set there,
+  // so its length is the honest count rather than an invented one.
+  const moverTotal = scoreChangesTotal ?? scoreChanges.length;
   const components: ReadonlyArray<readonly [string, string | null]> = [
     ["Gross return", attribution.avg_gross_return_pct],
     ["Market", attribution.avg_market_return_pct],
@@ -293,12 +310,18 @@ export function ModelThesisSection({
       <div>
         <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
           Rank movers
+          {shown.length > 0 ? (
+            <span className="normal-case text-slate-400">
+              {" "}
+              (largest single move per name; {shown.length} of {moverTotal} shown)
+            </span>
+          ) : null}
         </h3>
         {scoreChanges.length === 0 ? (
           <NilLine>No significant rank movements this period.</NilLine>
         ) : (
           <ul className="max-w-md space-y-0.5">
-            {scoreChanges.map((s) => (
+            {shown.map((s) => (
               <li key={`${s.instrument_id}-${s.scored_at}`} className="flex items-baseline justify-between gap-4">
                 <Link
                   to={`/instrument/${encodeURIComponent(s.symbol)}`}

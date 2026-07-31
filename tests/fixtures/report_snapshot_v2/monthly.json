@@ -41,7 +41,7 @@
     "unrealized_delta": null,
     "ytd_return": null
   },
-  "generated_at": "2026-06-12T15:15:46.731524+00:00",
+  "generated_at": "2026-07-30T23:50:31.444596+00:00",
   "holdings": [
     {
       "company_name": "Report Co",
@@ -51,7 +51,7 @@
       "period_contribution": null,
       "period_contribution_bps": null,
       "price": "110.000000",
-      "sector": "Technology",
+      "sector": "Information Technology",
       "since_entry_return_pct": "0.100000",
       "symbol": "RPTV2A",
       "units": "10.000000",
@@ -114,7 +114,7 @@
     "observation_label": "since inception, monthly observations",
     "observations": 0,
     "sector_exposure": {
-      "Technology": "0.523810"
+      "Information Technology": "0.523810"
     },
     "volatility": null
   },
@@ -147,6 +147,7 @@
   },
   "schema_version": 2,
   "score_changes": [],
+  "score_changes_total": 0,
   "tax_provision": {
     "estimated_tax_gbp": "0",
     "estimated_tax_usd": "0",
