@@ -121,12 +121,24 @@ def _short_lived_conn(request: Request) -> Iterator[psycopg.Connection[object]]:
 # ---------------------------------------------------------------------------
 
 # Every `/instruments/{symbol}/...` route resolved by symbol only, so a
-# numeric-id URL — the shape the FE itself mints at
-# `components/dashboard/AlertsStrip.tsx:204` and the shape
-# `pages/InstrumentDetailRedirect.tsx` bookmarks use — 404'd the whole
-# drill page. These two helpers are the one place that decision lives.
-# 29 sites in this module carried the by-symbol SQL verbatim; #2184
-# converts the two fundamentals-drill endpoints, leaving 27 to adopt it.
+# numeric-id drill URL — `/instrument/1001/fundamentals` — 404'd the
+# whole page (spec §1.1).
+#
+# Reachability, stated accurately because the first draft of this comment
+# got it wrong: NO frontend code path mints `/instrument/<id>/...`. Every
+# `/instrument/${…}` mint site in `frontend/src` passes a symbol — none
+# passes an `instrument_id` — and
+# `components/dashboard/AlertsStrip.tsx:204` mints the PLURAL legacy route
+# `/instruments/${row.instrument_id}` (`App.tsx:89`), which
+# `pages/InstrumentDetailRedirect.tsx` resolves by id and redirects to
+# `/instrument/:symbol`. The id form therefore reaches this module only via
+# a hand-typed or hand-edited URL, which is exactly what spec §1.1 claims —
+# a real defect, but not a machine-generated one. Do not size the remaining
+# 27-endpoint conversion off a "the FE mints this" premise.
+#
+# These two helpers are the one place that decision lives. 29 sites in this
+# module carried the by-symbol SQL verbatim; #2184 converts the two
+# fundamentals-drill endpoints, leaving 27 to adopt it.
 
 # `LiteralString`, not `str` — psycopg's `execute` takes `QueryNoTemplate`,
 # which is how the type checker enforces that no caller can route a
@@ -149,54 +161,72 @@ _RESOLVE_BY_SYMBOL_SQL: LiteralString = """
 """
 
 # ASCII digits only — `str.isdigit()` is True for '²' and Arabic-Indic
-# digits, and `int('²')` raises. A ref is an id only if it is entirely
+# digits, and `int('²')` raises. A ref can be an id only if it is entirely
 # ASCII digits.
 #
 # Bounded at 19 digits = BIGINT's own width, so no digit string this
-# branch accepts can be a valid `instrument_id` and be rejected. The
-# bound is load-bearing, not cosmetic: `int()` raises `ValueError` past
+# pattern rejects could have been a valid `instrument_id`. The bound is
+# load-bearing, not cosmetic: `int()` raises `ValueError` past
 # `sys.get_int_max_str_digits()` (4300 by default), so an unbounded
 # pattern turns `/instruments/<5000 digits>/financials` into a 500
-# instead of a 404. Anything longer falls to the symbol branch, misses,
+# instead of a 404. Anything longer gets the symbol attempt only, misses,
 # and 404s cleanly.
 _NUMERIC_REF = re.compile(r"^[0-9]{1,19}$")
 
 
-def instrument_ref_query(ref: str) -> tuple[LiteralString, dict[str, object]]:
-    """Pick the lookup SQL + bound params for a symbol-or-id path param.
+def instrument_ref_queries(ref: str) -> list[tuple[LiteralString, dict[str, object]]]:
+    """Ordered lookup attempts for a symbol-or-id path param.
 
-    Ref of 1-19 ASCII digits → resolve by ``instrument_id``; anything
-    else → resolve by symbol with the existing deterministic tie-break.
+    Attempt 1 is ALWAYS the by-symbol query. A ref of 1-19 ASCII digits
+    appends attempt 2, the by-id query. The caller runs them in order and
+    takes the first hit.
 
-    Safe on the full population: 0 of the instruments in the universe
-    have a purely-numeric ``symbol`` (verified 2026-07-31 against the dev
-    DB; numeric-leading tickers like ``1810.HK`` / ``2501.T`` all carry a
-    non-digit exchange suffix, so they take the symbol branch). A 19-digit
-    value past BIGINT's range does not raise either — Postgres compares it
-    as numeric and returns no rows, i.e. a clean 404.
+    **Symbol first, id as fallback** — the ordering is the safety
+    property, not a preference. ``/instrument/:symbol`` is the route's
+    declared contract and every FE link site passes a ticker; the id form
+    is a compat shim for a hand-typed URL. Branching *exclusively* on
+    "looks numeric" would let an unrelated ``instrument_id`` shadow a real
+    ticker the day eToro admits a letterless one (a bare ``1810`` rather
+    than ``1810.HK``), rendering a DIFFERENT issuer's financials under that
+    ticker instead of 404ing. ``instrument_id`` spans 1..1,065,714, which
+    squarely covers 4-digit exchange codes, and nothing in the schema or in
+    ``sync_universe`` forbids it. Today the collision does not exist (0 of
+    12,691 ``instruments`` rows have a purely-numeric ``symbol``; dev DB,
+    2026-07-31) — but that is a property of the current universe, not an
+    enforced invariant, so this order is what makes the resolution safe
+    rather than merely lucky.
 
-    Pure — no DB access — so the branch is table-testable without a
-    fixture. Callers must pass a non-empty, stripped ref.
+    Cost: one extra index seek, on the id path only. ``UPPER(symbol)`` is
+    covered by ``idx_instruments_symbol_primary`` (``sql/043``).
+
+    A 19-digit value past BIGINT's range does not raise — Postgres compares
+    it as numeric and returns no rows, i.e. a clean 404.
+
+    Pure — no DB access — so the ordering is table-testable without a
+    fixture. Callers must pass a non-empty ref.
     """
     cleaned = ref.strip()
+    attempts: list[tuple[LiteralString, dict[str, object]]] = [
+        (_RESOLVE_BY_SYMBOL_SQL, {"s": cleaned.upper()}),
+    ]
     if _NUMERIC_REF.match(cleaned):
-        return _RESOLVE_BY_ID_SQL, {"iid": int(cleaned)}
-    return _RESOLVE_BY_SYMBOL_SQL, {"s": cleaned.upper()}
+        attempts.append((_RESOLVE_BY_ID_SQL, {"iid": int(cleaned)}))
+    return attempts
 
 
 def resolve_instrument_ref(conn: psycopg.Connection[object], ref: str) -> tuple[int, str] | None:
     """Resolve a symbol-or-id path param to ``(instrument_id, symbol)``.
 
-    Returns ``None`` when nothing matches — the caller owns the 404 so it
-    can keep its own message.
+    Returns ``None`` when no attempt matches — the caller owns the 404 so
+    it can keep its own message.
     """
-    sql, params = instrument_ref_query(ref)
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(sql, params)
-        row = cur.fetchone()
-    if row is None:
-        return None
-    return int(row["instrument_id"]), str(row["symbol"])
+    for sql, params in instrument_ref_queries(ref):
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+        if row is not None:
+            return int(row["instrument_id"]), str(row["symbol"])
+    return None
 
 
 # ---------------------------------------------------------------------------

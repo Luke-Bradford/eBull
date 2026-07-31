@@ -49,6 +49,34 @@ def _clear_db_override() -> None:
     app.dependency_overrides.pop(get_conn, None)
 
 
+def _install_sequenced_db_conn(
+    fetchone_results: list[dict | None],
+    periods_rows: list[dict] | None = None,
+) -> MagicMock:
+    """Stub DB where each ``fetchone`` returns the next item in
+    ``fetchone_results``.
+
+    Needed for the symbol-or-id resolver (#2184), which makes up to TWO
+    resolution queries: the by-symbol attempt first, then the by-id
+    attempt only if that missed. Returns the shared cursor mock so a
+    caller can inspect ``execute`` calls.
+    """
+    cur_mock = MagicMock()
+    cur_mock.__enter__.return_value = cur_mock
+    cur_mock.fetchone.side_effect = list(fetchone_results)
+    cur_mock.fetchall.return_value = periods_rows if periods_rows is not None else []
+
+    def _conn() -> Iterator[MagicMock]:
+        conn_mock = MagicMock()
+        conn_mock.cursor.return_value = cur_mock
+        yield conn_mock
+
+    from app.db import get_conn
+
+    app.dependency_overrides[get_conn] = _conn
+    return cur_mock
+
+
 def test_unknown_symbol_returns_404(client: TestClient) -> None:
     _install_db_conn(None)
     try:
@@ -208,3 +236,77 @@ def test_cashflow_statement_dispatch(client: TestClient) -> None:
     body = resp.json()
     assert body["statement"] == "cashflow"
     assert body["period"] == "quarterly"
+
+
+# ---------------------------------------------------------------------------
+# #2184 — symbol-or-id path param. Spec §1.1's named acceptance test:
+# "request each drill endpoint by id and by symbol; both must 200."
+#
+# These drive the real handler through `resolve_instrument_ref`, which the
+# pure-logic table test in `tests/test_instrument_ref_resolution.py` does
+# not execute. Limits, stated honestly: the cursor is a MagicMock, so these
+# pin the routing, the attempt ORDER, and the SQL↔params binding — not that
+# a column name exists in Postgres. Column correctness rests on the dev
+# stack verification recorded in the PR.
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_id_returns_200_with_the_resolved_symbol(client: TestClient) -> None:
+    """`/instruments/1699/financials` — the shape that 404'd before #2184.
+
+    The by-symbol attempt misses (no ticker "1699"), the by-id attempt
+    hits, and the payload echoes the RESOLVED symbol so the FE heading can
+    read "GME" rather than "1699".
+    """
+    cur_mock = _install_sequenced_db_conn([None, {"instrument_id": 1699, "symbol": "GME"}])
+    try:
+        resp = client.get("/instruments/1699/financials?statement=income&period=annual")
+    finally:
+        _clear_db_override()
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["symbol"] == "GME"
+
+    # Both resolution attempts ran, symbol first — and each bound its own
+    # param key. A placeholder/param-key mismatch (`%(iid)s` bound with
+    # `{"s": ...}`) is precisely what psycopg raises on at runtime and what
+    # a fetchone-only assertion would miss.
+    executed = [(str(c.args[0]), c.args[1]) for c in cur_mock.execute.call_args_list if c.args]
+    resolution = [e for e in executed if "FROM instruments" in e[0]]
+    assert len(resolution) == 2, executed
+    assert "UPPER(symbol) = %(s)s" in resolution[0][0]
+    assert resolution[0][1] == {"s": "1699"}
+    assert "instrument_id = %(iid)s" in resolution[1][0]
+    assert resolution[1][1] == {"iid": 1699}
+
+
+def test_symbol_never_triggers_the_id_attempt(client: TestClient) -> None:
+    """The shadowing guard, end to end.
+
+    A ref that resolves as a symbol must stop there. If the id attempt
+    ever ran first — or ran at all on a hit — an unrelated
+    `instrument_id` could serve a DIFFERENT issuer's financials under a
+    numeric-looking ticker.
+    """
+    cur_mock = _install_sequenced_db_conn([{"instrument_id": 1001, "symbol": "AAPL"}])
+    try:
+        resp = client.get("/instruments/AAPL/financials?statement=income&period=annual")
+    finally:
+        _clear_db_override()
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["symbol"] == "AAPL"
+    executed = [str(c.args[0]) for c in cur_mock.execute.call_args_list if c.args]
+    resolution = [sql for sql in executed if "FROM instruments" in sql]
+    assert len(resolution) == 1, resolution
+    assert "instrument_id = %(iid)s" not in resolution[0]
+
+
+def test_numeric_ref_matching_nothing_still_404s(client: TestClient) -> None:
+    """Both attempts miss → 404, not a 500 and not a wrong instrument."""
+    _install_sequenced_db_conn([None, None])
+    try:
+        resp = client.get("/instruments/999999999/financials?statement=income")
+    finally:
+        _clear_db_override()
+    assert resp.status_code == 404

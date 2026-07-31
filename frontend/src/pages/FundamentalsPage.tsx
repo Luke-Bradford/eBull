@@ -33,7 +33,7 @@
  * numbers without losing the symbol context.
  */
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
@@ -64,14 +64,28 @@ type Period = "quarterly" | "annual";
 const VALID_PERIODS: ReadonlyArray<Period> = ["quarterly", "annual"];
 
 /**
- * A 404 means the route param names no instrument we hold — an operator
- * typo, or a stale bookmark. That is an EMPTY state, not a failure:
+ * "This endpoint says the ref names no instrument we hold" — an operator
+ * typo or a stale bookmark. That is an EMPTY state, not a failure:
  * `SectionError`'s red "check the browser console" banner tells the
- * operator to debug a working app (#2184). Any other status is a genuine
- * failure and still gets the banner.
+ * operator to debug a working app (#2184).
+ *
+ * Status alone is NOT enough. FastAPI answers a missing/renamed route or
+ * a mis-proxied `/api` base with a bare `{"detail":"Not Found"}`, and
+ * `client.ts` turns any non-2xx into `ApiError` (it special-cases only
+ * 401). Matching on status alone would render "No instrument matches
+ * AAPL" for every instrument during an outage, with no Retry — reporting
+ * a broken deploy as a data absence. So also require the endpoint's own
+ * message, which both drill raise sites spell `Instrument {symbol} not
+ * found` (app/api/instruments.py:994 financials, :1047 fcf-yield; the
+ * same string at all 30 sites in that module). The match is
+ * case-sensitive, which is what separates it from FastAPI's "Not Found".
+ *
+ * If that backend message ever changes, this guard fails CLOSED — back to
+ * `SectionError` + Retry, never to a false empty state.
  */
 function isNotFound(err: unknown): boolean {
-  return err instanceof ApiError && err.status === 404;
+  if (!(err instanceof ApiError) || err.status !== 404) return false;
+  return typeof err.detail === "string" && err.detail.includes("not found");
 }
 
 export function FundamentalsPage(): JSX.Element {
@@ -138,10 +152,31 @@ export function FundamentalsPage(): JSX.Element {
 
   // The route param may be a ticker OR a numeric instrument_id (#2184 —
   // the backend resolves either). The payload echoes the RESOLVED symbol,
-  // so the heading and the sibling links show `AAPL`, never `1001`. Falls
-  // back to the raw param only before the first response lands.
+  // so the heading and the sibling links show `AAPL`, never `1001`.
+  //
+  // Latched, because reading the payload alone is not enough: `useAsync`
+  // calls `setData(null)` at the start of every non-preserved fetch
+  // (lib/useAsync.ts:98), and the period toggle changes the deps
+  // `[symbol, period]`. Without the latch, every Quarterly→Annual toggle
+  // on `/instrument/1001/fundamentals` reverts the header to "1001" for
+  // the duration of the request and points `backHref` / `rawHref` at
+  // `/instrument/1001`, which dead-ends — `InstrumentPage` still resolves
+  // by symbol only. (`preserveOnRefetch` does NOT fix this: it applies
+  // only when `tick > 0`, i.e. an explicit `refetch()`, not a deps change.)
+  //
+  // The latch is keyed on the RAW ref so it is discarded when the operator
+  // navigates to a different instrument — React Router reuses this
+  // component across param changes, so an unkeyed latch would briefly show
+  // the previous instrument's symbol.
+  const payloadSymbol =
+    income.data?.symbol ?? balance.data?.symbol ?? cashflow.data?.symbol ?? null;
+  const resolvedRef = useRef<{ ref: string; symbol: string } | null>(null);
+  if (payloadSymbol !== null) {
+    resolvedRef.current = { ref: symbol, symbol: payloadSymbol };
+  }
   const resolvedSymbol =
-    income.data?.symbol ?? balance.data?.symbol ?? cashflow.data?.symbol ?? symbol;
+    payloadSymbol ??
+    (resolvedRef.current?.ref === symbol ? resolvedRef.current.symbol : symbol);
 
   const backHref = `/instrument/${encodeURIComponent(resolvedSymbol)}`;
   const rawHref = `/instrument/${encodeURIComponent(resolvedSymbol)}?tab=financials`;
@@ -174,9 +209,19 @@ export function FundamentalsPage(): JSX.Element {
   return (
     <div className="mx-auto max-w-screen-xl space-y-4 p-4">
       <header className="border-b border-slate-200 dark:border-slate-800 pb-3">
-        <Link to={backHref} className="text-xs text-sky-700 hover:underline">
-          ← Back to {resolvedSymbol}
-        </Link>
+        {/* On the not-found path both sibling links point at
+            `/instrument/<unresolvable ref>`, which dead-ends the same way
+            this page just did — `InstrumentPage` resolves by symbol only.
+            Offering them would hand the operator a second failure instead
+            of a recovery route, so the header drops to plain text and the
+            EmptyState's `/instruments` link is the only way out. */}
+        {notFound ? (
+          <span className="text-xs text-slate-500">Instrument drill</span>
+        ) : (
+          <Link to={backHref} className="text-xs text-sky-700 hover:underline">
+            ← Back to {resolvedSymbol}
+          </Link>
+        )}
         <div className="mt-1 flex flex-wrap items-baseline justify-between gap-2">
           <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
             Fundamentals — {resolvedSymbol}
@@ -202,9 +247,11 @@ export function FundamentalsPage(): JSX.Element {
                 Annual
               </button>
             </div>
-            <Link to={rawHref} className="text-sky-700 hover:underline">
-              Raw statements →
-            </Link>
+            {!notFound && (
+              <Link to={rawHref} className="text-sky-700 hover:underline">
+                Raw statements →
+              </Link>
+            )}
           </div>
         </div>
         <p className="mt-1 text-xs text-slate-500">
