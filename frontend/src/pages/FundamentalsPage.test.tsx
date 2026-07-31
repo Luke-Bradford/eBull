@@ -12,9 +12,16 @@ import * as api from "@/api/instruments";
 vi.mock("@/components/fundamentals/fundamentalsCharts", () => {
   function makeStub(
     label: string,
-  ): (props: { periods?: ReadonlyArray<unknown>; period?: unknown }) => JSX.Element {
-    return ({ periods, period }) => (
-      <div data-testid={`mock-${label}`}>
+  ): (props: {
+    periods?: ReadonlyArray<unknown>;
+    period?: unknown;
+    currency?: string | null;
+  }) => JSX.Element {
+    // `data-currency` surfaces the #2185 §1.4 prop so a test can assert the
+    // reported currency actually reaches the money charts — a stub that
+    // swallowed it would let the page silently stop threading it.
+    return ({ periods, period, currency }) => (
+      <div data-testid={`mock-${label}`} data-currency={currency ?? "none"}>
         {label} {Array.isArray(periods) ? periods.length : period ? "1" : "0"}
       </div>
     );
@@ -24,7 +31,7 @@ vi.mock("@/components/fundamentals/fundamentalsCharts", () => {
     MarginTrendsChart: makeStub("margins"),
     YoyGrowthChart: makeStub("yoy"),
     CashflowWaterfallChart: makeStub("waterfall"),
-    BalanceStructureChart: makeStub("balance"),
+    NetDebtChart: makeStub("netdebt"),
     DebtStructureChart: makeStub("debt"),
     DupontChart: makeStub("dupont"),
     RoicChart: makeStub("roic"),
@@ -110,11 +117,31 @@ describe("FundamentalsPage", () => {
     expect(screen.getByTestId("mock-margins")).toBeInTheDocument();
     expect(screen.getByTestId("mock-yoy")).toBeInTheDocument();
     expect(screen.getByTestId("mock-waterfall")).toBeInTheDocument();
-    expect(screen.getByTestId("mock-balance")).toBeInTheDocument();
+    expect(screen.getByTestId("mock-netdebt")).toBeInTheDocument();
     expect(screen.getByTestId("mock-debt")).toBeInTheDocument();
     expect(screen.getByTestId("mock-dupont")).toBeInTheDocument();
     expect(screen.getByTestId("mock-roic")).toBeInTheDocument();
     expect(screen.getByTestId("mock-fcf")).toBeInTheDocument();
+  });
+
+  it("threads the statement's reported currency into every money chart (#2185)", async () => {
+    // Money axes are ambiguous without it — `380.00B` of what? The identity
+    // chart is gone, so the money charts are P&L, waterfall, net debt, debt
+    // structure and FCF. Ratio/percentage charts deliberately receive none.
+    mockHappyPath();
+    renderAt("/instrument/GME/fundamentals");
+
+    await screen.findByTestId("mock-pnl");
+    for (const label of ["pnl", "waterfall", "netdebt", "debt", "fcf"]) {
+      expect(screen.getByTestId(`mock-${label}`)).toHaveAttribute(
+        "data-currency",
+        "USD",
+      );
+    }
+    expect(screen.getByTestId("mock-margins")).toHaveAttribute(
+      "data-currency",
+      "none",
+    );
   });
 
   it("toggles the period via ?period= search param", async () => {

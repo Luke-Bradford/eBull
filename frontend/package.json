@@ -14,6 +14,7 @@
     "typecheck": "tsc -b --noEmit",
     "dark:check": "node scripts/check-dark-classes.mjs",
     "pills:check": "node scripts/check-hand-rolled-pills.mjs",
+    "charts:check": "node scripts/check-chart-integrity.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:unit": "vitest run --exclude src/pages/SetupPage.test.tsx",

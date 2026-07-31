@@ -337,36 +337,54 @@ export function buildCashflowWaterfall(
   ];
 }
 
-export interface BalanceStructure {
+export interface NetDebtRow {
   readonly period_end: string;
-  readonly assets: number;
-  readonly liabilities: number;
-  readonly equity: number;
+  /** Gross debt. Null ONLY when both components are null. */
+  readonly debt: number | null;
+  readonly cash: number | null;
+  /** `debt - cash`. Null when either side is unavailable. */
+  readonly net_debt: number | null;
 }
 
-/** Most-recent balance-sheet snapshot — assets vs liabilities + equity.
- *  Returns null when the latest period lacks the three core fields.
- *  The recharts component renders this as two horizontal stacked bars
- *  so the operator visually checks `assets ≈ liab + equity`. */
-export function latestBalanceStructure(
+/**
+ * Net-debt trend — replaces the assets-vs-(liabilities+equity) chart, which
+ * was an accounting identity and therefore could not vary (#2185 / spec §1.6).
+ *
+ * Source rule — the repo's own settled treatment, NOT re-derived here:
+ *
+ *   CASE WHEN long_term_debt IS NOT NULL OR short_term_debt IS NOT NULL
+ *        THEN COALESCE(long_term_debt, 0) + COALESCE(short_term_debt, 0) END
+ *
+ * `app/services/fundamentals/__init__.py:152-154` (the `debt` column of the
+ * `fundamentals_snapshot` write) and `app/services/fair_value_band.py:1021`
+ * (which carries the full net-debt form, `… + COALESCE(long,0) +
+ * COALESCE(short,0) - cash`).
+ *
+ * Two consequences of that rule, both deliberate:
+ *   - Gross debt is null only when BOTH components are null. A filer that
+ *     reports long-term debt and omits short-term is NOT a data gap — the
+ *     COALESCE-0 is the settled treatment, not a guess. `short_term_debt` is
+ *     sparse (12% coverage) precisely because most filers have none to report.
+ *   - A missing `cash` IS a genuine data gap, so net debt goes null rather
+ *     than COALESCE-ing to zero, which would overstate net debt by the whole
+ *     cash balance (the same reasoning fair_value_band.py:1014-1016 records
+ *     for EV). There is no degrade path here; do not invent one.
+ */
+export function buildNetDebt(
   periods: ReadonlyArray<JoinedPeriod>,
-): BalanceStructure | null {
-  for (let i = periods.length - 1; i >= 0; i--) {
-    const p = periods[i]!;
-    if (
-      p.total_assets !== null &&
-      p.total_liabilities !== null &&
-      p.shareholders_equity !== null
-    ) {
-      return {
-        period_end: p.period_end,
-        assets: p.total_assets,
-        liabilities: p.total_liabilities,
-        equity: p.shareholders_equity,
-      };
-    }
-  }
-  return null;
+): NetDebtRow[] {
+  return periods.map((p) => {
+    const debt =
+      p.long_term_debt !== null || p.short_term_debt !== null
+        ? (p.long_term_debt ?? 0) + (p.short_term_debt ?? 0)
+        : null;
+    return {
+      period_end: p.period_end,
+      debt,
+      cash: p.cash,
+      net_debt: debt !== null && p.cash !== null ? debt - p.cash : null,
+    };
+  });
 }
 
 export interface DebtRow {

@@ -7,11 +7,11 @@ import {
   buildDupont,
   buildFcf,
   buildMargins,
+  buildNetDebt,
   buildPnlBuckets,
   buildRoic,
   buildYoyGrowth,
   joinStatements,
-  latestBalanceStructure,
   safeDiv,
 } from "@/lib/fundamentalsMetrics";
 
@@ -285,31 +285,70 @@ describe("buildCashflowWaterfall", () => {
   });
 });
 
-describe("latestBalanceStructure", () => {
-  it("walks backwards to find the most-recent complete snapshot", () => {
-    const periods = joinStatements(
-      [],
-      [
-        row("2025-Q1", {
-          total_assets: "1000",
-          total_liabilities: "600",
-          shareholders_equity: "400",
-        }),
-        row("2026-Q1", {
-          total_assets: "1500",
-          total_liabilities: null,
-          shareholders_equity: "600",
-        }),
-      ],
-      [],
+// `latestBalanceStructure` and its chart were deleted in #2185: assets and
+// (liabilities + equity) are equal by the accounting identity, so the chart
+// could not vary. `buildNetDebt` replaces it — the cases below pin the repo's
+// documented debt treatment rather than the identity.
+describe("buildNetDebt", () => {
+  function balance(values: Record<string, string | null>) {
+    return joinStatements([], [row("2026-03-31", values)], []);
+  }
+
+  it("sums both debt components against cash", () => {
+    const [r] = buildNetDebt(
+      balance({ long_term_debt: "800", short_term_debt: "200", cash: "300" }),
     );
-    const snap = latestBalanceStructure(periods);
-    expect(snap?.period_end).toBe("2025-Q1");
-    expect(snap?.assets).toBe(1000);
+    expect(r?.debt).toBe(1000);
+    expect(r?.net_debt).toBe(700);
   });
 
-  it("returns null when no period is complete", () => {
-    expect(latestBalanceStructure([])).toBeNull();
+  it("COALESCEs a missing component to 0 when the OTHER one is reported", () => {
+    // The settled rule (app/services/fundamentals/__init__.py:152-154):
+    // COALESCE(long,0) + COALESCE(short,0), guarded by "at least one is NOT
+    // NULL". short_term_debt is sparse (12% coverage) because most filers have
+    // none to report — treating that as a data gap would blank the chart for
+    // the large majority of instruments.
+    const [lt] = buildNetDebt(
+      balance({ long_term_debt: "500", short_term_debt: null, cash: "100" }),
+    );
+    expect(lt?.debt).toBe(500);
+    expect(lt?.net_debt).toBe(400);
+
+    const [st] = buildNetDebt(
+      balance({ long_term_debt: null, short_term_debt: "50", cash: "20" }),
+    );
+    expect(st?.debt).toBe(50);
+    expect(st?.net_debt).toBe(30);
+  });
+
+  it("nulls gross debt only when BOTH components are missing", () => {
+    const [r] = buildNetDebt(
+      balance({ long_term_debt: null, short_term_debt: null, cash: "100" }),
+    );
+    expect(r?.debt).toBeNull();
+    expect(r?.net_debt).toBeNull();
+  });
+
+  it("nulls net debt when cash is missing rather than COALESCE-ing it to 0", () => {
+    // A missing `cash` is a genuine data gap (fair_value_band.py:1014-1016
+    // records the same reasoning for EV). COALESCE-ing it to 0 would overstate
+    // net debt by the entire cash balance — gross debt still renders.
+    const [r] = buildNetDebt(
+      balance({ long_term_debt: "800", short_term_debt: "200", cash: null }),
+    );
+    expect(r?.debt).toBe(1000);
+    expect(r?.net_debt).toBeNull();
+  });
+
+  it("goes negative when cash exceeds debt (net cash)", () => {
+    const [r] = buildNetDebt(
+      balance({ long_term_debt: "100", short_term_debt: null, cash: "900" }),
+    );
+    expect(r?.net_debt).toBe(-800);
+  });
+
+  it("returns an empty array for no periods", () => {
+    expect(buildNetDebt([])).toEqual([]);
   });
 });
 

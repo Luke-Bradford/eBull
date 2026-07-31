@@ -282,12 +282,13 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Storage: `financial_periods.{long_term_debt, short_term_debt, cash}`; legacy `fundamentals_snapshot.{net_debt, debt}` for `key_stats`.
 - ⚠ `fundamentals_snapshot.as_of_date` = the FISCAL PERIOD END of the latest filed statement, NOT a fetch/ingest timestamp. Comparing it to `CURRENT_DATE` to judge pipeline freshness is meaningless (AAPL legitimately sits months "old" between quarters) — freshness of the PIPELINE is `job_runs` for `fundamentals_sync`; freshness of the DATA is as_of_date vs the company's expected filing cadence.
 - Endpoint: `/instruments/{symbol}/financials?statement=balance` + `/summary.key_stats.debt_to_equity`.
-- Chart: `FundamentalsPane.tsx` cell 4 (Total Debt); `fundamentalsCharts.tsx buildDebtStructure` (LTD + STD + interest coverage).
+- ⚠ Total debt is NULL **only when BOTH components are NULL**; otherwise the missing side COALESCEs to 0. `short_term_debt` is sparse (12%) because most filers have none to report — treating that as a gap blanks the metric for most instruments. A missing `cash`, by contrast, IS a real gap: net debt goes NULL rather than COALESCE-ing cash to 0, which would overstate it by the whole cash balance. Source rule: [app/services/fundamentals/__init__.py:152-154](../../../app/services/fundamentals/__init__.py#L152-L154) + [fair_value_band.py:1014-1021](../../../app/services/fair_value_band.py#L1014-L1021). Do not invent a degrade path.
+- Chart: `FundamentalsPane.tsx` cell 4 (Total Debt); `fundamentalsCharts.tsx buildDebtStructure` (LTD + STD + interest coverage); net-debt trend on the L2 pane via [`buildNetDebt` (fundamentalsMetrics.ts:373)](../../../frontend/src/lib/fundamentalsMetrics.ts#L373), which mirrors the same rule client-side (#2185).
 
 ### Total assets / liabilities / equity
 - Tags: `us-gaap:Assets`, `us-gaap:Liabilities`, `us-gaap:StockholdersEquity`.
 - Storage: `financial_periods.{total_assets, total_liabilities, shareholders_equity}`.
-- Chart: `latestBalanceStructure` ([fundamentalsMetrics.ts:351](../../../frontend/src/lib/fundamentalsMetrics.ts#L351)) — two horizontal stacked bars to verify `assets ≈ liab + equity`.
+- Chart: **none.** The former `latestBalanceStructure` two-bar snapshot was DELETED in #2185: assets and (liabilities + equity) are equal by the accounting identity, so the chart could not vary and carried no signal. Do not re-add it. The L2 pane is now a net-debt trend (`buildNetDebt`, below).
 
 ### ROE / ROA / ROIC
 - ROE = `net_income / shareholders_equity`. ROA = `net_income / total_assets`.
