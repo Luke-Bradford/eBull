@@ -143,8 +143,8 @@ describe("FundamentalsPage", () => {
 
   it("shows a 'no SEC XBRL coverage' empty state when every statement reports source='unavailable'", async () => {
     // The real /financials contract: 200 OK with source='unavailable'
-    // and rows=[] for non-SEC instruments. A 404 only fires for an
-    // unknown symbol, which falls through to the generic error.
+    // and rows=[] for non-SEC instruments. A 404 only fires when the
+    // route param names no instrument at all — a separate empty state.
     vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
       ((_symbol: string, query: { statement: "income" | "balance" | "cashflow" }) =>
         Promise.resolve({
@@ -192,5 +192,38 @@ describe("FundamentalsPage", () => {
     renderAt("/instrument/GME/fundamentals");
     const link = await screen.findByRole("link", { name: /Raw statements/i });
     expect(link).toHaveAttribute("href", "/instrument/GME?tab=financials");
+  });
+
+  // ---- #2184 -------------------------------------------------------------
+
+  it("renders an EmptyState (not the red error banner) on a 404", async () => {
+    const { ApiError } = await import("@/api/client");
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      (() => Promise.reject(new ApiError(404, "Instrument ZZZZ not found"))) as never,
+    );
+    renderAt("/instrument/ZZZZ/fundamentals");
+
+    expect(await screen.findByText(/Instrument not found/i)).toBeInTheDocument();
+    expect(screen.getByText(/No instrument matches "ZZZZ"/i)).toBeInTheDocument();
+    // The red "Failed to load. Check the browser console" banner and its
+    // Retry affordance must NOT appear — nothing failed.
+    expect(screen.queryByRole("button", { name: /Retry/i })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows the RESOLVED symbol in the heading when the route param is a numeric id", async () => {
+    mockHappyPath();
+    renderAt("/instrument/1699/fundamentals");
+
+    // Payload echoes symbol='GME'; the heading must not read "1699".
+    expect(
+      await screen.findByRole("heading", { name: /Fundamentals — GME/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Fundamentals — 1699/)).toBeNull();
+    // Sibling links follow the resolved symbol too, so the operator does
+    // not carry the id form into the next page.
+    expect(
+      screen.getByRole("link", { name: /Raw statements/i }),
+    ).toHaveAttribute("href", "/instrument/GME?tab=financials");
   });
 });

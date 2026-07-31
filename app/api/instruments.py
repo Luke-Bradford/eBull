@@ -24,11 +24,12 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Literal, get_args
+from typing import Literal, LiteralString, get_args
 
 import httpx
 import psycopg
@@ -113,6 +114,89 @@ def _short_lived_conn(request: Request) -> Iterator[psycopg.Connection[object]]:
         yield conn
     finally:
         gen.close()
+
+
+# ---------------------------------------------------------------------------
+# Instrument reference resolution (#2184)
+# ---------------------------------------------------------------------------
+
+# Every `/instruments/{symbol}/...` route resolved by symbol only, so a
+# numeric-id URL — the shape the FE itself mints at
+# `components/dashboard/AlertsStrip.tsx:204` and the shape
+# `pages/InstrumentDetailRedirect.tsx` bookmarks use — 404'd the whole
+# drill page. These two helpers are the one place that decision lives.
+# 29 sites in this module carried the by-symbol SQL verbatim; #2184
+# converts the two fundamentals-drill endpoints, leaving 27 to adopt it.
+
+# `LiteralString`, not `str` — psycopg's `execute` takes `QueryNoTemplate`,
+# which is how the type checker enforces that no caller can route a
+# runtime-built string through here (house precedent:
+# `app/services/peer_comparison.py:200`).
+_RESOLVE_BY_ID_SQL: LiteralString = """
+    SELECT instrument_id, symbol FROM instruments
+    WHERE instrument_id = %(iid)s
+    LIMIT 1
+"""
+
+# `symbol` is not UNIQUE across exchanges (see migration 043), so order by
+# `is_primary_listing DESC, instrument_id ASC` to make the winner
+# deterministic on collisions. Preserved verbatim from the call sites.
+_RESOLVE_BY_SYMBOL_SQL: LiteralString = """
+    SELECT instrument_id, symbol FROM instruments
+    WHERE UPPER(symbol) = %(s)s
+    ORDER BY is_primary_listing DESC, instrument_id ASC
+    LIMIT 1
+"""
+
+# ASCII digits only — `str.isdigit()` is True for '²' and Arabic-Indic
+# digits, and `int('²')` raises. A ref is an id only if it is entirely
+# ASCII digits.
+#
+# Bounded at 19 digits = BIGINT's own width, so no digit string this
+# branch accepts can be a valid `instrument_id` and be rejected. The
+# bound is load-bearing, not cosmetic: `int()` raises `ValueError` past
+# `sys.get_int_max_str_digits()` (4300 by default), so an unbounded
+# pattern turns `/instruments/<5000 digits>/financials` into a 500
+# instead of a 404. Anything longer falls to the symbol branch, misses,
+# and 404s cleanly.
+_NUMERIC_REF = re.compile(r"^[0-9]{1,19}$")
+
+
+def instrument_ref_query(ref: str) -> tuple[LiteralString, dict[str, object]]:
+    """Pick the lookup SQL + bound params for a symbol-or-id path param.
+
+    Ref of 1-19 ASCII digits → resolve by ``instrument_id``; anything
+    else → resolve by symbol with the existing deterministic tie-break.
+
+    Safe on the full population: 0 of the instruments in the universe
+    have a purely-numeric ``symbol`` (verified 2026-07-31 against the dev
+    DB; numeric-leading tickers like ``1810.HK`` / ``2501.T`` all carry a
+    non-digit exchange suffix, so they take the symbol branch). A 19-digit
+    value past BIGINT's range does not raise either — Postgres compares it
+    as numeric and returns no rows, i.e. a clean 404.
+
+    Pure — no DB access — so the branch is table-testable without a
+    fixture. Callers must pass a non-empty, stripped ref.
+    """
+    cleaned = ref.strip()
+    if _NUMERIC_REF.match(cleaned):
+        return _RESOLVE_BY_ID_SQL, {"iid": int(cleaned)}
+    return _RESOLVE_BY_SYMBOL_SQL, {"s": cleaned.upper()}
+
+
+def resolve_instrument_ref(conn: psycopg.Connection[object], ref: str) -> tuple[int, str] | None:
+    """Resolve a symbol-or-id path param to ``(instrument_id, symbol)``.
+
+    Returns ``None`` when nothing matches — the caller owns the 404 so it
+    can keep its own message.
+    """
+    sql, params = instrument_ref_query(ref)
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return int(row["instrument_id"]), str(row["symbol"])
 
 
 # ---------------------------------------------------------------------------
@@ -865,41 +949,31 @@ def get_instrument_financials(
 
     Returns an empty row list (not 500, not 404) when no SEC data
     exists — the UI shows "no statement data available".
+
+    ``symbol`` accepts a ticker OR a numeric ``instrument_id`` (#2184) —
+    the FE links instruments by id in places, and the drill page inherits
+    whichever form the URL carries.
     """
-    symbol_clean = symbol.strip().upper()
+    symbol_clean = symbol.strip()
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
 
     columns = _STATEMENT_COLUMNS[statement]
 
-    # Resolve symbol -> instrument_id for the local read. `symbol` is
-    # not UNIQUE across exchanges (see migration 043), so order by
-    # `is_primary_listing DESC, instrument_id ASC` to make the winner
-    # deterministic on collisions.
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT instrument_id, symbol FROM instruments
-            WHERE UPPER(symbol) = %(s)s
-            ORDER BY is_primary_listing DESC, instrument_id ASC
-            LIMIT 1
-            """,
-            {"s": symbol_clean},
-        )
-        inst_row = cur.fetchone()
-
-    if inst_row is None:
+    resolved = resolve_instrument_ref(conn, symbol_clean)
+    if resolved is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id, resolved_symbol = resolved
 
     local_rows, local_currency = _fetch_local_financials(
         conn,
-        int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        instrument_id,
         columns,
         period,
     )
     if local_rows:
         return InstrumentFinancials(
-            symbol=str(inst_row["symbol"]),  # type: ignore[index]
+            symbol=resolved_symbol,
             statement=statement,
             period=period,
             currency=local_currency,
@@ -910,7 +984,7 @@ def get_instrument_financials(
     # No SEC coverage → empty payload. Frontend renders the empty-
     # state hint; no fallback to a non-canonical source.
     return InstrumentFinancials(
-        symbol=str(inst_row["symbol"]),  # type: ignore[index]
+        symbol=resolved_symbol,
         statement=statement,
         period=period,
         currency=None,
@@ -932,33 +1006,25 @@ def get_instrument_fcf_yield(
     cross-currency issuers (no FX normaliser) are fail-closed SUPPRESSED
     (``suppressed_reason`` set, ``points`` empty); the FE keeps the absolute
     FCF line + a caveat. Policy lives in app/services/fcf_yield.py.
+
+    ``symbol`` accepts a ticker OR a numeric ``instrument_id`` (#2184).
     """
-    symbol_clean = symbol.strip().upper()
+    symbol_clean = symbol.strip()
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT instrument_id, symbol FROM instruments
-            WHERE UPPER(symbol) = %(s)s
-            ORDER BY is_primary_listing DESC, instrument_id ASC
-            LIMIT 1
-            """,
-            {"s": symbol_clean},
-        )
-        inst_row = cur.fetchone()
-
-    if inst_row is None:
+    resolved = resolve_instrument_ref(conn, symbol_clean)
+    if resolved is None:
         raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found")
+    instrument_id, resolved_symbol = resolved
 
     result = fcf_yield_series(
         conn,
-        instrument_id=int(inst_row["instrument_id"]),  # type: ignore[arg-type]
+        instrument_id=instrument_id,
         period=period,
     )
     return FcfYieldSeries(
-        symbol=str(inst_row["symbol"]),  # type: ignore[index]
+        symbol=resolved_symbol,
         suppressed_reason=result.suppressed_reason,
         points=[
             FcfYieldPoint(

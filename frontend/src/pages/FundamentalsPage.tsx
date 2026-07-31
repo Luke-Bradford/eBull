@@ -1,6 +1,10 @@
 /**
  * /instrument/:symbol/fundamentals — quant-grade financials drill (#589).
  *
+ * `:symbol` is a ticker OR a numeric instrument_id — the backend resolves
+ * either (#2184). The heading and the sibling links always show the
+ * RESOLVED symbol, so `/instrument/1001/fundamentals` reads "AAPL".
+ *
  * Replaces the thin "Financials" tab as the L2 analytical view. Nine
  * panes laid out top → bottom in a single scroll column, mirroring
  * the per-domain catalog in the parent spec. Each pane is a recharts
@@ -32,6 +36,7 @@
 import { useCallback, useMemo } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
+import { ApiError } from "@/api/client";
 import { fetchFcfYield, fetchInstrumentFinancials } from "@/api/instruments";
 import type { FcfYieldSeries, InstrumentFinancials } from "@/api/types";
 import {
@@ -57,6 +62,17 @@ import { joinStatements } from "@/lib/fundamentalsMetrics";
 
 type Period = "quarterly" | "annual";
 const VALID_PERIODS: ReadonlyArray<Period> = ["quarterly", "annual"];
+
+/**
+ * A 404 means the route param names no instrument we hold — an operator
+ * typo, or a stale bookmark. That is an EMPTY state, not a failure:
+ * `SectionError`'s red "check the browser console" banner tells the
+ * operator to debug a working app (#2184). Any other status is a genuine
+ * failure and still gets the banner.
+ */
+function isNotFound(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404;
+}
 
 export function FundamentalsPage(): JSX.Element {
   const { symbol = "" } = useParams<{ symbol: string }>();
@@ -120,21 +136,30 @@ export function FundamentalsPage(): JSX.Element {
     );
   }, [income.data, balance.data, cashflow.data]);
 
-  const backHref = `/instrument/${encodeURIComponent(symbol)}`;
-  const rawHref = `/instrument/${encodeURIComponent(symbol)}?tab=financials`;
+  // The route param may be a ticker OR a numeric instrument_id (#2184 —
+  // the backend resolves either). The payload echoes the RESOLVED symbol,
+  // so the heading and the sibling links show `AAPL`, never `1001`. Falls
+  // back to the raw param only before the first response lands.
+  const resolvedSymbol =
+    income.data?.symbol ?? balance.data?.symbol ?? cashflow.data?.symbol ?? symbol;
+
+  const backHref = `/instrument/${encodeURIComponent(resolvedSymbol)}`;
+  const rawHref = `/instrument/${encodeURIComponent(resolvedSymbol)}?tab=financials`;
 
   const loading = income.loading || balance.loading || cashflow.loading;
-  const errored =
-    income.error !== null || balance.error !== null || cashflow.error !== null;
+  const errors = [income.error, balance.error, cashflow.error];
+  const notFound = errors.some(isNotFound);
+  const errored = errors.some((e) => e !== null && !isNotFound(e));
   // The `/financials` endpoint returns 200 with `source="unavailable"`
   // and `rows=[]` when an instrument has no SEC coverage (non-US
   // issuer, no CIK, etc.) — see app/api/instruments.py around the
   // `_fetch_local_financials` empty-result branch. A 404 means the
-  // symbol itself isn't recognised, which falls through to the
-  // generic SectionError. The "no SEC XBRL coverage" empty state
-  // fires when every statement explicitly reports `unavailable`.
+  // route param itself isn't recognised — an empty state, handled
+  // separately above. The "no SEC XBRL coverage" empty state fires
+  // when every statement explicitly reports `unavailable`.
   const noSecCoverage =
     !errored &&
+    !notFound &&
     income.data?.source === "unavailable" &&
     balance.data?.source === "unavailable" &&
     cashflow.data?.source === "unavailable";
@@ -150,11 +175,11 @@ export function FundamentalsPage(): JSX.Element {
     <div className="mx-auto max-w-screen-xl space-y-4 p-4">
       <header className="border-b border-slate-200 dark:border-slate-800 pb-3">
         <Link to={backHref} className="text-xs text-sky-700 hover:underline">
-          ← Back to {symbol}
+          ← Back to {resolvedSymbol}
         </Link>
         <div className="mt-1 flex flex-wrap items-baseline justify-between gap-2">
           <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-            Fundamentals — {symbol}
+            Fundamentals — {resolvedSymbol}
           </h1>
           <div className="flex items-center gap-2 text-xs">
             <div className="flex gap-1">
@@ -197,13 +222,22 @@ export function FundamentalsPage(): JSX.Element {
         <SectionSkeleton rows={6} />
       ) : errored ? (
         <SectionError onRetry={refetchAll} />
+      ) : notFound ? (
+        <EmptyState
+          title="Instrument not found"
+          description={`No instrument matches "${symbol}". The URL takes either a ticker (AAPL) or a numeric instrument id (1001).`}
+        >
+          <Link to="/instruments" className="text-sm text-sky-700 hover:underline">
+            ← Browse instruments
+          </Link>
+        </EmptyState>
       ) : noSecCoverage ? (
         <EmptyState
           title="No fundamentals data"
           description="No SEC XBRL coverage for this instrument — likely a non-US issuer or one without an SEC CIK."
         >
           <Link to={backHref} className="text-sm text-sky-700 hover:underline">
-            ← Back to {symbol}
+            ← Back to {resolvedSymbol}
           </Link>
         </EmptyState>
       ) : periods.length === 0 ? (
@@ -212,7 +246,7 @@ export function FundamentalsPage(): JSX.Element {
           description="No XBRL statement rows on file for this instrument yet."
         >
           <Link to={backHref} className="text-sm text-sky-700 hover:underline">
-            ← Back to {symbol}
+            ← Back to {resolvedSymbol}
           </Link>
         </EmptyState>
       ) : (
