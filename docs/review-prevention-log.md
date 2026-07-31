@@ -2340,3 +2340,51 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
   writing another HTML heuristic.
 - Enforced in: this log; `.claude/skills/data-sources/edgartools.md` (DEF 14A
   row now names `extract_beneficial_ownership` and the data-row fallback).
+
+---
+
+### `<details>` does not defer render cost — React commits its children regardless
+- First seen in: #2178
+- Symptom: The reports appendix wrapped `JSON.stringify(snap, null, 2)` in a
+  `<details>` element, reading as "only built when opened". `<details>`
+  collapses **visually**; React still evaluates the expression and commits the
+  `<pre>` on every render. A monthly snapshot was ~4.4 MB, so every render
+  materialised ~9 MB of text plus a giant text node the operator never asked
+  for. Confirmed live: `<pre>` count was 0 after the state fix and only became
+  1 on click.
+- Prevention: Gate expensive children on **state**, not on a disclosure
+  element. `<details>`/`hidden`/`display:none`/CSS collapse are all
+  presentation-only — they change paint, never the React commit. Before
+  wrapping anything in a disclosure widget, ask "does the JSX inside cost
+  anything to *build*?" If yes (JSON.stringify, a large `.map`, a chart),
+  render `null` until opened. Grep prompt for review: any `<details>` whose
+  body contains `JSON.stringify`, `.map(`, or a component that takes a large
+  array prop.
+- Enforced in: this log; `frontend/src/pages/ReportsPage.tsx::RawJsonAppendix`
+  and its test "does not build the raw-JSON appendix until the operator opens it".
+
+---
+
+### A snapshot-shape change breaks a contract chain the fast tier cannot see
+- First seen in: #2178
+- Symptom: Adding one top-level key (`score_changes_total`) to the report
+  builders silently broke the deliberate chain
+  **builder == fixture == FE key list == interface**. The parity test
+  (`tests/test_reporting_v2_db.py::test_v2_fixture_is_backend_emitted`) is
+  `db`-marked, so `pytest -m "not db"` — the push gate — never ran it. Codex
+  ckpt-2 caught it; the local gates were all green and would have shipped it.
+- Prevention: Any change to a top-level key emitted by `generate_weekly_report`
+  / `generate_monthly_report` must, in the SAME diff: (1) regenerate the
+  fixtures with `REPORT_FIXTURE_WRITE=1 uv run pytest
+  tests/test_reporting_v2_db.py -k fixture_is_backend_emitted`, (2) update
+  `WEEKLY_KEYS`/`MONTHLY_KEYS` in `frontend/src/api/reportSnapshot.test.ts`,
+  (3) update the interface in `reportSnapshot.ts`. Because the guard is
+  `db`-marked, run that file explicitly — do not rely on the push gate.
+- Secondary finding: the regeneration surfaced an UNRELATED stale value the
+  parity test could never catch — the fixture's `sector` read `"Technology"`
+  where the builder emits `"Information Technology"` (#1634/#1851/#1951). The
+  parity test compares **keys only**, so fixture *values* drift silently and
+  indefinitely. When regenerating any golden fixture, diff the values too and
+  account for every change; a value diff is either a real regression or a
+  staleness that has been lying to tests since it appeared.
+- Enforced in: this log.
