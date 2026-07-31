@@ -1,7 +1,19 @@
 # Fundamentals drill page — refinement spec
 
-Status: **proposal, not approved.** Supersedes the loose ticket set #2182/#2183/#2184/#2185
-by giving them an order and a shared constraint.
+Status: **APPROVED by the operator 2026-07-31** for autonomous implementation with no further
+human review between approval and PR. Supersedes the loose ticket set #2182/#2183/#2184/#2185 by
+giving them an order and a shared constraint.
+
+Approval scope and its limits:
+
+- Covers §1 (provable defects), §3 (per-chart decisions, including the §3.1 and §3.6 JUDGEMENT
+  items), §4 (reduced chart infrastructure), §5 (toggles), §6 (order).
+- Does **not** extend to anything this spec marks REJECTED (§2), to #2155 (type scale / font
+  pairing — a new visual identity, operator-gated), or to any live-trade, capital, or LLM-model
+  promotion decision.
+- Each JUDGEMENT item retains its stated kill condition. If the validation named in §3.1 / §3.6
+  fails at review, the item is **deleted**, not iterated on. Autonomy to build is not autonomy to
+  keep something that did not work.
 
 Operator challenge that produced this doc (2026-07-31): *"check that something can be genuinely
 improved and we're not just trying to make changes in the hope it's better."* Every item below is
@@ -268,10 +280,22 @@ Rationale (Codex): *"presentation work before data and visual integrity is prema
 
 ---
 
-## 7. Open questions for the operator
+## 7. Operator questions — ANSWERED 2026-07-31, none outstanding
 
-1. §3.1 headline strip and §3.6 per-share are **JUDGEMENT** calls. Both are cheap to build and easy
-   to delete. Build and review, or spec further first?
-2. Field-level coverage (§0) may be a bigger ticket than #2182's row-level gaps — `capex` at 39% and
-   `short_term_debt` at 12% cap several charts permanently. Should that be its own investigation
-   before any §3 work?
+1. **§3.1 headline strip and §3.6 per-share — build, or spec further first?**
+   → **BUILD.** Operator: *"if you've refined every chart, codex fully agrees with any changes …
+   then please crack on."* Both retain their §3 kill conditions: if the stated validation fails at
+   review, delete the item rather than iterate.
+
+2. **Does field-level coverage deserve its own investigation before §3 work?**
+   → **NO — folded, not filed.** The question was raised on draft 1's row-level figures, which §0.1
+   records as wrong. The corrected instrument-level measurement puts every §3 input at 69–89%, so
+   there is no separate coverage crisis to investigate. The one genuinely gated chart (P&L
+   composition, 47%) is handled by the §3.2 residual definition. Row-level interior gaps remain
+   tracked in #2182 and are not duplicated here.
+   Low single-field coverage (`short_term_debt` 12%, `capex` 39%) is already absorbed by the repo's
+   settled COALESCE treatments (§3.5, §3.9) and needs no new work.
+
+**No question in this spec is awaiting an operator answer.** Anything discovered during
+implementation that would need one is, by §0's standing rule, a reason to stop and write a handoff
+note — not to guess.
