@@ -178,6 +178,23 @@ def test_empty_batch_does_not_release(mocked_env) -> None:  # type: ignore[no-un
     mocked_env["release"].assert_not_called()
 
 
+def test_all_locked_batch_does_not_release(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """Codex ckpt-2: a NON-empty batch that is entirely
+    LOCKED_BY_SIBLING never loads a model here — and the sibling holding
+    those locks is plausibly mid-generation with the same local model, so
+    releasing would de-warm someone else's work."""
+
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield False  # sibling holds every one
+
+    with patch.object(scheduler, "instrument_lock", fake_lock):
+        scheduler.thesis_refresh()
+
+    mocked_env["generate_thesis"].assert_not_called()
+    mocked_env["release"].assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # _select_thesis_batch — pure scope/batch selection (spec §6)
 # ---------------------------------------------------------------------------

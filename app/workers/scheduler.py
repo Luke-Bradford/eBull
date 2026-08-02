@@ -3295,9 +3295,16 @@ def thesis_refresh() -> None:
         # per generation would cost seconds each), then is released in
         # ``finally`` — including when the batch dies mid-way, which is
         # exactly when the weights would otherwise sit resident until the
-        # next hourly fire. Reached only past the early no-batch return,
-        # so a run that loaded nothing never unloads another consumer's
-        # model on this shared box.
+        # next hourly fire.
+        #
+        # Gated on ``load_attempted``, set immediately before the ONLY
+        # call that can pull a model into memory. A non-empty batch is
+        # not sufficient: a batch that is entirely LOCKED_BY_SIBLING
+        # never generates here, and on this shared box the sibling
+        # holding those locks is plausibly mid-generation with the same
+        # local model — an unconditional release would de-warm it
+        # (Codex ckpt-2).
+        load_attempted = False
         try:
             for idx, item in enumerate(batch, start=1):
                 try:
@@ -3311,6 +3318,7 @@ def thesis_refresh() -> None:
                                 )
                                 locked_skipped += 1
                             else:
+                                load_attempted = True
                                 generate_thesis(
                                     instrument_id=item.instrument_id,
                                     conn=conn,
@@ -3334,7 +3342,8 @@ def thesis_refresh() -> None:
                     skipped += 1
                 report_progress(idx, total)
         finally:
-            release_local_models(clients)
+            if load_attempted:
+                release_local_models(clients)
 
         report_progress(total, total, force=True)
         tracker.row_count = generated
