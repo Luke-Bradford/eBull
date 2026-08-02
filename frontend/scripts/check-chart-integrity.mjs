@@ -43,8 +43,8 @@
  *
  * THE RATCHET — and why it is NOT the skip-list #987 killed
  * --------------------------------------------------------
- * Widening the scope in one step would fail every developer's pre-push on 29
- * pre-existing violations, and a gate that is red on day one gets disabled
+ * Widening the scope in one step would fail every developer's pre-push on all
+ * 27 pre-existing violations, and a gate that is red on day one gets disabled
  * rather than obeyed. So the pre-existing debt is capped, not exempted, by
  * `RATCHET` below.
  *
