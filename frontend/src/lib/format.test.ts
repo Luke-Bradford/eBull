@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   formatBigMoney,
+  formatBigNumber,
   formatEta,
   formatHeartbeatAge,
   formatRate,
@@ -143,6 +144,22 @@ describe("formatBigMoney", () => {
     // had ever reached this helper.
     expect(formatBigMoney(-10_746_000_000, "USD")).toBe("-US$10.75B");
     expect(formatBigMoney(-1_500, undefined)).toBe("-\u00a31.50K");
+  });
+
+  it("signs sub-thousand magnitudes, which have no abbreviation suffix", () => {
+    // The under-1e3 branch is the one the #2190 refactor rerouted. It used to
+    // `return n.toFixed(0)` directly, ignoring the `sign` variable the four
+    // abbreviated branches above it used — correct only because toFixed
+    // carries its own sign, and the sole path where the two formatters
+    // disagreed about who owns it. Both now render from one derivation, so
+    // this pins the branch that had no coverage.
+    expect(formatBigMoney(-500, "USD")).toBe("-US$500");
+    expect(formatBigNumber(-500)).toBe("-500");
+    // `-0` must format unsigned: `-0 < 0` is false, matching the old
+    // `(-0).toFixed(0) === "0"` behaviour. A split that keyed on
+    // `Object.is(n, -0)` or `1 / n < 0` would render "-US$0" here.
+    expect(formatBigMoney(-0, "USD")).toBe("US$0");
+    expect(formatBigNumber(-0)).toBe("0");
   });
 
   it("degrades instead of throwing on a non-ISO-4217 code", () => {

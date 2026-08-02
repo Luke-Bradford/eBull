@@ -2,8 +2,11 @@
  * Charts for the peer-comparison drill (#594): a multi-factor radar, a sector
  * heatmap (hand-rolled CSS grid, like the filings heatmap), and a same-day
  * peer-return scatter. All read the pure shapes from `@/lib/peerComparison` and
- * take every colour from `useChartTheme()` `theme.*` (never `lightTheme.*` —
- * prevention-log 1917).
+ * take every colour from the resolved `useChartTheme()` palette — never from
+ * either raw palette imported by name out of `@/lib/chartTheme`
+ * (prevention-log 1917). Named in prose, not quoted: `charts:check` is
+ * line-based, so a quoted example here is a violation with nothing to fix
+ * (#1908 PR-2, #2190).
  */
 import { type CSSProperties } from "react";
 import {
