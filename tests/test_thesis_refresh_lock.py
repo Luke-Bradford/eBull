@@ -41,6 +41,7 @@ def mocked_env():  # type: ignore[no-untyped-def]
         patch.object(scheduler, "psycopg") as psycopg_mod,
         patch.object(scheduler, "connect_job") as connect_job_mock,
         patch.object(scheduler, "generate_thesis") as gen,
+        patch.object(scheduler, "release_local_models") as release,
         patch.object(scheduler, "report_progress"),
     ):
         tracker = MagicMock()
@@ -73,6 +74,8 @@ def mocked_env():  # type: ignore[no-untyped-def]
             "tracked_cm": tracked_cm,
             "make_client": make_client,
             "prereq_skip": prereq_skip,
+            "release": release,
+            "candidates": candidates_mock,
         }
 
 
@@ -127,6 +130,69 @@ def test_provider_unresolvable_prereq_skips_before_tracked_job(mocked_env) -> No
     assert mocked_env["prereq_skip"].call_args.args[0] == scheduler.JOB_THESIS_REFRESH
     mocked_env["tracked_cm"].assert_not_called()
     mocked_env["generate_thesis"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Local-model release after the batch (#2187)
+# ---------------------------------------------------------------------------
+
+
+def test_batch_releases_local_model_when_done(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """#2187: the model stays warm across the batch, then is released —
+    otherwise qwen3:14b sits 9.77 GB wired for the ~33 idle min/hour."""
+
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield True
+
+    with patch.object(scheduler, "instrument_lock", fake_lock):
+        scheduler.thesis_refresh()
+
+    mocked_env["release"].assert_called_once_with(mocked_env["make_client"].return_value)
+
+
+def test_batch_releases_local_model_when_a_generation_raises(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """A failed batch is exactly when the weights would otherwise stay
+    resident until the next hourly fire — release runs in ``finally``."""
+    mocked_env["generate_thesis"].side_effect = RuntimeError("decode blew up")
+
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield True
+
+    with patch.object(scheduler, "instrument_lock", fake_lock):
+        scheduler.thesis_refresh()
+
+    assert mocked_env["tracker"].row_count == 0
+    mocked_env["release"].assert_called_once()
+
+
+def test_empty_batch_does_not_release(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """Nothing was loaded, so nothing is unloaded — on a shared box an
+    unconditional release would evict another consumer's model."""
+    mocked_env["candidates"].return_value = []
+
+    scheduler.thesis_refresh()
+
+    mocked_env["generate_thesis"].assert_not_called()
+    mocked_env["release"].assert_not_called()
+
+
+def test_all_locked_batch_does_not_release(mocked_env) -> None:  # type: ignore[no-untyped-def]
+    """Codex ckpt-2: a NON-empty batch that is entirely
+    LOCKED_BY_SIBLING never loads a model here — and the sibling holding
+    those locks is plausibly mid-generation with the same local model, so
+    releasing would de-warm someone else's work."""
+
+    @contextmanager
+    def fake_lock(conn, iid):  # type: ignore[no-untyped-def]
+        yield False  # sibling holds every one
+
+    with patch.object(scheduler, "instrument_lock", fake_lock):
+        scheduler.thesis_refresh()
+
+    mocked_env["generate_thesis"].assert_not_called()
+    mocked_env["release"].assert_not_called()
 
 
 # ---------------------------------------------------------------------------

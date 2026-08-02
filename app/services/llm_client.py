@@ -47,7 +47,11 @@ import psycopg
 
 from app.config import settings
 from app.services.anthropic_client import make_anthropic_client
-from app.services.runtime_config import get_runtime_config
+from app.services.runtime_config import (
+    get_runtime_config,
+    is_local_llm_endpoint,
+    local_llm_model_violation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,30 @@ LLM_REQUEST_TIMEOUT: httpx.Timeout = httpx.Timeout(
     read=600.0,
     write=30.0,
     pool=10.0,
+)
+
+# Native Ollama model-lifecycle route (#2187). NOT part of the
+# OpenAI-compatible surface — it lives at the server ROOT, not under
+# ``/v1``, so the release path strips the ``/v1`` suffix off
+# ``llm_base_url``. Verified empirically 2026-08-02 against ollama on
+# this box: ``POST {"model": M, "keep_alive": 0}`` answers
+# ``{"done_reason": "unload"}`` and the model leaves ``/api/ps`` within
+# seconds (ollama RSS 9.28 GB → 0.05 GB). Unload is ASYNCHRONOUS — the
+# model can still appear in ``/api/ps`` on the very next call, with
+# ``expires_at`` set to now.
+#
+# Passing ``keep_alive`` in the ``/v1/chat/completions`` BODY does not
+# work: it is not an OpenAI field and Ollama ignores it there. That is
+# why release is a separate call rather than a request parameter.
+_OLLAMA_UNLOAD_PATH = "/api/generate"
+
+# Release is best-effort housekeeping, not a generation — it must never
+# hold a job open the way a 600s decode window legitimately can.
+LLM_RELEASE_TIMEOUT: httpx.Timeout = httpx.Timeout(
+    connect=5.0,
+    read=30.0,
+    write=10.0,
+    pool=5.0,
 )
 
 # Empirical (spec "Empirical verification", 2026-07-09): qwen3's default
@@ -93,11 +121,20 @@ _LLM_CALL_SEMAPHORE = threading.Semaphore(1)
 
 
 class LLMProviderNotConfigured(RuntimeError):
-    """Raised when the configured provider cannot be constructed.
+    """Raised when the configured provider must not be used as configured.
 
-    Only reachable on the ``anthropic`` path with no ``ANTHROPIC_API_KEY``
-    set — the ``openai_compatible`` path needs no key (Ollama ignores it)
-    and its base URL / model columns are NOT NULL with defaults.
+    Two reachable causes:
+
+    * the ``anthropic`` path with no ``ANTHROPIC_API_KEY`` set (the
+      ``openai_compatible`` path needs no key — Ollama ignores it — and
+      its base URL / model columns are NOT NULL with defaults);
+    * a locally-hosted model outside ``LOCAL_LLM_MODEL_ALLOWLIST``
+      (#2187), which /config rejects but a direct SQL write could still
+      leave in the row.
+
+    ``thesis_refresh`` catches this and records a PREREQ_SKIP with the
+    reason, so a bad config row is a visible skip rather than an hourly
+    crash loop.
     """
 
 
@@ -121,6 +158,15 @@ class LLMClient(Protocol):
     model: str
 
     def complete(self, *, system: str, user: str, max_tokens: int) -> LLMCompletion: ...
+
+    def release_model(self) -> None:
+        """Best-effort: drop this model from the serving process's memory.
+
+        Part of the interface (not an ``OpenAICompatProvider`` detail) so
+        every implementation — including test fakes — has to answer the
+        question. Implementations that hold nothing locally no-op.
+        """
+        ...
 
 
 def strip_think_block(text: str) -> str:
@@ -199,6 +245,39 @@ class OpenAICompatProvider:
             completion_tokens=usage.get("completion_tokens"),
         )
 
+    def release_model(self) -> None:
+        """Unload this model from a LOCAL inference server (#2187).
+
+        Skipped for remote endpoints: the weights are not in our RAM and
+        the unload route is not ours to call. Holds the same
+        per-process semaphore as ``complete`` so a release can never
+        land mid-generation in this process.
+
+        Best-effort by contract — a failure here costs memory, never
+        correctness, so it is logged and swallowed. Non-Ollama local
+        servers (llama.cpp, vLLM) simply 404 this route and take that
+        path.
+        """
+        if not is_local_llm_endpoint(self._base_url):
+            return
+        root = self._base_url.removesuffix("/v1")
+        try:
+            with _LLM_CALL_SEMAPHORE:
+                response = httpx.post(
+                    f"{root}{_OLLAMA_UNLOAD_PATH}",
+                    json={"model": self.model, "keep_alive": 0},
+                    timeout=LLM_RELEASE_TIMEOUT,
+                )
+            response.raise_for_status()
+        except Exception:
+            logger.warning(
+                "llm: release of local model %s failed (best-effort, continuing)",
+                self.model,
+                exc_info=True,
+            )
+        else:
+            logger.info("llm: released local model %s", self.model)
+
 
 class AnthropicProvider:
     """Wraps the existing bounded-timeout Anthropic SDK client (#1479).
@@ -238,6 +317,10 @@ class AnthropicProvider:
             prompt_tokens=message.usage.input_tokens,
             completion_tokens=message.usage.output_tokens,
         )
+
+    def release_model(self) -> None:
+        """No-op: a cloud model holds no memory on this machine (#2187)."""
+        return
 
 
 @dataclass(frozen=True)
@@ -282,6 +365,21 @@ def make_llm_clients(conn: psycopg.Connection[Any]) -> LLMClientPair:
             writer=AnthropicProvider(sdk, model=cfg.llm_model_writer),
             critic=AnthropicProvider(sdk, model=cfg.llm_model_critic),
         )
+    # #2187 allow-list at the LOAD site, not just at /config: the PATCH
+    # guard cannot see a model written straight into the row by SQL, and
+    # this is the only place a model is actually pulled into memory.
+    for field_name, model in (
+        ("llm_model_writer", cfg.llm_model_writer),
+        ("llm_model_critic", cfg.llm_model_critic),
+    ):
+        violation = local_llm_model_violation(
+            provider=cfg.llm_provider,
+            base_url=cfg.llm_base_url,
+            model=model,
+            field=field_name,
+        )
+        if violation is not None:
+            raise LLMProviderNotConfigured(violation)
     return LLMClientPair(
         writer=OpenAICompatProvider(
             base_url=cfg.llm_base_url, model=cfg.llm_model_writer, api_key=settings.llm_api_key
@@ -290,3 +388,23 @@ def make_llm_clients(conn: psycopg.Connection[Any]) -> LLMClientPair:
             base_url=cfg.llm_base_url, model=cfg.llm_model_critic, api_key=settings.llm_api_key
         ),
     )
+
+
+def release_local_models(clients: LLMClientPair) -> None:
+    """Release every distinct model a completed batch left resident (#2187).
+
+    Called once per ``thesis_refresh`` batch rather than per generation:
+    the model must stay warm across the ≤5 back-to-back generations
+    (a reload costs seconds each), but must NOT stay warm for the ~33
+    idle minutes that follow — that residency is the OOM.
+
+    Deduplicated by model name because writer and critic share one model
+    by default (``DEFAULT_LLM_MODEL_WRITER`` == ``DEFAULT_LLM_MODEL_CRITIC``).
+    Each ``release_model`` is already best-effort; this never raises.
+    """
+    seen: set[str] = set()
+    for client in (clients.writer, clients.critic):
+        if client.model in seen:
+            continue
+        seen.add(client.model)
+        client.release_model()

@@ -25,10 +25,13 @@ covers all config-style changes.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 import psycopg
 import psycopg.rows
@@ -66,6 +69,45 @@ DEFAULT_LLM_PROVIDER = "openai_compatible"
 DEFAULT_LLM_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_LLM_MODEL_WRITER = "qwen3:14b"
 DEFAULT_LLM_MODEL_CRITIC = "qwen3:14b"
+
+# Hostnames that mean "the inference server runs on THIS machine". IP
+# LITERALS are not listed here — they are classified numerically below,
+# because a string set silently misses valid loopback spellings
+# (`127.1`, `2130706433`, anything else in 127.0.0.0/8) and each miss is
+# a silent bypass of the allow-list (Codex ckpt-2).
+_LOCAL_LLM_HOSTNAMES: frozenset[str] = frozenset({"localhost"})
+
+# Models the thesis job may load into LOCAL memory (#2187).
+#
+# Why a cap exists: `thesis_refresh` is hourly and runs ≤5 generations at
+# ≈260s each (app/workers/scheduler.py JOB_THESIS_REFRESH), so the chosen
+# model is resident ~27 of every 60 minutes — as WIRED unified memory on
+# Apple silicon, which cannot be paged out. On the 24 GB dev box that is
+# already the OOM budget; a bigger model turns thrash into a hard OOM.
+# `mistral-small:latest` (14.33 GB pulled locally) is the concrete blob
+# this excludes. The ceiling here is qwen3:14b at 9.28 GB.
+#
+# This is a code constant, not config, deliberately: it is the guard
+# AGAINST config drift, so it must not itself be settable through the
+# surface it protects. Widening it is a reviewed one-line edit — measure
+# the model's resident size (`ollama list`) against the box first.
+#
+# Match is EXACT, tag included, and must stay that way: an Ollama tag
+# carries the quantization, and quantization dominates resident size.
+# `qwen3:14b` is Q4_K_M at 9.28 GB; a `qwen3:14b-q8_0` sibling is ~15 GB.
+# A family-or-prefix match would therefore admit the exact class of blob
+# this list exists to exclude.
+LOCAL_LLM_MODEL_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "qwen3:14b",
+        "qwen3:8b",
+        "deepseek-r1:14b",
+        "deepseek-r1:8b",
+        "phi4:14b",
+        "gemma3:12b",
+        "llama3.1:8b",
+    }
+)
 
 # Boot-recovery audit attribution. Operators investigating the audit log can
 # search for this exact reason to find re-seed events caused by a vanished
@@ -107,6 +149,67 @@ class RuntimeConfig:
 
 def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
+
+
+def is_local_llm_endpoint(base_url: str) -> bool:
+    """True when ``base_url`` points at an inference server on this machine.
+
+    Gates both #2187 controls (the model allow-list and the post-batch
+    model release) — a remote endpoint holds its weights in someone
+    else's RAM and exposes no unload route we own.
+
+    IP hosts are classified numerically (``is_loopback`` / unspecified),
+    not by string match, so every spelling of loopback resolves the same
+    way. ``socket.inet_aton`` is used for the IPv4 pass because it
+    accepts the shorthand and integer forms ``ipaddress`` rejects
+    (``127.1``, ``2130706433``); it parses numerically and never performs
+    a DNS lookup.
+
+    Known limit: a NAMED host other than ``localhost`` that happens to
+    resolve to this machine (``mymac.local``) reads as remote. Resolving
+    it would put DNS in a config-validation path. The rule targets drift
+    on the local-first default, not a determined operator — a deliberate
+    remote-looking pointer at your own box opts out of both controls.
+    """
+    try:
+        host = urlsplit(base_url).hostname  # lowercased; IPv6 brackets stripped
+    except ValueError:
+        # Malformed URL: not provably local, so no local-only rule applies.
+        return False
+    if host is None:
+        return False
+    if host in _LOCAL_LLM_HOSTNAMES:
+        return True
+    try:
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv4Address(socket.inet_aton(host))
+    except OSError:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False  # a hostname we cannot classify without DNS
+    return address.is_loopback or address.is_unspecified
+
+
+def local_llm_model_violation(*, provider: str, base_url: str, model: str, field: str) -> str | None:
+    """Return an error message if ``model`` may not be loaded locally, else None.
+
+    Single source of truth for the #2187 allow-list rule. Callers pick
+    their own failure mode from it: the /config PATCH path raises
+    ``ValueError`` (→ HTTP 400), while ``make_llm_clients`` raises
+    ``LLMProviderNotConfigured`` so ``thesis_refresh`` records a
+    PREREQ_SKIP instead of crash-looping on a bad config row.
+    """
+    if provider != "openai_compatible" or not is_local_llm_endpoint(base_url):
+        return None
+    if model in LOCAL_LLM_MODEL_ALLOWLIST:
+        return None
+    return (
+        f"{field}={model!r} is not in the local-model allow-list "
+        f"{sorted(LOCAL_LLM_MODEL_ALLOWLIST)} (#2187: a locally-hosted model is "
+        f"resident ~27 min/hour as wired memory; oversized models OOM the box). "
+        f"Widen LOCAL_LLM_MODEL_ALLOWLIST in app/services/runtime_config.py after "
+        f"checking the model's size against available RAM."
+    )
 
 
 def ensure_runtime_config_singleton(conn: psycopg.Connection[Any]) -> None:
@@ -358,6 +461,23 @@ def update_runtime_config(
         new_llm_base_url = llm_base_url if llm_base_url is not None else str(current["llm_base_url"])
         new_llm_model_writer = llm_model_writer if llm_model_writer is not None else str(current["llm_model_writer"])
         new_llm_model_critic = llm_model_critic if llm_model_critic is not None else str(current["llm_model_critic"])
+
+        # #2187 allow-list, evaluated on the RESULTING triple, not on the
+        # provided fields: a PATCH that only moves llm_base_url from a
+        # remote endpoint to localhost newly subjects the (unchanged)
+        # model columns to the local-memory rule.
+        for field_name, new_model in (
+            ("llm_model_writer", new_llm_model_writer),
+            ("llm_model_critic", new_llm_model_critic),
+        ):
+            violation = local_llm_model_violation(
+                provider=new_llm_provider,
+                base_url=new_llm_base_url,
+                model=new_model,
+                field=field_name,
+            )
+            if violation is not None:
+                raise ValueError(violation)
 
         # No-op patch detection: if every provided field already matches the
         # current row, refuse the patch.  Otherwise the UPDATE would silently

@@ -22,6 +22,7 @@ from app.services.llm_client import (
     OpenAICompatProvider,
     make_llm_clients,
     normalize_completion_text,
+    release_local_models,
     strip_code_fence,
     strip_think_block,
 )
@@ -188,6 +189,76 @@ class TestOpenAICompatProvider:
 
 
 # ---------------------------------------------------------------------------
+# Model release (#2187)
+# ---------------------------------------------------------------------------
+
+_OLLAMA_ROOT = "http://localhost:11434"
+
+
+class TestReleaseModel:
+    @respx.mock
+    def test_local_model_unloaded_at_server_root(self) -> None:
+        # The unload route is Ollama-native and lives at the ROOT, not
+        # under /v1 — a request to {base_url}/api/generate would 404.
+        route = respx.post(f"{_OLLAMA_ROOT}/api/generate").mock(
+            return_value=httpx.Response(200, json={"done_reason": "unload"})
+        )
+        OpenAICompatProvider(base_url=_BASE_URL, model="qwen3:14b").release_model()
+
+        assert route.called
+        assert json.loads(route.calls.last.request.content) == {"model": "qwen3:14b", "keep_alive": 0}
+
+    @respx.mock
+    def test_remote_endpoint_is_never_unloaded(self) -> None:
+        # Someone else's RAM, someone else's lifecycle: no call at all.
+        route = respx.post("https://llm.example.com/api/generate")
+        OpenAICompatProvider(base_url="https://llm.example.com/v1", model="qwen3:14b").release_model()
+        assert not route.called
+
+    @respx.mock
+    def test_failure_is_swallowed(self) -> None:
+        # Best-effort by contract: a failed release costs memory, never
+        # the batch that just succeeded.
+        respx.post(f"{_OLLAMA_ROOT}/api/generate").mock(return_value=httpx.Response(500, text="boom"))
+        OpenAICompatProvider(base_url=_BASE_URL, model="qwen3:14b").release_model()
+
+    @respx.mock
+    def test_transport_error_is_swallowed(self) -> None:
+        respx.post(f"{_OLLAMA_ROOT}/api/generate").mock(side_effect=httpx.ConnectError("down"))
+        OpenAICompatProvider(base_url=_BASE_URL, model="qwen3:14b").release_model()
+
+    def test_anthropic_release_is_a_noop(self) -> None:
+        sdk = MagicMock()
+        AnthropicProvider(sdk, model="claude-sonnet-4-6").release_model()
+        assert sdk.mock_calls == []
+
+    @respx.mock
+    def test_pair_with_shared_model_releases_once(self) -> None:
+        route = respx.post(f"{_OLLAMA_ROOT}/api/generate").mock(
+            return_value=httpx.Response(200, json={"done_reason": "unload"})
+        )
+        release_local_models(make_llm_clients(_config_conn(provider="openai_compatible")))
+        assert route.call_count == 1
+
+    @respx.mock
+    def test_pair_with_split_models_releases_each(self) -> None:
+        route = respx.post(f"{_OLLAMA_ROOT}/api/generate").mock(
+            return_value=httpx.Response(200, json={"done_reason": "unload"})
+        )
+        clients = make_llm_clients(
+            _config_conn(
+                provider="openai_compatible",
+                writer_model="deepseek-r1:14b",
+                critic_model="qwen3:14b",
+            )
+        )
+        release_local_models(clients)
+        assert route.call_count == 2
+        released = {json.loads(c.request.content)["model"] for c in route.calls}
+        assert released == {"deepseek-r1:14b", "qwen3:14b"}
+
+
+# ---------------------------------------------------------------------------
 # AnthropicProvider
 # ---------------------------------------------------------------------------
 
@@ -288,6 +359,32 @@ class TestMakeLLMClients:
         )
         assert clients.writer.model == "deepseek-r1:14b"
         assert clients.critic.model == "qwen3:14b"
+
+    def test_local_model_outside_allowlist_rejected(self) -> None:
+        # #2187: /config rejects this, but a direct SQL write could still
+        # leave it in the row — the load site must fail closed too, as
+        # LLMProviderNotConfigured so thesis_refresh records a PREREQ_SKIP.
+        conn = _config_conn(provider="openai_compatible", writer_model="mistral-small:latest")
+        with pytest.raises(LLMProviderNotConfigured, match="allow-list"):
+            make_llm_clients(conn)
+
+    def test_critic_model_outside_allowlist_rejected(self) -> None:
+        conn = _config_conn(provider="openai_compatible", critic_model="mistral-small:latest")
+        with pytest.raises(LLMProviderNotConfigured, match="llm_model_critic"):
+            make_llm_clients(conn)
+
+    def test_remote_endpoint_exempt_from_allowlist(self) -> None:
+        # Not our RAM — an arbitrary model name on a remote vLLM/OpenAI
+        # endpoint must not be blocked by a local-memory rule.
+        clients = make_llm_clients(
+            _config_conn(
+                provider="openai_compatible",
+                base_url="https://llm.example.com/v1",
+                writer_model="some-huge-remote-model",
+                critic_model="some-huge-remote-model",
+            )
+        )
+        assert clients.writer.model == "some-huge-remote-model"
 
     def test_anthropic_path_requires_key(self) -> None:
         conn = _config_conn(provider="anthropic", writer_model="claude-sonnet-4-6")

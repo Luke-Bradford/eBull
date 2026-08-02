@@ -14,6 +14,7 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 
+import { ApiError } from "@/api/client";
 import { patchConfig } from "@/api/config";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { useConfig } from "@/lib/ConfigContext";
@@ -39,7 +40,13 @@ export function LlmProviderSection(): JSX.Element {
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [error, setError] = useState(false);
+  // The server's own `detail`, not a generic phrase (OrderEntryModal
+  // pattern). #2187 made rejection an ordinary operator path — a model
+  // outside LOCAL_LLM_MODEL_ALLOWLIST is a plausible thing to type, and
+  // the 400 body names the offending field, the allowed set, and where
+  // to widen it. Dropping that into the console only would leave the
+  // operator staring at a form that just says "failed".
+  const [error, setError] = useState<string | null>(null);
 
   const runtime = config.data?.runtime ?? null;
   const displayedProvider = provider ?? runtime?.llm_provider ?? "openai_compatible";
@@ -55,7 +62,7 @@ export function LlmProviderSection(): JSX.Element {
     e.preventDefault();
     if (operatorName === null) return;
     setSaving(true);
-    setError(false);
+    setError(null);
     setSuccess(false);
     try {
       // Only send fields that actually changed — the backend rejects
@@ -77,7 +84,11 @@ export function LlmProviderSection(): JSX.Element {
       config.refetch();
     } catch (err: unknown) {
       console.error("Failed to update LLM provider config", err);
-      setError(true);
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to save LLM config. Check the browser console for details.",
+      );
     } finally {
       setSaving(false);
     }
@@ -202,12 +213,12 @@ export function LlmProviderSection(): JSX.Element {
                 LLM provider config updated.
               </p>
             )}
-            {error && (
+            {error !== null && (
               <p
                 role="alert"
                 className="rounded bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-xs text-red-700 dark:text-red-300"
               >
-                Failed to save LLM config. Check the browser console for details.
+                {error}
               </p>
             )}
           </form>

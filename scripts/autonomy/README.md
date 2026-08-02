@@ -29,11 +29,31 @@ launchctl list | grep jobs-daemon                       # confirm loaded
 tail -f var/autonomy-logs/launchd.jobs-daemon.err.log   # scheduler ticks (stderr)
 ```
 
+Restart (after a jobs/parser merge, or any time you want a clean boot):
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.ebull.jobs-daemon"
+```
+
 Stop:
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.ebull.jobs-daemon.plist
 ```
+
+## Exactly one launcher (#2187)
+
+This agent is the only thing that may start the jobs daemon. The VS Code
+`stack: jobs` task no longer launches its own supervisor — it runs the
+`kickstart` above and tails the agent's log, so closing that panel does not
+stop the daemon.
+
+Why it matters: when both launched a daemon, the task `kill -9`-ed both process
+patterns and started `app.jobs.dev_reload`, `KeepAlive` respawned this agent
+inside `ThrottleInterval`, and whichever lost the PG advisory-lock race stayed
+lost — `dev_reload`'s supervisor only respawns its child on a `*.py` change, not
+on a tick, so it parked at ~19 MB forever. Both processes looked healthy while
+the auto-reload-on-merge from #2144 was silently dead for weeks.
 
 Safe to run this daemon WITHOUT the AI loop and with the kill switch ON — the
 kill switch gates only the trade jobs (`morning_candidate_review`,
