@@ -115,7 +115,7 @@ export function SentimentTrendChart({ series }: { series: SentimentSeries }): JS
           <ReferenceLine y={0} stroke={theme.borderColor} />
           <Tooltip content={<SentimentTooltip />} cursor={{ stroke: theme.gridLine }} />
           <Area
-            type="monotone"
+            type="linear"
             dataKey="rolling"
             baseValue={0}
             stroke="url(#newsSentStroke)"
