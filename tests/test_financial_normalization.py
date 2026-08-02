@@ -8,6 +8,7 @@ from decimal import Decimal
 from app.services.fundamentals import (
     FactRow,
     _derive_periods_from_facts,
+    _is_plausible_fiscal_year,
     _resolve_period_fiscal_year,
 )
 
@@ -2090,3 +2091,116 @@ class TestFiscalYearGapFill1914:
         collided = [p for p in periods if p.period_type == "FY" and p.fiscal_year == 2024]
         assert {p.period_end_date for p in collided} == {date(2024, 6, 30), date(2024, 12, 31)}
         assert any("fiscal_year collision" in r.message for r in caplog.records)
+
+
+class TestFiscalYearRangeGuard2192:
+    """#2192 — a filer's mis-tagged DocumentFiscalYearFocus must never become
+    a fiscal-year label or an anchor.
+
+    Source rule: SEC companyfacts ``fy`` is the filing's DEI focus (#682) and
+    SEC republishes it verbatim, errors included — data.sec.gov itself serves
+    PRTH ``fy=43830`` (the Excel serial for that filing's own 2019-12-31
+    period end) and WTBA ``fy=2107``. The values below are those real ones.
+    """
+
+    def test_plausibility_bounds(self) -> None:
+        assert _is_plausible_fiscal_year(2019) is True
+        assert _is_plausible_fiscal_year(1995) is True
+        assert _is_plausible_fiscal_year(2100) is True
+        # SEC's own `fy: 0` for facts from filings with no fiscal-period focus.
+        assert _is_plausible_fiscal_year(0) is False
+        # Excel serial for 2019-12-31, as published by SEC for PRTH.
+        assert _is_plausible_fiscal_year(43830) is False
+        # WTBA's digit transposition of 2017.
+        assert _is_plausible_fiscal_year(2107) is False
+        assert _is_plausible_fiscal_year(None) is False
+
+    def test_no_anchor_implausible_stamp_degrades_to_period_end_year(self) -> None:
+        # Previously returned the stamp verbatim, which sql/243's CHECK now
+        # rejects outright — so the row would fail to store at all.
+        assert _resolve_period_fiscal_year({}, "FY", date(2019, 12, 31), 43830) == 2019
+
+    def test_no_anchor_plausible_stamp_still_wins_over_period_end_year(self) -> None:
+        # An off-December filer labels 2025-02-01 as FY2024; the stamp must
+        # still beat the calendar year when it is usable.
+        assert _resolve_period_fiscal_year({}, "FY", date(2025, 2, 1), 2024) == 2024
+
+    def test_implausible_stamp_never_becomes_an_anchor(self) -> None:
+        """The PRTH shape: a 10-K whose OWN primary period is stamped with an
+        Excel serial. The exact-anchor path would have returned it verbatim,
+        and the anchor would then have poisoned the comparative by calendar
+        delta (43830 - 1) rather than labelling it 2018."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("400"),
+                period_end="2018-12-31",
+                period_start="2018-01-01",
+                frame="CY2018",
+                fiscal_year=43830,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="P1",
+                filed_date="2020-03-16",
+            ),
+            _fact(
+                concept="Revenues",
+                val=Decimal("500"),
+                period_end="2019-12-31",
+                period_start="2019-01-01",
+                frame="CY2019",
+                fiscal_year=43830,
+                fiscal_period="FY",
+                form_type="10-K",
+                accession_number="P1",
+                filed_date="2020-03-16",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        fy_labels = sorted(p.fiscal_year for p in periods if p.period_type == "FY")
+        assert fy_labels == [2018, 2019]
+
+    def test_implausible_stamp_on_a_quarter_is_derived_not_stored(self) -> None:
+        """8 of the 12 damaged rows were quarters: #1914 confined re-derivation
+        to FY, so the quarterly path passed the stamp straight through."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("100"),
+                period_end="2019-03-31",
+                period_start="2019-01-01",
+                frame="CY2019Q1",
+                fiscal_year=43555,
+                fiscal_period="Q1",
+                form_type="10-Q",
+                accession_number="Q1",
+                filed_date="2019-05-10",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        q1 = [p for p in periods if p.period_type == "Q1"]
+        assert len(q1) == 1
+        assert q1[0].fiscal_year == 2019
+
+    def test_plausible_quarter_stamp_is_passed_through_byte_identical(self) -> None:
+        """The #1914 invariant: the quarter SET must not move. A sane stamp
+        still wins even where it disagrees with the calendar year (an
+        off-December filer's Q1 ending Feb 2024 is fiscal 2023)."""
+        facts = [
+            _fact(
+                concept="Revenues",
+                val=Decimal("100"),
+                period_end="2024-02-03",
+                period_start="2023-11-01",
+                frame=None,
+                fiscal_year=2023,
+                fiscal_period="Q1",
+                form_type="10-Q",
+                accession_number="Q1",
+                filed_date="2024-03-10",
+            ),
+        ]
+        periods = _derive_periods_from_facts(facts, reported_currency="USD")
+        q1 = [p for p in periods if p.period_type == "Q1"]
+        assert len(q1) == 1
+        assert q1[0].fiscal_year == 2023
