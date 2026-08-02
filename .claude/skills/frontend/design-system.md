@@ -46,6 +46,20 @@ Two things worth keeping from the drain:
 
 Describe these props and palettes **in prose** inside doc comments — never by quoting the literal. The gate is line-based, so a quoted example is a violation with nothing to fix (prevention log → #1908 PR-2; `Sparkline.tsx` was rewritten this way in #2190).
 
+## A display-unit mode is a property of the AXIS, not of one series (#2209)
+
+When a chart gains a display-unit mode — % change, rebased-to-100, log scale, currency conversion — the transform belongs to every series sharing that price scale. Teaching one overlay family and missing its sibling puts two units on one axis.
+
+The live failure: `ChartWorkspaceCanvas` compare mode re-bases the primary series to % change. The **trend** overlays (regression + channel) branched on it; the **indicator** overlays (SMA/EMA) did not and kept plotting absolute price. The single right-hand scale then spanned both — measured −80…80 with indicators off, −200…350 with them on, squashing the compare series the operator opened the mode to read into ~15% of the canvas. An axis label of `250.00` meant percent low and dollars high with nothing marking the boundary.
+
+Nothing fails on this: every value is a valid `number`, typecheck is blind, and lightweight-charts cannot render in jsdom, so **only looking at the browser catches it**. Rules:
+
+- Grep every `addSeries` / `setData` call site that targets the same price scale and confirm each takes the branch.
+- Derive it from ONE named flag (`compareMode`), not a re-derived `compares.length > 0` per effect — one flag is greppable, and it is a boolean rather than an array identity that changes every render.
+- Pin it: assert the union range of (primary ∪ every overlay) equals the primary's range. Enabling an overlay must not widen the axis. (`ChartWorkspaceCanvas.test.tsx` → "normalized indicators — compare mode invariants".)
+
+Same family as the prevention log's #1955 sibling-gap class, in the rendering layer.
+
 ## Chart series must not draw unreported values
 
 A financial series (quarterly/annual statements, any discrete observation) is points, not a sampled continuum. Recharts' `monotone` curve draws a smooth path *between* reported values, so the rendered line passes through magnitudes the issuer never reported and can overshoot a local extreme — and `dot={false}` removes the only cue distinguishing data from drawing. Use the **linear** curve type, and show dots while the series is short enough for them to read as markers (~40 points; above that they merge into a band). Same gate: `charts:check`.

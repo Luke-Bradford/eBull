@@ -700,10 +700,26 @@ export function ChartWorkspaceCanvas({
   // it, toggling indicators on a re-fetched range would compute SMAs over
   // the previous range's `cleanRowsRef`. Do not "simplify" by removing
   // `rows` from the deps.
+  //
+  // In compare mode the primary series is drawn as % change and the single
+  // right-hand price scale carries that unit, so the moving averages are
+  // computed on the normalized values too (#2209). Plotting absolute price
+  // here forced the axis to span dollars and percent at once, which both
+  // rendered the overlays against nothing comparable AND stretched the scale
+  // until the compare series themselves were unreadable. Same treatment the
+  // trend-overlay effect below already applies — keep the two families in
+  // agreement about what compare mode does to the scale.
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    const closes = cleanRowsRef.current.map((b) => b.close);
+    const rawCloses = cleanRowsRef.current.map((b) => b.close);
+    // normalizeToPercent nulls the WHOLE array (base 0 or non-finite) or none
+    // of it, so this filter never desynchronises `values[i]` from
+    // `cleanRowsRef.current[i]` — it either keeps every index or yields [],
+    // in which case the indicators simply draw no points.
+    const closes = compareMode
+      ? normalizeToPercent(rawCloses).filter((v): v is number => v !== null)
+      : rawCloses;
 
     // Remove series no longer enabled.
     for (const [id, series] of indicatorRefs.current.entries()) {
@@ -737,7 +753,11 @@ export function ChartWorkspaceCanvas({
       }
       series.setData(data);
     }
-  }, [indicators, clean]);
+    // `compareMode` is a dep: entering or leaving compare mode changes the unit
+    // the indicators are computed in, and `clean` does not necessarily change
+    // on that transition (adding a compare ticker leaves the primary rows
+    // untouched). Without it the overlays would keep the previous mode's unit.
+  }, [indicators, clean, compareMode]);
 
   // Trend overlays: linear regression + range channel.
   // In compare mode the visible axis is % change, so we compute trends on
@@ -753,7 +773,7 @@ export function ChartWorkspaceCanvas({
     // non-finite; in that degenerate case filter produces [] and the trend
     // helpers return empty arrays — overlays simply render no points, which is
     // correct.
-    const closes = compares.length > 0
+    const closes = compareMode
       ? normalizeToPercent(rawCloses).filter((v): v is number => v !== null)
       : rawCloses;
 
@@ -826,7 +846,10 @@ export function ChartWorkspaceCanvas({
         channelLowRef.current = null;
       }
     }
-  }, [showRegression, showChannel, clean, compares]);
+    // `compareMode` rather than `compares`: only the mode flip changes the unit
+    // these are computed in, and the array identity changes on every render,
+    // which re-ran this whole effect needlessly. Matches the indicator effect.
+  }, [showRegression, showChannel, clean, compareMode]);
 
   // Live last-bar updates (#602). Disabled in compare mode — when the
   // candle/volume series are hidden in favour of normalized lines,
