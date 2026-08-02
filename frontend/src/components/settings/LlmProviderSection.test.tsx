@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
+import { ApiError } from "@/api/client";
 import { patchConfig } from "@/api/config";
 import type { ConfigResponse } from "@/api/types";
 import { LlmProviderSection } from "@/components/settings/LlmProviderSection";
@@ -186,6 +187,28 @@ describe("LlmProviderSection", () => {
     await user.click(screen.getByRole("button", { name: /save llm config/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/failed to save llm config/i);
+  });
+
+  it("surfaces the server's own rejection detail (#2187 allow-list)", async () => {
+    // The 400 body names the field, the allowed set, and where to widen
+    // it. A generic phrase would strand the operator on a form that just
+    // says "failed" after typing a plausible model name.
+    mockedPatchConfig.mockRejectedValue(
+      new ApiError(
+        400,
+        "llm_model_writer='mistral-small:latest' is not in the local-model allow-list ['qwen3:14b']",
+      ),
+    );
+    const user = userEvent.setup();
+    renderSection();
+
+    const writerInput = screen.getByDisplayValue("qwen3:14b");
+    await user.clear(writerInput);
+    await user.type(writerInput, "mistral-small:latest");
+    await user.type(screen.getByPlaceholderText("Why are you changing this?"), "try a bigger model");
+    await user.click(screen.getByRole("button", { name: /save llm config/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/not in the local-model allow-list/i);
   });
 
   it("blocks save when no operator is authenticated (#1992)", () => {

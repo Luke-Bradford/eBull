@@ -68,6 +68,10 @@ class FakeClient:
     def __init__(self, script: list[LLMCompletion | Exception]) -> None:
         self._script = list(script)
         self.calls = 0
+        self.releases = 0
+
+    def release_model(self) -> None:
+        self.releases += 1
 
     def complete(self, *, system: str, user: str, max_tokens: int) -> LLMCompletion:
         self.calls += 1

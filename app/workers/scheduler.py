@@ -54,7 +54,7 @@ from app.services.exchange_directory import refresh_exchange_directory
 from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
-from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients
+from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
 from app.services.market_data import refresh_market_data
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
@@ -3291,40 +3291,50 @@ def thesis_refresh() -> None:
         skipped = 0
         locked_skipped = 0
         total = len(batch)
-        for idx, item in enumerate(batch, start=1):
-            try:
-                with connect_job() as conn:
-                    with instrument_lock(conn, item.instrument_id) as acquired:
-                        if not acquired:
-                            logger.info(
-                                "thesis_refresh: LOCKED_BY_SIBLING symbol=%s instrument_id=%d",
-                                item.symbol,
-                                item.instrument_id,
-                            )
-                            locked_skipped += 1
-                        else:
-                            generate_thesis(
-                                instrument_id=item.instrument_id,
-                                conn=conn,
-                                clients=clients,
-                                trigger="scheduled",
-                            )
-                            # Thesis row is committed by generate_thesis
-                            # (#293). Rankings pick the fresh thesis up at
-                            # the next morning_candidate_review scoring
-                            # run (#2065 — the cascade rerank path is
-                            # gone; that daily recompute was already the
-                            # only rerank landing in practice).
-                            generated += 1
-            except Exception:
-                logger.warning(
-                    "thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
-                    item.symbol,
-                    item.instrument_id,
-                    exc_info=True,
-                )
-                skipped += 1
-            report_progress(idx, total)
+        # #2187: the local model stays warm for the whole batch (a reload
+        # per generation would cost seconds each), then is released in
+        # ``finally`` — including when the batch dies mid-way, which is
+        # exactly when the weights would otherwise sit resident until the
+        # next hourly fire. Reached only past the early no-batch return,
+        # so a run that loaded nothing never unloads another consumer's
+        # model on this shared box.
+        try:
+            for idx, item in enumerate(batch, start=1):
+                try:
+                    with connect_job() as conn:
+                        with instrument_lock(conn, item.instrument_id) as acquired:
+                            if not acquired:
+                                logger.info(
+                                    "thesis_refresh: LOCKED_BY_SIBLING symbol=%s instrument_id=%d",
+                                    item.symbol,
+                                    item.instrument_id,
+                                )
+                                locked_skipped += 1
+                            else:
+                                generate_thesis(
+                                    instrument_id=item.instrument_id,
+                                    conn=conn,
+                                    clients=clients,
+                                    trigger="scheduled",
+                                )
+                                # Thesis row is committed by generate_thesis
+                                # (#293). Rankings pick the fresh thesis up at
+                                # the next morning_candidate_review scoring
+                                # run (#2065 — the cascade rerank path is
+                                # gone; that daily recompute was already the
+                                # only rerank landing in practice).
+                                generated += 1
+                except Exception:
+                    logger.warning(
+                        "thesis_refresh: failed for symbol=%s instrument_id=%d, skipping",
+                        item.symbol,
+                        item.instrument_id,
+                        exc_info=True,
+                    )
+                    skipped += 1
+                report_progress(idx, total)
+        finally:
+            release_local_models(clients)
 
         report_progress(total, total, force=True)
         tracker.row_count = generated

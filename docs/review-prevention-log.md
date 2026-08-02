@@ -2424,3 +2424,73 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
   account for every change; a value diff is either a real regression or a
   staleness that has been lying to tests since it appeared.
 - Enforced in: this log.
+
+---
+
+### Two supervisors for one singleton: the loser parks forever and its feature dies silently
+- First seen in: #2187 (2026-08-02). A launchd agent (`com.ebull.jobs-daemon`,
+  `KeepAlive` + `ThrottleInterval=60`) and the VS Code `stack: jobs` task both
+  launched the jobs daemon. The task `kill -9`-ed **both** process patterns
+  (`app\.jobs(\.dev_reload)?`) and started `app.jobs.dev_reload`; launchd
+  respawned its own copy inside the throttle window and won the PG
+  advisory-lock race. `dev_reload`'s child FATAL-exited, and its supervisor
+  only respawns on a `*.py` change — never on a tick — so it parked at ~19 MB
+  indefinitely. Net effect: **#2144's auto-reload-on-merge was dead for weeks
+  while both processes looked healthy**, and every jobs/parser merge silently
+  went back to needing the manual restart #2144 existed to remove.
+- Symptom: a process singleton guarded by an advisory lock / PID file has more
+  than one launcher (init system + IDE task + `nohup` runbook line). Because
+  the lock does its job, there is no error and no duplicate work — the visible
+  state is one healthy daemon. What is lost is whatever the *losing*
+  supervisor provided (a file watcher, a log tail, a restart policy), and that
+  loss is invisible precisely because the lock made the failure graceful.
+  `pgrep`-ing for the daemon confirms "it's running" and tells you nothing.
+- Prevention: a supervised singleton gets **exactly one launcher**, named in
+  the launcher's own comment, and every other entry point delegates to it
+  rather than starting its own copy (here: `.vscode/tasks.json` runs
+  `launchctl kickstart -k gui/$UID/com.ebull.jobs-daemon` and tails the
+  agent's log). When adding a supervisor wrapper around an existing daemon,
+  check for other launchers **before** shipping: `launchctl list | grep <name>`,
+  `grep -rn "<module>" .vscode/ scripts/ docs/`. Judge a supervisor by the
+  behaviour it provides, not by the child being alive — the #2144 tell was
+  the supervisor's RSS parked at ~19 MB, never that the daemon was down.
+- Enforced in: this log; `scripts/autonomy/com.ebull.jobs-daemon.plist`
+  (the "THERE MUST BE EXACTLY ONE LAUNCHER" block);
+  `scripts/autonomy/README.md` ("Exactly one launcher"); `.vscode/tasks.json`
+  (`stack: jobs` delegates to `launchctl kickstart`).
+
+---
+
+### A resident local-LLM model is a standing memory cost, not a per-call one
+- First seen in: #2187 (2026-08-02). The OOM was diagnosed twice from the
+  wrong premise — first "something set a 12h `keep_alive`", then "a duplicate
+  daemon double-polls". Both were falsified by measurement: `api/ps` showed
+  `expires_at = now + 5m` **sliding** (the default timer, refreshed by every
+  request), and the launchd log showed 4-5 theses/hour with zero variance
+  across 24 hours. The real mechanism needed no bug at all — `thesis_refresh`
+  is hourly with ≤5 generations at ≈260s each, so the model is resident ~27 of
+  every 60 minutes, 24/7, **by design**. On Apple silicon that is WIRED
+  unified memory, which cannot be paged out.
+- Symptom: an inference-server model appears to be "stuck" in memory. Every
+  keep-alive/TTL lever looks like the fix and none of them help, because a
+  polling caller refreshes the rolling timer faster than it can expire. The
+  TTL only ever governs the tail after the LAST call, so tuning it is close to
+  a no-op whenever the batch is longer than the TTL.
+- Prevention: before tuning any TTL, measure the caller's duty cycle
+  (`grep`-count the job's completions per hour in its log) and compare it to
+  the TTL. If duty-cycle ≫ TTL, the lever is an **explicit release after the
+  batch**, not a shorter timer. Release once per batch, never per call — the
+  model must stay warm across back-to-back generations. Put the release in
+  `finally` (a batch that dies mid-way is exactly when the weights would
+  otherwise sit until the next fire) and behind the "did we load anything?"
+  early return, so a no-op run cannot evict another consumer's model on a
+  shared box. Note that `keep_alive` is **not** an OpenAI field: sending it in
+  a `/v1/chat/completions` body looks like a fix and does nothing — Ollama's
+  unload route is native (`POST /api/generate {"keep_alive": 0}`) and lives at
+  the server ROOT, not under `/v1`.
+- Enforced in: this log;
+  `app/services/llm_client.py::OpenAICompatProvider.release_model` +
+  `release_local_models`; `app/workers/scheduler.py::thesis_refresh` (the
+  `finally` release); `tests/test_thesis_refresh_lock.py`
+  (`test_batch_releases_local_model_when_a_generation_raises`,
+  `test_empty_batch_does_not_release`).

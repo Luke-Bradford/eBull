@@ -223,6 +223,10 @@ class _FakeLLMClient:
     def __init__(self, completions: list[LLMCompletion | Exception]) -> None:
         self._completions = list(completions)
         self.calls: list[dict[str, object]] = []
+        self.releases = 0
+
+    def release_model(self) -> None:
+        self.releases += 1
 
     def complete(self, *, system: str, user: str, max_tokens: int) -> LLMCompletion:
         self.calls.append({"system": system, "user": user, "max_tokens": max_tokens})
