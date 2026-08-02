@@ -74,8 +74,9 @@
  * Burn-down progress (#2197 tracks the drain): `PerformanceChart.tsx` (2 curve)
  * done in #2190 — it was first because it renders on an operator-facing
  * statement. `dividendsCharts.tsx` (3 curve, 7 palette) then
- * `FundamentalsPane.tsx` (1 curve, 4 palette) done in #2197, largest entries
- * first. 10 violations remain across 7 files.
+ * `FundamentalsPane.tsx` (1 curve, 4 palette) and `riskCharts.tsx` (2 curve)
+ * done in #2197, largest entries first. 8 violations remain across 6 files —
+ * all of them singles.
  *
  * Note the forbidden strings are assembled from fragments below: these gates
  * are textual and line-based, so writing the banned literal in this file — even
@@ -124,7 +125,6 @@ const RATCHET = {
   "components/insider/InsiderNetByMonth.tsx": { curve: 0, palette: 1 },
   "components/instrument/OwnershipHistoryChart.tsx": { curve: 1, palette: 0 },
   "components/news/newsAnalyticsCharts.tsx": { curve: 1, palette: 0 },
-  "components/risk/riskCharts.tsx": { curve: 2, palette: 0 },
   "pages/components/ChartWorkspaceCanvas.tsx": { curve: 0, palette: 2 },
 };
 

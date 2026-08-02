@@ -155,7 +155,7 @@ export function UnderwaterChart({ points }: UnderwaterProps): JSX.Element {
             contentStyle={defaultTooltipStyle(theme)}
           />
           <Area
-            type="monotone"
+            type="linear"
             dataKey="drawdown"
             name="Drawdown"
             stroke={theme.down}
@@ -213,7 +213,7 @@ export function RollingVolChart({ points }: RollingVolProps): JSX.Element {
             contentStyle={defaultTooltipStyle(theme)}
           />
           <Line
-            type="monotone"
+            type="linear"
             dataKey="vol"
             name="Annualized vol"
             stroke={theme.accent[3]}
