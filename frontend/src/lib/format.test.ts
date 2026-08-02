@@ -134,4 +134,23 @@ describe("formatBigMoney", () => {
     expect(formatBigMoney(1_500, undefined)).toBe("\u00a31.50K");
     expect(formatBigMoney(null, "USD")).toBe("\u2014");
   });
+
+  it("puts a negative sign OUTSIDE the currency symbol", () => {
+    // "US$-10.75B" reads as a currency called "US$-"; the sign belongs in
+    // front. Net debt, investing/financing cash flow and negative FCF all
+    // cross zero on the fundamentals charts (#2185); before that branch the
+    // only callers passed always-positive offering proceeds, so no negative
+    // had ever reached this helper.
+    expect(formatBigMoney(-10_746_000_000, "USD")).toBe("-US$10.75B");
+    expect(formatBigMoney(-1_500, undefined)).toBe("-\u00a31.50K");
+  });
+
+  it("degrades instead of throwing on a non-ISO-4217 code", () => {
+    // `new Intl.NumberFormat(_, {style:"currency", currency:"XX"})` throws
+    // RangeError. These helpers run inside recharts tickFormatter/Tooltip
+    // callbacks fed backend `reported_currency` (TEXT NOT NULL, no shape
+    // CHECK), so a throw would take the whole chart down, not one label.
+    expect(() => formatBigMoney(1_000_000, "XX")).not.toThrow();
+    expect(formatBigMoney(1_000_000, "XX")).toBe("XX1.00M");
+  });
 });

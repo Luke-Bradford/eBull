@@ -475,11 +475,24 @@ describe("buildFcf", () => {
     expect(buildFcf(periods)[0]!.fcf).toBe(110);
   });
 
-  it("returns null when either side is missing", () => {
+  it("treats a missing capex as zero — capex must NOT gate the series", () => {
+    // Settled rule: `operating_cf - ABS(COALESCE(capex, 0))`
+    // (app/services/fcf_yield.py:111 quarterly, :132 annual). Spec §3.4:
+    // "Any implementation that gates the FCF line on `capex IS NOT NULL` is
+    // wrong." 1,142 FY instruments report OCF and never report capex.
     const periods = joinStatements(
       [],
       [],
       [row("2026", { operating_cf: "150" }, "annual")],
+    );
+    expect(buildFcf(periods)[0]!.fcf).toBe(150);
+  });
+
+  it("returns null only when operating cash flow is missing", () => {
+    const periods = joinStatements(
+      [],
+      [],
+      [row("2026", { capex: "40" }, "annual")],
     );
     expect(buildFcf(periods)[0]!.fcf).toBeNull();
   });

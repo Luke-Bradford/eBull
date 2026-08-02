@@ -81,15 +81,27 @@ function formatPeriod(period_end: string): string {
  *
  * `financial_periods.reported_currency` is already surfaced by
  * `GET /instruments/{symbol}/financials` (selected at
- * `app/api/instruments.py:819`, returned at `:838` as the response's
- * `currency`), and non-USD reporters are mixed into the universe — so a bare
- * `380.00B` does not say what it is denominated in. Same class as #2129: a
- * per-item currency field is a contract on every money field.
+ * `app/api/instruments.py:819`, extracted at `:838` as the response's
+ * `currency`), so a bare `380.00B` does not say what it is denominated in.
+ * Same class as #2129: a per-item currency field is a contract on every money
+ * field.
+ *
+ * **Measured, not assumed.** The dev corpus is currently 100% USD —
+ * `SELECT COALESCE(reported_currency,'<NULL>'), count(*) FROM
+ * financial_periods WHERE superseded_at IS NULL GROUP BY 1` returns exactly
+ * one row, `('USD', 223715)`, with zero NULLs and zero instruments carrying
+ * more than one code. So this labels rather than corrects: today every money
+ * axis simply gains the `US$` prefix (en-GB `Intl` renders USD as `US$`, not
+ * `$`). It is a contract for the first non-USD reporter #2182 / international
+ * ingest admits, not a fix for a wrong figure on screen now.
  *
  * A null currency renders UNPREFIXED rather than falling back to
  * `formatBigMoney`'s GBP default, which would assert a denomination the row
- * never reported. Both helpers are the shared ones in `lib/format` — this file
- * previously carried a private near-copy of `formatBigNumber`.
+ * never reported. That branch is unreachable against the corpus above and is
+ * covered by unit test rather than by live data. Both helpers are the shared
+ * ones in `lib/format`; this file previously carried a private variant of
+ * `formatBigNumber` that differed in the sub-million branch (`.toFixed(1)` vs
+ * the shared `.toFixed(2)`), so K-magnitude labels gain one decimal.
  */
 function formatMoneyAxis(n: number | null, currency: string | null): string {
   return currency === null ? formatBigNumber(n) : formatBigMoney(n, currency);
@@ -373,19 +385,40 @@ export function CashflowWaterfallChart({ period, currency }: WaterfallProps): JS
  * `buildNetDebt` (`lib/fundamentalsMetrics.ts`) — total debt is null only when
  * both components are null; a missing `cash` is a real gap, not a degrade path.
  *
- * The spec's §3.5 interest-coverage overlay is deliberately NOT duplicated
- * here: it already renders on its own right-hand axis in the Debt-structure
- * pane immediately below (`DebtStructureChart`). Repeating it would put the
- * same series on two adjacent panes and re-introduce the dual axis §3.7 is
- * trying to remove. Gross debt and cash render as the context bars instead, so
- * the reader can see WHICH side moved the net line.
+ * Computability — stated because §0's standing rule requires it, and measured
+ * per instrument on the full population (dev `financial_periods`,
+ * `superseded_at IS NULL`), NOT sampled:
+ *
+ * | basis | rendered the deleted identity chart | renders this pane | net-debt LINE at ≥3 periods |
+ * |---|---|---|---|
+ * | FY | 4,173 / 4,760 (87.7%) | 3,338 (70.1%) | 2,549 (53.6%) |
+ * | Q1 | 3,732 / 4,236 (88.1%) | 2,905 (68.6%) | 2,137 (50.4%) |
+ *
+ * So ~835 FY instruments (~827 quarterly) that previously saw a rendered pane
+ * now see the empty state, and at the spec's own ≥3-usable-periods bar this is
+ * the second-most-gated chart on the page after the 47% P&L stack. That is a
+ * real cost and it is accepted knowingly: the chart it replaces was an
+ * accounting identity, so its 88% was 88% of a pane that could not carry
+ * signal. A blank pane beats a chart that cannot vary.
+ *
+ * §3.5's interest-coverage overlay is NOT rendered here — it already has its
+ * own right-hand axis in the Debt-structure pane immediately below
+ * (`DebtStructureChart`), so repeating it would put one series on two adjacent
+ * panes. Note this is a deviation from an approved spec decided in code: the
+ * earlier justification here also cited §3.7, which is scoped to the DuPont
+ * chart and does not govern this pane. Gross debt and cash render as context
+ * bars instead so the reader can see WHICH side moved the net line.
  */
 export function NetDebtChart({ periods, currency }: MoneyChartProps): JSX.Element {
   const theme = useChartTheme();
   const rows = buildNetDebt(periods);
-  const hasData = rows.some((r) => r.net_debt !== null || r.debt !== null);
+  // `net_debt !== null` implies `debt !== null`, so this guard is exactly
+  // "some period reports a debt component". Cash is NOT required to render —
+  // it only gates the net-debt LINE — so the message must not claim it is
+  // missing to a debt-free issuer that does report cash.
+  const hasData = rows.some((r) => r.debt !== null);
   if (!hasData) {
-    return <NoData message="Net debt needs debt (long- or short-term) and cash on the balance sheet." />;
+    return <NoData message="Net debt needs a reported debt component (long- or short-term) on the balance sheet." />;
   }
   return (
     <div style={{ height: CHART_HEIGHT }} className="w-full">
@@ -597,7 +630,11 @@ export function FcfChart({
   const f = buildFcf(periods);
   const hasData = f.some((r) => r.fcf !== null);
   if (!hasData) {
-    return <NoData message="FCF needs operating cash flow and capex on the cash-flow statement." />;
+    // Capex is NOT required — the settled rule COALESCEs it to 0
+    // (`fcf_yield.py:111,132`), so operating cash flow is the only input the
+    // operator can be missing. Saying "and capex" told 1,142 FY instruments
+    // that a field they simply have none of was the blocker (#2185).
+    return <NoData message="FCF needs operating cash flow on the cash-flow statement." />;
   }
   // Decimal arrives as a string on the wire (#671 / types.ts) — coerce to
   // number at this chart boundary only.

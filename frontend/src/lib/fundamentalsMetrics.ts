@@ -492,12 +492,35 @@ export interface FcfRow {
   readonly fcf: number | null;
 }
 
+/**
+ * Free cash flow per period.
+ *
+ * Source rule — the repo's settled treatment, NOT re-derived here:
+ * `operating_cf − ABS(COALESCE(capex, 0))`
+ * (`app/services/fcf_yield.py:111` quarterly TTM, `:132` annual). **capex
+ * NULL → 0; operating_cf is the only strict input.** Spec §3.4 states it
+ * verbatim: *"Any implementation that gates the FCF line on
+ * `capex IS NOT NULL` is wrong."*
+ *
+ * This gated on `capex !== null` until #2185. Full-population cost of that
+ * (dev `financial_periods`, `superseded_at IS NULL`, per instrument):
+ *
+ * | basis | ≥1 period with OCF | of which NEVER report capex | mixed |
+ * |---|---|---|---|
+ * | FY | 4,636 | 1,142 (25%) | 1,004 (22%) |
+ * | Q1 | 4,208 | 1,247 (30%) |   984 (23%) |
+ *
+ * The never-capex instruments rendered the empty state for a series that is
+ * computable for every one of them; the mixed ones broke the line at exactly
+ * the periods where the right-hand #671 TTM-yield line — which already
+ * COALESCEs capex to 0 — still plotted a value. One chart, two capex rules.
+ */
 export function buildFcf(periods: ReadonlyArray<JoinedPeriod>): FcfRow[] {
   return periods.map((p) => ({
     period_end: p.period_end,
     fcf:
-      p.operating_cf !== null && p.capex !== null
-        ? p.operating_cf - Math.abs(p.capex)
+      p.operating_cf !== null
+        ? p.operating_cf - Math.abs(p.capex ?? 0)
         : null,
   }));
 }

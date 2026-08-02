@@ -29,8 +29,14 @@
  * than obeyed. Widen the scope in the PR that drains the next surface; do NOT
  * add a per-file skip-list (the #987 dark-gate precedent).
  *
- * Rule B's one structural exclusion is the definition site itself. That is
- * what makes it a chokepoint, not an exemption.
+ * Be honest about what that scope buys: this is NOT yet a repo-wide chokepoint
+ * on the raw palette. Both rules still go unenforced outside the scope
+ * (dividendsCharts.tsx, FundamentalsPane.tsx, riskCharts.tsx,
+ * PerformanceChart.tsx, InsiderByOfficer.tsx, OwnershipHistoryChart.tsx,
+ * filingsAnalyticsCharts.tsx, newsAnalyticsCharts.tsx). `lib/chartTheme.ts`,
+ * the definition site, is out of scope BY PATH rather than by an exemption
+ * rule — when the scope widens to `components/` or `src/`, rule B needs an
+ * explicit early-return for it, or the gate will flag its own source of truth.
  *
  * Note the forbidden strings are assembled from fragments below: these gates
  * are textual and line-based, so writing the banned literal in this file — even
@@ -47,9 +53,6 @@ const ROOT = fileURLToPath(new URL("../src", import.meta.url));
 
 /** Path suffix of the scanned area, so the check is checkout-independent. */
 const SCOPE = join("components", "fundamentals");
-
-/** The one module allowed to name the raw palettes. */
-const THEME_DEFINITION_SITE = join("lib", "chartTheme.ts");
 
 // Assembled from fragments — see the note in the module docstring.
 const CURVE_PROP = "type=" + '"' + "mono" + "tone" + '"';
@@ -77,6 +80,20 @@ function collect(dir) {
 }
 
 const files = collect(ROOT).filter((f) => f.includes(SCOPE + sep));
+
+// A file-glob that matches nothing must FAIL, not pass quietly. Renaming or
+// moving the scanned directory would otherwise leave the gate printing
+// "0 files, no violations" and exiting 0 forever — the exact shape of the
+// prevention-log lesson this script cites ("a lint gate's file-glob is part of
+// its contract").
+if (files.length === 0) {
+  console.error(
+    `x chart-integrity gate matched NO files under ${SCOPE} — the scope moved ` +
+      "or was renamed. Update SCOPE in this script; do not leave it empty.",
+  );
+  process.exit(1);
+}
+
 const violations = [];
 
 for (const file of files) {
@@ -90,7 +107,6 @@ for (const file of files) {
           "cubic interpolation on a discrete financial series — use the linear curve type",
       });
     }
-    if (file.endsWith(THEME_DEFINITION_SITE)) return;
     for (const palette of RAW_PALETTES) {
       if (line.includes(palette)) {
         violations.push({

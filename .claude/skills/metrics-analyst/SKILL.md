@@ -60,7 +60,7 @@ description: eBull metrics analyst — what we measure, where it comes from, whe
 | Executive compensation (DEF 14A SCT) | Filings + events | `def14a_exec_compensation` (sql/215, #1945) | `/instruments/{symbol}/exec-compensation` |
 | ETL freshness per source | Pipeline | `data_freshness_index` | (admin via DB) |
 | Exit recommendation | Portfolio | `trade_recommendations.action='EXIT'` | `/recommendations` |
-| FCF (period) | Fundamentals | derived `operating_cf - capex` | `/instruments/{symbol}/financials?statement=cashflow` (FE-derived) |
+| FCF (period) | Fundamentals | derived `operating_cf − ABS(COALESCE(capex, 0))` | `/instruments/{symbol}/financials?statement=cashflow` (FE-derived) |
 | FCF TTM | Fundamentals | `instrument_valuation.fcf_ttm` | (scoring) |
 | FCF yield | Fundamentals | `instrument_valuation.fcf_yield` | (scoring; planned operator surface #671) |
 | Float concentration info chip | Ownership | rollup `concentration.pct_outstanding_known` | `/instruments/{symbol}/ownership-rollup` |
@@ -260,12 +260,12 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - **Caveats**: depreciation/amort can be sparse on small issuers — falls back to operating income only.
 
 ### FCF (period) / FCF TTM / FCF yield
-- **FCF formula**: `operating_cf - capex` where capex = `PaymentsToAcquirePropertyPlantAndEquipment` (positive outflow in XBRL; subtracting is correct, see [fundamentalsMetrics.ts:272](../../../frontend/src/lib/fundamentalsMetrics.ts#L272)).
+- **FCF formula**: `operating_cf − ABS(COALESCE(capex, 0))` where capex = `PaymentsToAcquirePropertyPlantAndEquipment`. **capex NULL → 0; `operating_cf` is the only strict input.** The settled rule is `app/services/fcf_yield.py:111` (quarterly TTM) / `:132` (annual); the frontend `buildFcf` matches it. `abs()` because the sign convention varies between filers (prevention-log #596), so a filer reporting capex negative must not have FCF inflated.
 - **TTM**: `instrument_valuation.fcf_ttm`.
 - **FCF yield**: `(operating_cf_ttm - |capex_ttm|) / (current_price × shares_outstanding)` (sql/080:83-87) → `instrument_valuation.fcf_yield`.
 - **Endpoint**: per-period FCF computed FE from `/instruments/{symbol}/financials?statement=cashflow`. TTM via `instrument_valuation` (scoring only). FCF yield NOT operator-visible today — **planned operator surface: #671** (needs price-join exposure on L2 fundamentals).
-- **Chart**: `fundamentalsCharts.tsx:507` (FCF line chart).
-- **Caveats**: `capex` null on issuers without explicit PPE filing → empty-state hint. Negative FCF returns 0 from `_value_score`. Quote-derived; stale quote = stale yield.
+- **Chart**: `fundamentalsCharts.tsx:620` (`FcfChart` — FCF line + the #671 TTM-yield line on its own right-hand axis; that dual axis is deliberate, see spec §3.9, do not "simplify" it away).
+- **Caveats**: a null `capex` is NOT an empty state — it COALESCEs to 0, so the chart blanks only when `operating_cf` is absent. (`buildFcf` gated on `capex IS NOT NULL` until #2185; that hid the series from 1,142 FY / 1,247 Q1 instruments which report OCF and never report capex, and broke the line at the exact periods where the TTM-yield overlay still plotted.) Negative FCF returns 0 from `_value_score`. Quote-derived; stale quote = stale yield.
 
 ### Margins
 - **Definitions**: each = `(line / revenue) × 100`.

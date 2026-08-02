@@ -181,11 +181,20 @@ export function FundamentalsPage(): JSX.Element {
     (resolvedRef.current?.ref === symbol ? resolvedRef.current.symbol : symbol);
 
   // `financial_periods.reported_currency`, surfaced by the endpoint as
-  // `currency` (app/api/instruments.py:819,838). All three statements read the
-  // same rows, so any non-null one is the statement currency; first-non-null
-  // rather than income-only so a partially-covered instrument still labels its
-  // money axes. Null (no rows / no reported currency) leaves the axes
-  // unprefixed — see `formatMoneyAxis` (#2185 §1.4).
+  // `currency` (app/api/instruments.py:819,838). First-non-null across the
+  // three statements rather than income-only, so a partially-covered
+  // instrument still labels its money axes. Null (no rows / no reported
+  // currency) leaves the axes unprefixed — see `formatMoneyAxis` (#2185 §1.4).
+  //
+  // Granularity caveat, stated rather than glossed: the endpoint reads
+  // `db_rows[0]["reported_currency"]` under `ORDER BY period_end_date DESC`
+  // (instruments.py:824,838), i.e. the LATEST period's currency, and this
+  // stamps that one value onto all 20 periods. #2129's rule is per-item, so an
+  // issuer that switched reporting currency mid-history would mislabel its own
+  // back-series. Zero instruments are affected today — dev
+  // `financial_periods` has one distinct code corpus-wide (USD) and no
+  // instrument with more than one — so this is a known limit of the response
+  // shape, not a live defect. Fixing it means moving `currency` onto the row.
   const currency =
     income.data?.currency ??
     balance.data?.currency ??

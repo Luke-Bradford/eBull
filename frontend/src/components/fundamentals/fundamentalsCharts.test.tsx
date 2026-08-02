@@ -12,21 +12,24 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { NetDebtChart } from "@/components/fundamentals/fundamentalsCharts";
+import {
+  FcfChart,
+  NetDebtChart,
+} from "@/components/fundamentals/fundamentalsCharts";
 import { joinStatements } from "@/lib/fundamentalsMetrics";
 import type { InstrumentFinancialRow } from "@/api/types";
 
-function balanceRows(
+function statementRows(
   values: Record<string, string | null>,
 ): InstrumentFinancialRow[] {
   return [{ period_end: "2026-03-31", period_type: "Q1", values }];
 }
 
 function periodsWith(values: Record<string, string | null>) {
-  return joinStatements([], balanceRows(values), []);
+  return joinStatements([], statementRows(values), []);
 }
 
-const NO_DATA = /Net debt needs debt .* and cash on the balance sheet/i;
+const NO_DATA = /Net debt needs a reported debt component/i;
 
 describe("NetDebtChart", () => {
   it("renders the inline no-data hint when both debt components are missing", () => {
@@ -40,7 +43,11 @@ describe("NetDebtChart", () => {
         currency="USD"
       />,
     );
-    expect(screen.getByText(NO_DATA)).toBeInTheDocument();
+    const hint = screen.getByText(NO_DATA);
+    expect(hint).toBeInTheDocument();
+    // This issuer DOES report cash, so the hint must not name cash as the
+    // thing that is missing — the guard never required it.
+    expect(hint.textContent).not.toMatch(/cash/i);
   });
 
   it("renders the inline no-data hint on an empty period array", () => {
@@ -63,5 +70,41 @@ describe("NetDebtChart", () => {
       />,
     );
     expect(screen.queryByText(NO_DATA)).not.toBeInTheDocument();
+  });
+});
+
+const FCF_NO_DATA = /FCF needs operating cash flow/i;
+
+describe("FcfChart", () => {
+  it("draws for an issuer that reports operating cash flow but never capex", () => {
+    // The settled rule COALESCEs capex to 0 (app/services/fcf_yield.py:111,
+    // :132) and spec §3.4 forbids gating on it. 1,142 FY instruments in the
+    // dev corpus report OCF and never report capex — every one of them got
+    // the empty state for a series that is computable.
+    render(
+      <FcfChart
+        periods={joinStatements(
+          [],
+          [],
+          statementRows({ operating_cf: "150", capex: null }),
+        )}
+        yieldSeries={null}
+        currency="USD"
+      />,
+    );
+    expect(screen.queryByText(FCF_NO_DATA)).not.toBeInTheDocument();
+  });
+
+  it("renders the no-data hint only when operating cash flow is absent", () => {
+    render(
+      <FcfChart
+        periods={joinStatements([], [], statementRows({ capex: "40" }))}
+        yieldSeries={null}
+        currency="USD"
+      />,
+    );
+    const hint = screen.getByText(FCF_NO_DATA);
+    expect(hint).toBeInTheDocument();
+    expect(hint.textContent).not.toMatch(/capex/i);
   });
 });
