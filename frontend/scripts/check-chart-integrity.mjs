@@ -41,44 +41,37 @@
  * as protection. If the scope ever widens to `src/`, rule B needs a real
  * early-return for it at that point, not before.
  *
- * THE RATCHET — and why it is NOT the skip-list #987 killed
- * --------------------------------------------------------
- * Widening the scope in one step would fail every developer's pre-push on all
- * 27 pre-existing violations, and a gate that is red on day one gets disabled
- * rather than obeyed. So the pre-existing debt is capped, not exempted, by
- * `RATCHET` below.
+ * THE RATCHET — drained and removed (#2197)
+ * -----------------------------------------
+ * This gate shipped over 27 pre-existing violations. Failing every pre-push on
+ * day one would have got it disabled rather than obeyed, so the debt was
+ * CAPPED, not exempted, by a `RATCHET` map: a per-file, per-rule, EXACT count.
+ * `actual > cap` caught regression; `actual < cap` caught a burn-down that
+ * forgot to lower its number, which is the half that stops every fix leaving
+ * headroom for the debt to return. Unlisted files failed on their first
+ * violation, so new charts were guarded from the start rather than after the
+ * last fix. That is why it was not the skip-list #987 killed — a skip-list is
+ * binary and lets debt grow invisibly inside a listed file; a counted ratchet
+ * cannot.
  *
- * `check-dark-classes.mjs` carries the instruction "do NOT reintroduce a
- * skip-list — fix the file instead", from #987, which drained its Check F
- * skip-list to empty. That instruction is about not re-adding debt to an
- * already-clean gate, and it stands. This is a different mechanism at a
- * different stage — the same stage `dark:check` was at BEFORE #987, widening
- * over debt that already exists:
+ * It is now GONE, drained one file at a time across #2190 and #2197
+ * (`PerformanceChart` · `dividendsCharts` · `FundamentalsPane` · `riskCharts` ·
+ * `filingsAnalyticsCharts` · `OwnershipHistoryChart` · `newsAnalyticsCharts` ·
+ * `InsiderByOfficer` · `InsiderNetByMonth` · `ChartWorkspaceCanvas`). The gate
+ * refused to run on an empty map by design, so the final fix and the removal of
+ * the mechanism had to land in the SAME commit — the mechanism could not
+ * outlive the debt. Do not reintroduce it: this is now a plain tree-wide check,
+ * and a new violation is simply a failure to fix before pushing.
  *
- *   - A skip-list is binary. A listed file is not checked, so debt inside it
- *     can GROW invisibly. That is what made #987's drain necessary.
- *   - This ratchet is a COUNT, per file and per rule, and the match is EXACT.
- *     A listed file at its cap still fails on violation N+1, so debt cannot
- *     grow. It also fails when the actual count drops BELOW the cap, which
- *     forces a burn-down PR to lower the number in the same commit — without
- *     that half, every fix silently leaves headroom for the debt to return and
- *     the "temporary" mechanism becomes permanent.
- *   - An unlisted file fails on its first violation, so new charts are guarded
- *     immediately. That is the durable guarantee, and it lands now rather than
- *     after all 29 fixes.
- *
- * Burn the entries down one file at a time, then DELETE the `RATCHET` map and
- * the code that reads it. An empty ratchet is a bug, not a milestone: the gate
- * refuses to run with one, so the mechanism cannot outlive the debt.
- *
- * Burn-down progress (#2197 tracks the drain): `PerformanceChart.tsx` (2 curve)
- * done in #2190 — it was first because it renders on an operator-facing
- * statement. `dividendsCharts.tsx` (3 curve, 7 palette) then
- * `FundamentalsPane.tsx` (1 curve, 4 palette) and `riskCharts.tsx` (2 curve)
- * done in #2197, largest entries first, then the singles one file at a time.
- * 2 violations remain, both in `ChartWorkspaceCanvas.tsx` — the last entry,
- * and the only structural one: its reads are at MODULE SCOPE, where no hook
- * can run.
+ * Two things learned draining it, worth keeping:
+ *   - The counts measured offending LINES, not offending references. The
+ *     scanner records at most one violation per palette name per line, so the
+ *     same defect cost 2 in one file and 1 in another purely because of where
+ *     the formatter put a line break.
+ *   - The last entry was the one the mechanism could not have fixed early:
+ *     module-scope colour constants, where no hook can run. A shortcut taken
+ *     because "the palettes are identical anyway" is self-reinforcing — module
+ *     scope is exactly where the correct read is unavailable.
  *
  * Note the forbidden strings are assembled from fragments below: these gates
  * are textual and line-based, so writing the banned literal in this file — even
@@ -111,19 +104,6 @@ const RAW_PALETTES = ["light" + "Theme.", "dark" + "Theme."];
 
 const RULE_CURVE = "curve";
 const RULE_PALETTE = "palette";
-
-/**
- * Pre-existing debt at the moment the scope widened (#2190), as
- * `src`-relative POSIX path → per-rule count. Counts are EXACT, not ceilings:
- * see the ratchet note in the module docstring. Lower a number in the same
- * commit that fixes the violations; delete the entry at zero; delete this map
- * and its reader once it is empty.
- *
- * Measured on `origin/main` at d5853233.
- */
-const RATCHET = {
-  "pages/components/ChartWorkspaceCanvas.tsx": { curve: 0, palette: 2 },
-};
 
 /**
  * Collect every `.ts` / `.tsx` under `dir`.
@@ -182,52 +162,21 @@ const REASONS = {
 };
 
 /**
- * Compare measured counts against `RATCHET`, returning human-readable failures.
+ * Every measured violation as a `path:line: reason` failure string.
  *
- * Both directions fail, and the `stale` direction is the load-bearing one —
- * see the ratchet note in the module docstring.
+ * Reports EVERY offending line, not just the first per file: a developer
+ * fixing a chart should see the whole list in one run rather than rediscover
+ * it one pre-push at a time.
  */
-function checkRatchet(measured, ratchet) {
+function reportViolations(measured) {
   const failures = [];
-  const rules = [RULE_CURVE, RULE_PALETTE];
-
-  for (const [path, allowed] of Object.entries(ratchet)) {
-    for (const rule of rules) {
-      const cap = allowed[rule] ?? 0;
-      const actual = measured[path]?.[rule] ?? 0;
-      if (actual > cap) {
-        failures.push(
-          `${path}: ${rule} violations rose ${cap} -> ${actual}. ` +
-            "Ratchet entries cap pre-existing debt; they do not license more of it.",
-        );
-      } else if (actual < cap) {
-        failures.push(
-          `${path}: ${rule} violations fell ${cap} -> ${actual} but the ratchet ` +
-            `still says ${cap}. Lower it to ${actual} (or delete the entry at zero) ` +
-            "in this commit — a stale cap is headroom for the debt to return.",
-        );
-      }
-    }
-  }
-
   for (const [path, counts] of Object.entries(measured)) {
-    if (path in ratchet) continue;
-    for (const rule of rules) {
-      // Report EVERY offending line, not just the first: a developer fixing a
-      // new chart should see the whole list in one run rather than rediscover
-      // it one pre-push at a time. `*Lines` is optional so this stays callable
-      // with bare `{ curve, palette }` counts (the unit tests do exactly that).
-      const lines = counts[`${rule}Lines`] ?? [];
-      if (lines.length > 0) {
-        for (const line of lines) {
-          failures.push(`${path}:${line}: ${REASONS[rule]}`);
-        }
-      } else if ((counts[rule] ?? 0) > 0) {
-        failures.push(`${path}: ${counts[rule]}x ${REASONS[rule]}`);
+    for (const rule of [RULE_CURVE, RULE_PALETTE]) {
+      for (const line of counts[`${rule}Lines`]) {
+        failures.push(`${path}:${line}: ${REASONS[rule]}`);
       }
     }
   }
-
   return failures;
 }
 
@@ -250,24 +199,12 @@ for (const scope of SCOPES) {
   }
 }
 
-// An empty ratchet means the debt is drained: delete the mechanism rather than
-// leaving a dormant one for the next person to add to.
-if (Object.keys(RATCHET).length === 0) {
-  console.error(
-    "x chart-integrity ratchet is empty — the debt is drained. Delete RATCHET, " +
-      "checkRatchet() and this guard; the gate is now a plain tree-wide check.",
-  );
-  process.exit(1);
-}
-
 const measured = {};
 for (const file of files) {
   const found = scanSource(readFileSync(file, "utf8"));
   if (found.length === 0) continue;
   const path = keyFor(file);
   measured[path] = {
-    curve: found.filter((f) => f.rule === RULE_CURVE).length,
-    palette: found.filter((f) => f.rule === RULE_PALETTE).length,
     curveLines: found.filter((f) => f.rule === RULE_CURVE).map((f) => f.line),
     paletteLines: found
       .filter((f) => f.rule === RULE_PALETTE)
@@ -275,43 +212,20 @@ for (const file of files) {
   };
 }
 
-// A ratchet entry for a file that no longer exists is stale bookkeeping: it
-// would keep the map alive past the debt it describes.
-const orphans = Object.keys(RATCHET).filter(
-  (path) => !files.some((f) => keyFor(f) === path),
-);
-
-// An orphan is already fully explained by its own message; leaving it in the
-// ratchet passed to `checkRatchet` would ALSO report it as a stale cap
-// ("fell 2 -> 0"), which is the same fact stated twice and sends the reader
-// looking for a file that is gone.
-const liveRatchet = Object.fromEntries(
-  Object.entries(RATCHET).filter(([path]) => !orphans.includes(path)),
-);
-
-const failures = [
-  ...orphans.map(
-    (path) =>
-      `${path}: ratchet entry for a file that no longer exists — delete the entry.`,
-  ),
-  ...checkRatchet(measured, liveRatchet),
-];
+const failures = reportViolations(measured);
 
 if (failures.length > 0) {
   console.error(`x ${failures.length} chart-integrity violation(s):\n`);
   for (const f of failures) console.error(`  ${f}`);
   console.error(
     "\nSee .claude/skills/frontend/design-system.md " +
-      '§"Chart theming — ONE source". Do NOT widen a ratchet entry to pass.',
+      '§"Chart theming — ONE source". Fix the file; do NOT reintroduce a ' +
+      "ratchet or a skip-list to pass.",
   );
   process.exit(1);
 }
 
-const capped = Object.values(RATCHET).reduce(
-  (sum, c) => sum + c.curve + c.palette,
-  0,
-);
 console.log(
-  `OK chart-integrity gate: ${files.length} files, no new violations ` +
-    `(${capped} pre-existing capped across ${Object.keys(RATCHET).length} files — #2190 burn-down)`,
+  `OK chart-integrity gate: ${files.length} files, no violations ` +
+    "(ratchet drained and removed — #2197)",
 );

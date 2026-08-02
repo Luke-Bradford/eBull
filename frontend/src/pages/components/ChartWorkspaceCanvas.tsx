@@ -31,7 +31,7 @@ import {
   humanizeVolume,
   tickFormatter,
 } from "@/lib/chartFormatters";
-import { lightTheme } from "@/lib/chartTheme";
+import type { ChartTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { useLiveLastBar } from "@/lib/useLiveLastBar";
 import { useMarketSpecials } from "@/lib/useMarketSpecials";
@@ -40,13 +40,22 @@ import type { SessionProfile } from "@/api/types";
 export type IndicatorId = "sma20" | "sma50" | "ema20" | "ema50";
 export const INDICATOR_IDS: IndicatorId[] = ["sma20", "sma50", "ema20", "ema50"];
 
-// Keep palette keys exhaustively typed against IndicatorId so a missing or
-// misspelled key in theme.indicator fails typecheck rather than
-// returning undefined at runtime. Indicator slots are saturated and
-// identical across light/dark, so reading from `lightTheme` directly
-// avoids threading the theme hook through every indicator setter.
-const SMA_COLORS: Record<IndicatorId, string> = lightTheme.indicator;
-
+// Indicator colours come from the resolved palette's `indicator` slots,
+// read at each use site via useChartTheme(). The exhaustiveness guarantee
+// the old module-scope table provided is unchanged: ChartTheme declares
+// `indicator` with exactly the IndicatorId keys, so adding an id without
+// adding its slot fails typecheck rather than returning undefined at
+// runtime.
+//
+// This used to be a module-scope constant reading the light palette
+// directly, on the rationale that the slots are identical across
+// light/dark so it "avoids threading the theme hook through every
+// indicator setter". That rationale is what #2185 identified as the
+// defect: the aliasing is a current fact about the palettes, not a
+// contract, and the day a slot diverges every such read silently stops
+// following the theme. Module scope is also precisely where the hook
+// cannot run, so the shortcut is self-reinforcing — hence the reads move
+// to the components.
 const SMA_LABELS: Record<IndicatorId, string> = {
   sma20: "SMA(20)",
   sma50: "SMA(50)",
@@ -54,9 +63,18 @@ const SMA_LABELS: Record<IndicatorId, string> = {
   ema50: "EMA(50)",
 };
 
-// Fixed palette for compare overlays — distinct from SMA colors.
-// Compare slots are also saturated and identical across light/dark.
-export const COMPARE_COLORS: readonly string[] = lightTheme.compare;
+// Compare-overlay colours come from the resolved palette's `compare`
+// rotation, distinct from the indicator slots. Formerly an exported
+// module-scope constant off the light palette — the export had exactly one
+// consumer, in this file, on a line that already fell back to
+// `theme.compare[0]`. Removed rather than re-homed.
+//
+// Kept as a pure function of (theme, index) rather than inlined at the two
+// call sites: the series-creation path and the theme-change recolour path
+// MUST agree, and a duplicated `idx % len` is exactly how they would drift.
+function compareColorAt(theme: ChartTheme, idx: number): string {
+  return theme.compare[idx % theme.compare.length] ?? theme.compare[0];
+}
 
 export interface CompareSeries {
   readonly symbol: string;
@@ -455,7 +473,32 @@ export function ChartWorkspaceCanvas({
       wickDownColor: theme.down,
     });
     primaryLine.applyOptions({ color: theme.primaryLine });
+
+    // Recolour indicator series that already exist. Their colour is chosen in
+    // the creation branch of the indicator effect, which does NOT rerun on a
+    // theme change — so without this a theme toggle would leave a drawn line
+    // on the previous palette while `RichTooltip`, which reads the resolved
+    // theme at render, moved to the new one: the line and its own readout
+    // would disagree about the colour of the same series. Latent while the
+    // saturated slots alias across palettes, real the day one diverges —
+    // which is the whole point of reading them from the theme. Reads refs
+    // only, so it needs no dep beyond `theme`.
+    for (const [id, series] of indicatorRefs.current) {
+      series.applyOptions({ color: theme.indicator[id] });
+    }
   }, [theme]);
+
+  // Compare overlays get their own effect rather than riding the one above:
+  // their colour depends on position in `compares`, and folding that dep into
+  // the theme effect would re-run the whole chart/candle/primaryLine
+  // applyOptions block on every compare-list change (review of PR #2206).
+  useEffect(() => {
+    compares.forEach((cs, colorIdx) => {
+      const color = compareColorAt(theme, colorIdx);
+      compareColorRef.current.set(cs.symbol, color);
+      compareLineRefs.current.get(cs.symbol)?.applyOptions({ color });
+    });
+  }, [theme, compares]);
 
   // Numeric / null-filtered rows. Computed during render so values
   // are available to the live-tick aggregator's historical anchor on
@@ -591,8 +634,7 @@ export function ChartWorkspaceCanvas({
 
     // Add/update series for each compare symbol.
     compares.forEach((cs, colorIdx) => {
-      const color =
-        COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] ?? theme.compare[0];
+      const color = compareColorAt(theme, colorIdx);
       compareColorRef.current.set(cs.symbol, color);
 
       const compareClean: NumericBar[] = cs.rows.flatMap((r) => {
@@ -679,7 +721,7 @@ export function ChartWorkspaceCanvas({
       let series = indicatorRefs.current.get(id);
       if (!series) {
         series = chart.addSeries(LineSeries, {
-          color: SMA_COLORS[id]!,
+          color: theme.indicator[id],
           lineWidth: 2,
           priceLineVisible: false,
           lastValueVisible: false,
@@ -898,6 +940,7 @@ export function ChartWorkspaceCanvas({
  * a second row when present.
  */
 function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
+  const theme = useChartTheme();
   const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const fmtPct = (v: number | null | undefined) => {
     if (v === null || v === undefined) return "—";
@@ -969,7 +1012,7 @@ function RichTooltip({ hover }: { hover: RichHoverState }): JSX.Element {
           {hover.indicators.map((row) => (
             <span key={row.id} className="flex items-baseline gap-1">
               <span className="text-slate-400">{row.label}</span>
-              <span style={{ color: SMA_COLORS[row.id] }}>{fmt(row.value)}</span>
+              <span style={{ color: theme.indicator[row.id] }}>{fmt(row.value)}</span>
             </span>
           ))}
         </>
