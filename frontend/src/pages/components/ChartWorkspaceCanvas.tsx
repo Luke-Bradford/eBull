@@ -474,17 +474,25 @@ export function ChartWorkspaceCanvas({
     });
     primaryLine.applyOptions({ color: theme.primaryLine });
 
-    // Recolour series that already exist. Their colours are chosen in the
-    // creation branch of their own effects, which do NOT rerun on a theme
-    // change — so without this, a theme toggle would leave a drawn indicator
-    // or compare line on the previous palette while `RichTooltip`, which
-    // reads the resolved theme at render, moved to the new one: the line and
-    // its own readout would disagree about the colour of the same series.
-    // Latent while the saturated slots alias across palettes, real the day
-    // one diverges — which is the whole point of reading them from the theme.
+    // Recolour indicator series that already exist. Their colour is chosen in
+    // the creation branch of the indicator effect, which does NOT rerun on a
+    // theme change — so without this a theme toggle would leave a drawn line
+    // on the previous palette while `RichTooltip`, which reads the resolved
+    // theme at render, moved to the new one: the line and its own readout
+    // would disagree about the colour of the same series. Latent while the
+    // saturated slots alias across palettes, real the day one diverges —
+    // which is the whole point of reading them from the theme. Reads refs
+    // only, so it needs no dep beyond `theme`.
     for (const [id, series] of indicatorRefs.current) {
       series.applyOptions({ color: theme.indicator[id] });
     }
+  }, [theme]);
+
+  // Compare overlays get their own effect rather than riding the one above:
+  // their colour depends on position in `compares`, and folding that dep into
+  // the theme effect would re-run the whole chart/candle/primaryLine
+  // applyOptions block on every compare-list change (review of PR #2206).
+  useEffect(() => {
     compares.forEach((cs, colorIdx) => {
       const color = compareColorAt(theme, colorIdx);
       compareColorRef.current.set(cs.symbol, color);
