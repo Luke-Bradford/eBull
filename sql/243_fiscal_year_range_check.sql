@@ -53,31 +53,72 @@ BEGIN;
 -- offset form is what makes the migration correct on a corpus where the
 -- damaged issuer is NOT calendar-fiscal.
 
+-- Sane rows from BOTH derived tables (review NITPICK): an instrument whose
+-- only in-range rows live in financial_periods_raw must still be able to
+-- supply its own offset. `fiscal_year` and `period_end_date` are both NOT
+-- NULL, and MODE() over a non-empty group always returns a value, so
+-- `fy_offset` is non-null for every instrument PRESENT here — absence, not
+-- NULL, is how "no offset derivable" is represented.
 CREATE TEMP TABLE _fy_offset ON COMMIT DROP AS
 SELECT instrument_id,
-       MODE() WITHIN GROUP (
-           ORDER BY fiscal_year - EXTRACT(YEAR FROM period_end_date)::int
-       ) AS fy_offset
-FROM financial_periods
-WHERE fiscal_year BETWEEN 1995 AND 2100
+       MODE() WITHIN GROUP (ORDER BY offset_years) AS fy_offset
+FROM (
+    SELECT instrument_id,
+           fiscal_year - EXTRACT(YEAR FROM period_end_date)::int AS offset_years
+    FROM financial_periods
+    WHERE fiscal_year BETWEEN 1995 AND 2100
+    UNION ALL
+    SELECT instrument_id,
+           fiscal_year - EXTRACT(YEAR FROM period_end_date)::int
+    FROM financial_periods_raw
+    WHERE fiscal_year BETWEEN 1995 AND 2100
+) sane
 GROUP BY instrument_id;
 
+-- Assert the fallback path was never taken, BEFORE repairing (review
+-- PREVENTION). A post-hoc range check alone is not enough: a wrong offset
+-- that happens to land in range would pass it silently. An instrument with
+-- damaged rows and NO sane row to derive from must stop the migration, not
+-- be quietly assumed calendar-fiscal.
+DO $$
+DECLARE orphaned INTEGER;
+BEGIN
+    SELECT count(DISTINCT d.instrument_id) INTO orphaned
+    FROM (
+        SELECT instrument_id FROM financial_periods
+         WHERE fiscal_year < 1995 OR fiscal_year > 2100
+        UNION
+        SELECT instrument_id FROM financial_periods_raw
+         WHERE fiscal_year < 1995 OR fiscal_year > 2100
+    ) d
+    LEFT JOIN _fy_offset o ON o.instrument_id = d.instrument_id
+    WHERE o.instrument_id IS NULL;
+    IF orphaned > 0 THEN
+        RAISE EXCEPTION
+            '#2192: % instrument(s) have out-of-range fiscal_year rows but NO '
+            'in-range row to derive a fiscal-year offset from. Assuming a zero '
+            'offset would silently mis-label a non-calendar-fiscal issuer; '
+            'repair those instruments by hand before re-running.',
+            orphaned;
+    END IF;
+END $$;
+
+-- No COALESCE: the join is inner and `fy_offset` is non-null by construction,
+-- so a zero offset can only ever be a MEASURED zero, never a defaulted one.
 UPDATE financial_periods fp
-SET fiscal_year = EXTRACT(YEAR FROM fp.period_end_date)::int
-                  + COALESCE(o.fy_offset, 0)
+SET fiscal_year = EXTRACT(YEAR FROM fp.period_end_date)::int + o.fy_offset
 FROM _fy_offset o
 WHERE o.instrument_id = fp.instrument_id
   AND (fp.fiscal_year < 1995 OR fp.fiscal_year > 2100);
 
 UPDATE financial_periods_raw fpr
-SET fiscal_year = EXTRACT(YEAR FROM fpr.period_end_date)::int
-                  + COALESCE(o.fy_offset, 0)
+SET fiscal_year = EXTRACT(YEAR FROM fpr.period_end_date)::int + o.fy_offset
 FROM _fy_offset o
 WHERE o.instrument_id = fpr.instrument_id
   AND (fpr.fiscal_year < 1995 OR fpr.fiscal_year > 2100);
 
--- Fail loudly rather than let ADD CONSTRAINT report it: an instrument whose
--- rows are ALL out of range has no offset to derive and needs a human.
+-- Backstop: a repair that produced an out-of-range value (offset itself
+-- absurd) must not reach ADD CONSTRAINT as an opaque failure.
 DO $$
 DECLARE leftover INTEGER;
 BEGIN
@@ -88,9 +129,7 @@ BEGIN
       INTO leftover;
     IF leftover > 0 THEN
         RAISE EXCEPTION
-            '#2192: % fiscal_year rows still out of range after repair — '
-            'an affected instrument has no in-range row to derive its '
-            'fiscal-year offset from; repair by hand before re-running.',
+            '#2192: % fiscal_year rows still out of range after repair.',
             leftover;
     END IF;
 END $$;
