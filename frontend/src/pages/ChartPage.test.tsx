@@ -30,6 +30,7 @@
  *   - Pre-set ?view=raw renders raw table stub instead of chart canvas
  *   - Indicator / trend / compare controls hidden in raw view
  */
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -75,6 +76,7 @@ vi.mock("@/pages/components/ChartWorkspaceCanvas", () => ({
       data-symbol={symbol}
       data-indicators={indicators.join(",")}
       data-compares={(compares ?? []).map((c) => c.symbol).join(",")}
+      data-compare-rows={(compares ?? []).map((c) => `${c.symbol}:${c.rows.length}`).join(",")}
       data-show-regression={String(showRegression ?? false)}
       data-show-channel={String(showChannel ?? false)}
     />
@@ -180,6 +182,22 @@ function renderPage(path = "/instrument/AAPL/chart") {
         <Route path="instrument/:symbol/chart" element={<ChartPage />} />
       </Routes>
     </MemoryRouter>,
+  );
+}
+
+// Mirrors `main.tsx`, which mounts the app inside `<React.StrictMode>`.
+// Every other test here renders unmounted-once, which is exactly why #2207
+// (a mount-only compare-fetch bug) survived the suite — see the
+// "compare deep-link" describe block below.
+function renderPageStrict(path = "/instrument/AAPL/chart") {
+  return render(
+    <StrictMode>
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="instrument/:symbol/chart" element={<ChartPage />} />
+        </Routes>
+      </MemoryRouter>
+    </StrictMode>,
   );
 }
 
@@ -487,6 +505,29 @@ describe("ChartPage — compare fetch error handling", () => {
       "data-error",
       "true",
     );
+  });
+});
+
+describe("ChartPage — compare deep-link hydration (#2207)", () => {
+  it("pre-set ?compare= hands the canvas populated rows, not just chips", async () => {
+    renderPage("/instrument/AAPL/chart?compare=MSFT,GOOG");
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-compare-rows")).toBe("MSFT:2,GOOG:2");
+    });
+  });
+
+  it("under StrictMode too — the mount-time fetch must survive the double-invoke", async () => {
+    // The bug this pins: the mount effect stamped `compareFetchKeyRef` and
+    // started the fetch, StrictMode's simulated unmount cancelled it, and the
+    // second invocation early-returned on the now-matching key. Chips rendered
+    // (they read the URL) while `rows` stayed empty forever. Adding the same
+    // tickers interactively worked because that path changes the key.
+    renderPageStrict("/instrument/AAPL/chart?compare=MSFT,GOOG");
+    await waitFor(() => {
+      const stub = screen.getByTestId("chart-canvas-stub");
+      expect(stub.getAttribute("data-compare-rows")).toBe("MSFT:2,GOOG:2");
+    });
   });
 });
 

@@ -164,6 +164,54 @@ Rule: when both `asyncData` and the fallback can describe *different* records, g
 
 Every effect that resolves async data must check a `cancelled` flag before calling state setters, so a stale resolution cannot overwrite a newer one. If you write a new async hook, this is non-negotiable.
 
+### A "work started" ref must be released by the same cleanup that abandons the work (#2207)
+
+`cancelled` alone is not enough the moment the effect ALSO carries a dedup ref
+(`if (key === keyRef.current) return`). The two compose into a latch:
+
+```ts
+// BROKEN — the mount fetch is started, cancelled, and never retried.
+const key = [range, ...symbols].join(",");
+if (key === fetchKeyRef.current) return;
+fetchKeyRef.current = key;
+let cancelled = false;
+void fetchAll().then((r) => { if (!cancelled) setData(r); });
+return () => { cancelled = true; };
+```
+
+Under `StrictMode`, run 1 stamps the ref and fetches, the simulated unmount sets
+`cancelled = true` so run 1 discards its own result, and run 2 sees the stamp and
+returns before fetching. Nothing ever calls `setData`. Release the stamp:
+
+```ts
+return () => {
+  cancelled = true;
+  if (fetchKeyRef.current === key) fetchKeyRef.current = "";  // guard: don't clear a newer run's stamp
+};
+```
+
+Rule: a dedup ref whose lifetime outlives the fetch it guards is a latch, not a
+dedup. Ask of every such ref — "if this run is abandoned, who un-stamps it?"
+
+### Test at least one mount path under `StrictMode` (#2207)
+
+`main.tsx` mounts the app inside `<React.StrictMode>`; every test in the suite
+renders a bare `<MemoryRouter>`. So **production double-invokes mount effects and
+the tests never do** — an entire class of mount-only bugs is invisible to a green
+suite. #2207 shipped exactly this way: the non-StrictMode test of the failing URL
+passed, and only the StrictMode wrapper reproduced the browser behaviour.
+
+Any page whose mount-time effects fetch, subscribe, or stamp a ref needs one
+StrictMode-wrapped test. Pattern: `ChartPage.test.tsx::renderPageStrict`.
+
+When a bug reproduces in the browser but not under test, wrap the render in
+`<StrictMode>` before doubting the repro.
+
+Assert on the DATA handed to the child, not on chrome rendered from URL params —
+#2207's compare chips rendered correctly over a permanently empty series, so a
+chips-only assertion was green throughout. The stub exposes
+`data-compare-rows="MSFT:2,GOOG:2"` precisely so the count is assertable.
+
 ## When to promote past `useAsync`
 
 `@tanstack/react-query` is in `package.json` and its `QueryClientProvider` is mounted at the app root (`main.tsx`), but no page fetches through it yet — every read still goes through `useAsync`. Default = stay on `useAsync`. Promote to react-query only when **at least one** of the following is true:
