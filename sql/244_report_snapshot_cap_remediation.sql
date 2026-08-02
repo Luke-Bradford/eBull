@@ -83,8 +83,30 @@ FROM capped c
 JOIN totals t USING (snapshot_id)
 WHERE rs.snapshot_id = c.snapshot_id;
 
+-- ── 2. Backfill the total on legacy rows that were never over the cap ──
+--
+-- A pre-#2178 snapshot whose period happened to produce 1..20 movers has a
+-- non-empty `score_changes` and NO `score_changes_total`: it was never
+-- selected above, because it was never over the cap. Its array IS the whole
+-- set, so its pre-cap total is exactly that array's length. Without this the
+-- assertion below would abort the migration on any install holding such a row
+-- (Codex ckpt-2) — and the API contract would keep serving a non-empty
+-- exhibit with no total beside it.
+UPDATE report_snapshots
+SET snapshot_json = jsonb_set(
+        snapshot_json,
+        '{score_changes_total}',
+        to_jsonb(jsonb_array_length(snapshot_json->'score_changes')),
+        true
+    )
+WHERE jsonb_array_length(snapshot_json->'score_changes') > 0
+  AND snapshot_json->'score_changes_total' IS NULL;
+
+-- ── 3. Assert the table is uniformly capped ────────────────────────────
+--
 -- Fail loudly rather than leave a half-capped table: every row must now be
--- at or under the cap, and must carry its pre-cap total.
+-- at or under the cap, and every non-empty exhibit must carry its pre-cap
+-- total.
 DO $$
 DECLARE offending INTEGER;
 BEGIN
