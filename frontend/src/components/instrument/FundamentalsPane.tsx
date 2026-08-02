@@ -56,7 +56,7 @@ import type { InstrumentFinancialRow, InstrumentSummary } from "@/api/types";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
 import { Pane } from "@/components/instrument/Pane";
 import { formatBigNumber } from "@/lib/format";
-import { defaultTooltipStyle, lightTheme } from "@/lib/chartTheme";
+import { defaultTooltipStyle } from "@/lib/chartTheme";
 import { useAsync } from "@/lib/useAsync";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { useCallback, useId, useMemo } from "react";
@@ -318,6 +318,7 @@ function FundamentalsGrid({
 }: {
   readonly series: ReadonlyArray<SeriesRow>;
 }): JSX.Element {
+  const theme = useChartTheme();
   const revenue = buildCellPoints(series, (r) => r.revenue);
   const opIncome = buildCellPoints(series, (r) => r.operatingIncome);
   const netIncome = buildCellPoints(series, (r) => r.netIncome);
@@ -340,7 +341,7 @@ function FundamentalsGrid({
         points={revenue}
         nonNull={nonNullCount(revenue)}
         totalLen={totalLen}
-        fillColor={lightTheme.accent[1]}
+        fillColor={theme.accent[1]}
       />
       <FundamentalCell
         label="Op income"
@@ -348,7 +349,7 @@ function FundamentalsGrid({
         points={opIncome}
         nonNull={nonNullCount(opIncome)}
         totalLen={totalLen}
-        fillColor={lightTheme.up}
+        fillColor={theme.up}
       />
       <FundamentalCell
         label="Net income"
@@ -356,7 +357,7 @@ function FundamentalsGrid({
         points={netIncome}
         nonNull={nonNullCount(netIncome)}
         totalLen={totalLen}
-        fillColor={lightTheme.up}
+        fillColor={theme.up}
       />
       <FundamentalCell
         label="Total debt"
@@ -364,7 +365,7 @@ function FundamentalsGrid({
         points={totalDebt}
         nonNull={nonNullCount(totalDebt)}
         totalLen={totalLen}
-        fillColor={lightTheme.accent[3]}
+        fillColor={theme.accent[3]}
       />
     </div>
   );
@@ -475,7 +476,7 @@ function FundamentalCell({
                 contentStyle={defaultTooltipStyle(theme)}
               />
               <Area
-                type="monotone"
+                type="linear"
                 dataKey="value"
                 stroke={fillColor}
                 strokeWidth={1.75}
