@@ -17,8 +17,16 @@
  * last-value label inherits the same `currentColor` as the stroke and cannot
  * drift from it — including in dark mode, where a bare text colour has no
  * lint gate (prevention-log → "A bare text-<color> class has no dark-mode
- * gate"). For chart-theme alignment, new callers should pass
- * `stroke={lightTheme.accent[N]}` from `@/lib/chartTheme` — see #586.
+ * gate"). For chart-theme alignment (#586), a caller that wants a series
+ * colour rather than the inherited text colour should read the RESOLVED
+ * palette from the `useChartTheme` hook in `@/lib/useChartTheme` and pass an
+ * accent from it as `stroke`. It must not import either raw palette from
+ * `@/lib/chartTheme` by name — that hardcodes one mode's colours into a
+ * dark-capable component, which is the #2185 defect and is now a
+ * `charts:check` failure (#2190). This paragraph deliberately describes the
+ * call in prose: these gates are line-based, so quoting the literal here would
+ * trip the check on a doc comment that has no violation to fix
+ * (prevention-log → #1908 PR-2).
  */
 
 import { useState, useCallback, type JSX } from "react";

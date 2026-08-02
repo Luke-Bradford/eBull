@@ -128,15 +128,38 @@ export function formatBigMoney(n: number | null, currency = "GBP"): string {
     getFormatter(currency)
       .formatToParts(0)
       .find((p) => p.type === "currency")?.value ?? currency;
-  // `formatBigNumber` emits its own leading "-", so concatenating naively
-  // renders the sign INSIDE the denomination — "US$-10.75B". Lift it out:
-  // "-US$10.75B". Only the always-positive OfferingBlock call sites existed
+  // The sign must sit OUTSIDE the denomination — "-US$10.75B", not
+  // "US$-10.75B". Only the always-positive OfferingBlock call sites existed
   // before #2185, so no negative had ever exercised this (net debt, investing
   // /financing cash flow, negative FCF and operating income all do).
-  const body = formatBigNumber(n);
-  return body.startsWith("-")
-    ? `-${sym}${body.slice(1)}`
-    : `${sym}${body}`;
+  const { negative, magnitude } = splitBigMagnitude(n);
+  return negative ? `-${sym}${magnitude}` : `${sym}${magnitude}`;
+}
+
+/** Sign and unsigned abbreviated magnitude, derived ONCE.
+ *
+ *  `formatBigMoney` previously recovered the sign by string-matching
+ *  `formatBigNumber`'s output (`body.startsWith("-")`), which coupled two
+ *  independently-changeable string formats: changing how the magnitude
+ *  formatter renders a negative would silently relocate the currency symbol
+ *  relative to the sign, and the only thing standing between that and an
+ *  operator seeing "US$-10.75B" was a pair of regression tests. Both
+ *  formatters now render from this one split, so there is a single place
+ *  where "is it negative" is decided (#2188 review NITPICK, deferred to #2190).
+ *
+ *  Note `n < 0` is false for `-0`, which is what we want: negative zero
+ *  formats unsigned, matching the previous `(-0).toFixed(0) === "0"` path. */
+function splitBigMagnitude(n: number): {
+  negative: boolean;
+  magnitude: string;
+} {
+  const abs = Math.abs(n);
+  const negative = n < 0;
+  if (abs >= 1e12) return { negative, magnitude: `${(abs / 1e12).toFixed(2)}T` };
+  if (abs >= 1e9) return { negative, magnitude: `${(abs / 1e9).toFixed(2)}B` };
+  if (abs >= 1e6) return { negative, magnitude: `${(abs / 1e6).toFixed(2)}M` };
+  if (abs >= 1e3) return { negative, magnitude: `${(abs / 1e3).toFixed(2)}K` };
+  return { negative, magnitude: abs.toFixed(0) };
 }
 
 /** Abbreviated large magnitudes for financial-statement values:
@@ -144,13 +167,8 @@ export function formatBigMoney(n: number | null, currency = "GBP"): string {
  *  previously lived privately in FundamentalsPane (#554). */
 export function formatBigNumber(n: number | null): string {
   if (n === null) return "—";
-  const abs = Math.abs(n);
-  const sign = n < 0 ? "-" : "";
-  if (abs >= 1e12) return `${sign}${(abs / 1e12).toFixed(2)}T`;
-  if (abs >= 1e9) return `${sign}${(abs / 1e9).toFixed(2)}B`;
-  if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(2)}M`;
-  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(2)}K`;
-  return n.toFixed(0);
+  const { negative, magnitude } = splitBigMagnitude(n);
+  return negative ? `-${magnitude}` : magnitude;
 }
 
 export function formatDateTime(iso: string | null | undefined): string {
