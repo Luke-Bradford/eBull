@@ -183,8 +183,16 @@ export function FundamentalsPage(): JSX.Element {
 
   const loading = income.loading || balance.loading || cashflow.loading;
   const errors = [income.error, balance.error, cashflow.error];
-  const notFound = errors.some(isNotFound);
-  const errored = errors.some((e) => e !== null && !isNotFound(e));
+  // Classify each error ONCE, then read both conditions off the same
+  // pass. The two used to call isNotFound independently, which is not
+  // just duplicated work — it left "is a 404" and "is not a 404" free to
+  // drift apart if the predicate were ever changed at one site only.
+  // `errored` deliberately wins over `notFound` downstream: a genuine
+  // failure must surface as SectionError + Retry, never as a
+  // "no such instrument" empty state.
+  const notFoundFlags = errors.map((e) => e !== null && isNotFound(e));
+  const notFound = notFoundFlags.some(Boolean);
+  const errored = errors.some((e, i) => e !== null && !notFoundFlags[i]);
   // The `/financials` endpoint returns 200 with `source="unavailable"`
   // and `rows=[]` when an instrument has no SEC coverage (non-US
   // issuer, no CIK, etc.) — see app/api/instruments.py around the
