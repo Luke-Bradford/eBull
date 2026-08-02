@@ -919,6 +919,38 @@ def _compute_contributors(
     return {"contributors": contributors, "drags": drags}
 
 
+# Ceiling on one serialized snapshot (#2180).
+#
+# ROW-COUNT RETENTION IS DELIBERATELY *NOT* THE GUARD HERE, and must not be
+# added later: `_prior_v2_chain` selects EVERY prior v2 snapshot with no LIMIT,
+# and `_cover_and_performance` chain-links those returns into `si_return` and
+# takes `si_start` from `chained_rows[0]`. Deleting the oldest rows would
+# silently move the inception date forward — since-inception would quietly
+# become since-the-retention-window, and the risk section's drawdown index
+# would truncate with it. The history is load-bearing, so it stays.
+#
+# What actually caused #2180's 7.62 MB was not row COUNT but row SIZE: six
+# pre-#2178 rows each carrying the full run × instrument product (up to 14,473
+# elements). With every list field capped, a snapshot is ~3-4 KB and 52 weeklies
+# a year cost ~170 KB — growth that needs no pruning at all. So the durable
+# guard is a size assertion at the write, which catches the NEXT builder that
+# ships an uncapped field on its first run instead of after it has accumulated
+# silently for months.
+#
+# 64 KiB is ~16x the largest legitimate snapshot observed and well under the
+# smallest uncapped one (88 KB) — wide enough that ordinary content growth
+# never trips it, tight enough that an uncapped collection always does.
+_MAX_SNAPSHOT_BYTES = 64 * 1024
+
+
+class ReportSnapshotTooLarge(ValueError):
+    """A snapshot exceeded ``_MAX_SNAPSHOT_BYTES`` — almost always an uncapped
+    list field (#2180 / #2178). Raised rather than warned: eBull does not
+    silently bypass a failed check, and a loud job failure is strictly better
+    than a megabyte-scale leak that only surfaces months later in an API
+    response."""
+
+
 def persist_report_snapshot(
     conn: psycopg.Connection[Any],
     *,
@@ -931,7 +963,29 @@ def persist_report_snapshot(
 
     Idempotent: ON CONFLICT replaces the snapshot for the same
     (report_type, period_start) pair. The caller owns the commit.
+
+    Raises ``ReportSnapshotTooLarge`` before writing when the serialized
+    snapshot exceeds ``_MAX_SNAPSHOT_BYTES`` (#2180) — the check sits here
+    because a write is the only way this table grows, so it catches every
+    producer without a scheduled sweep that could drift out of sync.
     """
+    encoded_bytes = len(json.dumps(snapshot, default=str).encode("utf-8"))
+    if encoded_bytes > _MAX_SNAPSHOT_BYTES:
+        # Name the biggest collection: an uncapped list is the cause every
+        # time this has fired, and the operator needs to know WHICH one.
+        biggest = max(
+            ((k, len(v)) for k, v in snapshot.items() if isinstance(v, list)),
+            key=lambda kv: kv[1],
+            default=("<no list field>", 0),
+        )
+        raise ReportSnapshotTooLarge(
+            f"{report_type} snapshot for {period_start} is "
+            f"{encoded_bytes:,} bytes, over the "
+            f"{_MAX_SNAPSHOT_BYTES:,}-byte cap. Largest list field: "
+            f"{biggest[0]!r} with {biggest[1]:,} elements — cap it to a "
+            f"top-N exhibit and carry the pre-cap count alongside "
+            f"(the #2178 shape)."
+        )
     with conn.cursor() as cur:
         cur.execute(
             """
