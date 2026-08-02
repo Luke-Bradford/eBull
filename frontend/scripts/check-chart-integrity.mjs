@@ -76,7 +76,9 @@
  * statement. `dividendsCharts.tsx` (3 curve, 7 palette) then
  * `FundamentalsPane.tsx` (1 curve, 4 palette) and `riskCharts.tsx` (2 curve)
  * done in #2197, largest entries first, then the singles one file at a time.
- * 3 violations remain across 2 files, all of them raw-palette reads.
+ * 2 violations remain, both in `ChartWorkspaceCanvas.tsx` — the last entry,
+ * and the only structural one: its reads are at MODULE SCOPE, where no hook
+ * can run.
  *
  * Note the forbidden strings are assembled from fragments below: these gates
  * are textual and line-based, so writing the banned literal in this file — even
@@ -120,7 +122,6 @@ const RULE_PALETTE = "palette";
  * Measured on `origin/main` at d5853233.
  */
 const RATCHET = {
-  "components/insider/InsiderNetByMonth.tsx": { curve: 0, palette: 1 },
   "pages/components/ChartWorkspaceCanvas.tsx": { curve: 0, palette: 2 },
 };
 

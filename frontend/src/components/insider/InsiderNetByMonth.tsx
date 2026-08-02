@@ -22,7 +22,6 @@ import {
 
 import type { InsiderTransactionDetail } from "@/api/instruments";
 import { ChartTooltip } from "@/components/charts/ChartTooltip";
-import { lightTheme } from "@/lib/chartTheme";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { directionOf, signedShares } from "@/lib/insiderClassify";
 
@@ -191,7 +190,7 @@ export function InsiderNetByMonth({
               <Cell
                 key={b.month}
                 fill={
-                  b.net > 0 ? lightTheme.up : b.net < 0 ? lightTheme.down : theme.borderColor
+                  b.net > 0 ? theme.up : b.net < 0 ? theme.down : theme.borderColor
                 }
               />
             ))}
