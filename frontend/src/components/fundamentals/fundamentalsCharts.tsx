@@ -122,6 +122,14 @@ function formatMoneyAxis(n: number | null, currency: string | null): string {
  */
 const DOT_VISIBILITY_MAX_POINTS = 40;
 
+/** Gutter for a money `YAxis`. Wider than the percent/ratio axes because
+ *  `formatMoneyAxis` prefixes the ISO currency (`US$450.00B`, not
+ *  `450.00B`) — under en-GB, `Intl.NumberFormat` renders USD as `US$`,
+ *  so the widest tick is ~8 characters. One constant: five money axes
+ *  had this inline, and a divergent value shows up as misaligned chart
+ *  left edges down the page (review NITPICK on PR #2188). */
+const MONEY_AXIS_WIDTH = 72;
+
 function seriesDot(pointCount: number): { readonly r: number } | false {
   return pointCount < DOT_VISIBILITY_MAX_POINTS ? { r: 2 } : false;
 }
@@ -192,7 +200,7 @@ export function PnlStackedChart({ periods, currency }: MoneyChartProps): JSX.Ele
             minTickGap={20}
             {...sharedAxis(theme)}
           />
-          <YAxis tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={72} {...sharedAxis(theme)} />
+          <YAxis tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={MONEY_AXIS_WIDTH} {...sharedAxis(theme)} />
           <Tooltip
             cursor={{ fill: theme.gridLine }}
             formatter={(value: number) => formatMoneyAxis(value, currency)}
@@ -337,7 +345,7 @@ export function CashflowWaterfallChart({ period, currency }: WaterfallProps): JS
         <BarChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 4 }}>
           <SharedGrid theme={theme} />
           <XAxis dataKey="label" {...sharedAxis(theme)} />
-          <YAxis tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={72} {...sharedAxis(theme)} />
+          <YAxis tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={MONEY_AXIS_WIDTH} {...sharedAxis(theme)} />
           <ReferenceLine y={0} stroke={theme.borderColor} />
           <Tooltip
             cursor={{ fill: theme.gridLine }}
@@ -426,7 +434,7 @@ export function NetDebtChart({ periods, currency }: MoneyChartProps): JSX.Elemen
         <ComposedChart data={rows} margin={{ top: 8, right: 8, left: 8, bottom: 4 }}>
           <SharedGrid theme={theme} />
           <XAxis dataKey="period_end" tickFormatter={formatPeriod} interval="preserveStartEnd" minTickGap={20} {...sharedAxis(theme)} />
-          <YAxis tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={72} {...sharedAxis(theme)} />
+          <YAxis tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={MONEY_AXIS_WIDTH} {...sharedAxis(theme)} />
           {/* Net debt crossing zero is the readable event — below it the
               issuer holds more cash than debt. */}
           <ReferenceLine y={0} stroke={theme.borderColor} />
@@ -463,7 +471,7 @@ export function DebtStructureChart({ periods, currency }: MoneyChartProps): JSX.
         <ComposedChart data={rows} margin={{ top: 8, right: 32, left: 8, bottom: 4 }}>
           <SharedGrid theme={theme} />
           <XAxis dataKey="period_end" tickFormatter={formatPeriod} interval="preserveStartEnd" minTickGap={20} {...sharedAxis(theme)} />
-          <YAxis yAxisId="left" tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={72} {...sharedAxis(theme)} />
+          <YAxis yAxisId="left" tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={MONEY_AXIS_WIDTH} {...sharedAxis(theme)} />
           <YAxis yAxisId="right" orientation="right" tickFormatter={(v: number) => `${v.toFixed(0)}×`} width={48} {...sharedAxis(theme)} />
           <Tooltip
             formatter={(value: number, name: string) =>
@@ -662,7 +670,7 @@ export function FcfChart({
           <ComposedChart data={data} margin={{ top: 8, right: hasYield ? 32 : 8, left: 8, bottom: 4 }}>
             <SharedGrid theme={theme} />
             <XAxis dataKey="period_end" tickFormatter={formatPeriod} interval="preserveStartEnd" minTickGap={20} {...sharedAxis(theme)} />
-            <YAxis yAxisId="fcf" tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={72} {...sharedAxis(theme)} />
+            <YAxis yAxisId="fcf" tickFormatter={(v: number) => formatMoneyAxis(v, currency)} width={MONEY_AXIS_WIDTH} {...sharedAxis(theme)} />
             {hasYield ? (
               <YAxis yAxisId="yield" orientation="right" tickFormatter={(v: number) => `${v.toFixed(1)}%`} width={48} {...sharedAxis(theme)} />
             ) : null}

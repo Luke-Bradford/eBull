@@ -151,7 +151,6 @@ export function FundamentalsPage(): JSX.Element {
     );
   }, [income.data, balance.data, cashflow.data]);
 
-<<<<<<< HEAD
   // The route param may be a ticker OR a numeric instrument_id (#2184 —
   // the backend resolves either). The payload echoes the RESOLVED symbol,
   // so the heading and the sibling links show `AAPL`, never `1001`.
