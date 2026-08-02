@@ -281,11 +281,9 @@ class TestPersistReportSnapshot:
             snapshot=report,
         )
 
-        # Two statements now: the upsert, then the #2180 retention prune.
-        assert cursor.execute.call_count == 2
-        sql = cursor.execute.call_args_list[0][0][0]
-        params = cursor.execute.call_args_list[0][0][1]
-        assert "DELETE FROM report_snapshots" in cursor.execute.call_args_list[1][0][0]
+        cursor.execute.assert_called_once()
+        sql = cursor.execute.call_args[0][0]
+        params = cursor.execute.call_args[0][1]
         assert "ON CONFLICT" in sql
         assert params["report_type"] == "weekly"
         assert params["period_start"] == date(2026, 4, 6)
@@ -1159,55 +1157,109 @@ class TestSelectRankMovers:
         assert _select_rank_movers([], top_n=10) == []
 
 
-class TestPruneReportSnapshots2180:
-    """#2180 — `report_snapshots` had NO retention path at all, so every row
-    ever written was permanent (7.62 MB of a 7.63 MB table was six stale rows)."""
+class TestSnapshotSizeGuard2180:
+    """#2180 — the six stale rows were 7.62 MB of a 7.63 MB table because a
+    builder shipped an uncapped list field and nothing noticed for months."""
 
     @staticmethod
-    def _conn(rowcount: int = 0) -> tuple[MagicMock, MagicMock]:
+    def _conn() -> tuple[MagicMock, MagicMock]:
         conn = MagicMock()
         cursor = MagicMock()
-        cursor.rowcount = rowcount
         conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         return conn, cursor
 
-    def test_prunes_tail_beyond_retention(self) -> None:
-        from app.services.reporting import prune_report_snapshots
-
-        conn, cursor = self._conn(rowcount=3)
-        assert prune_report_snapshots(conn, report_type="weekly") == 3
-
-        sql = cursor.execute.call_args[0][0]
-        params = cursor.execute.call_args[0][1]
-        assert "DELETE FROM report_snapshots" in sql
-        # Ordered by the SAME key the API serves, so only the oldest tail can
-        # ever be dropped — never a row a caller could still page to.
-        assert "ORDER BY period_start DESC" in sql
-        assert "OFFSET" in sql
-        assert params == {"report_type": "weekly", "keep": 52}
-
-    def test_monthly_keeps_its_own_count(self) -> None:
-        from app.services.reporting import prune_report_snapshots
+    def test_oversized_snapshot_is_refused_before_the_write(self) -> None:
+        from app.services.reporting import ReportSnapshotTooLarge, persist_report_snapshot
 
         conn, cursor = self._conn()
-        prune_report_snapshots(conn, report_type="monthly")
-        assert cursor.execute.call_args[0][1]["keep"] == 24
-
-    def test_unconfigured_type_is_left_alone(self) -> None:
-        """Silently pruning a report type nobody sized is how a retention
-        sweep becomes data loss — no retention configured means no DELETE."""
-        from app.services.reporting import prune_report_snapshots
-
-        conn, cursor = self._conn()
-        assert prune_report_snapshots(conn, report_type="quarterly") == 0
+        # The real shape of the bug: one uncapped run x instrument product.
+        snapshot = {
+            "report_type": "weekly",
+            "score_changes": [{"symbol": f"S{i}", "rank_delta": i} for i in range(14473)],
+        }
+        with pytest.raises(ReportSnapshotTooLarge, match="score_changes"):
+            persist_report_snapshot(
+                conn,
+                report_type="weekly",
+                period_start=date(2026, 6, 8),
+                period_end=date(2026, 6, 14),
+                snapshot=snapshot,
+            )
+        # Refused BEFORE the write — nothing reaches the table.
         cursor.execute.assert_not_called()
 
-    def test_retention_exceeds_the_api_limit_ceiling(self) -> None:
-        """`app/api/reports.py` caps `limit` at 100 — but the ceiling that
-        matters is per report_type, and both budgets must clear the largest
-        page a caller can request for their own type."""
-        from app.services.reporting import _SNAPSHOT_RETENTION
+    def test_error_names_the_offending_field_and_its_length(self) -> None:
+        from app.services.reporting import ReportSnapshotTooLarge, persist_report_snapshot
 
-        assert _SNAPSHOT_RETENTION["weekly"] >= 52  # ~1 year of weeklies
-        assert _SNAPSHOT_RETENTION["monthly"] >= 24  # ~2 years of monthlies
+        conn, _ = self._conn()
+        snapshot = {"holdings": [{"symbol": f"S{i}", "note": "x" * 200} for i in range(500)]}
+        with pytest.raises(ReportSnapshotTooLarge) as exc:
+            persist_report_snapshot(
+                conn,
+                report_type="monthly",
+                period_start=date(2026, 6, 1),
+                period_end=date(2026, 6, 30),
+                snapshot=snapshot,
+            )
+        assert "holdings" in str(exc.value)
+        assert "500" in str(exc.value)
+
+    def test_capped_snapshot_passes(self) -> None:
+        """A #2178-shaped snapshot — 20-row exhibit plus the pre-cap count —
+        is ~3-4 KB on dev and must be nowhere near the ceiling."""
+        from app.services.reporting import persist_report_snapshot
+
+        conn, cursor = self._conn()
+        snapshot = {
+            "report_type": "weekly",
+            "score_changes": [{"symbol": f"S{i}", "rank_delta": 100 - i} for i in range(20)],
+            "score_changes_total": 14473,
+        }
+        persist_report_snapshot(
+            conn,
+            report_type="weekly",
+            period_start=date(2026, 6, 8),
+            period_end=date(2026, 6, 14),
+            snapshot=snapshot,
+        )
+        cursor.execute.assert_called_once()
+
+    def test_snapshot_with_dates_serialises_for_the_size_check(self) -> None:
+        """The guard must not itself become the failure: snapshots carry
+        `date`/`Decimal` values, which plain json.dumps cannot encode."""
+        from app.services.reporting import persist_report_snapshot
+
+        conn, cursor = self._conn()
+        persist_report_snapshot(
+            conn,
+            report_type="weekly",
+            period_start=date(2026, 6, 8),
+            period_end=date(2026, 6, 14),
+            snapshot={"as_of": date(2026, 6, 14), "pnl": Decimal("1.25")},
+        )
+        cursor.execute.assert_called_once()
+
+
+class TestRetentionDeletionIsDeliberatelyAbsent2180:
+    def test_no_delete_path_on_report_snapshots(self) -> None:
+        """Row-count retention must NOT be added: `_prior_v2_chain` selects
+        EVERY prior v2 snapshot with no LIMIT, and `si_return` / `si_start`
+        are chained from it. Deleting the oldest rows would silently move the
+        inception date forward (Codex ckpt-2 on PR #2195)."""
+        import inspect
+
+        from app.services import reporting
+
+        src = inspect.getsource(reporting)
+        assert "DELETE FROM report_snapshots" not in src
+
+    def test_prior_chain_query_is_unbounded(self) -> None:
+        """Pins the reason: if this ever grows a LIMIT, the no-retention
+        constraint above can be revisited."""
+        import inspect
+
+        from app.services.reporting import _prior_v2_chain
+
+        src = inspect.getsource(_prior_v2_chain)
+        assert "LIMIT" not in src.upper()

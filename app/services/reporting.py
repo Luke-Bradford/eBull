@@ -919,49 +919,36 @@ def _compute_contributors(
     return {"contributors": contributors, "drags": drags}
 
 
-# How many snapshots of each type survive a write (#2180). `report_snapshots`
-# had NO retention at all — `grep -riE 'delete|retention|sweep|prune'` over the
-# table's callers returned nothing — so every row ever written was permanent,
-# and the six pre-#2178 uncapped rows (7.62 MB of a 7.63 MB table) would have
-# sat there forever.
+# Ceiling on one serialized snapshot (#2180).
 #
-# Counts, not an age cutoff: `app/api/reports.py` serves `ORDER BY period_start
-# DESC` with `limit` up to 100, so a count bound is what actually bounds the
-# worst-case response, and it degrades predictably if a cadence ever changes.
-# ~1 year of weeklies and ~2 years of monthlies is well past the `limit=100`
-# ceiling any caller can ask for, so retention can never truncate a served page.
-_SNAPSHOT_RETENTION: dict[str, int] = {"weekly": 52, "monthly": 24}
+# ROW-COUNT RETENTION IS DELIBERATELY *NOT* THE GUARD HERE, and must not be
+# added later: `_prior_v2_chain` selects EVERY prior v2 snapshot with no LIMIT,
+# and `_cover_and_performance` chain-links those returns into `si_return` and
+# takes `si_start` from `chained_rows[0]`. Deleting the oldest rows would
+# silently move the inception date forward — since-inception would quietly
+# become since-the-retention-window, and the risk section's drawdown index
+# would truncate with it. The history is load-bearing, so it stays.
+#
+# What actually caused #2180's 7.62 MB was not row COUNT but row SIZE: six
+# pre-#2178 rows each carrying the full run × instrument product (up to 14,473
+# elements). With every list field capped, a snapshot is ~3-4 KB and 52 weeklies
+# a year cost ~170 KB — growth that needs no pruning at all. So the durable
+# guard is a size assertion at the write, which catches the NEXT builder that
+# ships an uncapped field on its first run instead of after it has accumulated
+# silently for months.
+#
+# 64 KiB is ~16x the largest legitimate snapshot observed and well under the
+# smallest uncapped one (88 KB) — wide enough that ordinary content growth
+# never trips it, tight enough that an uncapped collection always does.
+_MAX_SNAPSHOT_BYTES = 64 * 1024
 
 
-def prune_report_snapshots(conn: psycopg.Connection[Any], *, report_type: str) -> int:
-    """Drop all but the most recent N snapshots of ``report_type`` (#2180).
-
-    Returns the number of rows deleted. Keyed on ``period_start DESC`` — the
-    same order the API serves — so what is dropped is always the oldest tail,
-    never a row a caller could still page to.
-
-    A ``report_type`` with no configured retention is left ALONE rather than
-    defaulted to some number: silently pruning a type nobody sized is how a
-    retention sweep turns into data loss. The caller owns the commit.
-    """
-    keep = _SNAPSHOT_RETENTION.get(report_type)
-    if keep is None:
-        return 0
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            DELETE FROM report_snapshots
-            WHERE snapshot_id IN (
-                SELECT snapshot_id
-                FROM report_snapshots
-                WHERE report_type = %(report_type)s
-                ORDER BY period_start DESC
-                OFFSET %(keep)s
-            )
-            """,
-            {"report_type": report_type, "keep": keep},
-        )
-        return cur.rowcount
+class ReportSnapshotTooLarge(ValueError):
+    """A snapshot exceeded ``_MAX_SNAPSHOT_BYTES`` — almost always an uncapped
+    list field (#2180 / #2178). Raised rather than warned: eBull does not
+    silently bypass a failed check, and a loud job failure is strictly better
+    than a megabyte-scale leak that only surfaces months later in an API
+    response."""
 
 
 def persist_report_snapshot(
@@ -972,15 +959,33 @@ def persist_report_snapshot(
     period_end: date,
     snapshot: dict[str, Any],
 ) -> None:
-    """Upsert a report snapshot into report_snapshots, then prune the tail.
+    """Upsert a report snapshot into report_snapshots.
 
     Idempotent: ON CONFLICT replaces the snapshot for the same
     (report_type, period_start) pair. The caller owns the commit.
 
-    Pruning runs here rather than as a separate job (#2180): the only way
-    this table grows is a write, so retention enforced at the write is
-    exact and needs no new scheduled surface to drift out of sync.
+    Raises ``ReportSnapshotTooLarge`` before writing when the serialized
+    snapshot exceeds ``_MAX_SNAPSHOT_BYTES`` (#2180) — the check sits here
+    because a write is the only way this table grows, so it catches every
+    producer without a scheduled sweep that could drift out of sync.
     """
+    encoded = json.dumps(snapshot, default=str)
+    if len(encoded.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
+        # Name the biggest collection: an uncapped list is the cause every
+        # time this has fired, and the operator needs to know WHICH one.
+        biggest = max(
+            ((k, len(v)) for k, v in snapshot.items() if isinstance(v, list)),
+            key=lambda kv: kv[1],
+            default=("<no list field>", 0),
+        )
+        raise ReportSnapshotTooLarge(
+            f"{report_type} snapshot for {period_start} is "
+            f"{len(encoded.encode('utf-8')):,} bytes, over the "
+            f"{_MAX_SNAPSHOT_BYTES:,}-byte cap. Largest list field: "
+            f"{biggest[0]!r} with {biggest[1]:,} elements — cap it to a "
+            f"top-N exhibit and carry the pre-cap count alongside "
+            f"(the #2178 shape)."
+        )
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -998,9 +1003,6 @@ def persist_report_snapshot(
                 "snapshot": Jsonb(snapshot),
             },
         )
-    pruned = prune_report_snapshots(conn, report_type=report_type)
-    if pruned:
-        logger.info("report_snapshots: pruned %d %s snapshot(s) past retention", pruned, report_type)
 
 
 def load_report_snapshots(
