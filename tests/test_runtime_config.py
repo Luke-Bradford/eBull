@@ -377,6 +377,11 @@ class TestIsLocalLlmEndpoint:
             "http://LOCALHOST:11434/v1",
             "http://[::1]:11434/v1",
             "http://0.0.0.0:11434/v1",
+            # Loopback spellings a string set would silently miss, each
+            # one a bypass of the allow-list (Codex ckpt-2).
+            "http://127.1:11434/v1",
+            "http://2130706433:11434/v1",
+            "http://127.0.0.53:11434/v1",
         ],
     )
     def test_local_hosts(self, base_url: str) -> None:

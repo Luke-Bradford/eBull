@@ -25,7 +25,9 @@ covers all config-style changes.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -68,12 +70,12 @@ DEFAULT_LLM_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_LLM_MODEL_WRITER = "qwen3:14b"
 DEFAULT_LLM_MODEL_CRITIC = "qwen3:14b"
 
-# Hosts that mean "the inference server runs on THIS machine" — the only
-# case where a resident model's weights consume OUR RAM. Remote
-# OpenAI-compatible endpoints (a vLLM box, OpenAI itself) are exempt from
-# both the size allow-list and the post-batch release: neither the memory
-# hazard nor the unload route applies there.
-_LOCAL_LLM_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
+# Hostnames that mean "the inference server runs on THIS machine". IP
+# LITERALS are not listed here — they are classified numerically below,
+# because a string set silently misses valid loopback spellings
+# (`127.1`, `2130706433`, anything else in 127.0.0.0/8) and each miss is
+# a silent bypass of the allow-list (Codex ckpt-2).
+_LOCAL_LLM_HOSTNAMES: frozenset[str] = frozenset({"localhost"})
 
 # Models the thesis job may load into LOCAL memory (#2187).
 #
@@ -155,13 +157,37 @@ def is_local_llm_endpoint(base_url: str) -> bool:
     Gates both #2187 controls (the model allow-list and the post-batch
     model release) — a remote endpoint holds its weights in someone
     else's RAM and exposes no unload route we own.
+
+    IP hosts are classified numerically (``is_loopback`` / unspecified),
+    not by string match, so every spelling of loopback resolves the same
+    way. ``socket.inet_aton`` is used for the IPv4 pass because it
+    accepts the shorthand and integer forms ``ipaddress`` rejects
+    (``127.1``, ``2130706433``); it parses numerically and never performs
+    a DNS lookup.
+
+    Known limit: a NAMED host other than ``localhost`` that happens to
+    resolve to this machine (``mymac.local``) reads as remote. Resolving
+    it would put DNS in a config-validation path. The rule targets drift
+    on the local-first default, not a determined operator — a deliberate
+    remote-looking pointer at your own box opts out of both controls.
     """
     try:
-        host = urlsplit(base_url).hostname
+        host = urlsplit(base_url).hostname  # lowercased; IPv6 brackets stripped
     except ValueError:
         # Malformed URL: not provably local, so no local-only rule applies.
         return False
-    return host is not None and host.lower() in _LOCAL_LLM_HOSTS
+    if host is None:
+        return False
+    if host in _LOCAL_LLM_HOSTNAMES:
+        return True
+    try:
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv4Address(socket.inet_aton(host))
+    except OSError:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False  # a hostname we cannot classify without DNS
+    return address.is_loopback or address.is_unspecified
 
 
 def local_llm_model_violation(*, provider: str, base_url: str, model: str, field: str) -> str | None:
