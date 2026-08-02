@@ -919,6 +919,51 @@ def _compute_contributors(
     return {"contributors": contributors, "drags": drags}
 
 
+# How many snapshots of each type survive a write (#2180). `report_snapshots`
+# had NO retention at all — `grep -riE 'delete|retention|sweep|prune'` over the
+# table's callers returned nothing — so every row ever written was permanent,
+# and the six pre-#2178 uncapped rows (7.62 MB of a 7.63 MB table) would have
+# sat there forever.
+#
+# Counts, not an age cutoff: `app/api/reports.py` serves `ORDER BY period_start
+# DESC` with `limit` up to 100, so a count bound is what actually bounds the
+# worst-case response, and it degrades predictably if a cadence ever changes.
+# ~1 year of weeklies and ~2 years of monthlies is well past the `limit=100`
+# ceiling any caller can ask for, so retention can never truncate a served page.
+_SNAPSHOT_RETENTION: dict[str, int] = {"weekly": 52, "monthly": 24}
+
+
+def prune_report_snapshots(conn: psycopg.Connection[Any], *, report_type: str) -> int:
+    """Drop all but the most recent N snapshots of ``report_type`` (#2180).
+
+    Returns the number of rows deleted. Keyed on ``period_start DESC`` — the
+    same order the API serves — so what is dropped is always the oldest tail,
+    never a row a caller could still page to.
+
+    A ``report_type`` with no configured retention is left ALONE rather than
+    defaulted to some number: silently pruning a type nobody sized is how a
+    retention sweep turns into data loss. The caller owns the commit.
+    """
+    keep = _SNAPSHOT_RETENTION.get(report_type)
+    if keep is None:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM report_snapshots
+            WHERE snapshot_id IN (
+                SELECT snapshot_id
+                FROM report_snapshots
+                WHERE report_type = %(report_type)s
+                ORDER BY period_start DESC
+                OFFSET %(keep)s
+            )
+            """,
+            {"report_type": report_type, "keep": keep},
+        )
+        return cur.rowcount
+
+
 def persist_report_snapshot(
     conn: psycopg.Connection[Any],
     *,
@@ -927,10 +972,14 @@ def persist_report_snapshot(
     period_end: date,
     snapshot: dict[str, Any],
 ) -> None:
-    """Upsert a report snapshot into report_snapshots.
+    """Upsert a report snapshot into report_snapshots, then prune the tail.
 
     Idempotent: ON CONFLICT replaces the snapshot for the same
     (report_type, period_start) pair. The caller owns the commit.
+
+    Pruning runs here rather than as a separate job (#2180): the only way
+    this table grows is a write, so retention enforced at the write is
+    exact and needs no new scheduled surface to drift out of sync.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -949,6 +998,9 @@ def persist_report_snapshot(
                 "snapshot": Jsonb(snapshot),
             },
         )
+    pruned = prune_report_snapshots(conn, report_type=report_type)
+    if pruned:
+        logger.info("report_snapshots: pruned %d %s snapshot(s) past retention", pruned, report_type)
 
 
 def load_report_snapshots(

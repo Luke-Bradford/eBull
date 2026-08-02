@@ -262,6 +262,7 @@ class TestPersistReportSnapshot:
 
         conn = MagicMock()
         cursor = MagicMock()
+        cursor.rowcount = 0
         conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -280,9 +281,11 @@ class TestPersistReportSnapshot:
             snapshot=report,
         )
 
-        cursor.execute.assert_called_once()
-        sql = cursor.execute.call_args[0][0]
-        params = cursor.execute.call_args[0][1]
+        # Two statements now: the upsert, then the #2180 retention prune.
+        assert cursor.execute.call_count == 2
+        sql = cursor.execute.call_args_list[0][0][0]
+        params = cursor.execute.call_args_list[0][0][1]
+        assert "DELETE FROM report_snapshots" in cursor.execute.call_args_list[1][0][0]
         assert "ON CONFLICT" in sql
         assert params["report_type"] == "weekly"
         assert params["period_start"] == date(2026, 4, 6)
@@ -1154,3 +1157,57 @@ class TestSelectRankMovers:
         from app.services.reporting import _select_rank_movers
 
         assert _select_rank_movers([], top_n=10) == []
+
+
+class TestPruneReportSnapshots2180:
+    """#2180 — `report_snapshots` had NO retention path at all, so every row
+    ever written was permanent (7.62 MB of a 7.63 MB table was six stale rows)."""
+
+    @staticmethod
+    def _conn(rowcount: int = 0) -> tuple[MagicMock, MagicMock]:
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.rowcount = rowcount
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        return conn, cursor
+
+    def test_prunes_tail_beyond_retention(self) -> None:
+        from app.services.reporting import prune_report_snapshots
+
+        conn, cursor = self._conn(rowcount=3)
+        assert prune_report_snapshots(conn, report_type="weekly") == 3
+
+        sql = cursor.execute.call_args[0][0]
+        params = cursor.execute.call_args[0][1]
+        assert "DELETE FROM report_snapshots" in sql
+        # Ordered by the SAME key the API serves, so only the oldest tail can
+        # ever be dropped — never a row a caller could still page to.
+        assert "ORDER BY period_start DESC" in sql
+        assert "OFFSET" in sql
+        assert params == {"report_type": "weekly", "keep": 52}
+
+    def test_monthly_keeps_its_own_count(self) -> None:
+        from app.services.reporting import prune_report_snapshots
+
+        conn, cursor = self._conn()
+        prune_report_snapshots(conn, report_type="monthly")
+        assert cursor.execute.call_args[0][1]["keep"] == 24
+
+    def test_unconfigured_type_is_left_alone(self) -> None:
+        """Silently pruning a report type nobody sized is how a retention
+        sweep becomes data loss — no retention configured means no DELETE."""
+        from app.services.reporting import prune_report_snapshots
+
+        conn, cursor = self._conn()
+        assert prune_report_snapshots(conn, report_type="quarterly") == 0
+        cursor.execute.assert_not_called()
+
+    def test_retention_exceeds_the_api_limit_ceiling(self) -> None:
+        """`app/api/reports.py` caps `limit` at 100 — but the ceiling that
+        matters is per report_type, and both budgets must clear the largest
+        page a caller can request for their own type."""
+        from app.services.reporting import _SNAPSHOT_RETENTION
+
+        assert _SNAPSHOT_RETENTION["weekly"] >= 52  # ~1 year of weeklies
+        assert _SNAPSHOT_RETENTION["monthly"] >= 24  # ~2 years of monthlies
