@@ -143,8 +143,8 @@ describe("FundamentalsPage", () => {
 
   it("shows a 'no SEC XBRL coverage' empty state when every statement reports source='unavailable'", async () => {
     // The real /financials contract: 200 OK with source='unavailable'
-    // and rows=[] for non-SEC instruments. A 404 only fires for an
-    // unknown symbol, which falls through to the generic error.
+    // and rows=[] for non-SEC instruments. A 404 only fires when the
+    // route param names no instrument at all — a separate empty state.
     vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
       ((_symbol: string, query: { statement: "income" | "balance" | "cashflow" }) =>
         Promise.resolve({
@@ -192,5 +192,131 @@ describe("FundamentalsPage", () => {
     renderAt("/instrument/GME/fundamentals");
     const link = await screen.findByRole("link", { name: /Raw statements/i });
     expect(link).toHaveAttribute("href", "/instrument/GME?tab=financials");
+  });
+
+  // ---- #2184 -------------------------------------------------------------
+
+  it("renders an EmptyState (not the red error banner) on the endpoint's own 404", async () => {
+    const { ApiError } = await import("@/api/client");
+    // Shaped like a real response: `client.ts` sets BOTH `message` and
+    // `detail` from a string `{"detail": ...}` body.
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      (() =>
+        Promise.reject(
+          new ApiError(404, "Instrument ZZZZ not found", "Instrument ZZZZ not found"),
+        )) as never,
+    );
+    renderAt("/instrument/ZZZZ/fundamentals");
+
+    expect(await screen.findByText(/Instrument not found/i)).toBeInTheDocument();
+    expect(screen.getByText(/No instrument matches "ZZZZ"/i)).toBeInTheDocument();
+    // The red "Failed to load. Check the browser console" banner and its
+    // Retry affordance must NOT appear — nothing failed.
+    expect(screen.queryByRole("button", { name: /Retry/i })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps SectionError for a bare FastAPI 404 (missing route / mis-proxied base)", async () => {
+    // An outage must NOT be reported as a data absence. FastAPI answers a
+    // missing or renamed route with `{"detail":"Not Found"}` — same status,
+    // different meaning — and the operator needs the Retry affordance.
+    const { ApiError } = await import("@/api/client");
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      (() => Promise.reject(new ApiError(404, "Not Found", "Not Found"))) as never,
+    );
+    renderAt("/instrument/GME/fundamentals");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/No instrument matches/i)).toBeNull();
+  });
+
+  it("offers no dead-end sibling links on the not-found path", async () => {
+    // Both header links would point at `/instrument/<unresolvable ref>`,
+    // which dead-ends exactly like this page did. Only the EmptyState's
+    // `/instruments` link is a real recovery route.
+    const { ApiError } = await import("@/api/client");
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(
+      (() =>
+        Promise.reject(
+          new ApiError(404, "Instrument ZZZZ not found", "Instrument ZZZZ not found"),
+        )) as never,
+    );
+    renderAt("/instrument/ZZZZ/fundamentals");
+
+    await screen.findByText(/Instrument not found/i);
+    expect(screen.queryByRole("link", { name: /Raw statements/i })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Back to/i })).toBeNull();
+    expect(
+      screen.getByRole("link", { name: /Browse instruments/i }),
+    ).toHaveAttribute("href", "/instruments");
+  });
+
+  it("shows the RESOLVED symbol in the heading when the route param is a numeric id", async () => {
+    mockHappyPath();
+    renderAt("/instrument/1699/fundamentals");
+
+    // Payload echoes symbol='GME'; the heading must not read "1699".
+    expect(
+      await screen.findByRole("heading", { name: /Fundamentals — GME/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Fundamentals — 1699/)).toBeNull();
+    // Sibling links follow the resolved symbol too, so the operator does
+    // not carry the id form into the next page.
+    expect(
+      screen.getByRole("link", { name: /Raw statements/i }),
+    ).toHaveAttribute("href", "/instrument/GME?tab=financials");
+  });
+
+  it("keeps the resolved symbol across a period toggle on a numeric-id URL", async () => {
+    // `useAsync` clears `data` at the start of every deps-driven fetch
+    // (lib/useAsync.ts:98), so without the latch the header reverts to
+    // "1699" mid-toggle and `backHref`/`rawHref` point at
+    // `/instrument/1699`, which dead-ends. Deferring the resolve lets the
+    // assertion land while the refetch is genuinely in flight.
+    const pending: Array<() => void> = [];
+    vi.spyOn(api, "fetchInstrumentFinancials").mockImplementation(((
+      _symbol: string,
+      query: { statement: "income" | "balance" | "cashflow"; period: string },
+    ) => {
+      const payload =
+        query.statement === "income"
+          ? SAMPLE_INCOME
+          : query.statement === "balance"
+            ? SAMPLE_BALANCE
+            : SAMPLE_CASHFLOW;
+      if (query.period === "annual") {
+        return new Promise((resolve) => {
+          pending.push(() => resolve(payload));
+        });
+      }
+      return Promise.resolve(payload);
+    }) as never);
+
+    renderAt("/instrument/1699/fundamentals");
+    await screen.findByRole("heading", { name: /Fundamentals — GME/i });
+
+    fireEvent.click(screen.getByTestId("fundamentals-period-annual"));
+
+    // In flight: data is null, but the heading must still read GME.
+    await waitFor(() => {
+      expect(screen.getByTestId("fundamentals-period-annual")).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+    });
+    expect(
+      screen.getByRole("heading", { name: /Fundamentals — GME/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Fundamentals — 1699/)).toBeNull();
+    expect(screen.getByRole("link", { name: /Back to GME/i })).toHaveAttribute(
+      "href",
+      "/instrument/GME",
+    );
+
+    // Let the in-flight annual fetches settle so the test does not leave
+    // pending promises behind.
+    for (const resolve of pending) resolve();
   });
 });
