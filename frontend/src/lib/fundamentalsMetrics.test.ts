@@ -174,6 +174,26 @@ describe("buildYoyGrowth", () => {
     expect(buildYoyGrowth(periods)[0]!.revenue_yoy_pct).toBeNull();
   });
 
+  it("derives FCF YoY with the SAME capex rule as buildFcf when capex is absent (Codex ckpt-2, #2185)", () => {
+    // The two panes had diverged: buildFcf was corrected to the settled
+    // `operating_cf - ABS(COALESCE(capex, 0))` rule while buildYoyGrowth kept
+    // gating on `capex === null`. A capex-omitting filer — 25% of FY
+    // instruments that report OCF — got an FCF line on the FCF pane and a gap
+    // on the YoY pane for the very same periods.
+    const statements = [
+      row("2024-12-31", { operating_cf: "100", capex: null }, "FY"),
+      row("2025-12-31", { operating_cf: "150", capex: null }, "FY"),
+    ];
+    const periods = joinStatements([], [], statements);
+
+    // Both derivations must agree, and neither may be null.
+    const fcf = buildFcf(periods);
+    expect(fcf.map((r) => r.fcf)).toEqual([100, 150]);
+
+    const yoy = buildYoyGrowth(periods, "annual");
+    expect(yoy[1]!.fcf_yoy_pct).toBe(50); // (150 - 100) / |100| * 100
+  });
+
   it("uses |prior| in the denominator so swings from negative to positive read positive", () => {
     const periods = joinStatements(
       [

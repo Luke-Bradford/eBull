@@ -256,6 +256,28 @@ function isYearApart(curEnd: string, priorEnd: string): boolean {
  *  branch on annual data. The first `lag` rows are still emitted with
  *  null values so the time axis stays aligned with the other charts.
  *  A non-adjacent prior (history gap) is also nulled — see the guard above. */
+/** The ONE free-cash-flow derivation. Every FCF series in this file goes
+ *  through here.
+ *
+ *  Settled rule, cited not re-derived: `app/services/fcf_yield.py:111`
+ *  (quarterly) and `:132` (annual) compute
+ *  `operating_cf - ABS(COALESCE(capex, 0))` — OCF is strict, **capex NULL
+ *  coalesces to 0**. Spec §3.4 forbids gating on `capex IS NOT NULL`
+ *  verbatim.
+ *
+ *  capex is XBRL `us-gaap:PaymentsToAcquirePropertyPlantAndEquipment`,
+ *  normally a positive outflow — but the sign convention varies between
+ *  filers (prevention-log #596), so abs() before subtracting.
+ *
+ *  Do not inline this rule at a call site. It existed in two copies until
+ *  Codex checkpoint 2 on #2185; they disagreed, and the disagreement was
+ *  operator-visible as an FCF line that rendered on one pane and vanished
+ *  on another for the same periods.
+ */
+function fcfOf(p: JoinedPeriod): number | null {
+  return p.operating_cf !== null ? p.operating_cf - Math.abs(p.capex ?? 0) : null;
+}
+
 export function buildYoyGrowth(
   periods: ReadonlyArray<JoinedPeriod>,
   period: "quarterly" | "annual" = "quarterly",
@@ -267,13 +289,12 @@ export function buildYoyGrowth(
       candidate !== undefined && isYearApart(p.period_end, candidate.period_end)
         ? candidate
         : undefined;
-    const fcf = (cur: JoinedPeriod): number | null => {
-      if (cur.operating_cf === null || cur.capex === null) return null;
-      // capex is XBRL `us-gaap:PaymentsToAcquirePropertyPlantAndEquipment`,
-      // normally a positive outflow — but the sign convention varies between
-      // filers (prevention-log #596), so abs() before subtracting.
-      return cur.operating_cf - Math.abs(cur.capex);
-    };
+    // Uses the SHARED derivation — see fcfOf. This site gated on
+    // `capex === null` until Codex ckpt-2 on #2185 caught it: buildFcf had
+    // been corrected to the settled COALESCE rule while this copy had not,
+    // so a capex-omitting filer rendered an FCF line on the FCF pane and a
+    // gap on the YoY pane for the same periods. One rule, one function.
+    const fcf = fcfOf;
     return {
       period_end: p.period_end,
       revenue_yoy_pct: prior
@@ -516,11 +537,5 @@ export interface FcfRow {
  * COALESCEs capex to 0 — still plotted a value. One chart, two capex rules.
  */
 export function buildFcf(periods: ReadonlyArray<JoinedPeriod>): FcfRow[] {
-  return periods.map((p) => ({
-    period_end: p.period_end,
-    fcf:
-      p.operating_cf !== null
-        ? p.operating_cf - Math.abs(p.capex ?? 0)
-        : null,
-  }));
+  return periods.map((p) => ({ period_end: p.period_end, fcf: fcfOf(p) }));
 }
