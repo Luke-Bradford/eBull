@@ -995,6 +995,26 @@ def _resolve_flow_value(
     return None
 
 
+# Plausible range for a DERIVED fiscal-year label (#2192). Must match the
+# CHECK added in sql/243_fiscal_year_range_check.sql — a label outside it
+# now fails the insert, so the normalizer has to refuse the stamp BEFORE it
+# becomes a label or an anchor.
+#
+# Source rule: SEC companyfacts `fy` is the filing's DEI
+# DocumentFiscalYearFocus (#682) and SEC republishes whatever the filer
+# tagged, errors included — verified against data.sec.gov, which itself
+# serves PRTH fy=43830 (the Excel serial for its own 2019-12-31 period end),
+# WTBA fy=2107, and `fy: 0` for facts from filings with no fiscal-period
+# focus. The stamp is therefore untrusted INPUT, not a given.
+_FISCAL_YEAR_MIN = 1995
+_FISCAL_YEAR_MAX = 2100
+
+
+def _is_plausible_fiscal_year(fy: int | None) -> bool:
+    """True when a SEC ``fy`` stamp can be used as a fiscal-year label (#2192)."""
+    return fy is not None and _FISCAL_YEAR_MIN <= fy <= _FISCAL_YEAR_MAX
+
+
 def _resolve_period_fiscal_year(
     anchor_fy: dict[tuple[str, date], int],
     period_type: str,
@@ -1022,6 +1042,12 @@ def _resolve_period_fiscal_year(
     period (#682); DocumentFiscalYearFocus for a filing's own primary period is
     authoritative; Reg S-X 210.3-02 makes the comparatives real, consecutive
     annual periods.
+
+    #2192: "authoritative" still means "as tagged by the filer", so both
+    stamp-returning paths are guarded. ``anchor_fy`` is pre-filtered by the
+    caller, so a direct hit is already plausible; the final fallback is not,
+    and an implausible stamp with no anchor to fall back on degrades to the
+    period_end's own calendar year rather than poisoning the label.
     """
     direct = anchor_fy.get((period_type, period_end))
     if direct is not None:
@@ -1030,7 +1056,7 @@ def _resolve_period_fiscal_year(
     if same_type:
         pe, fy = min(same_type, key=lambda c: (abs(c[0].year - period_end.year), c[0]))
         return fy - (pe.year - period_end.year)
-    return stamped_fy
+    return stamped_fy if _is_plausible_fiscal_year(stamped_fy) else period_end.year
 
 
 def _build_period_row(
@@ -1144,6 +1170,12 @@ def _derive_periods_from_facts(
     _anchor_best: dict[tuple[str, date], tuple[date, str, int]] = {}
     for (_acc, fp), fs in _acc_fp_facts.items():
         primary = max(fs, key=lambda f: f.period_end)
+        # #2192 — an implausible stamp must never BECOME an anchor. Anchors
+        # are what the calendar-delta path extrapolates from, so one
+        # mis-tagged DocumentFiscalYearFocus would otherwise poison the
+        # neighbouring periods it anchors, not just its own.
+        if not _is_plausible_fiscal_year(primary.fiscal_year):
+            continue
         key = (_FP_MAP[fp][0], primary.period_end)
         cand = (primary.filed_date, primary.accession_number, primary.fiscal_year)
         current = _anchor_best.get(key)
@@ -1201,11 +1233,24 @@ def _derive_periods_from_facts(
             key=lambda f: (f.filed_date, f.accession_number),
             reverse=True,
         )
+        # #1914 confined fiscal_year re-derivation to FY rows so the quarter
+        # SET stays byte-identical (TTM in sql/220 and the Q4 = FY − ΣQ
+        # derivation depend on it). #2192 keeps that invariant exactly: a
+        # PLAUSIBLE stamp is still passed through untouched, and only an
+        # out-of-range one — which sql/243's CHECK would now reject outright —
+        # falls through to the same anchor derivation the FY path uses. The
+        # set of rows whose value changes is precisely the set that could not
+        # be stored at all.
+        quarter_fy = (
+            stamped_fy
+            if _is_plausible_fiscal_year(stamped_fy)
+            else _resolve_period_fiscal_year(anchor_fy, period_type, period_end, stamped_fy)
+        )
         periods.append(
             _build_period_row(
                 period_type=period_type,
                 fiscal_quarter=fiscal_quarter,
-                fiscal_year=stamped_fy,
+                fiscal_year=quarter_fy,
                 period_end=period_end,
                 canonical_facts=canonical_facts,
                 reported_currency=reported_currency,
