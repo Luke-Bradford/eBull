@@ -362,6 +362,10 @@ if [[ -d frontend && -f frontend/package.json ]] && command -v pnpm >/dev/null 2
   # Hand-rolled status pills (#2148) — Badge is the one pill primitive.
   echo "==> Pre-push gate: hand-rolled status pill check"
   pnpm --dir frontend pills:check
+  # Chart integrity (#2185) — no cubic interpolation on discrete financial
+  # series, no raw palette outside lib/chartTheme.ts.
+  echo "==> Pre-push gate: chart integrity check"
+  pnpm --dir frontend charts:check
 fi
 
 # #1208 Phase 4 — dev DB bloat warning (non-blocking).

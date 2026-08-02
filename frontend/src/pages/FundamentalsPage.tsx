@@ -17,8 +17,9 @@
  *   3. YoY growth (revenue / EPS / FCF grouped bars)
  *   4. Cash flow waterfall (latest period: operating → investing →
  *      financing → net change)
- *   5. Balance-sheet structure (latest snapshot — assets vs
- *      liabilities + equity stacked)
+ *   5. Net debt (gross debt + cash bars, net-debt line). Replaced the
+ *      assets vs liabilities+equity snapshot in #2185: those two are
+ *      equal by the accounting identity, so that chart could not vary.
  *   6. Debt structure (LT/ST debt bars + interest-coverage line)
  *   7. DuPont decomposition (ROE = NPM × Asset Turnover ×
  *      Equity Multiplier)
@@ -44,12 +45,12 @@ import {
   SectionSkeleton,
 } from "@/components/dashboard/Section";
 import {
-  BalanceStructureChart,
   CashflowWaterfallChart,
   DebtStructureChart,
   DupontChart,
   FcfChart,
   MarginTrendsChart,
+  NetDebtChart,
   PnlStackedChart,
   RoicChart,
   YoyGrowthChart,
@@ -178,6 +179,30 @@ export function FundamentalsPage(): JSX.Element {
     payloadSymbol ??
     (resolvedRef.current?.ref === symbol ? resolvedRef.current.symbol : symbol);
 
+  // `financial_periods.reported_currency`, surfaced by the endpoint as
+  // `currency` (app/api/instruments.py:819,838). First-non-null across the
+  // three statements rather than income-only, so a partially-covered
+  // instrument still labels its money axes. Null (no rows / no reported
+  // currency) leaves the axes unprefixed — see `formatMoneyAxis` (#2185 §1.4).
+  //
+  // Granularity caveat, stated rather than glossed: the endpoint reads
+  // `db_rows[0]["reported_currency"]` under `ORDER BY period_end_date DESC`
+  // (instruments.py:824,838), i.e. the LATEST period's currency, and this
+  // stamps that one value onto all 20 periods. #2129's rule is per-item, so an
+  // issuer that switched reporting currency mid-history would mislabel its own
+  // back-series. Zero instruments are affected today — dev
+  // `financial_periods` has one distinct code corpus-wide (USD) and no
+  // instrument with more than one — so this is a known limit of the response
+  // shape, not a live defect. Fixing it means moving `currency` onto the row.
+  const currency =
+    income.data?.currency ??
+    balance.data?.currency ??
+    cashflow.data?.currency ??
+    null;
+
+  // Both hrefs use the RESOLVED symbol (#2184), not the raw route param:
+  // `InstrumentPage` still resolves by symbol only, so `/instrument/1001`
+  // would dead-end exactly as this page used to.
   const backHref = `/instrument/${encodeURIComponent(resolvedSymbol)}`;
   const rawHref = `/instrument/${encodeURIComponent(resolvedSymbol)}?tab=financials`;
 
@@ -311,7 +336,7 @@ export function FundamentalsPage(): JSX.Element {
             scope={periodScope(period)}
             source={{ providers: ["sec_xbrl"] }}
           >
-            <PnlStackedChart periods={periods} />
+            <PnlStackedChart periods={periods} currency={currency} />
           </Pane>
           <Pane
             title="Margin trends"
@@ -332,21 +357,24 @@ export function FundamentalsPage(): JSX.Element {
             scope="latest period"
             source={{ providers: ["sec_xbrl"] }}
           >
-            <CashflowWaterfallChart period={periods[periods.length - 1] ?? null} />
+            <CashflowWaterfallChart
+              period={periods[periods.length - 1] ?? null}
+              currency={currency}
+            />
           </Pane>
           <Pane
-            title="Balance sheet structure"
-            scope="latest snapshot"
+            title="Net debt"
+            scope={periodScope(period)}
             source={{ providers: ["sec_xbrl"] }}
           >
-            <BalanceStructureChart periods={periods} />
+            <NetDebtChart periods={periods} currency={currency} />
           </Pane>
           <Pane
             title="Debt structure"
             scope={periodScope(period)}
             source={{ providers: ["sec_xbrl"] }}
           >
-            <DebtStructureChart periods={periods} />
+            <DebtStructureChart periods={periods} currency={currency} />
           </Pane>
           <Pane
             title="DuPont decomposition"
@@ -367,7 +395,11 @@ export function FundamentalsPage(): JSX.Element {
             scope={periodScope(period)}
             source={{ providers: ["sec_xbrl"] }}
           >
-            <FcfChart periods={periods} yieldSeries={fcfYield.data} />
+            <FcfChart
+              periods={periods}
+              yieldSeries={fcfYield.data}
+              currency={currency}
+            />
           </Pane>
         </div>
       )}

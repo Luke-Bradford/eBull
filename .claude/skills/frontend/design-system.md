@@ -33,6 +33,16 @@ Decision rule: **editorial chrome first.** Reach for a bounding surface only for
 
 Charts read colors, axes, gridlines, and tooltip styling from a single `chartTheme` module (tokens), not per-chart literals. A new chart imports the theme; it does not re-pick colors. Keep chart series colors on the same restrained palette as the rest of the UI (color = signal, not decoration).
 
+**Bind the resolved palette, then never reach past it.** The live failure (#2185): `fundamentalsCharts.tsx` bound `useChartTheme()` to `theme` AND imported `lightTheme`, then used `lightTheme.accent[…]` 23 times against 14 uses of `theme.` — hardcoding the LIGHT palette into a dark-capable page. It looked correct because `darkTheme` currently re-exports the light accents, so the bug was invisible on screen and would only surface the day an accent diverges. Importing `lightTheme` / `darkTheme` **by name** anywhere outside `lib/chartTheme.ts` is the smell; `useChartTheme()` is the only read.
+
+The dark gate cannot catch this — `check-dark-classes.mjs` inspects Tailwind bg/border/hover **class pairs**, and these are inline hex values from a JS module (prevention log → "a lint gate's file-glob is part of its contract"). `pnpm --dir frontend charts:check` (`scripts/check-chart-integrity.mjs`, wired into `.githooks/pre-push`) is the gate that does, scoped to `components/fundamentals/` until the next surface is swept.
+
+## Chart series must not draw unreported values
+
+A financial series (quarterly/annual statements, any discrete observation) is points, not a sampled continuum. Recharts' `monotone` curve draws a smooth path *between* reported values, so the rendered line passes through magnitudes the issuer never reported and can overshoot a local extreme — and `dot={false}` removes the only cue distinguishing data from drawing. Use the **linear** curve type, and show dots while the series is short enough for them to read as markers (~40 points; above that they merge into a band). Same gate: `charts:check`.
+
+Continuous sampled data (intraday price, an equity curve) is not covered by this — the rule is about *discrete* series.
+
 ## Density
 
 eBull is an operator dashboard, not a consumer app — **dense by default**. Grid/table surfaces get tight spacing + line-height. When in doubt, tighter. (See `operator-ui-conventions.md` density grid prefs.)

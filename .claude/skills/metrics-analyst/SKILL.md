@@ -60,7 +60,7 @@ description: eBull metrics analyst — what we measure, where it comes from, whe
 | Executive compensation (DEF 14A SCT) | Filings + events | `def14a_exec_compensation` (sql/215, #1945) | `/instruments/{symbol}/exec-compensation` |
 | ETL freshness per source | Pipeline | `data_freshness_index` | (admin via DB) |
 | Exit recommendation | Portfolio | `trade_recommendations.action='EXIT'` | `/recommendations` |
-| FCF (period) | Fundamentals | derived `operating_cf - capex` | `/instruments/{symbol}/financials?statement=cashflow` (FE-derived) |
+| FCF (period) | Fundamentals | derived `operating_cf − ABS(COALESCE(capex, 0))` | `/instruments/{symbol}/financials?statement=cashflow` (FE-derived) |
 | FCF TTM | Fundamentals | `instrument_valuation.fcf_ttm` | (scoring) |
 | FCF yield | Fundamentals | `instrument_valuation.fcf_yield` | (scoring; planned operator surface #671) |
 | Float concentration info chip | Ownership | rollup `concentration.pct_outstanding_known` | `/instruments/{symbol}/ownership-rollup` |
@@ -260,12 +260,12 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - **Caveats**: depreciation/amort can be sparse on small issuers — falls back to operating income only.
 
 ### FCF (period) / FCF TTM / FCF yield
-- **FCF formula**: `operating_cf - capex` where capex = `PaymentsToAcquirePropertyPlantAndEquipment` (positive outflow in XBRL; subtracting is correct, see [fundamentalsMetrics.ts:272](../../../frontend/src/lib/fundamentalsMetrics.ts#L272)).
+- **FCF formula**: `operating_cf − ABS(COALESCE(capex, 0))` where capex = `PaymentsToAcquirePropertyPlantAndEquipment`. **capex NULL → 0; `operating_cf` is the only strict input.** The settled rule is `app/services/fcf_yield.py:111` (quarterly TTM) / `:132` (annual); the frontend `buildFcf` matches it. `abs()` because the sign convention varies between filers (prevention-log #596), so a filer reporting capex negative must not have FCF inflated.
 - **TTM**: `instrument_valuation.fcf_ttm`.
 - **FCF yield**: `(operating_cf_ttm - |capex_ttm|) / (current_price × shares_outstanding)` (sql/080:83-87) → `instrument_valuation.fcf_yield`.
 - **Endpoint**: per-period FCF computed FE from `/instruments/{symbol}/financials?statement=cashflow`. TTM via `instrument_valuation` (scoring only). FCF yield NOT operator-visible today — **planned operator surface: #671** (needs price-join exposure on L2 fundamentals).
-- **Chart**: `fundamentalsCharts.tsx:507` (FCF line chart).
-- **Caveats**: `capex` null on issuers without explicit PPE filing → empty-state hint. Negative FCF returns 0 from `_value_score`. Quote-derived; stale quote = stale yield.
+- **Chart**: `fundamentalsCharts.tsx:620` (`FcfChart` — FCF line + the #671 TTM-yield line on its own right-hand axis; that dual axis is deliberate, see spec §3.9, do not "simplify" it away).
+- **Caveats**: a null `capex` is NOT an empty state — it COALESCEs to 0, so the chart blanks only when `operating_cf` is absent. (`buildFcf` gated on `capex IS NOT NULL` until #2185; that hid the series from 1,142 FY / 1,247 Q1 instruments which report OCF and never report capex, and broke the line at the exact periods where the TTM-yield overlay still plotted.) Negative FCF returns 0 from `_value_score`. Quote-derived; stale quote = stale yield.
 
 ### Margins
 - **Definitions**: each = `(line / revenue) × 100`.
@@ -282,12 +282,13 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Storage: `financial_periods.{long_term_debt, short_term_debt, cash}`; legacy `fundamentals_snapshot.{net_debt, debt}` for `key_stats`.
 - ⚠ `fundamentals_snapshot.as_of_date` = the FISCAL PERIOD END of the latest filed statement, NOT a fetch/ingest timestamp. Comparing it to `CURRENT_DATE` to judge pipeline freshness is meaningless (AAPL legitimately sits months "old" between quarters) — freshness of the PIPELINE is `job_runs` for `fundamentals_sync`; freshness of the DATA is as_of_date vs the company's expected filing cadence.
 - Endpoint: `/instruments/{symbol}/financials?statement=balance` + `/summary.key_stats.debt_to_equity`.
-- Chart: `FundamentalsPane.tsx` cell 4 (Total Debt); `fundamentalsCharts.tsx buildDebtStructure` (LTD + STD + interest coverage).
+- ⚠ Total debt is NULL **only when BOTH components are NULL**; otherwise the missing side COALESCEs to 0. `short_term_debt` is sparse (12%) because most filers have none to report — treating that as a gap blanks the metric for most instruments. A missing `cash`, by contrast, IS a real gap: net debt goes NULL rather than COALESCE-ing cash to 0, which would overstate it by the whole cash balance. Source rule: [app/services/fundamentals/__init__.py:152-154](../../../app/services/fundamentals/__init__.py#L152-L154) + [fair_value_band.py:1014-1021](../../../app/services/fair_value_band.py#L1014-L1021). Do not invent a degrade path.
+- Chart: `FundamentalsPane.tsx` cell 4 (Total Debt); `fundamentalsCharts.tsx buildDebtStructure` (LTD + STD + interest coverage); net-debt trend on the L2 pane via [`buildNetDebt` (fundamentalsMetrics.ts:373)](../../../frontend/src/lib/fundamentalsMetrics.ts#L373), which mirrors the same rule client-side (#2185).
 
 ### Total assets / liabilities / equity
 - Tags: `us-gaap:Assets`, `us-gaap:Liabilities`, `us-gaap:StockholdersEquity`.
 - Storage: `financial_periods.{total_assets, total_liabilities, shareholders_equity}`.
-- Chart: `latestBalanceStructure` ([fundamentalsMetrics.ts:351](../../../frontend/src/lib/fundamentalsMetrics.ts#L351)) — two horizontal stacked bars to verify `assets ≈ liab + equity`.
+- Chart: **none.** The former `latestBalanceStructure` two-bar snapshot was DELETED in #2185: assets and (liabilities + equity) are equal by the accounting identity, so the chart could not vary and carried no signal. Do not re-add it. The L2 pane is now a net-debt trend (`buildNetDebt`, below).
 
 ### ROE / ROA / ROIC
 - ROE = `net_income / shareholders_equity`. ROA = `net_income / total_assets`.

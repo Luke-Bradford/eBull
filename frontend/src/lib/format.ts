@@ -14,11 +14,24 @@
 const formatters: Record<string, Intl.NumberFormat> = {};
 function getFormatter(currency: string): Intl.NumberFormat {
   if (!formatters[currency]) {
-    formatters[currency] = new Intl.NumberFormat("en-GB", {
-      style: "currency",
-      currency,
-      maximumFractionDigits: 2,
-    });
+    try {
+      formatters[currency] = new Intl.NumberFormat("en-GB", {
+        style: "currency",
+        currency,
+        maximumFractionDigits: 2,
+      });
+    } catch {
+      // A non-ISO-4217 code throws RangeError ("Invalid currency code"),
+      // which inside a recharts `tickFormatter` / `Tooltip formatter`
+      // callback takes the whole chart down rather than one label. Since
+      // #2185 these helpers are fed backend-supplied
+      // `financial_periods.reported_currency` — TEXT NOT NULL with no shape
+      // CHECK (sql/032_financial_data_enrichment_p1.sql:121) — so degrade to an
+      // un-styled number and let the raw code stand in as the symbol.
+      formatters[currency] = new Intl.NumberFormat("en-GB", {
+        maximumFractionDigits: 2,
+      });
+    }
   }
   return formatters[currency];
 }
@@ -115,7 +128,15 @@ export function formatBigMoney(n: number | null, currency = "GBP"): string {
     getFormatter(currency)
       .formatToParts(0)
       .find((p) => p.type === "currency")?.value ?? currency;
-  return `${sym}${formatBigNumber(n)}`;
+  // `formatBigNumber` emits its own leading "-", so concatenating naively
+  // renders the sign INSIDE the denomination — "US$-10.75B". Lift it out:
+  // "-US$10.75B". Only the always-positive OfferingBlock call sites existed
+  // before #2185, so no negative had ever exercised this (net debt, investing
+  // /financing cash flow, negative FCF and operating income all do).
+  const body = formatBigNumber(n);
+  return body.startsWith("-")
+    ? `-${sym}${body.slice(1)}`
+    : `${sym}${body}`;
 }
 
 /** Abbreviated large magnitudes for financial-statement values:
