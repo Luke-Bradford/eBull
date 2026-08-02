@@ -246,7 +246,7 @@ export function RedFlagTrendChart({
           />
           <Tooltip content={<RedFlagTooltip />} cursor={{ stroke: theme.crosshair }} />
           <Line
-            type="monotone"
+            type="linear"
             dataKey="avg_score"
             name="avg red-flag"
             stroke={theme.down}
