@@ -337,6 +337,15 @@ export function ChartPage(): JSX.Element {
 
     return () => {
       cancelled = true;
+      // Release the dedup stamp for the key we just abandoned (#2207). This
+      // teardown discards the in-flight results, so the ref must stop claiming
+      // that key is covered — otherwise the next invocation early-returns and
+      // nothing ever calls setCompareData. That is precisely what StrictMode's
+      // mount-time double-invoke did: run 1 stamped + fetched, this cleanup
+      // cancelled it, run 2 matched the stamp and bailed. Chips rendered (they
+      // read the URL directly) over permanently empty rows. Guarded on equality
+      // so a teardown racing a newer run cannot clear that run's stamp.
+      if (compareFetchKeyRef.current === key) compareFetchKeyRef.current = "";
     };
     // compareSymbols is rebuilt each render from URL params — stable key string prevents
     // spurious re-fetches. eslint-disable needed because array identity changes each render.
