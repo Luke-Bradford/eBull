@@ -67,10 +67,13 @@
  *     immediately. That is the durable guarantee, and it lands now rather than
  *     after all 29 fixes.
  *
- * Burn the entries down one file at a time (`PerformanceChart.tsx` first — it
- * is on an operator-facing statement), then DELETE the `RATCHET` map and the
- * code that reads it. An empty ratchet is a bug, not a milestone: the gate
+ * Burn the entries down one file at a time, then DELETE the `RATCHET` map and
+ * the code that reads it. An empty ratchet is a bug, not a milestone: the gate
  * refuses to run with one, so the mechanism cannot outlive the debt.
+ *
+ * Burn-down progress: `PerformanceChart.tsx` (2 curve) done in #2190 — it was
+ * first because it renders on an operator-facing statement. 25 violations
+ * remain across 9 files.
  *
  * Note the forbidden strings are assembled from fragments below: these gates
  * are textual and line-based, so writing the banned literal in this file — even
@@ -121,7 +124,6 @@ const RATCHET = {
   "components/instrument/FundamentalsPane.tsx": { curve: 1, palette: 4 },
   "components/instrument/OwnershipHistoryChart.tsx": { curve: 1, palette: 0 },
   "components/news/newsAnalyticsCharts.tsx": { curve: 1, palette: 0 },
-  "components/reports/PerformanceChart.tsx": { curve: 2, palette: 0 },
   "components/risk/riskCharts.tsx": { curve: 2, palette: 0 },
   "pages/components/ChartWorkspaceCanvas.tsx": { curve: 0, palette: 2 },
 };
