@@ -1241,6 +1241,36 @@ class TestSnapshotSizeGuard2180:
         cursor.execute.assert_called_once()
 
 
+class TestZeroRankDeltaIsUnrepresentable2180:
+    """Review WARNING on PR #2195: sql/244's `kept` CTE partitions on
+    `rank_delta > 0` / `< 0`, so a zero would be dropped. It cannot occur —
+    and this pins BOTH reasons so the rebuttal cannot silently rot."""
+
+    def test_builder_uses_the_same_strict_sign_split(self) -> None:
+        """The migration must match `_select_rank_movers`, not improve on it:
+        a zero handled differently in the two places would make a repaired row
+        disagree with a natively-written one."""
+        from app.services.reporting import _select_rank_movers
+
+        rows = [
+            {"symbol": "UP", "rank_delta": 10},
+            {"symbol": "FLAT", "rank_delta": 0},
+            {"symbol": "DOWN", "rank_delta": -10},
+        ]
+        result = _select_rank_movers(rows, top_n=10)
+        assert [r["symbol"] for r in result] == ["UP", "DOWN"]
+
+    def test_score_changes_filters_below_the_min_delta(self) -> None:
+        """`_score_changes` takes `min_rank_delta=5` and the SQL filters on
+        ABS(rank_delta) >= it, so a zero never reaches the array at all."""
+        import inspect
+
+        from app.services.reporting import _score_changes
+
+        sig = inspect.signature(_score_changes)
+        assert sig.parameters["min_rank_delta"].default == 5
+
+
 class TestRetentionDeletionIsDeliberatelyAbsent2180:
     def test_no_delete_path_on_report_snapshots(self) -> None:
         """Row-count retention must NOT be added: `_prior_v2_chain` selects

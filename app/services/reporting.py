@@ -969,8 +969,8 @@ def persist_report_snapshot(
     because a write is the only way this table grows, so it catches every
     producer without a scheduled sweep that could drift out of sync.
     """
-    encoded = json.dumps(snapshot, default=str)
-    if len(encoded.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
+    encoded_bytes = len(json.dumps(snapshot, default=str).encode("utf-8"))
+    if encoded_bytes > _MAX_SNAPSHOT_BYTES:
         # Name the biggest collection: an uncapped list is the cause every
         # time this has fired, and the operator needs to know WHICH one.
         biggest = max(
@@ -980,7 +980,7 @@ def persist_report_snapshot(
         )
         raise ReportSnapshotTooLarge(
             f"{report_type} snapshot for {period_start} is "
-            f"{len(encoded.encode('utf-8')):,} bytes, over the "
+            f"{encoded_bytes:,} bytes, over the "
             f"{_MAX_SNAPSHOT_BYTES:,}-byte cap. Largest list field: "
             f"{biggest[0]!r} with {biggest[1]:,} elements — cap it to a "
             f"top-N exhibit and carry the pre-cap count alongside "
