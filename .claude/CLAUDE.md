@@ -91,6 +91,8 @@ Follow this order unless the user explicitly says otherwise:
 3. Read `docs/review-prevention-log.md`. State which entries are relevant. If none apply, say so explicitly.
 4. If implementation pressure suggests changing a settled decision or risks repeating a prevention entry, stop and surface it before coding.
 4b. **Research the source rule + falsify the premise FIRST — before writing the spec.** For ownership/filings/metric work: look up the governing SEC reg/Item or EDGAR/form rule (per "Source-rule before design"), and verify the issue's premise + any inferred signal against the SOURCE and the FULL population (query the dev DB / read the filing structure), not a sample. The handoff premise is falsified more often than not (member_of_group #1645, dimensional dei #1646/#1623, market-cap-as-float #1662, def14a-additive #1659) — and a wrong premise sinks the spec. Do this BEFORE step 6, not after Codex ckpt-1 (#1659 burned a spec + impl on a heuristic the full-population scan then killed).
+
+4c. **An INHERITED root-cause is a premise too — re-falsify it before building on it.** Step 4b was being read as "falsify the ISSUE's premise", which leaves a hole: a fix that a PRIOR SESSION root-caused, wrote up on-issue, and handed off as "ready to implement" arrives already carrying an author's confidence, so it gets implemented instead of tested. **A prior session's conclusion is evidence, not a finding.** Re-run its discriminator against the full population before writing any code — it is one query and it is the cheapest step in the ticket. Precedent (2026-08-03, #2182 B1): a handoff labelled "ROOT CAUSE CONFIRMED" proposed gating period-row creation on "≥1 duration fact"; the full-population check showed that gate suppressing **9,236 legitimate prior-year comparative balance sheets** (Reg S-X 3-01(a) requires two years of balance sheet, all instant facts) to catch **1,584** real shells. It was the SECOND falsified discriminator on that ticket after `months_covered IS NULL` (38.9% precision). Two failed keys in a row is the signal to question the MODEL, not to try a third key.
 5. Read the relevant engineering skills before writing code.
 6. Make schema/interface changes first.
 7. Implement service logic.
@@ -137,6 +139,21 @@ audit" pass: anything to contest? process inadequate anywhere? spec
 intent orphaned in prose? Findings become tickets IMMEDIATELY (template:
 the 2026-07-17 batch #2066-#2075). Do not fold findings into unrelated
 PRs or leave them in session notes — a finding without a ticket is lost.
+
+**The same rule binds INCIDENTAL findings, not just scheduled audits.** A
+defect noticed while doing something else — a query run in passing, a
+number that looked wrong on a panel, a job whose `success` did not match
+its output — becomes a ticket in that session, before the current task
+resumes. It does not go in the PR description of an unrelated change and
+it does not go in a memory file. Precedent (2026-08-03): five minutes of
+ad-hoc dev-DB queries during an unrelated assessment surfaced three
+unticketed defects — #2213 (OpenFIGI resolution dark for 7 weeks behind
+`success`-reporting sweeps), #2214 (ETF filer typing starved, 1 of
+11,465) and #2215 — none of which any scheduled pass would have found,
+because nothing was failing. **The health signals this app reports are
+self-consistent — a job that no-ops and reports success is invisible to
+every automated check we have.** Manual spot-measurement is currently the
+only detector for that class, so its output must be captured.
 
 ## Parallel-session coordination (#2075; 07-16 race lesson)
 
@@ -274,15 +291,30 @@ test. The `db` marker is auto-applied at collection
 pulls a real-DB fixture or whose module touches `psycopg.connect` /
 the test-DB URL / `run_migrations` / `TestClient`.
 
-The **DB-backed integration tier** (`-m db`, ~half the suite) is OFF the
-per-push path — it was the multi-minute, xdist-flaky, routinely
+The **DB-backed integration tier** (`-m db`, ~44% of the suite) is OFF
+the per-push path — it was the hour-plus, xdist-flaky, routinely
 `--no-verify`'d cost that paid no rent on every push. Run it
 deliberately when you change DB/SQL/ingest/schema code:
 
 ```bash
 docker compose --profile test up -d postgres-test   # once per session
-uv run pytest -m db                                  # full integration tier
+uv run pytest -m db tests/test_<touched>.py ...      # touched modules + neighbours
 ```
+
+⚠ **The cost premise changed on 2026-08-03 (#1568): the full tier is now
+~3.5 min, down from 66 min.** Whether that puts it back on the push gate
+is an OPERATOR call (it changes every push), not an agent one — until
+they decide, the gate is unchanged. But for a broad-surface diff there
+is no longer any excuse to skip the whole tier. Run it in file-scoped
+batches, never bare `-m db` (which has wedged this box twice):
+
+```bash
+find tests -name 'test_*.py' | sort | split -l 40 - /tmp/chunk_
+for f in /tmp/chunk_*; do uv run pytest -m db -q $(tr '\n' ' ' < "$f"); done
+```
+
+Gate on the EXIT CODE — this repo's pytest config suppresses the final
+`N passed` line, so the durations block is the last thing printed.
 
 CI does NOT run pytest (removed 2026-05-05). `--no-verify` is for
 genuine emergencies only (precedent: #1387).
