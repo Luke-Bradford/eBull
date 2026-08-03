@@ -1095,12 +1095,14 @@ def _cleanup_plan(conn: psycopg.Connection[tuple]) -> _CleanupPlan:
 
 # One long-lived connection per worker process does all per-test cleanup.
 #
-# This is a load-bearing performance decision, not tidiness (#1568). The probe
-# is a 139-branch ``UNION ALL ... EXISTS``; planning it on a FRESH backend costs
-# ~110 ms because an empty relcache/syscache must fault in every one of those
-# relations' catalog entries. On a connection that has already run it the same
-# query costs ~3.8 ms — warm catalog caches, plus psycopg3's automatic
-# server-side prepare once ``prepare_threshold`` (5) executions have gone by.
+# This is a load-bearing performance decision, not tidiness (#1568). The probe is
+# a ``UNION ALL ... EXISTS`` with one branch per NON-PARTITION ROOT of the wipe
+# set — 139 branches for today's 450-relation closure, since 311 of those
+# relations are partitions covered by their parent's branch. Planning it on a
+# FRESH backend costs ~110 ms because an empty relcache/syscache must fault in
+# every one of those relations' catalog entries. On a connection that has already
+# run it the same query costs ~3.8 ms — warm catalog caches, plus psycopg3's
+# automatic server-side prepare once ``prepare_threshold`` (5) executions pass.
 # Opening a connection per cleanup pass, as the fixture used to, paid the cold
 # price every single time.
 #
@@ -1137,9 +1139,15 @@ def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
     See the block comment above for why this is shaped the way it is (#1568).
     Falls back to ``_truncate_planner_tables`` on any operational failure so a
     test that outgrows the cached plan still gets a clean database.
+
+    ``assert_test_db`` runs INSIDE the try deliberately. Its wrong-database guard
+    raises ``RuntimeError``, which is not a ``psycopg.Error`` and so still escapes
+    uncaught — a connection pointed at the dev DB is never TRUNCATEd. But the same
+    call raises ``psycopg.Error`` on a connection whose backend has died, and that
+    must reach the fallback rather than abort cleanup.
     """
-    assert_test_db(conn)
     try:
+        assert_test_db(conn)
         plan = _cleanup_plan(conn)
         with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
             cur.execute(plan.probe_sql)
@@ -1162,19 +1170,24 @@ def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
         _CLEANUP_PLANS.pop(test_db_name(), None)
         try:
             conn.rollback()
-        except psycopg.Error:  # pragma: no cover - connection already unusable
+        except psycopg.Error:
             pass
-        if conn.broken:  # pragma: no cover - backend died mid-cleanup
-            # A dead janitor would fail every subsequent test with the same
-            # error; forget it so the next call dials a fresh backend.
-            _JANITOR_CONNS.pop(test_db_name(), None)
+        fallback_conn = conn
+        if conn.broken:
+            # A dead backend cannot run the fallback either, and the whole point
+            # of the fallback is that cleanup still happens. Discard it if it was
+            # the janitor — otherwise the cache serves a corpse to every later
+            # test — and TRUNCATE on a fresh backend instead.
+            if _JANITOR_CONNS.get(test_db_name()) is conn:
+                _JANITOR_CONNS.pop(test_db_name(), None)
+            fallback_conn = _janitor_conn()
         warnings.warn(
             f"Fast per-test cleanup failed ({type(exc).__name__}: {exc}); "
             f"falling back to TRUNCATE and rebuilding the cleanup plan. If this "
             f"warning is not rare, the FK topology changed — see #1568.",
             stacklevel=2,
         )
-        _truncate_planner_tables(conn)
+        _truncate_planner_tables(fallback_conn)
 
 
 def _assert_worker_relations_under_ceiling(conn: psycopg.Connection[tuple]) -> None:

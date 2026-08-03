@@ -14,9 +14,13 @@ import pytest
 
 from tests.fixtures.ebull_test_db import (
     _CLEANUP_PLANS,
+    _JANITOR_CONNS,
     _PLANNER_TABLES,
+    _admin_database_url,
     _cleanup_plan,
+    _janitor_conn,
     _reset_planner_tables,
+    test_database_url,
     test_db_name,
 )
 
@@ -139,3 +143,66 @@ def test_reset_falls_back_to_truncate_when_the_plan_is_stale(
         conn.rollback()
         conn.execute("DROP TABLE IF EXISTS zz_1568_fallback")
         conn.commit()
+
+
+def test_reset_refuses_a_connection_to_the_wrong_database(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The C1/#1447 guard must still escape, and must not degrade to a TRUNCATE.
+
+    ``assert_test_db`` runs inside ``_reset_planner_tables``' try block so that a
+    DEAD connection reaches the fallback. Its wrong-database refusal is a
+    ``RuntimeError``, not a ``psycopg.Error``, so it escapes uncaught — if that
+    ever inverted, cleanup would quietly TRUNCATE whatever database it was
+    handed, including the operator's dev DB.
+    """
+    del ebull_test_conn  # only needed so the worker DB exists to compare against
+    with psycopg.connect(_admin_database_url()) as admin:
+        with pytest.raises(RuntimeError, match="Refusing to TRUNCATE"):
+            _reset_planner_tables(admin)  # type: ignore[arg-type]
+
+
+def test_reset_recovers_when_the_connection_it_was_given_is_dead(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A dead backend must not take the fallback down with it.
+
+    ``_truncate_planner_tables`` cannot run on a broken connection either, so the
+    fallback reconnects. Without that, a backend dying mid-cleanup would raise
+    out of teardown and leave the worker DB dirty for every following test
+    (review bot WARNING on PR #2211).
+    """
+    conn = ebull_test_conn
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) "
+        "VALUES (1, 'CLN3', 'Dead Conn Test Co', TRUE)"
+    )
+    conn.commit()
+
+    doomed = psycopg.connect(test_database_url())
+    try:
+        with doomed.cursor() as cur:
+            cur.execute("SELECT pg_backend_pid()")
+            row = cur.fetchone()
+        assert row is not None
+        doomed.commit()
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_terminate_backend(%s)", (row[0],))
+        conn.commit()
+
+        with pytest.warns(UserWarning, match="falling back to TRUNCATE"):
+            _reset_planner_tables(doomed)
+        assert doomed.broken, "precondition: the connection under test must be broken"
+    finally:
+        doomed.close()
+
+    # The janitor cache must not be left holding a corpse.
+    cached = _JANITOR_CONNS.get(test_db_name())
+    assert cached is None or not cached.closed
+
+    conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM instruments")
+        row = cur.fetchone()
+    assert row is not None and row[0] == 0, "fallback did not clean the database"
+    assert not _janitor_conn().closed
