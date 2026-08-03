@@ -942,10 +942,18 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
     # over which the Manager has investment discretion. A later report from the same
     # filer that omits this security is therefore affirmative evidence the position
     # is gone — no date threshold and no tuning constant, unlike the as-of bound this
-    # ticket originally proposed. ``institutional_holdings`` is the raw landing
-    # table, so a later ``period_of_report`` there is the filer's newer 13F for some
-    # OTHER instrument; had that filing contained this one, ``_current`` would carry
-    # the later period.
+    # ticket originally proposed.
+    #
+    # The evidence is read from ``ownership_institutions_current`` ITSELF, not from
+    # the ``institutional_holdings`` landing table. Both were measured: they agree on
+    # 9,067 filers, ``_current`` is NEWER on 148 and behind on 0, because ``_current``
+    # is fed by the continuous manifest parser as well as the quarterly bulk dataset.
+    # Using one table also makes the predicate self-consistent — a later ``period_end``
+    # for this filer against some OTHER instrument means the filing existed and did
+    # not contain this one, or ``_current`` would carry the later period for it.
+    # (Needs ``idx_inst_current_filer_period``, sql/245: without it the MAX heap-fetches
+    # every row of a filer like Vanguard and the lookup costs 7,651ms instead of 25ms
+    # on AAPL. This runs at READ time on every rollup request.)
     #
     # ⚠ The guard matters as much as the predicate. Absence from a later filing can
     # also mean OUR CUSIP resolution failed on it. ``unresolved_13f_cusips`` holds
@@ -978,34 +986,34 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
+            WITH guard AS (
+                SELECT MAX(u.last_period_end) AS max_unresolved
+                FROM unresolved_13f_cusips u
+                JOIN external_identifiers e
+                  ON e.identifier_type = 'cusip'
+                 AND e.identifier_value = u.cusip
+                WHERE e.instrument_id = %(iid)s
+            )
             SELECT c.filer_cik, c.filer_name, c.filer_type, c.ownership_nature,
                    c.source, c.source_accession, c.shares, c.period_end
             FROM ownership_institutions_current c
+            CROSS JOIN guard g
+            LEFT JOIN LATERAL (
+                SELECT MAX(x.period_end) AS latest_filed_period
+                FROM ownership_institutions_current x
+                WHERE x.filer_cik = c.filer_cik
+            ) n ON TRUE
             WHERE c.instrument_id = %(iid)s
               AND c.shares IS NOT NULL
               AND c.exposure_kind = 'EQUITY'
               AND NOT EXISTS (
-                    SELECT 1 FROM institutional_filer_13f_notices n
-                    WHERE n.filer_cik  = c.filer_cik
-                      AND n.period_end > c.period_end
+                    SELECT 1 FROM institutional_filer_13f_notices nt
+                    WHERE nt.filer_cik  = c.filer_cik
+                      AND nt.period_end > c.period_end
               )
               AND NOT (
-                    EXISTS (
-                        SELECT 1
-                        FROM institutional_holdings h
-                        JOIN institutional_filers f ON f.filer_id = h.filer_id
-                        WHERE f.cik = c.filer_cik
-                          AND h.period_of_report > c.period_end
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM unresolved_13f_cusips u
-                        JOIN external_identifiers e
-                          ON e.identifier_type = 'cusip'
-                         AND e.identifier_value = u.cusip
-                        WHERE e.instrument_id = %(iid)s
-                          AND u.last_period_end >= c.period_end
-                    )
+                    COALESCE(n.latest_filed_period > c.period_end, FALSE)
+                    AND NOT COALESCE(g.max_unresolved >= c.period_end, FALSE)
               )
             """,
             {"iid": instrument_id},
@@ -1083,13 +1091,18 @@ def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) ->
     """List the institution rows EXCLUDED by 13F-HR supersession (#2229), with the
     later filing that proves the exit, for the ``corrections_applied`` telemetry.
 
-    The selection is the exact complement of the rollup institutions query's second
-    ``NOT (... AND NOT EXISTS ...)`` clause — these are the rows that filter removed.
-    Mirrors :func:`_read_notice_suppressions`: the lateral join picks the filer's
-    LATEST subsequent ``period_of_report`` (``ORDER BY ... DESC``, never a bare
-    ``LIMIT 1``, per the deterministic-pick rule). Without this the operator would
-    see the institutions wedge shrink with no visible cause — the same reason #1639
-    shipped its own producer.
+    The selection is the exact complement of the rollup institutions query's final
+    ``NOT (...)`` clause — these are the rows that filter removed, so the two must be
+    kept in step. Mirrors :func:`_read_notice_suppressions`: the lateral join picks
+    the filer's LATEST subsequent period (``ORDER BY ... DESC`` on both keys, never a
+    bare ``LIMIT 1``, per the deterministic-pick rule). Without this the operator
+    would see the institutions wedge shrink with no visible cause — the same reason
+    #1639 shipped its own producer.
+
+    ``winning_accession`` is the LATER filing's accession, not the removed row's:
+    Codex ckpt-2 caught it pointing at the superseded row while labelling it the
+    winning source, which would send an operator auditing the correction to the
+    losing filing.
 
     The 13F-NT exclusion is repeated here so a row suppressed by BOTH mechanisms is
     reported once, by :func:`_read_notice_suppressions` (the Notice is the stronger
@@ -1098,19 +1111,26 @@ def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) ->
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
+            WITH guard AS (
+                SELECT MAX(u.last_period_end) AS max_unresolved
+                FROM unresolved_13f_cusips u
+                JOIN external_identifiers e
+                  ON e.identifier_type = 'cusip'
+                 AND e.identifier_value = u.cusip
+                WHERE e.instrument_id = %(iid)s
+            )
             SELECT c.filer_cik, c.filer_name, c.shares,
                    c.period_end AS superseded_period,
-                   c.source_accession AS superseded_accession,
                    n.period_of_report AS winning_period,
                    n.accession_number AS winning_accession
             FROM ownership_institutions_current c
+            CROSS JOIN guard g
             JOIN LATERAL (
-                SELECT h.period_of_report, h.accession_number
-                FROM institutional_holdings h
-                JOIN institutional_filers f ON f.filer_id = h.filer_id
-                WHERE f.cik = c.filer_cik
-                  AND h.period_of_report > c.period_end
-                ORDER BY h.period_of_report DESC, h.accession_number DESC
+                SELECT x.period_end AS period_of_report, x.source_accession AS accession_number
+                FROM ownership_institutions_current x
+                WHERE x.filer_cik = c.filer_cik
+                  AND x.period_end > c.period_end
+                ORDER BY x.period_end DESC, x.source_accession DESC
                 LIMIT 1
             ) n ON TRUE
             WHERE c.instrument_id = %(iid)s
@@ -1121,15 +1141,7 @@ def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) ->
                     WHERE nt.filer_cik  = c.filer_cik
                       AND nt.period_end > c.period_end
               )
-              AND NOT EXISTS (
-                    SELECT 1
-                    FROM unresolved_13f_cusips u
-                    JOIN external_identifiers e
-                      ON e.identifier_type = 'cusip'
-                     AND e.identifier_value = u.cusip
-                    WHERE e.instrument_id = %(iid)s
-                      AND u.last_period_end >= c.period_end
-              )
+              AND NOT COALESCE(g.max_unresolved >= c.period_end, FALSE)
             ORDER BY c.shares DESC, c.filer_cik
             """,
             {"iid": instrument_id},

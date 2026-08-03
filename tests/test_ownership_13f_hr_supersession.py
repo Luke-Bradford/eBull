@@ -108,32 +108,21 @@ def _seed_later_filing(
     other_iid: int,
 ) -> None:
     """Seed evidence that ``filer_cik`` filed a 13F covering ``period_of_report`` —
-    for a DIFFERENT instrument, which is exactly the real shape: the filing exists and
-    does not mention the instrument under test."""
-    row = conn.execute(
-        """
-        INSERT INTO institutional_filers (cik, name)
-        VALUES (%s, 'ACME CAPITAL')
-        ON CONFLICT (cik) DO UPDATE SET name = EXCLUDED.name
-        RETURNING filer_id
-        """,
-        (filer_cik,),
-    ).fetchone()
-    assert row is not None
-    conn.execute(
-        """
-        INSERT INTO institutional_holdings (
-            filer_id, instrument_id, accession_number, period_of_report, shares, filed_at
-        ) VALUES (%s, %s, %s, %s, 1000, %s)
-        ON CONFLICT DO NOTHING
-        """,
-        (
-            row[0],
-            other_iid,
-            f"{filer_cik}-26-{period_of_report.month:02d}{period_of_report.day:02d}",
-            period_of_report,
-            datetime(period_of_report.year, period_of_report.month, 1, tzinfo=UTC),
-        ),
+    against a DIFFERENT instrument, which is exactly the real shape: the filing exists
+    and does not mention the instrument under test.
+
+    The evidence lives in ``ownership_institutions_current`` itself, not in the
+    ``institutional_holdings`` landing table: the two agree on 9,067 filers and
+    ``_current`` is newer on 148 (it is fed by the continuous manifest parser as well
+    as the quarterly bulk dataset), so the predicate reads the fresher source and
+    stays self-consistent on one table."""
+    _seed_institution_current(
+        conn,
+        iid=other_iid,
+        filer_cik=filer_cik,
+        shares="1000",
+        period_end=period_of_report,
+        accession=f"{filer_cik}-26-{period_of_report.month:02d}{period_of_report.day:02d}99",
     )
 
 
@@ -218,7 +207,7 @@ def test_later_hr_supersedes_exited_position_and_emits_correction(
     # removed. Codex ckpt-2 caught this pointing at ``c.source_accession`` — an operator
     # auditing the correction would have been sent to the losing accession while it was
     # labelled the winning source.
-    assert correction.winning_accession == f"{_FILER}-26-0331"
+    assert correction.winning_accession == f"{_FILER}-26-033199"
     assert correction.winning_accession != _HR_ACC
     # The shares return to the public residual rather than vanishing.
     assert rollup.residual.pct_outstanding == Decimal(1)
