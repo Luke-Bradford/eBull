@@ -272,7 +272,8 @@ def test_hr_supersession_predicate(
 ) -> None:
     conn = ebull_test_conn
     other = iid + 800
-    _seed_instrument(conn, iid=iid, symbol=f"HR{iid % 1000}")
+    symbol = f"HR{iid % 1000}"
+    _seed_instrument(conn, iid=iid, symbol=symbol)
     _seed_instrument(conn, iid=other, symbol=f"HO{iid % 1000}")
     _seed_outstanding(conn, iid=iid, shares="1000")
     _seed_institution_current(conn, iid=iid, filer_cik=_FILER, shares="400", period_end=_HR_PERIOD, accession=_HR_ACC)
@@ -283,7 +284,7 @@ def test_hr_supersession_predicate(
     if notice_at is not None:
         _seed_notice(conn, filer_cik=_FILER, period_end=notice_at)
 
-    rollup = ownership_rollup.get_ownership_rollup(conn, symbol="HR", instrument_id=iid)
+    rollup = ownership_rollup.get_ownership_rollup(conn, symbol=symbol, instrument_id=iid)
 
     kept = _FILER in _institution_filer_ciks(rollup)
     assert kept is expect_kept, f"case={case}: filer kept={kept}, expected {expect_kept}"
