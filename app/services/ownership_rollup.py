@@ -15,7 +15,11 @@ closes:
   * **Wrong denominator** — the prior frontend math used
     ``shares_outstanding + treasury_shares``; the canonical
     denominator is ``shares_outstanding`` only, with treasury
-    rendered as an additive top wedge.
+    rendered as a separate wedge stacked on top of the ring.
+    "On top" is a DRAWING instruction, not an arithmetic one:
+    treasury is outside the denominator, outside the residual
+    (#2217) and outside the CSV's additive reconciliation, where
+    it is a ``__memo:treasury__`` row.
   * **No cross-channel dedup** — the prior pipeline summed Form 4 +
     13D/A + 13F + DEF 14A as a partition (e.g. Cohen on GME read as
     ~75M shares because his Form 4 cumulative AND his 13D/A row
@@ -2822,10 +2826,13 @@ def _compute_residual(
     (see :func:`_read_shares_outstanding`), and shares issued = shares outstanding
     + treasury — so treasury shares were never in this base and subtracting them
     removed a quantity that is not there. That is the design contract too: the
-    denominator is outstanding only, with treasury rendered as an ADDITIVE top
-    wedge (``docs/proposals/etl/ownership-tier0-cik-history.md`` §OwnershipPanel;
-    the module docstring's "wrong denominator" ship-blocker). The frontend was
-    corrected then; this residual kept the mirror-image of the same error.
+    denominator is outstanding only, with treasury drawn as a separate wedge on
+    top of the ring (``docs/proposals/etl/ownership-tier0-cik-history.md``
+    §OwnershipPanel; the module docstring's "wrong denominator" ship-blocker).
+    That doc calls the wedge "additive" in the RENDERING sense — stacked above
+    the ring — which is not a licence to add or subtract it anywhere in the
+    arithmetic. The frontend was corrected then; this residual kept the
+    mirror-image of the same error.
 
     Left uncorrected it read as a *negative* residual for any serial repurchaser
     — 9 of 20 sampled large caps, with Coca-Cola, Goldman, JPM, P&G and Exxon

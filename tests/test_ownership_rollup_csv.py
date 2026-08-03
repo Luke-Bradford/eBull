@@ -540,7 +540,7 @@ def test_build_csv_def14a_proxy_disclosure_emits_as_memo_excluded_from_sum() -> 
         _rollup(
             slices=(insiders, proxy),
             treasury="100000",
-            residual_shares="9400000",  # 10M - 500k insiders - 100k treasury; proxy excluded
+            residual_shares="9500000",  # 10M - 500k insiders; treasury + proxy both excluded
         ),
     )
     lines = csv.splitlines()
@@ -550,8 +550,12 @@ def test_build_csv_def14a_proxy_disclosure_emits_as_memo_excluded_from_sum() -> 
     assert "__memo:treasury__" in lines[2]
     assert "__residual__" in lines[3]
     assert "Sponsor Control Group,__memo:def14a_unmatched__,300000," in lines[4]
-    # Additive reconciliation excludes the proxy block.
-    assert Decimal("500000") + Decimal("100000") + Decimal("9400000") == Decimal("10000000")
+    # Additive reconciliation, summed from the EMITTED CSV — excludes the proxy
+    # block AND treasury. Previously asserted over literals, which never read
+    # the CSV and so could not fail when the builder changed (#2217).
+    rows = [ln.split(",") for ln in lines[1:]]
+    additive = sum(Decimal(r[3]) for r in rows if not r[2].startswith("__memo:") and not r[2].startswith("__dropped:"))
+    assert additive == Decimal("10000000")  # 500k insider + 9.5M residual
 
 
 def test_build_csv_memo_overlay_only_no_pie_slices() -> None:
