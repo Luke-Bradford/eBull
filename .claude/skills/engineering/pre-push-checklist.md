@@ -25,9 +25,20 @@ The DB-backed integration tier is OFF the push gate (operator decision 2026-06-0
 
 ```bash
 docker compose --profile test up -d postgres-test   # once per session
-uv run pytest -m db                                  # full integration tier
+uv run pytest -m db tests/test_<touched>.py ...      # the touched modules + neighbours
 ```
 
+For broad surface (migrations across many tables, conftest/fixture changes,
+schema-wide refactors) run the WHOLE tier — ~3.5 min since #1568 — but in
+file-scoped batches, never bare `-m db`, which has wedged this box twice:
+
+```bash
+find tests -name 'test_*.py' | sort | split -l 40 - /tmp/chunk_
+for f in /tmp/chunk_*; do uv run pytest -m db -q $(tr '\n' ' ' < "$f"); done
+```
+
+Gate on the exit code — this repo's pytest config suppresses the final
+`N passed` line, so the durations block is the last thing printed.
 Fix failures before pushing. If `uv` is not on PATH, run `where uv` to find it and add to shell config.
 
 **Never pipe `git push` (#2073):** `git push | tail` (or any pipe) makes the
