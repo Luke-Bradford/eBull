@@ -151,6 +151,14 @@ class CorrectionApplied:
     Closed ``kind`` vocab:
       * ``suppressed_by_13f_nt`` (#1639) — a filer's stale 13F-HR removed because
         the filer filed a 13F-NT for a later quarter. NT-specific fields set.
+      * ``superseded_by_later_13f_hr`` (#2229) — a filer's stale 13F-HR removed
+        because the filer filed a LATER holdings report that omits this security.
+        Form 13F SI 5b makes a holdings report a complete statement of the Manager's
+        §13(f) holdings, so the omission is affirmative evidence of an exit. Distinct
+        from ``suppressed_by_13f_nt``: the Notice says the filer holds nothing
+        reportable at all, this says it no longer holds THIS security. A row matching
+        both is reported only under the NT kind. ``superseded_period`` set, NT fields
+        None; the winning period is in ``detail``.
       * ``def14a_restates_institution`` (#1644) — a proxy 5%-holder figure folded
         under a larger 13F family sum (the channel restated, did not add).
       * ``institutional_family_collapse`` (#1649) — a family's 13F shell figure
@@ -921,13 +929,59 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
     # ``_current``, so the strict ``>`` is always well-defined. The companion
     # :func:`_read_notice_suppressions` lists exactly the rows this excludes for
     # the ``corrections_applied`` telemetry.
+    #
+    # 13F-HR supersession (#2229) generalises that from the Notice case to the
+    # ordinary one. ``_current`` keeps the latest row per (instrument, filer,
+    # nature, exposure) and its MERGE deletes only ``NOT MATCHED BY SOURCE`` — but
+    # 13F reports an exit by OMISSION, never by a zero row, so a filer who sold out
+    # kept contributing its last reported position forever. 96.7% of filers whose
+    # row was stuck at 2025-12-31 had in fact filed later: they had stopped holding
+    # THIS instrument, not stopped filing.
+    #
+    # Form 13F Special Instruction 5b: a "13F HOLDINGS REPORT" reports ALL securities
+    # over which the Manager has investment discretion. A later report from the same
+    # filer that omits this security is therefore affirmative evidence the position
+    # is gone — no date threshold and no tuning constant, unlike the as-of bound this
+    # ticket originally proposed. ``institutional_holdings`` is the raw landing
+    # table, so a later ``period_of_report`` there is the filer's newer 13F for some
+    # OTHER instrument; had that filing contained this one, ``_current`` would carry
+    # the later period.
+    #
+    # ⚠ The guard matters as much as the predicate. Absence from a later filing can
+    # also mean OUR CUSIP resolution failed on it. ``unresolved_13f_cusips`` holds
+    # 109,683 rows, 1,650 of whose CUSIPs are resolvable via ``external_identifiers``
+    # — the instrument is known to us but some filing's row never bound. Without the
+    # guard this silently deletes real holders on exactly the instruments whose
+    # ingest is weakest, so an instrument with any unresolved sighting at or after
+    # the row's period is exempt from supersession entirely.
+    #
+    # The guard deliberately does NOT narrow by ``resolution_status``. Of the 3,227
+    # sighting rows whose CUSIP binds to a known instrument, 1,724 are marked
+    # ``resolved_via_openfigi`` / ``resolved_via_extid`` — but a resolution MARKING is
+    # not proof the holdings were re-ingested (#2213: OpenFIGI resolution ran dark for
+    # seven weeks behind success-reporting sweeps). Narrowing would fix more
+    # instruments at the cost of silently deleting real holders where that assumption
+    # is wrong, and the two errors are not symmetric: a false keep leaves an
+    # instrument visibly oversubscribed, a false delete is invisible. Broad it is;
+    # 1,648 instruments are exempted, which the A/B measures rather than assumes.
+    #
+    # Two Special Instructions checked and deliberately NOT guarded against:
+    #   * COMBINATION reports (SI 5c) are not complete, and we cannot tell them apart
+    #     (``sec_filing_manifest.form`` is only ``13F-HR``/``13F-HR/A``; the Report
+    #     Type checkbox lives in ``primary_doc.xml``, which we do not retain
+    #     queryably). Not a correctness risk: if manager B's holdings are reported by
+    #     manager A, A's filing INCLUDES those shares, so dropping B's stale row
+    #     removes a double count rather than a holder.
+    #   * De minimis omission (SI 9) lets a Manager omit a holding under 10,000 shares
+    #     AND under $200,000. Anything omitted on that basis is ≤10,000 shares, which
+    #     is negligible against any pie wedge.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT c.filer_cik, c.filer_name, c.filer_type, c.ownership_nature,
                    c.source, c.source_accession, c.shares, c.period_end
             FROM ownership_institutions_current c
-            WHERE c.instrument_id = %s
+            WHERE c.instrument_id = %(iid)s
               AND c.shares IS NOT NULL
               AND c.exposure_kind = 'EQUITY'
               AND NOT EXISTS (
@@ -935,8 +989,26 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                     WHERE n.filer_cik  = c.filer_cik
                       AND n.period_end > c.period_end
               )
+              AND NOT (
+                    EXISTS (
+                        SELECT 1
+                        FROM institutional_holdings h
+                        JOIN institutional_filers f ON f.filer_id = h.filer_id
+                        WHERE f.cik = c.filer_cik
+                          AND h.period_of_report > c.period_end
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM unresolved_13f_cusips u
+                        JOIN external_identifiers e
+                          ON e.identifier_type = 'cusip'
+                         AND e.identifier_value = u.cusip
+                        WHERE e.instrument_id = %(iid)s
+                          AND u.last_period_end >= c.period_end
+                    )
+              )
             """,
-            (instrument_id,),
+            {"iid": instrument_id},
         )
         for row in cur.fetchall():
             rows.append(
@@ -1002,6 +1074,82 @@ def _read_notice_suppressions(conn: psycopg.Connection[Any], instrument_id: int)
                     winning_nt_period=row["winning_nt_period"],
                     winning_nt_accession=str(row["winning_nt_accession"]),
                     source_channel="13f",  # the folded channel (#1647 generic provenance)
+                )
+            )
+    return tuple(rows)
+
+
+def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[CorrectionApplied, ...]:
+    """List the institution rows EXCLUDED by 13F-HR supersession (#2229), with the
+    later filing that proves the exit, for the ``corrections_applied`` telemetry.
+
+    The selection is the exact complement of the rollup institutions query's second
+    ``NOT (... AND NOT EXISTS ...)`` clause — these are the rows that filter removed.
+    Mirrors :func:`_read_notice_suppressions`: the lateral join picks the filer's
+    LATEST subsequent ``period_of_report`` (``ORDER BY ... DESC``, never a bare
+    ``LIMIT 1``, per the deterministic-pick rule). Without this the operator would
+    see the institutions wedge shrink with no visible cause — the same reason #1639
+    shipped its own producer.
+
+    The 13F-NT exclusion is repeated here so a row suppressed by BOTH mechanisms is
+    reported once, by :func:`_read_notice_suppressions` (the Notice is the stronger
+    evidence: the filer declared it holds nothing reportable at all)."""
+    rows: list[CorrectionApplied] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT c.filer_cik, c.filer_name, c.shares,
+                   c.period_end AS superseded_period,
+                   c.source_accession,
+                   n.period_of_report AS winning_period
+            FROM ownership_institutions_current c
+            JOIN LATERAL (
+                SELECT h.period_of_report
+                FROM institutional_holdings h
+                JOIN institutional_filers f ON f.filer_id = h.filer_id
+                WHERE f.cik = c.filer_cik
+                  AND h.period_of_report > c.period_end
+                ORDER BY h.period_of_report DESC
+                LIMIT 1
+            ) n ON TRUE
+            WHERE c.instrument_id = %(iid)s
+              AND c.shares IS NOT NULL
+              AND c.exposure_kind = 'EQUITY'
+              AND NOT EXISTS (
+                    SELECT 1 FROM institutional_filer_13f_notices nt
+                    WHERE nt.filer_cik  = c.filer_cik
+                      AND nt.period_end > c.period_end
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM unresolved_13f_cusips u
+                    JOIN external_identifiers e
+                      ON e.identifier_type = 'cusip'
+                     AND e.identifier_value = u.cusip
+                    WHERE e.instrument_id = %(iid)s
+                      AND u.last_period_end >= c.period_end
+              )
+            ORDER BY c.shares DESC, c.filer_cik
+            """,
+            {"iid": instrument_id},
+        )
+        for row in cur.fetchall():
+            rows.append(
+                CorrectionApplied(
+                    kind="superseded_by_later_13f_hr",
+                    filer_cik=str(row["filer_cik"]),
+                    filer_name=str(row["filer_name"]),
+                    shares_removed=Decimal(row["shares"]),
+                    superseded_period=row["superseded_period"],
+                    source_channel="13f",  # the folded channel (#1647 generic provenance)
+                    winning_source="13f",
+                    winning_accession=(str(row["source_accession"]) if row["source_accession"] else None),
+                    detail=(
+                        f"Filer reported holdings for {row['winning_period']} that omit this security; "
+                        f"Form 13F Special Instruction 5b makes a holdings report a complete statement "
+                        f"of the Manager's Section 13(f) holdings, so the {row['superseded_period']} "
+                        f"position is closed."
+                    ),
                 )
             )
     return tuple(rows)
@@ -3971,11 +4119,14 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     estimates = _read_universe_estimates(conn, instrument_id)
     coverage = _compute_coverage(slices, estimates)
     banner = _banner_for_state(coverage.state, coverage, concentration.pct_outstanding_known)
-    # 13F-NT supersession telemetry (#1639): the rows the institutions query
-    # excluded, so the shrunk wedge + grown residual are explainable. Read from
-    # the same snapshot as everything else (caller is inside snapshot_read).
+    # 13F-NT supersession telemetry (#1639) + 13F-HR supersession telemetry (#2229):
+    # the rows the institutions query excluded, so the shrunk wedge + grown residual
+    # are explainable. Read from the same snapshot as everything else (caller is
+    # inside snapshot_read). NT first — a row suppressed by both is reported once,
+    # under the stronger evidence.
     corrections_applied = (
         *_read_notice_suppressions(conn, instrument_id),
+        *_read_hr_supersessions(conn, instrument_id),
         *family_corrections,
         *same_accession_corrections,
         *insider_group_corrections,
