@@ -575,21 +575,20 @@ When replying to review:
 
 ## Final reminder — read this last
 
-This file is long. These four are the ones that decay first, so they are repeated here
-deliberately (Anthropic's Opus 5 guidance recommends pairing a conciseness instruction
-in a long prompt with a short reminder near the end).
+**These rules are STATED in the global `~/.claude/CLAUDE.md` ("Working with Claude
+Opus 5"), which is their single source.** They are echoed here — as a list of names, not
+a restatement — because this file is long and Anthropic's Opus 5 guidance recommends
+pairing a conciseness instruction with a short reminder near the end of a long prompt.
+If a rule below ever disagrees with the global file, the global file is right and this
+list is stale.
 
-- **Be concise.** Keep replies and written documents as short as the substance allows.
-  Cover what matters; do not pad with filler sections, redundant summaries or
-  boilerplate. This applies to PR descriptions, specs and issue comments as much as to
-  chat — Opus 5's written deliverables run long by default.
-- **Do the narrow task.** Deliver what was asked at the scope intended. Make routine
-  judgement calls yourself; check in only where different readings lead to materially
-  different work. If a better approach exists, say so in a sentence and continue.
-- **Don't add verification the model already does.** No re-checking your own answer, no
-  second agent to confirm your work, no extra pass "to be safe". The deterministic gates
-  (pre-push hook, full-population A/B on corpus changes, the review-comment resolution
-  contract) stay — those are evidence, not reassurance.
-- **Ask a reviewer for everything, filter afterwards.** Never prompt a review with "only
-  real bugs" or "be conservative" — Opus 5 takes it literally and reports less. Get the
-  full list, then classify severity yourself.
+- **Be concise** — replies and written documents both.
+- **Do the narrow task** — at the scope asked, without quietly widening it.
+- **Don't add verification the model already does** — no re-checking your own answer, no
+  second agent to confirm your own work.
+- **Ask a reviewer for everything, filter afterwards** — never "only real bugs".
+
+The eBull-specific half is the **review-intensity ladder** above: it decides which of
+this repo's gates a given change actually needs. The deterministic ones it selects —
+pre-push hook, full-population A/B on corpus changes, the review-comment resolution
+contract — are evidence, not reassurance, and none of the above weakens them.
