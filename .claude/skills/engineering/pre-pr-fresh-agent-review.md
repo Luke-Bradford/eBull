@@ -1,10 +1,23 @@
 # Pre-PR fresh-agent review skill
 
-**Purpose:** before pushing any non-trivial PR, run a fresh-agent Codex review with the perspectives a real fund / data team would apply. The review-bot keeps catching edges the generic pre-push prompt misses; this skill loads the right lenses up front so issues land before the bot finds them, not after.
+**Purpose:** a set of domain LENSES to brief a reviewer with, for diffs where a generic
+review prompt reliably misses the edges — SEC filing semantics, dedup/denominator
+correctness, partition and idempotency behaviour.
 
-## When to use
+> ⚠ **This is a lens library, not a verification gate (revised 2026-08-03).** It used to
+> be mandatory before every push on the surfaces below. Anthropic's Opus 5 prompting
+> guidance is explicit that separate verification steps — *"include a final verification
+> step", "use a subagent to verify"* — cause **over-verification** on this model and that
+> removing them "reduces wasted tokens with no loss in quality". A blanket pre-push
+> second-agent pass is exactly that pattern, and it contradicted this repo's own
+> "delegate gathering, never concluding" rule in `CLAUDE.md`.
+>
+> So: do NOT run this as a routine gate, and never to double-check work you can review
+> yourself in a few tool calls. Reach for it when the diff is genuinely large or
+> unfamiliar on one of the surfaces below and a second pass is cheaper than a bot round.
+> The review bot still runs on every push regardless.
 
-Mandatory before push for any PR touching:
+## Surfaces where these lenses are worth loading
 
 - Filings ETL — any form parser: Form 3/4/5, 13D/G, 13F-HR, DEF 14A / PRE 14A, N-PORT, N-CSR, 10-K / 10-Q / 8-K, NT notices, 424B, or any newly added form (authoritative map: `_FORM_TO_SOURCE` in `app/services/sec_manifest.py`).
 - Ownership rollup or any per-category observations / current table.
@@ -57,7 +70,7 @@ Apply these review lenses:
 3. Data scientist — dedup correctness, double-counting, denominator basis, cross-source priority chain integrity.
 4. Adversarial — what edge case would the bot catch? Be specific about: truthy-check-drops-zero, non-idempotent fallbacks, aggregate counts hiding partial-state bugs, cross-column invariants from legacy tables, stale comments.
 
-Reply terse. Real correctness bugs only. Skip style nits." < /dev/null
+Report EVERY plausible correctness, regression, schema, data-loss, corpus and test gap you can see. Do not be conservative and do not pre-filter by severity — I will classify severity myself afterwards. Reply terse." < /dev/null
 ```
 
 ## Apply findings before push
