@@ -299,14 +299,18 @@ export interface OwnershipSharesOutstandingSource {
 /** A figure-changing correction applied at read time (#1639 / #1647).
  *  First-class structured record so the UI / a machine consumer sees WHY the
  *  institutions total changed, not just the corrected number. ``kind`` is a
- *  closed vocabulary; today only ``suppressed_by_13f_nt`` (a filer's stale
- *  13F-HR removed because the filer filed a 13F-NT for a later quarter). */
+ *  closed vocabulary — keep it in step with the backend Literal in
+ *  ``app/api/instruments.py::_CorrectionAppliedModel``, which is the one that
+ *  500s the endpoint when a new kind is missing. */
 export type OwnershipCorrectionKind =
   | "suppressed_by_13f_nt"
   | "def14a_restates_institution"
   | "institutional_family_collapse"
   | "blockholder_group_collapse"
-  | "insider_control_group_collapse";
+  | "insider_control_group_collapse"
+  /** #2229 — a filer's stale 13F-HR removed because the filer filed a LATER
+   *  holdings report omitting this security (Form 13F Special Instruction 5b). */
+  | "superseded_by_later_13f_hr";
 
 export interface OwnershipCorrectionApplied {
   readonly kind: OwnershipCorrectionKind;
