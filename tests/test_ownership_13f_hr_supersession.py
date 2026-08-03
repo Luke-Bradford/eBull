@@ -214,6 +214,12 @@ def test_later_hr_supersedes_exited_position_and_emits_correction(
     assert correction.superseded_period == _HR_PERIOD
     assert correction.source_channel == "13f"
     assert "2026-03-31" in correction.detail
+    # ⚠ The WINNER is the later filing that proves the exit, not the stale row being
+    # removed. Codex ckpt-2 caught this pointing at ``c.source_accession`` — an operator
+    # auditing the correction would have been sent to the losing accession while it was
+    # labelled the winning source.
+    assert correction.winning_accession == f"{_FILER}-26-0331"
+    assert correction.winning_accession != _HR_ACC
     # The shares return to the public residual rather than vanishing.
     assert rollup.residual.pct_outstanding == Decimal(1)
     assert rollup.residual.oversubscribed is False

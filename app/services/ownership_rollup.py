@@ -1100,16 +1100,17 @@ def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) ->
             """
             SELECT c.filer_cik, c.filer_name, c.shares,
                    c.period_end AS superseded_period,
-                   c.source_accession,
-                   n.period_of_report AS winning_period
+                   c.source_accession AS superseded_accession,
+                   n.period_of_report AS winning_period,
+                   n.accession_number AS winning_accession
             FROM ownership_institutions_current c
             JOIN LATERAL (
-                SELECT h.period_of_report
+                SELECT h.period_of_report, h.accession_number
                 FROM institutional_holdings h
                 JOIN institutional_filers f ON f.filer_id = h.filer_id
                 WHERE f.cik = c.filer_cik
                   AND h.period_of_report > c.period_end
-                ORDER BY h.period_of_report DESC
+                ORDER BY h.period_of_report DESC, h.accession_number DESC
                 LIMIT 1
             ) n ON TRUE
             WHERE c.instrument_id = %(iid)s
@@ -1143,9 +1144,16 @@ def _read_hr_supersessions(conn: psycopg.Connection[Any], instrument_id: int) ->
                     superseded_period=row["superseded_period"],
                     source_channel="13f",  # the folded channel (#1647 generic provenance)
                     winning_source="13f",
-                    winning_accession=(str(row["source_accession"]) if row["source_accession"] else None),
+                    # The WINNER is the later filing that proves the exit, NOT the stale
+                    # row being removed (Codex ckpt-2). Pointing this at
+                    # ``c.source_accession`` would send an operator auditing the
+                    # correction to the losing accession while labelling it the winner —
+                    # mirrors ``winning_nt_accession`` on the NT kind, which names the
+                    # Notice.
+                    winning_accession=(str(row["winning_accession"]) if row["winning_accession"] else None),
                     detail=(
-                        f"Filer reported holdings for {row['winning_period']} that omit this security; "
+                        f"Filer reported holdings for {row['winning_period']} "
+                        f"(accession {row['winning_accession']}) that omit this security; "
                         f"Form 13F Special Instruction 5b makes a holdings report a complete statement "
                         f"of the Manager's Section 13(f) holdings, so the {row['superseded_period']} "
                         f"position is closed."
