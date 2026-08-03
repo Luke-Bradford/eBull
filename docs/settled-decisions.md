@@ -475,7 +475,7 @@ Entity-level data (10-K text, business summary, financial facts) is
 denormalised across siblings — acceptable for the small share-class
 population (~10 known instruments). If the population grows to 50+, file
 a follow-up to introduce a proper `entities` layer (Option B from the
-#1094 design discussion).
+Issue #1094 design discussion).
 
 `canonical_instrument_id` (#819) is a **different** mechanism for `.RTH`
 operational duplicates — same security, two ticker variants. Don't

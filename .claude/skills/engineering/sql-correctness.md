@@ -242,7 +242,7 @@ performance decision, not just a correctness one. Check that an index actually
 leads with the column you filter on — "the table has four indexes" means nothing
 if all four lead with something else.
 
-#2157 added an instrument-set lookup filtering `source_document_id` **alone** —
+Issue #2157 added an instrument-set lookup filtering `source_document_id` **alone** —
 by construction there was no `instrument_id` to lead with, since finding the
 instruments was the point. Every index on the table led with `instrument_id` or
 `holder_name_key`, so the lookup sequentially scanned 111,867 rows per accession

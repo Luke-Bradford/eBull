@@ -16,6 +16,41 @@ the panel was green on all seven that still contained real defects. 8 of its 14
 defects were visible only full-population. If you find yourself writing "spot-
 checked on AAPL/GME/MSFT and it looks right", you have not verified anything.
 
+## A documented caveat is a hypothesis about FREQUENCY — measure the rate
+
+The most expensive failure of 2026-08-03 was caused by a skill being right.
+
+`metrics-analyst` documents: *"Treasury IS allowed to push chart 'oversubscribed'
+if Σ pie_wedges + treasury > shares_outstanding (stale-13F + fresh Form 4 mix);
+residual clamps to zero, banner flags it."* True as written. So when the golden
+panel returned `oversubscribed=true` for JPM and HD, I read it as the documented
+condition and moved on. **The caveat functioned as a blindfold.**
+
+Sampling 20 large caps instead of 5 returned **9 oversubscribed** — 45%. A
+condition that fires on nearly half the population is not an edge case, and that
+rate was the tell. The actual cause was arithmetic: `residual` subtracted treasury
+from `shares_outstanding`, a base that already excludes it (shares issued = shares
+outstanding + treasury). GS carries treasury equal to 199.9% of outstanding, so
+`raw` was negative before any holder was counted. Public float rendered as ZERO
+for Coca-Cola, Goldman, JPM, P&G and Exxon (#2217).
+
+The rule:
+
+- A caveat tells you a condition CAN occur. It does not tell you how often, and
+  the author usually did not measure. **"Expected" at 2% is a caveat; the same
+  condition at 45% is a defect wearing the caveat as cover.**
+- When you meet a documented-expected condition in live data, spend the one query
+  it costs to get its RATE across the population before accepting it.
+- The dangerous shape is specifically: a caveat that explains an observation you
+  would otherwise have investigated. That is where it earns its cost.
+- Corollary to "a 3-5 item panel is not evidence": the panel is not evidence for
+  operator-visible METRIC correctness either, not just for parsers. Two of five is
+  a shrug; nine of twenty is an investigation. **A panel too small to carry a rate
+  cannot falsify a caveat.**
+
+Cheapest form of this check: loop the live endpoint over ~20 names and count. It
+took under a minute and it found the largest defect of the session.
+
 ## Choosing the metric
 
 **Row count is the wrong metric, and it is wrong in both directions.**
@@ -64,7 +99,7 @@ When a change **widens** what a selector or scorer can see, its failure mode is
 **admitting things it previously could not see**. A guard tuned against the old
 input has no coverage of them.
 
-#2158's audit reported "0 shapes where the fold lowers the score, 0 newly
+Issue #2158's audit reported "0 shapes where the fold lowers the score, 0 newly
 disqualified" and looked clean. Both counters were the wrong direction. The real
 hazard was Item 402(g) tables **newly clearing the floor** — 47 shapes in a
 300-item smoke, and it emitted vesting data as beneficial ownership.
@@ -101,7 +136,7 @@ Arms 1 and 2 key on the ENTITY identity — for DEF 14A, `holder_name`. Any
 other column the change can move is invisible to both, and the diff will look
 clean while the column is wrong.
 
-#2164 changed a role-heading regex. Arms 1 and 2 were green; a separate
+Issue #2164 changed a role-heading regex. Arms 1 and 2 were green; a separate
 role audit — re-parsing BOTH trees and diffing `{accession: {name: role}}` —
 found **40 holders whose `holder_role` regressed** from `principal` to `None`.
 Nothing in the name-keyed arms could have shown it.
@@ -118,7 +153,7 @@ control's roles from the branch's output.
 When the change deliberately alters the identity key, the raw diff reports the
 whole re-keyed population as loss, and it looks catastrophic.
 
-#2164's arm 1 reported **606 distinct holders lost**. Every one was a re-key:
+Issue #2164's arm 1 reported **606 distinct holders lost**. Every one was a re-key:
 the fix strips zero-width characters and footnote markers from `holder_name`,
 and `holder_name_key` is `lower(trim(...))` — `trim()` removes neither. After
 normalising BOTH sides by the same two transforms, genuine loss was **0**.
@@ -141,7 +176,7 @@ a bad merge reaching stored data.
 Plan for 3+ rounds on any real parser change. One round means you have not
 looked hard enough.
 
-#2164 ran three rounds and found a real defect in each of the first two — 35
+Issue #2164 ran three rounds and found a real defect in each of the first two — 35
 genuine holders lost in round 1, 40 role regressions in round 2. **Codex, 114
 unit tests and the 5-filing panel all passed the round-1 design.** Treat a clean
 Codex review as weak evidence about corpus behaviour; it reads the diff, not the

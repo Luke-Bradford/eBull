@@ -2549,3 +2549,31 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Symptom: the #1955 sibling-gap class in the **rendering** layer. Two families of overlay draw onto one shared axis; a later change teaches one family about a display-unit mode and misses the other. Nothing fails — both series render, the axis just silently auto-scales to the union of two incompatible units, so an axis label like `250.00` means percent in the lower region and dollars in the upper one with nothing marking the boundary. Worse than the overlays being meaningless: turning them on destroys the readability of the comparison the operator opened compare mode to see. Typecheck and unit tests are blind to it (the numbers are all valid `number`s) and lightweight-charts cannot render in jsdom, so only a browser look catches it.
 - Prevention: when a chart introduces a display-unit mode (% change, log scale, rebased-to-100, currency conversion), grep every `addSeries` / `setData` call site that targets the SAME price scale and confirm each one takes the branch — a shared axis means the transform is a property of the AXIS, not of the series that happened to prompt the change. Pin it with a test asserting the union range of (primary ∪ every overlay) equals the primary's range, i.e. enabling an overlay cannot widen the axis. Prefer deriving the branch from ONE named flag (`compareMode`) over re-deriving `compares.length > 0` per effect, so a reader can grep the flag and enumerate every consumer.
 - Enforced in: this log; `.claude/skills/frontend/design-system.md`; `frontend/src/pages/components/ChartWorkspaceCanvas.tsx` (both the indicator and trend effects branch on `compareMode`); `frontend/src/pages/components/ChartWorkspaceCanvas.test.tsx` ("normalized indicators — compare mode invariants (#2209)").
+
+### A documented caveat became a blindfold — "expected" is a claim about frequency
+
+- First seen in: #2217 (found 2026-08-03 during an unrelated accuracy audit).
+- Symptom: `metrics-analyst` documents that treasury may legitimately push the ownership chart `oversubscribed` on a stale-13F + fresh-Form-4 mix. When the golden panel returned `oversubscribed=true` for JPM and HD, the documented caveat was accepted as the explanation and the observation was dropped. Sampling 20 large caps instead of 5 returned **9** — 45%. The real cause was arithmetic: `_compute_residual` subtracted `treasury_shares` from `shares_outstanding`, a base that already excludes treasury (shares issued = shares outstanding + treasury). GS holds treasury equal to 199.9% of outstanding, so the residual went negative before any holder was counted, clamped to zero, and public float rendered as **ZERO** for Coca-Cola, Goldman, JPM, P&G and Exxon. 12 lines below, `_compute_concentration` already excluded treasury correctly — the right treatment existed in the same file.
+- Prevention: a caveat states that a condition CAN occur; it says nothing about how often, and the author usually never measured. **"Expected" at 2% is a caveat; the same condition at 45% is a defect wearing the caveat as cover.** On meeting a documented-expected condition in live data, spend the one query it costs to get its RATE across the population before accepting it. The dangerous shape is precisely a caveat that explains away an observation you would otherwise have investigated. Also: the 3-5 instrument golden panel is not evidence for operator-visible METRIC correctness, not just for parsers — a panel too small to carry a rate cannot falsify a caveat.
+- Enforced in: this prevention log; `.claude/skills/engineering/full-population-ab.md` ("A documented caveat is a hypothesis about FREQUENCY"). `metrics-analyst` treasury/residual entry to be corrected when #2217 lands.
+
+---
+
+### Asserting a cause without checking whether the effect is a settled decision
+
+- First seen in: #2213 (2026-08-03), caught by a Codex pass over the assessment, not by any test.
+- Symptom: a ticket was filed claiming an OpenFIGI resolution stall was "the direct cause of `coverage.state = unknown_universe` on the ownership card for all five golden-panel instruments". It is not. `ownership_rollup._read_universe_estimates` returns hard-coded `None` for every category, and its docstring records committee verdict #790 (disposed 2026-06-17): *"`unknown_universe` IS the truthful state — faking a denominator is the lie."* The state is unconditional and correct. Left standing, the claim would have given the next session an acceptance signal that can never move, and pointed them at reopening a closed decision.
+- Root cause of the miss: working-order step 2 ("read `docs/settled-decisions.md`") was being applied to tickets being *worked*, not to causal claims made while *investigating* — which is where it matters most, because a cause-claim written into a ticket becomes the next session's acceptance criterion.
+- Prevention: before writing "X causes Y" about any operator-visible symptom, (1) grep `docs/settled-decisions.md` for Y, and (2) read the docstring of the function that produces Y — in this repo the disposal rationale is usually written there at length by whoever settled it. **A symptom you find surprising is as likely to be a decision you have not read as it is to be a bug.**
+- Enforced in: this prevention log; `.claude/CLAUDE.md` ("Never assert a CAUSE without checking whether the effect is a settled decision").
+
+---
+
+### A line beginning `#<digits>` renders as an H1
+
+- First seen in: 2026-08-03, in `.claude/skills/engineering/full-population-ab.md` (4 occurrences) and caught again in a CLAUDE.md edit the same day.
+- Symptom: prose wrapped so that an issue reference lands at the start of a line (`#2164 changed a role-heading regex...`) is parsed by markdown as an ATX heading and renders as giant text, silently corrupting the document structure of a skill file. Invisible in the editor's plain-text view; only the markdown linter (MD018) flags it.
+- Prevention: never let a line start with `#` followed by a digit. Prefix the word `Issue` or rewrap. Markdown lint warnings on `.claude/**` and `docs/**` are worth reading rather than dismissing as cosmetic — this class silently breaks the rendering of the very files agents read for instruction.
+- Enforced in: this prevention log; the four occurrences in `full-population-ab.md` are fixed.
+
+---

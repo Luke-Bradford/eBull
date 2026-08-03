@@ -61,7 +61,7 @@ Filing/coverage alerts: `app/api/alerts.py`, `app/api/coverage.py`.
 **Planned (not shipped):** tender / going-private parser (SC TO-T/TO-I/14D9/13E3 →
 `tender_offer_events`) — spec `docs/specs/filings/2026-07-05-tender-going-private-parser.md`;
 no table/parser in the tree yet. Deep filing-text thesis analysis is build-priority
-#3→#4 (CLAUDE.md); LLM memo work lives in the `thesis-writer` / `thesis-critic` skills.
+Issue #3→#4 (CLAUDE.md); LLM memo work lives in the `thesis-writer` / `thesis-critic` skills.
 
 ## Invariants
 
