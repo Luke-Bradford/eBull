@@ -220,8 +220,8 @@ def test_build_csv_emits_dropped_source_memo_rows() -> None:
     """#1640: a deduped owner's losing filings (e.g. Cohen's 13D behind his
     Form 4) are ``dropped_sources``. They surface as ``__dropped:<source>__``
     memo rows — excluded from the SUM(shares) reconciliation but visible for
-    audit. The sum invariant (pie-wedge holders + treasury + residual ==
-    outstanding) holds over the non-memo rows."""
+    audit. The sum invariant (pie-wedge holders + residual == outstanding;
+    treasury is NOT a term, #2217) holds over the non-memo rows."""
     cohen = _holder(
         cik="0001767470",
         name="Cohen Ryan",
@@ -421,8 +421,9 @@ def test_build_csv_handles_null_cik_and_no_as_of() -> None:
 def test_build_csv_memo_overlay_slices_emit_after_residual_with_prefix() -> None:
     """Funds slice (#919) is a memo overlay (``denominator_basis=
     'institution_subset'``). Per the documented CSV invariant
-    (treasury_shares + residual.shares + Σ pie-wedge holders =
-    shares_outstanding), memo-overlay rows must be emitted in a
+    (residual.shares + Σ pie-wedge holders = shares_outstanding;
+    treasury is a ``__memo:`` row, not a term, #2217), memo-overlay
+    rows must be emitted in a
     trailing block AFTER residual with the ``__memo:<category>__``
     category prefix so spreadsheet consumers can filter them out of
     any SUM(shares) reconciliation. Codex pre-push review for #919
@@ -456,14 +457,14 @@ def test_build_csv_memo_overlay_slices_emit_after_residual_with_prefix() -> None
         ),
         denominator_basis="institution_subset",
     )
-    # outstanding = 10M; pie-wedge insider 500k + treasury 100k +
-    # residual must = 10M for the documented additive-sum invariant
-    # to hold. residual = 10M - 500k - 100k = 9.4M.
+    # outstanding = 10M; pie-wedge insider 500k + residual must = 10M for the
+    # documented additive-sum invariant to hold, so residual = 9.5M. Treasury
+    # (100k) is NOT a term since #2217 — it is a ``__memo:`` row like funds.
     csv = build_rollup_csv(
         _rollup(
             slices=(insiders, funds),
             treasury="100000",
-            residual_shares="9400000",
+            residual_shares="9500000",
         ),
     )
     lines = csv.splitlines()
@@ -479,22 +480,27 @@ def test_build_csv_memo_overlay_slices_emit_after_residual_with_prefix() -> None
     assert "0000036405,Vanguard 500 Index Fund,__memo:funds__,200000," in lines[4]
 
     # The actual reconciliation invariant: SUM(pie-wedge holder shares)
-    # + treasury + residual = shares_outstanding. The memo row's 200k
+    # + residual = shares_outstanding (treasury excluded, #2217). The 200k
     # is OUTSIDE this sum — that is the contract being pinned. If the
     # CSV builder ever folds memo rows into the additive total the
     # operator's spreadsheet reconciliation breaks; if it ever drops
     # pie-wedge holders into the memo block it under-counts. Pinning
     # the exact rows + the equality below catches both regressions.
-    pie_share_total = Decimal("500000")  # insiders only — funds excluded
-    treasury_total = Decimal("100000")
-    residual_total = Decimal("9400000")
-    outstanding = Decimal("10000000")
-    assert pie_share_total + treasury_total + residual_total == outstanding
-    # Memo total is non-zero AND outside the additive sum. Removing
-    # ``__memo:funds__`` filtering would push the additive total above
-    # outstanding by exactly this delta and break the assertion above.
-    memo_share_total = Decimal("200000")
-    assert memo_share_total > 0
+    # Summed from the EMITTED CSV, applying the one documented filter rule.
+    # The previous version of this block asserted
+    # ``500000 + 100000 + 9400000 == 10000000`` over hand-written literals — an
+    # arithmetic identity that never read the CSV, so it could not fail when the
+    # builder changed. That is why the treasury row's additive/memo status could
+    # drift unnoticed (#2217).
+    rows = [ln.split(",") for ln in lines[1:]]
+    additive = sum(Decimal(r[3]) for r in rows if not r[2].startswith("__memo:") and not r[2].startswith("__dropped:"))
+    assert additive == Decimal("10000000")  # 500k insider + 9.5M residual
+
+    # Both memo rows carry real, non-zero share counts and are excluded: if
+    # either the funds overlay (200k) or treasury (100k) leaked into the
+    # additive block the assertion above would overshoot by exactly that much.
+    excluded = sum(Decimal(r[3]) for r in rows if r[2].startswith("__memo:"))
+    assert excluded == Decimal("300000")
 
 
 def test_build_csv_def14a_proxy_disclosure_emits_as_memo_excluded_from_sum() -> None:

@@ -4138,7 +4138,7 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     # Form 4) become ``dropped_sources`` and would otherwise vanish from the
     # CSV audit. Emit them as ``__dropped:<source>__`` memo rows — excluded
     # from any SUM(shares) reconciliation (the sum invariant holds over the
-    # pie-wedge rows + treasury + residual), but visible so an operator can see
+    # pie-wedge rows + residual; treasury is a memo row, #2217), but visible so an operator can see
     # the full filing trail behind a deduped owner.
     for slc in pie_slices:
         for holder in slc.holders:
