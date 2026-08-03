@@ -2607,3 +2607,29 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Enforced in: this prevention log; `.claude/skills/engineering/full-population-ab.md`; `sql/245_inst_current_filer_period_idx.sql` records the measurement in its header.
 
 ---
+
+### zsh eats backticks in ANY double-quoted argument, not just `git commit -m`
+
+- First seen in: #2235 (2026-08-03), generalising the `git commit -m` case already
+  recorded in the operator's global notes and the pre-push-hook entry above.
+- Symptom: `gh issue comment 2235 --body "… a \`_validate_writer_output\` identity
+  assertion gives a retry-once …"` posted with the function name **missing entirely** —
+  the comment read "a  identity assertion", and zsh reported
+  `command not found: _validate_writer_output`. The comment was already public before
+  the mangling was noticed; the `command not found` line is the only tell, and it is
+  easy to miss next to a successful-looking URL in the same output.
+- Root cause of the miss: the existing guidance was filed against `git commit -m` and
+  against pre-push hook echoes, so it read as being about *those two commands*. It is
+  not — it is about **zsh double quotes**, and every CLI that takes prose as an argument
+  is exposed: `gh issue comment --body`, `gh pr create --body`, `gh pr comment`,
+  `gh issue create --body`. Technical prose is exactly the kind that contains backticked
+  identifiers, so the exposure is highest where the text matters most.
+- Prevention: **never pass prose containing backticks in a double-quoted argument.** Use
+  a quoted heredoc, which disables all expansion:
+  `gh issue comment N --body "$(cat <<'EOF' … EOF\n)"` — note the quoted `'EOF'`, which
+  is what turns substitution off; an unquoted `EOF` still expands. The same form works
+  for `git commit -F -`. If a comment has already posted mangled, `gh issue comment
+  --edit-last` repairs it in place rather than leaving a correction comment.
+- Enforced in: this prevention log. No automated gate — the failure is in the shell, not
+  in the repo, so the guard is the habit of reaching for the heredoc whenever the body
+  contains a code identifier.

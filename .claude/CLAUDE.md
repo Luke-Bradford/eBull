@@ -330,19 +330,30 @@ a bug.** Check which, before you write it down.
 
 Codex runs at exactly three points in the workflow. Non-negotiable.
 
-> ⚠ **KNOWN CONTRADICTION with the review-intensity ladder above — operator decision
-> pending (raised 2026-08-03).** The ladder says a narrow diff gets "self-review +
-> pre-push hook + review bot, nothing else" and that you should never run a second agent
-> to check your own work. Checkpoint 2 below mandates `codex exec review` on every branch
-> before first push, which contradicts both.
+> ✅ **RESOLVED 2026-08-03 (operator delegated the call). Checkpoint 2 is now
+> LADDER-SCOPED, not universal.** The contradiction was: the ladder says a narrow diff
+> gets "self-review + pre-push hook + review bot, nothing else", while checkpoint 2
+> mandated `codex exec review` on *every* branch before first push.
 >
-> **Until the operator rules, checkpoint 2 wins** — it is their declared process and this
-> note exists so the conflict is deterministic rather than silent, not so it can be
-> quietly ignored.
+> The resolution is the RE-TARGET that was already on the table, made concrete:
 >
-> The recommendation on the table is to RE-TARGET rather than delete: keep checkpoints 1
-> and 3 (both judgement-artefact shaped, where Codex has demonstrably paid), drop
-> checkpoint 2, and let the ladder decide when a diff warrants a second opinion.
+> - **Checkpoints 1 and 3 are unconditional.** Both are judgement-artefact shaped, and
+>   that is where Codex demonstrably pays. Checkpoint 1 on the #2231 spec caught an
+>   INVERTED RATIO DIRECTION — the spec said multiply where the arithmetic requires
+>   divide, which would have moved every stale ownership row the wrong way by ratio² —
+>   plus `filed_at`-vs-`period_end` as-of semantics. Neither is a thing a diff reviewer
+>   would see.
+> - **Checkpoint 2 fires only at the ladder's "behavioural change with data semantics"
+>   rung and above** — service logic, endpoints, scoring inputs, parsers, ETL, schema
+>   migrations, metric derivation. A narrow mechanical diff (one or two files, no data
+>   semantics) gets self-review + hook + bot, per the ladder, and nothing else.
+>
+> Rationale: the ladder is the single source for review intensity, and a blanket
+> pre-push Codex pass is precisely the "run a second agent to check your own work"
+> pattern the working-style rules forbid. Scoping it by rung keeps Codex where it earns
+> and removes it where the review bot already sits. The prior evidence ("3-for-3 on
+> semantics-carrying diffs, nothing on test-only") points the same way — those wins were
+> all at or above the behavioural rung.
 
 **Where it actually pays (2026-08-03 evidence).** Checkpoint 2 is DIFF-shaped, and on
 that diff Codex found nothing while the review bot found a real WARNING. The same day, a Codex pass over an *assessment* — findings, causal
@@ -358,7 +369,7 @@ reasoning and ask it to attack the framing — not just "review this diff".
 1. **Before writing code** — two Codex passes:
    - **After spec is written, before user final-approves:** `codex exec "Review this spec for <feature>. Path: docs/specs/<area>/<topic>.md (live spec) OR docs/proposals/<area>/<topic>.md (unshipped). Report EVERY plausible correctness gap, invariant violation and missing edge case — do not pre-filter by severity or confidence, I will classify afterwards. For any ownership/filings/metric data-treatment decision: FLAG it if the spec infers the treatment from first principles where a documented source rule exists (SEC reg/Item, EDGAR, form spec) and is not cited; FLAG any signal whose safety rests on a sample rather than a full-population check. Reply terse."` Fix issues before presenting spec to user for sign-off.
    - **After implementation plan is written, before first task dispatch:** same invocation against the plan doc. Catches plan-shape bugs (bad task decomposition, missing dependency, wrong contract) before any subagent starts coding.
-2. **Before first push** — after self-review + local gates pass, run `codex exec review` on the branch. Fix anything real before pushing.
+2. **Before first push — ONLY at the ladder's "behavioural change with data semantics" rung or above** (service logic, endpoints, scoring inputs, parsers, ETL, schema migrations, metric derivation). After self-review + local gates pass, run `codex exec review --base origin/main` on the branch and fix anything real before pushing. **A narrow mechanical diff does NOT get this** — one or two files, no data semantics, gets self-review + pre-push hook + review bot and nothing else, per the ladder. Resolved 2026-08-03; see the note above.
 3. **Before merging on a rebuttal-only round** — if the latest review's findings are all rebuttals (no code changes pending), run Codex to confirm the rebuttals are sound. Without this step, rebuttals are unverified and may hide real bugs the review bot *did* catch in disguise.
 
 When Codex is NOT required:
@@ -374,7 +385,9 @@ Invocation rule: always use `codex exec` (non-interactive). Never bare `codex` w
 ```
 Self-review (diff + engineering skills)
   ↓
-Codex review (checkpoint 2: before first push)
+Is the diff at the "behavioural change with data semantics" rung or above?
+  ├─ No (narrow, mechanical) → skip to push
+  └─ Yes → Codex review (checkpoint 2: before first push)
   ↓
 Push + wait for Claude review bot + CI
   ↓
@@ -461,11 +474,19 @@ uv run pytest -m db tests/test_<touched>.py ...      # touched modules + neighbo
 ```
 
 ⚠ **The cost premise changed on 2026-08-03 (#1568): the full tier is now
-~3.5 min, down from 66 min.** Whether that puts it back on the push gate
-is an OPERATOR call (it changes every push), not an agent one — until
-they decide, the gate is unchanged. But for a broad-surface diff there
-is no longer any excuse to skip the whole tier. Run it in file-scoped
-batches, never bare `-m db` (which has wedged this box twice):
+~3.5 min, down from 66 min.** ✅ **RESOLVED 2026-08-03: the db tier goes
+back on the push gate WHEN #2224 is fixed, and not before.** The blocker
+is not cost, it is determinism — #2224 is ~2 intermittent failures per
+full run, different tests each time, and a gate that fails randomly
+trains you to `--no-verify`, which is strictly worse than no gate. The
+trigger is objective, so no further decision is needed: **when #2224 is
+closed and the full tier has run clean 3 consecutive times, add `-m db`
+to `.githooks/pre-push` and to the pre-push checklist above.** Until
+then the gate is fast tier + smoke, unchanged.
+
+For a broad-surface diff there is no longer any excuse to skip the whole
+tier manually. Run it in file-scoped batches, never bare `-m db` (which
+has wedged this box twice):
 
 ```bash
 find tests -name 'test_*.py' | sort | split -l 40 - /tmp/chunk_
