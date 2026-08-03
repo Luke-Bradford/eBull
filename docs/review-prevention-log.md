@@ -2587,3 +2587,23 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Enforced in: this prevention log; `.claude/skills/engineering/full-population-ab.md` §Mechanics.
 
 ---
+
+### A closed vocabulary declared in three places is validated in none of them
+
+- First seen in: #2229 (2026-08-03). Found by curling the live dev endpoint for Definition-of-Done clause 8, not by any test.
+- Symptom: a new `CorrectionApplied` kind (`superseded_by_later_13f_hr`) was added to the service layer. `_CorrectionAppliedModel.kind` in `app/api/instruments.py` is a closed Pydantic `Literal` and `frontend/src/api/ownership.ts::OwnershipCorrectionKind` is a closed TS union; neither was updated. **Every `/instruments/{sym}/ownership-rollup` request that fired the new correction returned 500** — 364 corrections on AAPL, 691 on HD — while `ruff`, `pyright`, the fast tier, the smoke test, both DB-backed supersession suites and `test_api_instruments.py` were all green.
+- Root cause of the miss: the service constructs the dataclass with a plain `str` field; the Literal is only evaluated at *serialization*. Service-layer tests assert on the dataclass and never serialize, and no API test exercised an instrument that had a correction. The two declarations were coupled by convention only. This is the #1955 class ("contract-field wired into one model not its sibling") in its most expensive form, because the failure is a hard 500 rather than a wrong number.
+- Prevention: when a vocabulary is declared in more than one place, **derive one from the other in a test** rather than adding a case per value. `tests/test_correction_kind_vocab_contract.py` reads every `CorrectionApplied(kind=...)` out of the service by AST and asserts the API Literal and the FE union cover all of them, plus the reverse so a rename cannot leave stale vocabulary behind. Two guards on the extractor itself were load-bearing and both fired while it was being written: a `>= 6` lower bound caught it missing a conditional-expression call site (matching bare `ast.Constant` made BOTH branches of `"a" if src == "x" else "b"` invisible), and a subsequent blind `ast.walk` over-collected `"x"` — the comparison operand in that conditional's test. **A coverage assertion built on an extractor needs a test that the extractor found anything, or it passes vacuously** — the `x <> ALL('{}')` failure mode in test form.
+- Enforced in: this prevention log; `tests/test_correction_kind_vocab_contract.py`; the docstring on `_CorrectionAppliedModel` names its sibling explicitly.
+
+---
+
+### A read-time metric needs a LATENCY arm, not just a correctness A/B
+
+- First seen in: #2229 (2026-08-03).
+- Symptom: the supersession predicate was correct — the paired full-population A/B would have confirmed it — and made the operator-facing ownership-rollup endpoint **11-20x slower**: AAPL 214ms → 2,390ms, HD 180ms → 3,675ms. The rollup is computed at read time and stored nowhere (`metrics-analyst`: "Storage: not stored"), so a predicate added to it runs on every request. Nothing in the correctness harness, the test suite or the review checklist measures wall time.
+- Root cause of the miss: `full-population-ab.md` measures whether the FIGURE changed. For a metric with no stored artefact, "cost per request" is a second axis the same change can regress, and it is invisible to every existing gate.
+- Prevention: for any change to a read-time-computed metric, **time control vs treatment on the real endpoint before pushing** — same `git show origin/main` control extraction the paired A/B already uses, just measuring `perf_counter` instead of the figure. Three findings came out of doing it here, none of which correctness testing would surface: (1) a subquery scoped to the *instrument* was being re-evaluated per *row* and belonged in a CTE; (2) the better data source measured 3x WORSE until it had a covering index — `idx_inst_current_filer (filer_cik)` alone made `MAX(period_end)` heap-fetch every row of a filer like Vanguard, 7,651ms, against 25ms with `(filer_cik, period_end DESC)`; (3) **a missing index can make you reject the correct source.** Measure the source and the index together, or the index decision silently becomes a data-model decision.
+- Enforced in: this prevention log; `.claude/skills/engineering/full-population-ab.md`; `sql/245_inst_current_filer_period_idx.sql` records the measurement in its header.
+
+---

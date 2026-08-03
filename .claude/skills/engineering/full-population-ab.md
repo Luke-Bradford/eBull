@@ -88,6 +88,32 @@ classify each one by hand. "Net +11,000" hides "and 101 real holders vanished".
 parsed as holders — appeared only among the gains. A change that only adds
 looks safe and isn't.
 
+### For a READ-TIME metric, latency is a second metric — measure it
+
+Issue #2229. A metric computed at read time and stored nowhere (the ownership
+rollup: `metrics-analyst` says "Storage: not stored") runs its every predicate
+on **every operator request**. The correctness arms above ask whether the FIGURE
+changed; they are silent on what it now costs, and so is every other gate —
+lint, typecheck, the test suite, the review bot.
+
+That change's supersession predicate was correct and made the endpoint **11-20x
+slower**: AAPL 214ms → 2,390ms, HD 180ms → 3,675ms.
+
+So time control vs treatment on the real path before pushing. It is the same
+`git show origin/main:<path>` control extraction the paired design already uses
+— just `perf_counter` around each arm instead of diffing the figure. Doing it
+surfaced three things no correctness arm could:
+
+1. A subquery scoped to the **instrument** was being re-evaluated per **row**;
+   hoisting it to a CTE was behaviour-preserving (identical counts) and cut
+   3,675ms → 1,449ms.
+2. The better data source measured **3x worse** until it had a covering index.
+3. Therefore: **a missing index can make you reject the correct source.**
+   `idx_inst_current_filer (filer_cik)` alone made `MAX(period_end)` heap-fetch
+   every row of a filer like Vanguard — 7,651ms, against 25ms with
+   `(filer_cik, period_end DESC)`. Measure the source and its index together,
+   or the index decision silently becomes a data-model decision.
+
 ## Three arms, because one cannot see what the others see
 
 **Arm 1 — parse vs parse.** `main` in a git worktree vs the branch. Catches
