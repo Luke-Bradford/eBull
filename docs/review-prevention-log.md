@@ -2577,3 +2577,13 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Enforced in: this prevention log; the four occurrences in `full-population-ab.md` are fixed.
 
 ---
+
+### A/B whose two arms read the live dev DB is measuring ingest, not the change
+
+- First seen in: #2217 (2026-08-03), caught by the harness's own invariants, not by review.
+- Symptom: control and treatment were run as two sequential ~4-minute processes against the live dev DB, 15 minutes apart. The diff reported four invariant failures — residual decreasing on 42 instruments, zero-treasury control instruments moving, and `concentration` changing on 465 — none of which the one-line arithmetic change could produce. The jobs daemon had rewritten **2,175 `ownership_institutions_current` rows** in the window between the arms, so the two sides simply saw different data.
+- Root cause of the miss: the existing guidance ("run both sides concurrently, use a worktree for the control") addresses code isolation, and is silent on DATA isolation. It assumes the offline re-parse path, where both sides read frozen payloads. A metric computed at read time has no stored artefact to re-parse, so both arms necessarily hit the live database — which never stops moving.
+- Prevention: **an invariant failing on a quantity the change cannot affect means suspect the harness before the fix.** For read-time metrics, pair the arms: one process, and for each item evaluate BOTH inside a single `snapshot_read` (REPEATABLE READ) from one set of inputs. Extract the control body verbatim via `git show origin/main:<path>` and `exec` it rather than retyping or deriving it analytically — that keeps "never simulate the control" intact while removing the contamination. Re-run paired, all four invariants passed and the controls were byte-identical.
+- Enforced in: this prevention log; `.claude/skills/engineering/full-population-ab.md` §Mechanics.
+
+---
