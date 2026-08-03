@@ -214,6 +214,29 @@ item. With the index: ~300/min. `EXPLAIN` the new query once; it costs seconds.
   see byte-identical input.
 - Run both sides concurrently; a git worktree at `origin/main` gives the control
   side without disturbing the dev checkout.
+- ⚠ **If either side reads the LIVE dev DB, two sequential runs are not an A/B.**
+  The jobs daemon keeps ingesting underneath you, so the arms see different
+  inputs and the diff is measuring ingest, not your change. #2217 ran control
+  and treatment as two ~4-minute processes 15 minutes apart; **2,175
+  `ownership_institutions_current` rows were rewritten between them**, and the
+  diff reported four invariant failures — including zero-treasury control
+  instruments moving, and `concentration` changing on 465 instruments, which
+  that diff could not touch.
+
+  **The tell is an invariant failing on a quantity your change cannot affect.**
+  When you see one, suspect the harness before the fix.
+
+  Fix by **pairing**: one process, and for each item evaluate BOTH arms inside a
+  single `snapshot_read` (REPEATABLE READ) from one set of inputs, so nothing
+  can land between them. That is not "simulating the control" — extract the
+  control function's body verbatim from `git show origin/main:<path>` and `exec`
+  it, then invoke it on the same arguments the live path built. Both arms are
+  real code; only the contamination is gone. Re-run paired, #2217's four
+  invariants all passed and the controls were byte-identical.
+
+  Offline re-parse from stored payloads (above) is immune to this — prefer it
+  when the data allows. Pairing is for metrics computed at read time, which have
+  no stored artefact to re-parse.
 - Long runs need `run_in_background: true` — a `nohup … &` started inside an
   ordinary tool call is killed when that call's process group is cleaned up.
 - Reference implementation: `scripts/ab_2140_def14a_parser.py`
