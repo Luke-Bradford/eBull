@@ -163,7 +163,8 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 - **Endpoint**: `GET /instruments/{symbol}/ownership-rollup` slices `category="institutions"` and `category="etfs"`; flat list at `GET /instruments/{symbol}/institutional-holdings` ([app/api/instruments.py:4098](../../../app/api/instruments.py#L4098)).
 - **Chart**: `OwnershipPanel.tsx` ring 2 (institutions+etfs).
 - **Cadence**: `sec_13f_quarterly_sweep` Sat 02:00 UTC, 6h deadline. Filer directory walks last 4 closed quarters.
-- **Caveats**: AAPL was historically under-counted ~10× until #840-A through #840-F landed full decomposition. Universe expansion via #841 still pending — institutional totals can lag reality. CUSIP coverage gates the join: 7.4% on dev as of #914 vs 80% target.
+- **Caveats**: AAPL was historically under-counted ~10× until #840-A through #840-F landed full decomposition. Universe expansion via #841 still pending — institutional totals can lag reality.
+  - ⚠ **CUSIP resolution gates the join, and `institutional_holdings.instrument_id` is `NOT NULL` — so an unresolved CUSIP is a DROPPED holding, not a degraded one. Every institutional % is a lower bound.** Measured 2026-08-03: 7,419,463 resolved holding rows vs **33,319,332 unresolved observations** across 109,630 CUSIPs (18.2% by observation). Most unresolved are legitimately out of universe (bonds, options, foreign, non-eToro) so a low absolute rate is EXPECTED and is not itself the defect. **The defect is #2213: the OpenFIGI leg has been dark since 2026-06-18** while the surrounding sweeps kept reporting `success`, and 44,195 CUSIPs (11.2M observations) carry `resolution_status IS NULL` — never attempted, still growing. This is the direct cause of `coverage.state = 'unknown_universe'` on the ownership card for all five golden-panel instruments. (Supersedes the old "7.4% on dev as of #914 vs 80% target" figure.)
 - **Validation**: cross-check vs WhaleWisdom / SEC EDGAR direct; track `unresolved_13f_cusips` count.
 - **denominator_basis**: `pie_wedge`. ETF filer-type holdings come from same 13F data but render as separate slice for legibility.
 
@@ -223,12 +224,21 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 | insiders | pie_wedge | Beneficial ownership; sums into pie |
 | blockholders | pie_wedge | 13D/G; sums into pie |
 | institutions | pie_wedge | 13F-HR equity; sums into pie |
-| etfs | pie_wedge | 13F-HR by filer-type ETF; sums into pie |
+| etfs | pie_wedge | 13F-HR by filer-type ETF; sums into pie. ⚠ **EMPTY UNIVERSE-WIDE today (#2214)** — see below |
 | def14a_unmatched | proxy_disclosure (memo overlay, #1659) | DEF 14A holders unresolved to Form 4 / 13F. NON-ADDITIVE — a Rule 13d-3 deemed/overlapping disclosure (SEC Item 403), already counted via 13D/G + 13F + Form 4; excluded from pie/residual/concentration, rendered as a cross-check overlay (reverses #1627's additive wedge) |
 | funds | institution_subset | N-PORT positions are strict subset of parent advisor's 13F-HR aggregate; memo overlay only |
 | treasury | (special) | Top-level field; rendered above pie; excluded from concentration numerator |
 
 Future overlays (ESOP #843 / DRS / short-interest #961) will land as additional `institution_subset` rows.
+
+### ⚠ Two slices do not render what their name promises (measured 2026-08-03)
+
+Before quoting either of these to an operator, read the ticket — the API declares the category, the UI carries a wedge, and neither renders.
+
+- **`etfs` is empty for the entire universe (#2214).** `institutional_filers` has **1** filer typed `ETF` and 11,464 typed `INV`, because both inputs to `classify_filer_type` are starved: `etf_filer_cik_seeds` holds 1 row and `ncen_filer_classifications` holds **0** (`ncen_classifier_yearly` ran once on 2026-06-04, reported `success`, wrote nothing, and is on a YEARLY cadence). **Ownership totals are NOT wrong** — ETF-managed 13F holdings still land in `institutions`, so the pie sums correctly. What is lost is the index-vs-active decomposition.
+- **`blockholders` is structurally invisible on any name that also has a 13F/Form 4 filer (#2215).** The data exists (22,770 rows / 4,898 instruments; every golden-panel name has 2-3 rows) but `_PRIORITY_RANK` correctly gives Form 4 / 13F precedence, and Vanguard / BlackRock / State Street file both a 13G and a 13F. So an empty blockholder wedge means "deduped away", NOT "no >5% holder" — opposite conclusions, identical rendering.
+
+**General rule this pair teaches:** a declared-but-empty slice is worse than an absent one, because absence reads as a finding. When adding a category to the rollup, verify it renders non-empty on the golden panel before shipping the wedge.
 
 ### Share-class collapse (GOOGL+GOOG)
 - GOOGL and GOOG share CIK 1652044 (Alphabet) but separate CUSIPs and separate `instrument_id`. Each class has its own card.
