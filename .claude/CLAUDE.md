@@ -268,6 +268,34 @@ closed decision. Caught by a Codex pass on the assessment, not by any test.
 **A symptom you find surprising is as likely to be a decision you have not read as
 a bug.** Check which, before you write it down.
 
+## Review-intensity ladder — pick the rung, then stop
+
+**This is the single source for "how much review does this change need". Every other
+file defers to it.** The old set applied near-maximum scrutiny to everything, which
+looks safe and is not: it buries the signal from the checks that matter, and Opus 5
+already self-verifies, so a blanket pass costs tokens without improving the result.
+
+Match the rung to what could actually go wrong. Climbing higher than the change warrants
+is a defect, not diligence.
+
+| the change is… | what it gets |
+| --- | --- |
+| **A narrow diff** — one or two files, mechanical, no data semantics | self-review + the deterministic pre-push hook + the review bot. **Nothing else.** No second-opinion pass, no lens library, no extra agent. |
+| **A behavioural change with data semantics** — service logic, endpoints, scoring inputs | the above + the relevant domain skill read for the surface touched |
+| **A corpus change** — parser, ETL, schema migration, metric derivation | the above + full-population A/B (`full-population-ab.md`) + Definition-of-Done clauses 8-12 evidence table. **This rung is non-negotiable; it is evidence, not reassurance.** |
+| **A judgement artefact** — spec, plan, causal claim, priority order, acceptance criteria | a second opinion on the FRAMING (this is where Codex has actually paid — see below) |
+| **A high-stakes cross-domain plan** | committee review, capped at 2-3 lenses unless the operator explicitly asks for the full panel |
+| **A rebuttal-only merge round** | a second opinion on the REBUTTED CLAIMS ONLY — never a whole-diff re-review |
+
+Two rules that cut across every rung:
+
+- **Never ask a reviewer to be conservative.** No "only real bugs", no "high-severity
+  only", no "skip nits". Opus 5 takes it literally and reports less. Ask for everything;
+  classify severity yourself afterwards.
+- **Never run a second agent to check your own work.** If you can review it yourself in a
+  handful of tool calls, do that. Deterministic gates (hook, CI, A/B harness) are not
+  "another pass" — they produce evidence you do not already have.
+
 ## Codex second-opinion — mandatory checkpoints
 
 Codex runs at exactly three points in the workflow. Non-negotiable.
@@ -285,7 +313,7 @@ sits.** When you have an assessment or a plan, hand Codex the numbers and the
 reasoning and ask it to attack the framing — not just "review this diff".
 
 1. **Before writing code** — two Codex passes:
-   - **After spec is written, before user final-approves:** `codex exec "Review this spec for <feature>. Path: docs/specs/<area>/<topic>.md (live spec) OR docs/proposals/<area>/<topic>.md (unshipped). Focus on correctness gaps, invariant violations, missing edge cases. For any ownership/filings/metric data-treatment decision: FLAG it if the spec infers the treatment from first principles where a documented source rule exists (SEC reg/Item, EDGAR, form spec) and is not cited; FLAG any signal whose safety rests on a sample rather than a full-population check. Reply terse."` Fix issues before presenting spec to user for sign-off.
+   - **After spec is written, before user final-approves:** `codex exec "Review this spec for <feature>. Path: docs/specs/<area>/<topic>.md (live spec) OR docs/proposals/<area>/<topic>.md (unshipped). Report EVERY plausible correctness gap, invariant violation and missing edge case — do not pre-filter by severity or confidence, I will classify afterwards. For any ownership/filings/metric data-treatment decision: FLAG it if the spec infers the treatment from first principles where a documented source rule exists (SEC reg/Item, EDGAR, form spec) and is not cited; FLAG any signal whose safety rests on a sample rather than a full-population check. Reply terse."` Fix issues before presenting spec to user for sign-off.
    - **After implementation plan is written, before first task dispatch:** same invocation against the plan doc. Catches plan-shape bugs (bad task decomposition, missing dependency, wrong contract) before any subagent starts coding.
 2. **Before first push** — after self-review + local gates pass, run `codex exec review` on the branch. Fix anything real before pushing.
 3. **Before merging on a rebuttal-only round** — if the latest review's findings are all rebuttals (no code changes pending), run Codex to confirm the rebuttals are sound. Without this step, rebuttals are unverified and may hide real bugs the review bot *did* catch in disguise.
@@ -432,7 +460,9 @@ Both must pass.
 
 ## Required engineering skills
 
-Read and apply these before pushing:
+Read and apply these before pushing — **scoped by the review-intensity ladder above**,
+not all of them on every diff. A narrow change needs the pre-push checklist and
+nothing more:
 
 - `.claude/skills/engineering/pre-flight-review.md`
 - `.claude/skills/engineering/pre-pr-fresh-agent-review.md` — a LENS LIBRARY (financial-plumbing / data-engineer / data-scientist / adversarial) for filings ETL, schema, identity-resolution and observations diffs. **No longer a mandatory pre-push gate** (revised 2026-08-03): a blanket second-agent pass before every push is the "use a subagent to verify" pattern Anthropic's Opus 5 guidance says causes over-verification, and it contradicted this file's own "delegate gathering, never concluding" rule. Reach for the lenses when a diff on those surfaces is genuinely large or unfamiliar.
@@ -465,7 +495,7 @@ Read and apply these before pushing:
 
 ## Settled decisions
 
-→ Covered in the Working order above (steps 2 and 4).
+→ Covered in the Working order above (steps 2 and 3), and by the rule "Never assert a CAUSE without checking whether the effect is a settled decision".
 
 ## Repo discipline
 

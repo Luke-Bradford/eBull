@@ -96,7 +96,16 @@ Ask:
 - did I create hidden tech debt without recording it?
 
 ### I. Settled decision check
-Before coding, read `docs/settled-decisions.md` and list every decision that applies to this issue.
+
+> ⚠ These two sections (I and J) are **planning-time input, not a pre-push ritual**. This
+> is a pre-PUSH self-review skill, so by the time you read it the decisions should already
+> have shaped the code — re-listing them here produces prose, not safety. Use them as a
+> last-look filter: *did anything I actually wrote contradict a decision or repeat a
+> prevention entry?* If not, write nothing. Per `CLAUDE.md` working order step 2, cite an
+> entry only where it shapes or blocks the plan; a standalone "no settled decision
+> applies" sentence is worth nothing.
+
+Read `docs/settled-decisions.md` for decisions touching the surface you changed.
 
 For each relevant decision:
 - state what the rule is
@@ -117,7 +126,10 @@ Typical examples:
 - action-specific execution guard rules
 
 ### J. Prevention log check
-Before coding, read `docs/review-prevention-log.md` and identify any entries relevant to this issue.
+
+Same posture as I — a last-look filter, not a survey to narrate.
+
+Read `docs/review-prevention-log.md` for entries matching the bug classes your diff could plausibly reintroduce.
 
 For each relevant entry:
 - state the bug class

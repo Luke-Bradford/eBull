@@ -102,4 +102,4 @@ If our observations table doesn't carry a field EdgarTools exposes for the same 
 
 ## Perf-claim diffs
 
-If the diff also asserts a performance improvement (latency, throughput, wall-clock) against any ETL hot path, the [`etl-perf-claims`](etl-perf-claims.md) skill is mandatory in this fresh-agent review pass — load it alongside the financial-plumbing / data-engineer / data-scientist / adversarial lenses so the §4 artifact contract + §5 process rules are part of the lens stack before push.
+If the diff asserts a performance improvement (latency, throughput, wall-clock) against any ETL hot path, [`etl-perf-claims`](etl-perf-claims.md) applies **whether or not you run this lens pass** — its §4 artifact contract is enforced by the `perf-claim-lint` CI gate, so it is a deterministic requirement on the change, not a step in a review. Load it as a lens too if you are running this pass anyway.
