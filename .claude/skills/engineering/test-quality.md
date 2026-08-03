@@ -110,21 +110,78 @@ assert rec.rationale == "No action trigger met; score=0.600 rank=2"
 assert rec.rationale == _hold_rationale(score_row, quote_is_fallback=False)
 ```
 
-## Scope the deliberate DB-tier run to the diff — NEVER bare `pytest -m db` locally
+## Run the full DB tier in file-scoped batches — NEVER bare `pytest -m db` locally
 
 Bare full-suite `uv run pytest -m db` on the dev Mac has wedged twice (2026-06-09:
 froze at startup, zero workers; 2026-06-10: ran 2h02m to 98% then froze with all
-xdist workers dead — a moving progress bar does not mean it will finish). Even when
-it moves, ~4,300 db tests × 1-3s fixture overhead ≈ an hour+ of wall-clock for
-milliseconds of test logic; suite-shape fix tracked in #1568.
+xdist workers dead — a moving progress bar does not mean it will finish).
 
-Operator decision: never block a small PR on the full tier. The "run the DB tier
-deliberately" rule is satisfied by running the test files for the touched modules +
-immediate neighbours (e.g. a 2-file rewash change → 4 files / 105 tests / ~60s).
-For broad surface (migrations touching many tables, conftest/fixture changes,
-schema-wide refactors) run the tier in file-scoped batches, not bare `-m db`. A run
-with 0% CPU and no `gw*` workers is wedged: `kill -9` it, then reap leaked test DBs
-with `uv run python -m tests.fixtures.cleanup_test_dbs`.
+Since #1568 the fixture cost is gone (per-test setup+teardown 1,805 ms → ~10 ms),
+so the whole tier runs in **~3.5 min** — but drive it in batches, one pytest
+process per batch, so memory and worker state are reclaimed between them and a
+wedge is contained to one batch instead of the whole run. Bare `-m db` has not
+been re-verified as safe post-#1568 and should still be avoided.
+
+```bash
+docker compose --profile test up -d postgres-test
+find tests -name 'test_*.py' | sort | split -l 40 - /tmp/chunk_
+for f in /tmp/chunk_*; do uv run pytest -m db -q $(tr '\n' ' ' < "$f"); done
+```
+
+Operator decision: a small PR is still not blocked on the full tier — the
+"run the DB tier deliberately" rule is satisfied by the test files for the touched
+modules + immediate neighbours. Run the whole tier for broad surface (migrations
+touching many tables, conftest/fixture changes, schema-wide refactors).
+
+A run with 0% CPU and no `gw*` workers is wedged: `kill -9` it, then reap leaked
+test DBs with `uv run python -m tests.fixtures.cleanup_test_dbs`.
+
+Note: this repo's pytest config suppresses the final `N passed` line — the
+durations block is the last thing printed. Gate on the **exit code**, or pass
+`--junitxml` when you need counts.
+
+## Per-test DB cleanup cost is per-RELATION, not per-row
+
+`TRUNCATE` on an empty table is not free — it takes ACCESS EXCLUSIVE and rewrites
+a relfilenode per relation regardless of content. Truncating the 105-table planner
+set cost **845 ms** against a database that was already empty, twice per test
+(#1568). Cost scales with how many tables you name, not how much the test wrote.
+
+Probe first, then delete only what is dirty:
+
+- `SELECT 't' WHERE EXISTS (SELECT 1 FROM t) UNION ALL …` over the wipe set is an
+  exact non-empty test in one round trip. `pg_class.reltuples` is **not** usable
+  for this — it reported 1,466 "dirty" relations immediately after a TRUNCATE
+  (stale planner estimate).
+- Probe **partition roots only** (`relispartition = false`). `EXISTS` on a
+  partitioned parent already short-circuits across every partition; probing the
+  1,311 individual partitions instead of their 12 parents cost 69.8 ms vs 3.9 ms
+  for the same answer.
+- `DELETE` has no `CASCADE`, so the order must be topological (children first),
+  derived from `pg_constraint` — not a hand-maintained list.
+- `DELETE` has no `RESTART IDENTITY` either. Reset sequences separately, and probe
+  them independently of rows: `nextval` is **not transactional**, so a rolled-back
+  INSERT leaves the sequence advanced while the table stays empty.
+  `pg_sequences.last_value IS NOT NULL` means exactly "read since the last
+  RESTART" and costs 0.8 ms.
+
+Rollback-per-test isolation is the usual answer and does **not** fit this
+codebase: 271 explicit `.commit()` calls across 71 app files would break any
+enclosing transaction. Rule that out by grepping before designing around it.
+
+## Reuse one connection for per-test DB cleanup — a fresh backend is a cold backend
+
+The #1568 dirty-set probe is a 139-branch `UNION ALL … EXISTS`. Planning it costs
+**~110 ms on a brand-new connection and ~3.8 ms on one that has run it before** —
+an empty relcache/syscache has to fault in every referenced relation's catalog
+entry, and psycopg3 only auto-prepares after `prepare_threshold` (5) executions on
+the *same* connection. A fixture that opens a connection per cleanup pass pays the
+cold price every test and hides a 30x win.
+
+Same trap for any per-test helper issuing a catalog-heavy or many-relation query.
+Measure it on a fresh connection, not in a loop on a warm one, or the benchmark
+will flatter the design. Hold the helper's connection at session scope; keep the
+per-test connection the test itself uses fresh.
 
 ## DB write + return value consistency
 
