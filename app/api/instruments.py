@@ -5621,9 +5621,10 @@ def get_instrument_exec_compensation(
 
 # Slice categories present on ``OwnershipSlice.category``. The
 # frontend's ``CATEGORY_LABELS`` set also includes ``treasury`` —
-# treasury is a memo row in the CSV (additive wedge on the chart),
-# not a holders slice. Treated as a valid filter value below: it
-# scopes the CSV to the treasury memo + residual rows only.
+# treasury is a memo row in the CSV (a wedge drawn on top of the chart,
+# never inside the denominator, and since #2217 not deducted from the
+# residual either), not a holders slice. Treated as a valid filter value
+# below: it scopes the CSV to the treasury memo + residual rows only.
 _ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
     {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"},
 )
@@ -5665,9 +5666,11 @@ def get_instrument_ownership_rollup_csv(
             "drops all slice holders and emits only the treasury + residual "
             "memo rows. ``funds`` and ``esop`` are memo-overlay slices — their "
             "rows render with the ``__memo:<category>__`` prefix in the output "
-            "CSV so they are outside the additive (treasury + residual + "
-            "Σ pie-wedge) reconciliation. Without ``category``, every slice "
-            "is exported."
+            "CSV so they are outside the additive (residual + Σ pie-wedge) "
+            "reconciliation — as does treasury, which since #2217 is "
+            "``__memo:treasury__`` and is NOT a term in that sum "
+            "(shares_outstanding already excludes it). Without ``category``, "
+            "every slice is exported."
         ),
     ),
     conn: psycopg.Connection[object] = Depends(get_conn),

@@ -212,7 +212,7 @@ def test_build_csv_row_per_holder_across_slices() -> None:
     assert lines[2].startswith("0000222222,BigFund,institutions,2000000,")
     assert "13f" in lines[2] and ",OTHER," in lines[2]
     assert ",ETF," in lines[3]  # filer_type column
-    assert lines[4].startswith(",Treasury (memo),__treasury__,500000,")
+    assert lines[4].startswith(",Treasury (memo),__memo:treasury__,500000,")
     assert lines[5].startswith(",Public / unattributed,__residual__,6500000,")
 
 
@@ -257,6 +257,45 @@ def test_build_csv_emits_dropped_source_memo_rows() -> None:
     )
     # 38,347,842 (Cohen once) + 410,027,315 residual == 448,375,157 outstanding.
     assert summed == Decimal("448375157")
+
+
+def test_build_csv_sum_invariant_holds_with_treasury_present() -> None:
+    """The additive reconciliation must hold for a treasury-carrying issuer.
+
+    Regression for the gap that let #2217 reach the CSV: the invariant test
+    above runs with ``treasury=None``, and treasury's old ``__treasury__``
+    category was outside the ``__memo:``/``__dropped:`` filter — so no test
+    ever summed a CSV that contained a treasury row. Once the residual stopped
+    deducting treasury, the exported column would have summed to
+    ``outstanding + treasury`` and nothing would have failed.
+
+    Treasury is deliberately LARGER than outstanding here (12M vs 10M), the
+    Goldman shape: if it were an additive term the sum could not reconcile at
+    all.
+    """
+    holder = _holder(
+        cik="0000111111",
+        name="Alice CEO",
+        shares="3000000",
+        pct="0.30",
+        source="form4",
+        accession="0000111-26-000001",
+    )
+    insiders = _slice("insiders", (holder,))
+    csv = build_rollup_csv(
+        _rollup(slices=(insiders,), treasury="12000000", residual_shares="7000000"),
+    )
+    lines = csv.splitlines()
+
+    assert any(",Treasury (memo),__memo:treasury__,12000000," in ln for ln in lines)
+
+    data_rows = [ln.split(",") for ln in lines[1:]]
+    summed = sum(
+        Decimal(r[3]) for r in data_rows if not r[2].startswith("__dropped:") and not r[2].startswith("__memo:")
+    )
+    # 3,000,000 attributed + 7,000,000 residual == 10,000,000 outstanding.
+    # The 12,000,000 treasury row is excluded by the documented filter.
+    assert summed == Decimal("10000000")
 
 
 def test_build_csv_omits_treasury_row_when_treasury_zero_or_none() -> None:
@@ -434,7 +473,7 @@ def test_build_csv_memo_overlay_slices_emit_after_residual_with_prefix() -> None
     assert "insiders," in lines[1]
     assert "Vanguard" not in lines[1]
     # Treasury + residual sit between pie-wedge and memo blocks.
-    assert "__treasury__" in lines[2]
+    assert "__memo:treasury__" in lines[2]
     assert "__residual__" in lines[3]
     # Memo row carries the `__memo:funds__` prefix on the category column.
     assert "0000036405,Vanguard 500 Index Fund,__memo:funds__,200000," in lines[4]
@@ -502,7 +541,7 @@ def test_build_csv_def14a_proxy_disclosure_emits_as_memo_excluded_from_sum() -> 
     # header / insider / treasury / residual / memo:def14a_unmatched = 5 lines.
     assert len(lines) == 5
     assert "insiders," in lines[1]
-    assert "__treasury__" in lines[2]
+    assert "__memo:treasury__" in lines[2]
     assert "__residual__" in lines[3]
     assert "Sponsor Control Group,__memo:def14a_unmatched__,300000," in lines[4]
     # Additive reconciliation excludes the proxy block.

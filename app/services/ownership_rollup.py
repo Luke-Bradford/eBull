@@ -4026,17 +4026,31 @@ _CSV_HEADER: tuple[str, ...] = (
 def build_rollup_csv(rollup: OwnershipRollup) -> str:
     """Flatten a deduped :class:`OwnershipRollup` into a CSV string.
 
-    One row per surviving holder across all slices, plus two memo
-    rows at the end:
+    One row per surviving holder across all slices, plus:
 
-      * ``__treasury__`` — issuer treasury share count (additive
-        wedge on the chart, not a deduped holder).
       * ``__residual__`` — ``Public / unattributed`` block (clamped
-        to 0 when oversubscribed).
+        to 0 when oversubscribed). ADDITIVE.
+      * ``__memo:treasury__`` — issuer treasury share count. NOT
+        additive (#2217).
 
-    The two memo rows let an operator sum the ``shares`` column and
-    verify it equals ``shares_outstanding`` without round-tripping
-    to a separate endpoint.
+    The additive reconciliation an operator can run on the ``shares``
+    column is::
+
+        Σ (rows whose category is neither __memo:* nor __dropped:*)
+            == shares_outstanding
+
+    i.e. pie-wedge holders + residual. **Treasury is not a term.**
+    ``shares_outstanding`` is the DEI/us-gaap OUTSTANDING count, which
+    already excludes treasury (shares issued = outstanding + treasury),
+    so adding treasury back would overshoot by exactly that amount —
+    and treasury can exceed outstanding outright (Goldman: 199.9%).
+    It moved from ``__treasury__`` to the established
+    ``__memo:<category>__`` prefix so the one documented filter rule
+    excludes it, the same way funds and unmatched DEF 14A rows are
+    excluded. It keeps its historical emission position (immediately
+    before ``__residual__``) rather than moving to the trailing memo
+    block — only the category token changed, so a consumer keying on
+    the prefix needs no positional rework.
 
     Header always emitted so an automation pipe can be branchless on
     empty rollups (no_data state, pre-ingest instruments).
@@ -4054,8 +4068,8 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     writer.writerow(_CSV_HEADER)
 
     # Emit pie-wedge slices first so the additive-sum invariant holds
-    # against (treasury_shares + residual.shares + Σ pie-wedge holders)
-    # = shares_outstanding. Memo-overlay slices (funds, esop, future
+    # against (residual.shares + Σ pie-wedge holders) = shares_outstanding.
+    # Treasury is NOT a term (#2217). Memo-overlay slices (funds, esop, future
     # DRS / short-interest) are emitted in a trailing block with the
     # ``__memo:<category>__`` prefix so spreadsheet consumers can
     # filter them OUT of any SUM(shares) reconciliation. Codex
@@ -4093,7 +4107,7 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
             [
                 "",
                 "Treasury (memo)",
-                "__treasury__",
+                "__memo:treasury__",
                 str(rollup.treasury_shares),
                 treasury_pct,
                 "",
