@@ -57,9 +57,18 @@ marker stays absent ~15s) is stolen; a live owner is waited on
 indefinitely. Fast tier ~60-90s under load (the ~25s figure above is
 quiet-machine).
 
-## Then read `git diff origin/main...HEAD` top to bottom
+## Then check the branch diff — scope always, contents proportionally
 
-Adopt the reviewer's posture: read what is there, not what you intended.
+The branch-SCOPE check below is **not optional at any rung** — it is the only thing
+standing between you and a silent revert of somebody else's merged work, and it is one
+command.
+
+Reading the whole diff top to bottom is a different matter: on a narrow change you have
+just written and already reviewed, a second full pass is the re-check Opus 5 already
+performs, and the review-intensity ladder in `CLAUDE.md` says to skip it. Read the diff
+in full when it is large, unfamiliar, spans surfaces you did not hold in mind at once,
+or touches data semantics. When you do, adopt the reviewer's posture: read what is
+there, not what you intended.
 
 **First, check the branch SCOPE — one command, catches silent reverts:**
 
