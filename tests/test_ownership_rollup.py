@@ -1075,8 +1075,12 @@ class TestResidualAndCoverage:
         return conn
 
     def test_residual_label_and_value(self, _setup: psycopg.Connection[tuple]) -> None:
-        """30M known + 10M treasury → residual = 60M, label =
-        Public / unattributed, oversubscribed=False."""
+        """30M known of 100M outstanding → residual = 70M.
+
+        The 10M treasury is NOT deducted (#2217): ``shares_outstanding`` already
+        excludes treasury (shares issued = outstanding + treasury), so the old
+        60M expectation double-counted it. This assertion is what pinned the bug
+        in place — it was asserting the defect, not the contract."""
         conn = _setup
         _seed_form4(
             conn,
@@ -1092,10 +1096,44 @@ class TestResidualAndCoverage:
         rollup = ownership_rollup.get_ownership_rollup(conn, symbol="RESID", instrument_id=789_020)
 
         assert rollup.residual.label == "Public / unattributed"
-        assert rollup.residual.shares == Decimal("60000000")
+        assert rollup.residual.shares == Decimal("70000000")
         assert rollup.residual.oversubscribed is False
         # Concentration: 30M / 100M = 30% (treasury excluded from numerator).
         assert rollup.concentration.pct_outstanding_known == Decimal("0.30")
+
+    def test_treasury_exceeding_outstanding_does_not_zero_residual(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Regression for #2217, in the shape that made it operator-visible.
+
+        A serial repurchaser can carry treasury far in excess of shares
+        outstanding — Goldman Sachs held 199.9% at the time of the fix, which is
+        only possible *because* outstanding excludes treasury. Deducting it drove
+        the residual negative before a single holder was counted, so public float
+        rendered as ZERO and the warning bar blamed 13F snapshot lag for it.
+
+        200% treasury with only 30% attributed must leave the remaining 70%
+        public and the flag clear."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=789_021, symbol="BUYBACK")
+        _seed_outstanding(conn, instrument_id=789_021, shares="100000000", treasury="200000000")
+        _seed_form4(
+            conn,
+            accession="0001234500-25-000125",
+            instrument_id=789_021,
+            filer_cik="0009999002",
+            filer_name="Big Holder Inc",
+            txn_date=date(2026, 3, 1),
+            post_transaction_shares="30000000",
+        )
+        conn.commit()
+
+        rollup = ownership_rollup.get_ownership_rollup(conn, symbol="BUYBACK", instrument_id=789_021)
+
+        assert rollup.treasury_shares == Decimal("200000000")
+        assert rollup.residual.shares == Decimal("70000000")
+        assert rollup.residual.oversubscribed is False
 
     def test_oversubscribed_clamps_residual_to_zero(self, _setup: psycopg.Connection[tuple]) -> None:
         """Stale 13F + fresh 13D: holders sum to 110% of outstanding.

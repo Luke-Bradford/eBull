@@ -15,7 +15,11 @@ closes:
   * **Wrong denominator** — the prior frontend math used
     ``shares_outstanding + treasury_shares``; the canonical
     denominator is ``shares_outstanding`` only, with treasury
-    rendered as an additive top wedge.
+    rendered as a separate wedge stacked on top of the ring.
+    "On top" is a DRAWING instruction, not an arithmetic one:
+    treasury is outside the denominator, outside the residual
+    (#2217) and outside the CSV's additive reconciliation, where
+    it is a ``__memo:treasury__`` row.
   * **No cross-channel dedup** — the prior pipeline summed Form 4 +
     13D/A + 13F + DEF 14A as a partition (e.g. Cohen on GME read as
     ~75M shares because his Form 4 cumulative AND his 13D/A row
@@ -280,10 +284,11 @@ class OwnershipSlice:
 
 @dataclass(frozen=True)
 class ResidualBlock:
-    """``Public / unattributed`` wedge. ``oversubscribed=True`` when
-    deduped slices + treasury exceed shares_outstanding (stale
-    13F + fresh Form 4 / 13D mix); residual clamps to 0 in that
-    case and the frontend renders the warning bar."""
+    """``Public / unattributed`` wedge. ``oversubscribed=True`` when the
+    deduped pie-wedge slices exceed shares_outstanding (stale 13F + fresh
+    Form 4 / 13D mix); residual clamps to 0 in that case and the frontend
+    renders the warning bar. Treasury is NOT part of this comparison —
+    shares outstanding already excludes it (#2217)."""
 
     shares: Decimal
     pct_outstanding: Decimal
@@ -2813,17 +2818,37 @@ def _build_slice(
 def _compute_residual(
     outstanding: Decimal,
     slices: Sequence[OwnershipSlice],
-    treasury: Decimal | None,
 ) -> ResidualBlock:
     """Compute the ``Public / unattributed`` residual.
 
-    Stale-mixed-date inputs (fresh Form 4 + old 13F) can leave the
-    raw residual negative — we clamp to 0 and surface
-    ``oversubscribed=True`` so the frontend renders a warning bar.
-    The category-counted slices use deduped totals, so the only path
-    to oversubscription is the snapshot-lag class of bug, not a
-    dedup mistake."""
-    treasury_d = treasury if treasury is not None else Decimal(0)
+    Treasury is NOT deducted (#2217). ``outstanding`` is
+    ``dei:EntityCommonStockSharesOutstanding`` / ``us-gaap:CommonStockSharesOutstanding``
+    (see :func:`_read_shares_outstanding`), and shares issued = shares outstanding
+    + treasury — so treasury shares were never in this base and subtracting them
+    removed a quantity that is not there. That is the design contract too: the
+    denominator is outstanding only, with treasury drawn as a separate wedge on
+    top of the ring (``docs/proposals/etl/ownership-tier0-cik-history.md``
+    §OwnershipPanel; the module docstring's "wrong denominator" ship-blocker).
+    That doc calls the wedge "additive" in the RENDERING sense — stacked above
+    the ring — which is not a licence to add or subtract it anywhere in the
+    arithmetic. The frontend was corrected then; this residual kept the
+    mirror-image of the same error.
+
+    Left uncorrected it read as a *negative* residual for any serial repurchaser
+    — 9 of 20 sampled large caps, with Coca-Cola, Goldman, JPM, P&G and Exxon
+    rendering a public float of exactly ZERO, and the warning bar below blaming
+    snapshot lag for it. Goldman carries treasury equal to 199.9% of outstanding,
+    which is only possible *because* the base excludes it.
+
+    Stale-mixed-date inputs (fresh Form 4 + old 13F) can still leave the raw
+    residual negative — we clamp to 0 and surface ``oversubscribed=True`` so the
+    frontend renders a warning bar. The category-counted slices use deduped
+    totals, so with the treasury term gone the remaining paths to
+    oversubscription are the snapshot-lag class and a genuine over-attribution,
+    not arithmetic.
+
+    :func:`_compute_concentration` below has always excluded treasury correctly;
+    the two now agree."""
     # Memo-overlay slices (funds N-PORT; DEF 14A proxy_disclosure #1659; future
     # ESOP/DRS/short-interest) do NOT contribute to ``sum_known`` — they describe
     # positions already counted via a pie-wedge slice (N-PORT funds are fund-level
@@ -2833,7 +2858,7 @@ def _compute_residual(
         (s.total_shares for s in slices if s.denominator_basis == "pie_wedge"),
         Decimal(0),
     )
-    raw = outstanding - sum_known - treasury_d
+    raw = outstanding - sum_known
     clamped = raw if raw > 0 else Decimal(0)
     pct = clamped / outstanding if outstanding > 0 else Decimal(0)
     return ResidualBlock(
@@ -3929,7 +3954,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         funds_holders=funds_holders,
         esop_holders=esop_holders,
     )
-    residual = _compute_residual(effective_outstanding, slices, treasury)
+    residual = _compute_residual(effective_outstanding, slices)
     concentration = _compute_concentration(effective_outstanding, slices)
     sanity = _compute_sanity(slices, effective_outstanding)
     # Independent denominator tie-out (#1647 part 5) — reads the comparison figure from
@@ -4008,17 +4033,31 @@ _CSV_HEADER: tuple[str, ...] = (
 def build_rollup_csv(rollup: OwnershipRollup) -> str:
     """Flatten a deduped :class:`OwnershipRollup` into a CSV string.
 
-    One row per surviving holder across all slices, plus two memo
-    rows at the end:
+    One row per surviving holder across all slices, plus:
 
-      * ``__treasury__`` — issuer treasury share count (additive
-        wedge on the chart, not a deduped holder).
       * ``__residual__`` — ``Public / unattributed`` block (clamped
-        to 0 when oversubscribed).
+        to 0 when oversubscribed). ADDITIVE.
+      * ``__memo:treasury__`` — issuer treasury share count. NOT
+        additive (#2217).
 
-    The two memo rows let an operator sum the ``shares`` column and
-    verify it equals ``shares_outstanding`` without round-tripping
-    to a separate endpoint.
+    The additive reconciliation an operator can run on the ``shares``
+    column is::
+
+        Σ (rows whose category is neither __memo:* nor __dropped:*)
+            == shares_outstanding
+
+    i.e. pie-wedge holders + residual. **Treasury is not a term.**
+    ``shares_outstanding`` is the DEI/us-gaap OUTSTANDING count, which
+    already excludes treasury (shares issued = outstanding + treasury),
+    so adding treasury back would overshoot by exactly that amount —
+    and treasury can exceed outstanding outright (Goldman: 199.9%).
+    It moved from ``__treasury__`` to the established
+    ``__memo:<category>__`` prefix so the one documented filter rule
+    excludes it, the same way funds and unmatched DEF 14A rows are
+    excluded. It keeps its historical emission position (immediately
+    before ``__residual__``) rather than moving to the trailing memo
+    block — only the category token changed, so a consumer keying on
+    the prefix needs no positional rework.
 
     Header always emitted so an automation pipe can be branchless on
     empty rollups (no_data state, pre-ingest instruments).
@@ -4036,8 +4075,8 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     writer.writerow(_CSV_HEADER)
 
     # Emit pie-wedge slices first so the additive-sum invariant holds
-    # against (treasury_shares + residual.shares + Σ pie-wedge holders)
-    # = shares_outstanding. Memo-overlay slices (funds, esop, future
+    # against (residual.shares + Σ pie-wedge holders) = shares_outstanding.
+    # Treasury is NOT a term (#2217). Memo-overlay slices (funds, esop, future
     # DRS / short-interest) are emitted in a trailing block with the
     # ``__memo:<category>__`` prefix so spreadsheet consumers can
     # filter them OUT of any SUM(shares) reconciliation. Codex
@@ -4075,7 +4114,7 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
             [
                 "",
                 "Treasury (memo)",
-                "__treasury__",
+                "__memo:treasury__",
                 str(rollup.treasury_shares),
                 treasury_pct,
                 "",
@@ -4106,7 +4145,7 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     # Form 4) become ``dropped_sources`` and would otherwise vanish from the
     # CSV audit. Emit them as ``__dropped:<source>__`` memo rows — excluded
     # from any SUM(shares) reconciliation (the sum invariant holds over the
-    # pie-wedge rows + treasury + residual), but visible so an operator can see
+    # pie-wedge rows + residual; treasury is a memo row, #2217), but visible so an operator can see
     # the full filing trail behind a deduped owner.
     for slc in pie_slices:
         for holder in slc.holders:

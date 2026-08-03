@@ -5621,9 +5621,10 @@ def get_instrument_exec_compensation(
 
 # Slice categories present on ``OwnershipSlice.category``. The
 # frontend's ``CATEGORY_LABELS`` set also includes ``treasury`` —
-# treasury is a memo row in the CSV (additive wedge on the chart),
-# not a holders slice. Treated as a valid filter value below: it
-# scopes the CSV to the treasury memo + residual rows only.
+# treasury is a memo row in the CSV (a wedge drawn on top of the chart,
+# never inside the denominator, and since #2217 not deducted from the
+# residual either), not a holders slice. Treated as a valid filter value
+# below: it scopes the CSV to the treasury memo + residual rows only.
 _ROLLUP_CSV_SLICE_CATEGORIES: frozenset[str] = frozenset(
     {"insiders", "blockholders", "institutions", "etfs", "def14a_unmatched", "funds", "esop"},
 )
@@ -5663,11 +5664,9 @@ def get_instrument_ownership_rollup_csv(
             "| etfs | def14a_unmatched | funds | esop | treasury. Slice "
             "categories scope the export to that slice's holders; ``treasury`` "
             "drops all slice holders and emits only the treasury + residual "
-            "memo rows. ``funds`` and ``esop`` are memo-overlay slices — their "
-            "rows render with the ``__memo:<category>__`` prefix in the output "
-            "CSV so they are outside the additive (treasury + residual + "
-            "Σ pie-wedge) reconciliation. Without ``category``, every slice "
-            "is exported."
+            "memo rows. Without ``category``, every slice is exported. See the "
+            "endpoint description for which rows are additive and for the "
+            "2026-08-03 ``__memo:treasury__`` rename (#2217)."
         ),
     ),
     conn: psycopg.Connection[object] = Depends(get_conn),
@@ -5688,7 +5687,29 @@ def get_instrument_ownership_rollup_csv(
     Reads run inside ``snapshot_read`` so the per-slice totals,
     treasury, and residual all reconcile against one REPEATABLE
     READ snapshot. Same isolation contract as the JSON rollup
-    endpoint."""
+    endpoint.
+
+    ⚠ **BREAKING for CSV consumers, 2026-08-03 (#2217).** The treasury
+    row's ``category`` cell changed from ``__treasury__`` to
+    ``__memo:treasury__``, and treasury is no longer a term in the
+    additive reconciliation. A consumer keying on the literal
+    ``__treasury__`` will stop matching that row; one summing
+    ``pie + treasury + residual`` will now overshoot
+    ``shares_outstanding`` by the treasury amount.
+
+    Migration: filter on the ``__memo:`` / ``__dropped:`` category
+    prefixes — the rule the export has always documented — rather than
+    on individual tokens. The reconciliation is::
+
+        Σ (rows whose category starts with neither __memo: nor __dropped:)
+            == shares_outstanding
+
+    Why it changed: ``shares_outstanding`` is the DEI/us-gaap OUTSTANDING
+    count, which already excludes treasury (shares issued = outstanding +
+    treasury). Treasury can and does exceed outstanding outright (Goldman:
+    199.9%), so it was never additive against this base — including it
+    drove the residual negative and rendered public float as zero for
+    every large repurchaser."""
     symbol_clean = symbol.strip().upper()
     if not symbol_clean:
         raise HTTPException(status_code=400, detail="symbol is required")
