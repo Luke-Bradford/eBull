@@ -212,7 +212,19 @@ _MAX_TOKENS_CRITIC = 2048
 # 37.20" leaked verbatim into a MSFT memo), derived arithmetic must END in a
 # per-share price + band sanity cross-check (a $52.8B P/S "target" shipped),
 # cited figures verbatim-or-show-inputs (fabricated 13.1% gross margin).
-_PROMPT_VERSION = "v5"
+# v6 (#2235): subject-identity anchor. v5's context expansion left the
+# instrument identity as one buried mid-payload field, and the writer
+# sporadically wrote the memo about a different company while citing the
+# subject's own figures (a GME memo about Yelp, quoting GME's 34.39% gross
+# margin verbatim) — 19 such memos on v5, zero on v1-v4. _build_writer_prompt
+# now states the subject ahead of the JSON, and _WRITER_SYSTEM opens its rule
+# list with a subject-identity rule. Second v5-only leak fixed here: v5
+# abstracted its worked example to placeholders to stop a literal
+# "12 x EPS 3.10 = 37.20" leaking, which traded example-leakage for
+# placeholder-leakage (46 memos containing "[Company] operates in the
+# [sector]") — an explicit no-placeholder rule now closes that. Context shape
+# and _validate_writer_output are unchanged.
+_PROMPT_VERSION = "v6"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -1320,6 +1332,18 @@ Produce a JSON object with EXACTLY these fields:
 }
 
 Rules:
+- SUBJECT IDENTITY. The memo is about ONE company: the instrument named on the
+  SUBJECT line above the context, which is the same company as the `instrument`
+  block's `symbol` / `company_name`. Name that company explicitly in the memo's
+  first sentence. Never write the memo about a different company — every
+  figure in the context describes the SUBJECT, so a memo naming anyone else
+  misattributes real financial data. Peers, competitors and the benchmark may
+  be cited only as explicit comparisons ("versus <peer>"), never as the
+  subject.
+- NO PLACEHOLDERS in memo_markdown. Every slot carries an actual value from
+  THIS context. Never emit a bracketed stand-in — no "[Company]", "[sector]",
+  "[X]", "<multiple>", "<peer>". The angle-bracket forms in this prompt are
+  schema notation describing what to produce; they are not text to copy.
 - thesis_type must be one of: compounder, value, turnaround, speculative
 - stance must be one of: buy, hold, watch, avoid
 - confidence_score in [0.0, 1.0] — higher means more conviction
@@ -1430,7 +1454,23 @@ Rules:
 
 
 def _build_writer_prompt(context: dict[str, object]) -> str:
-    return json.dumps(context, indent=2, default=str)
+    """Name the subject instrument, then hand over the JSON context.
+
+    The instrument identity is one field in the middle of a large payload.
+    v5's context expansion (fair_value_band, analytics_evidence, ta_state,
+    valuation, risk_metrics, price_anchor) diluted it enough that the writer
+    sporadically confabulated a different company — #2235, a GME memo written
+    about Yelp while citing GME's own margins to 4dp. Stating the subject
+    ahead of the context gives identity a position the payload cannot bury.
+    """
+    subject_line = ""
+    instrument = context.get("instrument")
+    if isinstance(instrument, dict):
+        symbol = instrument.get("symbol")
+        if symbol:
+            name = instrument.get("company_name") or symbol
+            subject_line = f"SUBJECT: {name} ({symbol}) — write the memo about this company and no other.\n\n"
+    return subject_line + json.dumps(context, indent=2, default=str)
 
 
 # ---------------------------------------------------------------------------
