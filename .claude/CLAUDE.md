@@ -155,6 +155,46 @@ self-consistent — a job that no-ops and reports success is invisible to
 every automated check we have.** Manual spot-measurement is currently the
 only detector for that class, so its output must be captured.
 
+## Subagents: delegate GATHERING, never CONCLUDING
+
+Correctness in this repo depends on context that does not travel: 74 settled
+decisions, 283 prevention-log entries, and per-metric caveats spread across the
+data-foundation skills. A subagent starts without them and cannot know what it has
+not read.
+
+So the split is not by difficulty, it is by **what the output is**:
+
+- **Safe to delegate — measurement and location.** "Run this query and return the
+  distribution." "Find every caller of X." "List the files matching this shape."
+  "Fetch these 20 endpoints and tabulate one field." The result is checkable
+  against the source, and wrong output is obvious.
+- **Do NOT delegate — causal claims, severity, priority, or a fix.** "Why is Y
+  happening", "is this a bug", "which of these matters most", "propose the fix".
+  A subagent will produce a fluent, plausible answer built on the fraction of the
+  decision-history it happened to read, and you will not be able to tell.
+
+The evidence is not hypothetical, and it is not about subagents being weak — the
+MAIN agent made exactly this error on 2026-08-03. I had correct measurements
+(`coverage.state = unknown_universe` on all five golden-panel instruments) and drew
+a confident causal conclusion (#2213 causes it) that was false, because I had read
+`metrics-analyst` but not `settled-decisions.md` or the producing function's
+docstring. Same failure mode a subagent has by construction, in an agent that at
+least *could* have read the context.
+
+Practical consequences:
+
+1. Fan out read-only measurement freely — it is the cheapest parallelism available
+   and this session had four independent ones (fundamentals gaps, ownership state,
+   frontend inventory, instruction-file audit).
+2. Bring the numbers back and do the reasoning **in the main thread**, where the
+   settled decisions are.
+3. If you must delegate an investigation that ends in a judgement, pass the
+   relevant settled decisions and skill sections INTO the prompt. An agent cannot
+   check a rule it was never given.
+4. Prefer a Codex pass over the assembled reasoning to a subagent producing the
+   reasoning — Codex attacks a framing you supply, which is the failure mode you
+   actually have.
+
 ## Parallel-session coordination (#2075; 07-16 race lesson)
 
 Multiple sessions may hold overlapping handoffs. Non-negotiable:
@@ -193,9 +233,46 @@ Multiple sessions may hold overlapping handoffs. Non-negotiable:
 6. Re-run local checks before every follow-up push.
 7. Merge only after review is satisfied on the most recent commit and CI is green.
 
+## Never assert a CAUSE without checking whether the effect is a settled decision
+
+Working-order step 2 ("read `docs/settled-decisions.md`") was being applied only
+to tickets being worked, not to causal claims made while investigating. Those
+are where it matters most, because a cause-claim written into a ticket becomes
+the next session's acceptance criterion.
+
+Before writing "X causes Y" about any operator-visible symptom:
+
+1. `grep` `docs/settled-decisions.md` for Y;
+2. read the **docstring of the function that produces Y** — in this repo the
+   disposal rationale is usually written there, at length, by whoever settled it.
+
+Precedent (2026-08-03, #2213): I filed "the OpenFIGI stall is the direct cause of
+`coverage.state = unknown_universe` on the ownership card". It is not.
+`_read_universe_estimates` returns hard-coded `None` for every category, and its
+docstring records committee verdict #790 (disposed 2026-06-17): *"`unknown_universe`
+IS the truthful state — faking a denominator is the lie."* The state is
+unconditional and correct. Left standing, that claim would have handed the next
+session an acceptance signal that can never move — and pointed them at reopening a
+closed decision. Caught by a Codex pass on the assessment, not by any test.
+
+**A symptom you find surprising is as likely to be a decision you have not read as
+a bug.** Check which, before you write it down.
+
 ## Codex second-opinion — mandatory checkpoints
 
 Codex runs at exactly three points in the workflow. Non-negotiable.
+
+**Where it actually pays (2026-08-03 evidence).** The three checkpoints below are
+all DIFF-shaped, and on that diff Codex found nothing while the review bot found a
+real WARNING. The same day, a Codex pass over an *assessment* — findings, causal
+claims, ticket framing, execution order — caught a false causal claim (#2213), a
+missed ordering dependency, an under-prioritised bug that turned out to be the
+session's largest defect (#2217), and two tickets scoped around a symptom rather
+than their shared root cause (#2218). One session is not a trend, but the shape is
+worth acting on: **Codex earns most on JUDGEMENT artefacts (specs, plans, priority
+orders, causal claims) and least on line-level diffs, where the review bot already
+sits.** When you have an assessment or a plan, hand Codex the numbers and the
+reasoning and ask it to attack the framing — not just "review this diff".
 
 1. **Before writing code** — two Codex passes:
    - **After spec is written, before user final-approves:** `codex exec "Review this spec for <feature>. Path: docs/specs/<area>/<topic>.md (live spec) OR docs/proposals/<area>/<topic>.md (unshipped). Focus on correctness gaps, invariant violations, missing edge cases. For any ownership/filings/metric data-treatment decision: FLAG it if the spec infers the treatment from first principles where a documented source rule exists (SEC reg/Item, EDGAR, form spec) and is not cited; FLAG any signal whose safety rests on a sample rather than a full-population check. Reply terse."` Fix issues before presenting spec to user for sign-off.

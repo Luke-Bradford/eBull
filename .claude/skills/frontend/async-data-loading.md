@@ -208,7 +208,7 @@ When a bug reproduces in the browser but not under test, wrap the render in
 `<StrictMode>` before doubting the repro.
 
 Assert on the DATA handed to the child, not on chrome rendered from URL params —
-#2207's compare chips rendered correctly over a permanently empty series, so a
+Issue #2207's compare chips rendered correctly over a permanently empty series, so a
 chips-only assertion was green throughout. The stub exposes
 `data-compare-rows="MSFT:2,GOOG:2"` precisely so the count is assertable.
 

@@ -28,7 +28,7 @@ P/S, P/B + EV/EBITDA percentiles, **fvb_v5** #2043) that feeds the thesis writer
 as passive evidence + a **base-to-base** divergence audit — NOT the thesis
 bear/base/bull. Synthesis rules: peer + own percentiles, blend base,
 **outer-envelope wings clamped by a fixed per-leg cap** (`_R_UP`/`_R_DN`, v2
-#2022), own history uses **interior quantiles p25/p75** (not p20/p80 — a
+Issue #2022), own history uses **interior quantiles p25/p75** (not p20/p80 — a
 near-max of ~6 quarters is unreproducible). **EV/EBITDA is peer-only** (no
 own-history EBITDA exists; snapshot lacks it) with strict D&A + cash-present +
 debt/interest coherence gates and a fail-closed leg drop when the net-debt
@@ -75,7 +75,7 @@ otherwise. Rows are append-only (`UNIQUE(instrument_id, thesis_version)`).
 (`CREATE VIEW`, `sql/201_instrument_valuation_dual_class_suppress.sql:45`,
 latest revision) joining latest quote + TTM fundamentals. It NULLs
 shares-distorted columns for curated dual-class instruments (#1664 /
-#1623). Scoring reads it (`scoring.py:1285`) only when no thesis
+Issue #1623). Scoring reads it (`scoring.py:1285`) only when no thesis
 `base_value` exists.
 
 **Consumed by the scoring value family** — weight `0.25`
