@@ -9,9 +9,9 @@ description: Multi-agent committee review of a plan, spec, or design document. D
 
 > ⚠ **Default to 2-3 lenses, not 8 (revised 2026-08-03).** This skill dispatches 7 agents
 > plus a Codex pass and blocks on all 8. That collides with `CLAUDE.md`'s subagent rule
-> ("if one agent can do it, use one, not several") and with Anthropic's Opus 5 guidance
-> on capping delegation — Opus 5 delegates readily, and 8 agents on a doc that needed two
-> is the single most expensive mistake available in this repo.
+> ("if one agent can do it, use one, not several") and with the standing rule to cap
+> delegation — 8 agents on a doc that needed two is the single most expensive mistake
+> available in this repo.
 >
 > Escalate to the full panel ONLY when the operator asks for it explicitly, or when a
 > 2-3 lens pass has already returned findings that genuinely span more boundaries than

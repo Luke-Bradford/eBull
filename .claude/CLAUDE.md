@@ -149,7 +149,7 @@ left only in a PR description of an unrelated change, or in a memory file.
 File it immediately when it is high-risk, cheap to write up, or would be
 lost once the context is gone. Otherwise record the evidence in a short
 handoff note and file it at the end of the task. **Do not turn a narrow
-ticket into an audit** — Opus 5 expands scope readily, and "I found
+ticket into an audit** — scope expands readily under agentic work, and "I found
 something while I was in there" is the most common way a one-file fix
 becomes a session. Precedent (2026-08-03): five minutes of
 ad-hoc dev-DB queries during an unrelated assessment surfaced three
@@ -193,8 +193,8 @@ Practical consequences:
    and this session had four independent ones (fundamentals gaps, ownership state,
    frontend inventory, instruction-file audit). **But do not delegate work you can
    finish yourself in a handful of tool calls, and never spawn an agent to verify or
-   double-check your own work** — Opus 5 delegates more readily than earlier models
-   and already self-verifies, so both patterns cost tokens and time without improving
+   double-check your own work** — delegation is cheap to reach for and self-verification
+   already happens, so both patterns cost tokens and time without improving
    the result. If one agent can do it, use one, not several.
 2. Bring the numbers back and do the reasoning **in the main thread**, where the
    settled decisions are.
@@ -224,8 +224,8 @@ Multiple sessions may hold overlapping handoffs. Non-negotiable:
 
 **This is the single source for "how much review does this change need". Every other
 file defers to it.** The old set applied near-maximum scrutiny to everything, which
-looks safe and is not: it buries the signal from the checks that matter, and Opus 5
-already self-verifies, so a blanket pass costs tokens without improving the result.
+looks safe and is not: it buries the signal from the checks that matter, and
+self-verification already happens, so a blanket pass costs tokens without improving the result.
 
 Match the rung to what could actually go wrong. Climbing higher than the change warrants
 is a defect, not diligence.
@@ -242,7 +242,7 @@ is a defect, not diligence.
 Two rules that cut across every rung:
 
 - **Never ask a reviewer to be conservative.** No "only real bugs", no "high-severity
-  only", no "skip nits". Opus 5 takes it literally and reports less. Ask for everything;
+  only", no "skip nits". A good reviewer takes it literally and reports less. Ask for everything;
   classify severity yourself afterwards.
 - **Never run a second agent to check your own work.** If you can review it yourself in a
   handful of tool calls, do that. Deterministic gates (hook, CI, A/B harness) are not
@@ -506,7 +506,7 @@ not all of them on every diff. A narrow change needs the pre-push checklist and
 nothing more:
 
 - `.claude/skills/engineering/pre-flight-review.md`
-- `.claude/skills/engineering/pre-pr-fresh-agent-review.md` — a LENS LIBRARY (financial-plumbing / data-engineer / data-scientist / adversarial) for filings ETL, schema, identity-resolution and observations diffs. **No longer a mandatory pre-push gate** (revised 2026-08-03): a blanket second-agent pass before every push is the "use a subagent to verify" pattern Anthropic's Opus 5 guidance says causes over-verification, and it contradicted this file's own "delegate gathering, never concluding" rule. Reach for the lenses when a diff on those surfaces is genuinely large or unfamiliar.
+- `.claude/skills/engineering/pre-pr-fresh-agent-review.md` — a LENS LIBRARY (financial-plumbing / data-engineer / data-scientist / adversarial) for filings ETL, schema, identity-resolution and observations diffs. **No longer a mandatory pre-push gate** (revised 2026-08-03): a blanket second-agent pass before every push is the "use a subagent to verify" pattern that causes over-verification, and it contradicted this file's own "delegate gathering, never concluding" rule. Reach for the lenses when a diff on those surfaces is genuinely large or unfamiliar.
 - `.claude/skills/engineering/pr-authoring.md`
 - `.claude/skills/engineering/review-resolution.md`
 - `.claude/skills/engineering/python-hygiene.md`
@@ -575,21 +575,20 @@ When replying to review:
 
 ## Final reminder — read this last
 
-This file is long. These four are the ones that decay first, so they are repeated here
-deliberately (Anthropic's Opus 5 guidance recommends pairing a conciseness instruction
-in a long prompt with a short reminder near the end).
+**These rules are STATED in the global `~/.claude/CLAUDE.md` ("Working with Claude
+"Working style"), which is their single source.** They are echoed here — as a list of
+names, not a restatement — because this file is long and a short reminder near the end of
+a long prompt is worth more than one buried at the top.
+If a rule below ever disagrees with the global file, the global file is right and this
+list is stale.
 
-- **Be concise.** Keep replies and written documents as short as the substance allows.
-  Cover what matters; do not pad with filler sections, redundant summaries or
-  boilerplate. This applies to PR descriptions, specs and issue comments as much as to
-  chat — Opus 5's written deliverables run long by default.
-- **Do the narrow task.** Deliver what was asked at the scope intended. Make routine
-  judgement calls yourself; check in only where different readings lead to materially
-  different work. If a better approach exists, say so in a sentence and continue.
-- **Don't add verification the model already does.** No re-checking your own answer, no
-  second agent to confirm your work, no extra pass "to be safe". The deterministic gates
-  (pre-push hook, full-population A/B on corpus changes, the review-comment resolution
-  contract) stay — those are evidence, not reassurance.
-- **Ask a reviewer for everything, filter afterwards.** Never prompt a review with "only
-  real bugs" or "be conservative" — Opus 5 takes it literally and reports less. Get the
-  full list, then classify severity yourself.
+- **Be concise** — replies and written documents both.
+- **Do the narrow task** — at the scope asked, without quietly widening it.
+- **Don't add verification the model already does** — no re-checking your own answer, no
+  second agent to confirm your own work.
+- **Ask a reviewer for everything, filter afterwards** — never "only real bugs".
+
+The eBull-specific half is the **review-intensity ladder** above: it decides which of
+this repo's gates a given change actually needs. The deterministic ones it selects —
+pre-push hook, full-population A/B on corpus changes, the review-comment resolution
+contract — are evidence, not reassurance, and none of the above weakens them.

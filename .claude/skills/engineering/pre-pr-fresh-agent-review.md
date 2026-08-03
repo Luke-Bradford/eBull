@@ -5,8 +5,7 @@ review prompt reliably misses the edges — SEC filing semantics, dedup/denomina
 correctness, partition and idempotency behaviour.
 
 > ⚠ **This is a lens library, not a verification gate (revised 2026-08-03).** It used to
-> be mandatory before every push on the surfaces below. Anthropic's Opus 5 prompting
-> guidance is explicit that separate verification steps — *"include a final verification
+> be mandatory before every push on the surfaces below. Separate verification steps — *"include a final verification
 > step", "use a subagent to verify"* — cause **over-verification** on this model and that
 > removing them "reduces wasted tokens with no loss in quality". A blanket pre-push
 > second-agent pass is exactly that pattern, and it contradicted this repo's own
