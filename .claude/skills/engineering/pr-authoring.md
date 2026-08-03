@@ -15,9 +15,8 @@ pad with filler sections, redundant summaries or boilerplate. A one-file fix doe
 need the full section set, and a section with nothing to say should be omitted rather
 than filled with a placeholder.
 
-This matters more on Opus 5 than it did on earlier models: its written deliverables run
-longer by default, so a template that reads as "produce all of these" reliably yields a
-padded document. The sections below are the areas a reviewer needs covered **when they
+Written deliverables run long by default, so a template that reads as "produce all of
+these" reliably yields a padded document. The sections below are the areas a reviewer needs covered **when they
 apply** — not a form to complete.
 
 The exception is the ETL/parser/schema evidence table (CLAUDE.md Definition of Done
