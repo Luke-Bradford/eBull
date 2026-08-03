@@ -65,7 +65,7 @@ Examples:
 - missing quote fallback
 
 ### Security model
-State the security story explicitly: input surfaces touched, and whether any execution path is affected (if so, confirm the execution guard is called and `decision_audit` is written before any order is staged). If none, say "No execution path touched." (Template heading: "Security and audit model".)
+State the security story: input surfaces touched, and whether any execution path is affected (if so, confirm the execution guard is called and `decision_audit` is written before any order is staged). **This is the ONE section that is never omitted** — the PR template always carries the heading, and silence about security reads as "not considered" rather than "not applicable". When nothing applies, one line is the whole section: "No execution path touched." Do not expand it into a paragraph to look thorough. (Template heading: "Security and audit model".)
 
 ### Tests added
 Summarise the behaviour covered by tests.

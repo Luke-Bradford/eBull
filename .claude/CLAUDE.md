@@ -100,7 +100,7 @@ Follow this order unless the user explicitly says otherwise:
 8. Self-review the diff using the pre-flight review skill.
 9. Run local checks.
 10. Write a complete PR description.
-11. Follow the branch and PR workflow below — push, poll, wait, resolve, repeat until APPROVE on the most recent commit with CI green.
+11. Follow the branch and PR workflow below — push, poll, wait, resolve, repeat until the review is SATISFIED on the most recent commit with CI green. "Satisfied" means an APPROVE, **or** the bot's doc-only skip notice ("Doc-only diff — engineering review skipped to save tokens"), which is a terminal state, not a pending one — a doc-only PR can never receive an APPROVE, so reading this gate literally makes such PRs permanently unmergeable.
 
 ## Terminal step of a ticket — never leave state to reconstruct
 
@@ -220,54 +220,6 @@ Multiple sessions may hold overlapping handoffs. Non-negotiable:
    re-detach), re-check live state via gh/git — a sibling may have done
    it already.
 
-## Branch and PR workflow
-
-1. Create a branch before touching code.
-   - `feature/{issue-number}-short-description`
-   - `fix/{issue-number}-short-description`
-2. Commit only on that branch.
-3. Push and open a PR.
-   After every push, poll:
-   - `gh pr view {pr_number} --comments`
-   - `gh pr checks {pr_number}`
-
-   Do not push again until:
-   - the Claude review has posted
-   - CI results are visible
-   - all review comments have been read
-
-   Do not push a follow-up commit for CI alone without first reading the review comments on the latest commit.
-   If the review has not posted yet, wait and poll again rather than continuing blindly.
-4. Wait for Claude review and CI on the latest commit.
-5. Resolve every review comment explicitly.
-6. Re-run local checks before every follow-up push.
-7. Merge only after review is satisfied on the most recent commit and CI is green.
-
-## Never assert a CAUSE without checking whether the effect is a settled decision
-
-Working-order step 2 ("read `docs/settled-decisions.md`") was being applied only
-to tickets being worked, not to causal claims made while investigating. Those
-are where it matters most, because a cause-claim written into a ticket becomes
-the next session's acceptance criterion.
-
-Before writing "X causes Y" about any operator-visible symptom:
-
-1. `grep` `docs/settled-decisions.md` for Y;
-2. read the **docstring of the function that produces Y** — in this repo the
-   disposal rationale is usually written there, at length, by whoever settled it.
-
-Precedent (2026-08-03, #2213): I filed "the OpenFIGI stall is the direct cause of
-`coverage.state = unknown_universe` on the ownership card". It is not.
-`_read_universe_estimates` returns hard-coded `None` for every category, and its
-docstring records committee verdict #790 (disposed 2026-06-17): *"`unknown_universe`
-IS the truthful state — faking a denominator is the lie."* The state is
-unconditional and correct. Left standing, that claim would have handed the next
-session an acceptance signal that can never move — and pointed them at reopening a
-closed decision. Caught by a Codex pass on the assessment, not by any test.
-
-**A symptom you find surprising is as likely to be a decision you have not read as
-a bug.** Check which, before you write it down.
-
 ## Review-intensity ladder — pick the rung, then stop
 
 **This is the single source for "how much review does this change need". Every other
@@ -296,13 +248,101 @@ Two rules that cut across every rung:
   handful of tool calls, do that. Deterministic gates (hook, CI, A/B harness) are not
   "another pass" — they produce evidence you do not already have.
 
+## Branch and PR workflow
+
+**How much review this PR needs is decided by the review-intensity ladder above, not
+by this section.** What follows is the mechanical sequence, which is the same at every
+rung; the ladder decides what feeds into it.
+
+1. Create a branch before touching code.
+   - `feature/{issue-number}-short-description`
+   - `fix/{issue-number}-short-description`
+   - `docs/{issue-number}-short-description` or `docs/{short-description}` — instruction
+     set, skills, prevention log, specs. Maintenance of the operating documents often has
+     no ticket, and inventing one to satisfy a naming rule is worse than the rule.
+   - `chore/{short-description}` — tooling, CI, dependency bumps.
+2. Commit only on that branch.
+3. Push and open a PR.
+   After every push, poll:
+   - `gh pr view {pr_number} --comments`
+   - `gh pr checks {pr_number}`
+
+   Do not push again until:
+   - the Claude review has posted
+   - CI results are visible
+   - all review comments have been read
+
+   Do not push a follow-up commit for CI alone without first reading the review comments on the latest commit.
+   If the review has not posted yet, wait and poll again rather than continuing blindly.
+4. Wait for Claude review and CI on the latest commit.
+5. Resolve every review comment explicitly.
+6. Re-run local checks before every follow-up push.
+7. Merge only after review is satisfied on the most recent commit and CI is green
+   ("satisfied" = APPROVE, or the doc-only skip notice — see Working order step 11).
+
+### Composition with the global `~/.claude/CLAUDE.md`
+
+That file states the same workflow for every project the operator works on. Where the two
+disagree, **this file wins for eBull work** — it knows the repo's CI gates and the review
+bot's actual behaviour. Two specific reconciliations (raised 2026-08-03):
+
+- **"Close all linked issues" on merge** — do NOT apply literally. This repo's PR template
+  and the `pr-issue-link` CI gate deliberately distinguish `Closes/Fixes/Resolves` (issue
+  closes) from `Refs/Part of/Umbrella` (issue stays open). Closing a referenced umbrella
+  or parent issue because a child PR merged is a regression, not compliance. Close what
+  the PR resolves; leave the rest.
+- **Branch naming** — the global file lists only `feature/` and `fix/`. This file adds
+  `docs/` and `chore/`, because instruction-set and tooling maintenance frequently has no
+  ticket and minting one to satisfy a naming rule is worse than the rule.
+
+Both are worth fixing in the global file too, but that is the operator's to edit — it
+affects all their projects, not just this one.
+
+## Never assert a CAUSE without checking whether the effect is a settled decision
+
+Working-order step 2 ("read `docs/settled-decisions.md`") was being applied only
+to tickets being worked, not to causal claims made while investigating. Those
+are where it matters most, because a cause-claim written into a ticket becomes
+the next session's acceptance criterion.
+
+Before writing "X causes Y" about any operator-visible symptom:
+
+1. `grep` `docs/settled-decisions.md` for Y;
+2. read the **docstring of the function that produces Y** — in this repo the
+   disposal rationale is usually written there, at length, by whoever settled it.
+
+Precedent (2026-08-03, #2213): I filed "the OpenFIGI stall is the direct cause of
+`coverage.state = unknown_universe` on the ownership card". It is not.
+`_read_universe_estimates` returns hard-coded `None` for every category, and its
+docstring records committee verdict #790 (disposed 2026-06-17): *"`unknown_universe`
+IS the truthful state — faking a denominator is the lie."* The state is
+unconditional and correct. Left standing, that claim would have handed the next
+session an acceptance signal that can never move — and pointed them at reopening a
+closed decision. Caught by a Codex pass on the assessment, not by any test.
+
+**A symptom you find surprising is as likely to be a decision you have not read as
+a bug.** Check which, before you write it down.
+
 ## Codex second-opinion — mandatory checkpoints
 
 Codex runs at exactly three points in the workflow. Non-negotiable.
 
-**Where it actually pays (2026-08-03 evidence).** The three checkpoints below are
-all DIFF-shaped, and on that diff Codex found nothing while the review bot found a
-real WARNING. The same day, a Codex pass over an *assessment* — findings, causal
+> ⚠ **KNOWN CONTRADICTION with the review-intensity ladder above — operator decision
+> pending (raised 2026-08-03).** The ladder says a narrow diff gets "self-review +
+> pre-push hook + review bot, nothing else" and that you should never run a second agent
+> to check your own work. Checkpoint 2 below mandates `codex exec review` on every branch
+> before first push, which contradicts both.
+>
+> **Until the operator rules, checkpoint 2 wins** — it is their declared process and this
+> note exists so the conflict is deterministic rather than silent, not so it can be
+> quietly ignored.
+>
+> The recommendation on the table is to RE-TARGET rather than delete: keep checkpoints 1
+> and 3 (both judgement-artefact shaped, where Codex has demonstrably paid), drop
+> checkpoint 2, and let the ladder decide when a diff warrants a second opinion.
+
+**Where it actually pays (2026-08-03 evidence).** Checkpoint 2 is DIFF-shaped, and on
+that diff Codex found nothing while the review bot found a real WARNING. The same day, a Codex pass over an *assessment* — findings, causal
 claims, ticket framing, execution order — caught a false causal claim (#2213), a
 missed ordering dependency, an under-prioritised bug that turned out to be the
 session's largest defect (#2217), and two tickets scoped around a symptom rather
@@ -338,7 +378,8 @@ Push + wait for Claude review bot + CI
 Bot findings? → Triage each: FIXED / DEFERRED / REBUTTED
   ↓
 Any rebuttals on latest review?
-  ├─ No  → all fixed → merge when green + APPROVE on latest commit
+  ├─ No  → all fixed → merge when green + review SATISFIED on latest commit
+  │                      (APPROVE, or the doc-only skip notice — see step 11)
   └─ Yes → Codex review (checkpoint 3: before rebuttal-only merge)
             ↓
             Codex + author both agree rebuttals sound + nothing else to do → merge
