@@ -22,6 +22,7 @@ import psycopg
 from app.workers.scheduler import (
     JOB_CUSIP_EXTID_SWEEP,
     JOB_CUSIP_UNIVERSE_BACKFILL,
+    JOB_DAILY_NEWS_REFRESH,
     JOB_DAILY_PORTFOLIO_SYNC,
     JOB_ETORO_LOOKUPS_REFRESH,
     JOB_EXCHANGES_METADATA_REFRESH,
@@ -34,6 +35,7 @@ from app.workers.scheduler import (
     JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC,
     JOB_ORPHAN_TEST_DB_REAP,
     JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
+    JOB_PG_SIZE_SAMPLE,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_RETRY_SWEEPER,
@@ -42,6 +44,7 @@ from app.workers.scheduler import (
     JOB_SEC_MANIFEST_WORKER,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
+    JOB_THESIS_REFRESH,
     JOB_WEEKLY_REPORT,
     SCHEDULED_JOBS,
     _bootstrap_complete,
@@ -156,6 +159,22 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         # bootstrap gate like any non-exempt job (pauses cleanly during
         # bootstrap). No bootstrap dependency of its own.
         JOB_RETRY_SWEEPER,
+        # #2212 (audited 2026-08-03) — three scheduled jobs that drifted in
+        # without a per-job prereq. All three are
+        # ``exempt_from_universal_bootstrap_gate=False``, so the UNIVERSAL gate
+        # (#1181, app/jobs/runtime.py::_wrap_invoker) already rejects their
+        # scheduled fires with ``bootstrap_not_complete`` until bootstrap
+        # completes. Adding a per-job ``_bootstrap_complete`` would double-gate —
+        # the same JOB_NCEN_CLASSIFIER call above.
+        #   * daily_news_refresh — Yahoo-RSS ingest; no bootstrap-produced input.
+        #   * pg_size_sample — DB-size telemetry sampler; meaningful (and
+        #     arguably most useful) during bootstrap itself.
+        #   * thesis_refresh — carries a prereq, but it gates LLM-provider
+        #     reachability (``_llm_provider_resolvable``), not bootstrap state,
+        #     so ``_references_bootstrap_complete`` correctly reports False.
+        JOB_DAILY_NEWS_REFRESH,
+        JOB_PG_SIZE_SAMPLE,
+        JOB_THESIS_REFRESH,
     }
 )
 

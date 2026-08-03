@@ -343,13 +343,19 @@ def test_pending_retry_status_when_freshness_recheck_covers_failed_scope(
         ON CONFLICT (instrument_id) DO NOTHING
         """
     )
+    # ``next_recheck_at = now()`` — already due, so it is <= next_fire_at
+    # whatever the wall clock says. ``now() + 5 minutes`` was NOT: this job
+    # fires hourly at :35 (scheduler.py:1010), so between :30 and :35 UTC the
+    # recheck landed AFTER the next fire and the row correctly read ``failed``,
+    # failing this test for ~5 minutes in every hour (#2212). The negative
+    # sibling below covers the not-covered case by omitting the row entirely,
+    # so nothing here depends on the offset's size.
     ebull_test_conn.execute(
         """
         INSERT INTO data_freshness_index
             (subject_type, subject_id, source, state, next_recheck_at,
              instrument_id)
-        VALUES ('issuer', '9100002', 'sec_form4', 'error',
-                now() + interval '5 minutes', 9100002)
+        VALUES ('issuer', '9100002', 'sec_form4', 'error', now(), 9100002)
         """
     )
     ebull_test_conn.commit()

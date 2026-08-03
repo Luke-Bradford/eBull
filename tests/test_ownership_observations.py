@@ -68,6 +68,19 @@ class TestProvenanceBlockUniformity:
     they auto-enroll into this test via the
     ``information_schema.tables`` LIKE pattern."""
 
+    # Tables that match the LIKE pattern but are NOT part of the two-layer
+    # ownership model, so the provenance block does not apply to them.
+    #
+    # ownership_drs_observations (#844 PR-2, sql/239) is issuer-disclosed
+    # registered-vs-street overlay data: one row per (instrument, accession),
+    # no ``_current`` twin, no ownership_observations_repair category, and its
+    # own header states it "never joins the ownership pie". Its identity key is
+    # (instrument_id, source_accession) rather than the provenance block's
+    # (source, source_document_id, known_from/known_to) bitemporal shape, so
+    # requiring that block would mean retrofitting columns nothing reads
+    # (#2212). Excluded by name, not by loosening the invariant.
+    _NON_TWO_LAYER_OVERLAYS: frozenset[str] = frozenset({"ownership_drs_observations"})
+
     _PROVENANCE_COLS: tuple[str, ...] = (
         "source",
         "source_document_id",
@@ -96,11 +109,29 @@ class TestProvenanceBlockUniformity:
                   AND table_name NOT LIKE 'ownership_%%_observations_%%'
                 """
             )
-            tables = [str(row["table_name"]) for row in cur.fetchall()]
+            discovered = {str(row["table_name"]) for row in cur.fetchall()}
 
-        assert tables, "no ownership_*_observations tables found"
+        assert discovered, "no ownership_*_observations tables found"
 
-        for table in tables:
+        # Classification gate. Every table matching the pattern must be either a
+        # two-layer category (the repair sweep's own registry is the definition
+        # of that model) or a declared overlay — so a NEW table matching the
+        # pattern fails here until someone classifies it, which is the drift
+        # signal this test exists for.
+        from app.jobs.ownership_observations_repair import _CATEGORIES
+
+        two_layer = {obs_table for _current, obs_table, *_rest in _CATEGORIES}
+        unclassified = discovered - two_layer - self._NON_TWO_LAYER_OVERLAYS
+        assert not unclassified, (
+            f"Unclassified ownership_*_observations table(s): {sorted(unclassified)}. "
+            "Add to app.jobs.ownership_observations_repair._CATEGORIES (two-layer "
+            "model → must carry the full provenance block) or to "
+            "_NON_TWO_LAYER_OVERLAYS with a rationale."
+        )
+        missing_tables = two_layer - discovered
+        assert not missing_tables, f"Registered two-layer categories with no table: {sorted(missing_tables)}"
+
+        for table in sorted(two_layer):
             with ebull_test_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     """

@@ -280,7 +280,10 @@ class TestListFilings:
         client.get("/filings/1")
 
         items_sql: str = cursors[2].execute.call_args[0][0]
-        assert "order by filing_date desc" in items_sql.lower()
+        # Table-qualified since the query gained the ``fe`` alias; the trailing
+        # ``, fe.filing_event_id DESC`` tiebreak makes pagination deterministic
+        # and does not change the primary sort this test pins.
+        assert "order by fe.filing_date desc" in items_sql.lower()
 
     def test_limit_capped_at_max(self) -> None:
         resp = client.get("/filings/1", params={"limit": 999})
