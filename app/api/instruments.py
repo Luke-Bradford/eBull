@@ -4741,6 +4741,20 @@ class _CorrectionAppliedModel(BaseModel):
         blockholders wedge.
       * ``insider_control_group_collapse`` (#1652) — a sponsor's GP/LP chain deemed block
         counted once across Form 4 / Form 3 / 13D / 13G (insiders slice).
+      * ``superseded_by_later_13f_hr`` (#2229) — a filer's stale 13F-HR removed because
+        the filer filed a LATER holdings report that omits this security (Form 13F
+        Special Instruction 5b: a holdings report is a COMPLETE statement of the
+        Manager's Section 13(f) holdings, so the omission proves the exit).
+        ``superseded_period`` + ``winning_accession`` set, NT fields null.
+
+    ⚠ This Literal is a CLOSED vocabulary and the service layer's ``kind`` strings are
+    NOT validated against it until serialization — so a new kind added to
+    ``ownership_rollup.CorrectionApplied`` without being added HERE makes the endpoint
+    500 on exactly the instruments the new correction fires for, while every
+    service-layer test still passes. That is what happened when #2229 landed; the
+    sibling to keep in step is ``frontend/src/api/ownership.ts``
+    (``OwnershipCorrectionKind``). See prevention-log "contract-field wired into one
+    model not its sibling".
 
     The NT-specific fields are null for the #1644/#1649 kinds; ``family_id`` /
     ``source_channel`` / ``winning_source`` / ``winning_accession`` / ``detail``
@@ -4753,6 +4767,7 @@ class _CorrectionAppliedModel(BaseModel):
         "institutional_family_collapse",
         "blockholder_group_collapse",
         "insider_control_group_collapse",
+        "superseded_by_later_13f_hr",
     ]
     filer_cik: str | None
     filer_name: str
