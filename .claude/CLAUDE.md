@@ -87,20 +87,20 @@ If any step fails, do NOT consider the PR fully landed even after merge — open
 Follow this order unless the user explicitly says otherwise:
 
 1. Read the issue.
-2. Read `docs/settled-decisions.md`. State which decisions apply and how the plan preserves them. If none apply, say so explicitly.
-3. Read `docs/review-prevention-log.md`. State which entries are relevant. If none apply, say so explicitly.
-4. If implementation pressure suggests changing a settled decision or risks repeating a prevention entry, stop and surface it before coding.
-4b. **Research the source rule + falsify the premise FIRST — before writing the spec.** For ownership/filings/metric work: look up the governing SEC reg/Item or EDGAR/form rule (per "Source-rule before design"), and verify the issue's premise + any inferred signal against the SOURCE and the FULL population (query the dev DB / read the filing structure), not a sample. The handoff premise is falsified more often than not (member_of_group #1645, dimensional dei #1646/#1623, market-cap-as-float #1662, def14a-additive #1659) — and a wrong premise sinks the spec. Do this BEFORE step 6, not after Codex ckpt-1 (#1659 burned a spec + impl on a heuristic the full-population scan then killed).
+2. Read `docs/settled-decisions.md` and `docs/review-prevention-log.md` for anything touching the files or behaviour in scope. **Apply what you find; cite an entry only where it actually shapes or blocks the plan.** Do not narrate a survey — "no settled decision applies here" as a standalone sentence is the ritual form of this step and is worth nothing. What the step is FOR is catching the case where a decision contradicts what you were about to do.
+   ⚠ Reading "for anything relevant" has a known blind spot: you cannot judge relevance for a decision you do not know exists. That is why the separate rule below ("Never assert a CAUSE without checking whether the effect is a settled decision") greps for the EFFECT by name — it is the backstop for exactly this, and it is not optional.
+3. If implementation pressure suggests changing a settled decision or risks repeating a prevention entry, stop and surface it before coding.
+3b. **Research the source rule + falsify the premise FIRST — before writing the spec.** For ownership/filings/metric work: look up the governing SEC reg/Item or EDGAR/form rule (per "Source-rule before design"), and verify the issue's premise + any inferred signal against the SOURCE and the FULL population (query the dev DB / read the filing structure), not a sample. The handoff premise is falsified more often than not (member_of_group #1645, dimensional dei #1646/#1623, market-cap-as-float #1662, def14a-additive #1659) — and a wrong premise sinks the spec. Do this BEFORE writing code, not after a second-opinion pass (#1659 burned a spec + impl on a heuristic the full-population scan then killed).
 
-4c. **An INHERITED root-cause is a premise too — re-falsify it before building on it.** Step 4b was being read as "falsify the ISSUE's premise", which leaves a hole: a fix that a PRIOR SESSION root-caused, wrote up on-issue, and handed off as "ready to implement" arrives already carrying an author's confidence, so it gets implemented instead of tested. **A prior session's conclusion is evidence, not a finding.** Re-run its discriminator against the full population before writing any code — it is one query and it is the cheapest step in the ticket. Precedent (2026-08-03, #2182 B1): a handoff labelled "ROOT CAUSE CONFIRMED" proposed gating period-row creation on "≥1 duration fact"; the full-population check showed that gate suppressing **9,236 legitimate prior-year comparative balance sheets** (Reg S-X 3-01(a) requires two years of balance sheet, all instant facts) to catch **1,584** real shells. It was the SECOND falsified discriminator on that ticket after `months_covered IS NULL` (38.9% precision). Two failed keys in a row is the signal to question the MODEL, not to try a third key.
-5. Read the relevant engineering skills before writing code.
-6. Make schema/interface changes first.
-7. Implement service logic.
-8. Write or update tests.
-9. Self-review the diff using the pre-flight review skill.
-10. Run local checks.
-11. Write a complete PR description.
-12. Follow the branch and PR workflow below — push, poll, wait, resolve, repeat until APPROVE on the most recent commit with CI green.
+3c. **An INHERITED root-cause is a premise too — re-falsify it before building on it.** Step 3b was being read as "falsify the ISSUE's premise", which leaves a hole: a fix that a PRIOR SESSION root-caused, wrote up on-issue, and handed off as "ready to implement" arrives already carrying an author's confidence, so it gets implemented instead of tested. **A prior session's conclusion is evidence, not a finding.** Re-run its discriminator against the full population before writing any code — it is one query and it is the cheapest step in the ticket. Precedent (2026-08-03, #2182 B1): a handoff labelled "ROOT CAUSE CONFIRMED" proposed gating period-row creation on "≥1 duration fact"; the full-population check showed that gate suppressing **9,236 legitimate prior-year comparative balance sheets** (Reg S-X 3-01(a) requires two years of balance sheet, all instant facts) to catch **1,584** real shells. It was the SECOND falsified discriminator on that ticket after `months_covered IS NULL` (38.9% precision). Two failed keys in a row is the signal to question the MODEL, not to try a third key.
+4. Read the relevant engineering skills before writing code.
+5. Make schema/interface changes first.
+6. Implement service logic.
+7. Write or update tests.
+8. Self-review the diff using the pre-flight review skill.
+9. Run local checks.
+10. Write a complete PR description.
+11. Follow the branch and PR workflow below — push, poll, wait, resolve, repeat until APPROVE on the most recent commit with CI green.
 
 ## Terminal step of a ticket — never leave state to reconstruct
 
@@ -140,12 +140,18 @@ intent orphaned in prose? Findings become tickets IMMEDIATELY (template:
 the 2026-07-17 batch #2066-#2075). Do not fold findings into unrelated
 PRs or leave them in session notes — a finding without a ticket is lost.
 
-**The same rule binds INCIDENTAL findings, not just scheduled audits.** A
-defect noticed while doing something else — a query run in passing, a
-number that looked wrong on a panel, a job whose `success` did not match
-its output — becomes a ticket in that session, before the current task
-resumes. It does not go in the PR description of an unrelated change and
-it does not go in a memory file. Precedent (2026-08-03): five minutes of
+**The same rule binds INCIDENTAL findings, not just scheduled audits — but
+capture them without derailing the current task.** A defect noticed while
+doing something else (a query run in passing, a number that looked wrong
+on a panel, a job whose `success` did not match its output) must not be
+left only in a PR description of an unrelated change, or in a memory file.
+
+File it immediately when it is high-risk, cheap to write up, or would be
+lost once the context is gone. Otherwise record the evidence in a short
+handoff note and file it at the end of the task. **Do not turn a narrow
+ticket into an audit** — Opus 5 expands scope readily, and "I found
+something while I was in there" is the most common way a one-file fix
+becomes a session. Precedent (2026-08-03): five minutes of
 ad-hoc dev-DB queries during an unrelated assessment surfaced three
 unticketed defects — #2213 (OpenFIGI resolution dark for 7 weeks behind
 `success`-reporting sweeps), #2214 (ETF filer typing starved, 1 of
@@ -185,7 +191,11 @@ Practical consequences:
 
 1. Fan out read-only measurement freely — it is the cheapest parallelism available
    and this session had four independent ones (fundamentals gaps, ownership state,
-   frontend inventory, instruction-file audit).
+   frontend inventory, instruction-file audit). **But do not delegate work you can
+   finish yourself in a handful of tool calls, and never spawn an agent to verify or
+   double-check your own work** — Opus 5 delegates more readily than earlier models
+   and already self-verifies, so both patterns cost tokens and time without improving
+   the result. If one agent can do it, use one, not several.
 2. Bring the numbers back and do the reasoning **in the main thread**, where the
    settled decisions are.
 3. If you must delegate an investigation that ends in a judgement, pass the
@@ -425,7 +435,7 @@ Both must pass.
 Read and apply these before pushing:
 
 - `.claude/skills/engineering/pre-flight-review.md`
-- `.claude/skills/engineering/pre-pr-fresh-agent-review.md` ← MANDATORY before push for filings ETL / schema migrations / identity resolution / observations work. Loads financial-plumbing + data-engineer + data-scientist + adversarial lenses up front so Codex catches what the bot would otherwise find post-merge.
+- `.claude/skills/engineering/pre-pr-fresh-agent-review.md` — a LENS LIBRARY (financial-plumbing / data-engineer / data-scientist / adversarial) for filings ETL, schema, identity-resolution and observations diffs. **No longer a mandatory pre-push gate** (revised 2026-08-03): a blanket second-agent pass before every push is the "use a subagent to verify" pattern Anthropic's Opus 5 guidance says causes over-verification, and it contradicted this file's own "delegate gathering, never concluding" rule. Reach for the lenses when a diff on those surfaces is genuinely large or unfamiliar.
 - `.claude/skills/engineering/pr-authoring.md`
 - `.claude/skills/engineering/review-resolution.md`
 - `.claude/skills/engineering/python-hygiene.md`
@@ -491,3 +501,24 @@ When replying to review:
 - include the commit SHA
 - if not fixing now, link the tech-debt issue
 - if disagreeing, explain why concretely
+
+## Final reminder — read this last
+
+This file is long. These four are the ones that decay first, so they are repeated here
+deliberately (Anthropic's Opus 5 guidance recommends pairing a conciseness instruction
+in a long prompt with a short reminder near the end).
+
+- **Be concise.** Keep replies and written documents as short as the substance allows.
+  Cover what matters; do not pad with filler sections, redundant summaries or
+  boilerplate. This applies to PR descriptions, specs and issue comments as much as to
+  chat — Opus 5's written deliverables run long by default.
+- **Do the narrow task.** Deliver what was asked at the scope intended. Make routine
+  judgement calls yourself; check in only where different readings lead to materially
+  different work. If a better approach exists, say so in a sentence and continue.
+- **Don't add verification the model already does.** No re-checking your own answer, no
+  second agent to confirm your work, no extra pass "to be safe". The deterministic gates
+  (pre-push hook, full-population A/B on corpus changes, the review-comment resolution
+  contract) stay — those are evidence, not reassurance.
+- **Ask a reviewer for everything, filter afterwards.** Never prompt a review with "only
+  real bugs" or "be conservative" — Opus 5 takes it literally and reports less. Get the
+  full list, then classify severity yourself.

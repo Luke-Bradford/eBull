@@ -8,9 +8,25 @@ A reviewer should be able to understand the change, its invariants, and its trad
 
 If the PR description is weak, the review quality drops and the review rounds increase.
 
-## Required PR sections
+## Length calibration — read before the section list
 
-Every PR description must cover these sections. Exact heading wording may vary (recent merged PRs use e.g. `## What` / `## Security model`), but each area must be explicitly present. The repo template `.github/pull_request_template.md` additionally supplies the Issue-reference line (`Closes #N` — see the CI gate below) and the checklist.
+**Match the description's length to what the change needs.** Cover the substance; do not
+pad with filler sections, redundant summaries or boilerplate. A one-file fix does not
+need the full section set, and a section with nothing to say should be omitted rather
+than filled with a placeholder.
+
+This matters more on Opus 5 than it did on earlier models: its written deliverables run
+longer by default, so a template that reads as "produce all of these" reliably yields a
+padded document. The sections below are the areas a reviewer needs covered **when they
+apply** — not a form to complete.
+
+The exception is the ETL/parser/schema evidence table (CLAUDE.md Definition of Done
+clauses 8-12). That is a CI-and-review contract, not prose, and it is never optional on
+those changes.
+
+## PR sections
+
+Cover these areas when they apply. Exact heading wording may vary (recent merged PRs use e.g. `## What` / `## Security model`). The repo template `.github/pull_request_template.md` additionally supplies the Issue-reference line (`Closes #N` — see the CI gate below) and the checklist.
 
 ### What changed
 Describe the code changes concretely.
@@ -26,7 +42,7 @@ List:
 - data backfill expectations
 - compatibility notes
 
-If none, say "None".
+If none, omit the section — do not write a placeholder.
 
 ### Invariants checked
 State the important correctness rules you preserved.
@@ -64,7 +80,7 @@ Examples:
 
 ### Tech debt opened
 List any explicitly deferred items with issue numbers.
-If none, say "None".
+If none, omit the section — do not write a placeholder.
 
 **Filings-ETL / parser / schema-migration PRs** must also record the dev-verify evidence per project CLAUDE.md "Definition of done" clauses 8-12: instruments smoked (default panel AAPL/GME/MSFT/JPM/HD) + figure observed, cross-source figure compared + source, `POST /jobs/sec_rebuild/run` invocation + outcome, rollup-endpoint check — each with the commit SHA it was verified at.
 
