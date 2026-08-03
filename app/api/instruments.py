@@ -5664,13 +5664,9 @@ def get_instrument_ownership_rollup_csv(
             "| etfs | def14a_unmatched | funds | esop | treasury. Slice "
             "categories scope the export to that slice's holders; ``treasury`` "
             "drops all slice holders and emits only the treasury + residual "
-            "memo rows. ``funds`` and ``esop`` are memo-overlay slices — their "
-            "rows render with the ``__memo:<category>__`` prefix in the output "
-            "CSV so they are outside the additive (residual + Σ pie-wedge) "
-            "reconciliation — as does treasury, which since #2217 is "
-            "``__memo:treasury__`` and is NOT a term in that sum "
-            "(shares_outstanding already excludes it). Without ``category``, "
-            "every slice is exported."
+            "memo rows. Without ``category``, every slice is exported. See the "
+            "endpoint description for which rows are additive and for the "
+            "2026-08-03 ``__memo:treasury__`` rename (#2217)."
         ),
     ),
     conn: psycopg.Connection[object] = Depends(get_conn),
