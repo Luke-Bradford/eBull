@@ -16,6 +16,20 @@ the panel was green on all seven that still contained real defects. 8 of its 14
 defects were visible only full-population. If you find yourself writing "spot-
 checked on AAPL/GME/MSFT and it looks right", you have not verified anything.
 
+**This does not contradict Definition-of-Done clause 8** (`CLAUDE.md`), which requires
+smoking the AAPL/GME/MSFT/JPM/HD panel. The two answer different questions and both are
+required on a corpus change:
+
+| | question it answers | what a green result proves |
+| --- | --- | --- |
+| **Golden panel (DoD 8-11)** | does the operator-visible figure still RENDER, end to end, after the backfill? | the read path works on known-good instruments |
+| **Full-population A/B** | is the change SAFE across the corpus? | nothing was silently lost or admitted at scale |
+
+A green panel with no A/B means "it renders" and says nothing about safety. An A/B with
+no panel means "the numbers moved as intended" and says nothing about whether the chart
+still draws. Neither substitutes for the other — and a panel too small to carry a rate
+also cannot falsify a documented caveat (see below).
+
 ## A documented caveat is a hypothesis about FREQUENCY — measure the rate
 
 The most expensive failure of 2026-08-03 was caused by a skill being right.
@@ -173,8 +187,11 @@ earlier fix **in the same PR**. Expect this. Fix them in the same PR rather than
 shipping the widening and filing the fallout; each round is cheap compared with
 a bad merge reaching stored data.
 
-Plan for 3+ rounds on any real parser change. One round means you have not
-looked hard enough.
+Budget for multiple rounds on any real parser change: every round that FINDS something,
+or that changes the harness, invalidates the previous one and needs a re-run. A single
+clean round is sufficient only when the harness demonstrably covers all three arms and
+the blind spots listed above — it is the harness coverage that justifies stopping, not
+the round count.
 
 Issue #2164 ran three rounds and found a real defect in each of the first two — 35
 genuine holders lost in round 1, 40 role regressions in round 2. **Codex, 114
