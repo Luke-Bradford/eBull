@@ -179,6 +179,15 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "thesis_outcomes",
     "instruments",
     "job_runs",
+    # #1508 C6 / migration 185 — per-job first-seen anchor. Standalone: its only
+    # constraint is the PK on job_name, so no inbound-FK path reaches it and the
+    # derived closure cannot pick it up. Omitted when it shipped, so anchors
+    # leaked between tests: tests/test_job_first_seen.py's "no anchor row" case
+    # read whichever anchor the previously-run test in that file had committed
+    # and flipped never_started with it. Presented as an xdist flake (#2212) —
+    # it is order-dependence, and reproduces every time when the 7-day-anchor
+    # test runs immediately before it.
+    "job_first_seen",
     "financial_periods_raw",
     "financial_periods",
     "dividend_events",

@@ -66,13 +66,23 @@ class TestPostSyncDisabled:
 
 
 class TestGetSyncLayersShape:
-    def test_returns_10_layers_with_schema(self, client, auth_headers) -> None:
-        """Read-only against dev DB — pre-existing runs/freshness OK."""
+    def test_returns_every_registered_layer_with_schema(self, client, auth_headers) -> None:
+        """Read-only against dev DB — pre-existing runs/freshness OK.
+
+        Asserted against ``registry.LAYERS`` rather than a frozen count: the
+        contract is "the endpoint exposes every registered layer", and a literal
+        went stale the moment a layer shipped — 10 → 12 via ``risk_metrics``
+        (#591/PR #1637) and ``fair_value_band`` (#2009/PR #2019), neither of
+        which touched this file (#2212).
+        """
+        from app.services.sync_orchestrator.registry import LAYERS
+
         r = client.get("/sync/layers", headers=auth_headers)
         assert r.status_code == 200
         data = r.json()
-        assert len(data["layers"]) == 10
         names = {layer["name"] for layer in data["layers"]}
+        assert names == set(LAYERS.keys())
+        assert len(data["layers"]) == len(LAYERS)
         assert "universe" in names
         assert "monthly_reports" in names
         for layer in data["layers"]:
