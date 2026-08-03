@@ -329,7 +329,8 @@ def _check_cross_source(rollups: list[tuple[str, OwnershipRollup]], warnings: li
         if rollup.residual.oversubscribed:
             warnings.append(
                 f"reconciliation: {symbol} mildly oversubscribed "
-                f"(known holders + treasury exceed shares_outstanding — stale 13F vs fresh XBRL)"
+                f"(known holders exceed shares_outstanding — stale 13F vs fresh XBRL). "
+                f"Treasury is not part of this comparison (#2217)"
             )
     logger.info("bootstrap_validation: cross-source reconciliation OK (%d rendered)", len(rollups))
 

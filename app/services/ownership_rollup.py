@@ -280,10 +280,11 @@ class OwnershipSlice:
 
 @dataclass(frozen=True)
 class ResidualBlock:
-    """``Public / unattributed`` wedge. ``oversubscribed=True`` when
-    deduped slices + treasury exceed shares_outstanding (stale
-    13F + fresh Form 4 / 13D mix); residual clamps to 0 in that
-    case and the frontend renders the warning bar."""
+    """``Public / unattributed`` wedge. ``oversubscribed=True`` when the
+    deduped pie-wedge slices exceed shares_outstanding (stale 13F + fresh
+    Form 4 / 13D mix); residual clamps to 0 in that case and the frontend
+    renders the warning bar. Treasury is NOT part of this comparison —
+    shares outstanding already excludes it (#2217)."""
 
     shares: Decimal
     pct_outstanding: Decimal
@@ -2813,17 +2814,34 @@ def _build_slice(
 def _compute_residual(
     outstanding: Decimal,
     slices: Sequence[OwnershipSlice],
-    treasury: Decimal | None,
 ) -> ResidualBlock:
     """Compute the ``Public / unattributed`` residual.
 
-    Stale-mixed-date inputs (fresh Form 4 + old 13F) can leave the
-    raw residual negative — we clamp to 0 and surface
-    ``oversubscribed=True`` so the frontend renders a warning bar.
-    The category-counted slices use deduped totals, so the only path
-    to oversubscription is the snapshot-lag class of bug, not a
-    dedup mistake."""
-    treasury_d = treasury if treasury is not None else Decimal(0)
+    Treasury is NOT deducted (#2217). ``outstanding`` is
+    ``dei:EntityCommonStockSharesOutstanding`` / ``us-gaap:CommonStockSharesOutstanding``
+    (see :func:`_read_shares_outstanding`), and shares issued = shares outstanding
+    + treasury — so treasury shares were never in this base and subtracting them
+    removed a quantity that is not there. That is the design contract too: the
+    denominator is outstanding only, with treasury rendered as an ADDITIVE top
+    wedge (``docs/proposals/etl/ownership-tier0-cik-history.md`` §OwnershipPanel;
+    the module docstring's "wrong denominator" ship-blocker). The frontend was
+    corrected then; this residual kept the mirror-image of the same error.
+
+    Left uncorrected it read as a *negative* residual for any serial repurchaser
+    — 9 of 20 sampled large caps, with Coca-Cola, Goldman, JPM, P&G and Exxon
+    rendering a public float of exactly ZERO, and the warning bar below blaming
+    snapshot lag for it. Goldman carries treasury equal to 199.9% of outstanding,
+    which is only possible *because* the base excludes it.
+
+    Stale-mixed-date inputs (fresh Form 4 + old 13F) can still leave the raw
+    residual negative — we clamp to 0 and surface ``oversubscribed=True`` so the
+    frontend renders a warning bar. The category-counted slices use deduped
+    totals, so with the treasury term gone the remaining paths to
+    oversubscription are the snapshot-lag class and a genuine over-attribution,
+    not arithmetic.
+
+    :func:`_compute_concentration` below has always excluded treasury correctly;
+    the two now agree."""
     # Memo-overlay slices (funds N-PORT; DEF 14A proxy_disclosure #1659; future
     # ESOP/DRS/short-interest) do NOT contribute to ``sum_known`` — they describe
     # positions already counted via a pie-wedge slice (N-PORT funds are fund-level
@@ -2833,7 +2851,7 @@ def _compute_residual(
         (s.total_shares for s in slices if s.denominator_basis == "pie_wedge"),
         Decimal(0),
     )
-    raw = outstanding - sum_known - treasury_d
+    raw = outstanding - sum_known
     clamped = raw if raw > 0 else Decimal(0)
     pct = clamped / outstanding if outstanding > 0 else Decimal(0)
     return ResidualBlock(
@@ -3929,7 +3947,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         funds_holders=funds_holders,
         esop_holders=esop_holders,
     )
-    residual = _compute_residual(effective_outstanding, slices, treasury)
+    residual = _compute_residual(effective_outstanding, slices)
     concentration = _compute_concentration(effective_outstanding, slices)
     sanity = _compute_sanity(slices, effective_outstanding)
     # Independent denominator tie-out (#1647 part 5) — reads the comparison figure from

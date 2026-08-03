@@ -202,18 +202,19 @@ The ownership card is the cleanest example of "one fetch, one snapshot, one deno
 - **Endpoint**: `/ownership-rollup.treasury_shares` + `treasury_as_of` (top-level fields, NOT inside `slices`); also balance sheet endpoint.
 - **Chart**: `OwnershipPanel.tsx` renders treasury wedge above the ring; legend has treasury swatch.
 - **Cadence**: companyfacts daily sync.
-- **Caveats**: excluded from numerator of `concentration.pct_outstanding_known` — issuer doesn't "invest" in itself (`_compute_concentration:2626`). Treasury IS allowed to push chart "oversubscribed" if `Σ pie_wedges + treasury > shares_outstanding` (stale-13F + fresh Form 4 mix); residual clamps to zero, banner flags it.
-- **Validation**: check `shares_authorized ≥ shares_issued ≥ treasury_shares` invariant.
+- **Caveats**: excluded from numerator of `concentration.pct_outstanding_known` — issuer doesn't "invest" in itself. ⚠ **Treasury is NOT in the residual either, since #2217.** It is neither added to nor subtracted from `shares_outstanding` anywhere: `shares issued = shares outstanding + treasury`, so the DEI/us-gaap outstanding figure already excludes it. Treasury is a purely additive TOP wedge drawn outside the ring (design: `docs/proposals/etl/ownership-tier0-cik-history.md` §OwnershipPanel).
+- ⚠ **This bullet previously read "treasury IS allowed to push the chart oversubscribed" — that was the caveat the bug hid behind.** It was written as a rare stale-13F artefact; measured, it was firing on 9 of 20 large caps because `_compute_residual` subtracted treasury from a base excluding it. **A documented caveat is a hypothesis about frequency — measure the rate before accepting it as the explanation.**
+- **Validation**: check `shares_authorized ≥ shares_issued ≥ treasury_shares` invariant. Note treasury can legitimately exceed *outstanding* (Goldman: 199.9%) — a serial repurchaser retires nothing; that is not a data error.
 
 ### Public float / residual
 - **Definition**: shares not attributable to any known SEC filing or treasury — by construction includes retail, undeclared institutional below 13F threshold, and any filer outside coverage cohort.
-- **Formula**: `residual = shares_outstanding − Σ (slices where denominator_basis="pie_wedge") − treasury_shares`. Clamped ≥ 0; `oversubscribed` flag fires when negative (`_compute_residual:2591`).
-- **Storage**: not stored — computed at read time.
-- **Service**: [app/services/ownership_rollup.py:2591](../../../app/services/ownership_rollup.py#L2591) (`_compute_residual`).
+- **Formula**: `residual = shares_outstanding − Σ (slices where denominator_basis="pie_wedge")`. **No treasury term** (#2217). Clamped ≥ 0; `oversubscribed` fires when the raw value is negative.
+- **Storage**: not stored — computed at read time. (So a fix here needs no backfill; it lands the moment the API process reloads.)
+- **Service**: [app/services/ownership_rollup.py:2814](../../../app/services/ownership_rollup.py#L2814) (`_compute_residual`); [`:2866`](../../../app/services/ownership_rollup.py#L2866) (`_compute_concentration`).
 - **Endpoint**: `/ownership-rollup.residual.{shares, pct_outstanding, oversubscribed}`.
 - **Chart**: `OwnershipPanel.tsx` `ResidualLine` (`:355`); always rendered as grey "Public / unattributed" wedge.
-- **Caveats**: residual is NOT a free signal — 90% residual on a small-cap usually means coverage is incomplete, not that retail owns 90%. Coverage banner is the right cue.
-- **Validation**: `Σ all wedges + residual + treasury ≈ shares_outstanding` exactly when `oversubscribed=false`.
+- **Caveats**: residual is NOT a free signal — 90% residual on a small-cap usually means coverage is incomplete, not that retail owns 90%. Coverage banner is the right cue. ⚠ **`oversubscribed` is currently unusable as an exception signal: it fires on 47% of the 4,421 instruments with a denominator (#2226), because Σ pie wedges alone exceeds outstanding (OPCH 513%, PRVA 187%). #2217 removed the treasury term and took it from 52% → 47%; the rest is a separate defect.**
+- **Validation**: `Σ pie wedges + residual = shares_outstanding` exactly when `oversubscribed=false`. ⚠ **Treasury is NOT a term in that identity** — it was until #2217, which is precisely the arithmetic that made public float render zero for KO/GS/JPM/PG/XOM. If treasury belonged in it, no issuer could hold treasury above 100% of outstanding, and many do.
 
 ### denominator_basis explained per kind
 
