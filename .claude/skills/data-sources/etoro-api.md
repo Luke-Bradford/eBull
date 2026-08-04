@@ -32,11 +32,23 @@ of a documented limit is not absence of a limit.** Measured on demo
 
 | limit | value | behaviour at the boundary |
 | --- | --- | --- |
-| topics per **session** | **4,999** | rejected: `errorCode: SubscribeFailed`, `"Too many subscriptions for session"`. Connection survives. Per-frame **atomic** — a straddling frame bounces whole, nothing partially applied. |
-| bytes per **frame** | **25 KiB** (25,600) | **silent: close 1006, empty reason, no ack, no error envelope.** Not applied. Bracket 25,529 B ok / 25,719 B dead. |
+| topics per **session** | **4,999** | rejected: `errorCode: SubscribeFailed`, `"Too many subscriptions for session"`. Connection survives **and keeps serving**. Per-frame **atomic** — a straddling frame bounces whole, nothing partially applied. |
+| bytes per **frame** | **25 KiB** (25,600) | **silent: socket dropped, no ack, no error envelope.** Not applied. Bracket 25,529 B ok / 25,719 B dead. |
 
+- 4,999 replicated exactly on a second independent session — not a
+  single-run artefact.
+- **An over-cap rejection does not poison the session.** Measured after a
+  rejection: 3,141 rate messages in the next 20s on already-subscribed
+  topics, and both `Subscribe` and `Unsubscribe` still acked. No reconnect
+  needed — handle the rejection, do not tear down.
+- **The over-size drop is not a client-side limit.** `ws.send()` returns
+  normally and the close is `1006 ABNORMAL_CLOSURE` with an empty reason,
+  i.e. **no close frame was received at all** — the socket is dropped, not
+  closed. Attribution is server-or-intermediary; do not assume either.
 - The session cap is **per connection, not per key** — 3 concurrent sessions
-  hold the full 12,684 universe (measured 12,684/12,684, 0 failures, 2.21s).
+  hold the full 12,684 universe (measured 12,684/12,684 topics **accepted**,
+  2.21s; "0 failures" there means zero rejected Subscribe frames, and says
+  nothing about data completeness, which S2/#2242 owns).
 - `Unsubscribe` frees capacity — live occupancy, not a lifetime budget.
 - **Chunk by BYTES, never by topic count** — instrument-id width varies, so a
   count-based cap does not bound frame size. 500 topics ≈ 9.4 KB, proven.

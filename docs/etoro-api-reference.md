@@ -447,8 +447,16 @@ against the wire, not against parsed ticks.**
 
 | limit | value | behaviour at the boundary |
 | --- | --- | --- |
-| topics per **session** | **4,999** | Subscribe rejected with `errorCode: SubscribeFailed`, `errorMessage: "Too many subscriptions for session"`. Connection survives. Rejection is **per-frame and atomic** — a frame straddling the cap bounces whole. |
-| bytes per **frame** | **25 KiB** (25,600) | **No ack, no error — the server closes with 1006 and an empty reason.** Subscription not applied. Bracket: 25,529 B acked / 25,719 B closed. |
+| topics per **session** | **4,999** | Subscribe rejected with `errorCode: SubscribeFailed`, `errorMessage: "Too many subscriptions for session"`. Connection survives and keeps serving. Rejection is **per-frame and atomic** — a frame straddling the cap bounces whole. |
+| bytes per **frame** | **25 KiB** (25,600) | **No ack, no error — the socket is dropped** (`1006 ABNORMAL_CLOSURE`, empty reason, i.e. no close frame). Subscription not applied. Bracket: 25,529 B acked / 25,719 B dropped. |
+
+4,999 was replicated exactly on a second independent session. An over-cap
+rejection does **not** poison the session — 3,141 rate messages arrived in
+the following 20s on already-subscribed topics, and both `Subscribe` and
+`Unsubscribe` still acked, so a rejection needs handling rather than a
+reconnect. The over-size drop is **not** a client-side send limit:
+`ws.send()` returns normally and no close frame is received, so
+attribution is server-or-intermediary.
 
 The session cap is **per connection, not per API key**: concurrent sessions
 each get their own 4,999, so the full 12,684-instrument universe fits in 3
