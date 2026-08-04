@@ -28,7 +28,7 @@ to the wrong tables and the wrong assumptions.
 | --- | --- | --- |
 | question | what is the chart saying now | did this pattern ever pay |
 | storage | latest bar only (median **1** bar/instrument has indicators) | full history over a research corpus |
-| price source | `price_daily`, eToro-sourced | **public research corpus** — eToro is the execution venue, not the data source |
+| price source | `price_daily`, eToro-sourced | **licensed research corpus** — eToro is the execution venue, not the data source |
 | consumers | scoring, entry_timing, thesis | strategy registry, signal ledger, backtester |
 
 Two facts from that programme that change how you should read this skill:
@@ -43,6 +43,15 @@ Two facts from that programme that change how you should read this skill:
   reaches decades further. Do not conclude from `price_daily` that a given
   history depth is unavailable — that is a property of our provider, not the
   market.
+- ⚠ **Depth is free; survivorship is not** (#2284, 2026-08-05). Do not read the
+  bullet above as "the free feeds solve the corpus". Measured over all **382**
+  common-equity delistings of 2023 (EDGAR Form 25, filtered per
+  `data-sources/sec-edgar.md` §2.6): the free retail feed serves **0%** whose
+  series stops at the delisting — 87.4% are absent outright, and the 12.6% that
+  resolve are the ticker's *current* occupant (successor entity, OTC
+  continuation, or an unrelated company that later took the symbol). Any
+  backtest built on symbol lookups against a live feed selects only survivors,
+  and nothing in the response says so.
 
 Before any work on backtesting, strategy definitions, signal recording or
 historical TA, read
