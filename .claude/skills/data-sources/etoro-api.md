@@ -71,10 +71,24 @@ Census over 180,666 messages: 59.8% pure heartbeat, 16.8% `Bid`+`Ask`,
 10.5% `Bid`+`BidDiscounted`+`LastExecution`, 10.1% `Ask`+`AskDiscounted`,
 1.6% `LastExecution` alone, ~1.2% across 12 further combinations.
 
-- **`_parse_rate_content` requires BOTH `Bid` and `Ask`, so it drops 58.1% of
-  price-CHANGING messages** — stored quotes run 1.5–2.6× staler than the feed
-  allows. Tracked as #2252. **Any consumer must carry per-instrument state and
-  merge deltas**; requiring a complete payload sees under half the market.
+- **Any consumer MUST carry per-instrument state and merge deltas.** Requiring a
+  complete payload sees under half the market. Production does this since #2252:
+  `parse_rate_deltas()` → `RateStateStore.apply()` in
+  `app/services/etoro_websocket.py`. The pre-fix parser required both `Bid` and
+  `Ask` and dropped 58.1% of price-CHANGING messages. Measured on a paired-arm
+  capture (184 crypto/FX instruments, 300 s, one stream through both parsers):
+  captured share of wire price-changes **45.5% → 92.8%**, median usable-update
+  gap **3.27 s → 1.24 s** against a wire price-change gap of 1.24 s, i.e.
+  staleness **2.64× → 1.00×** (crypto 3.96× → 1.00×, FX 1.77× → 1.00×). The
+  residual 7% are instruments where one side was never quoted, so no complete
+  tick can be formed at all.
+- **Field PRESENCE and field VALUE mean different things.** An absent
+  `LastExecution` means "unchanged"; a present one that is ≤ 0 means "not a real
+  trade → NULL" (#1429). A `Decimal | None` cannot express both — the delta type
+  needs explicit `has_*` flags or the #1429 rule silently un-does itself.
+- **A price-less heartbeat must not emit.** 59.8% of messages carry only
+  `Date` + `PriceRateID`; publishing on those advances `quoted_at` with no price
+  behind it, reporting freshness that does not exist.
 - "23% of messages parse" is right but does **not** mean "77% are inert" —
   only ~60% are. Size ingest against the wire.
 

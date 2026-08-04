@@ -48,7 +48,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
@@ -102,6 +102,71 @@ class QuoteUpdate:
     ask: Decimal
     last: Decimal | None
     quoted_at: datetime
+
+
+@dataclass(frozen=True)
+class RateDelta:
+    """One ``Trading.Instrument.Rate`` push, parsed but NOT yet merged.
+
+    eToro's rate push is a **field-level sparse delta**, not a
+    complete snapshot (#2243, measured over 180,666 messages; see
+    ``.claude/skills/data-sources/etoro-api.md`` §"WS rate semantics").
+    Any subset of ``Bid`` / ``Ask`` / ``LastExecution`` can arrive
+    alone — only 16.8% of messages carry ``Bid``+``Ask`` together,
+    and requiring both discarded 58.1% of *price-changing* messages
+    (#2252).
+
+    So the wire shape cannot be normalised to a :class:`QuoteUpdate`
+    in isolation: a bid-only push is meaningful, but only against the
+    last known ask. This type is the honest intermediate — what the
+    frame actually said — and :class:`RateStateStore` merges it onto
+    per-instrument state to produce a complete tick.
+
+    Presence is tracked separately from value because the two carry
+    different meanings for ``last``: an *absent* ``LastExecution``
+    means "unchanged, keep prior", whereas a *present* one that is
+    non-positive means "not a real trade → NULL" (#1429). A bare
+    ``Decimal | None`` cannot express both.
+    """
+
+    instrument_id: int
+    quoted_at: datetime
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    last: Decimal | None = None
+    # True iff the payload carried the field at all. ``has_last`` with
+    # ``last is None`` is the #1429 "non-positive → NULL" case.
+    has_bid: bool = False
+    has_ask: bool = False
+    has_last: bool = False
+
+    @property
+    def carries_price(self) -> bool:
+        """True if this push moves any price field.
+
+        59.8% of rate messages are pure heartbeats (``Date`` +
+        ``PriceRateID``, no price field). Merging one changes nothing,
+        and emitting on one would advance ``quoted_at`` without any
+        price behind it — reporting freshness we do not have.
+        """
+        return self.has_bid or self.has_ask or self.has_last
+
+    def to_quote_update(self) -> QuoteUpdate | None:
+        """Stateless promotion — only a delta already carrying BOTH
+        sides is a complete tick. Returns ``None`` otherwise.
+
+        This is the pre-#2252 behaviour, preserved for the
+        stateless :func:`parse_rate_messages` API.
+        """
+        if self.bid is None or self.ask is None:
+            return None
+        return QuoteUpdate(
+            instrument_id=self.instrument_id,
+            bid=self.bid,
+            ask=self.ask,
+            last=self.last,
+            quoted_at=self.quoted_at,
+        )
 
 
 def build_auth_message(api_key: str, user_key: str) -> str:
@@ -223,16 +288,22 @@ def _iter_inner_messages(raw: str) -> list[dict[str, object]]:
     return []
 
 
-def _parse_rate_content(msg: dict[str, object]) -> QuoteUpdate | None:
+def _parse_rate_content(msg: dict[str, object]) -> RateDelta | None:
     """Parse one inner ``Trading.Instrument.Rate`` message into a
-    :class:`QuoteUpdate`.
+    :class:`RateDelta`.
 
     Handles both the documented envelope shape — where ``content``
     is a JSON-encoded string carrying the actual fields — and the
     legacy ``data`` shape (parsed object directly under ``data``)
-    used by older test fixtures. Returns ``None`` on any field-
-    shape failure so the listener loop drops the bad frame and
-    keeps reading.
+    used by older test fixtures.
+
+    ``None`` means **"not a rate message"** — wrong type, unparseable
+    content, or no usable identity/timestamp. It does NOT mean
+    "rate message with a partial payload": that is a
+    :class:`RateDelta` whose ``has_*`` flags say which fields
+    arrived, and collapsing the two is exactly the #2252 defect
+    (58.1% of price-changing pushes discarded as if they were
+    malformed).
     """
     if msg.get("type") != _RATE_MESSAGE_TYPE:
         return None
@@ -260,26 +331,37 @@ def _parse_rate_content(msg: dict[str, object]) -> QuoteUpdate | None:
             instrument_id_raw = topic.removeprefix("instrument:")
     try:
         instrument_id = int(str(instrument_id_raw))
-        bid = Decimal(str(payload["Bid"]))
-        ask = Decimal(str(payload["Ask"]))
+        # Identity + timestamp are the only REQUIRED fields. Every
+        # price field is optional (#2243): the heartbeat shape is
+        # ``{Date, PriceRateID}`` and carries no price at all.
+        date_str = str(payload["Date"])
+        if date_str.endswith("Z"):
+            date_str = date_str[:-1] + "+00:00"
+        quoted_at = datetime.fromisoformat(date_str)
+
+        has_bid = "Bid" in payload
+        bid = Decimal(str(payload["Bid"])) if has_bid else None
+        has_ask = "Ask" in payload
+        ask = Decimal(str(payload["Ask"])) if has_ask else None
+
+        has_last = "LastExecution" in payload
         last_raw = payload.get("LastExecution")
         last = Decimal(str(last_raw)) if last_raw is not None else None
         # #1429: a non-positive last is not a real trade (eToro pushes 0 for
         # un-freshly-traded instruments) — persist NULL, never a fake 0.
         if last is not None and last <= 0:
             last = None
-        date_str = str(payload["Date"])
-        if date_str.endswith("Z"):
-            date_str = date_str[:-1] + "+00:00"
-        quoted_at = datetime.fromisoformat(date_str)
-    except KeyError, TypeError, ValueError:
+    except KeyError, TypeError, ValueError, InvalidOperation:
         return None
-    return QuoteUpdate(
+    return RateDelta(
         instrument_id=instrument_id,
+        quoted_at=quoted_at,
         bid=bid,
         ask=ask,
         last=last,
-        quoted_at=quoted_at,
+        has_bid=has_bid,
+        has_ask=has_ask,
+        has_last=has_last,
     )
 
 
@@ -302,26 +384,143 @@ def parse_rate_message(raw: str) -> QuoteUpdate | None:
     :func:`parse_rate_messages` to receive every update.
 
     Kept for backward-compat with existing single-tick test fixtures.
+    Stateless, so — like :func:`parse_rate_messages` — it sees only
+    pushes that are complete on their own (#2252).
     """
     for msg in _iter_inner_messages(raw):
-        update = _parse_rate_content(msg)
+        delta = _parse_rate_content(msg)
+        if delta is None:
+            continue
+        update = delta.to_quote_update()
         if update is not None:
             return update
     return None
 
 
-def parse_rate_messages(raw: str) -> list[QuoteUpdate]:
+def parse_rate_deltas(raw: str) -> list[RateDelta]:
     """Extract every ``Trading.Instrument.Rate`` push in a raw WS
-    frame. eToro's WS may batch multiple rates into one frame; the
-    listener loop must process all of them or the rate-stream will
-    silently drop ticks for high-frequency instruments.
+    frame as a :class:`RateDelta`, complete or partial.
+
+    eToro's WS may batch multiple rates into one frame; the listener
+    loop must process all of them or the rate-stream will silently
+    drop ticks for high-frequency instruments.
+
+    This is the parse the subscriber uses. Feed the results through
+    a :class:`RateStateStore` to merge them into complete ticks.
+    """
+    deltas: list[RateDelta] = []
+    for msg in _iter_inner_messages(raw):
+        delta = _parse_rate_content(msg)
+        if delta is not None:
+            deltas.append(delta)
+    return deltas
+
+
+def parse_rate_messages(raw: str) -> list[QuoteUpdate]:
+    """Extract every rate push that is complete **on its own**.
+
+    Stateless view over :func:`parse_rate_deltas`, kept for callers
+    and fixtures that predate #2252. Partial deltas are not visible
+    here — on the live wire that is 58.1% of price-changing pushes,
+    so anything ingesting the real feed must use
+    :func:`parse_rate_deltas` + :class:`RateStateStore` instead.
     """
     updates: list[QuoteUpdate] = []
-    for msg in _iter_inner_messages(raw):
-        update = _parse_rate_content(msg)
+    for delta in parse_rate_deltas(raw):
+        update = delta.to_quote_update()
         if update is not None:
             updates.append(update)
     return updates
+
+
+class RateStateStore:
+    """Per-instrument last-known rate state, merged across sparse deltas.
+
+    Exists because :data:`_UPSERT_SQL` writes ``bid``, ``ask``,
+    ``last`` and ``spread_pct`` in one statement, so a partial delta
+    cannot be applied without prior state — and eToro only sends
+    partials (#2252). Holding the last known value per field turns a
+    bid-only push into a complete tick against the standing ask.
+
+    State is seeded for free: :func:`build_subscribe_message` already
+    requests ``snapshot: True``, and the snapshot arrives as an
+    ordinary rate message carrying every field, so a fresh
+    subscription is complete from its first push.
+
+    Not thread-safe by design — the subscriber applies deltas on the
+    event loop in :meth:`EtoroWebSocketSubscriber._listen`, and only
+    the resulting :class:`QuoteUpdate` is handed to a worker thread.
+    """
+
+    __slots__ = ("_state",)
+
+    def __init__(self) -> None:
+        # instrument_id -> (bid, ask, last, quoted_at)
+        self._state: dict[int, tuple[Decimal | None, Decimal | None, Decimal | None, datetime]] = {}
+
+    def apply(self, delta: RateDelta) -> QuoteUpdate | None:
+        """Merge ``delta`` onto stored state; return a complete tick, or None.
+
+        Returns ``None`` — meaning "nothing to publish", not "error" — when:
+
+        * the delta carries no price field (a heartbeat; 59.8% of the
+          wire). Emitting would advance ``quoted_at`` with no price
+          behind it, overstating freshness;
+        * the merged state still lacks a bid or an ask, i.e. we have
+          never seen one side for this instrument. Only possible
+          before the snapshot lands or if it was missed;
+        * the delta is older than the state it would overwrite. The
+          in-memory guard mirrors the ``quoted_at`` guard already in
+          :data:`_UPSERT_SQL`, and matters more here: an out-of-order
+          push that merely lost a race used to affect one row, but
+          against merged state it would corrupt every subsequent tick
+          for that instrument.
+        """
+        # A heartbeat is inert: nothing to merge, and — critically —
+        # it must NOT advance the ordering watermark. Heartbeats are
+        # the majority of the wire and arrive continuously, so letting
+        # one set `quoted_at` would make the guard below reject the
+        # next genuine price delta stamped anywhere behind it. The
+        # watermark exists to order PRICE data against price data.
+        if not delta.carries_price:
+            return None
+
+        prev = self._state.get(delta.instrument_id)
+        if prev is not None and delta.quoted_at < prev[3]:
+            return None
+
+        bid, ask, last = (prev[0], prev[1], prev[2]) if prev is not None else (None, None, None)
+        if delta.has_bid:
+            bid = delta.bid
+        if delta.has_ask:
+            ask = delta.ask
+        if delta.has_last:
+            # Presence, not truthiness: a present-but-non-positive
+            # LastExecution clears `last` to NULL per #1429, which is
+            # a real state change and not the same as "unchanged".
+            last = delta.last
+        self._state[delta.instrument_id] = (bid, ask, last, delta.quoted_at)
+
+        if bid is None or ask is None:
+            return None
+        return QuoteUpdate(
+            instrument_id=delta.instrument_id,
+            bid=bid,
+            ask=ask,
+            last=last,
+            quoted_at=delta.quoted_at,
+        )
+
+    def forget(self, instrument_ids: list[int]) -> None:
+        """Drop state for instruments no longer subscribed.
+
+        Called on Unsubscribe so the store tracks live subscriptions
+        rather than growing for the lifetime of the process — which
+        matters once #2240's collector subscribes the full 12,684
+        universe rather than the handful of ids on screen.
+        """
+        for iid in instrument_ids:
+            self._state.pop(iid, None)
 
 
 def _compute_spread_pct(bid: Decimal, ask: Decimal) -> Decimal | None:
@@ -520,6 +719,17 @@ class EtoroWebSocketSubscriber:
         # calls that can arrive from multiple SSE clients on the
         # same event loop. Small lock, held briefly.
         self._topic_lock = asyncio.Lock()
+
+        # Per-instrument merged rate state (#2252). eToro's rate push
+        # is a field-level sparse delta, so a bid-only message is only
+        # a usable quote against the standing ask. Mutated solely on
+        # the event loop (``_listen`` / ``remove_instruments``).
+        # Deliberately NOT cleared on reconnect: Subscribe replays
+        # with ``snapshot: True``, so a stale entry is overwritten by
+        # the snapshot before any partial can be merged onto it, and
+        # keeping it means the reconnect window does not regress to
+        # "no quote at all" for instruments whose snapshot is slow.
+        self._rate_state = RateStateStore()
 
     def _default_watched_ids(self) -> list[int]:
         with self._pool.connection() as conn:
@@ -989,6 +1199,9 @@ class EtoroWebSocketSubscriber:
                 if self._topic_refs[iid] <= 0:
                     del self._topic_refs[iid]
                     to_unsubscribe.append(iid)
+            # Drop merged rate state alongside the topic (#2252) — the
+            # next Subscribe re-seeds it from the snapshot.
+            self._rate_state.forget(to_unsubscribe)
             # See ``add_instruments`` for the rationale on sending
             # under the lock — same wire-ordering invariant.
             if to_unsubscribe and self._ws is not None:
@@ -1020,7 +1233,13 @@ class EtoroWebSocketSubscriber:
             # frame carries.
             if is_private_event(raw):
                 self._schedule_reconcile()
-            updates = parse_rate_messages(raw)
+            # #2252: parse to sparse deltas and merge onto per-instrument
+            # state. Requiring a complete Bid+Ask payload — as this loop
+            # did — discarded 58.1% of price-CHANGING pushes and left
+            # ``quotes`` 1.5-2.6x staler than the feed allows.
+            updates = [
+                update for delta in parse_rate_deltas(raw) if (update := self._rate_state.apply(delta)) is not None
+            ]
             for update in updates:
                 # Publish first, on the event loop, before the DB
                 # offload. SSE subscribers see the tick within the
