@@ -20,7 +20,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.market_data import most_recent_trading_day
-from app.workers.scheduler import _T3_CANDLE_BATCH_SIZE, daily_candle_refresh
+from app.workers.scheduler import (
+    _T3_CANDLE_BATCH_SIZE,
+    _T3_SUPPLY_LESS_MISSES,
+    _T3_SUPPLY_LESS_RECHECK,
+    daily_candle_refresh,
+)
 
 
 def _make_mock_conn(
@@ -192,6 +197,12 @@ class TestDailyCandleRefreshT3Bootstrap:
             # burns requests on instruments that are then skipped; tighter,
             # and the series it excludes never get refreshed at all.
             "fresh_through": most_recent_trading_day(date.today()),
+            # #2262 — supply-less de-prioritisation. The exclusion EXPIRES
+            # (re-probe after supply_recheck) rather than latching, so a
+            # relisted or newly-supplied instrument returns to scope on its
+            # own; a latching exclusion would make this a seeder again.
+            "supply_misses": _T3_SUPPLY_LESS_MISSES,
+            "supply_recheck": _T3_SUPPLY_LESS_RECHECK,
         }
 
     def test_t3_batch_size_covers_the_t3_population(self) -> None:
@@ -199,8 +210,13 @@ class TestDailyCandleRefreshT3Bootstrap:
 
         At 200 (its seed-only value) it sits an order of magnitude below
         the ~3,850 T3 instruments needing a fetch, which would mean
-        permanent partial coverage with a rotating fresh set."""
-        assert _T3_CANDLE_BATCH_SIZE == 5000
+        permanent partial coverage with a rotating fresh set.
+
+        Raised 5,000 -> 12,000 in #2262: replacing the fundamentals-shaped
+        seeding gate with design decision 9's price-eligibility predicate
+        admits 7,242 instruments and takes the measured scope to 10,483, so
+        5,000 would have bound on the first run."""
+        assert _T3_CANDLE_BATCH_SIZE == 12000
 
     def test_daily_candle_refresh_includes_benchmark_before_t3(self) -> None:
         """Benchmark instruments appear in the refresh list before T3 rows."""

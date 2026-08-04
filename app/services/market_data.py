@@ -60,6 +60,88 @@ _SYSTEMIC_FAILURE_CATEGORIES = frozenset(
     }
 )
 
+# #2262 — consecutive attempted-but-unmoved fetches after which an instrument
+# reads as SUPPLY-LESS. The refresh is nightly, so 5 is roughly a week: long
+# enough to absorb a market holiday, a mid-week halt, or a run that fired before
+# the venue's close, and short enough that a delisted name stops consuming a
+# capped T3 slot within days rather than forever.
+_SUPPLY_LESS_CONSECUTIVE_MISSES = 5
+
+
+def series_advanced(last_bar_before: date | None, last_bar_after: date | None) -> bool:
+    """Did an attempted fetch actually move the series forward? (#2262)
+
+    PUBLIC + pure so it is table-testable: this single predicate is the whole
+    supply signal, because eToro answers HTTP 200 with nothing new for a
+    supply-less instrument and there is no other observable.
+
+    A series that went from "no bars" to "some bars" ADVANCED. A series whose
+    last bar is unchanged did not — and neither did one that somehow went
+    backwards, which is why this is ``>`` and not ``!=``.
+    """
+    if last_bar_after is None:
+        return False
+    return last_bar_before is None or last_bar_after > last_bar_before
+
+
+def _record_supply_outcome(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+    *,
+    last_bar_before: date | None,
+    last_bar_after: date | None,
+) -> None:
+    """Record whether an ATTEMPTED candle fetch actually moved the series (#2262).
+
+    ⚠⚠ eToro returns HTTP 200 with nothing new for a supply-less instrument — no
+    error, no 404, no exception. So this is keyed on the only observable there
+    is: did ``MAX(price_date)`` move. A marker keyed on status or on an
+    exception would never fire for any of the ~108 affected instruments.
+
+    Called ONLY on an attempted fetch. A freshness skip is not an attempt (we
+    never asked), and a FAILED fetch is neutral (the provider was unreachable,
+    which is a different signal from the provider having nothing) — neither
+    touches the counter, so neither can manufacture a supply-less verdict.
+    """
+    advanced = series_advanced(last_bar_before, last_bar_after)
+    conn.execute(
+        """
+        INSERT INTO instrument_price_supply
+            (instrument_id, consecutive_no_advance, last_attempt_at, last_advance_at, last_known_bar, updated_at)
+        VALUES (%(iid)s, %(miss)s, now(), CASE WHEN %(advanced)s THEN now() END, %(last_bar)s, now())
+        ON CONFLICT (instrument_id) DO UPDATE
+           SET consecutive_no_advance = CASE
+                   WHEN %(advanced)s THEN 0
+                   ELSE instrument_price_supply.consecutive_no_advance + 1
+               END,
+               last_attempt_at = now(),
+               last_advance_at = CASE
+                   WHEN %(advanced)s THEN now()
+                   ELSE instrument_price_supply.last_advance_at
+               END,
+               last_known_bar = %(last_bar)s,
+               updated_at = now()
+        """,
+        {
+            "iid": instrument_id,
+            "miss": 0 if advanced else 1,
+            "advanced": advanced,
+            "last_bar": last_bar_after,
+        },
+    )
+
+
+def _last_bar(
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instrument_id: int,
+) -> date | None:
+    row = conn.execute(
+        "SELECT MAX(price_date) FROM price_daily WHERE instrument_id = %(iid)s",
+        {"iid": instrument_id},
+    ).fetchone()
+    return None if row is None else row[0]
+
+
 # Default spread threshold from trading-policy.md.
 # An instrument is flagged if (ask - bid) / mid > this value.
 DEFAULT_MAX_SPREAD_PCT = Decimal("1.0")  # 1%
@@ -275,6 +357,10 @@ def refresh_market_data(
         upserted = 0
         computed = 0
         adjustment_detected = False
+        # #2262 — snapshot BEFORE the fetch so the supply marker can tell
+        # "the provider had nothing" from "we never asked". Read outside the
+        # transaction below so a rolled-back write cannot corrupt the baseline.
+        last_bar_before = _last_bar(conn, instrument_id)
         try:
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
@@ -318,6 +404,24 @@ def refresh_market_data(
                 adjustment_refetches += 1
             # A clean fetch proves the provider + DB are reachable → reset.
             consecutive_systemic_failures = 0
+            # #2262 — the fetch was attempted and returned cleanly. Whether it
+            # returned anything NEW is the supply signal, and it is the only
+            # one there is: a 200-with-nothing looks identical to a 200-with-a-
+            # bar at every layer above this one.
+            try:
+                with conn.transaction():
+                    _record_supply_outcome(
+                        conn,
+                        instrument_id,
+                        last_bar_before=last_bar_before,
+                        last_bar_after=_last_bar(conn, instrument_id),
+                    )
+            except psycopg.Error:
+                # Bookkeeping must never cost a candle refresh. Its own
+                # transaction so a failure here cannot roll back the bars.
+                logger.warning(
+                    "Failed to record price-supply outcome for %s (id=%d)", symbol, instrument_id, exc_info=True
+                )
         except Exception as exc:
             candles_failed += 1
             logger.warning("Failed to refresh candles for %s (id=%d), skipping", symbol, instrument_id, exc_info=True)
