@@ -1366,8 +1366,13 @@ class EtoroWebSocketSubscriber:
             # send to flush; ws.send() is non-blocking on a healthy
             # socket so contention is small in practice.
             if newly_tracked and self._ws is not None:
-                frames = build_subscribe_frames(newly_tracked)
                 try:
+                    # Built INSIDE the try: `_seal_frame` raises on a
+                    # sizing bug, and this runs on the SSE request path
+                    # — an uncaught raise would 500 the operator's
+                    # stream, where the existing contract is "log and
+                    # let the next reconnect resubscribe from refs".
+                    frames = build_subscribe_frames(newly_tracked)
                     for frame in frames:
                         await self._ws.send(frame.payload)
                         self._register_pending(frame)
@@ -1411,8 +1416,9 @@ class EtoroWebSocketSubscriber:
             # See ``add_instruments`` for the rationale on sending
             # under the lock — same wire-ordering invariant.
             if to_unsubscribe and self._ws is not None:
-                frames = build_unsubscribe_frames(to_unsubscribe)
                 try:
+                    # Built inside the try — see `add_instruments`.
+                    frames = build_unsubscribe_frames(to_unsubscribe)
                     for frame in frames:
                         await self._ws.send(frame.payload)
                         self._register_pending(frame)
