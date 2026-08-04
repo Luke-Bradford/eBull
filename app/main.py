@@ -407,8 +407,9 @@ def _bootstrap_fx_rates(pool: ConnectionPool[Any]) -> None:
     """Populate ``live_fx_rates`` synchronously when the table is empty.
 
     Per the visibility-driven live-prices spec
-    (docs/superpowers/specs/2026-04-25-visibility-driven-live-prices-spec.md
-    PR C), the daily Frankfurter cron does not guarantee rates are
+    (docs/proposals/etl/visibility-driven-live-prices.md, PR C — moved from
+    docs/superpowers/specs/, see docs/_archive/path-migration-map.md), the
+    daily Frankfurter cron does not guarantee rates are
     in the table at boot — a fresh DB, a wiped table, or a process
     restart between ECB publishes would all leave readers seeing
     no rows. Non-SSE handlers (``/portfolio``, ``/portfolio/copy-trading``,

@@ -4585,7 +4585,8 @@ def fx_rates_refresh() -> None:
     """Refresh live FX rates from Frankfurter (ECB reference rates).
 
     Per the visibility-driven live-prices spec
-    (docs/superpowers/specs/2026-04-25-visibility-driven-live-prices-spec.md):
+    (docs/proposals/etl/visibility-driven-live-prices.md — moved from
+    docs/superpowers/specs/, see docs/_archive/path-migration-map.md):
 
     - Cadence cut from hourly to once daily at 17:00 CET. ECB
       publishes reference rates once per working day ~16:00 CET, so

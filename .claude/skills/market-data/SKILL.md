@@ -47,10 +47,14 @@ last > 0`, sql/181). Price-derived risk stats live in
 `instrument_risk_metrics_observations`/`_current` (sql/198, `risk_v1`).
 
 **Jobs** — `daily_candle_refresh` (`app/workers/scheduler.py`, `etoro` lane)
-calls `refresh_market_data(..., skip_quotes=True)`; hourly `fx_rates_refresh`
-(`db` lane) owns quote freshness so the daily EOD job never shadows fresher
-quotes. Both registered in `app/jobs/runtime.py`; bootstrap stage
-`candle_refresh` (`bootstrap_orchestrator.py`).
+calls `refresh_market_data(..., skip_quotes=True)`; **`quotes_refresh` (hourly
+@ :23, `etoro` lane) owns quote freshness**, so the daily EOD sweep never
+shadows fresher quotes and never stamps instruments with marks taken 70
+minutes apart. `fx_rates_refresh` (`db` lane, daily 17:00 CET) owns ECB FX
+rates ONLY — it gave up its batch-quote phase in #502 and owned nothing about
+quotes for the ~3 months until #2271. All registered in
+`app/jobs/runtime.py`; bootstrap stage `candle_refresh`
+(`bootstrap_orchestrator.py`).
 
 **Read paths** — `/instruments/{symbol}/candles` reads `price_daily` only, no
 provider fallback (empty state, not 404). `/intraday-candles` fetches live from
