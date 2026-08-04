@@ -107,11 +107,14 @@ def _series_batches(
 ) -> Iterator[tuple[int, str | None, list[Bar]]]:
     """Yield ``(instrument_id, asset_class, bars ascending by date)``, one instrument at a time.
 
-    Per-instrument reads rather than one streaming pass over all 3.2M rows,
-    because the writes below commit per instrument: a server-side cursor's
-    portal lives inside the reading transaction, so the first per-instrument
-    commit would close it out from under the iteration. The largest series is
-    ~1,042 bars (eToro's fetch ceiling), so nothing is materialised that matters.
+    Per-instrument reads rather than one streaming pass over all 3.2M rows. A
+    server-side cursor's portal lives inside the reading transaction, so it
+    would be invalidated by any commit taken mid-iteration — and this generator
+    is deliberately agnostic about the caller's transaction shape rather than
+    encoding an assumption about it. ``refresh_price_quarantine`` documents what
+    that shape actually is (one transaction for the whole run, with a per-
+    instrument savepoint as the unit of failure). The largest series is ~1,042
+    bars (eToro's fetch ceiling), so nothing is materialised that matters.
     """
     scope = conn.execute(_SCOPE_SQL, {"instrument_ids": instrument_ids}).fetchall()
     for instrument_id, asset_class in scope:
