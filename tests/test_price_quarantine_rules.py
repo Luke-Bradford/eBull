@@ -318,6 +318,20 @@ class TestProvisionalTrailingWindow:
         assert transition.turnover_ratio is None
         assert transition.notable is True  # visible as deferred, not silently dropped
 
+    def test_ordinary_provisional_transition_is_not_notable(self) -> None:
+        # Provisional ALONE is not a reason to store a row. Every instrument has
+        # a few transitions inside the correction window on any run (16,907
+        # corpus-wide); one that never approached the magnitude threshold has
+        # nothing deferred about it. Storing them made
+        # `transitions_provisional_deferred` count all of them while the API
+        # described the figure as T3-deferred — an operator-visible number that
+        # did not match its own stated rule.
+        bars = [flat(AS_OF - timedelta(days=1), "100", "1000"), flat(AS_OF, "101", "1100")]
+        transition = evaluate_series(bars, "us_equity", as_of=AS_OF).transitions[0]
+        assert transition.provisional is True
+        assert transition.corroboration == "not_applicable"
+        assert transition.notable is False
+
 
 class TestWindowRules:
     def test_w1_fires_on_a_quarantined_transition_inside_the_window(self) -> None:

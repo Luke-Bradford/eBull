@@ -47,9 +47,13 @@ class CensusResponse(BaseModel):
     transitions_quarantined: int
     transition_rule_counts: dict[str, int]
     transitions_provisional_deferred: int
-    """Transitions touching a mid-session bar. T3 reads volume, and a partial
-    bar's volume is a part-session count, so the verdict is DEFERRED rather than
-    decided — not quarantined, not admitted."""
+    """Transitions that CROSSED the T3 magnitude threshold but touch a bar inside
+    the trailing correction window. T3's corroboration reads volume, and a
+    part-session bar's volume is a part-session count, so the verdict is DEFERRED
+    rather than decided — not quarantined, not admitted, and recomputed once the
+    bar is final. Ordinary recent transitions that never approached the threshold
+    are NOT counted here: they are provisional too, but they have nothing
+    deferred about them."""
 
     t3_corroboration: dict[str, int]
     """The narrowing-gate census: every transition whose magnitude triggered T3,

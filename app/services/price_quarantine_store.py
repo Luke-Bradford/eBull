@@ -369,7 +369,17 @@ def census(conn: psycopg.Connection) -> QuarantineCensus:  # type: ignore[type-a
     transitions = conn.execute(
         """
         SELECT COUNT(*) FILTER (WHERE cardinality(rules) > 0),
-               COUNT(*) FILTER (WHERE provisional AND cardinality(rules) = 0)
+               -- DEFERRED, not merely provisional. The magnitude threshold must
+               -- actually have been crossed (which is what sets corroboration to
+               -- anything other than 'not_applicable') AND no rule fired. Without
+               -- the corroboration clause this counts every ordinary transition
+               -- inside the trailing correction window, and the figure stops
+               -- matching the rule the API states for it.
+               COUNT(*) FILTER (
+                   WHERE provisional
+                     AND cardinality(rules) = 0
+                     AND corroboration <> 'not_applicable'
+               )
         FROM price_transition_quarantine
         WHERE rule_set_version = %(ver)s
         """,

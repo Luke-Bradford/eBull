@@ -219,8 +219,19 @@ class TransitionVerdict:
         rejects *against what it saw*, and an admitted transition is the
         denominator. It is also the audit trail for the one signal that can
         overturn a quarantine, so it has to survive the run that made the call.
+
+        ``provisional`` ALONE is deliberately NOT enough. Every instrument has a
+        few transitions inside the trailing correction window on any given run —
+        16,907 of them corpus-wide — and an ordinary recent transition that never
+        approached the magnitude threshold has nothing to say. Storing them made
+        ``transitions_provisional_deferred`` count all of them while the API
+        described the figure as T3-deferred: an operator-visible number that did
+        not match its own stated rule, which is the exact defect this rule set
+        exists to prevent. A genuinely deferred transition is identified by
+        ``corroboration != 'not_applicable'``, which is set only when the
+        magnitude threshold was crossed.
         """
-        return bool(self.rules) or self.provisional or self.corroboration != "not_applicable"
+        return bool(self.rules) or self.corroboration != "not_applicable"
 
 
 @dataclass(frozen=True)
