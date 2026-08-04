@@ -235,6 +235,9 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # service). Empty tuple completes the manual-only triangle (source +
     # metadata + invoker) so the manual API validator accepts a zero-param
     # trigger.
+    # price_quarantine_refresh — #2261 full-corpus quarantine recompute. No
+    # operator params: scope is the whole priced universe.
+    "price_quarantine_refresh": (),
     "risk_metrics_refresh": (),
     # fair_value_band_refresh — #2009 deterministic fair-value band recompute.
     # No operator-tunable params (multiples set + calibration constants are

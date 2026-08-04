@@ -286,6 +286,13 @@ def risk_metrics_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     return _fresh_by_audit(conn, "risk_metrics_refresh", timedelta(days=7))
 
 
+def price_quarantine_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
+    # 24h window (#2261): the verdicts are derived from price_daily, which the
+    # candles layer rewrites nightly, so a day-old quarantine describes a
+    # day-old series. Matches the layer cadence.
+    return _fresh_by_audit(conn, "price_quarantine_refresh", timedelta(hours=24))
+
+
 def weekly_reports_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     return _fresh_by_audit(conn, "weekly_report", timedelta(days=7))
 

@@ -556,6 +556,13 @@ class TestProductionInvokerRegistry:
             # (the layer cadence/freshness gate the DAG walk). Source-lock
             # "fair_value_band" + empty param metadata complete the triangle.
             "fair_value_band_refresh",
+            # #2261 — price_quarantine_refresh. Orchestrator-driven (DAG layer
+            # "price_quarantine") + manual-trigger-only. Same rationale as
+            # risk_metrics_refresh: in _INVOKERS for the orchestrator adapter
+            # inner-JobLock + Admin "Run now"; NOT in SCHEDULED_JOBS (the layer
+            # cadence/freshness gate the DAG walk). Source-lock
+            # "price_quarantine" + empty param metadata complete the triangle.
+            "price_quarantine_refresh",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "

@@ -49,6 +49,7 @@ from app.api.operator_ingest import router as operator_ingest_router
 from app.api.operators import router as operators_router
 from app.api.orders import router as orders_router
 from app.api.portfolio import router as portfolio_router
+from app.api.price_quarantine import router as price_quarantine_router
 from app.api.processes import router as processes_router
 from app.api.recommendations import router as recommendations_router
 from app.api.reports import router as reports_router
@@ -529,6 +530,7 @@ app.include_router(broker_credentials_router)
 app.include_router(config_router)
 app.include_router(copy_trading_router)
 app.include_router(coverage_router)
+app.include_router(price_quarantine_router)
 app.include_router(business_summary_admin_router)
 app.include_router(fund_metadata_router)  # #1171 fund-metadata endpoints
 app.include_router(fundamentals_admin_router)  # #677 fundamentals force-refresh

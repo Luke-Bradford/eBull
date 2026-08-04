@@ -104,6 +104,7 @@ from app.workers.scheduler import (
     JOB_OWNERSHIP_OBSERVATIONS_SYNC,
     JOB_PG_SIZE_SAMPLE,
     JOB_PORTFOLIO_EOD_SNAPSHOT,
+    JOB_PRICE_QUARANTINE_REFRESH,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_RETRY_SWEEPER,
@@ -167,6 +168,7 @@ from app.workers.scheduler import (
     ownership_observations_sync,
     pg_size_sample,
     portfolio_eod_snapshot_job,
+    price_quarantine_refresh,
     raw_data_retention_sweep,
     retry_deferred_recommendations_job,
     risk_metrics_refresh,
@@ -322,6 +324,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # layer cadence/freshness gate the DAG walk — a scheduled row would
     # double-fire). Source-lock "risk_metrics" in MANUAL_TRIGGER_JOB_SOURCES;
     # empty params in MANUAL_TRIGGER_JOB_METADATA.
+    JOB_PRICE_QUARANTINE_REFRESH: _adapt_zero_arg(price_quarantine_refresh),
     JOB_RISK_METRICS_REFRESH: _adapt_zero_arg(risk_metrics_refresh),
     # #2009 — fair-value band recompute. Orchestrator-driven (DAG layer
     # "fair_value_band") + manual-trigger-only; NOT in SCHEDULED_JOBS (the

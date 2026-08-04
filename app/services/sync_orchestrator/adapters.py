@@ -310,6 +310,23 @@ def refresh_risk_metrics(
     )
 
 
+def refresh_price_quarantine(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    # #2261 — impossible-bar quarantine recompute over the priced universe.
+    from app.workers.scheduler import price_quarantine_refresh
+
+    return _wrap_single(
+        job_name="price_quarantine_refresh",
+        layer_name="price_quarantine",
+        legacy_fn=price_quarantine_refresh,
+        progress=progress,
+    )
+
+
 def refresh_fair_value_band(
     *,
     sync_run_id: int,
