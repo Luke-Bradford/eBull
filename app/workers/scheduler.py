@@ -55,7 +55,7 @@ from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
-from app.services.market_data import refresh_market_data
+from app.services.market_data import _most_recent_trading_day, refresh_market_data
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
@@ -2408,11 +2408,27 @@ def nightly_universe_sync() -> None:
             tracker.row_count = row_count
 
 
-# Max T3 instruments to include in candle refresh for bootstrap
-# scoring. Prevents hitting API rate limits while giving enough T3
-# instruments price data to enable T3→T2 promotion via the
-# scoring/coverage pipeline.
-_T3_BOOTSTRAP_BATCH_SIZE = 200
+# Ceiling on T3 instruments fetched per candle-refresh run (#2254).
+#
+# This is a SAFETY CEILING, not a rationing device. It was 200 while the
+# T3 branch was seed-only; a cap below the T3 population would now mean
+# permanent partial coverage with a rotating fresh set, which is the
+# defect #2254 is fixing rather than a smaller version of the fix.
+#
+# Sized from two independent bounds, whichever is tighter:
+#   * population — 3,838 priced T3 + 27 still-unseeded gate-passers
+#     (measured 2026-08-04, full population), so 5,000 leaves ~29% growth
+#     headroom before the cap can bind;
+#   * wall clock — the provider paces reads at 1.1s (_ETORO_READ_INTERVAL_S,
+#     ≈55 req/min under eToro's 60/min limit), so 5,000 is ~92 min worst
+#     case, on top of ~26 min for held + T1/T2 + benchmark.
+#
+# Raising it is a deliberate cost decision, not a side effect: admitting
+# the 7,242 instruments currently blocked by the fundamentals-shaped
+# seeding gate (#2246) would take the branch to ~2.3h/night. When the cap
+# binds, daily_candle_refresh logs a WARNING — a silently truncated sweep
+# would read as "everything is current" when it is not.
+_T3_CANDLE_BATCH_SIZE = 5000
 
 # Benchmark instruments (S&P 500 + Nasdaq-100 + 11 GICS sector SPDRs)
 # always candle-refreshed regardless of coverage tier so the risk layer
@@ -2434,39 +2450,70 @@ BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
     {"SPX500", "SPY", "QQQ", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
 )
 
-# T3 candle bootstrap eligibility query.
+# T3 candle eligibility query.
 # Module-level constant so the test suite imports the same SQL the
 # scheduler executes — eliminates the drift risk Codex flagged on
 # PR 0 (#515): a copy-pasted test SQL could stay green after a
-# production regression. Tests import _T3_BOOTSTRAP_SELECT directly.
+# production regression. Tests import _T3_CANDLE_SELECT directly.
 #
-# Eligibility branches (post-#515 PR 0):
-#   1. Tradable + tier 3 + no candles + has fundamentals (original).
-#   2. OR tradable + tier 3 + no candles + non-fundamentals-bearing
-#      asset class (crypto / fx / commodity / index — those classes
-#      never get a fundamentals_snapshot row by design).
-# Instruments on exchanges with asset_class='unknown' stay gated;
-# operator curates the row first via the #503 PR 4 admin path.
-_T3_BOOTSTRAP_SELECT = """
+# TWO ARMS, deliberately carrying DIFFERENT predicates (#2254):
+#
+#   SEED arm — tier 3, no candles at all, and eligible for a first
+#   fetch: has fundamentals (original, #515 PR 0), OR sits in a
+#   non-fundamentals-bearing asset class (crypto / fx / commodity /
+#   index, which never get a fundamentals_snapshot row by design).
+#   Instruments on exchanges with asset_class='unknown' stay gated;
+#   the operator curates the row first via the #503 PR 4 admin path.
+#
+#   MAINTENANCE arm — tier 3 that ALREADY has a series and is behind
+#   the most recent trading day. NO eligibility gate: the seeding gate
+#   answers "is a first fetch worth spending", which is a question
+#   already settled for an instrument that has bars. Applying it here
+#   would strand 274 priced us_equity T3 that carry no
+#   fundamentals_snapshot row (259 of them already >30d stale,
+#   measured 2026-08-04 on the full population).
+#
+# WHY the split exists at all (#2254): this query previously carried a
+# single `NOT EXISTS (price_daily)` for both purposes, which selects on
+# the ABSENCE of the rows the job writes — so a T3 left candle-refresh
+# scope permanently on its first bar and nothing took over. 3,523 of
+# 3,838 priced T3 had no bar in 30 days and every crypto / FX /
+# commodity series in the DB was ~2 months stale. A stale close is not
+# an absent value; it renders, scores and backtests as a wrong one.
+#
+# The maintenance predicate must stay FRESHNESS-based, never
+# existence-based: an exclusion that expires keeps the instrument in
+# scope tomorrow, an exclusion that latches makes this a seeder again.
+# `%(fresh_through)s` is `_most_recent_trading_day` — the SAME boundary
+# `_candles_are_fresh` uses to decide whether to spend a request — so
+# scope membership and the per-instrument freshness skip cannot drift.
+_T3_CANDLE_SELECT = """
 SELECT i.instrument_id, i.symbol
 FROM instruments i
 JOIN coverage c ON c.instrument_id = i.instrument_id
 LEFT JOIN exchanges e ON e.exchange_id = i.exchange
+LEFT JOIN LATERAL (
+    SELECT MAX(p.price_date) AS last_bar
+    FROM price_daily p
+    WHERE p.instrument_id = i.instrument_id
+) pd ON TRUE
 WHERE i.is_tradable = TRUE
   AND c.coverage_tier = 3
   AND i.symbol <> ALL(%(benchmark_symbols)s)
-  AND NOT EXISTS (
-      SELECT 1 FROM price_daily p
-      WHERE p.instrument_id = i.instrument_id
-  )
   AND (
-      EXISTS (
-          SELECT 1 FROM fundamentals_snapshot f
-          WHERE f.instrument_id = i.instrument_id
+      (pd.last_bar IS NOT NULL AND pd.last_bar < %(fresh_through)s)
+      OR (
+          pd.last_bar IS NULL
+          AND (
+              EXISTS (
+                  SELECT 1 FROM fundamentals_snapshot f
+                  WHERE f.instrument_id = i.instrument_id
+              )
+              OR e.asset_class IN ('crypto', 'fx', 'commodity', 'index')
+          )
       )
-      OR e.asset_class IN ('crypto', 'fx', 'commodity', 'index')
   )
-ORDER BY i.symbol, i.instrument_id
+ORDER BY pd.last_bar ASC NULLS FIRST, i.symbol, i.instrument_id
 LIMIT %(limit)s
 """
 
@@ -2480,9 +2527,13 @@ def daily_candle_refresh() -> None:
          the operator needs current price context for anything in the
          portfolio even if it's been demoted below T2.
       2. All Tier 1/2 covered instruments (uncapped).
-      3. Up to ``_T3_BOOTSTRAP_BATCH_SIZE`` Tier 3 instruments that
-         already have fundamentals, ordered by symbol for determinism.
-         Enables T3→T2 promotion by seeding candle history.
+      3. Up to ``_T3_CANDLE_BATCH_SIZE`` Tier 3 instruments, stalest
+         first (see ``_T3_CANDLE_SELECT``): those with no candles yet
+         and eligible for a first fetch (seeds history, enabling T3→T2
+         promotion), PLUS those whose existing series is behind the
+         most recent trading day (#2254 — the branch used to drop an
+         instrument permanently once it had its first bar, freezing
+         3,523 series).
 
     Fetches up to 1000 daily candles per instrument (post-#603 — eToro's
     hard ceiling, ≈4 calendar years of trading-day price points).
@@ -2547,16 +2598,39 @@ def daily_candle_refresh() -> None:
                 {"symbols": sorted(BENCHMARK_SYMBOLS)},
             ).fetchall()
 
-            # T3: bootstrap batch (see _T3_BOOTSTRAP_SELECT comment).
+            # T3: seed + maintenance batch (see _T3_CANDLE_SELECT comment).
             # refresh_market_data fetches up to 1000 candles per
             # instrument in a single API call (post-#603), so a
-            # "partial" bootstrap still gives enough data for momentum
-            # scoring. If the API call fails entirely, no rows are
-            # inserted and the instrument retries next run.
+            # "partial" seed still gives enough data for momentum
+            # scoring, and a stale series with a gap wider than the
+            # incremental window is healed in one call by
+            # _candles_fetch_count's backfill fallback. If the API call
+            # fails entirely, no rows are inserted and the instrument
+            # retries next run.
+            #
+            # T3 is deliberately LAST in `ordered` below: held / T1/T2 /
+            # benchmark are fetched first, so if the batch circuit-breaker
+            # (#1833) trips part-way through a long T3 sweep, the scoped
+            # instruments that must be current already are.
             t3_rows = conn.execute(
-                _T3_BOOTSTRAP_SELECT,
-                {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)},
+                _T3_CANDLE_SELECT,
+                {
+                    "limit": _T3_CANDLE_BATCH_SIZE,
+                    "benchmark_symbols": sorted(BENCHMARK_SYMBOLS),
+                    "fresh_through": _most_recent_trading_day(date.today()),
+                },
             ).fetchall()
+            if len(t3_rows) == _T3_CANDLE_BATCH_SIZE:
+                # #2254 "no silent caps" — a truncated sweep leaves an
+                # unknown number of T3 series stale while the run still
+                # reports success. Surface it; the cap is a safety
+                # ceiling and binding means the population outgrew it.
+                logger.warning(
+                    "daily_candle_refresh: T3 scope hit the %d-instrument cap "
+                    "(_T3_CANDLE_BATCH_SIZE) — an unknown number of T3 series stay stale "
+                    "this run. Stalest are fetched first; raise the cap or add cadence.",
+                    _T3_CANDLE_BATCH_SIZE,
+                )
 
             # Dedupe across scopes. A held T1 instrument must not be
             # fetched twice; set semantics keyed on instrument_id preserve
@@ -2585,7 +2659,8 @@ def daily_candle_refresh() -> None:
                 return
 
             logger.info(
-                "daily_candle_refresh: %d held + %d T1/T2 + %d benchmark + %d T3 bootstrap = %d unique instruments",
+                "daily_candle_refresh: %d held + %d T1/T2 + %d benchmark + %d T3 (seed + stale) "
+                "= %d unique instruments",
                 len(held_rows),
                 len(tier12_rows),
                 len(benchmark_rows),

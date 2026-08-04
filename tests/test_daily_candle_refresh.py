@@ -1,22 +1,26 @@
-"""Unit tests for daily_candle_refresh T3 bootstrap logic.
+"""Unit tests for daily_candle_refresh T3 scope logic.
 
 Verifies that the candle refresh includes a capped batch of T3
-instruments with fundamentals data alongside the full T1/T2 set.
+instruments alongside the full T1/T2 set.
 
 Fix for #253 — T3 instruments were excluded from candle refresh,
 creating a bootstrap deadlock where T3 had no price data and could
-not score high enough to promote.
+not score high enough to promote. Extended by #2254 — the T3 branch
+was seed-only, so an instrument left scope on its first bar and its
+series froze; it now also carries the stale-series maintenance arm.
 
 No live database or network calls — all dependencies are mocked.
 """
 
 from __future__ import annotations
 
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.workers.scheduler import _T3_BOOTSTRAP_BATCH_SIZE, daily_candle_refresh
+from app.services.market_data import _most_recent_trading_day
+from app.workers.scheduler import _T3_CANDLE_BATCH_SIZE, daily_candle_refresh
 
 
 def _make_mock_conn(
@@ -149,7 +153,7 @@ class TestDailyCandleRefreshT3Bootstrap:
         assert instruments == [(1, "AAPL"), (2, "MSFT")]
 
     def test_t3_query_uses_limit_param(self) -> None:
-        """Verify the T3 query passes _T3_BOOTSTRAP_BATCH_SIZE as limit."""
+        """Verify the T3 query passes _T3_CANDLE_BATCH_SIZE as limit."""
         mock_conn = _make_mock_conn([(1, "AAPL")], [(100, "XYZ")])
         mock_provider = MagicMock()
         mock_provider.__enter__ = MagicMock(return_value=mock_provider)
@@ -172,18 +176,31 @@ class TestDailyCandleRefreshT3Bootstrap:
             daily_candle_refresh()
 
         # Fourth execute call is the T3 query with limit + benchmark_symbols
-        # (1st=held, 2nd=tier12, 3rd=benchmark, 4th=T3 bootstrap).
+        # + fresh_through (1st=held, 2nd=tier12, 3rd=benchmark, 4th=T3).
         t3_call = mock_conn.execute.call_args_list[3]
         sql_text = t3_call[0][0]
         params = t3_call[0][1]
         assert "LIMIT" in sql_text
         from app.workers.scheduler import BENCHMARK_SYMBOLS
 
-        assert params == {"limit": _T3_BOOTSTRAP_BATCH_SIZE, "benchmark_symbols": sorted(BENCHMARK_SYMBOLS)}
+        assert params == {
+            "limit": _T3_CANDLE_BATCH_SIZE,
+            "benchmark_symbols": sorted(BENCHMARK_SYMBOLS),
+            # #2254 — the maintenance arm's staleness boundary MUST be the
+            # same one _candles_are_fresh uses to decide whether to spend a
+            # request. A scope predicate looser than the skip predicate
+            # burns requests on instruments that are then skipped; tighter,
+            # and the series it excludes never get refreshed at all.
+            "fresh_through": _most_recent_trading_day(date.today()),
+        }
 
-    def test_bootstrap_batch_size_is_200(self) -> None:
-        """Sanity check the constant value."""
-        assert _T3_BOOTSTRAP_BATCH_SIZE == 200
+    def test_t3_batch_size_covers_the_t3_population(self) -> None:
+        """#2254 — the cap is a SAFETY CEILING, not a rationing device.
+
+        At 200 (its seed-only value) it sits an order of magnitude below
+        the ~3,850 T3 instruments needing a fetch, which would mean
+        permanent partial coverage with a rotating fresh set."""
+        assert _T3_CANDLE_BATCH_SIZE == 5000
 
     def test_daily_candle_refresh_includes_benchmark_before_t3(self) -> None:
         """Benchmark instruments appear in the refresh list before T3 rows."""
@@ -258,10 +275,10 @@ class TestDailyCandleRefreshT3Bootstrap:
         assert 900 in ids
 
     def test_t3_select_excludes_benchmark_symbols(self) -> None:
-        """_T3_BOOTSTRAP_SELECT must reference %(benchmark_symbols)s."""
-        from app.workers.scheduler import _T3_BOOTSTRAP_SELECT
+        """_T3_CANDLE_SELECT must reference %(benchmark_symbols)s."""
+        from app.workers.scheduler import _T3_CANDLE_SELECT
 
-        assert "benchmark_symbols" in _T3_BOOTSTRAP_SELECT
+        assert "benchmark_symbols" in _T3_CANDLE_SELECT
 
 
 # ---------------------------------------------------------------------------
