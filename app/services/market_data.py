@@ -357,11 +357,15 @@ def refresh_market_data(
         upserted = 0
         computed = 0
         adjustment_detected = False
-        # #2262 — snapshot BEFORE the fetch so the supply marker can tell
-        # "the provider had nothing" from "we never asked". Read outside the
-        # transaction below so a rolled-back write cannot corrupt the baseline.
-        last_bar_before = _last_bar(conn, instrument_id)
         try:
+            # #2262 — snapshot BEFORE the fetch so the supply marker can tell
+            # "the provider had nothing" from "we never asked". INSIDE the
+            # per-instrument try (and outside the transaction below, so a
+            # rolled-back write cannot corrupt the baseline): a transient DB
+            # error reading it is a per-instrument fault like any other, and
+            # raising it here would abort the whole batch loop, which is the
+            # one thing this loop's error handling exists to prevent.
+            last_bar_before = _last_bar(conn, instrument_id)
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
                 # #2066 split-cliff guard: provider history is back-adjusted
@@ -416,9 +420,20 @@ def refresh_market_data(
                         last_bar_before=last_bar_before,
                         last_bar_after=_last_bar(conn, instrument_id),
                     )
-            except psycopg.Error:
-                # Bookkeeping must never cost a candle refresh. Its own
-                # transaction so a failure here cannot roll back the bars.
+            except Exception:
+                # DELIBERATELY BROAD, against the usual rule. The candle write
+                # has already COMMITTED at this point. Any exception escaping
+                # here reaches the outer handler, which increments
+                # ``candles_failed`` and logs the instrument as a failed refresh
+                # — mislabelling a successful fetch, and corrupting the job's own
+                # health signal in the direction #2218 documents (a run whose
+                # reported outcome does not match what it actually did).
+                #
+                # The usual objection to a broad except is that it hides a
+                # genuine TypeError/AttributeError bug. That is answered by
+                # scope and by ``exc_info``: this guards two bookkeeping calls,
+                # not a work path, and the full traceback is logged at WARNING
+                # every time. A bug here is loud; it just is not fatal.
                 logger.warning(
                     "Failed to record price-supply outcome for %s (id=%d)", symbol, instrument_id, exc_info=True
                 )

@@ -38,7 +38,19 @@ CREATE TABLE IF NOT EXISTS instrument_price_supply (
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Read pattern: "which eligible instruments look supply-less?" and the T3 scope
--- query's per-instrument lookup.
-CREATE INDEX IF NOT EXISTS idx_instrument_price_supply_no_advance
-    ON instrument_price_supply (consecutive_no_advance DESC, last_attempt_at);
+-- NO SECONDARY INDEX, deliberately. The first draft carried
+-- (consecutive_no_advance DESC, last_attempt_at), which does not serve either
+-- read:
+--
+--   * the T3 scope query filters with an OR across those two columns
+--     (`consecutive_no_advance < N OR last_attempt_at < now() - interval`), and
+--     a composite index cannot serve an OR branch on its trailing column;
+--   * it is the nullable side of a LEFT JOIN, so every row is visited anyway.
+--
+-- Measured on the dev corpus rather than argued from the shape: the planner
+-- takes a Seq Scan on this table with the index present (cost 0.00..2.20), and
+-- the whole scope query runs in 52ms over 10,483 result rows. The table is
+-- bounded at ONE ROW PER TRADABLE INSTRUMENT — 12,684 today — so a sequential
+-- scan of narrow fixed-width rows is the correct plan and an index is pure
+-- write cost. Add one when a read exists that measurably wants it, per the
+-- #2230/#2231 lesson that read-time cost is decided by EXPLAIN, not by shape.
