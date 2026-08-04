@@ -323,6 +323,45 @@ Consequences:
     mean 20-bar return    +105.73% -> +0.95%   hit rate  49.884% -> 49.901%
     ```
 
+    > ⚠⚠ **FOUR of those figures are SUPERSEDED by the 0a implementation (#2261,
+    > merged `9bcb9f33`). Do not use the block above as an acceptance criterion.**
+    > The live figures are served by `GET /price-quarantine/census`; read that, not
+    > this. Unchanged and still exact: 3,236,874 bars / 5,226 instruments,
+    > B1 137 / B2 140 / B3 215 / B4 40, `return_usable = false` **177**,
+    > T1 **214** / T2 **556**, T3 **148 triggered / 34 turnover-admitted**.
+    >
+    > 1. **`range_usable = false` 492 → 532.** S7 contradicts itself: §4 assigns
+    >    B4's class "both false", while §5's summary line computes
+    >    `range = B1 ∪ B2 ∪ B3` (arithmetically 137+140+215). A sentinel bar stored
+    >    flat at `0.0001` has an internally consistent range at a meaningless
+    >    level, so every touch test against it is nonsense — §4 is right and §5's
+    >    formula is the stale half. The delta is exactly B4's 40 bars.
+    > 2. **T3 114 → 111, transitions quarantined 884 → 881.** The 3 missing are
+    >    DEFERRED, not admitted: they touch a bar in the trailing correction
+    >    window, and T3's corroboration reads `volume`, which on a part-session bar
+    >    is a part-session count. S7 had no provisional concept and decided them.
+    >    111 + 3 = 114; 214 + 556 + 111 = 881, + 3 = 884.
+    > 3. **T3 excludes T2-explained transitions.** S7's written rule says "not
+    >    explained by T1", but its own census excluded T2 overlaps — including them
+    >    yields 181 triggers, not 148. Excluding them reproduces 148 exactly, and it
+    >    is independently right: a ratio spanning a series hole is not a same-scale
+    >    comparison, and a `price_series_break` minted from a gap strands history
+    >    behind a break that never happened.
+    > 4. **Breaks 59 instruments / 11,410 bars → 71 / 13,503.** ⚠ **S7 never stated
+    >    its break derivation** — §8 gives counts but not the rule producing them.
+    >    0a defines it explicitly: a break is a T3-quarantined transition. That is a
+    >    broader set, and deliberately the safe direction — over-stranding is
+    >    marked, published and reversible by an adjustment row; under-stranding
+    >    silently joins across a real break. **Not tuned to reproduce 59.**
+    >
+    > Also inherited, and it changes nothing today but will: `eu_equity` /
+    > `uk_equity` / `asia_equity` / `mena_equity` are given the **equity**
+    > parameters (T = 5×), not the strict 2× default. S7's threshold table covers
+    > only the five classes that had bars to measure, and the priced universe is
+    > `us_equity` 4,795 / `crypto` 289 / `fx` 63 / `commodity` 44 / `index` 35 —
+    > **zero non-US equities**. Once #2262's seeding gives them bars, per-class
+    > p99.99 recalibration is owed.
+
     Unadjustable history is **marked, never dropped** — `price_series_break` rows
     plus a per-instrument **segment** model (a single `usable_from` gate discards
     joinable segments when an instrument has several breaks and only some resolve).
@@ -351,14 +390,14 @@ falsifies is worse than no ticket.
 
 | # | phase | gated on |
 | --- | --- | --- |
-| 0a | adjusted-price + eligibility layer (adjustment table, quarantine rules, per-strategy eligible universe). Eligibility predicate + the two items it owns: §3 decision 9; quarantine rules + adjustment/break schema: §3 decision 10 | S6 ✅, S7 ✅, **#2254** ✅ — **unblocked** |
+| 0a | adjusted-price + eligibility layer (adjustment table, quarantine rules, per-strategy eligible universe). Eligibility predicate + the two items it owns: §3 decision 9; quarantine rules + adjustment/break schema: §3 decision 10 | ✅ **SHIPPED 2026-08-04** — #2261 (`9bcb9f33`) + #2262 (`933125f5`). Live census: `GET /price-quarantine/census`. See the ⚠⚠ block on §3 decision 10 for the four figures the implementation superseded. |
 | 0b | collector path — universe-wide WS subscription coexisting with the SSE path | S1, S3 |
 | 0c | tick persistence — tiered: short-retention raw layer, durable 1-min bars, time partitioning | S2 |
 | 1 | heat map (`?view=heatmap`) — first consumer, proves the spine end to end | 0b, 0c, S4 |
-| 2 | historical indicator recomputation from raw OHLCV | 0a |
+| 2 | historical indicator recomputation from raw OHLCV | 0a ✅ — **unblocked, next** |
 | 3 | strategy registry + signal ledger + **execution semantics** (shared with 5) | 2 |
 | 4 | outcome resolver (`tp_hit`/`sl_hit`/`expired`/`ambiguous`) | 3, S5 |
-| 5 | bounded backtester — window and eligible universe stated on every number | 2, 3 |
+| 5 | bounded backtester — window and eligible universe stated on every number | 2, 3, **#2260** (RSI<30 → 76.8% unexplained; a backtest-validity signal of exactly phase 5's shape — do not start without it) |
 | 6 | signals lens + strategy performance surface | 4, 5 |
 | 7 | paper portfolio + capital allocation, through `execution_guard` | 6 |
 | 8 | strategy discovery (constrained search) | 6, 7 |

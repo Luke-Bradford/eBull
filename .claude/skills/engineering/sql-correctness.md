@@ -143,6 +143,23 @@ Identical output ⇒ contract preserved; any delta needs a stated reason in the 
 
 The runner records each applied file's SHA-256 in `schema_migrations.content_sha256` (#1333) and **raises at boot** if an applied file's content changed. Editing `sql/NNN_*.sql` after any DB recorded it (dev included — drafts applied during PR development count) is therefore a boot-breaker, not a silent no-op. All follow-up changes go into a new `NNN+1` file. If you knowingly replayed an edited file manually (idempotent), reset its hash: `UPDATE schema_migrations SET content_sha256 = NULL WHERE filename = '<file>'` — never DELETE the row. Full RCA in `docs/review-prevention-log.md` ("Migration content drift").
 
+**The unshipped-draft case is different, and nulling the hash is WRONG for it (#2262, 2026-08-04).** While a migration is still in an open PR it exists on exactly one DB — your dev box — and review feedback routinely changes it. A new `NNN+1` file to fix a file that has never left your branch ships two migrations where the PR contains one concept. Nulling the hash is worse still: it declares "the DB matches the file" when it does not. A review that made me **remove an index** from `sql/248` left that index sitting in dev while the file no longer created it, so a null hash would have recorded agreement between a file and a schema that disagreed.
+
+For a draft migration whose content genuinely DIVERGED (not an idempotent replay), undo its effects and re-apply from scratch:
+
+```python
+with psycopg.connect(settings.database_url, autocommit=True) as c:   # autocommit — see below
+    c.execute("DROP TABLE IF EXISTS <what the migration created>")
+    c.execute("DELETE FROM schema_migrations WHERE filename = '<file>'")
+run_migrations()
+# then ASSERT the recorded hash equals sha256(file bytes) — do not assume
+```
+
+This is the one place `DELETE FROM schema_migrations` is correct, and it stops being correct the moment the migration is merged. **Two traps came with it:**
+
+- ⚠ **`autocommit=True` on DDL scripts.** `psycopg.connect()` defaults to a transaction. A `DROP INDEX`/`DROP TABLE` takes an ACCESS EXCLUSIVE lock and holds it until commit — so a script that raises, times out, or is killed by the harness leaves an `idle in transaction` backend blocking every later attempt. I stacked three of these and deadlocked myself. Diagnose with `SELECT pid, state, wait_event_type, left(query,60) FROM pg_stat_activity WHERE datname='ebull' AND state <> 'idle'`; clear with `pg_terminate_backend(pid)`. Killing the CLIENT does not close the backend.
+- ⚠ **The dev API server runs migrations on every `--reload`**, so touching anything under `app/` re-applies whatever is on disk *at that moment* and can re-record a hash mid-repair. Do the reset and the re-apply in ONE script, then verify the stored hash rather than trusting the sequence.
+
 ## Constraints live in two places — grep both
 
 The `CREATE TABLE` statement is **not** authoritative for CHECK / FK / UNIQUE constraints. Subsequent migrations land additional constraints via `ALTER TABLE ... ADD CONSTRAINT`. Before writing any code (seeder, fixture, parser, ingester) that emits or accepts values for a column, grep both:

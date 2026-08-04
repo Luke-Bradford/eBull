@@ -147,6 +147,34 @@ hazard was Item 402(g) tables **newly clearing the floor** — 47 shapes in a
 Before running the audit, write down what the change could newly admit, and
 count that.
 
+## A census over a SPARSE table has THREE clauses, not two
+
+The usual check is "does the query implement the rule". When the figure is
+counted over a table whose rows are **conditionally written** — quarantine and
+exception tables, `*_observations` written only on change, audit rows written
+only on failure — a third artefact sits between them: the predicate deciding
+what gets stored. The rule can be right, the query can be right, they can agree
+with each other, and the number can still be wrong, because the rows were never
+written.
+
+#2261 hit this twice in one PR:
+
+- T3-ADMITTED transitions were not marked notable, so they were never stored,
+  so the corroboration census read `spike: 1` where the true count was **34**.
+  **A narrowing gate's denominator is the set it ADMITTED** — publishing only
+  the rejected side makes the gate unmeasurable while every stored number stays
+  internally consistent.
+- `provisional` alone made a transition notable, storing every ordinary
+  transition in the trailing correction window, so a figure named
+  `..._provisional_deferred` reported **16,907** against a rule that yields
+  **3**.
+
+So state the storage predicate alongside the rule, and for every published
+figure with a name, answer in one line: *what is excluded from this count, and
+is that exclusion the one the name implies?* Then assert the figure against the
+number your write-up claims **before** writing the write-up — both gaps above
+were sitting in plain sight in the census output.
+
 ## Harness integrity — a clean result is the suspicious one
 
 **Never simulate the control arm.** If the harness reconstructs "what `main`
