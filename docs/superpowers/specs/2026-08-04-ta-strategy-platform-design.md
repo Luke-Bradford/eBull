@@ -108,6 +108,31 @@ Consequences:
   are structurally impossible on them and they are not comparable to the daily
   bars already stored.
 
+> ⚠ **Amended by S3 (#2243), 2026-08-04 — two claims above are wrong.**
+>
+> 1. `IntradayBar.volume` is **equity-only**. It is populated for US and Tokyo
+>    equities and is always `None` for crypto and FX, so volume-confirmed rules
+>    are impossible on those classes from *either* path, not just the WS one.
+> 2. The two paths are **the same price series**. eToro's own `OneMinute` candle
+>    is built from the **bid** (bars rebuilt from `Bid` reproduce it on 77.1% of
+>    closes / 60.3% of full OHLC; from mid or ask, 0%). So "fall back to REST
+>    candles for real prices" does not buy print-based bars — it buys volume, on
+>    equities. The choice between the paths is about **volume and cost, not price
+>    truthfulness**.
+>
+> Also settled there: `QuoteUpdate.last` is **not** a trade print — it never
+> leaves `[bid, ask]` in 26,741 observations — and is bid-side (exactly
+> `BidDiscounted` on 100% of Tokyo-equity and 97.8% of FX observations, but only
+> 58.7% of crypto). So **bars must be built from `Bid`, not `last`**, as an
+> empirical compatibility rule: `Bid` is what reproduces eToro's own candle.
+> And the WS rate push is a field-level sparse delta whose partial shapes
+> production currently discards (#2252) — the collector must carry
+> per-instrument state.
+>
+> ⚠ Measured on demo, one 10-minute window, crypto / FX / Tokyo equities. Live
+> env, US equities, HK and stressed regimes (auction, halt, wide spread) are
+> unmeasured; phase 0b should not treat them as settled.
+
 ## 3. Decisions taken
 
 1. **Win = take-profit hit before stop-loss, with a max-hold expiry.** Operator

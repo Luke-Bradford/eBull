@@ -56,14 +56,72 @@ of a documented limit is not absence of a limit.** Measured on demo
   ack is the only signal that a Subscribe did not take. eToro acks both ops:
   `{"id": …, "success": true, "operation": "Subscribe"}`.
 
-Two rate-push shapes: a fat snapshot, and a thin delta carrying only
-`{"Date","PriceRateID"}` (no price, no `InstrumentID`) that
-`_parse_rate_content` drops. 23% of inner rate messages parsed to a
-`QuoteUpdate` — **size ingest against the wire, not parsed ticks.** The
-snapshot also carries undocumented `OfficialClosingPrice`, `IsMarketOpen`,
+The snapshot also carries undocumented `OfficialClosingPrice`, `IsMarketOpen`,
 `IsExchangeOpen`, `ConversionRateBid`/`Ask` (see
 `docs/etoro-api-reference.md` §WebSocket API); undocumented means
 unversioned, so re-verify before depending on them.
+
+## WS rate semantics — MEASURED (#2243, 2026-08-04)
+
+**Rate pushes are FIELD-LEVEL SPARSE DELTAS, not "fat vs thin".** ⚠ This
+corrects the two-shape model recorded under #2241. Any subset of `Bid`,
+`Ask`, `LastExecution`, `BidDiscounted`, `AskDiscounted` can arrive alone;
+the instrument is always on the envelope `topic`, never in the payload.
+Census over 180,666 messages: 59.8% pure heartbeat, 16.8% `Bid`+`Ask`,
+10.5% `Bid`+`BidDiscounted`+`LastExecution`, 10.1% `Ask`+`AskDiscounted`,
+1.6% `LastExecution` alone, ~1.2% across 12 further combinations.
+
+- **`_parse_rate_content` requires BOTH `Bid` and `Ask`, so it drops 58.1% of
+  price-CHANGING messages** — stored quotes run 1.5–2.6× staler than the feed
+  allows. Tracked as #2252. **Any consumer must carry per-instrument state and
+  merge deltas**; requiring a complete payload sees under half the market.
+- "23% of messages parse" is right but does **not** mean "77% are inert" —
+  only ~60% are. Size ingest against the wire.
+
+**`LastExecution` is NOT a trade print** — the portal's *"price of the most
+recent trade execution"* is wrong, the second time this field's documented
+meaning has diverged from the wire (cf. #1429's `last = 0.00`). Over 26,741
+observations it **never left `[bid, ask]`** (0.00%), which a real print would.
+It is bid-side, and how tightly is asset-class-dependent — state the class, not
+a single global label:
+
+| arm | `== BidDiscounted` | reading |
+| --- | --- | --- |
+| Tokyo equity | 100.0% | is the pre-markup bid |
+| FX | 97.8% | is the pre-markup bid |
+| crypto | 58.7% | bid-*near*, not identical (median spread position 0.000, mean 0.041) |
+
+⚠ Crypto does not fit the clean story — do not carry "it IS BidDiscounted" across
+asset classes without re-measuring. `== AskDiscounted` is 0.0% everywhere.
+
+⚠ **Run the bid/ask-excursion test against `BidDiscounted`/`AskDiscounted`, not
+`Bid`/`Ask`.** eToro's markup makes the FX series look like a derived mid
+(mean spread position 0.399) when against the underlying quote it sits exactly
+on the bid. The wrong column pair yields the opposite verdict.
+
+**Build 1-minute bars from `Bid`.** This is an *empirical compatibility rule* —
+`Bid` is the series that reproduces eToro's own `OneMinute` REST candle — not a
+claim about what the candle semantically is. Reconstruction scores, 131 complete
+minutes: `Bid` 77.1% of closes / 60.3% of full OHLC; `LastExecution` 55.0% /
+48.1%; mid or ask **0%**.
+
+The residual is granularity, not a second series: on a re-run attributing all 42
+mismatches, **zero were Tokyo equities** (100% exact there), and every mismatch
+was **within 0.20%** of the REST close — median 0.0019%, max 0.0716%, none above
+1%. Reconstruction is the discriminator that settled this spike; containment
+alone did not (see the prevention-log entry).
+
+**`OneMinute` volume is equity-only** — populated for US and Tokyo equities,
+always `None` for crypto and FX. Volume-confirmed rules are structurally
+impossible on crypto/FX from either path. Bid bars cannot carry trade volume at
+all, so volume must come from the REST candle.
+
+⚠ **Scope of this verdict: demo env, one 10-minute window, crypto / FX / Tokyo
+equities.** Not measured: **live env** (may price, mark up or smooth
+differently), **US equities** (#2243's arm is still outstanding), **HK** (shut
+during the capture, 0 messages), and any stressed regime — open/close auction,
+halt, wide spread, FX rollover. Re-measure before treating any of those as
+settled.
 
 ## Maintenance
 
