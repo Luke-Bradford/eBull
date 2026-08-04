@@ -231,3 +231,43 @@ None` — or `assert v is not None`. Grep self-review: `float\(` / `int\(` /
 `Decimal\(` directly wrapping an attribute access inside a guarded block.
 
 Origin: PR #1853 (#1823) review BLOCKING on the IAR insider assembler.
+
+## `decimal.InvalidOperation` is an `ArithmeticError`, NOT a `ValueError`
+
+`Decimal("abc")` does not raise `ValueError` — it raises
+`decimal.InvalidOperation`, which inherits `DecimalException` →
+`ArithmeticError`. So the very common guard
+
+```python
+except (KeyError, TypeError, ValueError):
+```
+
+around `Decimal(str(payload["x"]))` catches a missing key and a `None`, but
+**not a non-numeric string** — the exception escapes the parser and takes
+out whatever loop is above it.
+
+Rule: any `except` tuple guarding a `Decimal(...)` construction from external
+input must include `InvalidOperation`. Grep self-review: for every
+`Decimal(` inside a `try`, check the tuple.
+
+Origin: #2252 — the WS rate parser had guarded `Decimal(str(...))` on
+untrusted wire fields with `(KeyError, TypeError, ValueError)` since #274.
+Latent, because eToro sends well-formed numbers; surfaced when the parser
+started reading more optional fields.
+
+## `except A, B, C:` without parentheses is VALID on Python 3.14 (PEP 758)
+
+This stack is 3.14+, where `except`/`except*` accept an unparenthesised
+tuple as long as there is no `as` clause. It reads exactly like the Python 2
+syntax that has been a `SyntaxError` since 3.0, so it looks like a bug on
+sight and invites a false finding.
+
+Rule: **compile it before reporting it.**
+`uv run python -c "import py_compile; py_compile.compile('<path>', cfile='/tmp/x.pyc', doraise=True)"`
+— note `cfile` must be a real path, `/dev/null` errors out with "is a
+non-regular file". Applies to reading any surprising-but-modern syntax, not
+just this one.
+
+Origin: #2252 — `app/services/etoro_websocket.py` had
+`except KeyError, TypeError, ValueError:` on `main`; verified by compiling
+before touching it.

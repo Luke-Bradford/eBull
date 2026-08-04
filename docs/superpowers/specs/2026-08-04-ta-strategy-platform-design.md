@@ -44,6 +44,38 @@ tradable instruments                        12,684
 price_daily                             3,098,914 rows, 2020-10-19 → 2026-08-03
 ```
 
+> ⚠⚠ **Superseded by S6 (#2246), 2026-08-04. The binding number is 1,406, not 5,221.**
+>
+> `5,221` counts instruments with *any* `price_daily` row. Measured on **freshness**
+> instead, only **1,406 (11.1%)** have a bar in the last 7 days. `_T3_BOOTSTRAP_SELECT`
+> carries `NOT EXISTS (price_daily)`, so a Tier-3 instrument leaves candle-refresh scope
+> on its **first** bar and nothing takes over: 3,523 of 3,838 priced T3 have no bar in
+> 30 days, and **every crypto, FX and commodity series is ~2 months stale**. Tracked as
+> **#2254**, which gates phase 0a — an adjusted-price layer over a series frozen in June
+> is not a price layer.
+>
+> The 7,463 break into **four** populations under **one** gate, not the two the ticket
+> assumed:
+>
+> | population | n | why it fails the gate |
+> | --- | --- | --- |
+> | non-US equity (eu 2,805 · uk 989 · asia 894 · mena 61) | **4,749** | **no branch it can pass** — `fundamentals_snapshot` is SEC-fed, and their `asset_class` is not in the crypto/fx/commodity/index escape hatch |
+> | `asset_class = 'unknown'` (CME 192 + 2) | 194 | deliberate; operator curates the exchange row first (#503 PR 4) |
+> | `us_equity` with no fundamentals row | 2,493 | incl. the whole "Regular Trading Hours - RTH" exchange (562), OTC 54, CBOE 47 |
+> | gate-passers with no eToro supply | 27 | selected nightly; probed all 27 → **0 bars**. The irreducible floor |
+>
+> **eToro serves the international set** — 27/28 probed non-US instruments returned bars
+> current to the prior close. The gap is our selection gate, not provider supply, and it
+> is an **accident**: nothing decides it, and it falls out of sourcing coverage tier from
+> SEC fundamentals. All 1,383 T1/T2 instruments are `us_equity`; no non-US instrument has
+> ever reached T1/T2.
+>
+> **Consequence for §7's open question ("which instruments get minute bars").** Defining
+> the focus set as "scoring-eligible" would inherit this silently and mean **US-filer
+> only**, while presenting as "the market". Define it on **price-data eligibility**
+> (tradable ∧ exchange served ∧ not in population 4) — orthogonal to fundamentals
+> coverage, and the thing the TA layer actually consumes. Full verdict on #2246.
+
 ### History depth per instrument
 
 ```
