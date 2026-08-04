@@ -1130,6 +1130,10 @@ class TestListenResilience:
             upsert_calls.append(update)
 
         sub._sync_upsert = fake_upsert  # type: ignore[method-assign]
+        # Post-#2252 ``_listen`` admits only subscribed ids, so the
+        # frame under test needs a ref. Unchanged in intent: this test
+        # asserts a rate frame still lands AFTER a private event.
+        sub._topic_refs[1001] = 1
 
         worker = asyncio.create_task(sub._reconcile_worker())
         await asyncio.sleep(0)
@@ -1167,6 +1171,52 @@ class TestListenResilience:
             worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await worker
+
+    async def test_listen_ignores_frames_for_unsubscribed_instruments(self) -> None:
+        """#2252 review round 2 — ``_rate_state`` must not be repopulated
+        by a frame for an id we no longer hold a ref for.
+
+        ``remove_instruments`` forgets BEFORE the wire Unsubscribe
+        lands, so a dropped / rejected / cancelled Unsubscribe would
+        otherwise let already-buffered frames refill the store
+        indefinitely. This is what bounds it, not ``forget``.
+        """
+        upsert_calls: list[QuoteUpdate] = []
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+        sub._sync_upsert = upsert_calls.append  # type: ignore[method-assign]
+        sub._topic_refs[1001] = 1  # 2002 deliberately absent
+
+        class FakeWs:
+            def __init__(self, frames: list[str]) -> None:
+                self._frames = frames
+
+            def __aiter__(self) -> FakeWs:
+                return self
+
+            async def __anext__(self) -> str:
+                if not self._frames:
+                    raise StopAsyncIteration
+                return self._frames.pop(0)
+
+        ws = FakeWs(
+            [
+                _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="100", Ask="101"),
+                _rate_frame(2002, "2026-08-04T10:00:00Z", Bid="200", Ask="201"),
+            ]
+        )
+        await sub._listen(ws)  # type: ignore[arg-type]
+
+        assert [u.instrument_id for u in upsert_calls] == [1001]
+        assert 2002 not in sub._rate_state._state
+        assert set(sub._rate_state._state) <= set(sub._topic_refs)
 
 
 # ---------------------------------------------------------------------------

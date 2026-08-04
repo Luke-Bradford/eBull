@@ -516,8 +516,12 @@ class RateStateStore:
 
         Called on Unsubscribe so the store tracks live subscriptions
         rather than growing for the lifetime of the process — which
-        matters once #2240's collector subscribes the full 12,684
-        universe rather than the handful of ids on screen.
+        matters once #2240's collector holds a universe-scale
+        subscription rather than the handful of ids on screen.
+
+        This is the tidy path, not the guarantee: ``_listen`` also
+        refuses to create state for an unsubscribed id, which is what
+        actually bounds the store when an Unsubscribe never lands.
         """
         for iid in instrument_ids:
             self._state.pop(iid, None)
@@ -723,7 +727,9 @@ class EtoroWebSocketSubscriber:
         # Per-instrument merged rate state (#2252). eToro's rate push
         # is a field-level sparse delta, so a bid-only message is only
         # a usable quote against the standing ask. Mutated solely on
-        # the event loop (``_listen`` / ``remove_instruments``).
+        # the event loop (``_listen`` / ``remove_instruments``), and
+        # ``_listen`` admits only ids present in ``_topic_refs``, so
+        # its key set is bounded by the live subscription set.
         # Deliberately NOT cleared on reconnect: Subscribe replays
         # with ``snapshot: True``, so a stale entry is overwritten by
         # the snapshot before any partial can be merged onto it, and
@@ -1237,8 +1243,27 @@ class EtoroWebSocketSubscriber:
             # state. Requiring a complete Bid+Ask payload — as this loop
             # did — discarded 58.1% of price-CHANGING pushes and left
             # ``quotes`` 1.5-2.6x staler than the feed allows.
+            #
+            # Gate on ``_topic_refs`` so ``_rate_state`` can only ever
+            # hold instruments we are currently subscribed to. Without
+            # it the merge state is repopulated by any frame for an
+            # unsubscribed id — and ``remove_instruments`` forgets
+            # BEFORE the wire Unsubscribe lands, so a dropped, rejected,
+            # cancelled or simply ignored Unsubscribe would let
+            # already-buffered frames refill it indefinitely. The gate
+            # turns "bounded by the universe" from a claim about the
+            # data into an invariant the code enforces.
+            #
+            # Unlocked read: ``_topic_refs`` is only mutated by
+            # ``add_instruments`` / ``remove_instruments``, which run on
+            # this same event loop, and there is no await between the
+            # read and its use — so the lock buys nothing here and
+            # taking it would serialise every frame against every
+            # page-view change.
             updates = [
-                update for delta in parse_rate_deltas(raw) if (update := self._rate_state.apply(delta)) is not None
+                update
+                for delta in parse_rate_deltas(raw)
+                if delta.instrument_id in self._topic_refs and (update := self._rate_state.apply(delta)) is not None
             ]
             for update in updates:
                 # Publish first, on the event loop, before the DB
