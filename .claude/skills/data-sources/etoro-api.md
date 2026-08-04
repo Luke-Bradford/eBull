@@ -23,6 +23,36 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
 - Trading (verified live): open by-amount/by-units; close per position with optional `UnitsToDeduct` (partial); **`PATCH /api/v2/trading[/demo]/positions/{positionId}`** for TP/SL edit (`stopLossRate`, `takeProfitRate`, `stopLossType` fixed|trailing, `clearStopLoss`, `clearTakeProfit`; ≥1 field; **202 async** `{operationId, positionId, referenceId}`).
 - Write ops are asynchronous (202) — re-sync portfolio before treating them as landed.
 
+## WebSocket limits — MEASURED, because the portal documents none
+
+`websocket/overview.md` and `websocket/topics.md` state no cap of any kind:
+no topics/frame, no topics/connection, no concurrent-session limit. **Absence
+of a documented limit is not absence of a limit.** Measured on demo
+(#2241, 2026-08-04):
+
+| limit | value | behaviour at the boundary |
+| --- | --- | --- |
+| topics per **session** | **4,999** | rejected: `errorCode: SubscribeFailed`, `"Too many subscriptions for session"`. Connection survives. Per-frame **atomic** — a straddling frame bounces whole, nothing partially applied. |
+| bytes per **frame** | **25 KiB** (25,600) | **silent: close 1006, empty reason, no ack, no error envelope.** Not applied. Bracket 25,529 B ok / 25,719 B dead. |
+
+- The session cap is **per connection, not per key** — 3 concurrent sessions
+  hold the full 12,684 universe (measured 12,684/12,684, 0 failures, 2.21s).
+- `Unsubscribe` frees capacity — live occupancy, not a lifetime budget.
+- **Chunk by BYTES, never by topic count** — instrument-id width varies, so a
+  count-based cap does not bound frame size. 500 topics ≈ 9.4 KB, proven.
+- **Correlate every frame uuid to its ack.** Over-size is silent, so a missing
+  ack is the only signal that a Subscribe did not take. eToro acks both ops:
+  `{"id": …, "success": true, "operation": "Subscribe"}`.
+
+Two rate-push shapes: a fat snapshot, and a thin delta carrying only
+`{"Date","PriceRateID"}` (no price, no `InstrumentID`) that
+`_parse_rate_content` drops. 23% of inner rate messages parsed to a
+`QuoteUpdate` — **size ingest against the wire, not parsed ticks.** The
+snapshot also carries undocumented `OfficialClosingPrice`, `IsMarketOpen`,
+`IsExchangeOpen`, `ConversionRateBid`/`Ask` (see
+`docs/etoro-api-reference.md` §WebSocket API); undocumented means
+unversioned, so re-verify before depending on them.
+
 ## Maintenance
 
 When you verify a NEW capability or find drift: update `docs/etoro-api-reference.md` + the memory reference files in the same session (skill-ownership rule — no "later").
