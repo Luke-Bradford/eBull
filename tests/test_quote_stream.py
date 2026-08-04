@@ -481,6 +481,10 @@ class TestEtoroWsBusIntegration:
             upsert_calls.append(update)
 
         sub._sync_upsert = fake_upsert  # type: ignore[method-assign]
+        # Post-#2252 ``_listen`` admits only subscribed ids (the merge
+        # state must stay bounded by the live subscription set). Intent
+        # of this test is unchanged: publish must precede upsert.
+        sub._topic_refs[1001] = 1
 
         rate = json.dumps(
             {

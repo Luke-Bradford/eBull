@@ -27,6 +27,7 @@ from app.services import etoro_websocket
 from app.services.etoro_websocket import (
     EtoroWebSocketSubscriber,
     QuoteUpdate,
+    RateStateStore,
     _await_auth_envelope,
     _compute_spread_pct,
     _is_auth_success,
@@ -37,6 +38,7 @@ from app.services.etoro_websocket import (
     build_unsubscribe_message,
     fetch_watched_instrument_ids,
     is_private_event,
+    parse_rate_deltas,
     parse_rate_message,
     parse_rate_messages,
     upsert_quote,
@@ -169,6 +171,170 @@ class TestParseRateMessage:
             {"type": "Trading.Instrument.Rate", "data": {"Bid": "1", "Ask": "2", "Date": "2026-04-24T14:30:00Z"}}
         )
         assert parse_rate_message(raw) is None
+
+
+def _rate_frame(instrument_id: int, date: str, **fields: str) -> str:
+    """One official-envelope rate frame carrying exactly ``fields``.
+
+    Mirrors the live shape: the instrument is on the envelope
+    ``topic``, never in the payload (#2243).
+    """
+    payload: dict[str, str] = {"Date": date, "PriceRateID": "x", **fields}
+    return json.dumps(
+        {
+            "messages": [
+                {
+                    "topic": f"instrument:{instrument_id}",
+                    "type": "Trading.Instrument.Rate",
+                    "content": json.dumps(payload),
+                }
+            ]
+        }
+    )
+
+
+class TestRateStateStore:
+    """#2252 — eToro's rate push is a field-level sparse delta.
+
+    Shapes below are the ones actually observed on the wire over
+    180,666 messages (#2243): only 16.8% carry Bid+Ask together, and
+    requiring both discarded 58.1% of price-CHANGING pushes.
+    """
+
+    def _apply(self, store: RateStateStore, raw: str) -> list[QuoteUpdate]:
+        return [u for d in parse_rate_deltas(raw) if (u := store.apply(d)) is not None]
+
+    def test_snapshot_then_partials_each_produce_a_tick(self) -> None:
+        """The core defect: after a complete snapshot seeds state, a
+        bid-only and an ask-only push must each emit a merged tick."""
+        store = RateStateStore()
+
+        seeded = self._apply(
+            store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="186.50", Ask="186.70", LastExecution="186.60")
+        )
+        assert [(u.bid, u.ask, u.last) for u in seeded] == [(Decimal("186.50"), Decimal("186.70"), Decimal("186.60"))]
+
+        # Bid-only — pre-#2252 this was dropped entirely.
+        bid_only = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Bid="187.00"))
+        assert len(bid_only) == 1
+        assert bid_only[0].bid == Decimal("187.00")
+        assert bid_only[0].ask == Decimal("186.70")  # standing ask retained
+        assert bid_only[0].last == Decimal("186.60")  # absent field unchanged
+        assert bid_only[0].quoted_at == datetime(2026, 8, 4, 10, 0, 1, tzinfo=UTC)
+
+        # Ask-only.
+        ask_only = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:02Z", Ask="187.40"))
+        assert len(ask_only) == 1
+        assert ask_only[0].bid == Decimal("187.00")
+        assert ask_only[0].ask == Decimal("187.40")
+
+        # LastExecution alone (1.6% of the wire).
+        last_only = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:03Z", LastExecution="187.20"))
+        assert len(last_only) == 1
+        assert last_only[0].last == Decimal("187.20")
+        assert last_only[0].bid == Decimal("187.00")
+
+    def test_heartbeat_emits_nothing(self) -> None:
+        """59.8% of messages carry no price field. Emitting on one
+        would advance quoted_at with no price behind it."""
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:05Z")) == []
+
+    def test_heartbeat_does_not_advance_the_ordering_watermark(self) -> None:
+        """Codex checkpoint-2 catch: heartbeats are the majority of the
+        wire, so if one set `quoted_at` the guard would reject the next
+        genuine price delta stamped behind it."""
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="10.00", Ask="10.02"))
+        # Heartbeat well ahead of the price stream.
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:09Z")) == []
+        # A real price delta stamped BEHIND the heartbeat but AHEAD of
+        # the last price must still be merged.
+        after = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:04Z", Bid="10.50"))
+        assert [(u.bid, u.ask) for u in after] == [(Decimal("10.50"), Decimal("10.02"))]
+
+    def test_partial_before_any_snapshot_emits_nothing(self) -> None:
+        """One side alone is not a quote — no fabricated counter-side."""
+        store = RateStateStore()
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="186.50")) == []
+        # ...and the ask completing it does emit.
+        done = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Ask="186.70"))
+        assert [(u.bid, u.ask) for u in done] == [(Decimal("186.50"), Decimal("186.70"))]
+
+    def test_present_zero_last_clears_to_none_but_absent_last_retains(self) -> None:
+        """#1429 regression guard, plus the presence-vs-value distinction:
+        a present LastExecution<=0 clears to NULL; an absent one keeps
+        the prior value."""
+        store = RateStateStore()
+        self._apply(
+            store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="697.16", Ask="697.22", LastExecution="697.20")
+        )
+
+        absent = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Bid="697.18"))
+        assert absent[0].last == Decimal("697.20")  # retained, not nulled
+
+        present_zero = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:02Z", LastExecution="0.00"))
+        assert present_zero[0].last is None  # NOT Decimal("0.00")
+
+        present_negative = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:03Z", LastExecution="-1.0"))
+        assert present_negative[0].last is None
+
+    def test_out_of_order_delta_is_ignored(self) -> None:
+        """Against merged state an out-of-order push would corrupt every
+        subsequent tick, not just lose one row."""
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:05Z", Bid="10.00", Ask="10.02"))
+
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Bid="9.00")) == []
+
+        after = self._apply(store, _rate_frame(1001, "2026-08-04T10:00:06Z", Ask="10.04"))
+        assert after[0].bid == Decimal("10.00")  # stale 9.00 never merged
+
+    def test_state_is_per_instrument(self) -> None:
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))
+        # A bid-only push for a DIFFERENT instrument must not borrow
+        # 1001's ask.
+        assert self._apply(store, _rate_frame(2002, "2026-08-04T10:00:01Z", Bid="50.00")) == []
+
+    def test_forget_drops_state(self) -> None:
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))
+        store.forget([1001])
+        assert self._apply(store, _rate_frame(1001, "2026-08-04T10:00:01Z", Bid="1.01")) == []
+
+    def test_stateless_api_still_sees_only_complete_pushes(self) -> None:
+        """parse_rate_messages keeps its pre-#2252 contract."""
+        assert parse_rate_messages(_rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00")) == []
+        assert len(parse_rate_messages(_rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))) == 1
+
+    def test_batched_frame_merges_deltas_in_order(self) -> None:
+        """A single frame can carry several partials for one instrument;
+        each must merge onto the result of the previous."""
+        store = RateStateStore()
+        self._apply(store, _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1.00", Ask="1.02"))
+        raw = json.dumps(
+            {
+                "messages": [
+                    {
+                        "topic": "instrument:1001",
+                        "type": "Trading.Instrument.Rate",
+                        "content": json.dumps({"Date": "2026-08-04T10:00:01Z", "Bid": "1.10"}),
+                    },
+                    {
+                        "topic": "instrument:1001",
+                        "type": "Trading.Instrument.Rate",
+                        "content": json.dumps({"Date": "2026-08-04T10:00:02Z", "Ask": "1.15"}),
+                    },
+                ]
+            }
+        )
+        updates = self._apply(store, raw)
+        assert [(u.bid, u.ask) for u in updates] == [
+            (Decimal("1.10"), Decimal("1.02")),
+            (Decimal("1.10"), Decimal("1.15")),
+        ]
 
 
 class TestParseRateMessageOfficialEnvelope:
@@ -964,6 +1130,10 @@ class TestListenResilience:
             upsert_calls.append(update)
 
         sub._sync_upsert = fake_upsert  # type: ignore[method-assign]
+        # Post-#2252 ``_listen`` admits only subscribed ids, so the
+        # frame under test needs a ref. Unchanged in intent: this test
+        # asserts a rate frame still lands AFTER a private event.
+        sub._topic_refs[1001] = 1
 
         worker = asyncio.create_task(sub._reconcile_worker())
         await asyncio.sleep(0)
@@ -1001,6 +1171,52 @@ class TestListenResilience:
             worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await worker
+
+    async def test_listen_ignores_frames_for_unsubscribed_instruments(self) -> None:
+        """#2252 review round 2 — ``_rate_state`` must not be repopulated
+        by a frame for an id we no longer hold a ref for.
+
+        ``remove_instruments`` forgets BEFORE the wire Unsubscribe
+        lands, so a dropped / rejected / cancelled Unsubscribe would
+        otherwise let already-buffered frames refill the store
+        indefinitely. This is what bounds it, not ``forget``.
+        """
+        upsert_calls: list[QuoteUpdate] = []
+        sentinel: Any = object()
+        sub = EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+        sub._sync_upsert = upsert_calls.append  # type: ignore[method-assign]
+        sub._topic_refs[1001] = 1  # 2002 deliberately absent
+
+        class FakeWs:
+            def __init__(self, frames: list[str]) -> None:
+                self._frames = frames
+
+            def __aiter__(self) -> FakeWs:
+                return self
+
+            async def __anext__(self) -> str:
+                if not self._frames:
+                    raise StopAsyncIteration
+                return self._frames.pop(0)
+
+        ws = FakeWs(
+            [
+                _rate_frame(1001, "2026-08-04T10:00:00Z", Bid="100", Ask="101"),
+                _rate_frame(2002, "2026-08-04T10:00:00Z", Bid="200", Ask="201"),
+            ]
+        )
+        await sub._listen(ws)  # type: ignore[arg-type]
+
+        assert [u.instrument_id for u in upsert_calls] == [1001]
+        assert 2002 not in sub._rate_state._state
+        assert set(sub._rate_state._state) <= set(sub._topic_refs)
 
 
 # ---------------------------------------------------------------------------

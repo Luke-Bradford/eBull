@@ -448,19 +448,34 @@ equities):
 | share | shape |
 | --- | --- |
 | 59.8% | heartbeat — `{"Date","PriceRateID"}` only, no price field |
-| 16.8% | `Bid`+`Ask` — **the only shape `_parse_rate_content` accepts** |
+| 16.8% | `Bid`+`Ask` — the only shape a stateless parser can use on its own |
 | 10.5% | `Bid`+`BidDiscounted`+`LastExecution` |
 | 10.1% | `Ask`+`AskDiscounted` |
 | 1.6% | `LastExecution` alone |
 | ~1.2% | 12 further partial combinations |
 
-`_parse_rate_content` requires **both** `Bid` and `Ask`, so it discards every
-partial: **58.1% of price-CHANGING messages are dropped** (21,245 of 36,564),
-making the stored quote 1.5–2.6× staler than the feed allows (median gap
-between usable updates vs actual price changes: crypto 3.01s vs 1.15s, JP
-3.99s vs 1.85s, FX 1.53s vs 1.02s). Tracked as #2252. **A consumer must carry
-per-instrument state and merge deltas** — requiring a complete payload sees
-under half the market.
+**A consumer must carry per-instrument state and merge deltas** — requiring a
+complete payload sees under half the market. Until #2252, `_parse_rate_content`
+required **both** `Bid` and `Ask` and discarded every partial: **58.1% of
+price-CHANGING messages dropped** (21,245 of 36,564), making the stored quote
+1.5–2.6× staler than the feed allows (median gap between usable updates vs
+actual price changes: crypto 3.01s vs 1.15s, JP 3.99s vs 1.85s, FX 1.53s vs
+1.02s).
+
+Fixed in #2252: `parse_rate_deltas()` → `RateStateStore.apply()` in
+`app/services/etoro_websocket.py`. Paired-arm acceptance (184 crypto/FX
+instruments, 300 s, one captured stream through both parsers, 46,037 deltas):
+share of wire price-changes captured **39.9% → 91.5%**; median usable-update
+gap **4.09s → 1.27s** against a 1.27s wire gap, i.e. staleness **3.21× →
+1.00×** (crypto 4.58× → 1.00×, FX 2.20× → 1.00×). Two rules fall out of the
+merge and bind any reimplementation:
+
+- **Presence ≠ value.** An absent `LastExecution` means "unchanged"; a present
+  one that is ≤ 0 means "not a real trade → NULL" (#1429). A single nullable
+  field cannot carry both, so the delta type needs explicit presence flags.
+- **A heartbeat must not advance the ordering watermark.** Heartbeats are the
+  majority of the wire; if one stamps the merge state's `quoted_at`, the
+  out-of-order guard then rejects the next genuine price delta behind it.
 
 **Size ingest against the wire, not against parsed ticks.** The earlier "23%
 parse" figure is right but was read as "77% are inert"; only ~60% are.
