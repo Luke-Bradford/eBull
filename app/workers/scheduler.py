@@ -751,9 +751,15 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         catch_up_on_boot=True,
         exempt_from_universal_bootstrap_gate=True,
     ),
-    # -- Outside-DAG jobs (5 kept on their own cron triggers) ------------
+    # -- Outside-DAG jobs (own cron triggers) ----------------------------
     # These have empty JOB_TO_LAYERS entries and remain independently
     # scheduled; they do not participate in the orchestrator DAG.
+    #
+    # The count that used to sit in this banner ("5 kept") was the Phase-4
+    # migration tally, not a description of the section, and had already
+    # drifted well past 5 before #2271 added another. Dropped rather than
+    # bumped: a hand-maintained count in a section header is a comment that
+    # goes stale on the next append, silently, and nothing reads it.
     ScheduledJob(
         name=JOB_QUOTES_REFRESH,
         display_name="Quote refresh",
