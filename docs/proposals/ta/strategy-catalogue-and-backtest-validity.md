@@ -96,6 +96,69 @@ Measured 2026-08-04, after the challenge:
   Bank, failed May 2023): **3,933 bars, 2010-12-09 → 2026-08-03, last close
   $0.0004.** The failure is right there in the data.
 
+> ### ⚠ 0.1 CORRECTION (2026-08-05, spike S8 / #2284) — both bullets above are wrong
+>
+> They are left in place because the reasoning built on them propagated into the
+> consequences below, and a silent edit would hide that. **Read this block as
+> superseding them.** Full measurements and method: #2284.
+>
+> **(a) "Public price feeds retain delisted names" is false at cohort scale.** It
+> was inferred from one hand-picked example. Tested against every 2023 Form 25
+> common-equity delisting — **382 tickers**, issuer resolved from the filing XML,
+> symbol from the pre-delisting cover-page `dei:TradingSymbol`:
+>
+> | outcome on the free public feed | n | share |
+> | --- | ---: | ---: |
+> | no series at all | 334 | **87.4%** |
+> | series *starts after* the delisting (unrelated company on the ticker) | 10 | 2.6% |
+> | series *spans* the delisting (successor entity, or OTC continuation) | 38 | 9.9% |
+> | **series that stops at the delisting** | **0** | **0.0%** |
+>
+> Nothing marks which case a symbol is. `SI` (Silvergate Capital, failed 2023)
+> now returns a series **beginning 2025-07-31** — a different company. `SAFE`
+> returns 9,244 bars from 1989, which is iStar's history welded to Safehold's
+> ticker. **`FRCB` is the 9.9% OTC-continuation case and generalises to nothing.**
+> Survivorship needs a source that is explicitly survivorship-bias-free; every
+> such source is paid. See #2284 for the chosen one and its price.
+>
+> **(b) "622 filings in 2023 QTR1" counts index ROWS, not filings** — EDGAR
+> indexes each 25-NSE under *both* the exchange CIK and the issuer CIK. QTR1 is
+> **329 distinct accessions**; full-year 2023 is 2,437 rows → **1,282 filings**.
+>
+> **(c) Form 25 is per-SECURITY, not per-issuer, and needs a rule-provision
+> filter.** Source rule: **17 CFR 240.12d2-2**. Berkshire Hathaway filed two
+> 25-NSEs in 2023; `<descriptionClassSecurity>` reads *"0.625% Senior Notes due
+> 2023"*. A "CIK in a Form 25 ⇒ delisted" register marks **Berkshire delisted in
+> January 2023**. The discriminator is `<ruleProvision>` in the filing's
+> structured XML — (a)(1) redemption-with-funds-deposited and (a)(2) redeemed/
+> matured are debt lifecycle, **440 of 1,282 (34.3%) of 2023 filings**, and are
+> not delistings. Only (a)(3) substitution-by-operation-of-law, (a)(4) rights
+> extinguished, (b) exchange-initiated, and issuer-filed Form 25 = (c) voluntary
+> withdrawal are. Filtering on provision *and* common-equity class gives **578
+> filings / 443 issuers** for 2023.
+>
+> **(c2) A survivorship-free corpus is shallower than §0 assumed, and that reopens
+> §2.2.** §0 argued that with ~45 years of history "the walk-forward objection
+> largely dissolves". Depth and survivorship-freedom turn out to be *different
+> purchases*. EODHD's delisted history carries **EOD prices only before 2018** — no
+> splits, no dividends — and an unadjusted series with unknown splits is not a
+> usable TA input, so its survivorship-free window is effectively **2018→present**.
+> Sharadar is survivorship-free from **1998** with split/dividend adjustment, but
+> is **US-only**. So the honest options are ~8 years global, or ~28 years US.
+> Either way **§2.2's argument for few simple strategies stands on data grounds
+> after all**, not only on overfitting discipline — the walk-forward objection did
+> not dissolve, it moved. Decide the fork before §4's catalogue is fixed: it
+> determines whether S-2 cross-sectional momentum has a survivorship-corrected
+> universe to run on at all.
+>
+> **(d) The register carries no ticker and SEC will not supply one.**
+> `submissions` JSON drops `tickers` to `[]` on delisting;
+> `companyconcept/…/dei/TradingSymbol.json` 404s (the XBRL company APIs are
+> numeric-facts-only). The symbol must be read from the **cover-page inline XBRL**
+> of the last periodic report filed before the delisting — which resolved
+> **382 of 443 (86.2%)**, the residue being closed-end funds and foreign private
+> issuers. #2282 needs this as an explicit resolution step, not an assumed join.
+
 **~4 years is eToro's ceiling, not the market's.** Tested via yfinance:
 **AAPL 11,502 bars back to 1980-12-12**; MSFT 10,176; JPM 11,690; GME 6,157.
 That is **~10× the history** our corpus holds, free. §2.2's "one-and-a-bit
@@ -131,12 +194,27 @@ criterion 10).
    calibrated cost input rather than a guess). Signals are generated and
    backtested on the research corpus; only fills, costs and live quotes come
    from eToro.
+   ⚠ **Still correct as an architecture — but "from public data" meant "free"
+   here, and §0.1(a) killed that.** The split stands; the research corpus comes
+   from a paid, survivorship-bias-free vendor (#2284), not a free retail feed.
 2. **"Start recording today" was wrong** as the primary answer on survivorship.
    Still worth doing for our own forward record, but it is now a *supplement* to
    a reconstructable history, not the only path. Downgraded accordingly.
+   ⚠ **Partially reinstated by §0.1(a).** The history is reconstructable for US
+   equities (Form 25, filtered per §0.1(c)) and for whatever the chosen vendor's
+   delisted flag covers. Outside that — ~4,749 non-US instruments — there is no
+   free dated delisting register, so forward recording *is* the only path there.
 3. **§2.2's argument for few simple strategies still stands** — but on the
    grounds of overfitting discipline and multiple-testing (§5 criterion 6), not
    on data scarcity. With 45 years the walk-forward objection largely dissolves.
+4. ⚠ **The source that produced every §0 measurement is not the source we will
+   use.** yfinance/Yahoo proved the architecture and is disqualified from
+   carrying it: Yahoo's ToS §2.4(i) prohibits automated collection and §2.4(j)
+   prohibits building "any database, archive … data feed" from the Services —
+   which is exactly what a stored research corpus is. That is a stronger
+   objection than "unofficial scraper" and no library stability fixes it. The
+   §0 *findings* survive (the two series are still interchangeable; the market
+   still has decades of history); only the vendor changes. See #2284.
 
 **Also settled the tooling question, empirically.** `vectorbt 1.1.0` installs and
 runs on this repo's Python 3.14 (verified: a full MA-crossover backtest with
@@ -152,6 +230,13 @@ semantics), §4 (the catalogue), §5 (validity gates) and §6 (governance) are
 unaffected by the correction — if anything §5's gates matter more now, because a
 45-year survivorship-inclusive corpus makes it possible to run the tests that
 were previously impossible.
+
+⚠ **One qualification on that last clause, from §0.1.** A survivorship-inclusive
+corpus is now a *purchase*, not a download, and it is US-complete rather than
+globally complete. §5's gates are unaffected; what changes is that the universe
+they can honestly be run over may be US equities only. That is a scope decision
+for the catalogue (§4), and it should be made explicitly rather than discovered
+when a global backtest quietly excludes its own losers.
 
 ---
 

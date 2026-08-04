@@ -320,6 +320,83 @@ def _parse_sec_date(s: str) -> date:
     raise ValueError(f"unrecognised SEC date: {s!r}")
 ```
 
+### 2.6 Form 25 / 25-NSE — delisting notifications (Rule 12d2-2)
+
+**Source rule: 17 CFR 240.12d2-2.** These are the authoritative, dated record of a
+security being removed from listing and registration. Discoverable via full-index by form
+type; `primary_doc.xml` is structured XML (`<notificationOfRemoval>`), so no HTML scraping.
+Four traps, all measured on the 2023 cohort in #2284 — every one of them silently inflates
+or corrupts a delisting register.
+
+**Trap 1 — index ROWS are not filings.** EDGAR indexes a 25-NSE under *both* the exchange
+CIK and the issuer CIK, so a naive row count roughly doubles. 2023 QTR1 is **622 rows /
+329 accessions**; full-year 2023 is **2,437 rows / 1,282 filings**. De-duplicate on
+accession, never on `(cik, form)`.
+
+**Trap 2 — a Form 25 is per-SECURITY, not per-issuer.** `<descriptionClassSecurity>` names
+the class struck from the tape, which is very often a bond, warrant, unit or preferred.
+Berkshire Hathaway filed two 25-NSEs in 2023 (*"0.625% Senior Notes due 2023"*). **"CIK
+appeared in a Form 25 ⇒ delisted" marks Berkshire delisted in January 2023.**
+
+**Trap 3 — filter on `<ruleProvision>`, and know what each paragraph means.** Roughly a
+third of filings are debt-lifecycle events, not delistings:
+
+| provision | condition | 2023 n | equity delisting? |
+|---|---|---|---|
+| `12d2-2(a)(1)` | class called for redemption/maturity/retirement; funds deposited | 250 | no |
+| `12d2-2(a)(2)` | class redeemed or paid at maturity | 190 | no |
+| `12d2-2(a)(3)` | instruments now evidence *other* securities by operation of law (merger / reorg) | 486 | **yes** |
+| `12d2-2(a)(4)` | all rights pertaining to the class extinguished | 9 | **yes** |
+| `12d2-2(b)` | exchange-initiated discretionary delisting (non-compliance) | 219 | **yes** |
+| *(absent)* | issuer-filed **Form 25** = `12d2-2(c)` voluntary withdrawal | 128 | **yes** |
+
+`(a)(1)+(a)(2)` = **440 of 1,282 (34.3%)** of 2023 filings. Note that issuer-filed Form 25
+(paragraph (c)) does **not** carry the `notificationOfRemoval` schema — it is a separate
+document shape with no `<ruleProvision>`, so branch on `form in ("25", "25/A")` rather than
+treating a missing provision as unparseable.
+
+⚠ **(b) and (a)(3) are not the same event for a backtest.** (b) is a failure; (a)(3) is an
+acquisition or holdco reorganisation where shareholders received something. A vendor's
+flat "delisted" flag cannot distinguish them; this rule provision can, which is why the
+EDGAR register is worth keeping even alongside a paid survivorship-free feed.
+
+**Trap 4 — the register carries no ticker, and SEC will not give you one.** `submissions`
+JSON drops `tickers` to `[]` once a company delists (verified: Umpqua CIK 1077771,
+Quotient CIK 1115128), and `companyconcept/CIK…/dei/TradingSymbol.json` **404s** — the XBRL
+company APIs serve numeric facts only (`dei/EntityCommonStockSharesOutstanding` returns 200
+for the same CIK). The symbol must be read from the **cover-page inline XBRL** of the last
+periodic/current report filed *before* the delisting:
+
+```python
+TS_RE = re.compile(r'name=["\']dei:TradingSymbol["\'][^>]*>([^<]{1,20})<', re.I)
+# walk submissions.recent for 10-K/10-Q/8-K/20-F/40-F with filingDate <= delisting date,
+# newest first, fetch primaryDocument, take the first match
+```
+
+Resolved **382 of 443 issuers (86.2%)** on the 2023 equity cohort; the residue is
+closed-end funds and foreign private issuers whose cover XBRL differs.
+
+**Trap 5 — a Form 25 carries three different dates; pick the one your consumer needs.**
+The `EX-99` rule-provision exhibit distinguishes them explicitly. Berkshire's 2023-01-17
+filing reads: *"intention to remove … at the opening of business on **January 30, 2023**"*,
+*"redeemed or paid at maturity … on **January 17, 2023**"*, and *"this security was
+suspended from trading on **January 17, 2023**"*. The `filed` date in `master.idx` is a
+**fourth** thing again. For truncating a price series, the last tradable date is the
+**suspension** date, not the filing date and not the removal-effective date.
+
+**Coverage limit, stated once:** Form 25 is **US-only**. There is no free authoritative
+equivalent for EU / UK / Asia / MENA listings.
+
+**The cohort this builds is a reusable vendor acceptance test.** Any candidate price
+vendor claiming survivorship-bias-free coverage should be run against it before purchase:
+does it serve each name, does the series terminate at the suspension date, and does it
+avoid handing back the *successor* entity's or a later occupant's history under the same
+symbol. Known cohort bias to state when using it: ticker resolution drops closed-end funds
+(they file N-CSR, not a cover-page-XBRL 10-K) and some foreign private issuers — 38% of the
+61 unresolved 2023 issuers were fund/trust-shaped versus 1% of the 382 resolved. The
+provision mix is **unbiased on the failure-vs-acquisition axis** ((a)(3) 61% / (b) 39%
+unresolved, versus 60% / 39% resolved), which is the axis survivorship actually turns on.
+
 ## 3. Identifiers
 
 ### 3.1 CIK (Central Index Key)
