@@ -428,6 +428,43 @@ Rate message fields: `Ask`, `Bid`, `LastExecution`, `Date` (ISO 8601),
 `UnitMarginBid`, `BidDiscounted`, `AskDiscounted`,
 `UnitMarginBidDiscounted`, `UnitMarginAskDiscounted`).
 
+**Undocumented fields present on the snapshot push** (measured #2241,
+2026-08-04 — absent from `api-reference/websocket/topics.md`, therefore
+unversioned; re-verify anything load-bearing): `InstrumentID`,
+`IsInstrumentActive`, `OfficialClosingPrice`, `IsMarketOpen`,
+`IsExchangeOpen`, `ConversionRateBid`, `ConversionRateAsk`, `AllowBuy`,
+`AllowSell`, `MaxPositionUnits`. `IsMarketOpen` and `IsExchangeOpen` are
+independent and do disagree (EURUSD: `true` / `false` at 23:37 UTC).
+
+**Two push shapes.** The fat snapshot above, and a steady-state thin delta
+carrying only `{"Date", "PriceRateID"}` — no price, no `InstrumentID`
+(the instrument is only on the envelope's `topic`). `_parse_rate_content`
+returns `None` for the thin shape. Measured ratio: 2,422 parsed
+`QuoteUpdate`s out of 10,564 inner rate messages (23%). **Size ingest
+against the wire, not against parsed ticks.**
+
+### WebSocket limits (measured, #2241 — the portal documents NONE)
+
+| limit | value | behaviour at the boundary |
+| --- | --- | --- |
+| topics per **session** | **4,999** | Subscribe rejected with `errorCode: SubscribeFailed`, `errorMessage: "Too many subscriptions for session"`. Connection survives. Rejection is **per-frame and atomic** — a frame straddling the cap bounces whole. |
+| bytes per **frame** | **25 KiB** (25,600) | **No ack, no error — the server closes with 1006 and an empty reason.** Subscription not applied. Bracket: 25,529 B acked / 25,719 B closed. |
+
+The session cap is **per connection, not per API key**: concurrent sessions
+each get their own 4,999, so the full 12,684-instrument universe fits in 3
+(measured: 12,684/12,684 accepted, 0 failures, 2.21s, no disconnect over a
+120s hold). `Unsubscribe` frees capacity, so it is live occupancy rather
+than a session lifetime budget.
+
+Consequences for any caller: **chunk Subscribe/Unsubscribe by BYTES**, not
+topic count (instrument-id width varies) — 500 topics is ~9.4 KB and is
+proven at scale; and **correlate each frame uuid to its ack**, because an
+over-size frame is silent and a missing ack is the only signal. eToro acks
+both ops as `{"id": …, "success": true, "operation": "Subscribe"}`.
+
+Time-to-first-tick after subscribe held at 0.03–0.18s from 10 through 4,999
+topics — no degradation with topic count.
+
 **No volume / size / quantity field exists on any WS topic** (#608, verified
 2026-06-27 against both api-portal `/websocket/topics` and
 `websocket-doc.html`). eToro's WS has exactly two topics — `instrument:<id>`
