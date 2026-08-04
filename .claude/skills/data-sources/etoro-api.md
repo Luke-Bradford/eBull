@@ -42,6 +42,35 @@ Recorded 2026-08-04 (#2271) because a session went looking for the last two
 here, found only eToro protocol facts, and concluded the subscriber was
 disconnected when it was not.
 
+## eToro prices vs the public tape — MEASURED (#2240, 2026-08-04)
+
+How far eToro's stored closes sit from the public market, and whether the two
+are interchangeable for analysis. Seven instruments, ~1,035 overlapping bars
+each, `price_daily.close` against **raw** (unadjusted) public closes:
+
+| | AAPL | MSFT | GME | JPM | HD | KO | XOM |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| daily-return correlation | 0.979 | 0.963 | 0.996 | 0.989 | 0.985 | 0.979 | 0.992 |
+| mean level bias | −0.14% | −0.14% | −0.22% | −0.17% | −0.20% | −0.16% | −0.17% |
+| median RSI-14 diff (0–100) | 0.19 | 0.16 | 0.12 | 0.18 | 0.15 | 0.18 | 0.13 |
+| SMA-200 regime agreement | 100.0% | 99.8% | 99.8% | 99.9% | 99.4% | 99.9% | 99.8% |
+
+- **The bias is consistently NEGATIVE, ~0.15–0.22%** — eToro's close sits about a
+  half-spread *below* the public close. That is independent corroboration of S3
+  (#2243): our bars are built from **Bid**, not from a trade print. Useful as a
+  first-order execution-cost input.
+- **It is a level offset, not a shape difference.** TA reads shape, so signals
+  computed on either series agree — which is what licenses using public data for
+  research while executing on eToro.
+- ⚠ **Compare against RAW closes, not adjusted ones.** An earlier run of this
+  using dividend-adjusted public prices showed JPM/HD diverging ~5% and looked
+  like a data defect. It was the dividend yield. eToro candles are **price, not
+  total return** — no dividend adjustment — which matters for any multi-month
+  return calculation.
+- ⚠ **History caps at ~4 years per instrument** (1,000-bar ceiling, #603, no
+  `from_date` pagination). Public sources reach decades further. Never infer
+  "this history is unavailable" from `price_daily`.
+
 ## WebSocket limits — MEASURED, because the portal documents none
 
 `websocket/overview.md` and `websocket/topics.md` state no cap of any kind:
