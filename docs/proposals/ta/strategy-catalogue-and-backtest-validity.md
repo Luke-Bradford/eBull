@@ -71,7 +71,96 @@ exists to guard against, and they were in the spec written to guard against them
 
 ---
 
+## 0. CORRECTION (2026-08-04, same day) — §1 and §2 were scoped to the wrong universe
+
+**Operator challenge:** *"Are you sure you're checking for what data is
+available? … you don't have to stick with what we have today … the market moves
+regardless of what eToro data we have, we just have slightly different prices."*
+
+Correct, and it invalidates the two constraints this document was built around.
+§1 measured **our Postgres**, and §2 then treated eToro's API as the boundary of
+what is obtainable. It is not. **eToro is the execution venue, not the data
+source**, and separating those two roles removes both "hard" constraints.
+
+Measured 2026-08-04, after the challenge:
+
+**Survivorship is NOT unfixable.** Two free sources, both tested:
+
+- **SEC EDGAR full-index** — `Archives/edgar/full-index/{year}/QTR{n}/form.idx`
+  lists every filing by form type. Form **25** / **25-NSE** *are* the delisting
+  notifications. Measured: **622 Form 25/25-NSE filings in 2023 QTR1 alone**,
+  each with CIK, company name and filing date; the index runs back to 1993. Free,
+  no key, and we already have SEC UA + rate-limit discipline. This is an
+  authoritative, dated delisting record — better than a vendor flag.
+- **Public price feeds retain delisted names.** Tested `FRCB` (First Republic
+  Bank, failed May 2023): **3,933 bars, 2010-12-09 → 2026-08-03, last close
+  $0.0004.** The failure is right there in the data.
+
+**~4 years is eToro's ceiling, not the market's.** Tested via yfinance:
+**AAPL 11,502 bars back to 1980-12-12**; MSFT 10,176; JPM 11,690; GME 6,157.
+That is **~10× the history** our corpus holds, free. §2.2's "one-and-a-bit
+regimes" argument applies only to the eToro corpus.
+
+**And the two price series are interchangeable for TA — measured, not assumed.**
+Comparing our stored closes against raw public closes on ~1,035 overlapping bars
+per instrument:
+
+| | AAPL | MSFT | GME | JPM | HD | KO | XOM |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| daily-return correlation | 0.979 | 0.963 | 0.996 | 0.989 | 0.985 | 0.979 | 0.992 |
+| mean level bias | −0.14% | −0.14% | −0.22% | −0.17% | −0.20% | −0.16% | −0.17% |
+| median RSI-14 difference (0–100 scale) | 0.19 | 0.16 | 0.12 | 0.18 | 0.15 | 0.18 | 0.13 |
+| SMA-200 regime agreement | **100.0%** | 99.8% | 99.8% | 99.9% | 99.4% | 99.9% | 99.8% |
+
+The bias is **consistently negative** — eToro's close sits ~0.15–0.22% *below*
+the public close, i.e. about a half-spread. That independently corroborates S3
+(#2243): our bars are built from **Bid**. It is a level offset, not a shape
+difference, and TA reads shape.
+
+⚠ Note the earlier run of this comparison used dividend-adjusted public prices
+and showed JPM/HD diverging ~5%. That was my error, not a data problem — it is
+the dividend yield. Against **raw** closes every name agrees. It does, however,
+confirm that eToro candles are unadjusted price, not total return (§5
+criterion 10).
+
+**Consequences — these supersede §2.1 and §2.2:**
+
+1. **Split the corpus by role.** A **research corpus** from public data (deep
+   history, delisted names retained, dividends and splits available) and the
+   **execution venue** (eToro, whose measured ~0.15% half-spread becomes a
+   calibrated cost input rather than a guess). Signals are generated and
+   backtested on the research corpus; only fills, costs and live quotes come
+   from eToro.
+2. **"Start recording today" was wrong** as the primary answer on survivorship.
+   Still worth doing for our own forward record, but it is now a *supplement* to
+   a reconstructable history, not the only path. Downgraded accordingly.
+3. **§2.2's argument for few simple strategies still stands** — but on the
+   grounds of overfitting discipline and multiple-testing (§5 criterion 6), not
+   on data scarcity. With 45 years the walk-forward objection largely dissolves.
+
+**Also settled the tooling question, empirically.** `vectorbt 1.1.0` installs and
+runs on this repo's Python 3.14 (verified: a full MA-crossover backtest with
+fees returning total return, Sharpe, trade count and max drawdown in one call).
+`numba 0.66.0` and `TA-Lib 0.7.1` both publish 3.14 support. So **phases 3–5 do
+not need a bespoke backtester** — the portfolio simulation, cost model, trade
+accounting and performance statistics are off-the-shelf and battle-tested. What
+remains genuinely ours is the strategy definitions (§4), the validity gates
+(§5), the governance (§6), and the eBull-specific plumbing.
+
+The rest of this document stands. §3 (what funds actually run), §3.5 (execution
+semantics), §4 (the catalogue), §5 (validity gates) and §6 (governance) are
+unaffected by the correction — if anything §5's gates matter more now, because a
+45-year survivorship-inclusive corpus makes it possible to run the tests that
+were previously impossible.
+
+---
+
 ## 1. Data reality — measured 2026-08-04, not assumed
+
+⚠ **Superseded in scope by §0** — the figures below are accurate for **our
+Postgres corpus** and remain the right numbers for anything eToro-sourced
+(execution, live quotes, the tradable universe). They are *not* the limit of
+available market data.
 
 Every number below is from the dev corpus post-#2262 seeding and post-0a
 quarantine. These are constraints, not context: three of them kill or reshape
@@ -549,20 +638,35 @@ worse than having no live record at all.
 
 ## 8. Sequencing
 
-The parent phase table needs three insertions. The first two are **start-recording-now** items whose value is purely a function of elapsed time — neither can be reconstructed retrospectively, so every day of delay is permanently lost history:
+**Revised after §0.** The research corpus moves to the front, because it
+unblocks everything downstream and turns the previously-impossible validity
+gates into ordinary work. "Start recording now" drops from *the* survivorship
+answer to a supplementary forward record.
 
 | when | what | why |
 | --- | --- | --- |
-| **now, before phase 2** | point-in-time universe membership recording | §2.1 — without it no backtest can ever be survivorship-free |
-| **now, before phase 2** | spread / liquidity history (append per `quotes_refresh` run, do not overwrite) | §5 criterion 2 — `quotes` keeps one row per instrument, so today there is no as-of cost data and the cost model has to be a static approximation |
-| phase 2 | historical indicator recomputation (existing plan) | with criterion 4 enforced by test |
+| **NEW — first** | **research corpus ingest**: deep public OHLCV + delisted names, into their own tables, separate from the eToro-sourced `price_daily` | §0 — 45 years vs 4, survivorship-inclusive. Unblocks §5 criteria 1, 3, 5 and 6, none of which were satisfiable before |
+| **NEW — with it** | **delisting register from SEC Form 25 / 25-NSE** via EDGAR full-index | §0 — authoritative dated delisting record, free, and we already have the SEC fetch discipline. Gives point-in-time membership back to the 1990s rather than from today |
+| **NEW — cheap** | **measured eToro cost model**: the ~0.15% half-spread from §0, per class and price band | §5 criterion 2 — replaces the static guess with a measurement, and re-links research prices to execution reality |
+| now (downgraded) | point-in-time universe membership recording | still worth having as our own forward record, but no longer the only path to survivorship-free backtests |
+| now (downgraded) | spread / liquidity history | still the route to *as-of* costs; the §0 measurement covers v1 |
+| phase 2 | historical indicator recomputation | with criterion 4 enforced by test. ⚠ Reconsider scope: `vectorbt`/TA-Lib compute indicators over a series directly, so persisting a full indicator history may be unnecessary for backtesting and needed only for the live signals lens |
 | **phase 2b** (#2279) | price-structure primitives | S-5/S-6 need them; the registry's vocabulary must be settled before phase 3 fixes it |
-| phase 3 | strategy registry + signal ledger | S-1..S-4 registered |
-| phase 4 | outcome resolver | criterion 7's expectancy/drawdown |
-| phase 5 | backtester | gated on #2260 being attributed |
+| phase 3 | strategy registry + signal ledger | S-1..S-4 registered. Ours to build — this is eBull-specific plumbing |
+| phase 4 | outcome resolver | criterion 7's expectancy/drawdown — much of it is `vectorbt` trade/portfolio stats |
+| phase 5 | backtester | ⚠ **Do not hand-roll.** `vectorbt 1.1.0` verified working on this repo's Python 3.14; portfolio simulation, fees, Sharpe/drawdown and trade accounting are off-the-shelf. Our work is wiring our data + strategies into it and enforcing §5. Still gated on #2260 being attributed |
 | phase 6 | performance surface | must show expectancy + survivorship label, not bare win rate |
 | phase 7 | allocation page | §7 |
 | phase 8 | discovery | only with criterion 6 enforced |
+
+**Vendor question, if free sources prove insufficient.** Free tier tested and
+working today (public feed for prices, EDGAR for delistings). If coverage or
+terms become a problem, the measured options are EODHD at **£19.99/mo** for 30+
+years EOD across 60+ exchanges — but **delisted coverage sits on the £59.99
+Fundamentals tier or the £99.99 all-in-one** — or Sharadar's US bundle via
+Nasdaq Data Link, which is explicitly point-in-time and survivorship-free back
+to the 1990s. Worth revisiting only once the free path is shown to be the
+binding constraint; do not buy data to solve a problem we have not hit.
 
 ---
 
@@ -591,10 +695,23 @@ The parent phase table needs three insertions. The first two are **start-recordi
 
 ## 10. What "competitive" honestly means here
 
-A competitive systematic fund's edge comes from execution quality, cost control,
-breadth, leverage, and shorting — not from a better RSI threshold. Long-only, no
-leverage, demo-account, ~4 years of history and ~12k instruments is not going to
-beat a CTA.
+⚠ **Revised after §0.** The first draft said "~4 years of history and ~12k
+instruments is not going to beat a CTA", and used data scarcity as the reason to
+lower expectations. That reason is gone: with a survivorship-inclusive research
+corpus reaching back decades, an authoritative delisting register, an
+industrial-grade backtester, and a *measured* execution cost, **the research
+setup here is not far off what a small systematic shop actually runs on.** The
+remaining gaps are real but they are different ones — long-only, no leverage, no
+shorting, and a single retail execution venue. Those cap the achievable Sharpe;
+they no longer cap the quality of the research.
+
+The honest edge statement: a fund's advantage comes from execution quality, cost
+control, breadth, leverage and shorting — not from a better RSI threshold. We
+give up leverage and shorting by policy. What we can genuinely compete on is
+**rigour**: most retail systematic trading fails not on strategy cleverness but
+on survivorship, look-ahead, overlapping windows and multiple testing — the four
+things §5 gates and the four things that were, until §0, impossible for us to
+test properly.
 
 What this platform can realistically deliver, and what makes it worth building:
 
@@ -605,8 +722,19 @@ What this platform can realistically deliver, and what makes it worth building:
   outcomes);
 - a **record** that accumulates, so a year from now the question "does this
   work?" has an evidence-based answer rather than an opinion;
-- a **discipline** that makes it hard to fool ourselves — which, given #2260 and
-  §2.1, is the binding constraint, not strategy cleverness.
+- a **discipline** that makes it hard to fool ourselves — which, given #2260, is
+  the binding constraint, not strategy cleverness.
 
-That is a realistic and genuinely valuable goal. Promising alpha competitive
-with a professional systematic fund would not be.
+That is a realistic and genuinely valuable goal, and §0 makes it a more ambitious
+one than this document originally claimed.
+
+**Lesson recorded, because it nearly cost the milestone:** every constraint in
+§1–§2 was measured correctly and scoped wrongly. I queried our database and
+concluded what the *market* made possible. "Survivorship is unfixable" was true
+of our Postgres and false of the world; "~4 years is the hard ceiling" was
+eToro's ceiling, not the market's. The operator's challenge — *"you don't have to
+stick with what we have today"* — is the general rule: **before declaring a
+constraint fundamental, check whether it is a property of the problem or of the
+data source you happened to look at first.** A correct measurement of the wrong
+population is still the wrong answer, and it is more dangerous than a wrong
+measurement because the numbers all check out.
