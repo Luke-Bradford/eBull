@@ -241,12 +241,20 @@ Consequences:
      #2254 (~1.1 s each per night thereafter). Raise `_T3_CANDLE_BATCH_SIZE`
      deliberately when this lands — it is sized for today's population, and the
      cap logs a WARNING rather than silently truncating.
-   - **"Eligible but supply-less" needs a stored marker.** Population 4 is
-     currently knowable only by probing; nothing records that the provider
-     returned no bars, so those 27 are indistinguishable from "not yet seeded"
-     and will be re-probed nightly forever. 0a must persist the outcome so the
-     surfaces can render "no data" honestly and the refresh can stop paying for
-     it.
+   - **"Eligible but supply-less" needs a stored marker, and it is 108, not 27.**
+     Measured on the full in-scope population after the #2254 backfill (2026-08-04),
+     not by probe: **81 priced instruments were fetched and did not advance** (78
+     `us_equity` — delisted/acquired names, oldest last bar 2021-05-21 — plus 2
+     crypto and 1 fx), and the **27** unpriced gate-passers returned no bars. S6's
+     probe could only see the 27 because it sampled the unpriced set; the 78 priced
+     ones were invisible to it, so **the marker must cover priced instruments too**.
+
+     ⚠ **eToro returns HTTP 200 with nothing new for these — it does not error.** A
+     marker keyed on HTTP status or an exception would never fire; it has to record
+     *fetch attempted, series did not advance, N consecutive times*. Until it
+     exists, these are indistinguishable from "not yet refreshed", they are
+     re-probed nightly forever, and every coverage number quietly counts them as
+     refreshable.
 
    The gap is an **accident**, not a scope boundary: eToro serves the
    international set (27/28 probed non-US instruments returned bars current to

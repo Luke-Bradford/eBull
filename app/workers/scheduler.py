@@ -2539,7 +2539,11 @@ def daily_candle_refresh() -> None:
     hard ceiling, ≈4 calendar years of trading-day price points).
     Quotes are skipped (owned by the hourly job).
 
-    Runs daily at 22:00 UTC, after US market close. Watchlist scope
+    Fired by the orchestrator full sync (03:00 UTC) as the ``candles``
+    DataLayer — NOT the "22:00 UTC after US close" this docstring used
+    to claim; there is no ``ScheduledJob`` entry for it. See
+    ``market_data.most_recent_trading_day`` for what the earlier start
+    means for same-day bars. Watchlist scope
     (spec §1.3 bullet 2) lands once the watchlist table exists
     (Phase 3.2). High-frequency held-position refresh (5-min cadence
     during market hours) is Phase 4 (live quotes).

@@ -412,9 +412,22 @@ def most_recent_trading_day(today: date) -> date:
     drifts from the skip boundary either burns requests or strands
     series), and the orchestrator's candle freshness/content predicates.
 
-    On weekdays (Mon-Fri), today's candle is available after market
-    close — the daily candle job runs at 22:00 UTC, well after the
-    US close (~21:00 UTC). So the freshness target is today itself.
+    On weekdays (Mon-Fri) the freshness target is today itself.
+
+    ⚠ The original rationale for that ("the job runs at 22:00 UTC, well
+    after the ~21:00 UTC US close") is STALE: ``daily_candle_refresh``
+    has no ``ScheduledJob`` entry — it is the ``candles`` DataLayer in
+    the orchestrator registry, fired by the full sync at **03:00 UTC**,
+    which is before the US session it names. Two consequences, both
+    benign and neither worth "fixing" without a reason:
+      * no US equity is ever skipped as fresh on a weekday run, so the
+        T1/T2 set is re-fetched nightly (~1.1 s each);
+      * a partially-formed bar dated today can be stored for an
+        instrument quoting outside US hours. It self-heals — the next
+        run's ``_INCREMENTAL_FETCH_BARS`` window (yesterday + today +
+        one correction day) rewrites it, which is what that buffer is
+        for. Do NOT treat a same-day bar from an off-close run as a
+        final close.
 
     Weekends roll back to Friday (no candles for Sat/Sun).
 

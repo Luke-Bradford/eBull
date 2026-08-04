@@ -347,24 +347,36 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Endpoint: `/instruments/{symbol}/candles?range=1w|1m|3m|6m|ytd|1y|5y|max` ([app/api/instruments.py:1075](../../../app/api/instruments.py#L1075)).
 - Chart: `PriceChart.tsx`. Range mapping at `_CANDLE_RANGE_DAYS` (instruments.py:1047).
 - Cadence: daily after market close.
-- ⚠⚠ **COVERAGE — the honest denominator is 1,406, not 5,221 (measured 2026-08-04, #2246).**
-  `daily_candle_refresh` scope is held ∪ T1/T2 ∪ `BENCHMARK_SYMBOLS` ∪ ≤200/night of T3
-  (`app/workers/scheduler.py:2474`). Any number quoting "instruments with price history"
-  must say which of these it means:
+- ⚠⚠ **COVERAGE — always quote BOTH denominators (#2246 / #2254).**
+  `daily_candle_refresh` scope is held ∪ T1/T2 ∪ `BENCHMARK_SYMBOLS` ∪ T3 that is
+  unseeded-and-eligible OR behind the most recent trading day
+  (`app/workers/scheduler.py::_T3_CANDLE_SELECT`). Any number quoting "instruments
+  with price history" must say which of these it means:
 
   ```
   tradable                       12,684
-    with any price_daily row      5,221   (41.2%)
-    with a bar in the LAST 7 DAYS 1,406   (11.1%)   <- the usable set
+    with any price_daily row      5,221   (41.2%)   <- unchanged by #2254
+    with a bar in the LAST 7 DAYS 5,140   (40.5%)   <- the usable set
   ```
 
-  - **Existence ≠ freshness.** `_T3_BOOTSTRAP_SELECT` carries `NOT EXISTS (price_daily)`
-    (`scheduler.py:2458`), so a Tier-3 instrument leaves refresh scope on its FIRST bar
-    and nothing picks it back up unless it promotes (needs `total_score >= 0.55`,
-    `app/services/coverage.py:90`) or is held/benchmark. 3,523 of 3,838 priced T3 have
-    no bar in 30 days; **every crypto, FX and commodity series is ~2 months stale**
-    (#2254). A stale close is not a missing value — it renders, scores and backtests
-    as a live one.
+  - **Existence ≠ freshness — the gap was 3.7x until 2026-08-04.** The T3 branch
+    used to carry `NOT EXISTS (price_daily)`, i.e. it selected on the absence of the
+    rows it writes, so a Tier-3 instrument left refresh scope on its FIRST bar and
+    nothing picked it back up unless it promoted (needs `total_score >= 0.55`,
+    `app/services/coverage.py:90`) or was held/benchmark. At its worst: fresh 1,406
+    (11.1%), 3,523 of 3,838 priced T3 with no bar in 30 days, and **every crypto, FX
+    and commodity series ~2 months stale**. Fixed in #2254 (freshness-based
+    maintenance arm) — the same run took fresh 1,406 → 5,140. **Keep measuring on
+    `max(price_date)` anyway**: a stale close is not a missing value, it renders,
+    scores and backtests as a live one, and the next scope regression will look
+    identical from the existence side.
+  - **~108 instruments are supply-less, not unrefreshed** (full-population measure,
+    2026-08-04, after the #2254 backfill): 81 priced ones fetched HTTP 200 with no
+    advance (78 `us_equity`, oldest 2021-05-21 — delisted/acquired names — plus 2
+    crypto, 1 fx) and 27 unpriced gate-passers that returned no bars at all. eToro
+    does **not** error on these; it returns 200 with nothing new, so they are
+    indistinguishable from "not yet refreshed" until a marker exists (TA design doc
+    §3 decision 9). Do not read them as a refresh failure.
   - **Coverage tier is implicitly US-only**, because it is driven by
     `fundamentals_snapshot`, which is SEC-fed. All 1,383 T1/T2 instruments are
     `us_equity`; no non-US instrument has ever reached T1/T2. So "scoring-eligible"
