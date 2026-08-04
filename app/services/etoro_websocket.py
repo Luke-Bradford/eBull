@@ -864,6 +864,9 @@ class EtoroWebSocketSubscriber:
         # ticks to the bus exactly the way the WS path does. Skipped
         # when no SSE stream has visible ids.
         self._rest_poll_task: asyncio.Task[None] | None = None
+        # Timer-driven un-acked-frame reporter (#2249). Separate from
+        # the receive loop on purpose — see ``_ack_reaper_loop``.
+        self._ack_reaper_task: asyncio.Task[None] | None = None
 
         # Visibility-driven topic registry. Every page-view SSE stream
         # bumps a ref on its visible instrument ids; the topic is sent
@@ -1023,6 +1026,7 @@ class EtoroWebSocketSubscriber:
         # not held / watchlist state (#498).
         self._task = asyncio.create_task(self._run(), name="etoro-ws-subscriber")
         self._rest_poll_task = asyncio.create_task(self._rest_poll_loop(), name="etoro-ws-rest-poll")
+        self._ack_reaper_task = asyncio.create_task(self._ack_reaper_loop(), name="etoro-ws-ack-reaper")
         logger.info("EtoroWebSocketSubscriber: started")
 
     async def stop(self) -> None:
@@ -1038,6 +1042,11 @@ class EtoroWebSocketSubscriber:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._rest_poll_task
             self._rest_poll_task = None
+        if self._ack_reaper_task is not None:
+            self._ack_reaper_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._ack_reaper_task
+            self._ack_reaper_task = None
         # Cancel the reconcile worker. The worker coroutine may be
         # awaiting ``asyncio.to_thread`` — the cancel raises
         # CancelledError out of the await, but the OS thread running
@@ -1262,9 +1271,12 @@ class EtoroWebSocketSubscriber:
                 async with self._topic_lock:
                     topics_to_send = sorted(self._topic_refs.keys())
                     self._ws = ws
-                    # Stale acks from the dead connection can never
-                    # arrive; keeping them would spam the reaper.
-                    self._pending_acks.clear()
+                    # Frames pending on the dead connection can never
+                    # be acked now. Report them rather than clearing
+                    # silently — a reconnect that happened BECAUSE an
+                    # oversize frame killed the socket is exactly when
+                    # this evidence matters.
+                    self._reap_unacked(reason="connection was re-established before the ack arrived")
                     # #2249: chunk the replay. A single frame over the
                     # ref set is what turns a large subscription into a
                     # connect → oversize frame → 1006 → reconnect loop
@@ -1430,26 +1442,49 @@ class EtoroWebSocketSubscriber:
                 ack.error_code,
             )
 
-    def _reap_unacked(self) -> None:
+    def _reap_unacked(self, *, reason: str | None = None) -> None:
         """Report op frames that were never acknowledged.
 
         The silent-drop failure mode has no other detector: `ws.send()`
         returns normally, no error envelope arrives, and the close (if
         any) is a bare 1006. Reported once per frame, then forgotten so
-        the warning does not repeat every subsequent read.
+        the warning does not repeat.
+
+        ``reason`` set → drain EVERY pending frame regardless of age,
+        for the case where they can no longer possibly be acked (the
+        connection is gone).
         """
         now = time.monotonic()
-        stale = [(fid, meta) for fid, meta in self._pending_acks.items() if now - meta[2] > _ACK_TIMEOUT_S]
+        expired = reason is not None
+        stale = [(fid, meta) for fid, meta in self._pending_acks.items() if expired or now - meta[2] > _ACK_TIMEOUT_S]
         for fid, (operation, topic_count, _) in stale:
             del self._pending_acks[fid]
             logger.warning(
-                "EtoroWebSocketSubscriber: %s frame %s (%d topics) NEVER ACKED after %.0fs — "
-                "eToro silently dropped it; those topics are NOT subscribed",
+                "EtoroWebSocketSubscriber: %s frame %s (%d topics) NEVER ACKED (%s) — those topics are NOT subscribed",
                 operation,
                 fid,
                 topic_count,
-                _ACK_TIMEOUT_S,
+                reason or f"no ack in {_ACK_TIMEOUT_S:.0f}s; eToro silently dropped it",
             )
+
+    async def _ack_reaper_loop(self) -> None:
+        """Time-driven un-acked-frame reporter.
+
+        Deliberately NOT piggybacked on the receive loop: the failure
+        this detects is an oversize frame that gets the socket dropped,
+        which means **no further inbound message ever arrives** — so a
+        reaper riding inbound traffic would miss precisely the case it
+        exists for (Codex checkpoint 2). Ticks on a timer instead.
+        """
+        interval = max(1.0, _ACK_TIMEOUT_S / 2)
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            if self._pending_acks:
+                self._reap_unacked()
 
     async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:
@@ -1467,8 +1502,6 @@ class EtoroWebSocketSubscriber:
             # never arrive. Cheap on the hot path — the ack shape is
             # rejected on the first key check for a rate frame.
             self._resolve_acks(raw)
-            if self._pending_acks:
-                self._reap_unacked()
 
             if is_private_event(raw):
                 self._schedule_reconcile()

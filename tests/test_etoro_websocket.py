@@ -296,6 +296,44 @@ class TestAckCorrelation:
         assert "NEVER ACKED" in caplog.text
         assert sub._pending_acks == {}, "reported once, then dropped so it does not repeat"
 
+    async def test_reaper_fires_with_no_inbound_traffic(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Codex checkpoint-2 catch: the failure this detects is an
+        oversize frame that gets the SOCKET DROPPED, so no further
+        inbound message ever arrives. A reaper riding the receive loop
+        would miss exactly the case it exists for — it must be timed."""
+        monkeypatch.setattr(etoro_websocket, "_ACK_TIMEOUT_S", 0.02)
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+
+        reaper = asyncio.create_task(sub._ack_reaper_loop())
+        try:
+            with caplog.at_level(logging.WARNING):
+                # No frames are fed to _listen at all — the reaper is
+                # the only thing running.
+                for _ in range(100):
+                    await asyncio.sleep(0.01)
+                    if not sub._pending_acks:
+                        break
+            assert sub._pending_acks == {}
+            assert "NEVER ACKED" in caplog.text
+        finally:
+            sub._stop_event.set()
+            reaper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reaper
+
+    def test_reconnect_reports_pending_rather_than_clearing_silently(self, caplog: pytest.LogCaptureFixture) -> None:
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        with caplog.at_level(logging.WARNING):
+            sub._reap_unacked(reason="connection was re-established before the ack arrived")
+        assert "NEVER ACKED" in caplog.text
+        assert sub._pending_acks == {}
+
     def test_fresh_frame_is_not_reported(self) -> None:
         sub = self._sub()
         (frame,) = build_subscribe_frames([1001])
