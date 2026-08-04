@@ -120,10 +120,18 @@ Consequences:
 >    equities. The choice between the paths is about **volume and cost, not price
 >    truthfulness**.
 >
-> Also settled there: `QuoteUpdate.last` is **not** a trade print but the
-> pre-markup bid, so **bars must be built from `Bid`, not `last`**. And the WS
-> rate push is a field-level sparse delta whose partial shapes production
-> currently discards (#2252) — the collector must carry per-instrument state.
+> Also settled there: `QuoteUpdate.last` is **not** a trade print — it never
+> leaves `[bid, ask]` in 26,741 observations — and is bid-side (exactly
+> `BidDiscounted` on 100% of Tokyo-equity and 97.8% of FX observations, but only
+> 58.7% of crypto). So **bars must be built from `Bid`, not `last`**, as an
+> empirical compatibility rule: `Bid` is what reproduces eToro's own candle.
+> And the WS rate push is a field-level sparse delta whose partial shapes
+> production currently discards (#2252) — the collector must carry
+> per-instrument state.
+>
+> ⚠ Measured on demo, one 10-minute window, crypto / FX / Tokyo equities. Live
+> env, US equities, HK and stressed regimes (auction, halt, wide spread) are
+> unmeasured; phase 0b should not treat them as settled.
 
 ## 3. Decisions taken
 

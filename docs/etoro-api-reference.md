@@ -465,19 +465,31 @@ under half the market.
 **Size ingest against the wire, not against parsed ticks.** The earlier "23%
 parse" figure is right but was read as "77% are inert"; only ~60% are.
 
-**`LastExecution` is NOT a trade print — it is the pre-markup bid**
-(`BidDiscounted`), at full precision. Measured #2243 over 26,741 observations:
-it never left `[bid, ask]` (0.00%), and equals `BidDiscounted` on 100.0% of
-Tokyo-equity, 97.8% of FX and 58.7% of crypto observations. ⚠ Against eToro's
-*marked-up* `Bid`/`Ask` the FX series sits mid-spread (mean position 0.399) and
-looks like a derived mid — **the excursion test must be run against
-`BidDiscounted`/`AskDiscounted` or it returns the wrong answer.**
+**`LastExecution` is NOT a trade print** (measured #2243). Over 26,741
+observations it **never left `[bid, ask]`** (0.00%), which a real print would.
+It is bid-side, and how tightly is asset-class-dependent: `== BidDiscounted` on
+**100.0%** of Tokyo-equity and **97.8%** of FX observations, but only **58.7%**
+of crypto (bid-*near*: median spread position 0.000, mean 0.041). `==
+AskDiscounted` is 0.0% everywhere. ⚠ Do not carry a single global label across
+asset classes — crypto does not fit the clean story.
 
-**eToro's own `OneMinute` REST candle is built from the BID series**, not from
-trades or the mid. Bars rebuilt from `Bid` reproduce it on 77.1% of closes and
-60.3% of full OHLC; from `LastExecution` 55.0% / 48.1%; from mid or ask, 0%.
-**Build bars from `Bid`.** `OneMinute` volume is **equity-only** — populated for
-US and Tokyo equities, always `None` for crypto and FX.
+⚠ Against eToro's *marked-up* `Bid`/`Ask` the FX series sits mid-spread (mean
+position 0.399) and looks like a derived mid — **the excursion test must be run
+against `BidDiscounted`/`AskDiscounted` or it returns the wrong answer.**
+
+**Build 1-minute bars from `Bid`** — an empirical compatibility rule: `Bid` is
+the series that reproduces eToro's own `OneMinute` REST candle. Over 131
+complete minutes, `Bid` matched 77.1% of closes / 60.3% of full OHLC;
+`LastExecution` 55.0% / 48.1%; mid or ask 0%. The residual is granularity, not a
+second series — attributing all 42 mismatches, **zero were Tokyo equities**, and
+all were **within 0.20%** of the REST close (median 0.0019%, max 0.0716%).
+
+`OneMinute` volume is **equity-only** — populated for US and Tokyo equities,
+always `None` for crypto and FX.
+
+⚠ **Scope: demo env, one 10-minute window, crypto / FX / Tokyo equities.** Live
+env, US equities (#2243 arm outstanding), HK (shut during capture) and stressed
+regimes (auction, halt, wide spread, FX rollover) are all unmeasured.
 
 ### WebSocket limits (measured, #2241 — the portal documents NONE)
 
