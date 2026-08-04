@@ -2633,3 +2633,23 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - Enforced in: this prevention log. No automated gate — the failure is in the shell, not
   in the repo, so the guard is the habit of reaching for the heredoc whenever the body
   contains a code identifier.
+
+---
+
+### A discriminator run against the WRONG pair of columns returns the opposite verdict
+
+- First seen in: #2243 (2026-08-04).
+- Symptom: S3 asked whether `QuoteUpdate.last` is a real trade print. The spike's own stated method was the textbook one — a print can trade outside the quote, a derived value cannot — so: does `last` ever leave `[bid, ask]`? Run against eToro's `Bid`/`Ask`, the FX arm came back with `last` sitting mid-spread (mean normalised position 0.399, median 0.425, never equal to bid or ask), which reads as **a derived mid**. Run against the `BidDiscounted`/`AskDiscounted` columns in the same payload, `last` sits **exactly on the bid** in 97.8% of the same observations. The two runs support opposite conclusions about the same field on the same data.
+- Root cause of the miss: `Bid`/`Ask` are eToro's **marked-up** quote; the `*Discounted` fields are the underlying one. A test of the form "is X inside the interval [A, B]" silently assumes A and B are the interval the source actually derives X from. Nothing about the column names says which pair that is, and the obvious pair was the wrong one. The same shape recurs anywhere a vendor publishes both a raw and an adjusted/marked-up/net figure — the discriminator is only as good as the reference series it is measured against.
+- Prevention: before running a containment or excursion discriminator, **enumerate every candidate reference series in the payload and run the test against all of them**, then report the full matrix rather than the one pair that looked canonical. A discriminator that yields different verdicts per reference pair has not answered the question — it has found that the reference is the actual unknown. Corollary, from the same spike: the eventual verdict was settled not by the containment test at all but by **reconstruction** — rebuilding the vendor's own published artefact (its `OneMinute` candle) from each candidate series and scoring which one reproduces it. Reconstruction beats containment because it has a ground truth; containment only has a bound.
+- Enforced in: this prevention log; `.claude/skills/data-sources/etoro-api.md` (§WS rate semantics carries the "run it against `BidDiscounted`/`AskDiscounted`" warning inline).
+
+---
+
+### A "disagreement" count with no catch-up control measures LATENCY and reports it as data loss
+
+- First seen in: #2243 (2026-08-04).
+- Symptom: to test whether eToro's sparse WS deltas drop price updates, a second connection took a forced full snapshot every 20s and the accumulated delta-state was compared against it. **3,435 of 4,566 field comparisons disagreed — 75%.** Read at face value that is a stream losing three quarters of its updates, and it would have justified abandoning WS-built bars outright. Adding a look-ahead control — for each disagreement, does the streaming session *ever* reach the snapshot's value? — showed **100% caught up within 30s and 0 never did.** The feed is lossless; the holder was sub-second behind a fresh read.
+- Root cause of the miss: comparing a continuously-updated accumulator against a point-in-time authoritative read conflates two different failure modes — "never received it" and "had not received it *yet*". At any sampling instant a healthy stream is legitimately a few hundred ms stale, so the disagreement rate is a function of tick rate and sampling latency, not of correctness. The measurement looked decisive and pointed the wrong way.
+- Prevention: whenever a freshness or completeness check compares live-accumulated state against an authoritative snapshot, **the disagreement count is not the finding — the unresolved-after-lookahead count is.** Always pair it with "did the accumulator subsequently converge to the snapshot value, and within what window", and report both. Same family as the narrowing-gate rule: the raw count is silent about the thing you actually care about.
+- Enforced in: this prevention log. The S3 probe scripts attached to #2243 carry the control as `s3_position.py` §D6.

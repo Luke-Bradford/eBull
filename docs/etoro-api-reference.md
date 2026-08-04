@@ -436,12 +436,48 @@ unversioned; re-verify anything load-bearing): `InstrumentID`,
 `AllowSell`, `MaxPositionUnits`. `IsMarketOpen` and `IsExchangeOpen` are
 independent and do disagree (EURUSD: `true` / `false` at 23:37 UTC).
 
-**Two push shapes.** The fat snapshot above, and a steady-state thin delta
-carrying only `{"Date", "PriceRateID"}` — no price, no `InstrumentID`
-(the instrument is only on the envelope's `topic`). `_parse_rate_content`
-returns `None` for the thin shape. Measured ratio: 2,422 parsed
-`QuoteUpdate`s out of 10,564 inner rate messages (23%). **Size ingest
-against the wire, not against parsed ticks.**
+**Rate pushes are FIELD-LEVEL SPARSE DELTAS** (measured #2243, 2026-08-04;
+this corrects the "two push shapes" model recorded under #2241). A push
+carries only the fields that changed — any subset of `Bid`, `Ask`,
+`LastExecution`, `BidDiscounted`, `AskDiscounted` may arrive alone. The
+instrument is on the envelope's `topic`, not in the payload, on every shape.
+
+Census over 180,666 messages (240 instruments, 608 s, crypto + FX + Tokyo
+equities):
+
+| share | shape |
+| --- | --- |
+| 59.8% | heartbeat — `{"Date","PriceRateID"}` only, no price field |
+| 16.8% | `Bid`+`Ask` — **the only shape `_parse_rate_content` accepts** |
+| 10.5% | `Bid`+`BidDiscounted`+`LastExecution` |
+| 10.1% | `Ask`+`AskDiscounted` |
+| 1.6% | `LastExecution` alone |
+| ~1.2% | 12 further partial combinations |
+
+`_parse_rate_content` requires **both** `Bid` and `Ask`, so it discards every
+partial: **58.1% of price-CHANGING messages are dropped** (21,245 of 36,564),
+making the stored quote 1.5–2.6× staler than the feed allows (median gap
+between usable updates vs actual price changes: crypto 3.01s vs 1.15s, JP
+3.99s vs 1.85s, FX 1.53s vs 1.02s). Tracked as #2252. **A consumer must carry
+per-instrument state and merge deltas** — requiring a complete payload sees
+under half the market.
+
+**Size ingest against the wire, not against parsed ticks.** The earlier "23%
+parse" figure is right but was read as "77% are inert"; only ~60% are.
+
+**`LastExecution` is NOT a trade print — it is the pre-markup bid**
+(`BidDiscounted`), at full precision. Measured #2243 over 26,741 observations:
+it never left `[bid, ask]` (0.00%), and equals `BidDiscounted` on 100.0% of
+Tokyo-equity, 97.8% of FX and 58.7% of crypto observations. ⚠ Against eToro's
+*marked-up* `Bid`/`Ask` the FX series sits mid-spread (mean position 0.399) and
+looks like a derived mid — **the excursion test must be run against
+`BidDiscounted`/`AskDiscounted` or it returns the wrong answer.**
+
+**eToro's own `OneMinute` REST candle is built from the BID series**, not from
+trades or the mid. Bars rebuilt from `Bid` reproduce it on 77.1% of closes and
+60.3% of full OHLC; from `LastExecution` 55.0% / 48.1%; from mid or ask, 0%.
+**Build bars from `Bid`.** `OneMinute` volume is **equity-only** — populated for
+US and Tokyo equities, always `None` for crypto and FX.
 
 ### WebSocket limits (measured, #2241 — the portal documents NONE)
 

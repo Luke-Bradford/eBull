@@ -56,14 +56,52 @@ of a documented limit is not absence of a limit.** Measured on demo
   ack is the only signal that a Subscribe did not take. eToro acks both ops:
   `{"id": …, "success": true, "operation": "Subscribe"}`.
 
-Two rate-push shapes: a fat snapshot, and a thin delta carrying only
-`{"Date","PriceRateID"}` (no price, no `InstrumentID`) that
-`_parse_rate_content` drops. 23% of inner rate messages parsed to a
-`QuoteUpdate` — **size ingest against the wire, not parsed ticks.** The
-snapshot also carries undocumented `OfficialClosingPrice`, `IsMarketOpen`,
+The snapshot also carries undocumented `OfficialClosingPrice`, `IsMarketOpen`,
 `IsExchangeOpen`, `ConversionRateBid`/`Ask` (see
 `docs/etoro-api-reference.md` §WebSocket API); undocumented means
 unversioned, so re-verify before depending on them.
+
+## WS rate semantics — MEASURED (#2243, 2026-08-04)
+
+**Rate pushes are FIELD-LEVEL SPARSE DELTAS, not "fat vs thin".** ⚠ This
+corrects the two-shape model recorded under #2241. Any subset of `Bid`,
+`Ask`, `LastExecution`, `BidDiscounted`, `AskDiscounted` can arrive alone;
+the instrument is always on the envelope `topic`, never in the payload.
+Census over 180,666 messages: 59.8% pure heartbeat, 16.8% `Bid`+`Ask`,
+10.5% `Bid`+`BidDiscounted`+`LastExecution`, 10.1% `Ask`+`AskDiscounted`,
+1.6% `LastExecution` alone, ~1.2% across 12 further combinations.
+
+- **`_parse_rate_content` requires BOTH `Bid` and `Ask`, so it drops 58.1% of
+  price-CHANGING messages** — stored quotes run 1.5–2.6× staler than the feed
+  allows. Tracked as #2252. **Any consumer must carry per-instrument state and
+  merge deltas**; requiring a complete payload sees under half the market.
+- "23% of messages parse" is right but does **not** mean "77% are inert" —
+  only ~60% are. Size ingest against the wire.
+
+**`LastExecution` is NOT a trade print. It is the pre-markup bid**
+(`BidDiscounted`) at full precision — the portal's *"price of the most recent
+trade execution"* is wrong, the second time this field's documented meaning has
+diverged from the wire (cf. #1429's `last = 0.00`). Over 26,741 observations it
+never left `[bid, ask]` (0.00%) and equalled `BidDiscounted` on 100.0% of
+Tokyo-equity, 97.8% of FX, 58.7% of crypto observations.
+
+⚠ **Run the bid/ask-excursion test against `BidDiscounted`/`AskDiscounted`, not
+`Bid`/`Ask`.** eToro's markup makes the FX series look like a derived mid
+(mean spread position 0.399) when against the underlying quote it sits exactly
+on the bid. The wrong column pair yields the opposite verdict.
+
+**eToro's own `OneMinute` REST candle is built from the BID series.** Bars
+rebuilt from `Bid` reproduce it on 77.1% of closes / 60.3% of full OHLC; from
+`LastExecution` 55.0% / 48.1%; from mid or ask, **0%**. **Build bars from
+`Bid`.** Corollary: WS bars and REST candles are the *same* price series, so
+choosing between them is about volume and cost, not price truthfulness.
+
+**`OneMinute` volume is equity-only** — populated for US and Tokyo equities,
+always `None` for crypto and FX. Volume-confirmed rules are structurally
+impossible on crypto/FX from either path.
+
+⚠ Verdict measured on crypto / FX / Tokyo equities. **The US-session equity arm
+is still outstanding** (#2243) — do not treat US behaviour as settled.
 
 ## Maintenance
 
