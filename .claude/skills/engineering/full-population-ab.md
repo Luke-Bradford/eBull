@@ -263,6 +263,26 @@ item. With the index: ~300/min. `EXPLAIN` the new query once; it costs seconds.
   Offline re-parse from stored payloads (above) is immune to this — prefer it
   when the data allows. Pairing is for metrics computed at read time, which have
   no stored artefact to re-parse.
+- **Aggregate the arms over the SAME entity set — the intersection, not each
+  arm's own.** A per-arm median (or mean, or rate) is computed over whatever
+  entities that arm happened to produce a value for, and the arms rarely produce
+  values for the same ones: the treatment arm usually covers MORE, and the extra
+  entities are systematically the marginal ones. Comparing arm-A-over-its-set
+  against arm-B-over-its-set silently compares two different populations.
+
+  **The tell is a result that is physically impossible.** #2252 measured
+  inter-update gaps for control / treatment / a ground-truth "wire" arm, each
+  over its own instruments: the treatment arm came out *faster than the wire it
+  was reading from*, which cannot happen. Nothing was wrong with the fix — the
+  medians were over 74 / 84 / 105 instruments respectively. Restricted to the
+  121 instruments measurable in all three arms, the numbers were clean and the
+  treatment tracked the wire exactly (1.00x).
+
+  So: compute the intersection first, state its size next to the result
+  (`121 of 184`), and report what fell out and why. An arm that covers more
+  entities is itself a finding — report it as coverage, never let it leak into
+  a rate comparison. Same family as "distinct entities, never row count": the
+  denominator is the thing most likely to be quietly wrong.
 - Long runs need `run_in_background: true` — a `nohup … &` started inside an
   ordinary tool call is killed when that call's process group is cleaned up.
 - Reference implementation: `scripts/ab_2140_def14a_parser.py`

@@ -347,6 +347,34 @@ All US fundamentals come from SEC XBRL via Company Facts API (settled in `docs/s
 - Endpoint: `/instruments/{symbol}/candles?range=1w|1m|3m|6m|ytd|1y|5y|max` ([app/api/instruments.py:1075](../../../app/api/instruments.py#L1075)).
 - Chart: `PriceChart.tsx`. Range mapping at `_CANDLE_RANGE_DAYS` (instruments.py:1047).
 - Cadence: daily after market close.
+- ⚠⚠ **COVERAGE — the honest denominator is 1,406, not 5,221 (measured 2026-08-04, #2246).**
+  `daily_candle_refresh` scope is held ∪ T1/T2 ∪ `BENCHMARK_SYMBOLS` ∪ ≤200/night of T3
+  (`app/workers/scheduler.py:2474`). Any number quoting "instruments with price history"
+  must say which of these it means:
+
+  ```
+  tradable                       12,684
+    with any price_daily row      5,221   (41.2%)
+    with a bar in the LAST 7 DAYS 1,406   (11.1%)   <- the usable set
+  ```
+
+  - **Existence ≠ freshness.** `_T3_BOOTSTRAP_SELECT` carries `NOT EXISTS (price_daily)`
+    (`scheduler.py:2458`), so a Tier-3 instrument leaves refresh scope on its FIRST bar
+    and nothing picks it back up unless it promotes (needs `total_score >= 0.55`,
+    `app/services/coverage.py:90`) or is held/benchmark. 3,523 of 3,838 priced T3 have
+    no bar in 30 days; **every crypto, FX and commodity series is ~2 months stale**
+    (#2254). A stale close is not a missing value — it renders, scores and backtests
+    as a live one.
+  - **Coverage tier is implicitly US-only**, because it is driven by
+    `fundamentals_snapshot`, which is SEC-fed. All 1,383 T1/T2 instruments are
+    `us_equity`; no non-US instrument has ever reached T1/T2. So "scoring-eligible"
+    silently means "US filer" — do NOT use it to scope a market-wide surface.
+  - eToro **does** serve daily candles for the international set (27/28 probed,
+    current). The 7,463 unpriced are our selection gate, not provider supply — except
+    an irreducible 27 for which eToro returns 0 bars.
+  - Daily REST candle volume is patchy on non-US equities (Tokyo 1/4, Sydney 1/4,
+    Xetra 1/4 in the probe) — a separate bound from price coverage. `OneMinute`
+    volume is equity-only (#2243).
 
 ### Volume (live volume V2 — planned: #608)
 - Today: `price_daily.volume` per day; live-tick volume not aggregated.
