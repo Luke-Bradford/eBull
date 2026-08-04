@@ -281,6 +281,12 @@ class QuoteRefreshSummary:
     instruments_requested: int
     quotes_updated: int
     quotes_skipped: int
+    # Count of FETCHED quotes whose spread exceeded the threshold — NOT a
+    # count of rows now flagged in the table. The two diverge when
+    # ``_upsert_quote``'s monotonicity guard rejects a stale snapshot: the
+    # fetched quote is still counted here, while the stored row keeps the
+    # fresher tick's flag. Named for the fetch because that is what this
+    # function observes; the table is the authority on stored state.
     spread_flags_set: int
     # True when the provider's batch fetch itself failed, so every
     # instrument counts as skipped for a reason that is NOT "the provider

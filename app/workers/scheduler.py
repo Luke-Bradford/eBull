@@ -2929,7 +2929,11 @@ def quotes_refresh() -> None:
         tracker.row_count = summary.quotes_updated
 
     logger.info(
-        "quotes_refresh complete: requested=%d updated=%d no_quote=%d spread_flags=%d",
+        # ``wide_spreads_fetched``, not ``spread_flags``: the count is of quotes
+        # eToro returned with a wide spread, which is not the same as rows now
+        # flagged in the table — a stale snapshot rejected by the monotonicity
+        # guard still counts here (review NITPICK on #2275).
+        "quotes_refresh complete: requested=%d updated=%d no_quote=%d wide_spreads_fetched=%d",
         summary.instruments_requested,
         summary.quotes_updated,
         summary.quotes_skipped,
