@@ -44,6 +44,7 @@ import json
 import logging
 import ssl
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -85,6 +86,22 @@ _RECONCILE_DEBOUNCE_S = 3.0
 # 5s × 12 polls/min = 12 GET/min — well under the 60 GET/min budget.
 # Each poll batch-fetches every visible instrument in one rates call.
 _RATE_POLL_INTERVAL_S = 5.0
+
+# Hard per-frame ceiling on the eToro WS, MEASURED — the portal
+# documents no limit of any kind (#2241, bracketed 25,529 B accepted /
+# 25,719 B fatal). Over it the socket is DROPPED: close code 1006 with
+# an empty reason, i.e. no close frame at all, no ack, no error
+# envelope, subscription not applied.
+_WS_FRAME_LIMIT_BYTES = 25_600
+# What we actually pack to. The headroom absorbs any envelope drift on
+# eToro's side and keeps frames near the 500-topic/~9.4 KB shape proven
+# stable at full scale in #2241 — there is no benefit to sailing close
+# to a limit whose breach is silent and kills the connection.
+_WS_FRAME_BUDGET_BYTES = 20_480
+# How long an op frame may sit un-acked before it is reported. eToro
+# acks Subscribe/Unsubscribe within milliseconds; a missing ack is the
+# ONLY signal that a frame was dropped, so it must not pass unnoticed.
+_ACK_TIMEOUT_S = 10.0
 
 
 # ---------------------------------------------------------------------
@@ -180,11 +197,101 @@ def build_auth_message(api_key: str, user_key: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class WsFrame:
+    """One op frame ready to send, with the id needed to match its ack."""
+
+    frame_id: str
+    operation: str
+    payload: str
+    topic_count: int
+
+
+def _topic_frames(
+    instrument_ids: list[int],
+    operation: str,
+    extra_data: dict[str, object] | None = None,
+) -> list[WsFrame]:
+    """Split ``instrument_ids`` into frames that fit the WS byte limit.
+
+    **Pack by BYTES, never by topic count** (#2241): instrument-id
+    width varies from 2 to 6 digits, so a count-based cap does not
+    bound frame size. Over the limit eToro does not reject — it drops
+    the socket with `1006` and an empty reason, no ack and no error
+    envelope, and the subscription is simply not applied (#2249).
+
+    Sizing is exact rather than iterative: the envelope is serialised
+    once with an empty topic list to get its overhead, and each topic
+    costs its own JSON encoding plus one separator byte. Both are pure
+    ASCII here, so byte length equals character length.
+    """
+    if not instrument_ids:
+        return []
+
+    data: dict[str, object] = {"topics": [], **(extra_data or {})}
+    # Overhead of everything except the topics themselves. The uuid is
+    # a fixed 36 chars, so any id stands in for the real one.
+    overhead = len(json.dumps({"id": str(uuid.uuid4()), "operation": operation, "data": data}))
+
+    frames: list[WsFrame] = []
+    batch: list[str] = []
+    size = overhead
+    for iid in instrument_ids:
+        topic = f"instrument:{iid}"
+        # +1 for the comma joining it to the previous topic. Charging
+        # it on the first topic too simply leaves one spare byte.
+        cost = len(json.dumps(topic)) + 1
+        if batch and size + cost > _WS_FRAME_BUDGET_BYTES:
+            frames.append(_seal_frame(batch, operation, extra_data))
+            batch = []
+            size = overhead
+        batch.append(topic)
+        size += cost
+    if batch:
+        frames.append(_seal_frame(batch, operation, extra_data))
+    return frames
+
+
+def _seal_frame(topics: list[str], operation: str, extra_data: dict[str, object] | None) -> WsFrame:
+    frame_id = str(uuid.uuid4())
+    payload = json.dumps(
+        {
+            "id": frame_id,
+            "operation": operation,
+            "data": {"topics": topics, **(extra_data or {})},
+        }
+    )
+    # Belt and braces: the accounting above is exact, but a silent
+    # over-limit frame costs the whole connection, so assert rather
+    # than trust the arithmetic.
+    encoded = len(payload.encode("utf-8"))
+    if encoded > _WS_FRAME_LIMIT_BYTES:
+        raise ValueError(f"{operation} frame is {encoded} bytes, over the {_WS_FRAME_LIMIT_BYTES}-byte WS limit")
+    return WsFrame(frame_id=frame_id, operation=operation, payload=payload, topic_count=len(topics))
+
+
+def build_subscribe_frames(instrument_ids: list[int]) -> list[WsFrame]:
+    """``Subscribe`` frames for ``instrument_ids``, chunked to fit the
+    WS byte limit. Empty list for empty input."""
+    return _topic_frames(instrument_ids, "Subscribe", {"snapshot": True})
+
+
+def build_unsubscribe_frames(instrument_ids: list[int]) -> list[WsFrame]:
+    """``Unsubscribe`` frames for ``instrument_ids``, chunked to fit the
+    WS byte limit. Empty list for empty input."""
+    return _topic_frames(instrument_ids, "Unsubscribe")
+
+
 def build_subscribe_message(instrument_ids: list[int]) -> str | None:
-    """Compose the ``Subscribe`` op JSON for a list of instrument IDs.
+    """Compose a SINGLE ``Subscribe`` op JSON for a list of instrument IDs.
 
     Returns ``None`` when the list is empty so callers don't send a
     no-op subscription that eToro might reject.
+
+    ⚠ **Not safe for an unbounded id set** — over 25 KiB the frame is
+    dropped silently and takes the connection with it (#2249). Callers
+    that cannot bound their input must use :func:`build_subscribe_frames`.
+    Retained for fixtures and for call sites with a known-small set.
     """
     if not instrument_ids:
         return None
@@ -363,6 +470,59 @@ def _parse_rate_content(msg: dict[str, object]) -> RateDelta | None:
         has_ask=has_ask,
         has_last=has_last,
     )
+
+
+@dataclass(frozen=True)
+class OpAck:
+    """eToro's acknowledgement of a Subscribe / Unsubscribe frame."""
+
+    frame_id: str
+    operation: str
+    success: bool
+    error_code: str | None = None
+
+
+def parse_op_acks(raw: str) -> list[OpAck]:
+    """Extract every Subscribe / Unsubscribe ack in a raw WS frame.
+
+    Shape: ``{"id": …, "success": true, "operation": "Subscribe"}``
+    (#2241). Parsed separately from :func:`_iter_inner_messages`
+    because an ack carries **no** ``type`` field, so that helper's
+    top-level branch does not return it.
+
+    Reading acks is not cosmetic: an oversize frame produces no error
+    envelope and no close frame, so the *absence* of an ack is the only
+    evidence it was dropped.
+    """
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    candidates: list[object]
+    if isinstance(envelope, dict) and isinstance(envelope.get("messages"), list):
+        candidates = list(envelope["messages"])
+    else:
+        candidates = [envelope]
+
+    acks: list[OpAck] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        frame_id = item.get("id")
+        operation = item.get("operation")
+        if not isinstance(frame_id, str) or operation not in ("Subscribe", "Unsubscribe"):
+            continue
+        error_code = item.get("errorCode")
+        acks.append(
+            OpAck(
+                frame_id=frame_id,
+                operation=operation,
+                success=bool(item.get("success")),
+                error_code=error_code if isinstance(error_code, str) else None,
+            )
+        )
+    return acks
 
 
 def is_private_event(raw: str) -> bool:
@@ -737,6 +897,14 @@ class EtoroWebSocketSubscriber:
         # "no quote at all" for instruments whose snapshot is slow.
         self._rate_state = RateStateStore()
 
+        # Op frames sent and not yet acked (#2249):
+        # frame_id -> (operation, topic_count, monotonic sent_at).
+        # An oversize frame yields no ack, no error envelope and no
+        # close frame, so a missing ack is the ONLY evidence it was
+        # dropped — without this the log reads "subscribed to N topics"
+        # immediately before every death.
+        self._pending_acks: dict[str, tuple[str, int, float]] = {}
+
     def _default_watched_ids(self) -> list[int]:
         with self._pool.connection() as conn:
             return fetch_watched_instrument_ids(conn)
@@ -1094,12 +1262,23 @@ class EtoroWebSocketSubscriber:
                 async with self._topic_lock:
                     topics_to_send = sorted(self._topic_refs.keys())
                     self._ws = ws
-                    sub_msg = build_subscribe_message(topics_to_send)
-                    if sub_msg is not None:
-                        await ws.send(sub_msg)
+                    # Stale acks from the dead connection can never
+                    # arrive; keeping them would spam the reaper.
+                    self._pending_acks.clear()
+                    # #2249: chunk the replay. A single frame over the
+                    # ref set is what turns a large subscription into a
+                    # connect → oversize frame → 1006 → reconnect loop
+                    # that cannot self-heal, because the failure never
+                    # drains ``_topic_refs``.
+                    frames = build_subscribe_frames(topics_to_send)
+                    if frames:
+                        for frame in frames:
+                            await ws.send(frame.payload)
+                            self._register_pending(frame)
                         logger.info(
-                            "EtoroWebSocketSubscriber: subscribed to %d instrument topics",
+                            "EtoroWebSocketSubscriber: subscribed to %d instrument topics in %d frame(s)",
                             len(topics_to_send),
+                            len(frames),
                         )
                     else:
                         logger.info(
@@ -1168,20 +1347,22 @@ class EtoroWebSocketSubscriber:
             # send to flush; ws.send() is non-blocking on a healthy
             # socket so contention is small in practice.
             if newly_tracked and self._ws is not None:
-                msg = build_subscribe_message(newly_tracked)
-                if msg is not None:
-                    try:
-                        await self._ws.send(msg)
-                        logger.info(
-                            "EtoroWebSocketSubscriber: subscribe %d topics",
-                            len(newly_tracked),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "EtoroWebSocketSubscriber: Subscribe send failed; "
-                            "next reconnect will resubscribe from ref counts",
-                            exc_info=True,
-                        )
+                frames = build_subscribe_frames(newly_tracked)
+                try:
+                    for frame in frames:
+                        await self._ws.send(frame.payload)
+                        self._register_pending(frame)
+                    logger.info(
+                        "EtoroWebSocketSubscriber: subscribe %d topics in %d frame(s)",
+                        len(newly_tracked),
+                        len(frames),
+                    )
+                except Exception:
+                    logger.warning(
+                        "EtoroWebSocketSubscriber: Subscribe send failed; "
+                        "next reconnect will resubscribe from ref counts",
+                        exc_info=True,
+                    )
 
     async def remove_instruments(self, instrument_ids: list[int]) -> None:
         """Decrement ref counts; send Unsubscribe for topics that
@@ -1211,19 +1392,64 @@ class EtoroWebSocketSubscriber:
             # See ``add_instruments`` for the rationale on sending
             # under the lock — same wire-ordering invariant.
             if to_unsubscribe and self._ws is not None:
-                msg = build_unsubscribe_message(to_unsubscribe)
-                if msg is not None:
-                    try:
-                        await self._ws.send(msg)
-                        logger.info(
-                            "EtoroWebSocketSubscriber: unsubscribe %d topics",
-                            len(to_unsubscribe),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "EtoroWebSocketSubscriber: Unsubscribe send failed",
-                            exc_info=True,
-                        )
+                frames = build_unsubscribe_frames(to_unsubscribe)
+                try:
+                    for frame in frames:
+                        await self._ws.send(frame.payload)
+                        self._register_pending(frame)
+                    logger.info(
+                        "EtoroWebSocketSubscriber: unsubscribe %d topics in %d frame(s)",
+                        len(to_unsubscribe),
+                        len(frames),
+                    )
+                except Exception:
+                    logger.warning(
+                        "EtoroWebSocketSubscriber: Unsubscribe send failed",
+                        exc_info=True,
+                    )
+
+    def _register_pending(self, frame: WsFrame) -> None:
+        """Record a sent op frame so its ack can be correlated (#2249)."""
+        self._pending_acks[frame.frame_id] = (frame.operation, frame.topic_count, time.monotonic())
+
+    def _resolve_acks(self, raw: str) -> None:
+        """Clear pending entries for acked frames and log rejections."""
+        for ack in parse_op_acks(raw):
+            pending = self._pending_acks.pop(ack.frame_id, None)
+            if ack.success:
+                continue
+            # An explicit rejection (e.g. the 4,999-topic session cap,
+            # #2241) does NOT poison the session — the connection keeps
+            # serving already-subscribed topics. Log and carry on; do
+            # not tear down.
+            logger.warning(
+                "EtoroWebSocketSubscriber: %s REJECTED for %s topics (errorCode=%s) — "
+                "connection still live, those topics are not subscribed",
+                ack.operation,
+                pending[1] if pending else "?",
+                ack.error_code,
+            )
+
+    def _reap_unacked(self) -> None:
+        """Report op frames that were never acknowledged.
+
+        The silent-drop failure mode has no other detector: `ws.send()`
+        returns normally, no error envelope arrives, and the close (if
+        any) is a bare 1006. Reported once per frame, then forgotten so
+        the warning does not repeat every subsequent read.
+        """
+        now = time.monotonic()
+        stale = [(fid, meta) for fid, meta in self._pending_acks.items() if now - meta[2] > _ACK_TIMEOUT_S]
+        for fid, (operation, topic_count, _) in stale:
+            del self._pending_acks[fid]
+            logger.warning(
+                "EtoroWebSocketSubscriber: %s frame %s (%d topics) NEVER ACKED after %.0fs — "
+                "eToro silently dropped it; those topics are NOT subscribed",
+                operation,
+                fid,
+                topic_count,
+                _ACK_TIMEOUT_S,
+            )
 
     async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:
@@ -1237,6 +1463,13 @@ class EtoroWebSocketSubscriber:
             # every frame: schedule a reconcile if any inner message
             # is a private event, AND publish every rate tick the
             # frame carries.
+            # #2249: match acks to sent op frames, and report any that
+            # never arrive. Cheap on the hot path — the ack shape is
+            # rejected on the first key check for a rate frame.
+            self._resolve_acks(raw)
+            if self._pending_acks:
+                self._reap_unacked()
+
             if is_private_event(raw):
                 self._schedule_reconcile()
             # #2252: parse to sparse deltas and merge onto per-instrument

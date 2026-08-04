@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import threading
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -26,6 +27,7 @@ import pytest
 from app.services import etoro_websocket
 from app.services.etoro_websocket import (
     EtoroWebSocketSubscriber,
+    OpAck,
     QuoteUpdate,
     RateStateStore,
     _await_auth_envelope,
@@ -34,10 +36,13 @@ from app.services.etoro_websocket import (
     _looks_like_json_envelope,
     build_auth_message,
     build_private_subscribe_message,
+    build_subscribe_frames,
     build_subscribe_message,
+    build_unsubscribe_frames,
     build_unsubscribe_message,
     fetch_watched_instrument_ids,
     is_private_event,
+    parse_op_acks,
     parse_rate_deltas,
     parse_rate_message,
     parse_rate_messages,
@@ -171,6 +176,152 @@ class TestParseRateMessage:
             {"type": "Trading.Instrument.Rate", "data": {"Bid": "1", "Ask": "2", "Date": "2026-04-24T14:30:00Z"}}
         )
         assert parse_rate_message(raw) is None
+
+
+class TestFrameChunking:
+    """#2249 — a single Subscribe frame over the ref set is fatal above
+    ~25 KiB, and the failure is SILENT: eToro drops the socket with 1006
+    and an empty reason, so `ws.send()` succeeds and nothing surfaces."""
+
+    def test_five_thousand_wide_ids_all_fit_under_the_limit(self) -> None:
+        # Widest ids in the real universe are 6 digits (100236 etc.).
+        ids = list(range(100_000, 105_000))
+        frames = build_subscribe_frames(ids)
+
+        assert len(frames) > 1, "5,000 wide ids must not fit in one frame"
+        for f in frames:
+            assert len(f.payload.encode("utf-8")) <= etoro_websocket._WS_FRAME_LIMIT_BYTES
+
+        # Nothing dropped and nothing duplicated across the split.
+        sent = [t for f in frames for t in json.loads(f.payload)["data"]["topics"]]
+        assert sent == [f"instrument:{i}" for i in ids]
+
+    def test_chunking_is_by_bytes_not_topic_count(self) -> None:
+        """Same COUNT, different id widths → different frame counts.
+        A count-based cap would give the same answer for both."""
+        narrow = build_subscribe_frames(list(range(10, 3_010)))
+        wide = build_subscribe_frames(list(range(100_000_000, 100_003_000)))
+        assert len(wide) > len(narrow)
+
+    def test_subscribe_frames_carry_snapshot_and_unsubscribe_does_not(self) -> None:
+        sub = build_subscribe_frames([1, 2, 3])
+        assert json.loads(sub[0].payload)["data"]["snapshot"] is True
+        assert json.loads(sub[0].payload)["operation"] == "Subscribe"
+
+        unsub = build_unsubscribe_frames([1, 2, 3])
+        assert "snapshot" not in json.loads(unsub[0].payload)["data"]
+        assert json.loads(unsub[0].payload)["operation"] == "Unsubscribe"
+
+    def test_empty_input_produces_no_frames(self) -> None:
+        assert build_subscribe_frames([]) == []
+        assert build_unsubscribe_frames([]) == []
+
+    def test_every_frame_has_a_distinct_id(self) -> None:
+        frames = build_subscribe_frames(list(range(100_000, 105_000)))
+        ids = [f.frame_id for f in frames]
+        assert len(set(ids)) == len(ids)
+
+
+class TestParseOpAcks:
+    """#2249 — a missing ack is the ONLY signal that a frame was dropped."""
+
+    def test_parses_success_ack(self) -> None:
+        raw = json.dumps({"id": "abc", "success": True, "operation": "Subscribe"})
+        assert parse_op_acks(raw) == [OpAck(frame_id="abc", operation="Subscribe", success=True, error_code=None)]
+
+    def test_parses_rejection_with_error_code(self) -> None:
+        raw = json.dumps(
+            {
+                "id": "abc",
+                "success": False,
+                "operation": "Subscribe",
+                "errorCode": "SubscribeFailed",
+            }
+        )
+        (ack,) = parse_op_acks(raw)
+        assert ack.success is False
+        assert ack.error_code == "SubscribeFailed"
+
+    def test_parses_acks_inside_the_messages_envelope(self) -> None:
+        raw = json.dumps(
+            {
+                "messages": [
+                    {"id": "a", "success": True, "operation": "Subscribe"},
+                    {"id": "b", "success": True, "operation": "Unsubscribe"},
+                ]
+            }
+        )
+        assert [a.frame_id for a in parse_op_acks(raw)] == ["a", "b"]
+
+    def test_rate_frames_and_junk_are_not_acks(self) -> None:
+        assert parse_op_acks(_rate_frame(1001, "2026-08-04T10:00:00Z", Bid="1", Ask="2")) == []
+        assert parse_op_acks("not json") == []
+        assert parse_op_acks(json.dumps({"id": "x", "operation": "Authenticate"})) == []
+
+
+class TestAckCorrelation:
+    """#2249 — the log used to read 'subscribed to N topics' immediately
+    before every death, because the send succeeds locally."""
+
+    def _sub(self) -> EtoroWebSocketSubscriber:
+        sentinel: Any = object()
+        return EtoroWebSocketSubscriber(
+            api_key="API",
+            user_key="USR",
+            env="demo",
+            pool=sentinel,
+            watched_ids_provider=lambda: [],
+            reconcile_runner=lambda: None,
+        )
+
+    def test_ack_clears_the_pending_entry(self) -> None:
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        assert frame.frame_id in sub._pending_acks
+
+        sub._resolve_acks(json.dumps({"id": frame.frame_id, "success": True, "operation": "Subscribe"}))
+        assert sub._pending_acks == {}
+
+    def test_unacked_frame_is_reported_and_then_forgotten(self, caplog: pytest.LogCaptureFixture) -> None:
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        # Backdate past the timeout rather than sleeping.
+        operation, count, sent_at = sub._pending_acks[frame.frame_id]
+        sub._pending_acks[frame.frame_id] = (operation, count, sent_at - etoro_websocket._ACK_TIMEOUT_S - 1)
+
+        with caplog.at_level(logging.WARNING):
+            sub._reap_unacked()
+        assert "NEVER ACKED" in caplog.text
+        assert sub._pending_acks == {}, "reported once, then dropped so it does not repeat"
+
+    def test_fresh_frame_is_not_reported(self) -> None:
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        sub._reap_unacked()
+        assert frame.frame_id in sub._pending_acks
+
+    def test_rejection_is_logged_without_tearing_down(self, caplog: pytest.LogCaptureFixture) -> None:
+        """#2241: an over-cap rejection does NOT poison the session —
+        already-subscribed topics keep serving. Log, do not reconnect."""
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+        sub._register_pending(frame)
+        with caplog.at_level(logging.WARNING):
+            sub._resolve_acks(
+                json.dumps(
+                    {
+                        "id": frame.frame_id,
+                        "success": False,
+                        "operation": "Subscribe",
+                        "errorCode": "SubscribeFailed",
+                    }
+                )
+            )
+        assert "REJECTED" in caplog.text
+        assert sub._pending_acks == {}
 
 
 def _rate_frame(instrument_id: int, date: str, **fields: str) -> str:

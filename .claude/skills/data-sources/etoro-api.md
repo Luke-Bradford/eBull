@@ -54,7 +54,16 @@ of a documented limit is not absence of a limit.** Measured on demo
   count-based cap does not bound frame size. 500 topics ≈ 9.4 KB, proven.
 - **Correlate every frame uuid to its ack.** Over-size is silent, so a missing
   ack is the only signal that a Subscribe did not take. eToro acks both ops:
-  `{"id": …, "success": true, "operation": "Subscribe"}`.
+  `{"id": …, "success": true, "operation": "Subscribe"}`. ⚠ The ack carries
+  **no `type` field**, so a helper that filters inner messages on `type` will
+  not see it — parse acks separately.
+- Both are implemented since #2249: `build_subscribe_frames()` /
+  `build_unsubscribe_frames()` pack to a 20 KiB budget under the 25,600 B hard
+  limit, and the subscriber holds a pending-ack registry that reports any frame
+  un-acked after 10s. Dev-verified: 4,900 topics → 5 frames, max 21,615 B, 5/5
+  acked; the unchunked frame the code used to send would have been 92,979 B,
+  **3.6× the limit**, i.e. an unrecoverable connect → 1006 → reconnect loop
+  (nothing drains the ref set, so it cannot self-heal).
 
 The snapshot also carries undocumented `OfficialClosingPrice`, `IsMarketOpen`,
 `IsExchangeOpen`, `ConversionRateBid`/`Ask` (see
