@@ -55,6 +55,35 @@ lock (`JOBS_PROCESS_LOCK_KEY`, `app/jobs/locks.py`) enforces one jobs process.
 `launchctl kickstart` is a no-op and merged scheduler/parser changes are NOT
 picked up until the operator restarts that task — check `ps -o ppid` first.
 
+⚠⚠ **The API's application object does NOT live in either process that
+`pgrep -f uvicorn` matches.** Under `uvicorn --reload` (the dev stack's shape)
+the app runs in a **multiprocessing-spawned worker**; `pgrep -f uvicorn` returns
+the `uv run uvicorn` parent and the uvicorn supervisor, and *neither holds
+application sockets*. So `lsof` against those pids reports zero outbound
+connections on a completely healthy app — and it fails in the direction that
+manufactures a bug, because "zero sockets" reads as a dead subsystem.
+
+Measured 2026-08-04 (#2271), with the eToro WS fully connected the whole time:
+
+```
+pid=60224 etoro_sockets=1   <- multiprocessing-spawned app worker
+pid=61071 etoro_sockets=0   <- uv run uvicorn (parent)
+pid=61124 etoro_sockets=0   <- uvicorn supervisor
+```
+
+Both the #2271 report and the first diagnosis pass concluded "the WS subscriber
+is not connected" from exactly that measurement. It was wrong, and it pointed
+the investigation away from the real defect (`quotes` had no scheduled writer).
+
+**To check whether the app holds a connection, ask the app, not the OS.**
+`GET /_debug/etoro-ws` returns `ws_state` (CONNECTING/OPEN/CLOSING/CLOSED) from
+inside the process that owns the socket, which no external process inspection
+can get wrong. If you must inspect externally, resolve the target host and grep
+every pid for its address (`lsof -nP -i TCP | grep <ip>`) — matching on the
+command line will miss the worker. General rule: **prefer an in-process liveness
+report over external process inspection, and when an external measurement says a
+subsystem is dead, confirm it in-process before writing it into a ticket.**
+
 ## Invariants (do not break)
 
 - **Process topology (#719, settled 2026-04-30):** no scheduler / executor /

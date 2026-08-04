@@ -2,7 +2,31 @@
 
 Date: 2026-04-25
 Author: Luke / Claude
-Status: Draft v3 (post-Codex round 3; pending operator sign-off)
+Status: **SHIPPED and LIVE** — this describes current behaviour, not a proposal.
+The "Draft v3 (post-Codex round 3; pending operator sign-off)" header stood for
+months after the design shipped, which reads as "never built" to anyone checking
+how live prices actually work. It lives under `docs/proposals/` only because the
+whole tree moved (`docs/_archive/path-migration-map.md`); treat the directory as
+an accident of that move, not as its status.
+
+**Amendments since sign-off — read these before trusting the body below:**
+
+- **#502** cut FX cadence hourly → daily 17:00 CET and **dropped Phase 2 (eToro
+  batch quotes)** from `fx_rates_refresh`, on the rationale that the WS covers
+  quotes. True for the browser only.
+- **#2271** (2026-08-04) found the consequence: because the WS is
+  visibility-driven, dropping Phase 2 left the `quotes` table with **no
+  scheduled writer at all** for ~3 months, while eight headless services kept
+  reading it (scoring, portfolio, execution_guard, position_monitor, valuation,
+  transaction_cost, coverage, the quotes-gated valuation view). Held-position
+  marks were 14-22h stale. Fixed by the `quotes_refresh` job (hourly @ :23).
+  So **"what the operator can't see, doesn't stream" remains right for the WS,
+  but it was never a statement about who keeps `quotes` current.**
+
+Implementation: `app/services/etoro_websocket.py`, `app/api/sse_quotes.py`,
+`app/main.py::_maybe_start_etoro_ws`. Operating invariants are in
+`.claude/skills/market-data/SKILL.md` — that is the maintained summary; this
+document is the design record.
 
 ## Goal
 

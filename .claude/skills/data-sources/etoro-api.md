@@ -23,6 +23,25 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
 - Trading (verified live): open by-amount/by-units; close per position with optional `UnitsToDeduct` (partial); **`PATCH /api/v2/trading[/demo]/positions/{positionId}`** for TP/SL edit (`stopLossRate`, `takeProfitRate`, `stopLossType` fixed|trailing, `clearStopLoss`, `clearTakeProfit`; ≥1 field; **202 async** `{operationId, positionId, referenceId}`).
 - Write ops are asynchronous (202) — re-sync portfolio before treating them as landed.
 
+## Scope boundary — what this file is NOT
+
+This file documents **eToro's** behaviour: endpoints, limits, payload shapes,
+rate semantics. It deliberately does not document **our** policy for using
+them, and you will be misled if you look for that here:
+
+- **What we subscribe to** is visibility-driven (#498) — the WS boots quiet and
+  sends no Subscribe frame until an SSE stream lands. That is our decision, not
+  an eToro constraint. → `.claude/skills/market-data/SKILL.md`,
+  `docs/proposals/etl/visibility-driven-live-prices.md`.
+- **Which job keeps which table current** → `.claude/skills/market-data/SKILL.md`.
+- **Where our WS client process actually runs** (and why `lsof` against the
+  uvicorn pids cannot see its socket under `--reload`) →
+  `.claude/skills/ops-monitor/SKILL.md` §Process topology.
+
+Recorded 2026-08-04 (#2271) because a session went looking for the last two
+here, found only eToro protocol facts, and concluded the subscriber was
+disconnected when it was not.
+
 ## WebSocket limits — MEASURED, because the portal documents none
 
 `websocket/overview.md` and `websocket/topics.md` state no cap of any kind:
