@@ -313,7 +313,27 @@ def refresh_market_data(
     ``<= 0`` to disable the breaker (walk every instrument regardless).
 
     Raw provider responses are persisted by the provider before being returned.
+
+    CONNECTION CONTRACT (#2269) — ``conn`` MUST be autocommit, or the
+    per-instrument atomicity this function advertises does not exist. Each
+    instrument's work is scoped by ``with conn.transaction()``, which psycopg3
+    turns into a real ``BEGIN``/``COMMIT`` only when no transaction is already
+    open. On a non-autocommit connection the caller's first ``execute`` has
+    already opened one, so every block degrades to ``SAVEPOINT``/``RELEASE``
+    and nothing is durable until the CALLER commits — for a 12k-instrument
+    sweep that is hours of work riding on one transaction, lost whole on any
+    restart. This function must not commit it away itself: it does not own the
+    connection (prevention log, "Mid-transaction ``conn.commit()`` in service
+    functions"). The caller supplies the boundary; we only check and warn.
     """
+    if not conn.autocommit:
+        logger.warning(
+            "refresh_market_data called on a NON-AUTOCOMMIT connection (%d instruments) — "
+            "per-instrument transactions degrade to savepoints and NOTHING is durable until "
+            "the caller commits. A restart mid-sweep loses the entire run (#2269).",
+            len(instruments),
+        )
+
     candle_rows_upserted = 0
     features_computed = 0
     quotes_updated = 0

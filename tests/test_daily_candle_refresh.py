@@ -425,6 +425,49 @@ def test_benchmark_symbols_constant_is_the_expected_set() -> None:
     )
 
 
+def test_candle_refresh_connection_is_autocommit() -> None:
+    """The sweep's connection must be autocommit (#2269).
+
+    ``refresh_market_data`` advertises a per-instrument commit boundary via
+    ``with conn.transaction()``. psycopg3 only honours that as a real
+    ``BEGIN``/``COMMIT`` when no transaction is already open — and this job's
+    four scope SELECTs open one. Under the default ``autocommit=False`` every
+    per-instrument block silently degrades to ``SAVEPOINT``/``RELEASE``, so a
+    ~12k-instrument sweep commits once at connection close and loses 100% of
+    its work to any daemon restart (four consecutive runs were reaped this way).
+    Asserting on the kwarg is the only cheap regression guard: the failure mode
+    is invisible in-process — every write "succeeds", nothing is durable.
+    """
+    mock_conn = _make_mock_conn([(1, "AAPL")], [])
+    mock_provider = MagicMock()
+    mock_provider.__enter__ = MagicMock(return_value=mock_provider)
+    mock_provider.__exit__ = MagicMock(return_value=False)
+    mock_tracker = MagicMock()
+    mock_tracker.__enter__ = MagicMock(return_value=mock_tracker)
+    mock_tracker.__exit__ = MagicMock(return_value=False)
+    mock_summary = MagicMock()
+    mock_summary.candle_rows_upserted = 1
+    mock_summary.instruments_refreshed = 1
+    mock_summary.features_computed = 0
+    mock_summary.quotes_updated = 0
+    mock_summary.quotes_skipped = 0
+    mock_summary.spread_flags_set = 0
+    mock_summary.candles_failed = 0
+    mock_summary.candles_skipped = 0
+
+    with (
+        patch(_PATCHES["creds"], return_value=("key", "ukey")),
+        patch(_PATCHES["tracked"], return_value=mock_tracker),
+        patch(_PATCHES["provider_cls"], return_value=mock_provider),
+        patch(_PATCHES["connect"], return_value=mock_conn) as mock_connect,
+        patch(_PATCHES["refresh"], return_value=mock_summary),
+    ):
+        daily_candle_refresh()
+
+    mock_connect.assert_called_once()
+    assert mock_connect.call_args.kwargs.get("autocommit") is True
+
+
 def test_reporting_benchmark_symbol_is_always_refreshed() -> None:
     """The reporting benchmark must be in the always-fresh candle set (#1818).
 
