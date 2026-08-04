@@ -55,7 +55,7 @@ from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
-from app.services.market_data import most_recent_trading_day, refresh_market_data
+from app.services.market_data import most_recent_trading_day, refresh_market_data, refresh_quotes
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
@@ -336,6 +336,13 @@ JOB_DAILY_TAX_RECONCILIATION = "daily_tax_reconciliation"
 JOB_DAILY_PORTFOLIO_SYNC = "daily_portfolio_sync"
 JOB_EXECUTE_APPROVED_ORDERS = "execute_approved_orders"
 JOB_FX_RATES_REFRESH = "fx_rates_refresh"
+# #2271 — the scheduled writer for the ``quotes`` table. Restores the
+# headless quote refresh that #502 removed along with the FX cadence cut:
+# that PR dropped fx_rates_refresh's batch-quote phase as "redundant for
+# visibility-driven workflows", which is true of the browser and false of
+# scoring, portfolio, execution_guard, position_monitor, valuation,
+# transaction_cost and coverage — all of which read ``quotes`` headless.
+JOB_QUOTES_REFRESH = "quotes_refresh"
 JOB_RETRY_DEFERRED = "retry_deferred_recommendations"
 JOB_MONITOR_POSITIONS = "monitor_positions"
 JOB_PORTFOLIO_EOD_SNAPSHOT = "portfolio_eod_snapshot"
@@ -747,6 +754,28 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
     # -- Outside-DAG jobs (5 kept on their own cron triggers) ------------
     # These have empty JOB_TO_LAYERS entries and remain independently
     # scheduled; they do not participate in the orchestrator DAG.
+    ScheduledJob(
+        name=JOB_QUOTES_REFRESH,
+        display_name="Quote refresh",
+        source="etoro",
+        description="Refresh the quotes table for held + benchmark + Tier 1/2 instruments.",
+        # Hourly, NOT every_n_minutes, for two reasons. (1) Cadence: hourly is
+        # what quote freshness had before #502, and the headless readers are
+        # slower than that — the execution guard fires daily, position monitor
+        # and portfolio hourly. (2) The #1526/#1527 lane tick-race: a 5-min-
+        # aligned slot loses its lane tick to a same-lane every_5min job.
+        # :23 is not 5-min-aligned and collides with nothing else on the
+        # ``etoro`` lane (execute_approved_orders 06:30, exchanges_metadata
+        # Mon 04:00, etoro_lookups Mon 04:30).
+        #
+        # Cost: ~1,390 instruments / 50 IDs per rates request = ~28 GETs per
+        # fire, i.e. ~0.5 req/min against eToro's 60 GET/min shared budget.
+        cadence=Cadence.hourly(minute=23),
+        # Fire on boot when overdue — a process restart otherwise leaves every
+        # headless reader on quotes up to an hour old for no reason, and the
+        # fetch is bounded (28 GETs).
+        catch_up_on_boot=True,
+    ),
     ScheduledJob(
         name=JOB_EXECUTE_APPROVED_ORDERS,
         display_name="Execute approved orders",
@@ -2741,9 +2770,13 @@ def daily_candle_refresh() -> None:
             )
 
             instruments = ordered
-            # skip_quotes=True: quote freshness is owned by the hourly
-            # fx_rates_refresh job; daily candle job must not shadow
-            # those fresher values with stale end-of-day data.
+            # skip_quotes=True: quote freshness is owned by ``quotes_refresh``
+            # (hourly @ :23, #2271) — NOT by fx_rates_refresh, which gave up
+            # its batch-quote phase in #502 and which this comment named as
+            # the owner for months afterwards. Keeping quotes out of this job
+            # is still right on its own merits: a 70-minute candle sweep would
+            # stamp instruments quoted at wildly different times, and the
+            # instruments it touches last would carry the stalest marks.
             summary = refresh_market_data(provider, conn, instruments, skip_quotes=True)
         tracker.row_count = summary.candle_rows_upserted
 
@@ -2798,6 +2831,110 @@ def daily_candle_refresh() -> None:
                 len(instruments) - summary.candles_skipped,
                 summary.candles_skipped,
             )
+
+
+def quotes_refresh() -> None:
+    """Refresh the ``quotes`` table for every instrument read headlessly.
+
+    #2271. The ``quotes`` table had no scheduled writer at all. Its only two
+    writers are the WS subscriber — which is visibility-driven by design
+    (#498: "Boots quiet … no Subscribe frame until an SSE stream lands"), so
+    it writes nothing unless an operator has the page open — and
+    ``market_data._upsert_quote``, which was unreachable because both callers
+    of ``refresh_market_data`` pass ``skip_quotes=True``.
+
+    Meanwhile eight non-browser services read the table: scoring,
+    portfolio, execution_guard, position_monitor, valuation,
+    transaction_cost, coverage and the quotes-gated valuation view. None of
+    them bounds ``quoted_at``, so a stale row is indistinguishable from a
+    fresh one — measured 2026-08-04, all five held positions were marked from
+    quotes 14-22 hours old. The settled "AUM basis" rule covers a *missing*
+    quote ("fall back to cost basis"); a stale one never triggers it.
+
+    Scope mirrors the readers, not the universe:
+      1. Held positions — portfolio marks, the execution guard's spread gate,
+         and position monitoring all price these.
+      2. Benchmarks — the reporting comparison (same reasoning as
+         ``daily_candle_refresh``).
+      3. Tier 1/2 — the scored set; scoring reads ``spread_flag``/``last``/
+         ``bid``/``ask`` per instrument.
+
+    Tier 3 is deliberately excluded: nothing scores it, and it would take the
+    fetch from ~28 to ~240 requests per fire for data no headless reader
+    consumes. A T3 instrument the operator actually opens still gets live WS
+    ticks, which is the visibility-driven path working as intended.
+    """
+    creds = _load_etoro_credentials(JOB_QUOTES_REFRESH)
+    if creds is None:
+        _record_prereq_skip(JOB_QUOTES_REFRESH, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+
+    with _tracked_job(JOB_QUOTES_REFRESH) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            # autocommit=True for the same reason as daily_candle_refresh
+            # (#2269): the scope SELECT below opens an implicit transaction,
+            # which would turn refresh_quotes' per-instrument
+            # ``with conn.transaction()`` into a savepoint and make the whole
+            # batch commit once, at connection close.
+            connect_job(autocommit=True) as conn,
+        ):
+            rows = conn.execute(
+                """
+                SELECT DISTINCT ON (i.instrument_id) i.instrument_id, i.symbol
+                FROM instruments i
+                LEFT JOIN coverage c ON c.instrument_id = i.instrument_id
+                LEFT JOIN positions p ON p.instrument_id = i.instrument_id AND p.current_units > 0
+                WHERE p.instrument_id IS NOT NULL
+                   OR (i.is_tradable = TRUE AND c.coverage_tier IN (1, 2))
+                   OR (i.is_tradable = TRUE AND i.symbol = ANY(%(benchmarks)s))
+                ORDER BY i.instrument_id, i.symbol
+                """,
+                {"benchmarks": sorted(BENCHMARK_SYMBOLS)},
+            ).fetchall()
+
+            instruments = [(int(r[0]), str(r[1])) for r in rows]
+            if not instruments:
+                # Same reasoning as daily_candle_refresh's empty-scope branch
+                # (#1293): an empty scope here is anomalous (no held positions,
+                # no T1/T2 coverage, no benchmarks) and must not read as a
+                # healthy no-op.
+                logger.warning(
+                    "quotes_refresh: scope is EMPTY (0 held + 0 T1/T2 + 0 benchmark) — nothing to quote; "
+                    "universe/coverage may not be seeded"
+                )
+                tracker.row_count = 0
+                return
+
+            summary = refresh_quotes(provider, conn, instruments)
+            if summary.batch_error is not None:
+                # #2218 shape — a total upstream failure must NOT report as a
+                # clean run that simply found no quotes. This has to raise
+                # INSIDE the ``_tracked_job`` block: once the context exits,
+                # the job_runs row is already stamped success/row_count=0 and
+                # the job's success state has advanced (Codex round 2).
+                #
+                # Re-raising the provider's original exception (rather than
+                # logging and returning) lets ``classify_exception`` recover
+                # AUTH_EXPIRED / RATE_LIMITED / SOURCE_DOWN from the httpx
+                # type, so the existing retry + operator-remedy paths fire.
+                logger.warning(
+                    "quotes_refresh: eToro batch quote fetch FAILED for all %d instruments — "
+                    "no quotes written; every headless reader (scoring, portfolio, execution "
+                    "guard) continues on the previously stored values",
+                    summary.instruments_requested,
+                )
+                raise summary.batch_error
+        tracker.row_count = summary.quotes_updated
+
+    logger.info(
+        "quotes_refresh complete: requested=%d updated=%d no_quote=%d spread_flags=%d",
+        summary.instruments_requested,
+        summary.quotes_updated,
+        summary.quotes_skipped,
+        summary.spread_flags_set,
+    )
 
 
 def _cik_destination_is_empty(conn: psycopg.Connection) -> bool:  # type: ignore[type-arg]
@@ -4448,6 +4585,17 @@ def fx_rates_refresh() -> None:
       pipeline (#274) writes to the ``quotes`` table directly for
       every instrument an SSE stream subscribes to, making the
       batch-quote path redundant for visibility-driven workflows.
+
+      ⚠ That last clause was load-bearing and only half true (#2271).
+      It holds for the browser and fails for everything else: scoring,
+      portfolio, execution_guard, position_monitor, valuation,
+      transaction_cost and coverage all read ``quotes`` with no browser
+      involved, and the WS writes nothing for them because it only
+      subscribes to what is on screen. Dropping phase 2 therefore left
+      the table with NO scheduled writer for ~3 months. Restored as the
+      dedicated ``quotes_refresh`` job (hourly @ :23) rather than
+      re-added here — the FX cadence cut in #502 was correct and daily
+      is the right cadence for ECB rates, but wrong for marks.
 
     Conditional ETag (#275): sends If-None-Match against the last
     persisted ETag. A 304 is a no-op upsert.

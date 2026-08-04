@@ -241,6 +241,9 @@ class EtoroMarketDataProvider(MarketDataProvider):
 
         all_quotes: list[Quote] = []
         failed_chunks = 0
+        # Retained so an all-chunks-failed batch can re-raise the real cause
+        # (and keep its FailureCategory) instead of returning a silent [].
+        last_exc: Exception | None = None
         total_chunks = (len(instrument_ids) + _RATES_BATCH_SIZE - 1) // _RATES_BATCH_SIZE
 
         for batch_num, i in enumerate(range(0, len(instrument_ids), _RATES_BATCH_SIZE)):
@@ -269,8 +272,9 @@ class EtoroMarketDataProvider(MarketDataProvider):
                     exc_info=True,
                 )
                 failed_chunks += 1
+                last_exc = exc
                 continue
-            except httpx.RequestError:
+            except httpx.RequestError as exc:
                 # Network-level failure (timeout, connection reset) — no response to persist.
                 logger.warning(
                     "Rates chunk %d network error (%d IDs), skipping",
@@ -279,9 +283,31 @@ class EtoroMarketDataProvider(MarketDataProvider):
                     exc_info=True,
                 )
                 failed_chunks += 1
+                last_exc = exc
                 continue
             raw = response.json()
             all_quotes.extend(_normalise_rates(raw))
+
+        if last_exc is not None and failed_chunks == total_chunks:
+            # EVERY chunk failed — that is an outage, not "these instruments
+            # have no quotes", and downstream the two are indistinguishable
+            # because both produce an empty list (#2271, Codex). Partial
+            # failure still returns partial results, per the docstring above;
+            # only TOTAL failure raises, so a caller cannot report a clean
+            # no-op run while every headless reader sits on stale marks
+            # (the #2218 "job reports success having done nothing" shape).
+            #
+            # Re-raise the original exception rather than a bespoke provider
+            # error: ``classify_exception`` keys off the httpx type, so this
+            # preserves AUTH_EXPIRED (401/403) / RATE_LIMITED (429) /
+            # SOURCE_DOWN (5xx, transport) instead of flattening an
+            # operator-actionable outage to INTERNAL_ERROR.
+            logger.warning(
+                "Rates fetch: ALL %d chunk(s) failed (%d instrument IDs) — re-raising the last error",
+                total_chunks,
+                len(instrument_ids),
+            )
+            raise last_exc
 
         if failed_chunks:
             logger.warning(
