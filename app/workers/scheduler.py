@@ -352,6 +352,11 @@ JOB_RISK_METRICS_REFRESH = "risk_metrics_refresh"
 # manual-trigger-only shape as JOB_RISK_METRICS_REFRESH (NOT in SCHEDULED_JOBS;
 # the DAG layer's 24h cadence + freshness gate the walk).
 JOB_FAIR_VALUE_BAND_REFRESH = "fair_value_band_refresh"
+# #2261 — impossible-bar quarantine recompute (phase 0a of #2240). Same
+# orchestrator-driven + manual-trigger-only shape as JOB_RISK_METRICS_REFRESH.
+# Must follow candles: the verdicts are derived from price_daily and a refresh
+# that rewrote bars leaves them describing a series that no longer exists.
+JOB_PRICE_QUARANTINE_REFRESH = "price_quarantine_refresh"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 # JOB_WEEKLY_COVERAGE_AUDIT + JOB_WEEKLY_COVERAGE_REVIEW retired in Chunk 2 of
@@ -4593,6 +4598,30 @@ def fair_value_band_refresh() -> None:
         with connect_job() as conn:
             result = refresh_fair_value_band_batch(conn, instrument_ids=None)
             tracker.row_count = result["written"] + result["statused"]
+
+
+def price_quarantine_refresh() -> None:
+    """Recompute + persist bar/transition quarantine verdicts (#2261).
+
+    DB-only producer (no external I/O): reads ``price_daily``, runs the pure
+    rule set in ``app.services.price_quarantine`` over each instrument's series,
+    and replaces the derived verdicts in ``price_bar_quarantine`` /
+    ``price_transition_quarantine`` / ``price_series_break``. Orchestrator-driven
+    via the ``price_quarantine`` DAG layer (24h cadence, depends on candles) and
+    operator-triggerable via the ``price_quarantine`` manual lane. Mirrors
+    ``risk_metrics_refresh``'s ``_tracked_job`` + own-connection +
+    ``tracker.row_count`` shape.
+
+    ``row_count`` counts INSTRUMENTS evaluated, not rows written. The verdict
+    tables are sparse by design (492 bar rows on a 3.2M-bar corpus), so a
+    row-count would report a near-zero number for a completely successful run
+    and read as NO_WORK.
+    """
+    from app.services.price_quarantine_store import refresh_price_quarantine
+
+    with _tracked_job(JOB_PRICE_QUARANTINE_REFRESH) as tracker:
+        with connect_job() as conn:
+            tracker.row_count = refresh_price_quarantine(conn).instruments
 
 
 def exchanges_metadata_refresh() -> None:
