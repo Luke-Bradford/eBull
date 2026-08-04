@@ -494,6 +494,13 @@ def parse_op_acks(raw: str) -> list[OpAck]:
     envelope and no close frame, so the *absence* of an ack is the only
     evidence it was dropped.
     """
+    # Substring pre-filter before the decode. This runs on every
+    # inbound frame, alongside the decodes that `is_private_event` and
+    # `parse_rate_deltas` already do, and the overwhelming majority of
+    # frames are rate pushes carrying no `operation` key at all. No
+    # semantic shortcut: an ack cannot exist without the literal key.
+    if '"operation"' not in raw:
+        return []
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError:
