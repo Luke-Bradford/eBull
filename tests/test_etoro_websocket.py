@@ -334,6 +334,37 @@ class TestAckCorrelation:
         assert "NEVER ACKED" in caplog.text
         assert sub._pending_acks == {}
 
+    async def test_ack_arriving_during_send_still_clears_the_entry(self) -> None:
+        """Review round 3 — `ws.send` awaits, so the receive loop can
+        resolve this very frame's ack before control returns. If the
+        entry were registered AFTER the send, nothing would ever clear
+        it and the reaper would report an acked frame as NEVER ACKED."""
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+
+        class AckingWs:
+            """Acks from inside `send` — the tightest possible race."""
+
+            async def send(self, payload: str) -> None:
+                await asyncio.sleep(0)  # yield, as a real send does
+                sub._resolve_acks(json.dumps({"id": frame.frame_id, "success": True, "operation": "Subscribe"}))
+
+        await sub._send_frames(AckingWs(), [frame])  # type: ignore[arg-type]
+        assert sub._pending_acks == {}, "ack raced the registration and was lost"
+
+    async def test_failed_send_is_deregistered(self) -> None:
+        """Nothing will ack a frame that never reached the wire."""
+        sub = self._sub()
+        (frame,) = build_subscribe_frames([1001])
+
+        class BrokenWs:
+            async def send(self, payload: str) -> None:
+                raise ConnectionError("socket gone")
+
+        with pytest.raises(ConnectionError):
+            await sub._send_frames(BrokenWs(), [frame])  # type: ignore[arg-type]
+        assert sub._pending_acks == {}
+
     def test_fresh_frame_is_not_reported(self) -> None:
         sub = self._sub()
         (frame,) = build_subscribe_frames([1001])

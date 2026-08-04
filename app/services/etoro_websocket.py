@@ -1291,9 +1291,7 @@ class EtoroWebSocketSubscriber:
                     # drains ``_topic_refs``.
                     frames = build_subscribe_frames(topics_to_send)
                     if frames:
-                        for frame in frames:
-                            await ws.send(frame.payload)
-                            self._register_pending(frame)
+                        await self._send_frames(ws, frames)
                         logger.info(
                             "EtoroWebSocketSubscriber: subscribed to %d instrument topics in %d frame(s)",
                             len(topics_to_send),
@@ -1373,9 +1371,7 @@ class EtoroWebSocketSubscriber:
                     # stream, where the existing contract is "log and
                     # let the next reconnect resubscribe from refs".
                     frames = build_subscribe_frames(newly_tracked)
-                    for frame in frames:
-                        await self._ws.send(frame.payload)
-                        self._register_pending(frame)
+                    await self._send_frames(self._ws, frames)
                     logger.info(
                         "EtoroWebSocketSubscriber: subscribe %d topics in %d frame(s)",
                         len(newly_tracked),
@@ -1419,9 +1415,7 @@ class EtoroWebSocketSubscriber:
                 try:
                     # Built inside the try — see `add_instruments`.
                     frames = build_unsubscribe_frames(to_unsubscribe)
-                    for frame in frames:
-                        await self._ws.send(frame.payload)
-                        self._register_pending(frame)
+                    await self._send_frames(self._ws, frames)
                     logger.info(
                         "EtoroWebSocketSubscriber: unsubscribe %d topics in %d frame(s)",
                         len(to_unsubscribe),
@@ -1436,6 +1430,30 @@ class EtoroWebSocketSubscriber:
     def _register_pending(self, frame: WsFrame) -> None:
         """Record a sent op frame so its ack can be correlated (#2249)."""
         self._pending_acks[frame.frame_id] = (frame.operation, frame.topic_count, time.monotonic())
+
+    async def _send_frames(self, ws: ClientConnection, frames: list[WsFrame]) -> None:
+        """Send op frames, registering each for ack correlation FIRST.
+
+        Order matters and is not cosmetic: ``ws.send`` awaits, which
+        yields to the event loop, so the receive loop can process this
+        very frame's ack before control returns here. Registering
+        afterwards would insert an entry that the ack has already been
+        and gone for — nothing would ever clear it, and the reaper
+        would later report a genuinely-acked frame as NEVER ACKED,
+        making the silent-drop detector cry wolf.
+
+        A frame that fails to send is de-registered: nothing will ack
+        what never reached the wire, and the caller already logs the
+        send failure. ``BaseException`` so a cancellation mid-send
+        cleans up too.
+        """
+        for frame in frames:
+            self._register_pending(frame)
+            try:
+                await ws.send(frame.payload)
+            except BaseException:
+                self._pending_acks.pop(frame.frame_id, None)
+                raise
 
     def _resolve_acks(self, raw: str) -> None:
         """Clear pending entries for acked frames and log rejections."""
@@ -1489,7 +1507,9 @@ class EtoroWebSocketSubscriber:
         reaper riding inbound traffic would miss precisely the case it
         exists for (Codex checkpoint 2). Ticks on a timer instead.
         """
-        interval = max(1.0, _ACK_TIMEOUT_S / 2)
+        # Floor guards a pathologically small timeout only; in
+        # production _ACK_TIMEOUT_S is 10s so the interval is 5s.
+        interval = max(0.05, _ACK_TIMEOUT_S / 2)
         while not self._stop_event.is_set():
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
