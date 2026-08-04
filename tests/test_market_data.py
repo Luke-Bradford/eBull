@@ -34,9 +34,9 @@ from app.services.market_data import (
     _compute_and_store_features,
     _compute_rolling_returns,
     _compute_volatility_30d,
-    _most_recent_trading_day,
     compute_day_change,
     compute_spread_pct,
+    most_recent_trading_day,
 )
 
 # ---------------------------------------------------------------------------
@@ -706,7 +706,7 @@ class TestCandlesAreFresh:
 
 
 def _candles_are_fresh_standalone(latest_date: date, today: date) -> bool:
-    return latest_date >= _most_recent_trading_day(today)
+    return latest_date >= most_recent_trading_day(today)
 
 
 class TestCandleFreshness:

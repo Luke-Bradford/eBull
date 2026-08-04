@@ -54,6 +54,13 @@ price_daily                             3,098,914 rows, 2020-10-19 → 2026-08-0
 > **#2254**, which gates phase 0a — an adjusted-price layer over a series frozen in June
 > is not a price layer.
 >
+> ✅ **#2254 FIXED.** The T3 branch now carries a freshness-based maintenance arm
+> alongside the seed arm, so a priced T3 behind the most recent trading day is
+> re-admitted every night instead of leaving scope permanently. The numbers above are
+> the pre-fix measurement and are kept as the record of what motivated it; the
+> post-fix figures are on the PR. **The eligibility predicate that 0a inherits from
+> this and from S6 is written down as decision 9 in §3** — use that, not these counts.
+>
 > The 7,463 break into **four** populations under **one** gate, not the two the ticket
 > assumed:
 >
@@ -201,6 +208,57 @@ Consequences:
    factor, version. #2231 feeds it when it lands. Quarantine rules for impossible
    bars must work independently of split detection. (Revised after Codex
    verdict 3.)
+9. **Price-data eligibility is defined on the price path, never on scoring
+   eligibility.** Settled by S6 (#2246); this is 0a's output, stated here so no
+   later phase re-derives it. `coverage_tier` and `fundamentals_snapshot` are
+   SEC-fed, so any universe keyed on "scoring-eligible" is **US-filer only**
+   while presenting as "the market" — all 1,383 T1/T2 instruments are
+   `us_equity` and no non-US instrument has ever reached T1/T2.
+
+   ```
+   eligible for a price series  :=  instruments.is_tradable
+                                AND exchanges.asset_class IS NOT NULL
+                                AND exchanges.asset_class <> 'unknown'
+   ```
+
+   Orthogonal to fundamentals coverage, and the thing the TA layer actually
+   consumes. Measured 2026-08-04 on the full population:
+
+   | | n | disposition |
+   | --- | --- | --- |
+   | tradable | 12,684 | |
+   | − `asset_class = 'unknown'` (CME 192 + 2) | 194 | **excluded** — operator curates the exchange row first (#503 PR 4). Renders "no data", not absent. |
+   | = price-eligible | **12,490** | |
+   | of which eToro serves 0 bars (probed all 27) | 27 | eligible but supply-less; renders "no data", not absent |
+
+   Two consequences 0a owns:
+
+   - **The admission is a cost decision, not a predicate change alone.** 7,242 of
+     the eligible set (4,749 non-US equity + 2,493 `us_equity` with no
+     fundamentals row) are currently unpriced solely because the seeding gate in
+     `_T3_CANDLE_SELECT` is fundamentals-shaped. Seeding them is ~2.2 h of the
+     55 req/min budget once, then they join the nightly maintenance arm fixed in
+     #2254 (~1.1 s each per night thereafter). Raise `_T3_CANDLE_BATCH_SIZE`
+     deliberately when this lands — it is sized for today's population, and the
+     cap logs a WARNING rather than silently truncating.
+   - **"Eligible but supply-less" needs a stored marker, and it is 108, not 27.**
+     Measured on the full in-scope population after the #2254 backfill (2026-08-04),
+     not by probe: **81 priced instruments were fetched and did not advance** (78
+     `us_equity` — delisted/acquired names, oldest last bar 2021-05-21 — plus 2
+     crypto and 1 fx), and the **27** unpriced gate-passers returned no bars. S6's
+     probe could only see the 27 because it sampled the unpriced set; the 78 priced
+     ones were invisible to it, so **the marker must cover priced instruments too**.
+
+     ⚠ **eToro returns HTTP 200 with nothing new for these — it does not error.** A
+     marker keyed on HTTP status or an exception would never fire; it has to record
+     *fetch attempted, series did not advance, N consecutive times*. Until it
+     exists, these are indistinguishable from "not yet refreshed", they are
+     re-probed nightly forever, and every coverage number quietly counts them as
+     refreshable.
+
+   The gap is an **accident**, not a scope boundary: eToro serves the
+   international set (27/28 probed non-US instruments returned bars current to
+   the prior close). Do not reopen this as "should we cover non-US".
 
 ## 4. Where it lives
 
@@ -224,7 +282,7 @@ falsifies is worse than no ticket.
 
 | # | phase | gated on |
 | --- | --- | --- |
-| 0a | adjusted-price + eligibility layer (adjustment table, quarantine rules, per-strategy eligible universe) | S6, S7 |
+| 0a | adjusted-price + eligibility layer (adjustment table, quarantine rules, per-strategy eligible universe). Eligibility predicate + the two items it owns: §3 decision 9 | S6, S7, **#2254** ✅ |
 | 0b | collector path — universe-wide WS subscription coexisting with the SSE path | S1, S3 |
 | 0c | tick persistence — tiered: short-retention raw layer, durable 1-min bars, time partitioning | S2 |
 | 1 | heat map (`?view=heatmap`) — first consumer, proves the spine end to end | 0b, 0c, S4 |
