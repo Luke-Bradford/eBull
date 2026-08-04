@@ -16,6 +16,42 @@ Also read it before citing any TA figure in an operator-facing surface or
 prompt — the interpretation rules below are the encoded ones, not textbook
 defaults.
 
+## ⚠ Scope boundary — this skill is CURRENT-STATE TA only
+
+Everything below describes TA as it works **today**: indicators computed on the
+latest bar, read by scoring / entry_timing / thesis to answer *"what is this
+chart saying right now"*. That is a different system from the **TA strategy
+platform** (#2240) being built alongside it, and conflating them will send you
+to the wrong tables and the wrong assumptions.
+
+| | current-state TA (this skill) | TA strategy platform (#2240) |
+| --- | --- | --- |
+| question | what is the chart saying now | did this pattern ever pay |
+| storage | latest bar only (median **1** bar/instrument has indicators) | full history over a research corpus |
+| price source | `price_daily`, eToro-sourced | **public research corpus** — eToro is the execution venue, not the data source |
+| consumers | scoring, entry_timing, thesis | strategy registry, signal ledger, backtester |
+
+Two facts from that programme that change how you should read this skill:
+
+- **eToro bars are Bid-derived and unadjusted.** Measured 2026-08-04 against raw
+  public closes on ~1,035 bars each across 7 instruments: level bias a consistent
+  **−0.14% to −0.22%** (a half-spread below public), daily-return correlation
+  **0.963–0.996**, median RSI-14 difference **0.12–0.19 points**, SMA-200 regime
+  agreement **99.4–100%**. So indicator *values* here are sound, but the series
+  is price-only (no dividend adjustment) and sits a half-spread low.
+- **eToro history caps at ~4 years** (1,000-bar API ceiling, #603). Public data
+  reaches decades further. Do not conclude from `price_daily` that a given
+  history depth is unavailable — that is a property of our provider, not the
+  market.
+
+Before any work on backtesting, strategy definitions, signal recording or
+historical TA, read
+`docs/proposals/ta/strategy-catalogue-and-backtest-validity.md` — especially §0
+(what the data actually permits), §3.5 (execution semantics — the fill-timing
+rule that prevents look-ahead) and §5 (the validity gates). Do not design a
+backtest from this skill alone; it does not cover the failure modes that make
+backtests lie.
+
 ## Where TA lives
 
 - **Computation** — `technical_analysis.py`: pure functions, no DB/IO.

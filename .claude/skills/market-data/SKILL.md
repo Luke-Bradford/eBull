@@ -83,6 +83,19 @@ streams live ticks via `QuoteBus`; `/risk-metrics` serves the `risk_v1` layer.
 - `price_daily.volume` NULL means "not provided or zero" (#21). Candle upsert is
   idempotent; features recompute only when the newest complete OHLCV bar matches
   the row being written.
+- **`price_daily` is the EXECUTION-VENUE view, not the research corpus (#2240).**
+  It is eToro-sourced, Bid-derived, unadjusted (price not total return), and caps
+  at ~4 years per instrument (1,000-bar API ceiling, #603). That is correct and
+  wanted for marks, fills and the tradable universe. It is **not** the basis for
+  backtesting: the universe holds only currently-listed instruments (5 of 12,691
+  non-tradable have any history), so any replay of it is survivorship-biased.
+  Historical strategy research runs on a separate public research corpus
+  (#2282); the two are interchangeable for signal *shape* — measured return
+  correlation 0.963–0.996, SMA-200 regime agreement 99.4–100% — with a consistent
+  −0.15% level bias that is the Bid half-spread. ⚠ Never conclude from
+  `price_daily` that a given history depth or instrument is unavailable; that is
+  a property of our provider, not the market (prevention log: "A correct
+  measurement of the WRONG POPULATION…").
 - **`quotes` has exactly two writers and they share one row per instrument
   (#2271).** The WS subscriber (`etoro_websocket.upsert_quote`) is
   *visibility-driven* — #498, "Boots quiet … no Subscribe frame until an SSE
