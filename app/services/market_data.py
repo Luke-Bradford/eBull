@@ -274,6 +274,109 @@ class MarketRefreshSummary:
     adjustment_refetches: int = 0
 
 
+@dataclass(frozen=True)
+class QuoteRefreshSummary:
+    """Outcome of a quotes-only refresh (#2271)."""
+
+    instruments_requested: int
+    quotes_updated: int
+    quotes_skipped: int
+    # Count of FETCHED quotes whose spread exceeded the threshold — NOT a
+    # count of rows now flagged in the table. The two diverge when
+    # ``_upsert_quote``'s monotonicity guard rejects a stale snapshot: the
+    # fetched quote is still counted here, while the stored row keeps the
+    # fresher tick's flag. Named for the fetch because that is what this
+    # function observes; the table is the authority on stored state.
+    spread_flags_set: int
+    # True when the provider's batch fetch itself failed, so every
+    # instrument counts as skipped for a reason that is NOT "the provider
+    # had no quote for it". Without this the caller cannot tell a total
+    # upstream outage from a universe of untraded instruments — both
+    # report quotes_updated=0 (#1293 / #2218 shape).
+    batch_failed: bool = False
+    # The exception that caused ``batch_failed``, retained so a caller that
+    # owns a job_runs row can re-raise it and have ``classify_exception`` key
+    # off the original httpx type (AUTH_EXPIRED / RATE_LIMITED / SOURCE_DOWN).
+    # Swallowing it into a bare bool would force the job to either report
+    # success or invent a category (#2271, Codex round 2).
+    batch_error: Exception | None = None
+
+
+def refresh_quotes(
+    provider: MarketDataProvider,
+    conn: psycopg.Connection,  # type: ignore[type-arg]
+    instruments: list[tuple[int, str]],
+    *,
+    max_spread_pct: Decimal = DEFAULT_MAX_SPREAD_PCT,
+) -> QuoteRefreshSummary:
+    """Batch-fetch quotes for *instruments* and upsert each one.
+
+    Extracted from ``refresh_market_data``'s quote phase (#2271) so the
+    scheduled ``quotes_refresh`` job can reach it without also pulling
+    candles. ``refresh_market_data`` still calls it, so there is one
+    implementation, not two.
+
+    Why this needed extracting: both of the callers that pass through
+    ``refresh_market_data`` set ``skip_quotes=True``, so the quote phase was
+    unreachable in production. Combined with the WS subscriber only writing
+    for instruments an SSE stream has on screen, nothing wrote the ``quotes``
+    table unless an operator had the page open — while scoring, the portfolio
+    manager and the execution guard all read it headless.
+
+    Per-instrument upsert failures are logged and skipped; a failure of the
+    batch fetch itself aborts the whole set and is reported as
+    ``batch_failed`` rather than silently reading as "no quotes available".
+    """
+    if not instruments:
+        return QuoteRefreshSummary(0, 0, 0, 0)
+
+    quotes_updated = 0
+    quotes_skipped = 0
+    spread_flags_set = 0
+
+    all_ids = [iid for iid, _ in instruments]
+    try:
+        quotes = provider.get_quotes(all_ids)
+    except Exception as exc:
+        logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
+        return QuoteRefreshSummary(
+            instruments_requested=len(instruments),
+            quotes_updated=0,
+            quotes_skipped=len(instruments),
+            spread_flags_set=0,
+            batch_failed=True,
+            batch_error=exc,
+        )
+
+    quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
+    for instrument_id, symbol in instruments:
+        quote = quote_map.get(instrument_id)
+        if quote is None:
+            logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
+            quotes_skipped += 1
+            continue
+        try:
+            with conn.transaction():
+                flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
+                quotes_updated += 1
+                if flagged:
+                    spread_flags_set += 1
+        except Exception:
+            logger.warning(
+                "Failed to upsert quote for %s (id=%d), skipping",
+                symbol,
+                instrument_id,
+                exc_info=True,
+            )
+
+    return QuoteRefreshSummary(
+        instruments_requested=len(instruments),
+        quotes_updated=quotes_updated,
+        quotes_skipped=quotes_skipped,
+        spread_flags_set=spread_flags_set,
+    )
+
+
 def refresh_market_data(
     provider: MarketDataProvider,
     conn: psycopg.Connection,  # type: ignore[type-arg]
@@ -495,38 +598,10 @@ def refresh_market_data(
     # fx_rates_refresh job — the daily candle job must not shadow those
     # fresher values with stale end-of-day data.
     if not skip_quotes:
-        all_ids = [iid for iid, _ in instruments]
-        batch_failed = False
-        try:
-            quotes = provider.get_quotes(all_ids)
-        except Exception:
-            logger.warning("Failed to batch-fetch quotes, skipping all quote updates", exc_info=True)
-            quotes = []
-            quotes_skipped = len(instruments)
-            batch_failed = True
-
-        if not batch_failed:
-            quote_map: dict[int, Quote] = {q.instrument_id: q for q in quotes}
-
-            for instrument_id, symbol in instruments:
-                quote = quote_map.get(instrument_id)
-                if quote is None:
-                    logger.debug("No quote returned for %s (id=%d), skipping quote upsert", symbol, instrument_id)
-                    quotes_skipped += 1
-                    continue
-                try:
-                    with conn.transaction():
-                        flagged = _upsert_quote(conn, instrument_id, quote, max_spread_pct)
-                        quotes_updated += 1
-                        if flagged:
-                            spread_flags_set += 1
-                except Exception:
-                    logger.warning(
-                        "Failed to upsert quote for %s (id=%d), skipping",
-                        symbol,
-                        instrument_id,
-                        exc_info=True,
-                    )
+        quote_result = refresh_quotes(provider, conn, instruments, max_spread_pct=max_spread_pct)
+        quotes_updated = quote_result.quotes_updated
+        quotes_skipped = quote_result.quotes_skipped
+        spread_flags_set = quote_result.spread_flags_set
 
     return MarketRefreshSummary(
         instruments_refreshed=len(instruments),
@@ -968,6 +1043,20 @@ def _upsert_quote(
     Upsert the current quote into the quotes table.
     Computes spread_pct and sets spread_flag if spread exceeds the threshold.
     Returns True if spread_flag was set (i.e. spread is wide).
+
+    The ``WHERE`` clause makes the write MONOTONIC in ``quoted_at`` (#2271),
+    matching ``etoro_websocket.upsert_quote``'s guard. The two writers share
+    one row per instrument and race: the WS streams live ticks for whatever is
+    on the operator's screen while this REST path runs on a schedule, so
+    without the guard a periodic snapshot would clobber a fresher live tick.
+    That is the hazard the old ``skip_quotes=True`` call sites were working
+    around by never writing quotes at all — which is what left the table with
+    no scheduled writer in the first place.
+
+    Note this makes the return value mean "the fetched quote is wide", not
+    "the stored row is now flagged" — on a rejected (stale) write the stored
+    row keeps the fresher tick's flag. The caller counts spread flags for
+    reporting only.
     """
     spread_pct = compute_spread_pct(quote.bid, quote.ask)
     spread_flag = spread_pct is not None and spread_pct > max_spread_pct
@@ -988,6 +1077,7 @@ def _upsert_quote(
             last        = EXCLUDED.last,
             spread_pct  = EXCLUDED.spread_pct,
             spread_flag = EXCLUDED.spread_flag
+        WHERE quotes.quoted_at IS NULL OR EXCLUDED.quoted_at >= quotes.quoted_at
         """,
         {
             "instrument_id": instrument_id,

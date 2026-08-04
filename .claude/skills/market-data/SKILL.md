@@ -79,6 +79,26 @@ streams live ticks via `QuoteBus`; `/risk-metrics` serves the `risk_v1` layer.
 - `price_daily.volume` NULL means "not provided or zero" (#21). Candle upsert is
   idempotent; features recompute only when the newest complete OHLCV bar matches
   the row being written.
+- **`quotes` has exactly two writers and they share one row per instrument
+  (#2271).** The WS subscriber (`etoro_websocket.upsert_quote`) is
+  *visibility-driven* — #498, "Boots quiet … no Subscribe frame until an SSE
+  stream lands" — so it writes **only** for instruments the operator has on
+  screen. Everything headless is covered by the `quotes_refresh` job (hourly
+  @ :23, held + benchmarks + T1/T2, `market_data.refresh_quotes`). Both
+  upserts MUST stay monotonic in `quoted_at`
+  (`WHERE quotes.quoted_at IS NULL OR EXCLUDED.quoted_at >= quotes.quoted_at`)
+  or the hourly REST snapshot clobbers a live tick while the page is open.
+  Do not "simplify" either guard away, and do not add a third writer without
+  it. History: #502 dropped `fx_rates_refresh`'s batch-quote phase as
+  "redundant for visibility-driven workflows", which left the table with no
+  scheduled writer for ~3 months while scoring, portfolio, execution_guard,
+  position_monitor, valuation, transaction_cost and coverage all read it
+  headless. Measured 2026-08-04 before the fix: 107 rows for a ~12k universe,
+  held-position marks 14-22h old.
+- **No reader of `quotes` bounds `quoted_at`.** The settled "AUM basis" rule
+  covers a *missing* quote ("fall back to cost basis"); a stale row is
+  indistinguishable from a fresh one and never triggers it. If you need
+  freshness, assert it at the read site — the table will not do it for you.
 - **`refresh_market_data` REQUIRES an autocommit connection (#2269).** Its
   per-instrument `with conn.transaction()` is only a real commit boundary when no
   transaction is already open. Callers read first (`daily_candle_refresh` runs
