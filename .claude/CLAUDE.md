@@ -380,6 +380,15 @@ Invocation rule: always use `codex exec` (non-interactive). Never bare `codex` w
 `codex exec review` needs a target — `codex exec review --base origin/main` for a branch diff. Bare `review` errors with
 "Specify --uncommitted, --base, --commit, or provide custom review instructions".
 
+⚠ **`git add -A` BEFORE `codex exec review --base origin/main`.** The diff it reads does not
+include untracked files, so a NEW file — which on a schema change is exactly the migration —
+is invisible to it. On #2262 this cost a full round: Codex returned a confident P1 ("the query
+joins `instrument_price_supply` but the patch adds no migration creating it, so
+`daily_candle_refresh` will fail with `UndefinedTable`"), which was correct about the diff it
+was given and wrong about the branch. Re-run with the file staged: no findings. The failure is
+silent in the direction that matters — a review that cannot see your new file reports on a
+codebase that does not exist, and everything it says will sound plausible.
+
 ## Review decision tree — who to consult in what order
 
 ```
