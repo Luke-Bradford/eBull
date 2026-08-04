@@ -2423,12 +2423,35 @@ def nightly_universe_sync() -> None:
 #     ≈55 req/min under eToro's 60/min limit), so 5,000 is ~92 min worst
 #     case, on top of ~26 min for held + T1/T2 + benchmark.
 #
-# Raising it is a deliberate cost decision, not a side effect: admitting
-# the 7,242 instruments currently blocked by the fundamentals-shaped
-# seeding gate (#2246) would take the branch to ~2.3h/night. When the cap
+# RAISED 5,000 -> 12,000 (#2262), and this is the deliberate cost decision
+# the comment above said it would be, not a side effect. Replacing the
+# fundamentals-shaped seeding gate with design decision 9's price-eligibility
+# predicate admits 7,242 instruments, taking the T3 population to ~11,100.
+# At 5,000 the cap would have BOUND on the very first run — the branch would
+# have logged its WARNING nightly and left an unknown remainder stale, which
+# reads as "everything is current" to every coverage number that counts it.
+#
+#   * population — measured on the full dev population 2026-08-04, the T3
+#     scope query returns 10,483 rows under the new predicate (the seed arm
+#     goes 27 -> 7,269, admitting exactly the 7,242), so 12,000 leaves ~13%
+#     headroom;
+#   * wall clock — ~2.2h of the 55 req/min budget for the one-off seeding
+#     sweep. Thereafter these join #2254's freshness-based maintenance arm at
+#     ~1.1s each per night, and the supply-less exclusion above removes the
+#     ~108 that will never advance.
+#
+# Headroom is thinner than the previous 29% by design: the population is now
+# the whole price-eligible universe rather than a filtered slice of it, so it
+# grows with eToro's catalogue rather than with SEC coverage. When the cap
 # binds, daily_candle_refresh logs a WARNING — a silently truncated sweep
 # would read as "everything is current" when it is not.
-_T3_CANDLE_BATCH_SIZE = 5000
+_T3_CANDLE_BATCH_SIZE = 12000
+
+# #2262 — supply-less exclusion parameters, mirroring
+# ``market_data._SUPPLY_LESS_CONSECUTIVE_MISSES``. The re-check interval is what
+# makes the exclusion EXPIRE rather than LATCH.
+_T3_SUPPLY_LESS_MISSES = 5
+_T3_SUPPLY_LESS_RECHECK = "7 days"
 
 # Benchmark instruments (S&P 500 + Nasdaq-100 + 11 GICS sector SPDRs)
 # always candle-refreshed regardless of coverage tier so the risk layer
@@ -2458,12 +2481,26 @@ BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
 #
 # TWO ARMS, deliberately carrying DIFFERENT predicates (#2254):
 #
-#   SEED arm — tier 3, no candles at all, and eligible for a first
-#   fetch: has fundamentals (original, #515 PR 0), OR sits in a
-#   non-fundamentals-bearing asset class (crypto / fx / commodity /
-#   index, which never get a fundamentals_snapshot row by design).
-#   Instruments on exchanges with asset_class='unknown' stay gated;
-#   the operator curates the row first via the #503 PR 4 admin path.
+#   SEED arm — tier 3, no candles at all, and PRICE-ELIGIBLE per design
+#   decision 9 (settled by S6 #2246): tradable, on an exchange whose
+#   asset_class is known and is not 'unknown'.
+#
+#   ⚠ REPLACED the fundamentals-shaped gate (#2262). The old predicate
+#   was "has a fundamentals_snapshot row OR sits in a
+#   non-fundamentals-bearing asset class". coverage_tier and
+#   fundamentals_snapshot are SEC-fed, so keying price seeding on them
+#   made the price universe US-FILER ONLY while presenting as "the
+#   market" — 7,242 price-eligible instruments (4,749 non-US equity +
+#   2,493 us_equity carrying no fundamentals row) were unpriced for that
+#   reason alone. Price-data eligibility is defined on the PRICE path;
+#   it is orthogonal to fundamentals coverage. The gap was an accident,
+#   not a scope boundary — eToro serves the international set (27 of 28
+#   probed non-US instruments returned bars current to the prior close).
+#
+#   Instruments on exchanges with asset_class='unknown' stay gated (194:
+#   CME 192 + 2); the operator curates the exchange row first via the
+#   #503 PR 4 admin path. That is the ONE thing this narrowing keeps
+#   rejecting, and it renders as "no data", not as absent.
 #
 #   MAINTENANCE arm — tier 3 that ALREADY has a series and is behind
 #   the most recent trading day. NO eligibility gate: the seeding gate
@@ -2487,11 +2524,19 @@ BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
 # `%(fresh_through)s` is `most_recent_trading_day` — the SAME boundary
 # `_candles_are_fresh` uses to decide whether to spend a request — so
 # scope membership and the per-instrument freshness skip cannot drift.
+# SUPPLY-LESS DE-PRIORITISATION (#2262). An instrument whose series has
+# not advanced on %(supply_misses)s consecutive attempted fetches stops
+# consuming a nightly slot — but the exclusion EXPIRES, it does not
+# LATCH: after %(supply_recheck)s it is probed again, and one advancing
+# fetch resets the counter to zero. A latching exclusion would make this
+# a seeder again (the #2254 defect), and a relisted or newly-supplied
+# instrument would never come back on its own.
 _T3_CANDLE_SELECT = """
 SELECT i.instrument_id, i.symbol
 FROM instruments i
 JOIN coverage c ON c.instrument_id = i.instrument_id
 LEFT JOIN exchanges e ON e.exchange_id = i.exchange
+LEFT JOIN instrument_price_supply s ON s.instrument_id = i.instrument_id
 LEFT JOIN LATERAL (
     SELECT MAX(p.price_date) AS last_bar
     FROM price_daily p
@@ -2504,14 +2549,14 @@ WHERE i.is_tradable = TRUE
       (pd.last_bar IS NOT NULL AND pd.last_bar < %(fresh_through)s)
       OR (
           pd.last_bar IS NULL
-          AND (
-              EXISTS (
-                  SELECT 1 FROM fundamentals_snapshot f
-                  WHERE f.instrument_id = i.instrument_id
-              )
-              OR e.asset_class IN ('crypto', 'fx', 'commodity', 'index')
-          )
+          AND e.asset_class IS NOT NULL
+          AND e.asset_class <> 'unknown'
       )
+  )
+  AND (
+      s.instrument_id IS NULL
+      OR s.consecutive_no_advance < %(supply_misses)s
+      OR s.last_attempt_at < now() - %(supply_recheck)s::interval
   )
 ORDER BY pd.last_bar ASC NULLS FIRST, i.symbol, i.instrument_id
 LIMIT %(limit)s
@@ -2622,6 +2667,8 @@ def daily_candle_refresh() -> None:
                     "limit": _T3_CANDLE_BATCH_SIZE,
                     "benchmark_symbols": sorted(BENCHMARK_SYMBOLS),
                     "fresh_through": most_recent_trading_day(date.today()),
+                    "supply_misses": _T3_SUPPLY_LESS_MISSES,
+                    "supply_recheck": _T3_SUPPLY_LESS_RECHECK,
                 },
             ).fetchall()
             if len(t3_rows) == _T3_CANDLE_BATCH_SIZE:

@@ -6,9 +6,14 @@ have no fundamentals_snapshot rows). Before that PR the bootstrap
 required EXISTS fundamentals_snapshot, locking every crypto coin
 out of the candle pipeline forever — operator-visible symptom: BTC
 and LRC instrument pages rendered "no price data". A non-fundamentals-
-bearing asset_class qualifies via the OR branch even without
-fundamentals, while an UNPRICED us_equity without fundamentals stays
-gated ("only bother if we'll score it").
+bearing asset_class qualifies even without fundamentals.
+
+⚠ #2262 REPLACED the seed arm's fundamentals-shaped predicate with design
+decision 9's price-eligibility one (tradable + asset_class known and not
+'unknown'). An UNPRICED us_equity without fundamentals is now ADMITTED, not
+gated — see test_us_equity_without_fundamentals_is_now_admitted for why the
+old assertion was backwards. The one remaining rejection is
+asset_class='unknown'.
 
 MAINTENANCE arm (#2254). The seed arm's `NOT EXISTS (price_daily)`
 used to be the WHOLE query, so a T3 left candle-refresh scope
@@ -31,7 +36,13 @@ import psycopg
 import pytest
 
 from app.services.market_data import most_recent_trading_day
-from app.workers.scheduler import _T3_CANDLE_BATCH_SIZE, _T3_CANDLE_SELECT, BENCHMARK_SYMBOLS
+from app.workers.scheduler import (
+    _T3_CANDLE_BATCH_SIZE,
+    _T3_CANDLE_SELECT,
+    _T3_SUPPLY_LESS_MISSES,
+    _T3_SUPPLY_LESS_RECHECK,
+    BENCHMARK_SYMBOLS,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -45,6 +56,9 @@ _QUERY_PARAMS = {
     "limit": _T3_CANDLE_BATCH_SIZE,
     "benchmark_symbols": [],
     "fresh_through": _FRESH_THROUGH,
+    # #2262 — supply-less de-prioritisation params.
+    "supply_misses": _T3_SUPPLY_LESS_MISSES,
+    "supply_recheck": _T3_SUPPLY_LESS_RECHECK,
 }
 
 
@@ -181,16 +195,22 @@ def test_other_non_fundamentals_classes_qualify(
         )
 
 
-def test_us_equity_without_fundamentals_still_gated(
+def test_us_equity_without_fundamentals_is_now_admitted(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """Preserves original SEED-arm behaviour for fundamentals-bearing
-    classes: an UNPRICED us_equity instrument at tier 3 with NO
-    fundamentals_snapshot is still excluded (the heuristic 'only bother
-    if we'll score it'). The OR branch only widens for
-    non-fundamentals-bearing classes; us_equity stays on the original
-    gate. Once it HAS bars the maintenance arm takes over instead —
-    see test_priced_us_equity_without_fundamentals_is_maintained."""
+    """#2262 INVERTS this case, and the inversion is the whole ticket.
+
+    It previously asserted the opposite: an UNPRICED tier-3 us_equity with no
+    fundamentals_snapshot row was excluded, on the heuristic "only bother if
+    we'll score it". But coverage_tier and fundamentals_snapshot are SEC-fed, so
+    that gate made the PRICE universe US-filer-only while presenting as "the
+    market" — 2,493 us_equity in exactly this state, plus 4,749 non-US equities,
+    7,242 in total, were unpriced for that reason alone.
+
+    Design decision 9 (settled by S6 #2246): price-data eligibility is defined
+    on the PRICE path, never on scoring eligibility, and is orthogonal to
+    fundamentals coverage.
+    """
     _seed_exchange(ebull_test_conn, exchange_id="test_us_pr0", asset_class="us_equity")
     _seed_instrument_t3_no_candles(
         ebull_test_conn,
@@ -204,12 +224,46 @@ def test_us_equity_without_fundamentals_still_gated(
         with ebull_test_conn.cursor() as cur:
             cur.execute(_T3_CANDLE_SELECT, _QUERY_PARAMS)
             symbols = sorted(r[1] for r in cur.fetchall())
-        assert "TESTUSEQ" not in symbols
+        assert "TESTUSEQ" in symbols
     finally:
         _cleanup(
             ebull_test_conn,
             exchange_ids=["test_us_pr0"],
             instrument_ids=[950300],
+        )
+
+
+def test_unknown_asset_class_stays_gated(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A narrowing gate is measured by what it REJECTS — this is the one thing
+    the #2262 predicate still rejects, so it needs its own test.
+
+    194 instruments (CME 192 + 2) sit on exchanges with asset_class='unknown'.
+    The operator curates the exchange row first via the #503 PR 4 admin path;
+    until then the instrument renders "no data", it is not absent. Without this
+    branch the predicate would be purely widening and nobody would notice it had
+    stopped excluding anything.
+    """
+    _seed_exchange(ebull_test_conn, exchange_id="test_unk_pr0", asset_class="unknown")
+    _seed_instrument_t3_no_candles(
+        ebull_test_conn,
+        instrument_id=950301,
+        symbol="TESTUNK",
+        exchange="test_unk_pr0",
+    )
+    ebull_test_conn.commit()
+
+    try:
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(_T3_CANDLE_SELECT, _QUERY_PARAMS)
+            symbols = sorted(r[1] for r in cur.fetchall())
+        assert "TESTUNK" not in symbols
+    finally:
+        _cleanup(
+            ebull_test_conn,
+            exchange_ids=["test_unk_pr0"],
+            instrument_ids=[950301],
         )
 
 
