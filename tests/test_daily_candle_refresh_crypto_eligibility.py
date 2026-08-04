@@ -328,15 +328,9 @@ def test_stalest_series_sort_before_less_stale(
     _seed_exchange(ebull_test_conn, exchange_id="test_order", asset_class="crypto")
     # Symbol order is deliberately the INVERSE of staleness order, so a
     # residual `ORDER BY symbol` would fail this assertion.
-    _seed_instrument_t3_no_candles(
-        ebull_test_conn, instrument_id=950430, symbol="AAA_RECENT", exchange="test_order"
-    )
-    _seed_instrument_t3_no_candles(
-        ebull_test_conn, instrument_id=950431, symbol="MMM_ANCIENT", exchange="test_order"
-    )
-    _seed_instrument_t3_no_candles(
-        ebull_test_conn, instrument_id=950432, symbol="ZZZ_UNSEEDED", exchange="test_order"
-    )
+    _seed_instrument_t3_no_candles(ebull_test_conn, instrument_id=950430, symbol="AAA_RECENT", exchange="test_order")
+    _seed_instrument_t3_no_candles(ebull_test_conn, instrument_id=950431, symbol="MMM_ANCIENT", exchange="test_order")
+    _seed_instrument_t3_no_candles(ebull_test_conn, instrument_id=950432, symbol="ZZZ_UNSEEDED", exchange="test_order")
     _seed_bar(ebull_test_conn, 950430, _FRESH_THROUGH - timedelta(days=5))
     _seed_bar(ebull_test_conn, 950431, _FRESH_THROUGH - timedelta(days=400))
     ebull_test_conn.commit()
