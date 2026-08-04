@@ -79,6 +79,20 @@ streams live ticks via `QuoteBus`; `/risk-metrics` serves the `risk_v1` layer.
 - `price_daily.volume` NULL means "not provided or zero" (#21). Candle upsert is
   idempotent; features recompute only when the newest complete OHLCV bar matches
   the row being written.
+- **`refresh_market_data` REQUIRES an autocommit connection (#2269).** Its
+  per-instrument `with conn.transaction()` is only a real commit boundary when no
+  transaction is already open. Callers read first (`daily_candle_refresh` runs
+  four scope SELECTs; the loop itself calls `_candles_are_fresh` every
+  iteration), so under `autocommit=False` psycopg3 turns every block into a
+  `SAVEPOINT` and the whole ~12k-instrument sweep commits once, at connection
+  close. Four consecutive sweeps were reaped by a routine jobs-daemon restart and
+  lost 100% of their work with every write reporting success. A pre-loop
+  `conn.commit()` does NOT fix it — the next iteration's read re-opens the
+  implicit tx. Both call sites (`app/workers/scheduler.py::daily_candle_refresh`,
+  `scripts/rebackfill_candles_5y.py`) pass autocommit; the service warns if a
+  caller does not. Durability here is only observable from a SECOND session —
+  poll the target table, or watch `now() - xact_start` in `pg_stat_activity`
+  (seconds = correct, monotonically growing = the bug).
 - **v1 is long-only / no-leverage / deterministic-execution** — price/quote data
   feeds scoring + the mark-to-market marks the execution guard re-checks; every
   refresh must be reproducible and every displayed price auditable to its source.

@@ -2607,7 +2607,23 @@ def daily_candle_refresh() -> None:
     with _tracked_job(JOB_DAILY_CANDLE_REFRESH) as tracker:
         with (
             EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
-            connect_job() as conn,
+            # autocommit=True is LOAD-BEARING (#2269), not a style choice.
+            # ``refresh_market_data`` wraps each instrument's fetch + upsert +
+            # feature-compute in ``with conn.transaction()`` and documents that
+            # as a per-instrument commit boundary. Under the default
+            # autocommit=False that claim is FALSE: the scope SELECTs below
+            # open an implicit transaction, so psycopg3 downgrades every
+            # ``transaction()`` to a SAVEPOINT and the whole ~12k-instrument
+            # sweep commits once, at connection close. Measured on dev PG17:
+            # zero rows visible to a concurrent session for the entire run.
+            # The jobs daemon restarts on any ``app/**`` edit
+            # (``app.jobs.dev_reload``), so four consecutive sweeps were reaped
+            # mid-run and lost 100% of their work; a fifth survived 3h53m only
+            # because nothing happened to restart it. Prevention log:
+            # "``conn.transaction()`` savepoint release does not commit the
+            # outer transaction" / "``with conn.transaction()`` inside an open
+            # implicit psycopg3 tx is SAVEPOINT not COMMIT".
+            connect_job(autocommit=True) as conn,
         ):
             # Held positions — always included, regardless of coverage
             # tier OR is_tradable status. A delisted/suspended instrument
