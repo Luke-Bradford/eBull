@@ -169,6 +169,24 @@ Corollaries:
 - **Never default a missing metric key to empty.** `summary.get("holders", {})`
   makes the section report zero lost *and* zero gained — indistinguishable from
   a clean run. Raise instead.
+- **The census must be the rule you wrote down.** Before publishing, re-read the
+  query against the rule table clause by clause: same predicate, same threshold,
+  same downstream consumer, for every named rule. A rejection census is plausible
+  at almost any magnitude, so nothing in the output fires when they diverge.
+  Highest risk when the rule is being *refined mid-analysis* — the prose moves
+  first and the SQL is left behind. S7 (#2247) published a wick-rule count computed
+  by the raw-ratio rule it had just argued was wrong, in the same document.
+- **One verdict class, one column.** If the artefact declares more than one kind of
+  usability (usable-for-returns vs usable-for-intrabar-touch), a single boolean is
+  the tell that the split exists only in the prose. S7 OR-ed range-only defects into
+  the return quarantine and over-rejected by 587 windows. Where the rules will ship,
+  express them once as a pure function and have both the census and production call
+  it, so the divergence cannot reopen.
+- **`NOT (col > 0 AND …)` is NULL, not TRUE, when `col IS NULL`.** Used as an
+  exclusion in a `CASE`/`WHERE`, every NULL-`col` row falls through to the other
+  branch — so a corroboration gate admits precisely the population it cannot verify.
+  `coalesce(…, FALSE)` every three-valued predicate. The tell is a downstream count
+  disagreeing with the census, not the flag itself.
 
 ## Arm 3 must cover fields the harness does NOT key on
 

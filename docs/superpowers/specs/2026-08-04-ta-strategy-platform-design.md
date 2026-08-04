@@ -131,6 +131,33 @@ a signal-measurement table was sanity-checked; the conditional rows looked
 plausible (RSI<30 → 76.8% hit rate). **Left unaddressed this inflates every win
 rate the platform would ever report.** Same root cause as #2231.
 
+> ⚠⚠ **Both claims above are falsified by S7 (#2247), 2026-08-04. Full verdict on the
+> issue; decision 10 in §3 is what 0a inherits.**
+>
+> 1. **The corpus IS predominantly split-adjusted.** Tested against an independent
+>    internal signal rather than inferred: a ≥5× step in
+>    `fundamentals_snapshot.shares_outstanding` is a split signature, and **320 of the
+>    330 that have price coverage (97.0%) pass through `price_daily` with no level
+>    break**. AMZN and GOOG run $107→$120 through their June 2022 20:1 events — the
+>    adjusted scale. The residual 10 are real and are what the §3 decision-8
+>    adjustment table exists for.
+> 2. **The +110% baseline is 10 observations.** The top 10 windows of 3,132,324
+>    contribute **104.55 of the 105.73 points**, and they trace to one bad ingest day
+>    (2025-12-24) writing sentinel closes of `0.01` / `0.0001`. Median is 0.000000%.
+> 3. **It does not inflate win rates.** Dropping those 10 windows moves the mean
+>    +105.73% → +1.18% and leaves the unconditional hit rate at **49.884%, unchanged
+>    to three decimals**. The defect destroys *mean*-shaped statistics and leaves
+>    *count*-shaped ones alone.
+>
+> ⚠ The danger is real but differently shaped: any rule whose **trigger** correlates
+> with the defect is unbounded. A "buy the one-day ≤ −50% crash" trigger reads
+> 48.95% hit / +626,683.7% mean raw, and **46.27% hit / −14.66% median** after
+> quarantine — 19.5% of its firings were corrupt bars.
+>
+> ⚠ **The RSI<30 → 76.8% figure is therefore still unexplained** and must not be
+> treated as closed. Candidates: look-ahead in indicator recomputation, survivorship
+> in the current-universe replay, the overlapping-window denominator.
+
 ### The two live-data paths are NOT equivalent
 
 | path | payload | cost model |
@@ -260,6 +287,48 @@ Consequences:
    international set (27/28 probed non-US instruments returned bars current to
    the prior close). Do not reopen this as "should we cover non-US".
 
+10. **Quarantine identifies "this return is not a return" — it never identifies a
+    cause.** Settled by S7 (#2247); full census on the issue. A split and a bad
+    print produce the same defect, so the rules never have to tell them apart —
+    which is exactly why they work independently of the unbuilt #2231 detector,
+    and why #2226's falsified drop-magnitude discriminator is not being
+    re-proposed. **Magnitude is a trigger, not a verdict.**
+
+    Four consequences 0a inherits:
+
+    - **Two verdicts per bar, not one: `return_usable` and `range_usable`.** A bar
+      can have a perfect close and a spurious wick (XPER 2024-06-03 is
+      `o 8.497 h 8.737 l 0.010 c 8.298`). Returns are untouched; every stop-loss in
+      the phase-4 outcome resolver reads as touched. A rule set that only protects
+      returns hands phantom fills to the backtester.
+    - **The defect lives on a transition, not a bar.** Bars either side of a level
+      break are valid prices in their own unit regime. Quarantine the transition
+      and the windows spanning it; keep the bars.
+    - **Rules are a pure function over bars, versioned, with per-rule tests.** Both
+      bugs Codex caught in this spike were "the SQL is not the written rule" — a
+      raw `high/low` test where the spec said wick, and range-only rules feeding the
+      return quarantine (which over-rejected by 587 windows).
+    - **Containment is not classification, so the bias must be published.** The
+      level-break rule rejects real moves at every threshold — demonstrably-real
+      outnumber split-like ~10:1 — and turnover corroboration reaches only ~30% of
+      the population (volume is equity-only, S3). The rejection census is an
+      operator-visible figure, not a one-off.
+
+    Measured rejection, full population at `a0ddf952` (3,236,874 bars):
+
+    ```
+    return_usable = false        177 bars     range_usable = false     492 bars
+    transitions quarantined      884          20-bar windows           7,059 (0.225%)
+    instruments w/ unresolved level break      59  (11,410 bars stranded pre-break)
+    mean 20-bar return    +105.73% -> +0.95%   hit rate  49.884% -> 49.901%
+    ```
+
+    Unadjustable history is **marked, never dropped** — `price_series_break` rows
+    plus a per-instrument **segment** model (a single `usable_from` gate discards
+    joinable segments when an instrument has several breaks and only some resolve).
+    Silent exclusion biases the eligible universe; every backtest states its window,
+    its eligible-universe size, and its history-truncated count.
+
 ## 4. Where it lives
 
 `/research` already models "N lenses on ONE dataset → one surface with `?view=`
@@ -282,7 +351,7 @@ falsifies is worse than no ticket.
 
 | # | phase | gated on |
 | --- | --- | --- |
-| 0a | adjusted-price + eligibility layer (adjustment table, quarantine rules, per-strategy eligible universe). Eligibility predicate + the two items it owns: §3 decision 9 | S6, S7, **#2254** ✅ |
+| 0a | adjusted-price + eligibility layer (adjustment table, quarantine rules, per-strategy eligible universe). Eligibility predicate + the two items it owns: §3 decision 9; quarantine rules + adjustment/break schema: §3 decision 10 | S6 ✅, S7 ✅, **#2254** ✅ — **unblocked** |
 | 0b | collector path — universe-wide WS subscription coexisting with the SSE path | S1, S3 |
 | 0c | tick persistence — tiered: short-retention raw layer, durable 1-min bars, time partitioning | S2 |
 | 1 | heat map (`?view=heatmap`) — first consumer, proves the spine end to end | 0b, 0c, S4 |
@@ -306,7 +375,7 @@ All read-only or throwaway. Each can invalidate design above it.
 | S4 | session / calendar semantics — what "% change" means with the market closed, across currencies and exchanges | the heat map and every daily comparison |
 | S5 | bar-touch tie-break — can intraday resolve TP-vs-SL order, or must some outcomes be `ambiguous`? | the operator's chosen win definition |
 | S6 | why 7,463 tradable instruments have no price history | universe coverage for every surface |
-| S7 | impossible-bar quarantine rules that work without the split detector | 0a, and every backtest number |
+| S7 ✅ | impossible-bar quarantine rules that work without the split detector | 0a, and every backtest number — **answered, §3 decision 10** |
 
 ## 7. Open questions carried from Codex review
 
