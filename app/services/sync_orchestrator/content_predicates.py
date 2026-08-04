@@ -17,9 +17,9 @@ import psycopg
 
 def candles_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     """Every Tier 1/2 instrument must have a candle for the most recent trading day."""
-    from app.services.market_data import _most_recent_trading_day
+    from app.services.market_data import most_recent_trading_day
 
-    trading_day = _most_recent_trading_day(date.today())
+    trading_day = most_recent_trading_day(date.today())
     # `i.is_tradable = TRUE` matches the filter in `daily_candle_refresh`
     # (app/workers/scheduler.py). Without it, a delisted instrument that
     # still carries tier 1/2 coverage would permanently fail this

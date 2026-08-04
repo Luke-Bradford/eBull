@@ -55,7 +55,7 @@ from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
-from app.services.market_data import _most_recent_trading_day, refresh_market_data
+from app.services.market_data import most_recent_trading_day, refresh_market_data
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
@@ -2484,7 +2484,7 @@ BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
 # The maintenance predicate must stay FRESHNESS-based, never
 # existence-based: an exclusion that expires keeps the instrument in
 # scope tomorrow, an exclusion that latches makes this a seeder again.
-# `%(fresh_through)s` is `_most_recent_trading_day` — the SAME boundary
+# `%(fresh_through)s` is `most_recent_trading_day` — the SAME boundary
 # `_candles_are_fresh` uses to decide whether to spend a request — so
 # scope membership and the per-instrument freshness skip cannot drift.
 _T3_CANDLE_SELECT = """
@@ -2617,7 +2617,7 @@ def daily_candle_refresh() -> None:
                 {
                     "limit": _T3_CANDLE_BATCH_SIZE,
                     "benchmark_symbols": sorted(BENCHMARK_SYMBOLS),
-                    "fresh_through": _most_recent_trading_day(date.today()),
+                    "fresh_through": most_recent_trading_day(date.today()),
                 },
             ).fetchall()
             if len(t3_rows) == _T3_CANDLE_BATCH_SIZE:

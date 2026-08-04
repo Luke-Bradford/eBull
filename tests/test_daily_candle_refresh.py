@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.market_data import _most_recent_trading_day
+from app.services.market_data import most_recent_trading_day
 from app.workers.scheduler import _T3_CANDLE_BATCH_SIZE, daily_candle_refresh
 
 
@@ -191,7 +191,7 @@ class TestDailyCandleRefreshT3Bootstrap:
             # request. A scope predicate looser than the skip predicate
             # burns requests on instruments that are then skipped; tighter,
             # and the series it excludes never get refreshed at all.
-            "fresh_through": _most_recent_trading_day(date.today()),
+            "fresh_through": most_recent_trading_day(date.today()),
         }
 
     def test_t3_batch_size_covers_the_t3_population(self) -> None:

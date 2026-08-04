@@ -30,7 +30,7 @@ from datetime import date, timedelta
 import psycopg
 import pytest
 
-from app.services.market_data import _most_recent_trading_day
+from app.services.market_data import most_recent_trading_day
 from app.workers.scheduler import _T3_CANDLE_BATCH_SIZE, _T3_CANDLE_SELECT, BENCHMARK_SYMBOLS
 
 pytestmark = pytest.mark.integration
@@ -39,7 +39,7 @@ pytestmark = pytest.mark.integration
 # Pinned once per module so a case that seeds a bar AT the freshness
 # boundary and the query that reads it can never straddle midnight —
 # the wall-clock-window flake class from #2224.
-_FRESH_THROUGH = _most_recent_trading_day(date.today())
+_FRESH_THROUGH = most_recent_trading_day(date.today())
 
 _QUERY_PARAMS = {
     "limit": _T3_CANDLE_BATCH_SIZE,

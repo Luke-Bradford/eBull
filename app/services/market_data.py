@@ -402,8 +402,15 @@ def refresh_market_data(
     )
 
 
-def _most_recent_trading_day(today: date) -> date:
+def most_recent_trading_day(today: date) -> date:
     """Return the most recent weekday (Mon-Fri) on or before today.
+
+    PUBLIC because it is the single definition of "a price series is
+    current" and four modules depend on it agreeing: the per-instrument
+    fetch skip (``_candles_are_fresh`` below), the T3 refresh scope
+    (``scheduler._T3_CANDLE_SELECT``, #2254 — a scope boundary that
+    drifts from the skip boundary either burns requests or strands
+    series), and the orchestrator's candle freshness/content predicates.
 
     On weekdays (Mon-Fri), today's candle is available after market
     close — the daily candle job runs at 22:00 UTC, well after the
@@ -441,7 +448,7 @@ def _candles_are_fresh(
     if row is None or row[0] is None:
         return False
     latest_date: date = row[0]
-    return latest_date >= _most_recent_trading_day(today)
+    return latest_date >= most_recent_trading_day(today)
 
 
 # Incremental fetch window in bars — yesterday + today + one

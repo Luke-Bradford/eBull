@@ -120,9 +120,9 @@ def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     # Content check: every T1/T2 instrument must have a candle for the
     # most recent trading day. Per-instrument query avoids the false-pass
     # of global MAX(price_date) when the table is uniformly stale.
-    from app.services.market_data import _most_recent_trading_day
+    from app.services.market_data import most_recent_trading_day
 
-    trading_day = _most_recent_trading_day(date.today())
+    trading_day = most_recent_trading_day(date.today())
     row = conn.execute(
         """
         SELECT COUNT(*) AS missing

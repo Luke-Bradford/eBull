@@ -17,7 +17,7 @@ import psycopg
 import pytest
 
 from app.providers.market_data import OHLCVBar
-from app.services.market_data import _most_recent_trading_day, refresh_market_data
+from app.services.market_data import most_recent_trading_day, refresh_market_data
 from tests.fixtures.ebull_test_db import ebull_test_conn
 from tests.fixtures.ebull_test_db import test_db_available as _test_db_available
 
@@ -60,7 +60,7 @@ def test_split_overlap_mismatch_triggers_full_refetch_and_heals_series(
     # 11 weekdays ending at the most recent trading day; the LAST one is
     # deliberately NOT seeded so the freshness skip does not fire and the
     # run enters incremental mode (gap of 1 trading day <= 3-bar window).
-    days = _weekdays_back(_most_recent_trading_day(date.today()), 11)
+    days = _weekdays_back(most_recent_trading_day(date.today()), 11)
     history = days[:-1]
     for d in history:
         conn.execute(
