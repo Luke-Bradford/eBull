@@ -152,8 +152,13 @@ def _stream_series(conn: psycopg.Connection[Any]) -> Iterator[tuple[int, list[St
 
 
 def _scipy_pivots(bars: list[StructureBar], n: int) -> tuple[set[int], set[int]]:
+    # Imported inside the function, and unresolvable to pyright, BOTH on
+    # purpose: scipy is the reference implementation this run compares against
+    # and must never become a repo dependency. It is supplied per-invocation by
+    # `uv run --with scipy`. A module-level import would make the rest of this
+    # script unimportable without it.
     import numpy as np
-    from scipy.signal import argrelextrema
+    from scipy.signal import argrelextrema  # pyright: ignore[reportMissingImports]
 
     highs = np.array([float(b.high) for b in bars])  # type: ignore[arg-type]
     lows = np.array([float(b.low) for b in bars])  # type: ignore[arg-type]
