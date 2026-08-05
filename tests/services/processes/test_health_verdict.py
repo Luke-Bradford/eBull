@@ -143,6 +143,10 @@ def test_no_stale_status_mapping() -> None:
         "running": ("working", False),
         "pending_retry": ("self_healing", True),
         "failed": ("attention", False),
+        # #2218 — this row is why the `set(expected) == set(_ALL_STATUSES)`
+        # assertion below earns its keep: adding the status without it would
+        # have shipped a member with no pinned verdict.
+        "degraded": ("attention", False),
         "cancelled": ("attention", False),
         "pending_first_run": ("working", False),
         "ok": ("current", False),
@@ -625,3 +629,41 @@ def test_verdict_for_row_wedged_running_reads_red() -> None:
     attention — a hung non-heartbeating job is never falsely calm."""
     row = _row(role="steady_state", status="running", stale_reasons=("mid_flight_stuck",))
     assert verdict_for_row(row, now=_NOW)[0] == "attention"
+
+
+# ---------------------------------------------------------------------------
+# #2218 — degraded
+# ---------------------------------------------------------------------------
+
+
+def test_degraded_reads_attention() -> None:
+    """A run that completed and made no progress is red.
+
+    The entire defect was that this state read as healthy for seven weeks
+    (#2213), so anything softer than attention re-introduces it.
+    """
+    v, sh, reason = compute_verdict(status="degraded", stale_reasons=())
+    assert (v, sh, reason) == ("attention", False, "completed with no progress")
+
+
+def test_degraded_does_not_mask_an_actionable_stale_reason() -> None:
+    """ckpt-1 invariant: the stale block still runs first."""
+    _, _, reason = compute_verdict(status="degraded", stale_reasons=("queue_stuck",))
+    assert reason == "queue stuck"
+
+
+def test_degraded_is_not_self_healed_by_a_retry_in_flight() -> None:
+    """⚠ Deliberate: nothing raised, so there is no ``next_retry_at`` and
+    re-firing would just re-hit whatever is not progressing. The retry branch
+    is scoped to ``failed`` / ``pending_retry`` and must not widen to cover
+    this — a degraded row stays red until a run actually progresses."""
+    v, sh, reason = compute_verdict(status="degraded", stale_reasons=(), retry_in_flight=True, retry_at_display="14:30")
+    assert (v, sh, reason) == ("attention", False, "completed with no progress")
+
+
+def test_degraded_last_run_is_not_hidden_behind_the_kill_switch() -> None:
+    """#1831's carve-out covers what the non-disabled path reddens, and the
+    degraded state now reddens. Without this a halt would hide it — the exact
+    masking the disabled branch exists to prevent."""
+    v, _, reason = compute_verdict(status="disabled", stale_reasons=(), last_run_failed=True)
+    assert (v, reason) == ("attention", "last run failed")

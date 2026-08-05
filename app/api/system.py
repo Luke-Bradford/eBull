@@ -55,6 +55,7 @@ from app.services.bootstrap_state import (
 )
 from app.services.ops_monitor import (
     JobHealth,
+    JobStatus,
     LayerHealth,
     LayerStatus,
     check_all_layers,
@@ -111,7 +112,7 @@ class KillSwitchStateResponse(BaseModel):
 
 class JobHealthResponse(BaseModel):
     name: str
-    last_status: Literal["running", "success", "failure", "skipped"] | None
+    last_status: JobStatus | None
     last_started_at: datetime | None
     last_finished_at: datetime | None
     detail: str
@@ -194,7 +195,7 @@ class JobOverviewResponse(BaseModel):
     # there is no live-fire-time source to compete with the cadence
     # computation. The frontend can drop the discriminator at its leisure.
     next_run_time_source: Literal["live", "declared"]
-    last_status: Literal["running", "success", "failure", "skipped"] | None
+    last_status: JobStatus | None
     last_started_at: datetime | None
     last_finished_at: datetime | None
     detail: str

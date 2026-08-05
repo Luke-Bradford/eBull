@@ -80,7 +80,7 @@ export interface ConfigResponse {
 export type LayerStatus = "ok" | "stale" | "empty" | "error";
 export type OverallStatus = "ok" | "degraded" | "down";
 export type JobLastStatus =
-  "running" | "success" | "failure" | "skipped" | null;
+  JobRunStatus | null;
 export type CadenceKind =
   "hourly" | "daily" | "weekly" | "monthly" | "yearly" | "every_n_minutes";
 
@@ -211,7 +211,15 @@ export interface ParamMetadata {
 // /jobs/runs (app/api/jobs.py — issue #13 PR B)
 // ---------------------------------------------------------------------------
 
-export type JobRunStatus = "running" | "success" | "failure" | "skipped";
+// #2218 — "degraded": the run completed and made no progress. "cancelled"
+// was already reachable server-side (sql/137) and missing here.
+export type JobRunStatus =
+  | "running"
+  | "success"
+  | "failure"
+  | "skipped"
+  | "cancelled"
+  | "degraded";
 
 export interface JobRunResponse {
   run_id: number;
@@ -2057,6 +2065,10 @@ export type ProcessStatus =
   | "pending_first_run"
   | "running"
   | "ok"
+  // #2218 — the run COMPLETED and made no progress. Not `ok` (that is what
+  // OpenFIGI resolution reported for seven weeks while it was dark) and not
+  // `failed` (nothing raised, so there is no error to show).
+  | "degraded"
   | "failed"
   | "pending_retry"
   | "cancelled"
@@ -2083,7 +2095,7 @@ export type HealthVerdict =
   | "paused";
 
 export type ProcessRunStatus =
-  "success" | "failure" | "partial" | "cancelled" | "skipped";
+  "success" | "failure" | "partial" | "cancelled" | "skipped" | "degraded";
 
 export type CursorKind =
   | "filed_at"

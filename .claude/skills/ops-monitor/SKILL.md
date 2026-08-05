@@ -30,6 +30,38 @@ name)` reads the latest `job_runs` row per scheduled job. `record_job_start` /
 `row_count`, `error_msg`). The kill switch also lives here
 (`activate_kill_switch` / `get_kill_switch_status`).
 
+⚠⚠ **`success` means "it finished", NOT "it did anything" — until a job opts into
+progress reporting (#2218).** Completion and progress are different facts, and
+deriving health from the first is how OpenFIGI resolution ran dark for seven weeks
+behind an unbroken run of `success / row_count 0` (#2213). A job that binds a
+whole-batch failure to a counter instead of raising is invisible to every check
+this app has.
+
+The opt-in is `tracker.progress = JobProgress(candidates_seen=…, outcomes={…},
+errors={…})` in the invoker; `_finish_tracked` runs
+`app/services/job_progress.py::degradation_reason` over it and writes
+`status='degraded'` + `progress_json` instead of `success`. Two rules, and
+⚠ **"zero rows written" is deliberately NOT one of them** — most jobs legitimately
+have nothing to do, and a blanket zero-rows alarm is noise that trains the operator
+to ignore the signal. The discriminator is `candidates_seen`: saw nothing / did
+nothing is healthy, saw work / produced no terminal outcome is stalled.
+
+⚠ **`progress is None` is judged exactly as before**, so the ~50 unwired jobs are
+inert. When investigating a suspect job, `progress_json IS NULL` means "this job
+does not report progress" — NOT "it reported zero". They are different claims and
+only one of them is evidence.
+
+⚠ **The terminal-status vocabulary is `ops_monitor.TERMINAL_STATUS_SQL`, and it is
+the single source.** It was hand-spelled in five SQL `IN (...)` literals across four
+modules plus two Python `Literal`s, and pyright cannot see inside a SQL string —
+adding a status to the CHECK constraint without touching all of them writes rows
+nothing reads. `tests/test_job_terminal_status_contract.py` derives the set from
+sql/254's constraint text and greps `app/` for hand-spelled lists.
+⚠ `sync_orchestrator/dispatcher.py::reset_stale_in_flight` uses a deliberately
+NARROWER set (`success`/`failure`/`degraded`) — `skipped` and `cancelled` mean the
+work was not done, and whether boot recovery should re-fire those is an open
+question. Do not "fix" it to the shared constant.
+
 **Admin verdict (`health_verdict.py`).** `verdict_for_row(row, now=...)` /
 `compute_verdict(...)` collapse a row's `ProcessStatus` pill + `stale_reasons`
 chips into ONE precedence-ordered `HealthVerdict` (`current` / `working` /

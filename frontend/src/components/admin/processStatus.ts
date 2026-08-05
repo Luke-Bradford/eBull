@@ -41,6 +41,11 @@ export const STATUS_VISUAL: Record<ProcessStatus, StatusVisual> = {
   // slot. A deliberate small colour change, not a no-op.
   running: { label: "running", tone: "info" },
   ok: { label: "ok", tone: "ok" },
+  // #2218 — `warn`, not `risk`: the job completed, so this is not an
+  // incident, but it made no progress and needs the operator. Sits between
+  // `ok` and `failed` visually because that is exactly where it sits
+  // semantically.
+  degraded: { label: "no progress", tone: "warn" },
   failed: { label: "failed", tone: "risk" },
   pending_retry: { label: "pending retry", tone: "warn" },
   cancelled: { label: "cancelled", tone: "neutral", extraClass: "line-through" },

@@ -54,6 +54,7 @@ from app.services.exchange_directory import refresh_exchange_directory
 from app.services.exchanges import refresh_exchanges_metadata
 from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
+from app.services.job_progress import JobProgress, degradation_reason
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
 from app.services.market_data import most_recent_trading_day, refresh_market_data, refresh_quotes
 from app.services.mf_directory import refresh_mf_directory
@@ -2160,13 +2161,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             else:
                 try:
                     with psycopg.connect(settings.database_url) as conn:
-                        record_job_finish(
-                            conn,
-                            tracker.run_id,
-                            status="success",
-                            row_count=tracker.row_count,
-                            error_msg=tracker.note,
-                        )
+                        _finish_tracked(conn, tracker)
                         if tracker.row_count is not None:
                             spike = check_row_count_spike(
                                 conn,
@@ -2214,13 +2209,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
         else:
             try:
                 with psycopg.connect(settings.database_url) as conn:
-                    record_job_finish(
-                        conn,
-                        tracker.run_id,
-                        status="success",
-                        row_count=tracker.row_count,
-                        error_msg=tracker.note,
-                    )
+                    _finish_tracked(conn, tracker)
                     # Check for row-count spikes after recording the successful run.
                     # Exclude the current run_id so we compare against the *previous*
                     # successful run, not the one we just wrote.
@@ -2243,6 +2232,13 @@ class _JobTracker:
     the body ran cleanly but the operator should know nothing happened.
     Leaving it ``None`` records the success row with NULL error_msg
     (the historical contract).
+
+    ``progress`` (#2218) — optional :class:`JobProgress` the body fills in
+    with what it SAW versus what it PRODUCED. When set and
+    ``degradation_reason`` fires, the terminal row is written
+    ``status='degraded'`` instead of ``'success'``. Leaving it ``None``
+    keeps the historical contract exactly, so this is opt-in per job and
+    inert for every job that has not been wired.
     """
 
     def __init__(self, job_name: str) -> None:
@@ -2250,6 +2246,39 @@ class _JobTracker:
         self.run_id: int = 0
         self.row_count: int | None = None
         self.note: str | None = None
+        self.progress: JobProgress | None = None
+
+
+def _finish_tracked(conn: psycopg.Connection[Any], tracker: _JobTracker) -> None:
+    """Write the non-failure terminal row for a tracked job (#2218).
+
+    Both of ``_tracked_job``'s success paths route through here so the
+    degraded verdict cannot apply on one and not the other — the early-return
+    branch and the main branch were byte-identical duplicates, which is
+    exactly how a rule ends up enforced in one place and not the other.
+
+    ⚠ The reason goes into ``error_msg`` on purpose: that is the field the
+    admin row and ``/system/jobs`` already surface, so a degraded run explains
+    itself without a second read. ``tracker.note`` still wins when the body
+    set one — a soft-skip digest is a deliberate operator message and must not
+    be overwritten by a derived string.
+
+    ``or`` rather than ``is not None`` is deliberate: an EMPTY note is not a
+    message, so falling through to the reason is the better outcome. Writing
+    ``""`` into ``error_msg`` would leave a degraded row with no explanation at
+    all, which is the one thing this function exists to prevent.
+    """
+    reason = degradation_reason(tracker.progress)
+    record_job_finish(
+        conn,
+        tracker.run_id,
+        status="degraded" if reason else "success",
+        row_count=tracker.row_count,
+        error_msg=tracker.note or reason,
+        progress=tracker.progress.as_json() if tracker.progress is not None else None,
+    )
+    if reason:
+        logger.warning("%s: DEGRADED — %s", tracker.job_name, reason)
 
 
 def _load_etoro_credentials(job_name: str) -> tuple[str, str] | None:
@@ -6698,6 +6727,36 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
                 conn.commit()
 
         tracker.row_count = report.promoted
+        # #2218 — the counters below were logged and nothing else. A pass where
+        # every CUSIP errored recorded `success / row_count 0`, which is how
+        # OpenFIGI resolution stayed dark from 2026-06-18 to 2026-08-02 (#2213).
+        # `resolved`, `no_instrument_match` and `unresolved_by_openfigi` are ALL
+        # outcomes: a CUSIP the resolver answered for is work completed, whatever
+        # the answer was. Each one tombstones the row, which is what makes it
+        # terminal.
+        #
+        # ⚠ `unresolved_by_openfigi` is the one worth defending, because it looks
+        # like a miss. It cannot mean a transport/HTTP failure —
+        # `OpenFigiResolver` raises `OpenFigiTransportError` / `OpenFigiRateLimited`
+        # on those, so they land in `api_errors`. It is NOT, however, exclusively
+        # "OpenFIGI said no": `_parse_entry` returns None for a per-item
+        # `{"error": ...}` too, and that is indistinguishable here from a real
+        # no-match (#2304). The justification for keeping it an outcome is the
+        # DISTRIBUTION, not purity: `select
+        # resolution_status, count(*) from unresolved_13f_cusips group by 1`
+        # returns 60,011 `openfigi_unknown` against 3,027 `resolved_via_openfigi`.
+        # Excluding it from `outcomes` would degrade nearly every real run — the
+        # false-alarm direction #2218 explicitly warns against.
+        tracker.progress = JobProgress(
+            candidates_seen=report.candidates_seen,
+            outcomes={
+                "resolved": report.resolved,
+                "promoted": report.promoted,
+                "no_instrument_match": report.no_instrument_match,
+                "unresolved_by_openfigi": report.unresolved_by_openfigi,
+            },
+            errors={"api_errors": report.api_errors},
+        )
         logger.info(
             "cusip_resolver_post_bulk_sweep: passes=%d candidates=%d resolved=%d promoted=%d "
             "no_instrument_match=%d unresolved_by_openfigi=%d api_errors=%d "
@@ -7283,6 +7342,25 @@ def ncen_classifier_yearly() -> None:
             report = classify_filers_via_ncen(conn, sec)
 
         tracker.row_count = report.classifications_written
+        # #2218 — this job ran ONCE (2026-06-04), reported success, wrote 0
+        # rows, and on a yearly cadence would not have fired again until 2027
+        # while `classify_filer_type` fell through to INV for all 11,464 filers
+        # (#2214). `no_ncen_found` is an OUTCOME, not an error: a filer with no
+        # N-CEN census filing is a resolved question, and the docstring's
+        # "empty filer-seed list = natural no-op" case is preserved because
+        # `filers_seen` is then 0 and the stall rule does not fire.
+        tracker.progress = JobProgress(
+            candidates_seen=report.filers_seen,
+            outcomes={
+                "classifications_written": report.classifications_written,
+                "no_ncen_found": report.no_ncen_found,
+            },
+            errors={
+                "parse_failures": report.parse_failures,
+                "fetch_failures": report.fetch_failures,
+                "crash_failures": report.crash_failures,
+            },
+        )
         logger.info(
             "ncen_classifier_yearly: filers_seen=%d classifications_written=%d "
             "no_ncen_found=%d parse_failures=%d fetch_failures=%d crash_failures=%d",

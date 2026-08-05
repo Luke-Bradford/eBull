@@ -26,11 +26,17 @@ import {
 import { useAsync } from "@/lib/useAsync";
 import { formatDateTime } from "@/lib/format";
 
+// Exhaustive by type, which is why adding a status to JobRunStatus fails the
+// build here rather than rendering an unstyled cell — #2218 relies on that.
 const STATUS_TONE: Record<JobRunResponse["status"], string> = {
   success: "text-emerald-700",
   failure: "text-red-700",
   running: "text-sky-700",
   skipped: "text-slate-500",
+  cancelled: "text-slate-500",
+  // #2218 — amber: the run completed, so it is not a failure, but it made no
+  // progress and needs the operator.
+  degraded: "text-amber-700",
 };
 
 export function AdminJobDetailPage() {
@@ -97,7 +103,8 @@ function RunsTable({ rows }: { rows: JobRunResponse[] }) {
             <th className="py-2 pr-4">Duration</th>
             <th className="py-2 pr-4 text-right">Rows</th>
             {/* Sixth column carries the per-row expand button on
-                failure rows. Declared here so the header and body row
+                failure and degraded rows (#2218 — both persist an
+                error_msg). Declared here so the header and body row
                 column counts match (5 vs 6 would skew alignment and
                 flag the table as malformed by semantic-HTML linters). */}
             <th className="py-2 pr-2 text-right">
@@ -117,7 +124,11 @@ function RunsTable({ rows }: { rows: JobRunResponse[] }) {
 
 function RunRow({ row }: { row: JobRunResponse }) {
   const [expanded, setExpanded] = useState(false);
-  const expandable = row.status === "failure" && row.error_msg !== null;
+  // #2218 — degraded rows carry their reason in `error_msg` too (the
+  // "api_errors=..." / no-progress detail). Gating expansion on `failure`
+  // alone renders an amber row with no way to read why it is amber.
+  const expandable =
+    (row.status === "failure" || row.status === "degraded") && row.error_msg !== null;
   const duration = formatDuration(row.started_at, row.finished_at);
   return (
     <>

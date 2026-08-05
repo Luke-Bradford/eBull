@@ -42,6 +42,7 @@ from typing import Any, Literal
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.services.ops_monitor import TERMINAL_STATUS_SQL
 from app.services.processes.bootstrap_coverage import BOOTSTRAP_COVERED_FRESHNESS_SOURCES
 
 logger = logging.getLogger(__name__)
@@ -153,10 +154,10 @@ def _latest_terminal_by_job(
 ) -> dict[str, tuple[str, str | None]]:
     """Latest terminal ``(status, error_msg)`` per job_name (never-run jobs absent)."""
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT ON (job_name) job_name, status, error_msg
           FROM job_runs
-         WHERE status IN ('success', 'failure', 'skipped', 'cancelled')
+         WHERE status IN {TERMINAL_STATUS_SQL}
          ORDER BY job_name, started_at DESC
         """
     ).fetchall()
