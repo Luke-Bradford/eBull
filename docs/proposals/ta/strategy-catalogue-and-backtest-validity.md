@@ -151,6 +151,25 @@ Measured 2026-08-04, after the challenge:
 > determines whether S-2 cross-sectional momentum has a survivorship-corrected
 > universe to run on at all.
 >
+> **(c3) The free path was searched exhaustively and there is no free answer** (#2284
+> close-out, 2026-08-05). Ten sources tested against the same 382-name cohort — yfinance,
+> the Hugging Face bulk archive, `lse-data`, Nasdaq's own API, stockanalysis.com, Alpha
+> Vantage, Marketstack, Stooq, qlib, Kaggle. **Every one returns 0 of 382.** The reason is
+> structural: Yahoo is effectively the only free full-market historical endpoint, so every
+> free "archive" is a snapshot of it (the HF archive matched Yahoo's first-bar date **29/29,
+> including its artefacts**), and Yahoo has no delisting concept. The two sources that pass
+> are **one-off purchases**, not subscriptions: FirstRateData (308/382 tagged `-DELISTED`)
+> and HistoricalData.net (from $299).
+> **Full landscape, the fingerprint technique and the acceptance test:
+> `.claude/skills/data-sources/research-price-corpus.md` — read that, not this paragraph.**
+>
+> Adopted consequence: **build on free data, buy at the validation gate.** Free deep history
+> on survivors is strictly better than eToro's 4-year cap and is enough for §2b primitives
+> (#2279) and single-name strategy *development*. It is not enough for *validation*, and
+> #2260 is a validation question. Two guards are mandatory while free data is in use — label
+> every survivor-only metric in the signal ledger, and guard ticker reuse (first bar must
+> precede the known listing; truncate at the Form 25 suspension date).
+>
 > **(d) The register carries no ticker and SEC will not supply one.**
 > `submissions` JSON drops `tickers` to `[]` on delisting;
 > `companyconcept/…/dei/TradingSymbol.json` 404s (the XBRL company APIs are
