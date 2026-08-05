@@ -386,7 +386,25 @@ class TestIndicatorCausality:
 
     @staticmethod
     def _streaming_rsi(closes: Sequence[Decimal], period: int = 14) -> list[float | None]:
-        """Reference Wilder RSI, computed forward one bar at a time."""
+        """Reference Wilder RSI, computed forward one bar at a time.
+
+        ⚠ This is a second implementation, NOT an independent oracle: it shares
+        the shipped function's seed convention (simple average of the first
+        `period` deltas, then Wilder smoothing). A convention error common to
+        both would not be caught here.
+
+        That is acceptable because this class pins CAUSALITY — that a value at
+        bar k is independent of bars after k — which is a structural property
+        of when information enters the calculation, not of which average is
+        used. Formula correctness is a separate concern and is not this
+        class's job.
+
+        A third-party cross-check was attempted and is not currently available:
+        no TA library is installed (adding one for a test is not justified —
+        `.claude/CLAUDE.md`, "do not add libraries casually"), and two
+        published worked examples are network-blocked from this environment.
+        If one becomes reachable, pin one absolute value against it.
+        """
         values = [float(c) for c in closes]
         out: list[float | None] = [None] * len(values)
         if len(values) <= period:
