@@ -346,3 +346,45 @@ have shipped as decoration.
 
 State the probe in the PR — "verified the test fails against the pre-fix
 ordering and passes after" — so a reviewer knows the assertion is load-bearing.
+
+## A "neutral" fixture is not neutral if the thing under test classifies it
+
+Bit twice in one PR (#2279, 2026-08-05), and both times the test failed against
+**correct** code — which is the expensive direction, because the first instinct
+is to change the code.
+
+A `_flat_bars()` helper built a baseline of identical bars, intended as
+inert background against which a few interesting bars were placed. But the
+function under test classifies every bar against a price band, and the flat
+baseline closed *inside* that band — so every "neutral" bar was already a
+`touch`. A break-and-retest test asserting `retest_index == 32` got `31`: the
+bar immediately after the break was a legitimate retest, and the assertion was
+wrong, not the state machine. Rewriting the fixture so those bars sat clear of
+the band fixed it. The same trap reappeared five tests later.
+
+**The check, before writing the assertion:** run the classifier over the
+baseline alone. If it returns anything other than the "nothing here" verdict,
+the baseline is participating in the test and every index you hand-count is
+suspect.
+
+Corollary for fixtures that carry a status alongside a payload: **derive the
+status from the same rule the producer uses, never hand-write a
+plausible-looking one.** A helper that fabricates `state="not_fired"` for
+hand-made input silently defeats any test about when that state is wrong — the
+fixture asserts the thing under test.
+
+## When a test fails, decide FIRST whether the fixture or the code is wrong
+
+Sounds obvious; is not the default under time pressure, because a red test reads
+as "the code is broken". Both #2279 failures above were fixture bugs, and in
+both the honest fix was to change the *setup*, leaving the assertion intact.
+
+Signal it is the fixture: the observed value is **explainable and defensible**
+(`retest_index == 31` because bar 31 genuinely intersects the band), rather than
+arbitrary. Signal it is the code: the observed value has no account you would
+defend in a PR description.
+
+⚠ The failure mode to avoid is relaxing the assertion to whatever the code
+produced. That converts a real test into a change-detector, and it is
+indistinguishable in the diff from a legitimate fixture fix — so say which one
+it was in the commit message.
