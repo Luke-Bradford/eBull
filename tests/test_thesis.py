@@ -582,6 +582,56 @@ class TestValidateWriterOutput:
     def test_valid_passes(self) -> None:
         _validate_writer_output(_VALID_WRITER)  # should not raise
 
+    # ------------------------------------------------------------------
+    # #2235 — unfilled placeholders in memo_markdown
+    # ------------------------------------------------------------------
+    #
+    # ⚠ The fixture above is the PASSING case and is stated as such. Its memo
+    # contains "## AAPL" and a "### Valuation" heading — markdown syntax the
+    # placeholder pattern must not mistake for a stand-in. A "neutral" memo
+    # would not exercise that (test-quality.md).
+
+    @pytest.mark.parametrize(
+        "memo",
+        [
+            "[Company] operates in the [sector] with strong margins.",
+            "## [Company Name]\n\nA durable compounder.",
+            "Trading at [X] times forward earnings.",
+            "Fair value is <multiple> times EPS.",
+            "Compares favourably with <peer>.",
+        ],
+    )
+    def test_placeholder_in_memo_raises(self, memo: str) -> None:
+        """Every form here was observed in a STORED v5 memo, not invented.
+        74 of 2,037 v5 memos carry one; the distinct set is
+        [Company] / [Company Name] / [Company name] / [company] /
+        [Instrument Name] / [Name] / [sector] / [base] / [bear] / [malformed].
+        """
+        bad = {**_VALID_WRITER, "memo_markdown": memo}
+        with pytest.raises(ValueError, match="placeholder"):
+            _validate_writer_output(bad)
+
+    @pytest.mark.parametrize(
+        "memo",
+        [
+            # Markdown link — the negative lookahead exists for exactly this.
+            "See [the latest 10-K](https://sec.gov/x) for segment detail.",
+            # Headings and emphasis are not stand-ins.
+            "## AAPL\n\n### Valuation\n\nTrading below **fair value**.",
+            # A bracketed footnote marker is a value, not a placeholder.
+            "Gross margin 44.1% [1] versus 43.0% prior.",
+            # Comparison operators must not read as angle-bracket stand-ins.
+            "Revenue growth < 5% would break the thesis.",
+        ],
+    )
+    def test_legitimate_brackets_do_not_raise(self, memo: str) -> None:
+        """The false-positive guard. A gate that rejects correct memos rides
+        retry-once and then FAILS the thesis, so its precision is the whole
+        question — verified at zero false positives across all 2,525 stored
+        memos before this landed."""
+        ok = {**_VALID_WRITER, "memo_markdown": memo}
+        _validate_writer_output(ok)  # should not raise
+
     def test_missing_field_raises(self) -> None:
         bad = {k: v for k, v in _VALID_WRITER.items() if k != "stance"}
         with pytest.raises(ValueError, match="missing fields"):

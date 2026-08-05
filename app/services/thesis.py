@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1581,6 +1582,41 @@ def _call_with_one_retry(
         )
 
 
+# #2235 — WHY THERE IS NO MISATTRIBUTION ASSERTION HERE.
+#
+# The defect is real and still live: 19 of 2,037 v5 memos (0.93%) declare their
+# subject as a different company — "Yelp (YELP)" heading a GME memo, "Apple
+# (AAPL)" heading AGCO's, measured 2026-08-05. It is NOT gated below, because
+# three candidate discriminators were each falsified against the full stored
+# corpus rather than a sample:
+#
+#   1. First `<Capitalised Name> (<TICKER>)` in the memo must be the subject.
+#      35 rejects, of which "Free Cash Flow (FCF)", "Price-to-Earnings (PE)",
+#      "Return on Assets (ROA)" are correct memos. A gate that retry-fails a
+#      correct memo takes `thesis_refresh` down at ~1.7% of generations.
+#   2. Same, restricted to the memo's opening (120/200/300/400 chars). The
+#      term expansions appear there too — 25 rejects at 120 chars, same shape.
+#   3. Drop matches where the ticker is an initialism of the preceding words.
+#      Removes 2 of 29. "Price-to-sales (PS)", "Equity (ROE)", "ETF Trust
+#      (SPY)" all survive it.
+#
+# Three failed keys is the signal to question the MODEL, not to try a fourth
+# (.claude/CLAUDE.md, "Source-rule before design"). A soft warning was also
+# rejected: at ~40% false positives it is noise that trains the operator to
+# ignore it, which is the same argument #2218 makes against a blanket
+# zero-rows alarm.
+#
+# ⚠ The prompt anchor above and the v6 bump remain UNVERIFIED — at 0.93% an
+# A/B powered to detect a halving needs thousands of local generations. Tracked
+# separately; the measurement query lives on that ticket.
+
+# Bracketed stand-ins the writer emitted instead of values. ``[text](url)`` is a
+# markdown link and must not match, hence the negative lookahead. The lowercase
+# angle form catches "<multiple>" / "<peer>" — the prompt's own schema notation
+# uses them, which is how they leaked into memo prose in the first place.
+_PLACEHOLDER_RE = re.compile(r"\[[A-Za-z][A-Za-z ]{0,24}\](?!\()|<[a-z][a-z ]{0,24}>")
+
+
 def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[str, object], LLMCompletion]:
     """
     Call the LLM writer and parse the structured thesis JSON.
@@ -1642,6 +1678,15 @@ def _validate_writer_output(data: dict[str, object], *, require_buy_zone: bool =
     memo = data.get("memo_markdown")
     if not isinstance(memo, str) or not memo.strip():
         raise ValueError("Writer output memo_markdown must be a non-empty string")
+
+    # #2235 — the placeholder leak, enforced deterministically. Verified on the
+    # FULL stored corpus, not a sample: 74 of 2,037 v5 memos (3.6%) rejected,
+    # every one a genuine "[Company]" / "[sector]" / "[Name]" stand-in, and
+    # zero correct memos caught. Unlike the misattribution above, this has a
+    # clean discriminator, so it gets a real gate and rides retry-once.
+    placeholder = _PLACEHOLDER_RE.search(memo)
+    if placeholder is not None:
+        raise ValueError(f"Writer output contains an unfilled placeholder: {placeholder.group(0)!r}")
 
     # Valuation-band coherence (#2007): the stored band must satisfy
     # bear <= base <= bull, and the buy zone low <= high. Local writers
