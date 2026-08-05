@@ -325,8 +325,15 @@ def _parse_sec_date(s: str) -> date:
 **Source rule: 17 CFR 240.12d2-2.** These are the authoritative, dated record of a
 security being removed from listing and registration. Discoverable via full-index by form
 type; `primary_doc.xml` is structured XML (`<notificationOfRemoval>`), so no HTML scraping.
-Four traps, all measured on the 2023 cohort in #2284 — every one of them silently inflates
-or corrupts a delisting register.
+Seven traps, all measured on the 2023 cohort — every one silently inflates or corrupts a
+delisting register.
+
+✅ **Built for real in #2282 stage 2c (2026-08-05): `sec_form25_register` (sql/252),
+parser `app/services/sec_form25_register.py`, harvester
+`scripts/build_2282_form25_register.py`.** Traps 1-5 below were reproduced exactly against
+the live 2023 corpus; traps 6 and 7 are NEW and were found by that build. Figures below
+are the ones the register actually produces — where they disagree with #2284's spike
+write-up, the register is the measurement and the spike was the estimate.
 
 **Trap 1 — index ROWS are not filings.** EDGAR indexes a 25-NSE under *both* the exchange
 CIK and the issuer CIK, so a naive row count roughly doubles. 2023 QTR1 is **622 rows /
@@ -360,6 +367,47 @@ acquisition or holdco reorganisation where shareholders received something. A ve
 flat "delisted" flag cannot distinguish them; this rule provision can, which is why the
 EDGAR register is worth keeping even alongside a paid survivorship-free feed.
 
+**Trap 6 — the provision is only HALF the filter. Security class is a second, orthogonal
+axis, and skipping it roughly doubles the cohort.** This is the one that made #2284's spike
+figure ("578 delisting-meaning equity filings / 443 issuers") unreproducible: the six
+provision counts above are exactly right, but they classify the **event**, not what came
+off the tape. Provision-filtering 2023 gives **842** filings, which decompose as:
+
+| security class | filings | in our universe? |
+|---|---:|---|
+| **common equity** | **317** | yes — `instrument_type_id = 5` (Stocks) |
+| warrant | 155 | **no such eToro type** |
+| unknown (issuer-filed, no description element) | 128 | unverifiable |
+| fund — ETF / closed-end | 111 | type 6 (ETF), excluded by #2289 |
+| unit | 62 | **no such eToro type** |
+| preferred / depositary | 56 | **no such eToro type** |
+| debt (a delisting provision on NOTES) | 10 | type 7 (Bonds), not equity |
+| right | 3 | **no such eToro type** |
+
+Grounded, not a taste call: `etoro_instrument_types` is {1 Forex, 2 Commodity, 3 CFD,
+4 Indices, 5 Stocks, 6 ETF, 7 Bonds, 8 TrustFunds, 9 Options, 10 Crypto} — there is **no
+warrant, unit, preferred or right type at all**, so those securities can never be
+instruments in our universe and their delistings cannot contribute survivorship bias to a
+backtest run on it. Funds are excluded by #2289's ex-ETF rule.
+
+⚠ **There is NO structured security-type field.** The SGML header carries only submission
+type, conformed name, SIC and file number; the X0203 schema exposes the security solely as
+free-text `<descriptionClassSecurity>`. Classifying that text is therefore the only
+available route, not a heuristic chosen over a documented rule. Order matters — test
+`unit` before `common` ("Units, each consisting of one share of Class A common stock"),
+and test `fund` LAST, because ETFs name the **product** ("Invesco DB Gold Fund", "The
+Cannabis ETF") and carry none of the security-class words.
+
+**Trap 7 — two identity potholes in the same fields.**
+
+- **CIK is not reliably zero-padded.** Medtronic's issuer CIK in accession
+  `0000876661-23-000234` is `000064670` — **nine** digits, where every CIK column in our
+  schema is ten. Normalise (`lstrip("0").zfill(10)`); do not relax the constraint.
+- **Issuer-filed Form 25 has no `<issuer>` block**, so reading only the XML leaves all 128
+  of 2023's with a NULL issuer — an entire delisting category that joins to nothing. For
+  `form in ("25", "25/A")` the **filer is the issuer**, so the index CIK is correct. The
+  same substitution is WRONG for a 25-NSE, where the index CIK is as often the exchange.
+
 **Trap 4 — the register carries no ticker, and SEC will not give you one.** `submissions`
 JSON drops `tickers` to `[]` once a company delists (verified: Umpqua CIK 1077771,
 Quotient CIK 1115128), and `companyconcept/CIK…/dei/TradingSymbol.json` **404s** — the XBRL
@@ -373,8 +421,13 @@ TS_RE = re.compile(r'name=["\']dei:TradingSymbol["\'][^>]*>([^<]{1,20})<', re.I)
 # newest first, fetch primaryDocument, take the first match
 ```
 
-Resolved **382 of 443 issuers (86.2%)** on the 2023 equity cohort; the residue is
-closed-end funds and foreign private issuers whose cover XBRL differs.
+Measured on the **common-equity** cohort (both filters, per trap 6): **259 of 308 issuers
+(84.1%)**. The residue is closed-end funds (they file N-CSR, not a cover-page-XBRL 10-K)
+and foreign private issuers whose cover XBRL differs.
+
+⚠ The spike's "382 of 443 (86.2%)" was measured **before** the security-class filter
+existed, so its denominator included warrants, units, preferred and funds. Both numbers
+are internally consistent; only the 260/315 pair describes a cohort of companies.
 
 **Trap 5 — a Form 25 carries three different dates; pick the one your consumer needs.**
 The `EX-99` rule-provision exhibit distinguishes them explicitly. Berkshire's 2023-01-17
@@ -384,6 +437,17 @@ suspended from trading on **January 17, 2023**"*. The `filed` date in `master.id
 **fourth** thing again. For truncating a price series, the last tradable date is the
 **suspension** date, not the filing date and not the removal-effective date.
 
+⚠ **How often is the suspension date actually stated? Measured: rarely.** Only **37 of the
+259** resolved common-equity cohort filings (14.3%) carry one, because the sentence lives
+in the EX-99 rule-provision exhibit and most exchanges attach a stub (1Life's entire
+EX-99.25 is the string `Onem-form25`). Across all 1,282 filings the rate is higher — 395,
+concentrated in the debt-lifecycle provisions, which state redemption dates precisely.
+
+Consequence for the vendor acceptance test: item 2 ("does the series terminate at the
+suspension date?") is only checkable on those 38. For the rest, `filed_date` is the only
+date available and it is a **different event** — store NULL rather than substituting, which
+is why `research_price_series.delisting_date` is CHECK-paired to `delisting_source`.
+
 **Coverage limit, stated once:** Form 25 is **US-only**. There is no free authoritative
 equivalent for EU / UK / Asia / MENA listings.
 
@@ -391,11 +455,31 @@ equivalent for EU / UK / Asia / MENA listings.
 vendor claiming survivorship-bias-free coverage should be run against it before purchase:
 does it serve each name, does the series terminate at the suspension date, and does it
 avoid handing back the *successor* entity's or a later occupant's history under the same
-symbol. Known cohort bias to state when using it: ticker resolution drops closed-end funds
-(they file N-CSR, not a cover-page-XBRL 10-K) and some foreign private issuers — 38% of the
-61 unresolved 2023 issuers were fund/trust-shaped versus 1% of the 382 resolved. The
-provision mix is **unbiased on the failure-vs-acquisition axis** ((a)(3) 61% / (b) 39%
-unresolved, versus 60% / 39% resolved), which is the axis survivorship actually turns on.
+symbol.
+
+**The cohort is committed at `tests/fixtures/form25_2023_cohort.csv`** (259 rows, one per
+issuer, amendments collapsed) so it never has to be rebuilt from scratch again — the #2284
+spike built it, left it in a session scratchpad and lost it, and #2282 2c paid for it a
+second time.
+
+⚠ **Known cohort bias — do NOT restate the earlier "unbiased" claim.** Measured on the
+common-equity cohort, the failure-vs-acquisition split differs between the resolved and
+unresolved sides:
+
+| | (a)(3) acquisitions | (b) failures | pct acquisitions |
+|---|---:|---:|---:|
+| resolved (n=259) | 168 | 91 | 65% |
+| unresolved (n=49) | 35 | 14 | **71%** |
+
+A **+6.6-point** skew toward losing acquisitions, **z = 0.92** — so it is **neither
+established as biased nor demonstrated to be unbiased**; the cohort simply cannot rule it
+out. Say that, rather than the earlier write-up's "unbiased on the
+failure-vs-acquisition axis", which was measured on the pre-security-filter denominator.
+It matters because that is precisely the axis survivorship turns on.
+
+`--census` recomputes this from the register rather than quoting it, so a re-harvest
+cannot leave the number stale — which it already did once on this branch, when adding the
+`fund` class moved the skew from +10 points to +6.6.
 
 ## 3. Identifiers
 

@@ -276,3 +276,33 @@ baseline**. With `CREATE INDEX … (source_document_id)`: **~300/min**.
   create it while the sweep is paused rather than fighting the lock.
 - Ship the index in the same PR as the predicate. A backfill that only runs fast
   on the author's machine because they added the index by hand is not reproducible.
+
+## Never index a GROUP BY result positionally
+
+A `GROUP BY` emits a row **only where one exists**. Code that reads
+`rows[0]` / `rows[1]` after grouping on a boolean or a small enum is asserting
+that every group is non-empty — which is true of the data you developed
+against and false the first time a category is legitimately absent.
+
+```python
+# WRONG — IndexError the day a year has nothing unresolved
+(ur_a, ur_b), (r_a, r_b) = (bias[0][1], bias[0][2]), (bias[1][1], bias[1][2])
+
+# RIGHT — keyed on the grouping value, with an explicit zero default
+by_resolved = {bool(row[0]): (row[1], row[2]) for row in rows}
+ur_a, ur_b = by_resolved.get(False, (0, 0))
+r_a, r_b = by_resolved.get(True, (0, 0))
+```
+
+⚠ The failure mode is inverted from the usual one: it crashes on the **clean**
+case. Full data produces both groups and the code works; a narrower or
+healthier slice produces one group and it raises. So it survives every test run
+against the corpus you built it on.
+
+Precedent: #2282 2c `build_2282_form25_register.py --census` unpacked a
+two-row `GROUP BY resolved` positionally. Correct for 2023, `IndexError` for
+any year whose Form 25 cohort resolved completely. Caught by the review bot,
+not by any test.
+
+Same shape, same fix: `GROUP BY status`, `GROUP BY provision_class`,
+`GROUP BY is_tradable` — anywhere the result feeds a fixed-arity unpack.
