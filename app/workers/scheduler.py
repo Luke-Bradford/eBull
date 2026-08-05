@@ -2262,6 +2262,11 @@ def _finish_tracked(conn: psycopg.Connection[Any], tracker: _JobTracker) -> None
     itself without a second read. ``tracker.note`` still wins when the body
     set one — a soft-skip digest is a deliberate operator message and must not
     be overwritten by a derived string.
+
+    ``or`` rather than ``is not None`` is deliberate: an EMPTY note is not a
+    message, so falling through to the reason is the better outcome. Writing
+    ``""`` into ``error_msg`` would leave a degraded row with no explanation at
+    all, which is the one thing this function exists to prevent.
     """
     reason = degradation_reason(tracker.progress)
     record_job_finish(
@@ -6725,10 +6730,21 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
         # #2218 — the counters below were logged and nothing else. A pass where
         # every CUSIP errored recorded `success / row_count 0`, which is how
         # OpenFIGI resolution stayed dark from 2026-06-18 to 2026-08-02 (#2213).
-        # `resolved` and `no_instrument_match` are BOTH outcomes: a CUSIP the
-        # resolver answered for and we could not match to an instrument is work
-        # completed, not work missed — treating it as an error would degrade
-        # every healthy run, since most bulk CUSIPs are not in our universe.
+        # `resolved`, `no_instrument_match` and `unresolved_by_openfigi` are ALL
+        # outcomes: a CUSIP the resolver answered for is work completed, whatever
+        # the answer was. Each one tombstones the row, which is what makes it
+        # terminal.
+        #
+        # ⚠ `unresolved_by_openfigi` is the one worth defending, because it looks
+        # like a miss. It is reachable ONLY on a 200 response with per-item "no
+        # match" — `OpenFigiResolver` raises `OpenFigiTransportError` /
+        # `OpenFigiRateLimited` on every transport, HTTP and parse failure, so an
+        # empty mapping dict for a non-empty input cannot mean "the API silently
+        # failed". And it is the DOMINANT legitimate outcome: `select
+        # resolution_status, count(*) from unresolved_13f_cusips group by 1`
+        # returns 60,011 `openfigi_unknown` against 3,027 `resolved_via_openfigi`.
+        # Excluding it from `outcomes` would degrade nearly every real run — the
+        # false-alarm direction #2218 explicitly warns against.
         tracker.progress = JobProgress(
             candidates_seen=report.candidates_seen,
             outcomes={
