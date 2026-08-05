@@ -162,3 +162,37 @@ A review is only complete when:
 - all deferrals have issue numbers
 - all rebuttals are specific
 - prevention notes have been extracted where relevant
+
+## A REBUTTAL can be right for the wrong reason — and the wrong reason outlives it
+
+The resolution contract asks whether the rebuttal's *conclusion* is sound. That is
+not sufficient, because a rebuttal is written into a PR comment and usually into a
+code comment, where its **reasoning** becomes the next session's premise. A correct
+verdict resting on a false claim about the code is worse than a wrong verdict: the
+verdict gets re-derived, the claim gets trusted.
+
+So checkpoint 3 has two questions, not one:
+
+1. Is the conclusion right?
+2. **Is every factual claim in the rebuttal actually true of the code?** Open the
+   file and check each one. Do not rebut from a mental model of what the module
+   does.
+
+Precedent (2026-08-05, #2218). I rebutted "this bucket could mask a stall" with:
+*"it is reachable ONLY on a 200 with per-item no-match, because the resolver raises
+on every transport, HTTP and parse failure."* The conclusion held — the real
+justification is a 60,011-vs-3,027 distribution that makes the alternative fire on
+nearly every run — but the reasoning was false in three ways: `_parse_entry` also
+returns `None` for a per-item `{"error": ...}` and for schema drift, `zip(...,
+strict=True)` raises an unwrapped `ValueError`, and `_pick_us_primary` can raise
+`AttributeError`. Codex found all three at checkpoint 3. Left standing, the code
+comment would have told the next reader that a bucket containing swallowed API
+errors contains none — and that bucket writes a permanent tombstone (#2304).
+
+**When the reasoning is corrected but the conclusion survives, say both plainly** in
+the resolution reply: what was wrong, why the decision does not change, and where
+the real defect is now tracked. A silent swap of justification reads as agreement.
+
+⚠ Corollary: if the rebuttal's real reason turns out to be "the alternative would
+fire too often", that is a **measurement**, not an argument. State the query and its
+numbers, not the intuition.
