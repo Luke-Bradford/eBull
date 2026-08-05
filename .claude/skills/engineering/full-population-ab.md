@@ -333,3 +333,36 @@ item. With the index: ~300/min. `EXPLAIN` the new query once; it costs seconds.
   ordinary tool call is killed when that call's process group is cleaned up.
 - Reference implementation: `scripts/ab_2140_def14a_parser.py`
   (`--out` / `--diff` / `--stored MAIN BRANCH` / `--audit`).
+
+## A RATIO metric needs a median, not a mean — and the mean fails loudly enough to look like a data defect
+
+Any arm that compares two sources by a ratio (`ours / theirs`, level gap, scale factor) is
+on a multiplicative scale, where one mis-levelled entity at 30x moves a mean across
+thousands of entities by more than the effect you are measuring.
+
+Precedent (#2282 2b, 2026-08-05). The cross-source guard reported:
+
+```
+mean   level gap (research/eToro - 1) : +0.367     <- looks like a failed adjustment basis
+median level ratio                    :  1.00203   <- the half-spread the reference predicts
+```
+
+The **statistic was wrong, not the data**. 87.5% of 5,174 instruments sat within ±1% of
+parity; a long tail of reverse-split epoch mismatches dragged the mean. Half an hour went
+into diagnosing a corpus that was correct.
+
+Rules:
+
+- **Report `percentile_cont(0.5)` for any ratio, and per-entity before pooling.** Take the
+  median within an entity, then the median across entities — a mean of per-entity means
+  reintroduces the same problem one level up.
+- **Log-space the thresholds.** `abs(ln(ratio)) <= 0.01` is symmetric; `ratio - 1` is not,
+  and a 2x and a 0.5x error should score the same.
+- ⚠ **`ln()` raises a domain error on zero and negatives**, so guard with
+  `ln(nullif(greatest(ratio, 0), 0))`. Guard it there rather than adding
+  `WHERE close > 0` upstream, which silently narrows the population — on a price corpus
+  that predicate is a survivorship filter wearing a data-quality hat.
+- **Report the tail's SHAPE, not just its size.** Splitting #2282's 686-instrument tail
+  into "returns agree, level offset" vs "returns disagree" separated a benign snapshot-epoch
+  artefact from a real `price_daily` defect (#2293). A single "686 failures" number would
+  have been actioned as one problem.
