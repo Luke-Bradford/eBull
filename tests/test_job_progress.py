@@ -107,3 +107,12 @@ def test_progress_serialises_with_its_three_axes_intact() -> None:
         "outcomes": {"done": 1},
         "errors": {"boom": 2},
     }
+
+
+def test_negative_counts_are_not_treated_as_opposites() -> None:
+    """Codex ckpt-3. A negative count is nonsense in either bucket, but under
+    truthiness it degraded on the error side and read as PROGRESS on the
+    outcome side — the same bad value pointing two different ways.
+    """
+    assert degradation_reason(JobProgress(errors={"api_errors": -1})) is None
+    assert degradation_reason(JobProgress(candidates_seen=5, outcomes={"done": -1})) is not None

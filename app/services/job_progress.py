@@ -44,6 +44,12 @@ class JobProgress:
     completed. Every one of them counts as progress, so a job must NOT put a
     bucket here that it also reports as an error.
 
+    ⚠ Buckets may legitimately OVERLAP within ``outcomes`` (the CUSIP sweep
+    reports both ``resolved`` and ``promoted``, and a promoted CUSIP was also
+    resolved). That is fine for the "any outcome" test and would be WRONG for
+    anyone who later sums them as units of work — do not add that reading
+    without changing the contract first.
+
     ``errors`` — buckets that represent work the job could not do. Any non-zero
     value degrades the run.
     """
@@ -80,13 +86,17 @@ def degradation_reason(progress: JobProgress | None) -> str | None:
     if progress is None:
         return None
 
-    failed = {name: n for name, n in progress.errors.items() if n}
+    # ``n > 0`` rather than truthiness (Codex ckpt-3): a negative count is
+    # nonsense either way, but truthiness makes ``{"api_errors": -1}`` degrade
+    # while ``{"done": -1}`` reads as progress — the two nonsense values would
+    # be treated as opposites.
+    failed = {name: n for name, n in progress.errors.items() if n > 0}
     if failed:
         detail = ", ".join(f"{name}={n}" for name, n in sorted(failed.items()))
         return f"errors reported: {detail}"
 
     seen = progress.candidates_seen
-    if seen is not None and seen > 0 and not any(progress.outcomes.values()):
+    if seen is not None and seen > 0 and not any(n > 0 for n in progress.outcomes.values()):
         buckets = ", ".join(sorted(progress.outcomes)) or "none reported"
         return f"saw {seen} candidates and produced no terminal outcome (buckets: {buckets})"
 

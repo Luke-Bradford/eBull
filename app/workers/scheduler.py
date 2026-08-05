@@ -6736,11 +6736,13 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
         # terminal.
         #
         # ⚠ `unresolved_by_openfigi` is the one worth defending, because it looks
-        # like a miss. It is reachable ONLY on a 200 response with per-item "no
-        # match" — `OpenFigiResolver` raises `OpenFigiTransportError` /
-        # `OpenFigiRateLimited` on every transport, HTTP and parse failure, so an
-        # empty mapping dict for a non-empty input cannot mean "the API silently
-        # failed". And it is the DOMINANT legitimate outcome: `select
+        # like a miss. It cannot mean a transport/HTTP failure —
+        # `OpenFigiResolver` raises `OpenFigiTransportError` / `OpenFigiRateLimited`
+        # on those, so they land in `api_errors`. It is NOT, however, exclusively
+        # "OpenFIGI said no": `_parse_entry` returns None for a per-item
+        # `{"error": ...}` too, and that is indistinguishable here from a real
+        # no-match (#2304). The justification for keeping it an outcome is the
+        # DISTRIBUTION, not purity: `select
         # resolution_status, count(*) from unresolved_13f_cusips group by 1`
         # returns 60,011 `openfigi_unknown` against 3,027 `resolved_via_openfigi`.
         # Excluding it from `outcomes` would degrade nearly every real run — the
