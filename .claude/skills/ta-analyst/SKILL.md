@@ -53,6 +53,44 @@ Two facts from that programme that change how you should read this skill:
   backtest built on symbol lookups against a live feed selects only survivors,
   and nothing in the response says so.
 
+### The platform's own TA module — `price_structure.py` (#2279, phase 2b)
+
+`app/services/price_structure.py` is the strategy platform's pure-function
+module, and it is **not** part of the current-state TA described below. Do not
+reach for it when answering "what is this chart saying now", and do not add
+scalar indicators to it.
+
+| | `technical_analysis.py` | `price_structure.py` |
+| --- | --- | --- |
+| answers | what is this number on the last N closes | objects with **identity over time** — a swing has a bar, a level has a touch count |
+| output | floats keyed by `price_daily` column | dataclasses carrying a `state` tri-state and a `confirmed_index` |
+| reads | `price_daily` (eToro, ~4y) | `research_price_daily` (#2282, 1962→2026) |
+| stored? | yes, on `price_daily` | **no** — recomputed; see the spec's §6 |
+
+Three things about it that are load-bearing and easy to break:
+
+- **`confirmed_index = index + n`, always.** A pivot happened at `index` but was
+  not knowable until `index + n`. Anything that reads a swing price without
+  gating on the confirmation has leaked look-ahead. This is why the N-bar
+  fractal was chosen over a percentage ZigZag — `pandas_ta.zigzag`'s lag is
+  data-dependent and measured at up to **38 bars** on our own panel.
+- **Every result carries a `state` tri-state**, never a bare empty collection.
+  `not_fired` (no structure here) and `not_evaluable` (cannot say) are different
+  facts and collapsing them corrupts a win-rate denominator.
+- **`universe` is a required keyword with no default** — the research corpus is
+  survivor-only and the label is mandatory (#2284). A default would let a caller
+  drop it by accident.
+
+Its constants (`SWING_LADDER` 5/21/63, `CLUSTER_ATR_K` 0.5,
+`BANDWIDTH_LOOKBACK` 126) are hashed into `RULE_SET_VERSION`. Changing one is a
+rule change that invalidates dependent signals — not a refactor.
+
+⚠ **`pandas-ta` cannot be installed here** (it needs `numba`, which caps at
+Python < 3.14; this repo is 3.14.4) and **TA-Lib has no swing/pivot/fractal
+function at all** — 161 functions, the closest are `MIN`/`MAX`/`MINMAX` and
+`SAR`. Both were tested, not assumed. Do not re-run that search from scratch;
+the evidence is in the spec's §2.
+
 Before any work on backtesting, strategy definitions, signal recording or
 historical TA, read
 `docs/proposals/ta/strategy-catalogue-and-backtest-validity.md` — especially §0

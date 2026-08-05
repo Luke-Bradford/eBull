@@ -128,6 +128,33 @@ Two guards are mandatory whenever free data is used, because it fails silently:
 - **Guard ticker reuse.** Require the series' first bar to precede the instrument's known
   listing date, and truncate at any Form 25 suspension date.
 
+⚠⚠ **The second guard is NOT implemented — do not assume it ran.** Measured
+2026-08-05 while scoping #2279:
+
+```
+research_price_series                 7,693 series
+  ... with delisting_date populated       0
+sec_form25_common_equity_delistings     317 rows, 260 with a resolved_symbol
+cohort symbols also present in the corpus 16
+```
+
+The schema (sql/249 `delisting_date` + `delisting_source`, CHECK-paired, with a column
+comment insisting on the SUSPENSION date) and the register (#2282 2c) both exist. **Nothing
+joins them** — `grep -rn "delisting_date" app/ scripts/` returns one hit, a docstring. So 16
+corpus series are 2023-delisted names whose bars run straight through the delisting: the
+`SI`/Silvergate shape sql/249 names as its target failure mode.
+
+Filed as **#2297**. Until it lands, every figure computed on this corpus is computed over
+series that may be welded, and that has to be stated rather than assumed away. This is the
+class the instruction set warns about — the guard *reads* as present because the column,
+the comment and the register all exist, and it is enforced nowhere.
+
+⚠ Note also that only **62 of 317** cohort rows carry a `suspension_date` at all (395 of
+1,282 across the whole register), because the date lives in the EX-99 rule-provision exhibit
+and most filings attach a stub. The other 255 must stay NULL; back-filling with `filed_date`
+is a different event and mistruncates. Reproduce with
+`select count(*), count(suspension_date) from sec_form25_register`.
+
 ## Coverage limit that no option on the table fixes
 
 Every survivorship-free source found is **US-only**. Our tradable universe is 12,684 of
