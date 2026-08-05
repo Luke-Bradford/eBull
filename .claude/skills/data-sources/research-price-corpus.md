@@ -142,3 +142,47 @@ and therefore US-centric. **No ISIN and no SEDOL anywhere in the schema.** For ~
 non-US instruments the only join key to any vendor is symbol + exchange. Rule-based symbol
 generation resolves **12,420 of 12,684 (97.9%)**; the 264 that do not are CME dated futures,
 commodity CFDs and index CFDs — no equities.
+
+## ⚠ Correction to the acceptance test — "does the series terminate?" is the WRONG question for (a)(3)
+
+Added 2026-08-05 (#2282 2c), after running the test for the first time against the
+committed cohort. **Item 2 as originally written is not universally right, and applying it
+flatly produces a false negative on the most common delisting provision.**
+
+Measured: of the 259-name cohort, 15 symbols appear in the HF corpus at all. None
+terminates at the delisting. But splitting them by shape:
+
+| shape | n | provisions |
+|---|---:|---|
+| series **spans** the filing | 12 | mostly `(a)(3)` |
+| series **starts after** the filing | 4 | `(b)` ×2, `(a)(3)` ×2 |
+
+The spanning set includes `LIN`, `BG`, `LBTYA`, `HUT`, `NWE`, `AESI` — all `(a)(3)`. And
+`(a)(3)` is *"instruments now evidence OTHER securities by operation of law"*: holdco
+reorganisations and redomiciliations, where **the same economic entity keeps trading under
+the same ticker**. For those, a continuous price series is the CORRECT answer, not
+contamination. A backtest holding the name through a redomiciliation did not experience a
+delisting.
+
+So the test must be **stratified by provision**, not applied flat:
+
+- **`(b)` — exchange-initiated failure.** The series SHOULD terminate at/near the
+  suspension. A series continuing past it is an OTC continuation or a later occupant, and
+  must be distinguishable.
+- **`(a)(3)` — merger / reorg / redomiciliation.** Terminate-or-continue is
+  *case-dependent*: the ticker may die (acquired for cash) or continue (holdco reorg).
+  Continuation is not evidence of a defect.
+- **`(a)(4)`, `(c)`** — as `(b)` for `(a)(4)`; `(c)` (voluntary withdrawal) usually means
+  a move to OTC, so continuation under the same ticker is expected.
+
+⚠ **Do not attribute individual names without checking.** `DBD` (Diebold Nixdorf, `(b)`,
+filed 2023-06-20) has a series starting 2023-08-14 — consistent with a Chapter 11
+reorganisation and relisting, i.e. the same company, not a later occupant. That reading is
+*plausible and unverified*; the point is that "starts after the filing" does not by itself
+establish ticker reuse either. Only **`(b)` with no corporate-action explanation** is
+unambiguous evidence of a wrong series.
+
+**What the 0/259 result does establish**, and it is enough: no name in the cohort is served
+as a *delisted* series — nothing terminates, and the archive keys on the live ticker, so it
+structurally cannot distinguish `X` from `X-DELISTED`. The free path remains unusable for
+survivorship. The correction is to the *diagnosis*, not to the verdict.
