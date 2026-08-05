@@ -44,6 +44,8 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.services.ops_monitor import TERMINAL_STATUS_SQL
+
 logger = logging.getLogger(__name__)
 
 _REQUESTED_BY = "system:retry_backoff"
@@ -169,10 +171,10 @@ def _refire_one(
 
 def _is_latest_terminal(conn: psycopg.Connection[Any], *, job_name: str, run_id: int) -> bool:
     row = conn.execute(
-        """
+        f"""
         SELECT run_id FROM job_runs
          WHERE job_name = %(job)s
-           AND status IN ('success', 'failure', 'skipped', 'cancelled')
+           AND status IN {TERMINAL_STATUS_SQL}
          ORDER BY started_at DESC, run_id DESC
          LIMIT 1
         """,

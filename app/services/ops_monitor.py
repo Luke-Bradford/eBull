@@ -28,10 +28,10 @@ than that threshold, the layer is flagged as stale.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, LiteralString
 
 import psycopg
 import psycopg.rows
@@ -125,7 +125,38 @@ _LAYER_QUERIES: dict[LayerName, str] = {
     "scores": "SELECT MAX(scored_at) AS latest FROM scores",
 }
 
-JobStatus = Literal["running", "success", "failure", "skipped"]
+# ⚠ "cancelled" was missing here before #2218 even though sql/137 added it to
+# the CHECK constraint in 2026 — the same drift this ticket is about, one
+# vocabulary over. Kept in sync with JOB_TERMINAL_STATUSES below by
+# tests/test_job_terminal_status_contract.py.
+JobStatus = Literal["running", "success", "failure", "skipped", "cancelled", "degraded"]
+
+# #2218 — THE terminal-status vocabulary for ``job_runs``, in one place.
+#
+# It was in five SQL string literals across four modules, all spelling
+# ``IN ('success', 'failure', 'skipped', 'cancelled')`` by hand. Adding
+# 'degraded' to the CHECK constraint without touching all five leaves the new
+# status invisible to the admin verdict, the retry sweeper and the bootstrap
+# gate — the row exists and nothing reads it, which is the same defect shape
+# this ticket is about. pyright cannot see inside a SQL string, so the only
+# defences are this constant and the derive-from-the-migration contract test
+# in tests/test_job_terminal_status_contract.py.
+#
+# 'running' is deliberately absent: it is a status but not a TERMINAL one.
+#: The ``IN (...)`` list, spelled ONCE and interpolated into every query that
+#: needs it. Declared as the literal rather than joined from the tuple below
+#: because psycopg3 types ``execute(query=...)`` as ``LiteralString`` — a
+#: runtime-joined string is ``str`` and pyright rejects it, which is a real
+#: guard against interpolating caller input and worth keeping rather than
+#: casting around.
+TERMINAL_STATUS_SQL: Final[LiteralString] = "('success', 'failure', 'skipped', 'cancelled', 'degraded')"
+
+#: Derived FROM the SQL literal, not maintained beside it — two hand-written
+#: copies of a vocabulary is the defect this whole constant exists to stop.
+JOB_TERMINAL_STATUSES: Final[tuple[str, ...]] = tuple(
+    part.strip().strip("'") for part in TERMINAL_STATUS_SQL.strip("()").split(",")
+)
+
 
 LayerStatus = Literal["ok", "stale", "empty", "error"]
 
@@ -240,11 +271,11 @@ def _retry_plan(
     # cap we stop retrying regardless, so deeper history is irrelevant.
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT status FROM job_runs
              WHERE job_name = %(job)s
                AND run_id   <> %(id)s
-               AND status IN ('success', 'failure', 'skipped', 'cancelled')
+               AND status IN {TERMINAL_STATUS_SQL}
                AND (started_at < %(ts)s
                     OR (started_at = %(ts)s AND run_id < %(id)s))
              ORDER BY started_at DESC, run_id DESC
@@ -432,10 +463,11 @@ def record_job_finish(
     conn: psycopg.Connection[Any],
     run_id: int,
     *,
-    status: Literal["success", "failure"],
+    status: Literal["success", "failure", "degraded"],
     row_count: int | None = None,
     error_msg: str | None = None,
     error_category: FailureCategory | None = None,
+    progress: Mapping[str, Any] | None = None,
     now: datetime | None = None,
 ) -> None:
     """Record the completion of a scheduled job.
@@ -445,6 +477,13 @@ def record_job_finish(
     ``attempt`` so the ``jobs_retry_sweeper`` re-fires it before its next
     natural cadence slot. A non-failure terminal clears ``next_retry_at``
     and leaves ``attempt`` at its default.
+
+    ``degraded`` (#2218) — the run COMPLETED and made no progress. It takes
+    the non-failure retry path deliberately: nothing raised, so there is no
+    transient-vs-permanent classification to make and re-firing it immediately
+    would just re-hit whatever is not progressing. It is a signal to the
+    operator, not a retry trigger. ``progress`` is the evidence, persisted so
+    the successor to #2213 is a query rather than log archaeology.
     """
     now = now or _utcnow()
     if status == "failure":
@@ -467,7 +506,8 @@ def record_job_finish(
             error_msg      = %(error_msg)s,
             error_category = %(error_category)s,
             next_retry_at  = %(next_retry_at)s,
-            attempt        = %(attempt)s
+            attempt        = %(attempt)s,
+            progress_json  = %(progress)s
         WHERE run_id = %(run_id)s
           AND status = 'running'
         """,
@@ -479,6 +519,7 @@ def record_job_finish(
             "error_category": error_category.value if error_category else None,
             "next_retry_at": next_retry_at,
             "attempt": attempt,
+            "progress": Jsonb(dict(progress)) if progress is not None else None,
             "run_id": run_id,
         },
     )

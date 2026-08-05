@@ -322,7 +322,17 @@ def reset_stale_in_flight(
               AND NOT EXISTS (
                 SELECT 1 FROM job_runs jr
                 WHERE jr.linked_request_id = pjr.request_id
-                  AND jr.status IN ('success', 'failure')
+                  -- #2218 — 'degraded' belongs here: the job RAN, it simply
+                  -- made no progress. Without it, a crash between the terminal
+                  -- row and mark_request_completed replays a request that
+                  -- already executed.
+                  --
+                  -- ⚠ Deliberately NOT app.services.ops_monitor's full
+                  -- TERMINAL_STATUS_SQL. This set is narrower on purpose:
+                  -- 'skipped' and 'cancelled' mean the work was NOT done, and
+                  -- whether a boot recovery should re-fire those is a separate
+                  -- question this ticket does not answer.
+                  AND jr.status IN ('success', 'failure', 'degraded')
               )
               AND NOT EXISTS (
                 SELECT 1 FROM sync_runs sr

@@ -52,6 +52,12 @@ ProcessStatus = Literal[
     "pending_first_run",
     "running",
     "ok",
+    # #2218 — the run COMPLETED and made no progress. Distinct from "failed"
+    # (nothing raised, so there is no error to show and no retry to schedule)
+    # and from "ok" (which is what OpenFIGI resolution reported for seven weeks
+    # while it was dark). Collapsing it into either loses what the operator
+    # needs to know.
+    "degraded",
     "failed",
     "pending_retry",
     "cancelled",
@@ -65,7 +71,12 @@ ProcessStatus = Literal[
 # ``health_verdict.compute_verdict``). The FE renders ONE verdict pill.
 HealthVerdict = Literal["current", "working", "self_healing", "attention", "stale_manual", "paused"]
 
-RunStatus = Literal["success", "failure", "partial", "cancelled", "skipped"]
+# ⚠ #2218 — "degraded" is NOT folded into "partial". The kill-switch branch
+# of health_verdict deliberately reads a benign ingest-sweep "partial" as
+# green while halted; a degraded run is the opposite (it is the state
+# OpenFIGI resolution sat in, unseen, for seven weeks) and must stay red
+# behind the switch, so it needs its own member rather than a mapping.
+RunStatus = Literal["success", "failure", "partial", "cancelled", "skipped", "degraded"]
 
 WatermarkCursorKind = Literal[
     "filed_at",

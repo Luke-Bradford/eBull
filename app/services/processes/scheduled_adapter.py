@@ -34,7 +34,7 @@ import psycopg.rows
 
 from app.services.data_freshness import cadence_for
 from app.services.job_liveness import cadence_period
-from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, TERMINAL_STATUS_SQL
 from app.services.processes import (
     ActiveRunSummary,
     ErrorClassSummary,
@@ -179,6 +179,9 @@ _RUN_STATUS_TO_SUMMARY: dict[str, RunStatus] = {
     "failure": "failure",
     "skipped": "skipped",
     "cancelled": "cancelled",
+    # #2218 — carried through as its own member, NOT folded into "partial";
+    # see the RunStatus comment in app/services/processes/__init__.py.
+    "degraded": "degraded",
 }
 
 
@@ -223,6 +226,12 @@ def _status_for(
         return "failed"
     if last_terminal_status == "success":
         return "ok"
+    # #2218. ⚠ Placed BEFORE the fall-through, which is the whole point: an
+    # unhandled terminal status lands on `pending_first_run` — "never ran" —
+    # so a new status added without touching this function would report the
+    # single most misleading state available.
+    if last_terminal_status == "degraded":
+        return "degraded"
     if last_terminal_status == "cancelled":
         return "cancelled"
     if last_terminal_status == "skipped":
@@ -279,13 +288,13 @@ def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -
     """Latest terminal job_runs row (success / failure / skipped / cancelled)."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT run_id, started_at, finished_at, status, row_count,
                    error_msg, error_classes, rows_skipped_by_reason,
                    rows_errored, cancelled_at, next_retry_at, attempt
               FROM job_runs
              WHERE job_name = %(name)s
-               AND status   IN ('success', 'failure', 'skipped', 'cancelled')
+               AND status   IN {TERMINAL_STATUS_SQL}
              ORDER BY started_at DESC
              LIMIT 1
             """,
@@ -329,11 +338,11 @@ def _read_latest_anchor_terminal_run(conn: psycopg.Connection[Any], *, job_name:
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT run_id, started_at, finished_at, status
               FROM job_runs
              WHERE job_name = %(name)s
-               AND status   IN ('success', 'failure', 'skipped', 'cancelled')
+               AND status   IN {TERMINAL_STATUS_SQL}
                AND NOT (status = 'skipped' AND error_msg LIKE %(lane_busy_pat)s)
              ORDER BY started_at DESC
              LIMIT 1
@@ -1111,12 +1120,12 @@ def list_runs(conn: psycopg.Connection[Any], *, process_id: str, days: int) -> l
         raise ValueError("days must be positive")
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT run_id, started_at, finished_at, status, row_count,
                    rows_skipped_by_reason, rows_errored, cancelled_at
               FROM job_runs
              WHERE job_name   = %(name)s
-               AND status     IN ('success', 'failure', 'skipped', 'cancelled')
+               AND status     IN {TERMINAL_STATUS_SQL}
                AND started_at >= now() - (%(days)s::int * INTERVAL '1 day')
              ORDER BY started_at DESC
             """,

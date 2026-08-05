@@ -232,6 +232,20 @@ def compute_verdict(
         return ("stale_manual", False, "aged one-shot failure")
     if status == "failed":
         return ("attention", False, "last run failed")
+    if status == "degraded":
+        # #2218. Attention, not a softer verdict: the whole defect was that a
+        # job making zero progress read as healthy for seven weeks, so a state
+        # that does not reach the operator is the bug rather than the fix.
+        # Placed after ``failed`` and before ``cancelled`` — a raised failure
+        # is the louder fact when both are somehow in play, and neither is
+        # allowed to mask an actionable stale reason (the block above already
+        # returned for those, preserving the ckpt-1 invariant).
+        #
+        # No retry branch above it on purpose: nothing raised, so there is no
+        # ``next_retry_at`` and re-firing would just re-hit whatever is not
+        # progressing. A degraded row stays red until a run actually
+        # progresses.
+        return ("attention", False, "completed with no progress")
     if status == "cancelled":
         # Task 5 (#1508): a cancel traceable to a deliberate operator stop
         # request (process_stop_requests join, resolved by the adapter) is
@@ -331,7 +345,10 @@ def verdict_for_row(row: ProcessRow, *, now: datetime) -> tuple[HealthVerdict, b
         # benign green (``has_failures`` counts ``ingest_status='failed'`` only).
         # So keeping ``partial`` red here would paint a row red that reads green
         # when the switch is off — false-red flooding, the #1831 bug (bot review).
-        last_run_failed=row.last_run is not None and row.last_run.status == "failure",
+        # #2218 — degraded counts here for the same reason failure does: it
+        # reddens on the non-disabled path, so hiding it behind the halt would
+        # re-introduce exactly the masking this branch exists to prevent.
+        last_run_failed=row.last_run is not None and row.last_run.status in ("failure", "degraded"),
     )
 
 
