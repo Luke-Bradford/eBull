@@ -31,8 +31,6 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import date
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -199,9 +197,7 @@ def _measure_series(
                 stats.cmp_ours_only += len(ours - theirs)
                 extra = theirs - ours
                 stats.cmp_scipy_only += len(extra)
-                stats.cmp_scipy_only_at_boundary += sum(
-                    1 for i in extra if i < n or i >= len(bars) - n
-                )
+                stats.cmp_scipy_only_at_boundary += sum(1 for i in extra if i < n or i >= len(bars) - n)
 
         # Downstream primitives, timed on the medium rung only — they consume
         # swings, so running all three would triple-count the same workload.
@@ -235,9 +231,7 @@ def _measure_series(
             totals.timings["interaction"] += time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            find_break_and_retest(
-                busiest, bars, universe="survivor_only", max_retest_bars=2 * n
-            )
+            find_break_and_retest(busiest, bars, universe="survivor_only", max_retest_bars=2 * n)
             totals.timings["break_retest"] += time.perf_counter() - t0
 
 
@@ -312,8 +306,7 @@ def main() -> int:
                 break
             if totals.series % 500 == 0:
                 print(
-                    f"  {totals.series:>5} series / {totals.bars:>10,} bars "
-                    f"({time.perf_counter() - started:.0f}s)",
+                    f"  {totals.series:>5} series / {totals.bars:>10,} bars ({time.perf_counter() - started:.0f}s)",
                     flush=True,
                 )
 
@@ -328,10 +321,7 @@ def main() -> int:
     for name, n in SWING_LADDER.items():
         s = totals.rungs[name]
         pct = 100.0 * s.not_evaluable_pivots / totals.bars if totals.bars else 0.0
-        print(
-            f"{name:8}{n:>4}{s.swings:>12,}{s.highs:>11,}{s.lows:>11,}"
-            f"{s.not_evaluable_pivots:>10,}{pct:>8.3f}%"
-        )
+        print(f"{name:8}{n:>4}{s.swings:>12,}{s.highs:>11,}{s.lows:>11,}{s.not_evaluable_pivots:>10,}{pct:>8.3f}%")
 
     print("\n=== series tri-state, per rung (§8.1) ===")
     print(f"{'rung':8}{'fired':>10}{'not_fired':>12}{'not_evaluable':>16}")

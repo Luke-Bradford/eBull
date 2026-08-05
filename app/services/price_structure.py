@@ -291,8 +291,23 @@ def _atr_at(bars: Sequence[StructureBar], index: int, period: int = ATR_PERIOD) 
     return atr(window, period)
 
 
-def _state_for(found: bool) -> State:
-    return "fired" if found else "not_fired"
+def _state_for(found: bool, *, blinded: bool = False) -> State:
+    """Tri-state from "did anything fire" plus "was any evidence hidden".
+
+    ``blinded`` is the half that is easy to forget and expensive to get wrong.
+    Finding nothing while some of the evidence was masked is NOT a negative — it
+    is "cannot say" — and reporting it as ``not_fired`` feeds a quarantined bar
+    into a win-rate denominator as an observed miss. Codex caught this module
+    making exactly that mistake in three separate places on the first pass,
+    which is why the rule lives in one helper now instead of at each call site.
+
+    A positive result is still ``fired`` even when something was masked: the
+    structure that WAS found is real, and the partial evidence is reported
+    separately (``not_evaluable_indices``, ``unclustered``).
+    """
+    if found:
+        return "fired"
+    return "not_evaluable" if blinded else "not_fired"
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +372,7 @@ def detect_swings(
             not_evaluable.append(i)
 
     return SwingSeries(
-        state=_state_for(bool(swings)),
+        state=_state_for(bool(swings), blinded=bool(not_evaluable)),
         swings=tuple(swings),
         n=n,
         bars_evaluated=len(bars) - 2 * n,
@@ -462,7 +477,9 @@ def cluster_levels(
 
     levels.sort(key=lambda lv: (lv.kind, lv.price_mean))
     return LevelSet(
-        state=_state_for(bool(levels)),
+        # Every swing unclusterable (masked ATR window, or a series shorter than
+        # the ATR warm-up) is "could not evaluate", not "no levels here".
+        state=_state_for(bool(levels), blinded=bool(unclustered)),
         levels=tuple(levels),
         unclustered=tuple(unclustered),
         universe=universe,
@@ -583,6 +600,7 @@ def find_break_and_retest(
     """
     patterns: list[BreakRetest] = []
     seen_evaluable = False
+    blinded = False
 
     state: Literal["idle", "broken", "retested"] = "idle"
     direction: Literal["up", "down"] = "up"
@@ -591,6 +609,16 @@ def find_break_and_retest(
     for i in range(len(bars)):
         verdict = classify_interaction(level, bars, i, k=k)
         if verdict == "not_evaluable":
+            # ⚠ A hidden bar INSIDE an active sequence voids it. Skipping past
+            # one and carrying the state forward would emit a break→retest→
+            # confirm spanning a bar the quarantine says is not a price — and
+            # that bar could have been the opposite-side close that invalidated
+            # the whole setup. Emitting a positive signal across hidden evidence
+            # is the worst direction this module can fail in, so the sequence
+            # resets and the series is marked blinded.
+            if state != "idle":
+                state = "idle"
+                blinded = True
             continue
         seen_evaluable = True
 
@@ -638,7 +666,7 @@ def find_break_and_retest(
     if not seen_evaluable:
         return BreakRetestSet(state="not_evaluable", patterns=(), universe=universe)
     return BreakRetestSet(
-        state=_state_for(bool(patterns)),
+        state=_state_for(bool(patterns), blinded=blinded),
         patterns=tuple(patterns),
         universe=universe,
     )

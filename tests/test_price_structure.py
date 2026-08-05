@@ -506,3 +506,69 @@ def test_version_is_distinct_from_the_quarantine_rule_set() -> None:
     from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_VERSION
 
     assert RULE_SET_VERSION != QUARANTINE_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Blinded tri-state — "found nothing while some evidence was hidden"
+# ---------------------------------------------------------------------------
+#
+# Three separate places got this wrong on the first pass (caught by Codex at
+# checkpoint 2). Finding nothing while a bar was masked is NOT a negative, and
+# reporting it as `not_fired` feeds a quarantined bar into a win-rate
+# denominator as an observed miss.
+
+
+def test_masked_candidate_with_no_swing_is_not_evaluable_not_not_fired() -> None:
+    result = detect_swings(_bars([1.0, None, 5.0, 2.0, 1.0]), 2, universe="survivor_only")
+    assert result.swings == ()
+    assert result.not_evaluable_indices != ()
+    assert result.state == "not_evaluable"
+
+
+def test_a_real_swing_still_fires_even_when_another_candidate_was_masked() -> None:
+    """Partial blinding must not suppress structure that WAS observed."""
+    highs: list[float | None] = [1.0, 2.0, 9.0, 2.0, 1.0, 2.0, None, 2.0, 1.0]
+    result = detect_swings(_bars(highs), 2, universe="survivor_only")
+
+    assert [s.index for s in result.swings if s.kind == "high"] == [2]
+    assert result.not_evaluable_indices != ()
+    assert result.state == "fired"
+
+
+def test_all_swings_unclusterable_is_not_evaluable() -> None:
+    highs: list[float | None] = [10.0] * 40
+    highs[18] = None  # inside the ATR(14) window ending at index 20
+    result = cluster_levels(_bars(highs), [_swing(20, "high", 10.0)], universe="survivor_only")
+
+    assert result.levels == ()
+    assert result.unclustered != ()
+    assert result.state == "not_evaluable"
+
+
+def test_masked_bar_inside_a_sequence_voids_it_rather_than_spanning_it() -> None:
+    """The worst failure direction: a positive signal emitted across hidden evidence.
+
+    Without the reset, the break at 30 would survive the masked bar at 31 and
+    pair with the retest/confirm after it — reporting a pattern over a bar the
+    quarantine says is not a price, and which could have been the opposite-side
+    close that invalidated the setup.
+    """
+    bars = _flat_bars(60)
+    _replace(bars, 30, 20.0, 19.0, 20.0)  # break up
+    bars[31] = StructureBar(bars[31].bar_date, Decimal("10"), None, None, None, 1_000)  # masked
+    _replace(bars, 32, 10.2, 9.8, 10.0)  # would-be retest
+    _replace(bars, 34, 21.0, 20.0, 21.0)  # would-be confirm
+
+    result = find_break_and_retest(_level(), bars, universe="survivor_only", max_retest_bars=10)
+    assert result.patterns == ()
+    assert result.state == "not_evaluable"
+
+
+def test_masked_bar_outside_any_sequence_does_not_blind_the_result() -> None:
+    """Only a mask INSIDE an active sequence hides anything."""
+    bars = _flat_bars(60)
+    bars[5] = StructureBar(bars[5].bar_date, Decimal("10"), None, None, None, 1_000)
+    _replace(bars, 30, 20.0, 19.0, 20.0)  # break, never retested
+
+    result = find_break_and_retest(_level(), bars, universe="survivor_only", max_retest_bars=3)
+    assert result.state == "not_fired"
