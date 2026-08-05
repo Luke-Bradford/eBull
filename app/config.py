@@ -1,6 +1,6 @@
 import os
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, AliasGenerator, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Minimum service-token length. 32 chars of base64/hex is ~192 bits of
@@ -39,8 +39,81 @@ os.environ.setdefault("PGCONNECT_TIMEOUT", str(DB_CONNECT_TIMEOUT_S))
 DEV_LIKE_ENVS: frozenset[str] = frozenset({"dev", "test", "local"})
 
 
+def _ebull_alias(field_name: str) -> AliasChoices:
+    """Accept both ``EBULL_<NAME>`` and the bare ``<NAME>`` for every field.
+
+    ⚠ THIS IS A SECURITY-RELEVANT DEFAULT, not a convenience. ``EBULL_`` is this
+    repo's environment-variable convention — ``EBULL_SECRETS_KEY``,
+    ``EBULL_ENV``, ``EBULL_DATA_DIR``, ``EBULL_SKIP_CATCH_UP`` and the rest are
+    all read that way, and ``.env.example`` + the README document the settings
+    below under the same prefix. But ``Settings`` has no ``env_prefix``, so
+    before this generator existed a field read ONLY the bare name and silently
+    dropped the documented one.
+
+    #1406 hit exactly this on ``secrets_key`` and fixed it with a per-field
+    ``AliasChoices``. It fixed one field and left six — measured 2026-08-05
+    (#2286): ``EBULL_SERVICE_TOKEN``, ``EBULL_BOOTSTRAP_TOKEN``, ``EBULL_HOST``,
+    ``EBULL_SESSION_COOKIE_SECURE``, ``EBULL_SESSION_IDLE_TIMEOUT_MINUTES`` and
+    ``EBULL_SESSION_ABSOLUTE_TIMEOUT_HOURS`` were all documented, all set in the
+    working ``.env``, and all read by nothing. The sharpest was the cookie flag:
+    an operator setting ``EBULL_SESSION_COOKIE_SECURE=true`` for a TLS
+    deployment got an insecure cookie and no indication (it feeds ``secure=`` at
+    ``app/api/auth_session.py``). The bootstrap-token case degraded to Mode A on
+    loopback and failed CLOSED off it, so it was a denial of the configured mode
+    rather than a bypass.
+
+    A seventh per-field patch would have been the wrong fix. Generating the
+    alias for every field makes the trap unrepresentable instead of remembered,
+    which is the difference between a rule and a habit. The documented
+    ``EBULL_`` spelling wins; the bare name stays working for back-compat.
+
+    Guarded by ``tests/test_config_env_contract.py``, which derives the field
+    set by AST and asserts each has a ``.env.example`` entry under one of its
+    accepted names — the check has to read the ALIAS set, because a check on
+    bare field names would have passed happily throughout the whole defect.
+    """
+    upper = field_name.upper()
+    return AliasChoices(f"EBULL_{upper}", upper)
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        alias_generator=AliasGenerator(validation_alias=_ebull_alias),
+        # ⚠ LOAD-BEARING, and it is what makes the alias above safe to add.
+        # A blank ``FOO=`` line means "not configured" to every operator who
+        # ever copied .env.example; pydantic-settings disagrees by default and
+        # treats it as the empty string. That interacts badly with an alias:
+        # the documented ``EBULL_FOO=`` (blank, copied from the example and
+        # never filled) is PRESENT, so it wins the AliasChoices race, and the
+        # bare ``FOO=<real value>`` sitting two lines below is never consulted.
+        #
+        # Measured on the working .env before this landed (#2286): adding the
+        # alias alone moved ``service_token`` from a 64-character credential to
+        # "" — a live break of the bearer-token auth path, caused by a fix.
+        # Caught by running Settings() against the REAL .env rather than a
+        # synthetic one, which is the only place the duplicate existed.
+        #
+        # It also corrects a pre-existing inconsistency: ``secrets_key`` is
+        # typed ``str | None`` and was already reading "" rather than None from
+        # a blank line, so every ``is None`` check on it was quietly false.
+        env_ignore_empty=True,
+        # ⚠ REQUIRED once alias_generator is set, and its absence fails
+        # SILENTLY. A ``validation_alias`` REPLACES the field name as an input
+        # key, so without this ``Settings(database_url=...)`` stops being
+        # accepted — and because ``extra="ignore"`` is set, the kwarg is
+        # discarded without error and the value falls back to .env or the
+        # default. Verified: both kwargs of
+        # ``Settings(database_url=..., app_env=...)`` were dropped.
+        #
+        # No caller uses field-name kwargs today (only ``_env_file=None``), so
+        # nothing was broken — but leaving it out would have reintroduced the
+        # exact defect this change exists to fix, one layer up: a value you set
+        # that does nothing and says nothing. Caught by Codex, not by the
+        # suite, because no test constructs Settings that way.
+        populate_by_name=True,
+    )
 
     app_env: str = "dev"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/ebull"
