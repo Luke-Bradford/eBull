@@ -342,7 +342,13 @@ def detect_swings(
             state="not_evaluable",
             swings=(),
             n=n,
-            bars_evaluated=len(bars),
+            # 0, NOT len(bars). `bars_evaluated` counts bars at which a pivot
+            # could be DECIDED, and a series shorter than the window decides
+            # none. An earlier version returned len(bars) here while the normal
+            # path returns len(bars) - 2n, so a consumer computing yield per
+            # evaluated bar got two incomparable denominators depending on a
+            # branch it could not see.
+            bars_evaluated=0,
             not_evaluable_indices=(),
             universe=universe,
         )
@@ -419,7 +425,7 @@ def _pivot_at(
 
 def cluster_levels(
     bars: Sequence[StructureBar],
-    swings: Sequence[Swing],
+    swings: SwingSeries,
     *,
     universe: Universe,
     k: float = CLUSTER_ATR_K,
@@ -436,10 +442,29 @@ def cluster_levels(
 
     ``touches`` is emitted, never filtered on: a minimum-touch threshold baked
     in here would hide the denominator from the consumer that needs it.
+
+    ⚠ Takes the whole ``SwingSeries``, NOT a bare ``Sequence[Swing]``, and that
+    is a correctness requirement rather than convenience. With a bare sequence
+    this function cannot tell "the detector found no swings" from "the detector
+    could not evaluate the series at all" — both arrive as ``()`` — so it would
+    report ``not_fired`` for a series that was too short or fully masked,
+    reintroducing the tri-state collapse one level up the pipeline. Caught by
+    the review bot after the same defect had already been fixed in three places
+    inside this module; the type is now what prevents it, not vigilance.
     """
-    if not swings:
+    # Upstream blinding travels: if the detector itself could not evaluate, no
+    # level derived from its (empty) output is a negative result.
+    if swings.state == "not_evaluable":
         return LevelSet(
-            state="not_evaluable" if not bars else "not_fired",
+            state="not_evaluable",
+            levels=(),
+            unclustered=(),
+            universe=universe,
+        )
+
+    if not swings.swings:
+        return LevelSet(
+            state=_state_for(False, blinded=bool(swings.not_evaluable_indices)),
             levels=(),
             unclustered=(),
             universe=universe,
@@ -449,7 +474,7 @@ def cluster_levels(
     unclustered: list[Swing] = []
 
     for kind, level_kind in (("high", "resistance"), ("low", "support")):
-        members = [s for s in swings if s.kind == kind]
+        members = [s for s in swings.swings if s.kind == kind]
         tolerances: dict[int, float] = {}
         clusterable: list[Swing] = []
         for swing in members:
@@ -479,7 +504,10 @@ def cluster_levels(
     return LevelSet(
         # Every swing unclusterable (masked ATR window, or a series shorter than
         # the ATR warm-up) is "could not evaluate", not "no levels here".
-        state=_state_for(bool(levels), blinded=bool(unclustered)),
+        state=_state_for(
+            bool(levels),
+            blinded=bool(unclustered) or bool(swings.not_evaluable_indices),
+        ),
         levels=tuple(levels),
         unclustered=tuple(unclustered),
         universe=universe,
@@ -538,7 +566,14 @@ def classify_interaction(
     if band is None or bar.close is None:
         return "not_evaluable"
 
-    tol = Decimal(str(k * band))
+    # Decimal(str(k)) * Decimal(str(band)), NOT Decimal(str(k * band)): the
+    # latter performs the multiplication in float and only then converts, so the
+    # band edge inherits float rounding error at exactly the boundary this
+    # function compares with strict inequality.
+    # ⚠ Residual, stated rather than papered over: `band` comes from
+    # technical_analysis.atr, which returns a float, so the edge is still only
+    # as precise as that. This removes the compounding, not the source.
+    tol = Decimal(str(k)) * Decimal(str(band))
     band_low = Decimal(str(level.price_low)) - tol
     band_high = Decimal(str(level.price_high)) + tol
 

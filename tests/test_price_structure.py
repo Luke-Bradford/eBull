@@ -31,8 +31,10 @@ from app.services.price_structure import (
     RULE_SET_VERSION,
     SWING_LADDER,
     Level,
+    State,
     StructureBar,
     Swing,
+    SwingSeries,
     anchored_vwap,
     classify_interaction,
     cluster_levels,
@@ -87,6 +89,30 @@ def _swing(index: int, kind: str, price: float, n: int = 1) -> Swing:
         confirmed_index=index + n,
         confirmed_date=BASE + timedelta(days=index + n),
     )
+
+
+def _series(swings: Sequence[Swing], *, n: int = 1, blinded: tuple[int, ...] = ()) -> SwingSeries:
+    """Wrap hand-made swings so cluster_levels gets the upstream tri-state.
+
+    cluster_levels takes the whole SwingSeries precisely so "found none" cannot
+    be confused with "could not look" — so a test helper that fabricated a
+    plausible-looking state would defeat the thing being tested. State here is
+    derived from the same rule the detector uses.
+    """
+    return SwingSeries(
+        state=_state_for_test(bool(swings), bool(blinded)),
+        swings=tuple(swings),
+        n=n,
+        bars_evaluated=0,
+        not_evaluable_indices=blinded,
+        universe="survivor_only",
+    )
+
+
+def _state_for_test(found: bool, blinded: bool) -> State:
+    if found:
+        return "fired"
+    return "not_evaluable" if blinded else "not_fired"
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +208,7 @@ def test_highs_and_lows_never_cluster_together() -> None:
     """A level asserts which side price approached from; merging destroys that."""
     bars = _bars([10.0] * 40)
     swings = [_swing(20, "high", 10.0), _swing(25, "low", 10.0)]
-    result = cluster_levels(bars, swings, universe="survivor_only")
+    result = cluster_levels(bars, _series(swings), universe="survivor_only")
 
     kinds = sorted(lv.kind for lv in result.levels)
     assert kinds == ["resistance", "support"]
@@ -192,7 +218,7 @@ def test_highs_and_lows_never_cluster_together() -> None:
 def test_nearby_swings_cluster_and_count_touches() -> None:
     bars = _bars([10.0] * 40)
     swings = [_swing(20, "high", 10.0), _swing(25, "high", 10.05), _swing(30, "high", 30.0)]
-    result = cluster_levels(bars, swings, universe="survivor_only")
+    result = cluster_levels(bars, _series(swings), universe="survivor_only")
 
     resistance = sorted((lv for lv in result.levels if lv.kind == "resistance"), key=lambda lv: lv.price_mean)
     assert [lv.touches for lv in resistance] == [2, 1]
@@ -204,14 +230,14 @@ def test_swing_with_unusable_atr_window_is_reported_unclustered() -> None:
     highs: list[float | None] = [10.0] * 40
     highs[18] = None  # inside the ATR(14) window ending at index 20
     bars = _bars(highs)
-    result = cluster_levels(bars, [_swing(20, "high", 10.0)], universe="survivor_only")
+    result = cluster_levels(bars, _series([_swing(20, "high", 10.0)]), universe="survivor_only")
 
     assert result.levels == ()
     assert [s.index for s in result.unclustered] == [20]
 
 
 def test_no_swings_is_not_fired_not_a_crash() -> None:
-    result = cluster_levels(_bars([10.0] * 40), [], universe="survivor_only")
+    result = cluster_levels(_bars([10.0] * 40), _series([]), universe="survivor_only")
     assert result.state == "not_fired"
 
 
@@ -538,7 +564,7 @@ def test_a_real_swing_still_fires_even_when_another_candidate_was_masked() -> No
 def test_all_swings_unclusterable_is_not_evaluable() -> None:
     highs: list[float | None] = [10.0] * 40
     highs[18] = None  # inside the ATR(14) window ending at index 20
-    result = cluster_levels(_bars(highs), [_swing(20, "high", 10.0)], universe="survivor_only")
+    result = cluster_levels(_bars(highs), _series([_swing(20, "high", 10.0)]), universe="survivor_only")
 
     assert result.levels == ()
     assert result.unclustered != ()
@@ -572,3 +598,32 @@ def test_masked_bar_outside_any_sequence_does_not_blind_the_result() -> None:
 
     result = find_break_and_retest(_level(), bars, universe="survivor_only", max_retest_bars=3)
     assert result.state == "not_fired"
+
+
+def test_cluster_levels_inherits_upstream_not_evaluable() -> None:
+    """The fourth instance of the same collapse, found by the review bot.
+
+    A bare `Sequence[Swing]` cannot distinguish "the detector found none" from
+    "the detector could not look" — both arrive as `()`. Taking the whole
+    SwingSeries is what makes the collapse unrepresentable.
+    """
+    too_short = detect_swings(_bars([1.0, 2.0, 3.0]), 2, universe="survivor_only")
+    assert too_short.state == "not_evaluable"
+
+    result = cluster_levels(_bars([1.0, 2.0, 3.0]), too_short, universe="survivor_only")
+    assert result.state == "not_evaluable"
+
+
+def test_cluster_levels_inherits_partial_upstream_blinding() -> None:
+    blinded = _series([], blinded=(7,))
+    assert cluster_levels(_bars([10.0] * 40), blinded, universe="survivor_only").state == "not_evaluable"
+
+
+def test_bars_evaluated_is_comparable_across_both_branches() -> None:
+    """Both paths count bars at which a pivot could be DECIDED, so yields divide."""
+    short = detect_swings(_bars([1.0] * 4), 2, universe="survivor_only")
+    assert short.state == "not_evaluable"
+    assert short.bars_evaluated == 0
+
+    normal = detect_swings(_bars([1.0] * 11), 2, universe="survivor_only")
+    assert normal.bars_evaluated == 11 - 2 * 2

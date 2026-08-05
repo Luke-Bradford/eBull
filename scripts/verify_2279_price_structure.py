@@ -209,7 +209,7 @@ def _measure_series(
         if name != "medium":
             continue
         t0 = time.perf_counter()
-        levels = cluster_levels(bars, result.swings, universe="survivor_only")
+        levels = cluster_levels(bars, result, universe="survivor_only")
         totals.timings["levels"] += time.perf_counter() - t0
 
         t0 = time.perf_counter()
