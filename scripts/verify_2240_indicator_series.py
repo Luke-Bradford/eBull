@@ -12,6 +12,12 @@ perfectly healthy — that cost 7 minutes on 2026-08-05. Redirect to a file and
 read the file. Same rule as `.claude/CLAUDE.md`'s "never pipe a gate command",
 second symptom.
 
+⚠ Every print here passes ``flush=True``, including the SUMMARY lines. The
+first draft flushed only the progress counter, so a two-arm run
+(``--equivalence --timing``) showed nothing at all between the arms — the
+equivalence verdict sat in the buffer while the timing arm ran, which is the
+same invisibility this docstring warns about, in the file that warns about it.
+
 WHY THIS IS A COMMITTED SCRIPT AND NOT A NUMBER IN A PR
 -------------------------------------------------------
 Acceptance 2 and 5 of the spec are full-corpus figures. A figure written by
@@ -125,11 +131,11 @@ def equivalence(conn: psycopg.Connection[tuple]) -> int:
         if (k + 1) % 1000 == 0:
             print(f"  {k + 1:,}/{len(ids):,} | checked={checked:,} mismatches={sum(totals.values())}", flush=True)
 
-    print(f"\n=== acceptance 2 — equivalence ({RULE_SET_VERSION}) ===")
-    print(f"  series checked : {checked:,}   (skipped {skipped:,} with < {_MIN_BARS} bars)")
+    print(f"\n=== acceptance 2 — equivalence ({RULE_SET_VERSION}) ===", flush=True)
+    print(f"  series checked : {checked:,}   (skipped {skipped:,} with < {_MIN_BARS} bars)", flush=True)
     for name in sorted(totals):
-        print(f"  {name:<16} {'OK' if totals[name] == 0 else f'*** {totals[name]} MISMATCH ***'}")
-    print(f"  total mismatches: {sum(totals.values())}")
+        print(f"  {name:<16} {'OK' if totals[name] == 0 else f'*** {totals[name]} MISMATCH ***'}", flush=True)
+    print(f"  total mismatches: {sum(totals.values())}", flush=True)
     print(f"  elapsed: {time.perf_counter() - started:.1f}s (includes reading the whole corpus)")
 
     # ⚠ The corpus carries no NULL OHLC, so the not_evaluable paths are NOT
@@ -139,8 +145,8 @@ def equivalence(conn: psycopg.Connection[tuple]) -> int:
         "SELECT count(*) FROM research_price_daily WHERE open IS NULL OR high IS NULL OR low IS NULL OR close IS NULL"
     ).fetchone()
     assert nulls is not None
-    print(f"  ⚠ bars with a NULL OHLC field: {nulls[0]:,} — the not_evaluable paths are")
-    print("    unreachable on this corpus and are covered ONLY by tests/test_indicator_series.py")
+    print(f"  ⚠ bars with a NULL OHLC field: {nulls[0]:,} — the not_evaluable paths are", flush=True)
+    print("    unreachable on this corpus and are covered ONLY by tests/test_indicator_series.py", flush=True)
     return 0 if sum(totals.values()) == 0 else 1
 
 
@@ -174,11 +180,11 @@ def timing(conn: psycopg.Connection[tuple]) -> int:
         bars_seen += len(series)
 
     wall = time.perf_counter() - started
-    print(f"\n=== acceptance 5 — timing, all seven together ({RULE_SET_VERSION}) ===")
-    print(f"  bars           : {bars_seen:,}")
-    print(f"  COMPUTE only   : {compute:.1f}s      <- the acceptance figure (< 60s)")
-    print(f"  wall incl. I/O : {wall:.1f}s")
-    print(f"  verdict        : {'PASS' if compute < 60 else '*** FAIL ***'}")
+    print(f"\n=== acceptance 5 — timing, all seven together ({RULE_SET_VERSION}) ===", flush=True)
+    print(f"  bars           : {bars_seen:,}", flush=True)
+    print(f"  COMPUTE only   : {compute:.1f}s      <- the acceptance figure (< 60s)", flush=True)
+    print(f"  wall incl. I/O : {wall:.1f}s", flush=True)
+    print(f"  verdict        : {'PASS' if compute < 60 else '*** FAIL ***'}", flush=True)
     return 0 if compute < 60 else 1
 
 
