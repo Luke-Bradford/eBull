@@ -441,6 +441,74 @@ strategy at a time. So it is specified once, here, and applies to all of them.
 
 ## 4. Strategy catalogue v1
 
+### 4.0 Validation universe — DECIDED 2026-08-05 (#2289)
+
+**Strategies are validated on `us_equity` only. Non-US instruments stay tradable
+but are not backtest-validated, and no strategy allocates to them on backtest
+evidence.** §0.1(c3) left this as "a scope decision for §4"; this is the call.
+
+Measured on the dev corpus 2026-08-05 (`instruments` ⋈ `exchanges.asset_class`;
+`asset_class` is on `exchanges`, not on `instruments`):
+
+| asset class | tradable | survivorship-correctable? |
+| --- | ---: | --- |
+| `us_equity` | 7,288 | **yes** — Form 25 register (#2282 2c) + a bought US corpus |
+| `eu_equity` | 2,805 | no |
+| `uk_equity` | 989 | no |
+| `asia_equity` | 894 | no |
+| `mena_equity` | 61 | no |
+| **non-US equity** | **4,749 (37.4%)** | **no source at any price we would pay** |
+
+Why this had to be decided *before* the catalogue rather than caveated after it:
+eToro serves all 12,684 shallowly, so a global backtest neither fails nor warns —
+it simply never sees the non-US losers. Validated on 57% of the universe, traded
+across 100% of it, with nothing in the output to say so.
+
+**Adopted: #2289 option (1) + option (3).**
+
+**(1) US-only validation universe.** Every §5 gate is run over `us_equity`. A
+strategy's live universe may be wider than its validated one, but the difference
+is carried in the signal ledger (#2288), and §7's allocation reads the validated
+universe, not the live one.
+
+**(3) Forward-record non-US membership from today**, so the constraint expires
+instead of being permanent. This is not free-standing: `sync_universe` currently
+*destroys* the transition it would need to record —
+`UPDATE instruments SET is_tradable = FALSE, last_seen_at = NOW()`
+([`app/services/universe.py`](../../../app/services/universe.py)) overwrites in
+place, so there is no dated membership row, and `last_seen_at` ends up holding
+the date we **noticed** the instrument was gone rather than the last date it was
+listed. That is Form 25 trap 5 in a different costume (`sec-edgar.md` §2.6): the
+detection date is never the date the consumer needs. Specified and ticketed as
+**#2290**; the shape to copy is `instrument_symbol_history` (`sql/103`), which
+already carries the exact temporal invariants — ordered ranges, single-current
+partial unique index, GIST no-overlap.
+
+Option (2) — global universe, survivor-biased, labelled — was rejected. It puts
+the entire weight on a label holding under pressure, at the one moment (an
+allocation decision) when pressure is highest.
+
+**Per-strategy consequence:**
+
+| strategy | validated universe | note |
+| --- | --- | --- |
+| S-1 time-series momentum | `us_equity` | per-instrument; may run live wider, marked unvalidated |
+| S-2 cross-sectional momentum | `us_equity` | resolves §9 Q1 — see below |
+| S-3 mean reversion in trend | `us_equity` | the #2260 shape; survivorship bias is **largest** here, so this one is gated on the corpus purchase as well as the universe |
+| S-4 volatility breakout | `us_equity` | |
+| S-5 / S-6 | `us_equity` | blocked on #2279 regardless |
+
+⚠ **S-2 is not descoped, and #2289's body was one step too pessimistic on it.**
+It argued S-2 needs index-membership history that even the paid US options do not
+sell. S-2 as written in this section does not rank within an index — it ranks
+within the *eligible listed* universe (≥273 bars, one asset class, one currency).
+What it needs is point-in-time **listing** membership, which the Form 25 register
+plus a delisted-inclusive US corpus does supply. Restricting its ranking universe
+to `us_equity` — which §9 Q1 already recommended on homogeneity grounds — is
+sufficient. If S-2 is ever re-specified against an index, that reopens.
+
+---
+
 Six strategies. Deliberately few, each with ≤3 free parameters, each with a
 stated economic rationale. **A strategy with no rationale is a data-mining
 result waiting to fail out-of-sample**, and phase 8 (discovery) is safe only
@@ -752,7 +820,7 @@ answer to a supplementary forward record.
 | **NEW — first** | **research corpus ingest**: deep public OHLCV + delisted names, into their own tables, separate from the eToro-sourced `price_daily` | §0 — 45 years vs 4, survivorship-inclusive. Unblocks §5 criteria 1, 3, 5 and 6, none of which were satisfiable before |
 | **NEW — with it** | **delisting register from SEC Form 25 / 25-NSE** via EDGAR full-index | §0 — authoritative dated delisting record, free, and we already have the SEC fetch discipline. Gives point-in-time membership back to the 1990s rather than from today |
 | **NEW — cheap** | **measured eToro cost model**: the ~0.15% half-spread from §0, per class and price band | §5 criterion 2 — replaces the static guess with a measurement, and re-links research prices to execution reality |
-| now (downgraded) | point-in-time universe membership recording | still worth having as our own forward record, but no longer the only path to survivorship-free backtests |
+| **now — reinstated (#2290)** | **append-only universe-membership recording** | §4.0 option (3). For the 4,749 non-US instruments this is the *only* path there will ever be, and today's `sync_universe` overwrites the transition instead of recording it. Not optional, and not "downgraded" any more |
 | now (downgraded) | spread / liquidity history | still the route to *as-of* costs; the §0 measurement covers v1 |
 | phase 2 | historical indicator recomputation | with criterion 4 enforced by test. ⚠ Reconsider scope: `vectorbt`/TA-Lib compute indicators over a series directly, so persisting a full indicator history may be unnecessary for backtesting and needed only for the live signals lens |
 | **phase 2b** (#2279) | price-structure primitives | S-5/S-6 need them; the registry's vocabulary must be settled before phase 3 fixes it |
@@ -763,24 +831,29 @@ answer to a supplementary forward record.
 | phase 7 | allocation page | §7 |
 | phase 8 | discovery | only with criterion 6 enforced |
 
-**Vendor question, if free sources prove insufficient.** Free tier tested and
-working today (public feed for prices, EDGAR for delistings). If coverage or
-terms become a problem, the measured options are EODHD at **£19.99/mo** for 30+
-years EOD across 60+ exchanges — but **delisted coverage sits on the £59.99
-Fundamentals tier or the £99.99 all-in-one** — or Sharadar's US bundle via
-Nasdaq Data Link, which is explicitly point-in-time and survivorship-free back
-to the 1990s. Worth revisiting only once the free path is shown to be the
-binding constraint; do not buy data to solve a problem we have not hit.
+⚠ **RETIRED 2026-08-05 (#2284).** This paragraph used to read *"free tier tested
+and working today … do not buy data to solve a problem we have not hit"*, and
+listed EODHD / Sharadar subscription tiers as the fallback. Both halves are
+falsified. The free path was searched exhaustively — ten sources, **every free
+one returns 0 of 382** on the delisted cohort — and the problem *has* been hit,
+structurally, not contingently. The two sources that pass are **one-off
+purchases** (~$299), not subscriptions. **Build free now, buy at the validation
+gate (#2260).** The measured landscape, the Yahoo-fingerprint technique and the
+382-name acceptance test live in
+`.claude/skills/data-sources/research-price-corpus.md` — read that, not a
+vendor-tier list in a spec that will go stale again.
 
 ---
 
 ## 9. Open questions for the operator
 
-1. **Universe breadth for S-2.** Cross-sectional momentum ranks instruments
-   against each other. Rank US equities only (7,098, homogeneous), or all
-   equities across regions (11,684, adds currency and session effects)?
-   Recommendation: **US-only for v1**, add regions once S-4's session semantics
-   (#2244) are settled.
+1. ✅ **RESOLVED 2026-08-05 by §4.0 / #2289 — US-only, and it now binds every
+   strategy, not just S-2.** The recommendation here was US-only on *homogeneity*
+   grounds (currency and session effects). #2284 supplied a harder reason:
+   `us_equity` is the only slice of the universe whose survivorship can be
+   corrected at all. "Add regions once #2244 is settled" is therefore no longer
+   the unblocking condition — the condition is a non-US delisting record, which
+   only #2290's forward recording will ever produce.
 2. **Rebalance cadence for S-2.** Monthly is standard and cheap. Weekly triples
    turnover and cost for marginal responsiveness. Recommendation: **monthly**.
 3. **Minimum history and price floor for eligibility.** ≥273 bars for S-2
