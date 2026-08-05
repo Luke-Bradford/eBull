@@ -37,7 +37,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from app.services.indicator_series import IndicatorSeries, MultiIndicatorSeries, Universe
 
@@ -74,33 +74,21 @@ NotEvaluableReason = Literal[
     "no_fill_bar",
 ]
 
-VERDICTS: frozenset[str] = frozenset({"fired", "not_fired", "not_evaluable"})
-SIGNAL_KINDS: frozenset[str] = frozenset({"entry", "exit"})
+# ⚠ DERIVED from the Literals above, never restated. Review flagged the
+# vocabulary being written out three times here — and sql/255's CHECK makes a
+# fourth — which is precisely the closed-vocabulary-in-N-places defect the
+# prevention log carries from #2218 (a member added in one place and missed in
+# the others writes rows nothing reads). `get_args` makes drift impossible in
+# Python; tests/test_strategy_registry.py pins the SQL CHECK against these.
+VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
+SIGNAL_KINDS: frozenset[str] = frozenset(get_args(SignalKind))
+NOT_EVALUABLE_REASONS: frozenset[str] = frozenset(get_args(NotEvaluableReason))
 
-NOT_EVALUABLE_REASONS: frozenset[str] = frozenset(
-    {
-        "missing_volume",
-        "missing_spread",
-        "insufficient_warmup",
-        "quarantined_bar",
-        "series_break",
-        "not_listed",
-        "ambiguous_intrabar",
-        "no_fill_bar",
-    }
-)
-
-PARENT_REASON_CODES: frozenset[str] = frozenset(
-    {
-        "missing_volume",
-        "missing_spread",
-        "insufficient_warmup",
-        "quarantined_bar",
-        "series_break",
-        "not_listed",
-        "ambiguous_intrabar",
-    }
-)
+#: The seven from parent criterion 8. `no_fill_bar` is OURS and is excluded
+#: deliberately — see NotEvaluableReason. Kept as an explicit subtraction so
+#: adding a parent code later cannot silently land on our side of the line.
+OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset({"no_fill_bar"})
+PARENT_REASON_CODES: frozenset[str] = NOT_EVALUABLE_REASONS - OUR_ADDITIONAL_REASON_CODES
 
 
 @dataclass(frozen=True)

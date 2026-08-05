@@ -17,7 +17,11 @@ from app.services.indicator_series import (
     sma_series,
 )
 from app.services.strategy_registry import (
+    NOT_EVALUABLE_REASONS,
+    OUR_ADDITIONAL_REASON_CODES,
     PARENT_REASON_CODES,
+    SIGNAL_KINDS,
+    VERDICTS,
     StrategyIdentity,
     StrategyInput,
     StrategySignal,
@@ -264,3 +268,37 @@ class TestClosedVocabulariesEnforcedAtRuntime:
     def test_unknown_kind_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown signal kind"):
             StrategySignal(verdict="fired", signal_index=0, kind="hedge")  # type: ignore[arg-type]
+
+
+class TestVocabularyIsDefinedOnce:
+    """[review NITPICK] The reason vocabulary was written out three times in
+    Python, and sql/255's CHECK is a fourth place. That is the
+    closed-vocabulary-in-N-places defect the prevention log carries from #2218:
+    a member added in one place and missed in the others writes rows nothing
+    reads. The Python sets are now derived via `get_args`; this pins the SQL.
+    """
+
+    @staticmethod
+    def _check_values(constraint: str, column: str) -> set[str]:
+        import re
+        from pathlib import Path
+
+        sql = (Path(__file__).resolve().parents[1] / "sql" / "255_strategy_signals.sql").read_text()
+        # The CHECK bodies are multi-line; grab from the column name to the
+        # closing paren of its IN (...) list.
+        match = re.search(rf"{column}[^;]*?IN \(([^)]*)\)", sql, re.DOTALL)
+        assert match is not None, f"no IN-list found for {column}"
+        return {value.strip().strip("'") for value in match.group(1).split(",") if value.strip()}
+
+    def test_sql_reason_codes_match_the_python_vocabulary(self) -> None:
+        assert self._check_values("strategy_signals", "not_evaluable_reason") == NOT_EVALUABLE_REASONS
+
+    def test_sql_verdicts_match(self) -> None:
+        assert self._check_values("strategy_signals", "verdict") == VERDICTS
+
+    def test_sql_signal_kinds_match(self) -> None:
+        assert self._check_values("strategy_signals", "signal_kind") == SIGNAL_KINDS
+
+    def test_parent_codes_are_the_derived_set_minus_ours(self) -> None:
+        assert PARENT_REASON_CODES == NOT_EVALUABLE_REASONS - OUR_ADDITIONAL_REASON_CODES
+        assert len(PARENT_REASON_CODES) == 7
