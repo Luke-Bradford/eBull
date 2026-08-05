@@ -443,7 +443,7 @@ strategy at a time. So it is specified once, here, and applies to all of them.
 
 ### 4.0 Validation universe — DECIDED 2026-08-05 (#2289)
 
-**Strategies are validated on US common stocks only. Non-US instruments stay tradable
+**Strategies are validated on US stocks (ex-ETF) only. Non-US instruments stay tradable
 but are not backtest-validated, and no strategy allocates to them on backtest
 evidence.** §0.1(c3) left this as "a scope decision for §4"; this is the call.
 
@@ -452,7 +452,7 @@ Measured on the dev corpus 2026-08-05 (`instruments` ⋈ `exchanges.asset_class`
 
 | asset class | tradable | survivorship-correctable? |
 | --- | ---: | --- |
-| `us_equity` | 7,288 | **yes** — Form 25 register (#2282 2c) + a bought US corpus |
+| `us_equity` | 7,288 | **partially** — Form 25 register (#2282 2c) + a bought US corpus, at 86.2% issuer resolution and subject to the two biases below. Not "yes" |
 | `eu_equity` | 2,805 | no |
 | `uk_equity` | 989 | no |
 | `asia_equity` | 894 | no |
@@ -465,14 +465,33 @@ are `Stocks` and 555 are `ETF`** (`etoro_instrument_types` 5 and 6; `asset_class
 lives on `exchanges`). Ranking an ETF against a common stock is precisely the
 homogeneity violation S-2's own ⚠ warns about, and a fund's price path is a
 basket's, not an issuer's. **The validated universe is `asset_class='us_equity'
-AND instrument_type_id = 5` — 6,733 instruments.** ADRs and US-listed foreign
-private issuers sit *inside* that 6,733 and are not separable today; they are the
-same population the Form 25 cohort under-resolves (below).
+AND instrument_type_id = 5` — 6,733 instruments.**
+
+⚠ **That cut is *necessary, not sufficient*, and this section deliberately says
+"US stocks ex-ETF" rather than "US common stocks".** eToro's `Stocks` type is a
+provider classification, not a security-master one: ADRs/ADSs, US-listed foreign
+private issuers, REITs, BDCs, preferreds, units, rights and SPAC remnants can all
+carry it. Calling the result "common stock" would be the wrong-population error
+this document's own §10 lesson is about. Two consequences:
+
+- The residue is **partly separable, contrary to a first draft of this
+  paragraph** — `ads_ratio` (`sql/240`) and the FPI/ADR valuation suppression
+  (`sql/237`) already identify part of the ADR population. Narrowing the cut
+  further is open work, not an impossibility; it is deferred because S-1..S-4 do
+  not rank across issuer domicile and S-2 is the only one that would notice.
+- **`instruments.instrument_type_id` carries no foreign key** — verified: the
+  only constraints on `instruments` are the PK, the `canonical_instrument_id`
+  FK and a self-reference check. The universe definition therefore rests on an
+  unconstrained integer maintained by the provider sync. It is clean today
+  (0 NULL across all 12,684 tradable), so this is a latent risk rather than a
+  live defect: **the universe query must assert the type-id lookup resolves,
+  not assume it.**
 
 Why this had to be decided *before* the catalogue rather than caveated after it:
 eToro serves all 12,684 shallowly, so a global backtest neither fails nor warns —
-it simply never sees the non-US losers. Validated on 57% of the universe, traded
-across 100% of it, with nothing in the output to say so.
+it simply never sees the non-US losers. Left undecided, that ends as validated on
+57% of the universe and allocated across 100% of it, with nothing in the output
+to say so — which is what the allocation invariant below exists to prevent.
 
 **Adopted: #2289 option (1) + option (3).**
 
@@ -504,15 +523,25 @@ bind execution, not just display:
 
 1. No backtest-derived allocation reaches an instrument outside the validated
    universe. Zero, not scaled-down.
-2. **Live paper results on unvalidated instruments do not become allocation
+2. **Order eligibility, not just allocation eligibility.** (1) constrains which
+   *pots* are funded; it does not constrain what a funded pot then buys. A
+   US-validated S-1 sleeve receiving capital and spending it on a non-US live
+   signal satisfies (1) and defeats it. So: **an order funded from a strategy's
+   allocation may only be placed on an instrument in that strategy's validated
+   universe.** This is a hard pre-trade rule and belongs in
+   [`execution_guard.py`](../../../app/services/execution_guard.py) — which is
+   deterministic, fail-closed and already writes one `decision_audit` row per
+   invocation — not in the signal ledger. **A ledger label is observability;
+   this needs enforcement.**
+3. **Live paper results on unvalidated instruments do not become allocation
    evidence either.** §6 moves capital toward what is working; without this
    clause a non-US sleeve accumulates live performance and re-enters allocation
    through the back door, having passed none of §5. If a non-US variant is ever
    to be allocated against, it registers as a **separate strategy identity** —
-   universe is part of the identity hash (criterion 11), so "S-1 on `us_equity`"
+   universe is part of the identity hash (criterion 11), so "S-1 on US stocks"
    and "S-1 on `eu_equity`" are two strategies and always were.
-3. Performance metrics are reported split by validated universe, never pooled.
-   A pooled number launders (2) back in as arithmetic.
+4. Performance metrics are reported split by validated universe, never pooled.
+   A pooled number launders (3) back in as arithmetic.
 
 **Two biases this decision does NOT fix.** Both are survivorship-shaped and
 neither was measured by #2284, so neither is covered by buying the corpus:
@@ -530,34 +559,45 @@ neither was measured by #2284, so neither is covered by buying the corpus:
   86.2%, not 100%, and the residue is **not** random with respect to fund-shaped
   instruments.
 
-**Per-strategy consequence.** Survivorship acts through two distinct channels
-and collapsing them into one column hides which fix applies:
+**Per-strategy consequence.** An earlier draft of this table graded
+"selection" against "price-path" and got it wrong, in a way worth recording
+because it is the intuitive error: it labelled every non-ranking strategy
+`selection = low`. That is false. A delisted name absent from the corpus never
+fires its signals at all, so **the trade set is truncated for every strategy**,
+not only for the one that ranks. The distinction that actually earns its place
+is **what fixes it**:
 
-- **selection** — the missing names change *which* instruments are picked;
-  fixed by a point-in-time universe (criterion 1).
-- **price-path** — the missing names change the *distribution of outcomes* for
-  instruments already picked; fixed only by a corpus that retains the losers'
-  bars to the end.
+- **omission** — the missing names' own trades never appear. Affects **every**
+  strategy. Fixed only by a corpus that retains the losers' bars to the end,
+  i.e. by the purchase.
+- **rank contamination** — the missing names change which *surviving* names get
+  picked, because the rule is relative. Affects **S-2 alone**. Needs
+  point-in-time membership at each rebalance (criterion 1) *on top of* the
+  corpus.
 
-| strategy | validated universe | selection | price-path | note |
+| strategy | validated universe | omission | rank contamination | note |
 | --- | --- | --- | --- | --- |
-| S-1 time-series momentum | US stocks | low | **high** | per-instrument, so nothing is ranked away — but averaging outcomes over survivors only is still biased |
-| S-2 cross-sectional momentum | US stocks | **highest** | **high** | ranks are *directly* altered by missing bankrupt losers; the skill calls this shape fatal |
-| S-3 mean reversion in trend | US stocks | low | **highest** | the #2260 shape — oversold names that kept going are exactly what is missing. Gated on the corpus purchase, not just the universe |
-| S-4 volatility breakout | US stocks | low | **high** | not harmless: distress *is* volatility expansion, so the missing names are over-represented in the setup |
-| S-5 / S-6 | US stocks | low | **high** | failed names generate many breaks and retests near distress. Blocked on #2279, but that is not the only gate |
+| S-1 time-series momentum | US stocks ex-ETF | **high** | none | trades on names that later died are simply absent, so the outcome distribution is survivor-truncated |
+| S-2 cross-sectional momentum | US stocks ex-ETF | **high** | **yes — only strategy affected** | a missing bankrupt loser promotes a survivor into the top decile that never belonged there. The skill calls this shape fatal |
+| S-3 mean reversion in trend | US stocks ex-ETF | **highest** | none | the #2260 shape. "Oversold and kept going" is the *definition* of the missing population, so the absent signals are disproportionately the losing ones |
+| S-4 volatility breakout | US stocks ex-ETF | **high** | none | distress *is* volatility expansion, so delisted names are over-represented in the setup, not incidental to it |
+| S-5 / S-6 | US stocks ex-ETF | **high** | none | failed names generate many breaks and retests near distress. Blocked on #2279, but that is not the only gate |
 
-⚠ Nothing in this table is "safe". The column that matters for sequencing is
-**selection**, because only S-2 is blocked on it; every strategy is blocked on
-price-path, i.e. on the corpus purchase, before its numbers may be allocated
-against.
+⚠ **Nothing in this table is "safe", and omission is not a lesser problem than
+contamination.** The only sequencing consequence is that S-2 additionally needs
+criterion 1; every strategy is blocked on the corpus purchase before its numbers
+may be allocated against.
 
 ⚠ **S-2 is not descoped, and #2289's body was one step too pessimistic on it.**
 It argued S-2 needs index-membership history that even the paid US options do not
 sell. S-2 as written in this section does not rank within an index — it ranks
 within the *eligible listed* universe (≥273 bars, one asset class, one currency).
-What it needs is point-in-time **listing** membership, which the Form 25 register
-plus a delisted-inclusive US corpus does supply. Restricting its ranking universe
+What it needs is point-in-time **listing** membership.
+⚠ Form 25 supplies only the *end* of a listing. Criterion 1 needs both ends, and
+the start has no equivalent register — it comes from the corpus's first bar, which
+is a proxy and is exactly what the ticker-reuse guard (#2282 scope item 7) exists
+to police. Listing membership is therefore *reconstructable* for US stocks, not
+simply *available*. Restricting its ranking universe
 to US stocks — which §9 Q1 already recommended on homogeneity grounds — is
 sufficient. If S-2 is ever re-specified against an index, that reopens.
 
@@ -592,11 +632,12 @@ Params: 3 (lookback, skip, decile).
 Rationale: the most replicated equity anomaly; the skip window prevents
 short-term reversal contaminating the momentum signal.
 Eligibility, evaluated **as-of each rebalance date** (§3.5 rule 5): ≥273 bars
-of history at that date. Roughly 7,700 instruments qualify today, but the
-as-of count in 2022 was far smaller — the backtest must use the historical
-count, not today's.
+of history at that date. ⚠ "Roughly 7,700 instruments qualify today" was the *global* count and is
+superseded by §4.0: S-2 ranks within the 6,733 US stocks ex-ETF, and the as-of
+count in 2022 was smaller again — the backtest must use the historical count,
+not today's and not the global one.
 ⚠ Rank within one asset class and one currency, or a currency move ranks
-against an equity move. See §9 Q1.
+against an equity move. Settled by §4.0 (§9 Q1 is resolved): US stocks, USD.
 ⚠ Returns are **price returns, not total returns** — eToro candles carry no
 dividend adjustment (`price_adjustments` is empty; see §5 criterion 10). This
 systematically understates high-yield names over a 12-month lookback.
@@ -687,9 +728,11 @@ Issue #2260 exists because a plausible number met none of these and was believed
    entry date. Results that cannot satisfy it carry a `survivorship_unadjusted`
    flag in the data model, not just in prose.
    ⚠ **Scoped by §4.0 — "pre-2026-06 this is impossible (§2.1)" is now only half
-   true.** For **US stocks** it is satisfiable back to the 1990s: the Form 25
-   register supplies dated delistings (at 86.2% issuer resolution) and a bought
-   delisted-inclusive corpus supplies the bars. For the **4,749 non-US**
+   true.** For the **resolved subset of US stocks** it is reconstructable back to
+   the 1990s: the Form 25 register supplies dated delistings and a bought
+   delisted-inclusive corpus supplies the bars. "Resolved subset" is load-bearing
+   — 86.2% issuer resolution, CEF/FPI-shaped residue, plus eToro-listing bias
+   (§4.0). It is not 100% and must not be reported as though it were. For the **4,749 non-US**
    instruments it remains impossible for all history predating #2290's forward
    record, and no purchase changes that. So the flag is not a legacy marker to
    be retired — it is the permanent state of every non-US result.
@@ -919,8 +962,8 @@ survivorship claim is not evidence.
 1. ✅ **RESOLVED 2026-08-05 by §4.0 / #2289 — US-only, and it now binds every
    strategy, not just S-2.** The recommendation here was US-only on *homogeneity*
    grounds (currency and session effects). #2284 supplied a harder reason:
-   US stocks are the only slice of the universe whose survivorship can be
-   corrected at all. "Add regions once #2244 is settled" is therefore no longer
+   US stocks are the only slice of the universe whose survivorship is
+   economically correctable at all — and then only partially (§4.0). "Add regions once #2244 is settled" is therefore no longer
    the unblocking condition — the condition is a non-US delisting record, which
    only #2290's forward recording will ever produce.
    ⚠ And it produces one **only for periods after recording starts**. Forward
