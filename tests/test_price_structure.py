@@ -627,3 +627,38 @@ def test_bars_evaluated_is_comparable_across_both_branches() -> None:
 
     normal = detect_swings(_bars([1.0] * 11), 2, universe="survivor_only")
     assert normal.bars_evaluated == 11 - 2 * 2
+
+
+def test_a_break_landing_on_the_timeout_bar_starts_a_fresh_sequence() -> None:
+    """The expired sequence must not swallow the bar that outlives it.
+
+    Previously the timeout branch reset to idle and `continue`d, dropping a
+    same-direction break on that exact bar — while an OPPOSITE-direction break
+    on the same bar was correctly kept. Two rules for one event, decided by
+    branch order.
+    """
+    bars = _flat_bars(80)
+    _replace(bars, 20, 20.0, 19.0, 20.0)  # break up
+    # 21-25 sit entirely above the band, so nothing retests and the window runs
+    # out. (The flat baseline closes INSIDE the band, so leaving them alone
+    # would hand the first break a retest on the very next bar.)
+    for i in range(21, 26):
+        _replace(bars, i, 25.0, 24.0, 24.5)
+    _replace(bars, 26, 30.0, 29.0, 30.0)  # break landing one bar past the window
+    _replace(bars, 27, 25.0, 24.0, 24.5)  # still clear of the band
+    _replace(bars, 28, 10.2, 9.8, 10.0)  # retest of the SECOND break
+    _replace(bars, 30, 31.0, 30.0, 31.0)  # confirm
+
+    result = find_break_and_retest(_level(), bars, universe="survivor_only", max_retest_bars=5)
+    assert [(p.break_index, p.retest_index, p.confirm_index) for p in result.patterns] == [(26, 28, 30)]
+
+
+def test_a_confirmation_after_the_retest_window_does_not_emit() -> None:
+    """The window is enforced by expiry, so a late close cannot resurrect it."""
+    bars = _flat_bars(80)
+    _replace(bars, 20, 20.0, 19.0, 20.0)  # break up
+    _replace(bars, 21, 10.2, 9.8, 10.0)  # retest
+    _replace(bars, 40, 21.0, 20.0, 21.0)  # confirm, far outside the window
+
+    result = find_break_and_retest(_level(), bars, universe="survivor_only", max_retest_bars=3)
+    assert result.patterns == ()

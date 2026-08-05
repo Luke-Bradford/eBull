@@ -657,6 +657,18 @@ def find_break_and_retest(
             continue
         seen_evaluable = True
 
+        # ⚠ Expire a stale sequence BEFORE interpreting this bar, not after.
+        # The timeout branches used to reset and `continue`, which swallowed a
+        # break landing ON the timeout bar — while the opposite-verdict branch
+        # below correctly kept one. Two rules for the same event, differing only
+        # by which branch happened to see it first. Expiring up front means one
+        # rule: a bar is interpreted against the state that is live when it
+        # arrives, and an expired sequence is simply not live.
+        if state == "broken" and i - break_index > max_retest_bars:
+            state = "idle"
+        elif state == "retested" and i - retest_index > max_retest_bars:
+            state = "idle"
+
         if state == "idle":
             if verdict in ("break_up", "break_down"):
                 state = "broken"
@@ -677,14 +689,17 @@ def find_break_and_retest(
             continue
 
         if state == "broken":
-            if i - break_index > max_retest_bars:
-                state = "idle"
-            elif verdict == "touch":
+            # A further break in the SAME direction while already broken is not
+            # a new occurrence — the level was broken at the first one, and
+            # re-anchoring here would let price walking away from the level
+            # extend the retest window indefinitely.
+            if verdict == "touch":
                 state = "retested"
                 retest_index = i
             continue
 
-        # state == "retested"
+        # state == "retested" — and still inside the window, since an expired
+        # one was reset above. So a same-direction close IS the confirmation.
         if verdict == same:
             patterns.append(
                 BreakRetest(
@@ -694,8 +709,6 @@ def find_break_and_retest(
                     confirm_index=i,
                 )
             )
-            state = "idle"
-        elif i - retest_index > max_retest_bars:
             state = "idle"
 
     if not seen_evaluable:
