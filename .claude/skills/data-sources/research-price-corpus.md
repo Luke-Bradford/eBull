@@ -20,6 +20,16 @@ source has it.
 
 ## Measured landscape (2026-08-05, #2284)
 
+⚠ **The cohort was rebuilt properly in #2282 stage 2c (2026-08-05) and is now committed at
+`tests/fixtures/form25_2023_cohort.csv` — 259 issuers, not 382.** The 382 below was
+measured before a **security-class** filter existed, so its denominator mixed warrants
+(155), funds (111), units (62), preferred (56), notes (10) and rights (3) in with the
+common stock. Those are not companies, and four of those classes have no eToro instrument
+type at all, so they can never contribute survivorship bias to our backtests. See
+`sec-edgar.md` §2.6 trap 6.
+**The vendor hit RATES below are still directionally valid** — every free source returned
+0 — but re-run any new vendor against the committed 259-name file, not against 382.
+
 Each row was tested against the same cohort: **all 382 US common-equity delistings of 2023**,
 built from EDGAR Form 25/25-NSE per `sec-edgar.md` §2.6. "Serves" means the source returns a
 series that **stops at the delisting** rather than being absent or silently continuing on a
@@ -84,10 +94,18 @@ the 382 names ask three things, because "the symbol resolves" is not one of them
 A source that keeps `X` and `X-DELISTED` as separate series (FirstRateData) can answer (3).
 One keyed on the live ticker (Yahoo, LSE, every free archive) structurally cannot.
 
-**Known cohort bias, state it when using it:** ticker resolution succeeds for 382 of 443
-issuers (86.2%); the 61 failures are 38% closed-end funds (they file N-CSR, not cover-page
-XBRL) plus foreign private issuers. The provision mix is **unbiased on the
-failure-vs-acquisition axis**, which is the axis survivorship turns on.
+**Known cohort bias, state it when using it.** On the rebuilt common-equity cohort
+(#2282 2c) ticker resolution succeeds for **259 of 308 issuers (84.1%)**; the failures are
+closed-end funds (they file N-CSR, not cover-page XBRL) plus foreign private issuers.
+
+⚠ **Do NOT repeat the earlier "unbiased on the failure-vs-acquisition axis" claim.**
+Measured on the common-equity cohort, the unresolved side is **71%** (a)(3) acquisitions
+(n=49) against **65%** on the resolved side (n=259) — a +6.6-point skew toward losing
+acquisitions, z = 0.92. Neither established as biased nor demonstrated to be unbiased; the
+cohort cannot rule it out. Recompute with
+`build_2282_form25_register --census` rather than quoting these figures. The earlier claim was computed on the
+pre-security-filter denominator. This is the axis survivorship turns on, so state the
+uncertainty rather than the reassurance.
 
 ## What free data can and cannot support
 
