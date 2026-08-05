@@ -68,7 +68,10 @@ known-first-party = ["app"]
 
 [tool.pyright]
 pythonVersion = "3.14"
-strict = false
+# NOTE: pyright's `strict` key takes an ARRAY OF PATHS, not a boolean. `strict = false`
+# made every run print `Config "strict" entry must contain an array` — permanent noise on a
+# gate, which is how a real message gets skimmed past. Omitting it is the correct spelling
+# of "no strict-mode paths" and is what the boolean was trying to say.
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
