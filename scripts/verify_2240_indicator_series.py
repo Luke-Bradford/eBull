@@ -54,7 +54,23 @@ from app.services.indicator_series import (
 
 logger = logging.getLogger("verify_2240")
 
-TOL = 1e-9
+# ⚠ RELATIVE, not absolute — and this was a real defect in the first draft.
+#
+# An absolute 1e-9 is magnitude-blind, and this corpus is not: `BINI` carries a
+# close of 3.0e17 and `TOPS` 1.0e15. One ULP of float64 at 1e9 is already
+# 1.2e-07, so at those magnitudes NO implementation can satisfy an absolute
+# 1e-9 — including `technical_analysis` itself. A tolerance that the reference
+# cannot meet either tests nothing or fails everything.
+#
+# Measured against an exact `math.fsum` reference, the streaming forms agree to
+# ~1-2 ULP (relative ~2e-16) at every magnitude tried. `1e-12` relative is
+# therefore four orders of magnitude of headroom over the observed error while
+# still being far tighter than any real defect would produce — the reverted
+# one-pass Bollinger variance sat at ~3e-08 relative.
+REL_TOL = 1e-12
+#: Absolute floor, so near-zero values (penny stocks, and the corpus has
+#: closes at 1e-4) do not fail on a relative comparison against ~0.
+ABS_FLOOR = 1e-12
 #: The corpus is survivor-only — #2284 measured 0 of 259 known delisted names
 #: served. Hard-coded here because this harness only ever reads that corpus;
 #: a caller with a different one must state its own.
@@ -81,7 +97,10 @@ def _compare(series: BarSeries, rows: list[ta.OHLCVRow], closes: list[Decimal]) 
         out.setdefault(name, 0)
         if batch is None and streamed is None:
             return
-        if batch is None or streamed is None or abs(streamed - batch) > TOL:
+        if batch is None or streamed is None:
+            out[name] += 1
+            return
+        if abs(streamed - batch) > max(ABS_FLOOR, REL_TOL * abs(batch)):
             out[name] += 1
 
     chk("sma_20", sma_series(series, universe=UNIVERSE, period=20).values[-1], ta.sma(closes, 20))

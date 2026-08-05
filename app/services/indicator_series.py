@@ -140,8 +140,6 @@ class BarSeries:
             object.__setattr__(self, "_float_cache", cache)
         cached = cache.get(field)
         if cached is None:
-            value = self.rows[0].get(field) if self.rows else None
-            del value
             cached = [None if (v := row.get(field)) is None else float(v) for row in self.rows]
             cache[field] = cached
         return cached
@@ -237,10 +235,6 @@ def _check_period(period: int, name: str = "period") -> None:
         raise ValueError(f"{name} must be positive, got {period}")
 
 
-def _usable_float(value: Decimal | None) -> float | None:
-    return None if value is None else float(value)
-
-
 # ---------------------------------------------------------------------------
 # The indicators
 # ---------------------------------------------------------------------------
@@ -263,6 +257,25 @@ def sma_series(series: BarSeries, *, universe: Universe, period: int) -> Indicat
     unevaluable: list[int] = []
     # Running sum — O(1) per bar. `nulls` counts NULLs currently inside the
     # window so the guard stays exact without rescanning it.
+    # ⚠ NO RE-SEEDING, and the reason is measured rather than assumed.
+    #
+    # A running sum looks like the same class of numerical shortcut as the
+    # reverted one-pass Bollinger variance, so it was checked the same way.
+    # Against an exact `math.fsum` reference over 20,000 bars:
+    #
+    #     base 1e2   abs 1.4e-14   rel 1.4e-16
+    #     base 1e5   abs 4.4e-11   rel 4.4e-16
+    #     base 1e9   abs 2.4e-07   rel 2.4e-16
+    #
+    # The RELATIVE error is ~1-2 ULP at every magnitude — this accumulator is
+    # as accurate as float64 permits, and the absolute figure only tracks the
+    # magnitude, as it must. An earlier draft added periodic re-seeding on the
+    # strength of that 2.4e-07 and it was cargo cult: `ta.sma` misses a 1e-9
+    # ABSOLUTE tolerance at 1e9 too, because one ULP there is 1.2e-07. The
+    # tolerance was the defect, not the accumulator (see the harness).
+    #
+    # Bollinger's VARIANCE is a genuinely different case and does not get a
+    # running form; see the comment there.
     running = 0.0
     nulls = 0
     for i, value in enumerate(closes):

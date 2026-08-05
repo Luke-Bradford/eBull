@@ -496,3 +496,46 @@ class TestBollingerNumericalStability:
         # times the tolerance.
         assert streamed["upper"][-1] == pytest.approx(batch[0], abs=1e-9)
         assert streamed["lower"][-1] == pytest.approx(batch[1], abs=1e-9)
+
+
+class TestRunningSumPrecision:
+    """[review WARNING] A running sum is the same class of shortcut as the
+    reverted one-pass Bollinger variance, and it shipped with no proof.
+
+    Checked the same way, against an exact `math.fsum` reference over 20,000
+    bars:
+
+        base 1e2   abs 1.4e-14   rel 1.4e-16
+        base 1e5   abs 4.4e-11   rel 4.4e-16
+        base 1e9   abs 2.4e-07   rel 2.4e-16
+
+    ⚠ The verdict is the opposite of the Bollinger one. Relative error is ~1-2
+    ULP at every magnitude, so the accumulator is as accurate as float64
+    allows. An earlier draft read the 2.4e-07 as drift and added periodic
+    re-seeding; that was a misattribution — one ULP at 1e9 IS 1.2e-07, and
+    `ta.sma` misses an absolute 1e-9 there too. The tolerance was the defect,
+    and the harness now compares relatively.
+    """
+
+    @pytest.mark.parametrize("base", [1e2, 1e5, 1e9])
+    def test_relative_agreement_holds_at_every_magnitude(self, base: float) -> None:
+        import math
+
+        amp, n = base * 1e-9, 3_000
+        closes = [base + (amp if i % 2 else -amp) + amp * 0.3 * (i % 7) for i in range(n)]
+        streamed = sma_series(_bars(closes), universe=U, period=20).values
+        for i in range(19, n, 91):
+            exact = math.fsum(closes[i - 19 : i + 1]) / 20
+            assert streamed[i] is not None
+            assert abs(streamed[i] - exact) <= 1e-12 * abs(exact), f"index {i}"  # type: ignore[operator]
+
+    def test_bollinger_mean_too(self) -> None:
+        import math
+
+        base, n = 1e9, 2_000
+        closes = [base + (1.0 if i % 2 else -1.0) + 0.3 * (i % 7) for i in range(n)]
+        middle = bollinger_series(_bars(closes), universe=U, period=20).components["middle"]
+        for i in range(19, n, 89):
+            exact = math.fsum(closes[i - 19 : i + 1]) / 20
+            assert middle[i] is not None
+            assert abs(middle[i] - exact) <= 1e-12 * abs(exact), f"index {i}"  # type: ignore[operator]
