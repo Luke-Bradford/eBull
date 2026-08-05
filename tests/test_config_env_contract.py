@@ -61,8 +61,15 @@ def _env_example_keys() -> set[str]:
     A commented `# FOO=` line still documents the variable — it tells the
     operator it exists and is optional — so it counts. What does NOT count is
     prose merely mentioning the name, which is why this matches an assignment.
+
+    ⚠ UPPERCASE-only, deliberately. Every env var here is UPPER_SNAKE, and the
+    looser `[A-Za-z_]` form would match ordinary prose inside a comment (`# set
+    foo=bar to ...`). That failure is PERMISSIVE — a false match makes a field
+    look documented when it is not — so the check would fail in the direction
+    that reports success. Measured on the current file the two forms return an
+    identical 38 keys, so this narrows the future, not the present.
     """
-    pattern = re.compile(r"^\s*#?\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", re.MULTILINE)
+    pattern = re.compile(r"^\s*(?:#\s*)?([A-Z][A-Z0-9_]*)\s*=", re.MULTILINE)
     return set(pattern.findall(ENV_EXAMPLE.read_text()))
 
 
