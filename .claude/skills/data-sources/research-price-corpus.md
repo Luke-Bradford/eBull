@@ -126,32 +126,67 @@ Two guards are mandatory whenever free data is used, because it fails silently:
 - **Label it.** A metric computed on a survivor-only universe is marked as such in the
   signal ledger, not in a comment.
 - **Guard ticker reuse.** Require the series' first bar to precede the instrument's known
-  listing date, and truncate at any Form 25 suspension date.
+  listing date. ⚠ The second half as originally written — "truncate at any Form 25
+  suspension date" — was tried in #2297 and does not work; see the block immediately
+  below before implementing anything against it.
 
-⚠⚠ **The second guard is NOT implemented — do not assume it ran.** Measured
-2026-08-05 while scoping #2279:
+⚠⚠ **The second guard is now WIRED (#2297) and the wiring FALSIFIED it. Truncating at the
+Form 25 suspension date cannot be done correctly, and the reason is structural, not a
+coverage gap that more data fixes.** Run
+`uv run python -m scripts.ingest_2282_research_archive --link-delistings` for live figures.
 
+The asymmetry, measured on the full 2023 register — this is the whole finding:
+
+```sql
+select coalesce(rule_provision,'(c)/absent') as provision,
+       count(*), count(suspension_date)
+  from sec_form25_common_equity_delistings group by 1;
+--   (a)(3)  212  62
+--   (b)     105   0
 ```
-research_price_series                 7,693 series
-  ... with delisting_date populated       0
-sec_form25_common_equity_delistings     317 rows, 260 with a resolved_symbol
-cohort symbols also present in the corpus 16
-```
 
-The schema (sql/249 `delisting_date` + `delisting_source`, CHECK-paired, with a column
-comment insisting on the SUSPENSION date) and the register (#2282 2c) both exist. **Nothing
-joins them** — `grep -rn "delisting_date" app/ scripts/` returns one hit, a docstring. So 16
-corpus series are 2023-delisted names whose bars run straight through the delisting: the
-`SI`/Silvergate shape sql/249 names as its target failure mode.
+- **`(b)` is the provision where truncation is unambiguously right** — exchange-initiated
+  delisting for non-compliance, the ticker died. It states a suspension date on **0 of 105**
+  cohort rows, because that sentence lives in the EX-99 rule-provision exhibit and exchanges
+  attach a stub (sec-edgar.md §2.6 trap 5).
+- **Every date the cohort supplies is `(a)(3)`** — merger, holdco reorganisation,
+  redomiciliation, where the same economic entity commonly keeps trading under the same
+  ticker and a continuous series is CORRECT.
 
-Filed as **#2297**. Until it lands, every figure computed on this corpus is computed over
-series that may be welded, and that has to be stated rather than assumed away. This is the
-class the instruction set warns about — the guard *reads* as present because the column,
-the comment and the register all exist, and it is enforced nowhere.
+So the truncation set is empty by construction, and a provision-blind truncation fires only
+where it is wrong. Concretely, the two corpus series that carry a date are `LIN` (Linde plc,
+8,572 bars, 1992→2026) and `AMRX` (Amneal, 2,051 bars) — **both `is_tradable = true` in our
+universe today**. Truncating either deletes ~3 years of correct history from a live name.
+Linde's own EX-99 (accession `0000876661-23-000160`, fetched direct from EDGAR) states all
+three dates: removal-effective March 13, operation-of-law March 01, *"suspended from trading
+on March 02, 2023"* — and LIN trades now.
+
+**What #2297 therefore shipped:** the date and its `delisting_provision` are STORED
+(sql/253, CHECK-tied so a reader of the date cannot lose the provision), and nothing
+truncates — at ingest or at read time. `link_form25_delistings` in
+`app/services/research_corpus_ingest.py`.
+
+**What is actually detectable, and it is the OTHER half of the guard.** "First bar precedes
+the known listing date" was thought unimplementable because the schema holds no listing date.
+A proxy needs neither a listing date nor a threshold: a series whose first bar postdates a
+Form 25 on the same symbol cannot be the series of the security that filing removed. Four
+today — `ALPS` (filed 2023-07-27, first bar 2025-10-31), `ATCX` (2023-04-19 → 2026-01-09),
+`USX` (2023-07-03 → 2026-06-03), `DBD` (2023-06-20 → 2023-08-14). ⚠ It is reported, never
+acted on: `DBD` is Diebold Nixdorf relisting after Chapter 11, the SAME company. The honest
+output is "identity unverified" — which is the FIRST guard (label it), not the second.
+
+⚠ **No corpus series is currently known to be welded.** `REED` and `SRAX` span their `(b)`
+filings with no gap at all (last bar the day before, first bar the day of) — both moved to
+OTC, which is continuation of the same company, not contamination. `terminating` is **0**:
+nothing in the archive ends at a delisting, which is the same structural fact as the 0/259
+acceptance result below.
+
+⚠ **The overlap is 15 series, not 16.** The earlier figure counted JOIN ROWS: `AESI` has two
+cohort filings (a 25-NSE and its 25-NSE/A, same day), so a naive join double-counts it —
+§2.6 trap 1's shape one level up. Aggregate the cohort per symbol before joining.
 
 ⚠ Note also that only **62 of 317** cohort rows carry a `suspension_date` at all (395 of
-1,282 across the whole register), because the date lives in the EX-99 rule-provision exhibit
-and most filings attach a stub. The other 255 must stay NULL; back-filling with `filed_date`
+1,282 across the whole register). The other 255 must stay NULL; back-filling with `filed_date`
 is a different event and mistruncates. Reproduce with
 `select count(*), count(suspension_date) from sec_form25_register`.
 

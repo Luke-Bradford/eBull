@@ -448,6 +448,27 @@ suspension date?") is only checkable on those 38. For the rest, `filed_date` is 
 date available and it is a **different event** — store NULL rather than substituting, which
 is why `research_price_series.delisting_date` is CHECK-paired to `delisting_source`.
 
+⚠⚠ **The scarcity is not uniform across provisions, and the direction is the worst
+possible one.** Measured 2026-08-05 (#2297) on the common-equity cohort:
+
+```sql
+select coalesce(rule_provision,'(c)/absent'), count(*), count(suspension_date)
+  from sec_form25_common_equity_delistings group by 1;
+--   (a)(3)  212  62
+--   (b)     105   0
+```
+
+**`(b)` — the exchange-initiated failure, the one provision where truncating a price series
+is unambiguously right — states a suspension date on ZERO of 105.** Every date the cohort
+supplies is on `(a)(3)`, where the same ticker very often keeps trading (holdco reorg,
+redomiciliation) and truncation is likely WRONG. Linde is the worked case: its `(a)(3)`
+EX-99 states all three dates cleanly, and `LIN` is `is_tradable = true` today.
+
+So "truncate at the suspension date" is not a guard that needs better coverage — it is a
+rule that can only ever fire where it does the damage. Store the date WITH its provision
+(sql/253 `delisting_provision`) and let the reader stratify; do not truncate on the date
+alone. Full write-up in `research-price-corpus.md`.
+
 **Coverage limit, stated once:** Form 25 is **US-only**. There is no free authoritative
 equivalent for EU / UK / Asia / MENA listings.
 
