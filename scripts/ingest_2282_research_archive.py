@@ -6,6 +6,7 @@ Run from repo root:
     uv run python -m scripts.ingest_2282_research_archive --load
     uv run python -m scripts.ingest_2282_research_archive --quarantine
     uv run python -m scripts.ingest_2282_research_archive --verify
+    uv run python -m scripts.ingest_2282_research_archive --link-delistings
 
 ⚠ Long-running (~20-40 min end to end on 25.8M rows). Launch it with the
 tool's own background mode — a ``nohup … &`` started inside an ordinary tool
@@ -120,6 +121,34 @@ def quarantine(conn: psycopg.Connection[tuple], as_of: date) -> int:
     print(f"  elapsed               : {time.time() - started:.0f}s")
     for row in conn.execute("SELECT * FROM research_quarantine_census").fetchall():
         print(f"  census view: {row}")
+    return 0
+
+
+def link_delistings(conn: psycopg.Connection[tuple]) -> int:
+    """#2297 — wire the Form 25 register to the corpus. Writes dates, truncates nothing.
+
+    Prints the NOT-covered side first, deliberately. A linkage that reports
+    only what it matched reads as a completed guard; this one's headline
+    finding is that the truncation set is empty by construction.
+    """
+    census = ingest.link_form25_delistings(conn)
+    print("\n=== #2297 Form 25 delisting linkage ===")
+    print(f"  overlapping series      : {census.overlap_series:,}")
+    print(f"  suspension dates written: {census.suspension_dates_written:,}")
+    print(f"  no suspension date (NULL, not back-filled): {census.no_suspension_date:,}")
+    print(f"  conflicting symbols     : {census.conflicting or 'none'}")
+    print("  overlap by rule provision:")
+    for provision, n in sorted(census.by_provision.items()):
+        print(f"    {provision:>14} : {n:,}")
+    print(
+        f"  identity unverified (series starts after a Form 25 on the same symbol): {len(census.identity_unverified):,}"
+    )
+    for symbol, filed, first_bar in census.identity_unverified:
+        print(f"    {symbol:<8} filed {filed}  first bar {first_bar}")
+    print(f"  terminating at/near the filing: {len(census.terminating):,}")
+    for symbol, filed, last_bar in census.terminating:
+        print(f"    {symbol:<8} filed {filed}  last bar {last_bar}")
+    print(f"\n  coverage: {census.coverage_note}")
     return 0
 
 
@@ -263,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--load", action="store_true")
     parser.add_argument("--quarantine", action="store_true")
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--link-delistings", action="store_true")
     parser.add_argument("--cache", type=Path, default=_DEFAULT_CACHE)
     parser.add_argument(
         "--as-of",
@@ -274,13 +304,13 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    if not any((args.download, args.load, args.quarantine, args.verify)):
-        parser.error("pick at least one of --download / --load / --quarantine / --verify")
+    if not any((args.download, args.load, args.quarantine, args.verify, args.link_delistings)):
+        parser.error("pick at least one of --download / --load / --quarantine / --verify / --link-delistings")
 
     if args.download:
         download(args.cache)
 
-    if not any((args.load, args.quarantine, args.verify)):
+    if not any((args.load, args.quarantine, args.verify, args.link_delistings)):
         return 0
 
     with psycopg.connect(settings.database_url) as conn:
@@ -289,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.quarantine and (rc := quarantine(conn, args.as_of)):
             return rc
         if args.verify and (rc := verify(conn)):
+            return rc
+        if args.link_delistings and (rc := link_delistings(conn)):
             return rc
     return 0
 
