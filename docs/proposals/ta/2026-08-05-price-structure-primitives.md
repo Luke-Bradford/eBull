@@ -498,10 +498,20 @@ left a `return_usable = false` close available to VWAP and the regime.
 
 Fail-closed in the direction that matters: we never assert a swing we cannot
 verify, and a spurious wick to `0.010` cannot suppress a real swing low by
-looking like a lower low. **[C1]** Blast radius is **reported exactly by the
-acceptance run (§8.3)**, not bounded by an arithmetic that double-counts
-overlapping windows — the input is 1,315 range-unusable bars across 669 series
-and 242 return-unusable across 51.
+looking like a lower low.
+
+**[C1] Blast radius, measured on the full corpus rather than bounded.** An
+earlier draft gave `1,315 × (2N+1)` as a bound; Codex flagged that it
+double-counts overlapping windows, and it does — it overstates by 4–10×:
+
+| rung | N | pivots `not_evaluable` | % of bars |
+| --- | ---: | ---: | ---: |
+| short | 5 | 3,915 | 0.015% |
+| medium | 21 | 7,814 | 0.030% |
+| long | 63 | 16,110 | 0.062% |
+
+Input: 1,315 range-unusable bars across 669 series, 242 return-unusable across
+51. Reproduce with `uv run --with scipy python scripts/verify_2279_price_structure.py`.
 
 **The reader.** `usable_bar_filter_sql` in `price_quarantine_store.py` gates on
 `return_usable` only and is keyed on `instrument_id`, so the research corpus
@@ -528,10 +538,35 @@ precedent — sql/249 makes exactly this argument when it declines to carry
 indicator columns for the research corpus, and phase 3's signal ledger is where
 structure-derived signals acquire a reader and the mandatory survivor-only label.
 
-**[C1] The claim is scoped to what was measured.** §1.4 benchmarks swings only.
-§8.6 makes the other five primitives an acceptance item, and if any is materially
-more expensive the persistence question reopens for that primitive — it is a
-phase-3 decision, not a closed one.
+**[C1] Now measured for all six, not just swings.** §1.4 benchmarked swings
+only, which Codex correctly refused to accept as settling the question. Full
+corpus, 25,818,944 bars:
+
+| primitive | full-corpus cost | persist? |
+| --- | ---: | --- |
+| swings, all three rungs | 76.0 s | **no** — this is what #2279 proposed persisting |
+| levels | 7.6 s | **no** |
+| volatility regime | 5.1 s | no |
+| anchored VWAP | 0.2 s | no |
+| Fibonacci | 0.1 s | no |
+| **the five above, combined** | **89.0 s** | |
+| level interaction, **per level** | 252.3 s | n/a — see below |
+| break-and-retest, **per level** | 253.1 s | n/a |
+
+So the no-persistence decision **holds for the objects #2279 actually proposed
+storing**: swings and levels together recompute over the whole corpus in 84
+seconds. A table would be storage plus a drift surface for no reader.
+
+⚠ **The last two rows are a real phase-5 finding and are flagged rather than
+explained away.** They are ~3× the swing cost *for a single level*, and a
+backtest evaluates many levels across many strategies, so this multiplies. It is
+**not** an argument for persisting swings — persisting them would leave this cost
+unchanged, because it is a per-strategy scan, not a derived object. The cause is
+identified: `_atr_at` recomputes a 15-bar Wilder window at every bar, making the
+scan O(bars × period) where a rolling ATR would make it O(bars). Left unoptimised
+here deliberately — it is correct, it is fast enough for this phase, and
+premature optimisation against an unbuilt backtester is a guess. Phase 5 should
+budget for it or fix it; it should not discover it.
 
 What #2279 was protecting is kept without the table: **`RULE_SET_VERSION` follows
 the `price_quarantine.py` pattern** — a stable rule-set id plus a SHA-256 of the
@@ -614,3 +649,53 @@ assumed away.
    asserted distinct from `0.0`.
 10. Provisional bars (last 5) fall inside the unconfirmable tail for every rung —
     asserted, not assumed (§1.3).
+
+## 9. Acceptance results — full corpus, 7,693 series / 25,818,944 bars
+
+`uv run --with scipy python scripts/verify_2279_price_structure.py`, 800 s wall.
+
+**Swing yield.** Highs and lows come out within 0.01% of each other at every
+rung, which is the cheapest sanity check available on a symmetric rule:
+
+| rung | N | swings | highs | lows |
+| --- | ---: | ---: | ---: | ---: |
+| short | 5 | 2,646,515 | 1,323,324 | 1,323,191 |
+| medium | 21 | 671,650 | 336,719 | 334,931 |
+| long | 63 | 219,755 | 110,011 | 109,744 |
+
+**scipy agreement (§8.2) — clean, with the residue fully explained.**
+
+| rung | series compared | matched | ours only | scipy only | …at a boundary |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| short | 6,944 | 2,425,030 | **0** | 7,882 | **7,882** |
+| medium | 6,683 | 615,161 | **0** | 10,717 | **10,717** |
+| long | 5,974 | 201,196 | **0** | 10,925 | **10,925** |
+
+`ours_only = 0` everywhere, and **every** scipy-only extremum is within N of a
+series end. That is the predicted and only difference: `argrelextrema` defaults
+to `mode='clip'`, so at the edges it compares a bar against clipped indices —
+i.e. against itself — and reports extrema in a window that does not exist. Our
+detector refuses to emit a pivot it cannot confirm on both sides. Not a
+tolerance; a complete account.
+
+The comparison is restricted to the 6,944 / 6,683 / 5,974 series with **no**
+masked bars, because scipy cannot represent one. Masking is measured separately
+in §5.
+
+**Series tri-state (§8.1).**
+
+| rung | fired | not_fired | not_evaluable |
+| --- | ---: | ---: | ---: |
+| short | 7,277 | 327 | 89 |
+| medium | 6,798 | 508 | 387 |
+| long | 6,177 | 309 | 1,207 |
+
+`not_evaluable` rises with N as it must — 1,207 series at N=63 are shorter than
+the 127-bar window or were blinded by a mask. A version of this table produced
+before the Codex checkpoint-2 fix understated the last column, because a blinded
+empty result was reporting as `not_fired`; the run was discarded and repeated
+rather than reconciled.
+
+**Fail-closed reader (§8.8).** A nonexistent series returns 0 bars; the reader's
+own SQL run at a stale `rule_set_version` returns 0 rows; and 0 series with bars
+lack a current coverage row.
