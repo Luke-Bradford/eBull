@@ -41,6 +41,7 @@ here closes those.
 from __future__ import annotations
 
 import hashlib
+from collections import deque
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -119,6 +120,43 @@ class BarSeries:
     @property
     def closes(self) -> list[Decimal | None]:
         return [row.get("close") for row in self.rows]
+
+    # ⚠ Decimal -> float conversion, done ONCE per series and cached.
+    #
+    # Measured before this existed: stochastic ran at 5,329 ns/bar because it
+    # converted 14 highs and 14 lows per bar — 28 Decimal->float conversions to
+    # produce one value. Across the corpus the seven indicators together came
+    # to 305.6 s against the spec's < 60 s acceptance, and conversion was the
+    # dominant term, not the arithmetic.
+    #
+    # `object.__setattr__` because the dataclass is frozen: the cache is
+    # derived state, not mutable content, and the alternative (dropping
+    # frozen) would give up the immutability the contract depends on.
+
+    def _floats(self, field: str) -> list[float | None]:
+        cache: dict[str, list[float | None]] | None = getattr(self, "_float_cache", None)
+        if cache is None:
+            cache = {}
+            object.__setattr__(self, "_float_cache", cache)
+        cached = cache.get(field)
+        if cached is None:
+            value = self.rows[0].get(field) if self.rows else None
+            del value
+            cached = [None if (v := row.get(field)) is None else float(v) for row in self.rows]
+            cache[field] = cached
+        return cached
+
+    @property
+    def float_closes(self) -> list[float | None]:
+        return self._floats("close")
+
+    @property
+    def float_highs(self) -> list[float | None]:
+        return self._floats("high")
+
+    @property
+    def float_lows(self) -> list[float | None]:
+        return self._floats("low")
 
 
 # ---------------------------------------------------------------------------
@@ -220,17 +258,30 @@ def sma_series(series: BarSeries, *, universe: Universe, period: int) -> Indicat
     Substituting would fabricate an observation.
     """
     _check_period(period)
-    closes = [_usable_float(c) for c in series.closes]
+    closes = series.float_closes
     values: list[float | None] = [None] * len(closes)
     unevaluable: list[int] = []
-    for i in range(len(closes)):
+    # Running sum — O(1) per bar. `nulls` counts NULLs currently inside the
+    # window so the guard stays exact without rescanning it.
+    running = 0.0
+    nulls = 0
+    for i, value in enumerate(closes):
+        if value is None:
+            nulls += 1
+        else:
+            running += value
+        if i >= period:
+            dropped = closes[i - period]
+            if dropped is None:
+                nulls -= 1
+            else:
+                running -= dropped
         if i + 1 < period:
             continue
-        window = closes[i - period + 1 : i + 1]
-        if any(v is None for v in window):
+        if nulls:
             unevaluable.append(i)
             continue
-        values[i] = sum(v for v in window if v is not None) / period
+        values[i] = running / period
     return IndicatorSeries(tuple(values), universe, tuple(unevaluable))
 
 
@@ -247,7 +298,7 @@ def ema_series(series: BarSeries, *, universe: Universe, period: int) -> Indicat
     becomes unevaluable from the first NULL onward rather than resuming.
     """
     _check_period(period)
-    closes = [_usable_float(c) for c in series.closes]
+    closes = series.float_closes
     values: list[float | None] = [None] * len(closes)
     unevaluable: list[int] = []
 
@@ -279,7 +330,7 @@ def rsi_series(series: BarSeries, *, universe: Universe, period: int = 14) -> In
     Local convention, not from Wilder, and labelled as such.
     """
     _check_period(period)
-    closes = [_usable_float(c) for c in series.closes]
+    closes = series.float_closes
     values: list[float | None] = [None] * len(closes)
     unevaluable: list[int] = []
 
@@ -335,10 +386,11 @@ def atr_series(series: BarSeries, *, universe: Universe, period: int = 14) -> In
     values: list[float | None] = [None] * len(rows)
     unevaluable: list[int] = []
 
+    highs, lows, closes_f = series.float_highs, series.float_lows, series.float_closes
     trs: list[float | None] = [None] * len(rows)
     for i in range(1, len(rows)):
-        high, low = rows[i].get("high"), rows[i].get("low")
-        prev_close = rows[i - 1].get("close")
+        high, low = highs[i], lows[i]
+        prev_close = closes_f[i - 1]
         # ⚠ [C2] `close[i]` is deliberately in this guard even though TR does
         # not read it. TR needs high[i], low[i] and close[i-1] only, so a bar
         # with a NULL close still HAS a computable true range — and emitting it
@@ -347,10 +399,9 @@ def atr_series(series: BarSeries, *, universe: Universe, period: int = 14) -> In
         # contract forbids. `price_structure._atr_at` fails closed on any
         # masked field for the same reason; over-conservative and consistent
         # beats computable and inconsistent.
-        if high is None or low is None or prev_close is None or rows[i].get("close") is None:
+        if high is None or low is None or prev_close is None or closes_f[i] is None:
             continue
-        h, lo, pc = float(high), float(low), float(prev_close)
-        trs[i] = max(h - lo, abs(h - pc), abs(lo - pc))
+        trs[i] = max(high - low, abs(high - prev_close), abs(low - prev_close))
 
     first_null = next((i for i in range(1, len(rows)) if trs[i] is None), None)
     horizon = len(rows) if first_null is None else first_null
@@ -444,23 +495,53 @@ def bollinger_series(
     _check_period(period)
     if num_std < 0:
         raise ValueError(f"num_std must be >= 0, got {num_std}")
-    closes = [_usable_float(c) for c in series.closes]
+    closes = series.float_closes
     n = len(closes)
     upper: list[float | None] = [None] * n
     middle: list[float | None] = [None] * n
     lower: list[float | None] = [None] * n
     unevaluable: list[int] = []
 
+    # ⚠ MEAN is a running sum (O(1)); VARIANCE deliberately walks the window.
+    #
+    # The O(1) one-pass form (`sumsq/n - mean^2`) was tried and REVERTED. It is
+    # a cancellation hazard on price data — variance is tiny against mean^2, so
+    # the subtraction eats the significant digits. A sample said it was fine:
+    # 48,707 bars from the three deepest series gave a max band error of
+    # 2.4e-11 against this module's 1e-9 tolerance, a 40x margin.
+    #
+    # The FULL-CORPUS sweep then failed it: **193 mismatches on each band**
+    # across 7,354 series. The sample was three large caps; the corpus contains
+    # high-priced low-volatility names where mean^2 dwarfs the variance and the
+    # cancellation bites. Half the speed win, none of the wrongness — and a
+    # reminder that a favourable sample is not evidence of safety, which is the
+    # same defect #2260 exists because of.
+    running = 0.0
+    nulls = 0
     for i in range(n):
+        value = closes[i]
+        if value is None:
+            nulls += 1
+        else:
+            running += value
+        if i >= period:
+            dropped = closes[i - period]
+            if dropped is None:
+                nulls -= 1
+            else:
+                running -= dropped
         if i + 1 < period:
             continue
-        window = closes[i - period + 1 : i + 1]
-        if any(v is None for v in window):
+        if nulls:
             unevaluable.append(i)
             continue
-        vals = [v for v in window if v is not None]
-        mean = sum(vals) / period
-        variance = sum((v - mean) ** 2 for v in vals) / period
+        mean = running / period
+        acc = 0.0
+        for j in range(i - period + 1, i + 1):
+            centred = closes[j]
+            assert centred is not None
+            acc += (centred - mean) ** 2
+        variance = acc / period
         std = variance**0.5
         middle[i] = mean
         upper[i] = mean + num_std * std
@@ -494,19 +575,45 @@ def stochastic_series(
     d: list[float | None] = [None] * n
     unevaluable: list[int] = []
 
+    highs = series.float_highs
+    lows = series.float_lows
+    closes = series.float_closes
+
+    # Monotonic deques — the standard sliding-window max/min. O(1) amortised
+    # per bar instead of O(period), and EXACT: max and min introduce no
+    # floating-point error, unlike a running-sum trick.
+    max_dq: deque[int] = deque()
+    min_dq: deque[int] = deque()
+    nulls = 0
     for i in range(n):
+        high_i, low_i = highs[i], lows[i]
+        if high_i is None or low_i is None:
+            nulls += 1
+        else:
+            while max_dq and (highs[max_dq[-1]] or 0.0) <= high_i:
+                max_dq.pop()
+            max_dq.append(i)
+            while min_dq and (lows[min_dq[-1]] or 0.0) >= low_i:
+                min_dq.pop()
+            min_dq.append(i)
+        if i >= period:
+            j = i - period
+            if highs[j] is None or lows[j] is None:
+                nulls -= 1
+            if max_dq and max_dq[0] == j:
+                max_dq.popleft()
+            if min_dq and min_dq[0] == j:
+                min_dq.popleft()
         if i + 1 < period:
             continue
-        window = rows[i - period + 1 : i + 1]
-        highs = [r.get("high") for r in window]
-        lows = [r.get("low") for r in window]
-        close = rows[i].get("close")
-        if close is None or any(h is None for h in highs) or any(lo is None for lo in lows):
+        close = closes[i]
+        if nulls or close is None or not max_dq or not min_dq:
             unevaluable.append(i)
             continue
-        hi = max(float(h) for h in highs if h is not None)
-        lo = min(float(v) for v in lows if v is not None)
-        k[i] = 50.0 if hi == lo else (float(close) - lo) / (hi - lo) * 100.0
+        hi = highs[max_dq[0]]
+        lo = lows[min_dq[0]]
+        assert hi is not None and lo is not None
+        k[i] = 50.0 if hi == lo else (close - lo) / (hi - lo) * 100.0
 
     # ⚠ [C2] %D inherits %K's unevaluability. A NULL input makes %K unevaluable
     # at index j, and every %D window containing j is unevaluable too — for the
@@ -565,15 +672,14 @@ def atr_window_series(series: BarSeries, *, universe: Universe, period: int = 14
     values: list[float | None] = [None] * n
     unevaluable: list[int] = []
 
+    highs, lows, closes_f = series.float_highs, series.float_lows, series.float_closes
     trs: list[float | None] = [None] * n
     for i in range(1, n):
-        high, low = rows[i].get("high"), rows[i].get("low")
-        prev_close = rows[i - 1].get("close")
-        close = rows[i].get("close")
-        if high is None or low is None or prev_close is None or close is None:
+        high, low = highs[i], lows[i]
+        prev_close = closes_f[i - 1]
+        if high is None or low is None or prev_close is None or closes_f[i] is None:
             continue
-        h, lo, pc = float(high), float(low), float(prev_close)
-        trs[i] = max(h - lo, abs(h - pc), abs(lo - pc))
+        trs[i] = max(high - low, abs(high - prev_close), abs(low - prev_close))
 
     for i in range(period, n):
         # The window spans bars[i - period .. i]; a masked field on ANY of them
@@ -582,8 +688,8 @@ def atr_window_series(series: BarSeries, *, universe: Universe, period: int = 14
         if any(t is None for t in window):
             unevaluable.append(i)
             continue
-        anchor = rows[i - period]
-        if anchor.get("high") is None or anchor.get("low") is None or anchor.get("close") is None:
+        j = i - period
+        if highs[j] is None or lows[j] is None or closes_f[j] is None:
             unevaluable.append(i)
             continue
         values[i] = sum(t for t in window if t is not None) / period

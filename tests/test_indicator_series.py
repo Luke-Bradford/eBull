@@ -461,3 +461,38 @@ class TestWindowedAtrMatchesPriceStructure:
             if wilder[i] is not None and window[i] is not None and abs(wilder[i] - window[i]) > 1e-9  # type: ignore[operator]
         )
         assert differing > 50, "the two ATR definitions should diverge after the seed"
+
+
+class TestBollingerNumericalStability:
+    """Pins the two-pass variance against a "faster" one-pass rewrite.
+
+    ⚠ THIS TEST EXISTS BECAUSE THE ONE-PASS FORM WAS SHIPPED AND REVERTED.
+    `sumsq/n - mean^2` is O(1) instead of O(period), and a sample said it was
+    safe: 48,707 bars from the three deepest corpus series gave a max band
+    error of 2.4e-11 against the 1e-9 tolerance, a 40x margin.
+
+    The FULL-CORPUS sweep then failed it — **193 mismatches on each band**
+    across 7,354 series. The sample was three large caps; the corpus contains
+    high-priced low-volatility names where mean^2 dwarfs the variance and the
+    subtraction eats the significant digits.
+
+    A high-price low-amplitude fixture reproduces it in milliseconds, so the
+    next person tempted by the O(1) form finds out here rather than nine
+    minutes into a corpus sweep.
+    """
+
+    @pytest.mark.parametrize(
+        ("base", "amplitude"),
+        [(10_000.0, 0.01), (100_000.0, 0.001)],
+    )
+    def test_matches_the_batch_form_where_one_pass_variance_fails(self, base: float, amplitude: float) -> None:
+        closes = [base + (amplitude if i % 2 else -amplitude) + amplitude * 0.3 * (i % 7) for i in range(40)]
+        series = _bars(closes)
+        streamed = bollinger_series(series, universe=U, period=20).components
+        batch = ta.bollinger_bands([Decimal(str(c)) for c in closes], period=20)
+        assert batch is not None
+        # The shipped two-pass form matches to 1e-9. The one-pass form is off by
+        # 5.1e-06 at base=10,000 and 3.3e-03 at base=100,000 — thousands of
+        # times the tolerance.
+        assert streamed["upper"][-1] == pytest.approx(batch[0], abs=1e-9)
+        assert streamed["lower"][-1] == pytest.approx(batch[1], abs=1e-9)
