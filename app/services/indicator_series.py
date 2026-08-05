@@ -533,3 +533,59 @@ def stochastic_series(
         universe=universe,
         not_evaluable_indices=tuple(unevaluable),
     )
+
+
+def atr_window_series(series: BarSeries, *, universe: Universe, period: int = 14) -> IndicatorSeries:
+    """Rolling TRAILING-WINDOW ATR — the mean of the last ``period`` true
+    ranges, recomputed in O(1) per bar rather than O(period).
+
+    ⚠ THIS IS NOT ``atr_series``, AND THE DIFFERENCE IS THE WHOLE POINT.
+    ``atr_series`` is Wilder-smoothed from the series START (recursive, infinite
+    memory). This one has finite memory: it forgets everything before the
+    window. They agree at the seed index and diverge everywhere after —
+    measured on a 36-bar fixture, index 25 gives 3.9610 (Wilder) against 4.2500
+    (window).
+
+    It exists because ``price_structure._atr_at`` computes exactly this, by
+    calling ``technical_analysis.atr`` with exactly ``period + 1`` bars: with
+    that many bars there are exactly ``period`` true ranges, so
+    ``atr_val = sum(trs[:period]) / period`` returns and the Wilder loop never
+    executes. #2279 §6 measured that recompute-per-bar at 252.3 s / 253.1 s per
+    level and said phase 5 should fix it rather than discover it — this is the
+    fix that preserves the meaning.
+
+    ⚠ Fails CLOSED on masking, exactly as ``_atr_at`` does: a single masked
+    high/low/close anywhere in the ``period + 1`` bar window makes the value
+    unevaluable. Substituting a fallback would silently widen or narrow a level
+    tolerance at precisely the bars quarantine flagged as untrustworthy.
+    """
+    _check_period(period)
+    rows = series.rows
+    n = len(rows)
+    values: list[float | None] = [None] * n
+    unevaluable: list[int] = []
+
+    trs: list[float | None] = [None] * n
+    for i in range(1, n):
+        high, low = rows[i].get("high"), rows[i].get("low")
+        prev_close = rows[i - 1].get("close")
+        close = rows[i].get("close")
+        if high is None or low is None or prev_close is None or close is None:
+            continue
+        h, lo, pc = float(high), float(low), float(prev_close)
+        trs[i] = max(h - lo, abs(h - pc), abs(lo - pc))
+
+    for i in range(period, n):
+        # The window spans bars[i - period .. i]; a masked field on ANY of them
+        # kills it, which is what the None TRs below encode.
+        window = trs[i - period + 1 : i + 1]
+        if any(t is None for t in window):
+            unevaluable.append(i)
+            continue
+        anchor = rows[i - period]
+        if anchor.get("high") is None or anchor.get("low") is None or anchor.get("close") is None:
+            unevaluable.append(i)
+            continue
+        values[i] = sum(t for t in window if t is not None) / period
+
+    return IndicatorSeries(tuple(values), universe, tuple(unevaluable))

@@ -391,3 +391,73 @@ class TestMultiSeriesAlignment:
         assert len(macd_series(SERIES, universe=U)) == len(SERIES)
         assert len(bollinger_series(SERIES, universe=U)) == len(SERIES)
         assert len(stochastic_series(SERIES, universe=U)) == len(SERIES)
+
+
+class TestWindowedAtrMatchesPriceStructure:
+    """`atr_window_series` must reproduce `price_structure._atr_at` EXACTLY.
+
+    ⚠ This is the test that makes ticket 2b safe, and it exists because the
+    spec's original 2b was wrong: it proposed rewiring `_atr_at` onto
+    `atr_series`, which is Wilder-smoothed from the series START and computes a
+    DIFFERENT quantity. They agree at the seed and diverge after — index 25 on
+    a 36-bar fixture gives 3.9610 (Wilder) vs 4.2500 (window). Swapping them
+    would silently change every level tolerance, and with it which swings
+    cluster into a level.
+    """
+
+    @staticmethod
+    def _bars(masked: set[int]) -> tuple[list, BarSeries]:  # type: ignore[type-arg]
+        from app.services.price_structure import StructureBar
+
+        closes = [100.0]
+        for i in range(120):
+            closes.append(closes[-1] * (1.0 + (0.013 if i % 3 else -0.019)))
+
+        def d(x: float) -> Decimal:
+            return Decimal(str(round(x, 4)))
+
+        structure = [
+            StructureBar(
+                bar_date=date(2024, 1, 1) + timedelta(days=i),
+                open=d(c),
+                high=None if i in masked else d(c * 1.01),
+                low=None if i in masked else d(c * 0.99),
+                close=None if i in masked else d(c),
+                volume=1,
+            )
+            for i, c in enumerate(closes)
+        ]
+        rows = [{"open": b.open, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume} for b in structure]
+        series = BarSeries(dates=tuple(b.bar_date for b in structure), rows=tuple(rows))  # type: ignore[arg-type]
+        return structure, series
+
+    @pytest.mark.parametrize("masked", [set(), {40}, {40, 90}])
+    def test_matches_at_every_index(self, masked: set[int]) -> None:
+        from app.services.indicator_series import atr_window_series
+        from app.services.price_structure import _atr_at
+
+        structure, series = self._bars(masked)
+        streamed = atr_window_series(series, universe=U, period=14).values
+        for i in range(len(structure)):
+            reference = _atr_at(structure, i, 14)
+            if reference is None:
+                assert streamed[i] is None, f"index {i}: _atr_at None, series {streamed[i]}"
+            else:
+                assert streamed[i] is not None, f"index {i}: series None, _atr_at {reference}"
+                assert abs(streamed[i] - reference) < 1e-9, f"index {i}"  # type: ignore[operator]
+
+    def test_is_not_the_wilder_form(self) -> None:
+        """⚠ Pins the distinction itself. If someone later 'simplifies' these
+        into one function, this fails — which is the point."""
+        from app.services.indicator_series import atr_series, atr_window_series
+
+        _, series = self._bars(set())
+        wilder = atr_series(series, universe=U, period=14).values
+        window = atr_window_series(series, universe=U, period=14).values
+        assert wilder[14] == pytest.approx(window[14])  # agree at the seed
+        differing = sum(
+            1
+            for i in range(15, len(series))
+            if wilder[i] is not None and window[i] is not None and abs(wilder[i] - window[i]) > 1e-9  # type: ignore[operator]
+        )
+        assert differing > 50, "the two ATR definitions should diverge after the seed"
