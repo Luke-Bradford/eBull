@@ -1025,16 +1025,29 @@ def link_form25_delistings(
             suspension_variants=suspension_variants,
             suspension_date=suspension_date,
         )
+        action = classify_form25_match(match)
         census.overlap_series += 1
-        key = provision if provision_variants == 1 else "conflicting"
+
+        # Bucket by the CLASSIFIER's verdict, never by re-deriving the
+        # condition here. Keying on `provision_variants` alone undercounts:
+        # a symbol whose filings agree on the provision but disagree on the
+        # suspension date is a conflict the classifier refuses to write, and
+        # it would still have been filed under its provision — a census that
+        # disagrees with the writer about what happened.
+        key = "conflicting" if action == "conflict" else provision
         census.by_provision[key] = census.by_provision.get(key, 0) + 1
 
+        # ``earliest_filed`` is min() over the symbol's cohort filings, and the
+        # min is deliberate rather than incidental. Both tests below are
+        # one-sided, so the earliest filing is the CONSERVATIVE bound: "the
+        # series begins after a Form 25 on this symbol" and "the series ends
+        # before any Form 25 on this symbol" are each true against min() for
+        # every filing, including when a conflicted symbol carries two events.
         if first_bar is not None and first_bar > earliest_filed:
             census.identity_unverified.append((symbol, earliest_filed, first_bar))
         if last_bar is not None and last_bar < earliest_filed:
             census.terminating.append((symbol, earliest_filed, last_bar))
 
-        action = classify_form25_match(match)
         if action == "conflict":
             census.conflicting.append(symbol)
             continue
