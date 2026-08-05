@@ -229,7 +229,10 @@ SELECT
     count(s.delisting_date)                            AS series_with_delisting
 FROM research_price_series s
 LEFT JOIN instruments i ON i.instrument_id = s.instrument_id
-LEFT JOIN exchanges   e ON e.exchange_id::text = i.exchange
+-- Both sides are TEXT; no cast. Matches the five existing call sites in app/
+-- (instruments.py, calendar.py). An earlier draft carried `e.exchange_id::text`,
+-- which is a no-op that reads as a papered-over type mismatch.
+LEFT JOIN exchanges   e ON e.exchange_id = i.exchange
 GROUP BY 1, 2;
 
 COMMENT ON VIEW research_corpus_census IS
