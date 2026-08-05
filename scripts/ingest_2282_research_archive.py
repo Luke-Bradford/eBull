@@ -166,6 +166,25 @@ per_instrument AS (
     FROM rets
     GROUP BY instrument_id
     HAVING count(*) >= 60
+),
+scored AS (
+    -- ⚠ ln() raises a domain error on zero and on negatives, and this corpus
+    -- deliberately has no price floor: two loaded bars are already at
+    -- close <= 0, and price_daily holds 154. They happen not to overlap TODAY,
+    -- which is exactly what makes it a latent crash in the acceptance guard
+    -- rather than a theoretical one.
+    --
+    -- Guarded here rather than by adding `research_close > 0` to the WHERE
+    -- above, because that would be a narrowing gate on precisely the
+    -- failed-company population the corpus exists to retain: FRCB's last bar
+    -- is 0.0004 and a delisted name's final bars are the signal. NULL means
+    -- "level not comparable for this instrument", and a NULL comparison
+    -- excludes it from the FILTERs without removing any bar.
+    SELECT n,
+           ret_corr,
+           med_level_ratio,
+           ln(nullif(greatest(med_level_ratio, 0), 0)) AS log_level_ratio
+    FROM per_instrument
 )
 SELECT count(*)                                        AS instruments,
        sum(n)                                          AS paired_bars,
@@ -173,13 +192,13 @@ SELECT count(*)                                        AS instruments,
                                                        AS median_return_corr,
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY med_level_ratio)::numeric, 6)
                                                        AS median_level_ratio,
-       count(*) FILTER (WHERE abs(ln(med_level_ratio)) <= 0.01)
+       count(*) FILTER (WHERE abs(log_level_ratio) <= 0.01)
                                                        AS instruments_level_within_1pct,
        count(*) FILTER (WHERE ret_corr >= 0.90)        AS instruments_corr_at_least_0_90,
-       count(*) FILTER (WHERE ret_corr >= 0.90 AND abs(ln(med_level_ratio)) > 0.10)
+       count(*) FILTER (WHERE ret_corr >= 0.90 AND abs(log_level_ratio) > 0.10)
                                                        AS tail_agreeing_returns_offset_level,
        count(*) FILTER (WHERE ret_corr < 0.90)         AS tail_disagreeing_returns
-FROM per_instrument
+FROM scored
 """
 
 

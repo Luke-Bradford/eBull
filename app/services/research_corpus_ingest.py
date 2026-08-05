@@ -395,6 +395,16 @@ def upsert_series(
             # vendor is the ticker-reuse pair the partial unique index rejects.
             # Leave the second unresolved and counted rather than letting the
             # insert fail the whole batch.
+            #
+            # ⚠ WHICH of the pair keeps the resolution is decided by
+            # ``symbols`` order, which ``load_archive`` sorts — so it is
+            # lexicographic, deterministic and ARBITRARY, not a policy. That is
+            # deliberate: there is no evidence at ingest for preferring one
+            # spelling of a reused ticker over the other, and inventing a
+            # tie-break (shorter symbol, more bars, earlier first bar) would
+            # dress a coin flip up as a rule. Both symbols land in
+            # ``ambiguous_symbols`` and are reported, so the pair is visible
+            # rather than silently halved.
             census.ambiguous_symbols.append(symbol)
             instrument_id = None
         if instrument_id is not None:
