@@ -444,10 +444,16 @@ def census(conn: psycopg.Connection[tuple], year: int) -> None:
             f"    {label}: (a)(3) acquisitions {acquisitions:>3} / (b) failures "
             f"{failures:>3}  = {100 * acquisitions / max(1, total):.0f}pct acquisitions"
         )
-    (ur_a, ur_b), (r_a, r_b) = (
-        (bias[0][1], bias[0][2]),
-        (bias[1][1], bias[1][2]),
-    )
+    # ⚠ Keyed on the boolean, NEVER indexed positionally. A GROUP BY emits a
+    # row only where one exists, so a year with (say) nothing unresolved
+    # returns ONE row and `bias[1]` is an IndexError — the census crashes on
+    # exactly the clean-data case it is least expected to.
+    by_resolved = {bool(row[0]): (row[1], row[2]) for row in bias}
+    ur_a, ur_b = by_resolved.get(False, (0, 0))
+    r_a, r_b = by_resolved.get(True, (0, 0))
+    if not (ur_a + ur_b + r_a + r_b):
+        print(f"    no delisting-meaning common-equity filings for {year}")
+        return
     p_unresolved = ur_a / max(1, ur_a + ur_b)
     p_resolved = r_a / max(1, r_a + r_b)
     n_unresolved, n_resolved = ur_a + ur_b, r_a + r_b

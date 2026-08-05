@@ -3,7 +3,7 @@
 Source rule: **17 CFR 240.12d2-2** (Rule 12d2-2, removal from listing and
 registration). The full recipe and every measured trap live in
 ``.claude/skills/data-sources/sec-edgar.md`` §2.6; this module is that recipe
-in code. The four things it must not get wrong, all reproduced against the
+in code. The traps it must not fall into, all reproduced against the live
 2023 cohort:
 
 **Trap 1 — index ROWS are not filings.** EDGAR indexes a 25-NSE under *both*
@@ -70,8 +70,9 @@ PROVISION_CLASSES = ("equity_delisting", "debt_lifecycle", "unknown")
 #: ⚠ SECOND, ORTHOGONAL AXIS. The rule provision says what EVENT happened; it
 #: says nothing about WHAT came off the tape, because a Form 25 is
 #: per-SECURITY (trap 2). Provision-filtering 2023 alone yields 842
-#: "delisting-meaning" filings — and 155 of those are warrants, 63 units, 55
-#: preferred or depositary shares, 15 NOTES and 3 rights. A warrant expiring
+#: "delisting-meaning" filings — and 155 of those are warrants, 111 ETFs/funds,
+#: 62 units, 56 preferred or depositary shares, 10 NOTES and 3 rights, leaving
+#: 317 common equity plus 128 issuer-filed. A warrant expiring
 #: worthless alongside its SPAC is not a company delisting, and a cohort built
 #: on provision alone silently doubles itself with securities that never had
 #: their own price series in our universe.
@@ -98,7 +99,7 @@ SECURITY_CLASSES = (
 #: where an operating company names the security class — "Invesco DB Gold
 #: Fund", "The Cannabis ETF", "Closed End Fund" — so they carry none of the
 #: words the classes above look for and fell through to ``unknown`` on the
-#: first pass (91 of 2023's delisting filings, nearly all of them funds).
+#: first pass (111 of 2023's delisting filings, nearly all of them funds).
 #: Testing it last means a description that DOES state a security class
 #: ("Common Stock of XYZ Realty Trust") is classified on the class, and only a
 #: bare product name falls through to ``fund``.
@@ -315,7 +316,14 @@ def normalise_cik(raw: str | None) -> str | None:
     digits = raw.strip()
     if not digits.isdigit():
         return None
-    return digits.lstrip("0").zfill(10) or None
+    significant = digits.lstrip("0")
+    # An all-zero value is not CIK 0, it is a filer that tagged nothing. The
+    # earlier `... .zfill(10) or None` could never return None, because
+    # "".zfill(10) is "0000000000" and truthy — dead code masquerading as a
+    # guard.
+    if not significant:
+        return None
+    return significant.zfill(10)
 
 
 def _text(xml: str, tag: str) -> str | None:
