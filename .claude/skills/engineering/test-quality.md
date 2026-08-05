@@ -388,3 +388,41 @@ defend in a PR description.
 produced. That converts a real test into a change-detector, and it is
 indistinguishable in the diff from a legitimate fixture fix — so say which one
 it was in the commit message.
+
+## An integration test through a production entry point may open its OWN connection
+
+`ebull_test_conn` gives the TEST database to the *test*. It does not redirect
+production code that calls `psycopg.connect` on `settings.database_url` itself —
+and a surprising amount of this repo's job/worker layer does, because those
+functions run in threads where a shared connection is not safe.
+
+**Before writing an integration test that drives a production function, grep it
+for its own connect.** If it has one, patch the global for the duration:
+
+```python
+@pytest.fixture(autouse=True)
+def _writes_to_the_test_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "database_url", test_database_url())
+```
+
+Autouse, so a test added to the file later cannot forget it. `conftest.py`'s
+`_filer_ingest_worker_conns_use_test_db` (#1274) is the same fix for the parallel
+filer-ingest driver — that one patches the module's `connect_job` reference
+instead, which is narrower where a single seam exists.
+
+⚠ **The failure is silent and it writes to the operator's dev DB.** The test does
+not error — the production code happily writes rows somewhere real, and the
+assertion then fails with "no row written" because it is reading a different
+database. Precedent (2026-08-05, #2218): `_tracked_job` has three of these connects
+(start, failure, success); the first draft of `test_job_degraded_terminal.py` wrote
+four rows into dev `job_runs` before that was noticed.
+
+⚠ Then the guard catches the DOCSTRING. `tests/smoke/test_no_settings_url_in_destructive_paths.py`
+is a line-literal grep and does not know prose from code, so a comment *explaining*
+the trap trips it. Reword around the literal call spelling and say why, rather than
+adding an exemption — the guard's bluntness is what makes it reliable.
+
+**Prefer not needing this at all.** One DB test per genuinely-new SQL mechanism;
+everything else pure. This one earns its place because only a real database proves
+a new status survives a rewritten `CHECK` constraint — a mocked cursor asserts the
+parameters and passes against a constraint that would reject them.

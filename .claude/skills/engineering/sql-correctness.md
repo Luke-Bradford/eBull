@@ -306,3 +306,74 @@ not by any test.
 
 Same shape, same fix: `GROUP BY status`, `GROUP BY provision_class`,
 `GROUP BY is_tradable` — anywhere the result feeds a fixed-arity unpack.
+
+## Widening a CHECK constraint — build the new list from the LIVE constraint
+
+An enum-style `CHECK` gets rewritten by successive migrations, and **only the
+database knows the union**. Writing the new one by copying the most recent
+migration file you happen to find silently DROPS every member added after it.
+
+```bash
+# The only safe source. Do this BEFORE writing the migration.
+grep -rn "<constraint_name>" sql/*.sql          # how many files touched it?
+```
+```python
+# ...and read what is actually installed:
+conn.execute(
+    "select pg_get_constraintdef(oid) from pg_constraint where conname = %s",
+    (constraint_name,),
+).fetchone()
+```
+
+⚠ **It fails silently in the direction that hides it.** Postgres validates a new
+CHECK against existing rows only — so a dropped member with no row exercising it
+applies clean, and the constraint then rejects the *next* one. There is no error,
+no warning, and the migration log says success.
+
+Precedent (2026-08-05, #2218): `sql/254` was written from `sql/020`'s
+`job_runs_status_check`, which predates `sql/137`, and dropped `'cancelled'`.
+Four migrations had rewritten that one constraint (014 → 020 → 137 → 254). It
+applied clean on the dev DB — `select status, count(*) from job_runs group by 1`
+returns only `success` / `skipped` / `failure` / `running`, zero cancelled rows to
+validate against — and would have rejected the next cancelled run. Caught by Codex
+at checkpoint 2; no gate saw it, and no test would have.
+
+**The durable fix is a derived contract test**, not care: parse the constraint out
+of the migration text and assert the Python constants equal it
+(`tests/test_job_terminal_status_contract.py`).
+
+## A closed vocabulary lives in the READ paths too, and SQL strings hide them
+
+pyright type-checks a `Literal`; it cannot see inside a query string. So adding a
+member to a vocabulary makes the *writer* type-check clean while every
+hand-spelled `IN (...)` filter silently excludes the new value — the row is
+written and nothing reads it, which looks exactly like the feature not working.
+
+Before adding a member to any status/kind/type vocabulary:
+
+```bash
+grep -rn "IN ('<existing_member>'" app/          # SQL filters
+grep -rn '"<existing_member>"' app/ frontend/src # Literals, unions, maps
+```
+
+Then collapse them: one exported constant plus a pre-rendered SQL fragment, and a
+test that greps `app/` for the hand-spelled shape.
+
+⚠ **Two precision rules for that grep guard, both learned by running it:**
+- Match the *shape*, not an exact string — sites differ only in whitespace.
+- Require a member unique to this vocabulary. A pattern of `'success'…'skipped'`
+  also matches `bootstrap_adapter`'s `('success', 'error', 'skipped', 'blocked',
+  'cancelled')`, a different vocabulary on a different table. Requiring
+  `'failure'` separates them.
+- Strip comment lines first, or the guard flags the comment that warns about the
+  anti-pattern.
+
+⚠ Not every narrow list is drift. `dispatcher.reset_stale_in_flight` uses
+`('success', 'failure', 'degraded')` **deliberately** — `skipped`/`cancelled` mean
+the work was not done, and whether boot recovery should re-fire those is a separate
+question. Say so at the site, or the next person "fixes" it to the shared constant.
+
+Precedent (2026-08-05, #2218): five SQL literals across four modules plus two
+`Literal`s. Three of the five were latest-terminal-run queries, so a `degraded` row
+would have been written and then skipped in favour of an older, greener run —
+shipping the ticket and changing nothing. Caught by Codex at checkpoint 2.
