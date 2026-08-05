@@ -358,3 +358,123 @@ class TestDeriveTrendSignals:
             "price_vs_sma200": expected_pvs,
             "sma_50_200_regime": expected_regime,
         }
+
+
+class TestIndicatorCausality:
+    """#2260 — a value at bar k must not depend on bars after k.
+
+    This is the invariant phase 2 (historical indicator recomputation) rests
+    on, and the repo did not previously assert it. `rsi()` returns ONE value
+    for the latest bar, so a historical series is built by calling it on
+    expanding prefixes — and nothing stopped a future refactor to a vectorised
+    or pandas form that seeds or normalises from the FULL series. That is
+    look-ahead, and it is invisible in every existing test because they all
+    call the function once on a complete series.
+
+    ⚠ Asserting "rsi(closes[:k]) is unchanged when bars are appended" would be
+    VACUOUS — it is the same input either way. The real check cross-validates
+    the shipped batch function against an independent streaming
+    implementation, which is what would diverge under such a refactor.
+
+    Context: the TA design doc recorded RSI<30 → 76.8% 20-day hit rate.
+    A causal full-population recompute measured 51.8% on `price_daily`
+    (n=311,332) and 50.4% on the research corpus (n=1,255,230), so the figure
+    is most likely an artefact of a non-causal recompute in a throwaway
+    script. The shipped function is causal; this test is what makes that a
+    property rather than an observation.
+    """
+
+    @staticmethod
+    def _streaming_rsi(closes: Sequence[Decimal], period: int = 14) -> list[float | None]:
+        """Reference Wilder RSI, computed forward one bar at a time."""
+        values = [float(c) for c in closes]
+        out: list[float | None] = [None] * len(values)
+        if len(values) <= period:
+            return out
+        gain = sum(max(values[i] - values[i - 1], 0.0) for i in range(1, period + 1)) / period
+        loss = sum(max(values[i - 1] - values[i], 0.0) for i in range(1, period + 1)) / period
+        out[period] = 100.0 if loss == 0 else 100.0 - 100.0 / (1 + gain / loss)
+        for i in range(period + 1, len(values)):
+            delta = values[i] - values[i - 1]
+            gain = (gain * (period - 1) + max(delta, 0.0)) / period
+            loss = (loss * (period - 1) + max(-delta, 0.0)) / period
+            out[i] = 100.0 if loss == 0 else 100.0 - 100.0 / (1 + gain / loss)
+        return out
+
+    def test_prefix_rsi_matches_a_streaming_recompute(self) -> None:
+        # A deliberately mixed series: a downtrend into an oversold reading,
+        # then a sharp reversal. If the batch form leaked future information,
+        # the reversal would pull the pre-reversal values upward.
+        closes = [
+            Decimal(str(v))
+            for v in (
+                100,
+                99,
+                97,
+                98,
+                95,
+                93,
+                94,
+                91,
+                89,
+                90,
+                87,
+                85,
+                86,
+                83,
+                81,
+                80,
+                78,
+                79,
+                76,
+                74,
+                75,
+                72,
+                70,
+                71,
+                95,
+                98,
+                101,
+                104,
+                107,
+                110,
+            )
+        ]
+        reference = self._streaming_rsi(closes)
+        for k in range(15, len(closes) + 1):
+            expected = reference[k - 1]
+            assert expected is not None
+            actual = rsi(closes[:k])
+            assert actual is not None
+            assert abs(actual - expected) < 1e-9, f"prefix length {k}: {actual} != {expected}"
+
+    def test_a_later_spike_cannot_move_an_earlier_value(self) -> None:
+        """The look-ahead this guards against, stated as its symptom.
+
+        ⚠ The obvious spelling — ``rsi(base) == rsi(with_future[:len(base)])``
+        — is VACUOUS: both sides are the same input, so it passes even against
+        a full-series seed. It was written that way first and SURVIVED the
+        revert-probe while its sibling failed, which is how it was caught.
+        The real comparison is against a streaming recompute over the LONGER
+        series: bar 20's value must be identical whether or not a +50% spike
+        follows it.
+        """
+        # ⚠ The series must contain BOTH gains and losses, with a different
+        # composition before and after bar 14. Two earlier fixtures failed to
+        # discriminate and were caught by the revert-probe, not by review:
+        #   * monotonic -1 per bar — a full-series seed and a first-14 seed
+        #     average to the same number, so the defect is invisible;
+        #   * all-negative with varying magnitude — avg_gain is 0 either way,
+        #     so RSI is 0 under both.
+        # Verified against the injected seed bug: correct 21.6205 vs buggy
+        # 19.5111 on this series.
+        base = [
+            Decimal(str(v)) for v in (100, 99, 100, 98, 97, 98, 96, 95, 96, 94, 93, 94, 92, 91, 92, 85, 84, 86, 83, 82)
+        ]
+        with_future = base + [Decimal(str(v)) for v in (95, 97, 99, 101, 103)]
+
+        at_bar_20 = self._streaming_rsi(with_future)[len(base) - 1]
+        assert at_bar_20 is not None
+        computed = rsi(base)
+        assert computed is not None
+        assert abs(computed - at_bar_20) < 1e-9
