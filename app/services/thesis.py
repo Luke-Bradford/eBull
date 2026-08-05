@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -212,7 +213,19 @@ _MAX_TOKENS_CRITIC = 2048
 # 37.20" leaked verbatim into a MSFT memo), derived arithmetic must END in a
 # per-share price + band sanity cross-check (a $52.8B P/S "target" shipped),
 # cited figures verbatim-or-show-inputs (fabricated 13.1% gross margin).
-_PROMPT_VERSION = "v5"
+# v6 (#2235): subject-identity anchor. v5's context expansion left the
+# instrument identity as one buried mid-payload field, and the writer
+# sporadically wrote the memo about a different company while citing the
+# subject's own figures (a GME memo about Yelp, quoting GME's 34.39% gross
+# margin verbatim) — 19 such memos on v5, zero on v1-v4. _build_writer_prompt
+# now states the subject ahead of the JSON, and _WRITER_SYSTEM opens its rule
+# list with a subject-identity rule. Second v5-only leak fixed here: v5
+# abstracted its worked example to placeholders to stop a literal
+# "12 x EPS 3.10 = 37.20" leaking, which traded example-leakage for
+# placeholder-leakage (46 memos containing "[Company] operates in the
+# [sector]") — an explicit no-placeholder rule now closes that. Context shape
+# and _validate_writer_output are unchanged.
+_PROMPT_VERSION = "v6"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -1320,6 +1333,18 @@ Produce a JSON object with EXACTLY these fields:
 }
 
 Rules:
+- SUBJECT IDENTITY. The memo is about ONE company: the instrument named on the
+  SUBJECT line above the context, which is the same company as the `instrument`
+  block's `symbol` / `company_name`. Name that company explicitly in the memo's
+  first sentence. Never write the memo about a different company — every
+  figure in the context describes the SUBJECT, so a memo naming anyone else
+  misattributes real financial data. Peers, competitors and the benchmark may
+  be cited only as explicit comparisons ("versus <peer>"), never as the
+  subject.
+- NO PLACEHOLDERS in memo_markdown. Every slot carries an actual value from
+  THIS context. Never emit a bracketed stand-in — no "[Company]", "[sector]",
+  "[X]", "<multiple>", "<peer>". The angle-bracket forms in this prompt are
+  schema notation describing what to produce; they are not text to copy.
 - thesis_type must be one of: compounder, value, turnaround, speculative
 - stance must be one of: buy, hold, watch, avoid
 - confidence_score in [0.0, 1.0] — higher means more conviction
@@ -1430,7 +1455,23 @@ Rules:
 
 
 def _build_writer_prompt(context: dict[str, object]) -> str:
-    return json.dumps(context, indent=2, default=str)
+    """Name the subject instrument, then hand over the JSON context.
+
+    The instrument identity is one field in the middle of a large payload.
+    v5's context expansion (fair_value_band, analytics_evidence, ta_state,
+    valuation, risk_metrics, price_anchor) diluted it enough that the writer
+    sporadically confabulated a different company — #2235, a GME memo written
+    about Yelp while citing GME's own margins to 4dp. Stating the subject
+    ahead of the context gives identity a position the payload cannot bury.
+    """
+    subject_line = ""
+    instrument = context.get("instrument")
+    if isinstance(instrument, dict):
+        symbol = instrument.get("symbol")
+        if symbol:
+            name = instrument.get("company_name") or symbol
+            subject_line = f"SUBJECT: {name} ({symbol}) — write the memo about this company and no other.\n\n"
+    return subject_line + json.dumps(context, indent=2, default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -1541,6 +1582,41 @@ def _call_with_one_retry(
         )
 
 
+# #2235 — WHY THERE IS NO MISATTRIBUTION ASSERTION HERE.
+#
+# The defect is real and still live: 19 of 2,037 v5 memos (0.93%) declare their
+# subject as a different company — "Yelp (YELP)" heading a GME memo, "Apple
+# (AAPL)" heading AGCO's, measured 2026-08-05. It is NOT gated below, because
+# three candidate discriminators were each falsified against the full stored
+# corpus rather than a sample:
+#
+#   1. First `<Capitalised Name> (<TICKER>)` in the memo must be the subject.
+#      35 rejects, of which "Free Cash Flow (FCF)", "Price-to-Earnings (PE)",
+#      "Return on Assets (ROA)" are correct memos. A gate that retry-fails a
+#      correct memo takes `thesis_refresh` down at ~1.7% of generations.
+#   2. Same, restricted to the memo's opening (120/200/300/400 chars). The
+#      term expansions appear there too — 25 rejects at 120 chars, same shape.
+#   3. Drop matches where the ticker is an initialism of the preceding words.
+#      Removes 2 of 29. "Price-to-sales (PS)", "Equity (ROE)", "ETF Trust
+#      (SPY)" all survive it.
+#
+# Three failed keys is the signal to question the MODEL, not to try a fourth
+# (.claude/CLAUDE.md, "Source-rule before design"). A soft warning was also
+# rejected: at ~40% false positives it is noise that trains the operator to
+# ignore it, which is the same argument #2218 makes against a blanket
+# zero-rows alarm.
+#
+# ⚠ The prompt anchor above and the v6 bump remain UNVERIFIED — at 0.93% an
+# A/B powered to detect a halving needs thousands of local generations. Tracked
+# separately; the measurement query lives on that ticket.
+
+# Bracketed stand-ins the writer emitted instead of values. ``[text](url)`` is a
+# markdown link and must not match, hence the negative lookahead. The lowercase
+# angle form catches "<multiple>" / "<peer>" — the prompt's own schema notation
+# uses them, which is how they leaked into memo prose in the first place.
+_PLACEHOLDER_RE = re.compile(r"\[[A-Za-z][A-Za-z ]{0,24}\](?!\()|<[a-z][a-z ]{0,24}>")
+
+
 def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[str, object], LLMCompletion]:
     """
     Call the LLM writer and parse the structured thesis JSON.
@@ -1602,6 +1678,15 @@ def _validate_writer_output(data: dict[str, object], *, require_buy_zone: bool =
     memo = data.get("memo_markdown")
     if not isinstance(memo, str) or not memo.strip():
         raise ValueError("Writer output memo_markdown must be a non-empty string")
+
+    # #2235 — the placeholder leak, enforced deterministically. Verified on the
+    # FULL stored corpus, not a sample: 74 of 2,037 v5 memos (3.6%) rejected,
+    # every one a genuine "[Company]" / "[sector]" / "[Name]" stand-in, and
+    # zero correct memos caught. Unlike the misattribution above, this has a
+    # clean discriminator, so it gets a real gate and rides retry-once.
+    placeholder = _PLACEHOLDER_RE.search(memo)
+    if placeholder is not None:
+        raise ValueError(f"Writer output contains an unfilled placeholder: {placeholder.group(0)!r}")
 
     # Valuation-band coherence (#2007): the stored band must satisfy
     # bear <= base <= bull, and the buy zone low <= high. Local writers
