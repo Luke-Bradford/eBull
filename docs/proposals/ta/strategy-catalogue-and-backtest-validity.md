@@ -391,7 +391,7 @@ vocabulary. What survives is a short list, and it is mostly boring.
 | family | who runs it | evidence | our data fit |
 | --- | --- | --- | --- |
 | **Time-series momentum / trend following** | the entire managed-futures / CTA industry (AQR, Winton, Man AHL) | strongest and longest — replicated across a century and every asset class | **excellent** — needs only close prices |
-| **Cross-sectional momentum (12-1)** | ubiquitous in quant equity | the most replicated equity anomaly there is | **excellent** — 12,179 instruments is real breadth |
+| **Cross-sectional momentum (12-1)** | ubiquitous in quant equity | the most replicated equity anomaly there is | ⚠ **revised by §4.0** — 12,179 is the *tradable* count, not the *validatable* one. S-2 ranks within **6,733 US stocks**; still real breadth, but half what this cell claimed |
 | **Short-horizon mean reversion (1–5d)** | stat-arb desks | real, but capacity-limited and cost-sensitive | **conditional** — dies on our p90 spread. ⚠ v1 has **no ex-ante liquidity gate at all**: no as-of spread is stored (§5 criterion 2), so costs are charged at settlement from the static model and the strategy is simply allowed to lose on them. A real gate arrives once spread history accrues (§8) |
 | **Volatility regime / compression breakout** | CTAs, vol funds | decent; overlaps trend | **good** — ATR/range only |
 | **Support / resistance as liquidity** | discretionary desks; systematised rarely | weak-to-moderate; mechanism (resting orders at prior extremes) is real | **buildable** once #2279 primitives exist |
@@ -443,7 +443,7 @@ strategy at a time. So it is specified once, here, and applies to all of them.
 
 ### 4.0 Validation universe — DECIDED 2026-08-05 (#2289)
 
-**Strategies are validated on `us_equity` only. Non-US instruments stay tradable
+**Strategies are validated on US common stocks only. Non-US instruments stay tradable
 but are not backtest-validated, and no strategy allocates to them on backtest
 evidence.** §0.1(c3) left this as "a scope decision for §4"; this is the call.
 
@@ -459,6 +459,16 @@ Measured on the dev corpus 2026-08-05 (`instruments` ⋈ `exchanges.asset_class`
 | `mena_equity` | 61 | no |
 | **non-US equity** | **4,749 (37.4%)** | **no source at any price we would pay** |
 
+⚠ **`us_equity` is an *exchange* classification, not a security-type filter, and
+the validated universe is narrower than the row above.** Of the 7,288, **6,733
+are `Stocks` and 555 are `ETF`** (`etoro_instrument_types` 5 and 6; `asset_class`
+lives on `exchanges`). Ranking an ETF against a common stock is precisely the
+homogeneity violation S-2's own ⚠ warns about, and a fund's price path is a
+basket's, not an issuer's. **The validated universe is `asset_class='us_equity'
+AND instrument_type_id = 5` — 6,733 instruments.** ADRs and US-listed foreign
+private issuers sit *inside* that 6,733 and are not separable today; they are the
+same population the Form 25 cohort under-resolves (below).
+
 Why this had to be decided *before* the catalogue rather than caveated after it:
 eToro serves all 12,684 shallowly, so a global backtest neither fails nor warns —
 it simply never sees the non-US losers. Validated on 57% of the universe, traded
@@ -466,7 +476,8 @@ across 100% of it, with nothing in the output to say so.
 
 **Adopted: #2289 option (1) + option (3).**
 
-**(1) US-only validation universe.** Every §5 gate is run over `us_equity`. A
+**(1) US-only validation universe.** Every §5 gate is run over the 6,733 US
+stocks defined above. A
 strategy's live universe may be wider than its validated one, but the difference
 is carried in the signal ledger (#2288), and §7's allocation reads the validated
 universe, not the live one.
@@ -488,15 +499,58 @@ Option (2) — global universe, survivor-biased, labelled — was rejected. It p
 the entire weight on a label holding under pressure, at the one moment (an
 allocation decision) when pressure is highest.
 
-**Per-strategy consequence:**
+**Allocation invariant — the part a label cannot carry.** "Not validated" has to
+bind execution, not just display:
 
-| strategy | validated universe | note |
-| --- | --- | --- |
-| S-1 time-series momentum | `us_equity` | per-instrument; may run live wider, marked unvalidated |
-| S-2 cross-sectional momentum | `us_equity` | resolves §9 Q1 — see below |
-| S-3 mean reversion in trend | `us_equity` | the #2260 shape; survivorship bias is **largest** here, so this one is gated on the corpus purchase as well as the universe |
-| S-4 volatility breakout | `us_equity` | |
-| S-5 / S-6 | `us_equity` | blocked on #2279 regardless |
+1. No backtest-derived allocation reaches an instrument outside the validated
+   universe. Zero, not scaled-down.
+2. **Live paper results on unvalidated instruments do not become allocation
+   evidence either.** §6 moves capital toward what is working; without this
+   clause a non-US sleeve accumulates live performance and re-enters allocation
+   through the back door, having passed none of §5. If a non-US variant is ever
+   to be allocated against, it registers as a **separate strategy identity** —
+   universe is part of the identity hash (criterion 11), so "S-1 on `us_equity`"
+   and "S-1 on `eu_equity`" are two strategies and always were.
+3. Performance metrics are reported split by validated universe, never pooled.
+   A pooled number launders (2) back in as arithmetic.
+
+**Two biases this decision does NOT fix.** Both are survivorship-shaped and
+neither was measured by #2284, so neither is covered by buying the corpus:
+
+- **eToro-listing bias.** The research universe is *"US names eToro lists
+  today, plus delisted names the corpus supplies"* — not *"US names that were
+  listed as of the entry date"*. A company that traded 2005–2015 and was never
+  on eToro's book is absent, and its absence looks exactly like survivorship.
+  The bought corpus reduces this (it is keyed on the market, not on eToro) but
+  only for names we think to ask for. Quantify it before trusting any
+  cross-sectional result: count corpus symbols with no `instruments` row.
+- **Form 25 resolution residue.** The register resolves **382 of 443 issuers
+  (86.2%)**; the missing 13.8% is closed-end funds (N-CSR, no cover-page XBRL)
+  and foreign private issuers (`sec-edgar.md` §2.6). US is "correctable" at
+  86.2%, not 100%, and the residue is **not** random with respect to fund-shaped
+  instruments.
+
+**Per-strategy consequence.** Survivorship acts through two distinct channels
+and collapsing them into one column hides which fix applies:
+
+- **selection** — the missing names change *which* instruments are picked;
+  fixed by a point-in-time universe (criterion 1).
+- **price-path** — the missing names change the *distribution of outcomes* for
+  instruments already picked; fixed only by a corpus that retains the losers'
+  bars to the end.
+
+| strategy | validated universe | selection | price-path | note |
+| --- | --- | --- | --- | --- |
+| S-1 time-series momentum | US stocks | low | **high** | per-instrument, so nothing is ranked away — but averaging outcomes over survivors only is still biased |
+| S-2 cross-sectional momentum | US stocks | **highest** | **high** | ranks are *directly* altered by missing bankrupt losers; the skill calls this shape fatal |
+| S-3 mean reversion in trend | US stocks | low | **highest** | the #2260 shape — oversold names that kept going are exactly what is missing. Gated on the corpus purchase, not just the universe |
+| S-4 volatility breakout | US stocks | low | **high** | not harmless: distress *is* volatility expansion, so the missing names are over-represented in the setup |
+| S-5 / S-6 | US stocks | low | **high** | failed names generate many breaks and retests near distress. Blocked on #2279, but that is not the only gate |
+
+⚠ Nothing in this table is "safe". The column that matters for sequencing is
+**selection**, because only S-2 is blocked on it; every strategy is blocked on
+price-path, i.e. on the corpus purchase, before its numbers may be allocated
+against.
 
 ⚠ **S-2 is not descoped, and #2289's body was one step too pessimistic on it.**
 It argued S-2 needs index-membership history that even the paid US options do not
@@ -504,7 +558,7 @@ sell. S-2 as written in this section does not rank within an index — it ranks
 within the *eligible listed* universe (≥273 bars, one asset class, one currency).
 What it needs is point-in-time **listing** membership, which the Form 25 register
 plus a delisted-inclusive US corpus does supply. Restricting its ranking universe
-to `us_equity` — which §9 Q1 already recommended on homogeneity grounds — is
+to US stocks — which §9 Q1 already recommended on homogeneity grounds — is
 sufficient. If S-2 is ever re-specified against an index, that reopens.
 
 ---
@@ -630,8 +684,15 @@ must not display a win rate anywhere the operator can allocate against it.
 Issue #2260 exists because a plausible number met none of these and was believed.
 
 1. **Point-in-time universe.** Selection only from instruments listed as of the
-   entry date. Pre-2026-06 this is impossible (§2.1) → those results carry a
-   `survivorship_unadjusted` flag in the data model, not just in prose.
+   entry date. Results that cannot satisfy it carry a `survivorship_unadjusted`
+   flag in the data model, not just in prose.
+   ⚠ **Scoped by §4.0 — "pre-2026-06 this is impossible (§2.1)" is now only half
+   true.** For **US stocks** it is satisfiable back to the 1990s: the Form 25
+   register supplies dated delistings (at 86.2% issuer resolution) and a bought
+   delisted-inclusive corpus supplies the bars. For the **4,749 non-US**
+   instruments it remains impossible for all history predating #2290's forward
+   record, and no purchase changes that. So the flag is not a legacy marker to
+   be retired — it is the permanent state of every non-US result.
 2. **Costs applied per trade — with an honest model, not a fictional one.**
    ⚠ The first draft said "use the spread as of the entry date". **That is
    unimplementable**: `quotes` holds one row per instrument (1,456 rows / 1,456
@@ -817,7 +878,7 @@ answer to a supplementary forward record.
 
 | when | what | why |
 | --- | --- | --- |
-| **NEW — first** | **research corpus ingest**: deep public OHLCV + delisted names, into their own tables, separate from the eToro-sourced `price_daily` | §0 — 45 years vs 4, survivorship-inclusive. Unblocks §5 criteria 1, 3, 5 and 6, none of which were satisfiable before |
+| **NEW — first** (#2282) | **research corpus ingest**, into its own tables, separate from the eToro-sourced `price_daily`. ⚠ **Two purchases, not one:** deep history on *survivors* is free today (the HF Parquet archive, 1962→2026); **delisted names are the paid part and land at the validation gate** | §0 — decades vs 4 years. Unblocks §5 criteria 3, 5 and 6 immediately; criterion 1 only once the delisted half lands |
 | **NEW — with it** | **delisting register from SEC Form 25 / 25-NSE** via EDGAR full-index | §0 — authoritative dated delisting record, free, and we already have the SEC fetch discipline. Gives point-in-time membership back to the 1990s rather than from today |
 | **NEW — cheap** | **measured eToro cost model**: the ~0.15% half-spread from §0, per class and price band | §5 criterion 2 — replaces the static guess with a measurement, and re-links research prices to execution reality |
 | **now — reinstated (#2290)** | **append-only universe-membership recording** | §4.0 option (3). For the 4,749 non-US instruments this is the *only* path there will ever be, and today's `sync_universe` overwrites the transition instead of recording it. Not optional, and not "downgraded" any more |
@@ -843,6 +904,14 @@ gate (#2260).** The measured landscape, the Yahoo-fingerprint technique and the
 `.claude/skills/data-sources/research-price-corpus.md` — read that, not a
 vendor-tier list in a spec that will go stale again.
 
+So that a future reader knows whether they need to open it: the skill is what
+carries the **vendor acceptance criteria** — delisted coverage measured against
+the 382-name cohort, split/dividend adjustment basis, security-level (not
+ticker-level) identity, symbol-history and ticker-reuse handling, listing and
+suspension dates, exchange/currency fields, and redistribution/ToS constraints.
+Any candidate is run against that cohort **before** purchase; a vendor's own
+survivorship claim is not evidence.
+
 ---
 
 ## 9. Open questions for the operator
@@ -850,10 +919,14 @@ vendor-tier list in a spec that will go stale again.
 1. ✅ **RESOLVED 2026-08-05 by §4.0 / #2289 — US-only, and it now binds every
    strategy, not just S-2.** The recommendation here was US-only on *homogeneity*
    grounds (currency and session effects). #2284 supplied a harder reason:
-   `us_equity` is the only slice of the universe whose survivorship can be
+   US stocks are the only slice of the universe whose survivorship can be
    corrected at all. "Add regions once #2244 is settled" is therefore no longer
    the unblocking condition — the condition is a non-US delisting record, which
    only #2290's forward recording will ever produce.
+   ⚠ And it produces one **only for periods after recording starts**. Forward
+   recording never corrects the past; it makes the constraint expire gradually
+   from the day it ships, which is the whole reason it ships now rather than
+   when non-US validation is wanted.
 2. **Rebalance cadence for S-2.** Monthly is standard and cheap. Weekly triples
    turnover and cost for marginal responsiveness. Recommendation: **monthly**.
 3. **Minimum history and price floor for eligibility.** ≥273 bars for S-2
