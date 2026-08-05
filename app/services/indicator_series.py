@@ -41,7 +41,7 @@ here closes those.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -157,16 +157,34 @@ class IndicatorSeries:
 class MultiIndicatorSeries:
     """For indicators that emit several aligned components (MACD, Bollinger,
     stochastic). Kept as named series rather than a list of tuples so a
-    consumer indexes by name and cannot transpose the components."""
+    consumer indexes by name and cannot transpose the components.
+
+    ⚠ ``frozen=True`` here buys immutability, NOT hashability — ``components``
+    is a dict, so hashing raises at runtime despite the generated ``__hash__``.
+    Same for ``BarSeries``, whose rows are ``OHLCVRow`` TypedDicts. Neither is
+    intended to be a set member or a dict key; if that is ever needed, convert
+    to a tuple of pairs rather than removing the ergonomics for every caller.
+    """
 
     components: dict[str, tuple[float | None, ...]]
     universe: Universe
     not_evaluable_indices: tuple[int, ...] = ()
     rule_set_version: str = RULE_SET_VERSION
-    _length: int = field(default=0)
+
+    def __post_init__(self) -> None:
+        # ⚠ Components must be mutually aligned, and the length is DERIVED from
+        # them rather than passed in. The first draft carried a `_length` field
+        # that nothing validated, so a caller constructing this directly could
+        # get a `__len__` disagreeing with the data — an alignment bug in the
+        # one object whose entire job is alignment.
+        lengths = {len(values) for values in self.components.values()}
+        if len(lengths) > 1:
+            raise ValueError(f"MultiIndicatorSeries components are not aligned: lengths {sorted(lengths)}")
 
     def __len__(self) -> int:
-        return self._length
+        for values in self.components.values():
+            return len(values)
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +424,6 @@ def macd_series(
         components={"line": tuple(line), "signal": tuple(signal), "histogram": tuple(hist)},
         universe=universe,
         not_evaluable_indices=fast_ema.not_evaluable_indices,
-        _length=n,
     )
 
 
@@ -453,7 +470,6 @@ def bollinger_series(
         components={"upper": tuple(upper), "middle": tuple(middle), "lower": tuple(lower)},
         universe=universe,
         not_evaluable_indices=tuple(unevaluable),
-        _length=n,
     )
 
 
@@ -516,5 +532,4 @@ def stochastic_series(
         components={"k": tuple(k), "d": tuple(d)},
         universe=universe,
         not_evaluable_indices=tuple(unevaluable),
-        _length=n,
     )

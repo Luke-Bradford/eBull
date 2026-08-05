@@ -370,3 +370,24 @@ class TestNullPropagation:
         for i, value in enumerate(result.components["d"]):
             if value is None and i >= 14 + 3 - 1:
                 assert i in listed, f"index {i}: None but neither warm-up nor listed"
+
+
+class TestMultiSeriesAlignment:
+    """[review] The length is DERIVED from the components, not carried beside
+    them. A `_length` field that nothing validated let a direct construction
+    produce a `__len__` disagreeing with the data — an alignment bug in the one
+    object whose entire job is alignment."""
+
+    def test_misaligned_components_rejected(self) -> None:
+        from app.services.indicator_series import MultiIndicatorSeries
+
+        with pytest.raises(ValueError, match="not aligned"):
+            MultiIndicatorSeries(
+                components={"a": (1.0, 2.0, 3.0), "b": (1.0, 2.0)},
+                universe=U,
+            )
+
+    def test_len_tracks_the_components(self) -> None:
+        assert len(macd_series(SERIES, universe=U)) == len(SERIES)
+        assert len(bollinger_series(SERIES, universe=U)) == len(SERIES)
+        assert len(stochastic_series(SERIES, universe=U)) == len(SERIES)
