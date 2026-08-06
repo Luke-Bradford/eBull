@@ -75,12 +75,36 @@ fi
 # mkdir is the atomic test-and-set available everywhere; macOS ships no flock(1).
 LOCK="$STATE_DIR/loop.lock"
 if ! mkdir "$LOCK" 2>/dev/null; then
-  holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
-    log "ABORT another ta_loop.sh holds $LOCK (pid $holder)"
-    exit 1
+  # ⚠ `mkdir` and the pid write are two operations, so a holder that has taken
+  # the lock microseconds ago has not written its pid yet. Reading that gap as
+  # "stale" would have the newcomer steal the lock from a live loop — the exact
+  # race the lock exists to prevent, reintroduced by the lock. So: retry the
+  # read for a second, and only fall back to the directory's age.
+  holder=""
+  for _ in 1 2 3 4 5; do
+    holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+    [[ -n "$holder" ]] && break
+    sleep 0.2
+  done
+
+  if [[ -n "$holder" ]]; then
+    if kill -0 "$holder" 2>/dev/null; then
+      log "ABORT another ta_loop.sh holds $LOCK (pid $holder)"
+      exit 1
+    fi
+    log "clearing stale lock $LOCK (holder $holder is gone)"
+  else
+    # No pid after a second. Either a holder was killed between mkdir and the
+    # write, or the lock predates a reboot. Age decides: under a minute is
+    # assumed live, because refusing to start is recoverable and stealing is
+    # not.
+    if [[ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+      log "ABORT $LOCK exists with no pid and is under a minute old -- assuming a live holder"
+      exit 1
+    fi
+    log "clearing stale lock $LOCK (no pid file, older than a minute)"
   fi
-  log "clearing stale lock $LOCK (holder '${holder:-unknown}' is gone)"
+
   rm -rf "$LOCK"
   mkdir "$LOCK" || { log "FATAL cannot take lock $LOCK"; exit 1; }
 fi
