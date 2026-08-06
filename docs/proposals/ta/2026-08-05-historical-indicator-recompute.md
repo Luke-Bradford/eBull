@@ -260,6 +260,18 @@ signals, or accept invalidating them later.
 7. No new table, column or dependency in the diff. Assert by inspection of
    `sql/` and `pyproject.toml` — both unchanged.
 
+   ⚠ **SUPERSEDED IN PART by #2311, 2026-08-06 — the dependency half only.**
+   Acceptance 5 failed as written: the shipped pure-Python form measured
+   **83.3 s** against this < 60 s bar, and #2311 declined to move the bar. The
+   fix is `numpy` on the two window indicators, which makes `pyproject.toml`
+   change — so this criterion and criterion 5 could not both be met.
+   Criterion 5 wins, for two reasons stated on #2311: it is the one phase 5
+   depends on, and `numpy` was **already a direct import** in
+   `app/services/risk_metrics.py` resolving through `pandas`, so the diff
+   declares an existing dependency rather than adding a new one.
+   ⚠ **The no-new-table / no-new-column half stands unchanged** — nothing here
+   is persisted, which is settled twice over (§1, sql/249, #2279 §6).
+
 ## 9. Tickets this mints
 
 Deliberately small and sequential; each is independently reviewable.

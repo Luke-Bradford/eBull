@@ -28,6 +28,16 @@ dependencies = [
   "redis[hiredis]>=5.0.0",
   "edgartools==5.30.2",
   "pandas>=3.0.2",
+  # #2311: imported DIRECTLY by app/services/indicator_series.py (window
+  # indicators) and app/services/risk_metrics.py (skew / kurtosis / percentile).
+  # It already resolved transitively as a `pandas` dependency — declared here so
+  # a direct import is not leaning on somebody else's transitive dep. ⚠ The
+  # risk_metrics import predates this line: the dependency was undeclared, not
+  # absent, and a pandas release that dropped numpy would have broken scoring
+  # with no diff to point at. Same reasoning as the `watchfiles` entry below.
+  # The features used (`sliding_window_view`, `ndarray.var`) date to 1.20; the
+  # floor is the major version the lock resolves within (2.4.4).
+  "numpy>=2.0",
 ]
 
 [tool.uv]
