@@ -704,6 +704,36 @@ unattributed, and S-3's results are not to be trusted until it is. If anything,
 S-3 is the test case: run it under the full criteria of §5 and see whether the
 76.8% survives.
 
+✅ **IMPLEMENTED 2026-08-06** — `app/services/strategies/s3_mean_reversion_in_trend.py`,
+a pure function against the phase-3a registry contract. Three notes it settles
+that this entry left open:
+
+- **The "10 bars elapsed" half of the exit is NOT a signal, and cannot be.** It is
+  measured from the entry it closes, so it is position state, and a pure per-bar
+  verdict function has none — S-1's stateless-exit reasoning, one step further.
+  It is not dropped: `MAX_HOLD_BARS = 10` is hashed into the strategy identity
+  (criterion 11) and enforced by `outcome_resolver.ExitLevels.max_hold_bars`
+  (phase 4a). The revert probe that matters most on this module is the one that
+  deletes it from `S3_PARAMS`, because nothing else in the code would notice.
+- ⚠ **A masked close refuses the whole TAIL of the series, not a 200-bar window** —
+  S-3's one structural difference from S-1, and a property of Wilder smoothing
+  rather than a choice: RSI carries state across every bar, so `rsi_series` has no
+  window for a hole to clear. Counted, not asserted away: over the validated
+  universe, **only 29 of 5,266 series carry a masked close at all — and they cost
+  80,476 bars** on which the 200-day average had recovered and the RSI never will
+  (`--census`, 2026-08-06). ⚠ That ratio is the point: ~2,775 refused bars per
+  affected series, where S-1 would have lost at most 200. The blast radius of a
+  single masked bar is the rest of the instrument's history.
+- **Both legs share ONE warm-up**, at the 200 bars `sma_200` implies. The exit
+  reads only `rsi_14` and is computable from bar 14, so this is a narrowing of
+  185 bars per series — wider than S-1's 150 — and it is counted: **957,878 exit
+  bars** over the validated universe (`--census`).
+
+⚠ **No performance claim is attached, deliberately.** §4's own survivorship table
+grades S-3's omission bias highest of the six, and #2260 remains unattributed —
+the causal Wilder RSI this module computes gives 51.8% / 50.4%, not 76.8%, so
+reproducing that figure would be evidence of a bug rather than of an edge.
+
 **S-4 · Volatility compression breakout**
 Setup: `atr_14(t)` sits in the bottom quartile of its own trailing 100-bar
 distribution, **computed on bars ≤ t**. Signal: `close(t) >` the highest close

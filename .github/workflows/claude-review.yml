@@ -92,18 +92,38 @@ jobs:
         if: steps.docs_only.outputs.docs_only != 'true'
         env:
           BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_ACTION: ${{ github.event.action }}
+        # ⚠ The range ENDS AT THE PR HEAD SHA, never at HEAD.
+        # actions/checkout on a `pull_request` event checks out
+        # refs/pull/N/merge — a synthetic merge of the PR head into the
+        # CURRENT base — so HEAD carries every sibling merge to main as
+        # well as this branch. `git diff $BEFORE_SHA..HEAD` therefore
+        # attributes other people's merged work to THIS push, in the one
+        # section the prompt tells the model to focus on.
+        # Measured on #2322: a 41-line, 1-file push was presented as 661
+        # lines across 7 files, 6 of them #2323's, and the review raised
+        # findings against them for two rounds.
+        # `gh pr diff` (the full diff above) is three-dot from the merge
+        # base and was never affected, which is why this stayed hidden.
         run: |
-          if [ "$EVENT_ACTION" = "synchronize" ] && [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
-            if git diff "$BEFORE_SHA"..HEAD > incremental.diff 2>&1; then
-              echo "has_incremental=true" > incremental_flag.txt
-              echo "Incremental diff: $(wc -l < incremental.diff) lines"
-            else
-              echo "::warning::git diff $BEFORE_SHA..HEAD failed — falling back to full diff only"
-              echo "has_incremental=false" > incremental_flag.txt
-              : > incremental.diff
-            fi
+          if [ "$EVENT_ACTION" != "synchronize" ] || [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "has_incremental=false" > incremental_flag.txt
+            : > incremental.diff
+          elif ! git rev-parse --verify --quiet "${BEFORE_SHA}^{commit}" >/dev/null \
+            || ! git rev-parse --verify --quiet "${AFTER_SHA}^{commit}" >/dev/null; then
+            # Expected after a force-push: the old head can be unreachable.
+            echo "::warning::before ($BEFORE_SHA) or after ($AFTER_SHA) sha unreachable — falling back to full diff only"
+            echo "has_incremental=false" > incremental_flag.txt
+            : > incremental.diff
+          elif git diff "$BEFORE_SHA".."$AFTER_SHA" > incremental.diff 2>incremental.err; then
+            # stderr goes to its own file: this diff is PROMPT INPUT, and a
+            # git warning inside it reads to the model as diff content.
+            echo "has_incremental=true" > incremental_flag.txt
+            echo "Incremental diff: $(wc -l < incremental.diff) lines ($BEFORE_SHA..$AFTER_SHA)"
           else
+            echo "::warning::git diff $BEFORE_SHA..$AFTER_SHA failed — falling back to full diff only"
+            cat incremental.err || true
             echo "has_incremental=false" > incremental_flag.txt
             : > incremental.diff
           fi
