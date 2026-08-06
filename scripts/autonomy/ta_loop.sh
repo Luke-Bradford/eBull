@@ -74,6 +74,13 @@ case "$SELF_DIR" in
   */var/autonomy/bin) inferred_worktree="${SELF_DIR%/var/autonomy/bin}" ;;
   */scripts/autonomy) inferred_worktree="${SELF_DIR%/scripts/autonomy}" ;;
 esac
+# A checkout at the filesystem root strips to the empty string rather than to
+# "/", and the emptiness test below would then read as "no path to infer" and
+# let the guard pass — silently, which is the one behaviour this guard exists
+# to rule out. Absurd layout, one line to close.
+[[ -z "$inferred_worktree" && -n "${SELF_DIR:-}" ]] && case "$SELF_DIR" in
+  /var/autonomy/bin|/scripts/autonomy) inferred_worktree="/" ;;
+esac
 if [[ -n "$inferred_worktree" && "$inferred_worktree" != "$WORKTREE" ]]; then
   echo "FATAL running from $inferred_worktree but TA_LOOP_WORKTREE=$WORKTREE" >&2
   echo "      refusing to drive another loop's checkout -- set TA_LOOP_WORKTREE to match," >&2
