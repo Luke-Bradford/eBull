@@ -551,6 +551,13 @@ class TestPerItemOutcomeRouting:
         ebull_test_conn.commit()
         assert report.api_errors == 2
         assert (report.invalid_identifier, report.unresolved_by_openfigi, report.item_errors) == (0, 0, 0)
+        # NOT `not_returned`: a batch that raised is a TRANSPORT failure,
+        # not a resolver that broke its totality contract. Without the
+        # explicit `if api_errors: continue` guard these rows would fall
+        # through to the missing-outcome branch and be misreported as a
+        # contract breach — same rows left pending either way, so only
+        # this assertion can see the difference.
+        assert report.not_returned == 0
         for cusip in ["TESTTRN001", "TESTTRN002"]:
             assert _status_of(ebull_test_conn, cusip) is None
 
