@@ -29,6 +29,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from app.services.outcome_ledger import (
     OutcomeRow,
@@ -50,11 +51,11 @@ _SIGNAL_INSERT = """
     INSERT INTO strategy_signals (
         strategy_id, strategy_version, instrument_id, signal_bar_date,
         signal_kind, verdict, not_evaluable_reason, fill_bar_date,
-        fill_price, universe
+        fill_price, universe, input_rule_set_versions
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(signal_bar_date)s,
         %(signal_kind)s, %(verdict)s, %(not_evaluable_reason)s, %(fill_bar_date)s,
-        %(fill_price)s, %(universe)s
+        %(fill_price)s, %(universe)s, %(input_rule_set_versions)s
     ) RETURNING signal_id
 """
 
@@ -97,6 +98,10 @@ def _insert_signal(
             "fill_bar_date": fill_bar_date,
             "fill_price": fill_price,
             "universe": "survivor_only",
+            # #2333 / sql/257 — NOT NULL with no default on the parent table.
+            # Immaterial to 4b's own assertions; stated so the parent row is
+            # constructible at all.
+            "input_rule_set_versions": Jsonb({"indicator_series": "indicator-series-v1+4b0000"}),
         },
     ).fetchone()
     assert row is not None

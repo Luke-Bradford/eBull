@@ -18,6 +18,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import BarSeries
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategy_registry import StrategyIdentity, StrategySignal
@@ -178,6 +179,14 @@ class TestBatchIntegrity:
         assert rows[0].strategy_version == _IDENTITY.version
         assert rows[0].instrument_id == 7
 
+    def test_input_rule_set_versions_come_from_the_identity(self) -> None:
+        """#2333, and the same argument one step further: the indicator rule
+        set is hashed INTO ``version``, so reading the stored copy off the same
+        object is what stops the column disagreeing with the hash beside it."""
+        rows = resolve_fills([_fired_at(0)], series=_series(_CONSECUTIVE), identity=_IDENTITY, instrument_id=7)
+        assert rows[0].input_rule_set_versions == _IDENTITY.input_rule_set_versions
+        assert dict(rows[0].input_rule_set_versions) == {"indicator_series": INDICATOR_SERIES_RULE_SET_VERSION}
+
 
 class TestLedgerRowRejects:
     """The row mirrors ``sql/255``'s CHECKs so a bad row fails before SQL."""
@@ -190,6 +199,7 @@ class TestLedgerRowRejects:
         "signal_kind": "entry",
         "verdict": "not_fired",
         "universe": "survivor_only",
+        "input_rule_set_versions": {"indicator_series": "indicator-series-v1+abc123"},
     }
 
     def test_universe_has_no_default(self) -> None:
@@ -199,6 +209,14 @@ class TestLedgerRowRejects:
         without_universe = {k: v for k, v in self._VALID.items() if k != "universe"}
         with pytest.raises(TypeError, match="universe"):
             LedgerRow(**without_universe)  # type: ignore[arg-type]
+
+    def test_input_rule_set_versions_has_no_default(self) -> None:
+        """#2333, same argument as ``universe``: an unrecorded indicator rule
+        set makes two signals computed under different indicator code
+        indistinguishable on the ledger."""
+        without = {k: v for k, v in self._VALID.items() if k != "input_rule_set_versions"}
+        with pytest.raises(TypeError, match="input_rule_set_versions"):
+            LedgerRow(**without)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(
         ("label", "overrides", "match"),
@@ -240,6 +258,25 @@ class TestLedgerRowRejects:
             ),
             ("unknown verdict", {"verdict": "maybe"}, "unknown verdict"),
             ("unknown kind", {"signal_kind": "hedge"}, "unknown signal kind"),
+            # #2333 — an EXACT mirror of sql/257's shape CHECK. Each of these
+            # is a state `NOT NULL` alone lets through.
+            ("empty rule-set mapping", {"input_rule_set_versions": {}}, "non-empty mapping"),
+            ("rule sets not a mapping", {"input_rule_set_versions": ["indicator_series"]}, "non-empty mapping"),
+            (
+                "blank rule-set version",
+                {"input_rule_set_versions": {"indicator_series": ""}},
+                "non-empty version string",
+            ),
+            (
+                "whitespace rule-set version",
+                {"input_rule_set_versions": {"indicator_series": "   "}},
+                "non-empty version string",
+            ),
+            (
+                "non-string rule-set version",
+                {"input_rule_set_versions": {"indicator_series": 5}},
+                "non-empty version string",
+            ),
         ],
     )
     def test_rejects(self, label: str, overrides: dict[str, object], match: str) -> None:

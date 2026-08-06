@@ -127,6 +127,17 @@ def test_stored_fill_price_is_open_of_the_next_bar_in_price_daily(
         (date(2024, 1, 9), "not_evaluable", "no_fill_bar", None, None),
     ]
 
+    # #2333 — the indicator rule set the signals were computed under, stored on
+    # every row and equal to the one hashed into `strategy_version`. The
+    # round-trip through JSONB is the genuinely-new DB behaviour here: the
+    # writer holds a read-only `MappingProxyType`, which psycopg cannot adapt
+    # without the explicit `Jsonb` wrapper.
+    rule_sets = ebull_test_conn.execute(
+        "SELECT DISTINCT input_rule_set_versions FROM strategy_signals WHERE instrument_id = %s",
+        (instrument_id,),
+    ).fetchall()
+    assert rule_sets == [(dict(_IDENTITY.input_rule_set_versions),)]
+
 
 def test_the_writer_refuses_to_overwrite_a_recorded_signal(
     ebull_test_conn: psycopg.Connection[tuple], instrument_with_a_calendar_gap: int

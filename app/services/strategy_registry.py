@@ -37,8 +37,10 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, get_args
 
+from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import IndicatorSeries, MultiIndicatorSeries, Universe
 
 STRATEGY_SET_ID = "strategy-registry-v1"
@@ -46,6 +48,43 @@ STRATEGY_SET_ID = "strategy-registry-v1"
 
 def _module_hash() -> str:
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+
+
+#: Every versioned rule set whose OUTPUT a strategy reads, keyed by the module
+#: that owns it. Hashed into ``StrategyIdentity.version`` and stored beside
+#: every ledger row.
+#:
+#: ⚠⚠ THIS IS A REGISTRY-WIDE CONSTANT, NOT A PER-STRATEGY DECLARATION, AND
+#: THAT IS THE POINT (#2333).
+#:
+#: The defect it closes: a strategy is `sma_series(fast) > sma_series(slow)` and
+#: has no other content, so a change to how the SMA is COMPUTED produces
+#: different signals — under an unchanged ``strategy_version``, whose key then
+#: treats the old and new rows as the same row. Same shape as the phase-4b
+#: prevention entry (*"a derived artefact's key must carry the version of every
+#: pipeline that can change it, not just the deriving module's own"*), which was
+#: fixed for ``strategy_outcomes`` and left unfixed one layer up.
+#:
+#: A per-strategy ``inputs=[...]`` field would be more precise and is rejected:
+#: the failure being fixed is an author not thinking about indicator versions at
+#: all, and a field they must remember to fill is the same omission with a
+#: nicer name. ``tests/test_strategy_registry.py::TestInputRuleSetsAreComplete``
+#: walks every module in ``app.services.strategies`` and fails if it imports a
+#: versioned rule set missing from here — so the coverage is checked, not
+#: promised.
+#:
+#: ⚠ The cost is OVER-INVALIDATION, twice over, and it is accepted knowingly
+#: rather than inherited: ``RULE_SET_VERSION`` hashes a module's whole source,
+#: so a comment edit in ``indicator_series.py`` moves every strategy's identity;
+#: and because this set is registry-wide, a strategy reading none of these
+#: series still moves with them. Both make stored signals visibly stale instead
+#: of silently mixed, which is the trade this epic has already taken three times
+#: (``price_quarantine``, ``price_structure``, ``indicator_series``).
+INPUT_RULE_SETS: Mapping[str, str] = MappingProxyType(
+    {
+        "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
+    }
+)
 
 
 Verdict = Literal["fired", "not_fired", "not_evaluable"]
@@ -141,6 +180,11 @@ class StrategyIdentity:
     ⚠ This is also why ``universe`` is NOT a separate column in that key:
     criterion 11 puts it *inside* the identity, so one identity spanning two
     universes is not one strategy.
+
+    ⚠ The hash also covers ``INPUT_RULE_SETS`` (#2333). The strategy's filter
+    logic is not only the module below — it is that module *plus the definition
+    of every indicator it reads*, and criterion 11 says changed filter logic is
+    a different strategy.
     """
 
     strategy_id: str
@@ -149,6 +193,26 @@ class StrategyIdentity:
     cost_model_id: str
     #: Source of the module DEFINING the strategy, not of this registry.
     source_hash: str
+
+    @property
+    def input_rule_set_versions(self) -> Mapping[str, str]:
+        """The rule sets this identity's version covers — see ``INPUT_RULE_SETS``.
+
+        ⚠ A PROPERTY, not a field, deliberately. A field is something a caller
+        can pass wrongly or a strategy author can forget; there is exactly one
+        correct value per process, so it is read rather than accepted.
+
+        ⚠ Consequence, stated because it is surprising: two identities with
+        equal FIELDS compare equal (``dataclass`` ``__eq__`` does not see a
+        property) while their ``version`` differs across processes running
+        different indicator code. That is the intended direction — the version
+        is what the ledger keys on, and it is the thing that must move.
+
+        The ledger writer reads it from HERE rather than importing the constant
+        itself, so the stored column and the hash it sits beside cannot
+        disagree — the argument ``LedgerRow`` already makes for ``universe``.
+        """
+        return INPUT_RULE_SETS
 
     @property
     def version(self) -> str:
@@ -160,6 +224,7 @@ class StrategyIdentity:
                 "cost_model_id": self.cost_model_id,
                 "source_hash": self.source_hash,
                 "registry": _module_hash(),
+                "input_rule_sets": dict(self.input_rule_set_versions),
             },
             sort_keys=True,
             separators=(",", ":"),

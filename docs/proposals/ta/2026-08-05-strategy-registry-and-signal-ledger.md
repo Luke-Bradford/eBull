@@ -86,13 +86,49 @@ collide on the key above.
 ```python
 STRATEGY_SET_VERSION = f"{STRATEGY_SET_ID}+{sha256(
     module_source || canonical_json(params) || universe || cost_model_id
+    || canonical_json(INPUT_RULE_SETS)          # #2333
 )[:12]}"
 ```
 
+⚠ **The last term was missing until #2333, and the omission was the same class
+of defect one layer up.** The hash covered the strategy's own module but not
+`indicator_series.RULE_SET_VERSION` — and a strategy IS its indicators: S-1 is
+`sma_series(fast) > sma_series(slow)` and has no other content. So a change to
+how the SMA, RSI or ATR is COMPUTED produced different signals under an
+UNCHANGED `strategy_version`, and the key above then treated the old and new
+rows as the same row. Criterion 11 calls changed filter logic a different
+strategy; an indicator definition is that filter logic.
+
+✅ **FIXED 2026-08-06** — `strategy_registry.INPUT_RULE_SETS` is in the payload,
+and `strategy_signals.input_rule_set_versions` (`sql/257`) stores the same
+mapping for querying. Three notes it settles:
+
+- **A registry-wide constant, not a per-strategy `inputs=[…]` field.** The
+  failure being fixed is an author not thinking about indicator versions at all;
+  a field they must remember to fill is the same omission with a nicer name.
+  Coverage is checked rather than promised —
+  `tests/test_strategy_registry.py::TestInputRuleSetsAreComplete` walks every
+  module in `app.services.strategies` and fails if it imports a versioned rule
+  set the registry does not name. ⚠ Direct imports only; a strategy reaching a
+  pipeline through a helper is not caught.
+- **The column is NOT key material**, unlike `strategy_outcomes.input_rule_set_version`.
+  It is *inside* `strategy_version` here, so the corrected row already has a
+  distinct key — whereas 4b's input version is outside the resolver's hash,
+  which is what made the corrected outcome unstorable there. Same lesson, two
+  different remedies because the two hashes cover different things.
+- **Added while both ledgers were empty** — measured 2026-08-06:
+  `select count(*), count(distinct strategy_version) from strategy_signals`
+  → `(0, 0)`, `select count(*) from strategy_outcomes` → `0`. After rows exist,
+  the indicator version behind them is recoverable only by guessing which
+  historical module source hashes into the digest, i.e. not recoverable.
+
 Over-invalidation stays the deliberate, inherited trade — a comment edit
 changes the version, making stored signals *visibly stale rather than silently
-mixed*, exactly as `price_quarantine` argues. A signal row stores the version
-that produced it, so an outcome is never reinterpreted under new logic.
+mixed*, exactly as `price_quarantine` argues. ⚠ #2333 widens it twice: a comment
+edit in `indicator_series.py` now moves every strategy's identity, and because
+the set is registry-wide, a strategy reading none of those series moves with
+them. Accepted knowingly. A signal row stores the version that produced it, so
+an outcome is never reinterpreted under new logic.
 
 ## 3. The registry
 
