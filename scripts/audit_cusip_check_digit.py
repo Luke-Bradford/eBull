@@ -46,6 +46,7 @@ import sys
 from typing import Final
 
 import psycopg
+from psycopg import sql
 
 from app.config import settings
 
@@ -128,9 +129,16 @@ def _reset_invalid(conn: psycopg.Connection[tuple]) -> None:
     print(" WHERE resolution_status = 'openfigi_unknown'")
     print("   AND source IS NOT NULL")
     print("   AND cusip IN (")
+    # ⚠ Quote through psycopg, never an f-string. These values come from filer
+    # 13F submissions, so a stored CUSIP containing a single quote would close
+    # the literal early and the rest would be pasted into psql as SQL. The
+    # script only PRINTS the statement, which makes it feel harmless — it is
+    # not: the whole point of this output is that an operator runs it verbatim,
+    # so the injection lands one copy-paste later instead of here.
+    quoted = [sql.Literal(c).as_string(conn) for c in invalid]
     # Commas BETWEEN chunks only — a trailing comma before ')' is a
     # syntax error, and this output exists to be pasted verbatim.
-    lines = [", ".join(f"'{c}'" for c in invalid[i : i + 8]) for i in range(0, len(invalid), 8)]
+    lines = [", ".join(quoted[i : i + 8]) for i in range(0, len(quoted), 8)]
     print(",\n".join(f"       {line}" for line in lines))
     print("   );")
     print("COMMIT;")

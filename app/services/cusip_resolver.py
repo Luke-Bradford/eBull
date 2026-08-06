@@ -1629,7 +1629,11 @@ def _sweep_pass(
         """
         rows = _tombstone_bulk_rows_for_cusip(conn, cusip=cusip, status=status)
         if rows == 0:
-            logger.info(
+            # warning, not info: this is the one path that silently drops a
+            # counter increment, so at info level the sweep's own totals
+            # disagree with the table and nothing says why unless verbose
+            # logging happened to be on.
+            logger.warning(
                 "openfigi sweep: tombstone %s for cusip %s updated 0 rows (raced status change)",
                 status,
                 cusip,
