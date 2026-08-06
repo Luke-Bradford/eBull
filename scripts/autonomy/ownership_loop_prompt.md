@@ -98,7 +98,12 @@ yourself; 10 and 11 need the operator.
 ## Workflow
 
 - `git fetch origin` then `git checkout -b fix/<issue>-<short> origin/main`.
-  NEVER commit to main.
+  NEVER commit to main. ⚠ Branch names are load-bearing here: `loop_status.sh`
+  attributes open PRs to a loop by branch pattern, so this loop must use
+  `fix/<issue>-<short>`, or `chore/ownership-<short>` / `docs/ownership-<short>`
+  for tooling and docs. A branch outside those three shapes still works — it
+  just stops appearing under this loop in the status view, which is where an
+  operator looks to see whether you are blocked.
 - Schema → service → tests → glue.
 - **Revert-probe every invariant test**: inject the defect it guards, confirm
   the test FAILS, restore, confirm it passes. ⚠ When injecting via string

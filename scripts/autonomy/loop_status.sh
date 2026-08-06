@@ -21,9 +21,14 @@
 set -uo pipefail
 
 # name|worktree|branch-glob-for-PR-listing
+#
+# ⚠ The glob must match ONLY the branches that loop opens, or the section is
+# worse than useless — it shows another loop's PR under this loop's heading and
+# reads as "mine". `*` is never right here. `|` alternates; each loop's prompt
+# fixes its branch naming, so these two lists have to move together with them.
 LOOPS=(
   "ta|/Users/lukebradford/Dev/.ebull-autonomy|feature/2240-*"
-  "ownership|/Users/lukebradford/Dev/.ebull-ownership|*"
+  "ownership|/Users/lukebradford/Dev/.ebull-ownership|fix/*|chore/ownership-*|docs/ownership-*"
 )
 
 want="${1:-}"
@@ -83,8 +88,12 @@ report_loop() {
 
   # 3. Open PRs it may be waiting on, narrowed to the branches it owns.
   echo "--- open PRs (headRef $pr_glob)"
+  # Anchored: an unanchored `fix/.*` matches any branch merely CONTAINING
+  # "fix/", which is how a filter starts lying quietly.
+  local pattern
+  pattern="^($(printf '%s' "$pr_glob" | sed 's/\*/.*/g'))$"
   gh pr list --state open --limit 20 --json number,title,headRefName \
-    --jq ".[] | select(.headRefName | test(\"$(printf '%s' "$pr_glob" | sed 's/\*/.*/g')\")) | \"  #\(.number)  \(.headRefName)  \(.title[0:60])\"" 2>/dev/null \
+    --jq ".[] | select(.headRefName | test(\"$pattern\")) | \"  #\(.number)  \(.headRefName)  \(.title[0:60])\"" 2>/dev/null \
     || echo "  (gh unavailable — check \`gh auth status\`)"
   echo
 
