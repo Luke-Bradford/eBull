@@ -674,3 +674,95 @@ class TestRunningSumPrecision:
             exact = math.fsum(closes[i - 19 : i + 1]) / 20
             assert middle[i] is not None
             assert abs(middle[i] - exact) <= 1e-12 * abs(exact), f"index {i}"  # type: ignore[operator]
+
+
+# ---------------------------------------------------------------------------
+# The conversion cache
+# ---------------------------------------------------------------------------
+
+
+class _CountingDecimal(Decimal):
+    """A Decimal that records every `float()` taken of it.
+
+    ⚠ Counts on the CLASS, so a test must reset before measuring.
+    """
+
+    conversions = 0
+
+    def __float__(self) -> float:
+        type(self).conversions += 1
+        return super().__float__()
+
+
+def _counting_bars(closes: list[int]) -> BarSeries:
+    rows: list[ta.OHLCVRow] = [
+        {
+            "open": _CountingDecimal(str(c)),
+            "high": _CountingDecimal(str(c + 1.5)),
+            "low": _CountingDecimal(str(c - 1.5)),
+            "close": _CountingDecimal(str(c)),
+            "volume": 1_000,
+        }
+        for c in closes
+    ]
+    start = date(2024, 1, 1)
+    return BarSeries(dates=tuple(start + timedelta(days=i) for i in range(len(closes))), rows=tuple(rows))
+
+
+class TestConversionHappensOncePerField:
+    """Decimal -> float conversion is O(bars), not O(bars x indicators).
+
+    ⚠ THIS IS A CORRECTNESS-SHAPED TEST FOR A PERFORMANCE INVARIANT, and it
+    exists because nothing else in this file would notice if the cache went
+    away. Every value stays right without it — the only symptom is that the
+    corpus sweep goes from ~35 s back towards the 305.6 s that made ticket 2a
+    add the cache in the first place. A regression with no failing test is
+    exactly the kind that survives review.
+
+    Counting `__float__` rather than asserting `x is x` is deliberate: identity
+    proves a value was memoised, not that the conversion happened ONCE. A cache
+    populated per-call would satisfy identity and still be O(bars x indicators).
+
+    ⚠ Also pins that nothing converts `open`. It is the one OHLC field with no
+    float view, and the count would rise by `len(bars)` if a future indicator
+    reached for it without adding one.
+    """
+
+    def test_seven_indicators_convert_each_field_exactly_once(self) -> None:
+        bars = _counting_bars(_CLOSES)
+        _CountingDecimal.conversions = 0
+
+        sma_series(bars, universe=U, period=20)
+        ema_series(bars, universe=U, period=12)
+        rsi_series(bars, universe=U)
+        atr_series(bars, universe=U)
+        macd_series(bars, universe=U)
+        bollinger_series(bars, universe=U)
+        stochastic_series(bars, universe=U)
+
+        # close, high, low — once each per bar. `open` is never converted.
+        assert _CountingDecimal.conversions == 3 * len(_CLOSES)
+
+    def test_the_ndarray_views_reuse_the_float_views(self) -> None:
+        """`array_*` must build from the float cache, not re-convert Decimals."""
+        bars = _counting_bars(_CLOSES)
+        _ = bars.float_closes, bars.float_highs, bars.float_lows
+        _CountingDecimal.conversions = 0
+
+        _ = bars.array_closes, bars.array_highs, bars.array_lows
+
+        assert _CountingDecimal.conversions == 0
+
+    def test_the_cache_survives_on_a_frozen_instance(self) -> None:
+        """The frozen dataclass must not defeat the memoisation.
+
+        `cached_property` writes into `instance.__dict__`; `frozen=True` only
+        overrides `__setattr__`. If a future edit adds `slots=True` there is no
+        instance `__dict__` to write into and this fails at first ACCESS — the
+        class definition itself stays legal, so nothing else would catch it.
+        """
+        bars = _counting_bars(_CLOSES)
+        assert bars.float_closes is bars.float_closes
+        assert bars.array_closes is bars.array_closes
+        with pytest.raises(Exception):  # noqa: B017 - FrozenInstanceError, by construction
+            bars.dates = ()  # type: ignore[misc]

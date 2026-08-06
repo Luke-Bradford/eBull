@@ -28,10 +28,16 @@ WHAT IS NOT PROBED, AND WHY
 loops, so this branch injects no defect into them and probing them here would
 be probing ticket 2a's work a second time.
 
-⚠ **The float -> ndarray cache.** Corrupting it (returning the wrong field)
+⚠ **CORRUPTING the float -> ndarray cache** — returning the wrong field. That
 fails essentially every test in the file, so a probe would report ``CAUGHT``
 without discriminating anything. The prefix-equivalence probes below cover the
 same ground with a fixture that says which value moved.
+
+⚠ REMOVING that cache is the opposite shape and IS probed (the last three
+entries). It breaks no value and fails no other test — the only symptom is the
+corpus sweep drifting back towards the 305.6 s that made ticket 2a add the
+cache. A performance invariant with no failing test is the kind that survives
+review, so it gets a counting test and a probe like any other.
 """
 
 from __future__ import annotations
@@ -148,6 +154,52 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
             )
         ],
         "test_stochastic_d_inherits_k_unevaluability",
+    ),
+    (
+        # ⚠ THE ONLY DEFECT HERE THAT BREAKS NO VALUE. Dropping the memoisation
+        # leaves every number in this module correct and every other test in the
+        # file green — the sole symptom is the corpus sweep drifting back
+        # towards the 305.6 s that made ticket 2a add the cache. That is why the
+        # counting test exists, and why the harness docstring's "not probed"
+        # note does not cover this: it declines to probe CORRUPTING the cache
+        # (returns the wrong field, fails everything, discriminates nothing).
+        # Removing it is the opposite shape.
+        "the float view converts on every access instead of once",
+        [
+            (
+                "    @cached_property\n    def float_closes(self) -> list[float | None]:",
+                "    @property\n    def float_closes(self) -> list[float | None]:",
+            )
+        ],
+        "test_seven_indicators_convert_each_field_exactly_once",
+    ),
+    (
+        # The ndarray view re-entering the uncached builder rather than reading
+        # the float view. Values identical; conversions doubled.
+        "the ndarray view re-converts the Decimals instead of reusing the float view",
+        [
+            (
+                "        return np.array(self.float_closes, dtype=float)",
+                '        return np.array(self._floats("close"), dtype=float)',
+            )
+        ],
+        "test_the_ndarray_views_reuse_the_float_views",
+    ),
+    (
+        # ⚠ Two-line anchor because `@dataclass(frozen=True)` also decorates
+        # `IndicatorSeries` — guard 1's exact failure mode.
+        #
+        # `slots=True` removes the instance `__dict__` that `cached_property`
+        # writes into. It is legal at class-definition time and fails at first
+        # ACCESS, so nothing but an access-path test catches it.
+        "slots=True added, leaving cached_property no __dict__ to write into",
+        [
+            (
+                "@dataclass(frozen=True)\nclass BarSeries:",
+                "@dataclass(frozen=True, slots=True)\nclass BarSeries:",
+            )
+        ],
+        "test_the_cache_survives_on_a_frozen_instance",
     ),
 ]
 
