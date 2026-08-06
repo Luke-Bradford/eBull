@@ -59,13 +59,41 @@ Safe to run this daemon WITHOUT the AI loop and with the kill switch ON — the
 kill switch gates only the trade jobs (`morning_candidate_review`,
 `retry_deferred`), not data ingestion.
 
-## `ta_loop.sh` — the headless TA loop
+## `ta_loop.sh` — the headless loop driver (TWO loops run on it)
 
 ```bash
-scripts/autonomy/ta_loop.sh          # run until stopped
-touch  <worktree>/var/autonomy/PAUSE # graceful stop after the current iteration
-cat    <worktree>/var/autonomy/status.md   # what it last did
+scripts/autonomy/loop_status.sh              # every loop, one screen
+scripts/autonomy/loop_status.sh ownership    # just one
+touch  <worktree>/var/autonomy/PAUSE         # graceful stop after this iteration
 tail -f <worktree>/var/autonomy/loop.log
+```
+
+| loop | worktree | launchd label | prompt |
+| --- | --- | --- | --- |
+| TA (#2240) | `~/Dev/.ebull-autonomy` | `com.ebull.ta-loop` | `ta_loop_prompt.md` |
+| ownership / filings | `~/Dev/.ebull-ownership` | `com.ebull.ownership-loop` | `ownership_loop_prompt.md` |
+
+**One driver, two configurations.** `ta_loop.sh` is loop-agnostic: worktree,
+state directory and prompt are env-driven and the single-instance lock lives at
+`$TA_LOOP_STATE/loop.lock`, so the two agents cannot collide. Adding a third is
+a worktree, a prompt and a plist.
+
+⚠ **A new plist MUST set `TA_LOOP_WORKTREE`.** `WorkingDirectory` does not imply
+it — the driver defaults to the TA worktree, and the state directory (hence the
+lock) is derived from it. Standing up the ownership loop with the prompt set but
+not the worktree pointed it at the TA loop's checkout: three
+`ABORT another ta_loop.sh holds …/.ebull-autonomy/var/autonomy/loop.lock` in 21
+seconds, one per `KeepAlive` respawn. The lock did its job. Nothing *said* what
+was wrong, so the driver now refuses outright when its installed path
+(`<worktree>/var/autonomy/bin`) disagrees with `TA_LOOP_WORKTREE`.
+
+⚠ **The tracked script is the source; `var/autonomy/bin/` is what runs.** The
+driver drives a worktree whose branch changes every iteration, so a driver read
+from a tracked path is deleted by its own `git checkout` the first time the loop
+branches off an older commit. `/var/*` is gitignored. Re-copy after any change:
+
+```bash
+cp scripts/autonomy/ta_loop.sh <worktree>/var/autonomy/bin/
 ```
 
 ⚠ **Deliberately dumb, and that is the design.** The previous eBull loop ran
