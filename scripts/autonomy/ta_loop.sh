@@ -188,10 +188,20 @@ while true; do
   # occurrence inside a larger payload cannot match.
   # (grep is the DOWNSTREAM command here and its status is the one being read
   # — this is not the `gate | tail` pattern that hides an exit code.)
+  # jq when it is there (/usr/bin/jq ships with macOS, so it normally is):
+  # `.type` is then the TOP-LEVEL field and a nested "type":"result" inside
+  # quoted tool output cannot match at all. `fromjson?` skips any line that is
+  # not valid JSON rather than aborting the scan. The regex below is the
+  # fallback, not the primary.
   result_ok=0
-  result_line="$(grep -E '^\{.*"type":"result".*\}$' "$transcript" | tail -1)"
-  if [[ -n "$result_line" ]] && printf '%s\n' "$result_line" | grep -q '"is_error":false'; then
-    result_ok=1
+  if command -v jq >/dev/null 2>&1; then
+    verdict="$(jq -R -r 'fromjson? | select(.type=="result") | .is_error' "$transcript" 2>/dev/null | tail -1)"
+    [[ "$verdict" == "false" ]] && result_ok=1
+  else
+    result_line="$(grep -E '^\{.*"type":"result".*\}$' "$transcript" | tail -1)"
+    if [[ -n "$result_line" ]] && printf '%s\n' "$result_line" | grep -q '"is_error":false'; then
+      result_ok=1
+    fi
   fi
 
   if [[ $rc -eq 0 && $result_ok -eq 1 ]]; then
