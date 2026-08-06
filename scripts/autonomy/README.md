@@ -58,3 +58,38 @@ the auto-reload-on-merge from #2144 was silently dead for weeks.
 Safe to run this daemon WITHOUT the AI loop and with the kill switch ON — the
 kill switch gates only the trade jobs (`morning_candidate_review`,
 `retry_deferred`), not data ingestion.
+
+## `ta_loop.sh` — the headless TA loop
+
+```bash
+scripts/autonomy/ta_loop.sh          # run until stopped
+touch  <worktree>/var/autonomy/PAUSE # graceful stop after the current iteration
+cat    <worktree>/var/autonomy/status.md   # what it last did
+tail -f <worktree>/var/autonomy/loop.log
+```
+
+⚠ **Deliberately dumb, and that is the design.** The previous eBull loop ran
+through the autonomy-engine supervisor and died on 2026-07-23 spinning on
+`WARN cannot determine kind for in-flight 'coder' (state unreadable)` — it
+wedged on its own state machine and nobody noticed for two weeks. This one has
+no state machine: one iteration is one `claude -p` call, and a dead iteration
+costs exactly one iteration.
+
+Three things it inherits from real incidents:
+
+- **Runs in its own git worktree** (`/Users/lukebradford/Dev/.ebull-autonomy`).
+  Two Claude instances on `~/Dev/eBull` clobber each other's uncommitted work —
+  prevention-log entry, 2026-07-16.
+- **PAUSE is announced in `status.md`, not just the log.** The engine's loop sat
+  paused for a MONTH printing its pause line into a log nobody opened.
+- **Never pipes a command it needs the exit code or progress from.** A pipe
+  returns the pipe's status and buffers output; that cost 7 minutes of
+  misdiagnosis on 2026-08-05.
+
+It stops itself after 3 consecutive failed iterations rather than hammering —
+three in a row means something structural that another immediate attempt will
+not fix.
+
+⚠ It has the dev **database** but NOT the dev **stack**: `:8000` and `:5173`
+serve `~/Dev/eBull`, not the worktree. Full-population verification works;
+live-endpoint dev-verify does not.
