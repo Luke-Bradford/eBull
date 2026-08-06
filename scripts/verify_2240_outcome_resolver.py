@@ -87,7 +87,14 @@ EQUIVALENCE_HOLD = 20
 #: stays visible, which a single corpus-wide query gives up.
 _CHUNK = 20
 
-_SKIP_LABELS = ("no_atr", "atr_not_positive", "entry_not_positive", "no_fill_bar")
+#: Skips that depend only on the bar and its ATR, so one grid cell's count
+#: stands for every cell. ASSERTED below, never assumed.
+_GRID_INDEPENDENT_SKIPS = ("no_atr", "atr_not_positive", "entry_not_positive", "no_fill_bar")
+
+#: ⚠ Skips that DO vary by grid cell, and must therefore be printed per cell.
+#: There is exactly one, and it was found by the assertion below firing — see
+#: `_levels`.
+_GRID_DEPENDENT_SKIPS = ("levels_do_not_bracket",)
 
 
 class Series:
@@ -152,11 +159,41 @@ def _levels(entry: Decimal, atr: float | None, tp_mult: Decimal, hold: int) -> t
     stop = _compute_stop_loss(entry, atr_dec)
     target = entry + tp_mult * atr_dec
     if not stop < entry < target:
-        # Unreachable given the guards above — `_compute_stop_loss` clamps to at
-        # least 2% below entry and a positive ATR puts the target above it — but
-        # asserted rather than assumed, because it is the resolver's own
-        # precondition and a silent skip here would be an invisible narrowing.
-        return None, "atr_not_positive"
+        # ⚠ This branch was written as "unreachable — a positive ATR puts the
+        # target above the entry" and labelled `atr_not_positive`. Both were
+        # wrong. The cross-cell assertion below is what found it: the count
+        # differed between grid cells, which a bar-and-ATR-only skip cannot.
+        #
+        # ROOT CAUSE — a FLAT price run, not a precision curiosity. On a run of
+        # bars with open = high = low = close the true range is 0 every bar, and
+        # Wilder smoothing (`atr = (13*atr_prev + tr)/14`) decays the ATR
+        # geometrically toward zero WITHOUT EVER REACHING IT in float. So
+        # `atr > 0` stays true while the ATR is economically zero. Worked
+        # example, series 2016 around 2018-07-20 — 21 consecutive bars holding
+        # ONE distinct OHLC tuple, o=h=l=c=1651206.625:
+        #     SELECT count(*), count(DISTINCT (open, high, low, close))
+        #     FROM (SELECT open, high, low, close,
+        #                  row_number() OVER (ORDER BY bar_date) rn
+        #           FROM research_price_daily WHERE series_id = 2016) t
+        #     WHERE rn BETWEEN 3480 AND 3500;
+        #
+        # PROXIMATE CAUSE — `Decimal` is arbitrary-PRECISION, not infinite:
+        # the default context is 28 significant digits, so once the ATR is that
+        # small relative to the price, `entry + tp_mult * atr` ROUNDS BACK TO
+        # `entry`. The rounding threshold scales with `tp_mult`, which is why
+        # the count is GRID-DEPENDENT and the signal totals rise monotonically
+        # across the grid. ⚠ The counts are NOT written here — this arm computes
+        # and prints them per cell under `levels_do_not_bracket`, so a
+        # re-harvest cannot leave a hand-copied figure lying:
+        #     uv run python -m scripts.verify_2240_outcome_resolver --distribution
+        #
+        # ⚠ Consequence for phase 5, recorded because it is not obvious:
+        # `atr > 0` is NOT a sufficient "this instrument has volatility" gate.
+        # Skipping here is correct — a target equal to the entry is a zero-width
+        # bracket and not a trade, and the resolver rejects it by its own
+        # precondition — but only the NAME and the countability were wrong, and
+        # a strategy filter that trusts `atr > 0` will admit these flat runs.
+        return None, "levels_do_not_bracket"
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=hold), None
 
 
@@ -264,16 +301,27 @@ def distribution(conn: psycopg.Connection[tuple]) -> int:
         )
 
     print("\n  --- signals with no bracket at all (excluded above) ---", flush=True)
-    # Every skip reason depends only on the bar and its ATR, never on the grid
-    # cell — so one cell's counts stand for all of them. Asserted rather than
-    # assumed: if that ever stops holding, printing one cell would silently
-    # under-report the exclusions criterion 9 requires be visible.
+    # ⚠ ASSERTED, never assumed. These skips depend only on the bar and its ATR,
+    # so one cell's count stands for every cell — but if that stops holding,
+    # printing one cell silently under-reports the exclusions criterion 9
+    # requires be visible. The assertion has already earned its keep once: it
+    # caught `levels_do_not_bracket` (then mislabelled `atr_not_positive`)
+    # varying across the grid, which is how the Decimal-precision rounding in
+    # `_levels` was found at all.
     first = cells[(TP_MULTIPLES[0], MAX_HOLDS[0])]
-    for label in _SKIP_LABELS:
+    for label in _GRID_INDEPENDENT_SKIPS:
         if any(cell[label] != first[label] for cell in cells.values()):
             raise AssertionError(f"skip reason {label!r} differs across grid cells; it must not")
-    for label in _SKIP_LABELS:
-        print(f"  {label:<20} {first[label]:>14,}", flush=True)
+    for label in _GRID_INDEPENDENT_SKIPS:
+        print(f"  {label:<24} {first[label]:>14,}", flush=True)
+
+    # ⚠ Grid-DEPENDENT, so printed PER CELL. Collapsing these into one number is
+    # the exact under-reporting the assertion above exists to prevent.
+    for label in _GRID_DEPENDENT_SKIPS:
+        print(f"\n  --- {label} (varies by cell — see `_levels`) ---", flush=True)
+        print(f"  {'TP×ATR':>7} {'hold':>5} {'signals':>14}", flush=True)
+        for (tp, hold), cell in cells.items():
+            print(f"  {tp:>7} {hold:>5} {cell[label]:>14,}", flush=True)
 
     print(f"\n  acceptance 14 — bars violating low <= open <= high : {ohlc_inconsistent:,}", flush=True)
     print("    ⚠ measured, NOT repaired — bar validity is price_quarantine's, not this module's", flush=True)

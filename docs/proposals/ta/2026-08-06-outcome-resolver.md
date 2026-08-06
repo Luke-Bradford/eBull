@@ -349,6 +349,19 @@ module's `RULE_SET_VERSION`, which is recorded on every outcome (§3.7).
     what you reject" applied to this module's own refusals. The SL rule is held
     fixed at `entry_timing._compute_stop_loss` (the repo's own, cited, and what
     S5 swept against) so the grid varies what this phase actually parameterises.
+
+    ⚠ The census also asserts **which of its skip buckets are grid-invariant**
+    before printing one cell's count as if it stood for all of them. That
+    assertion found a real defect on the first full-corpus run: a branch
+    commented "unreachable" fires on **flat price runs** (`open = high = low =
+    close`, so true range is 0 and Wilder smoothing decays the ATR toward zero
+    without reaching it), where `entry + tp×atr` rounds back to `entry` under
+    `Decimal`'s 28-digit context. It was filed under `atr_not_positive` — a
+    label that is false, since the ATR is positive — and now has its own,
+    `levels_do_not_bracket`, printed per cell because it varies with the target
+    multiple. ⚠ **Consequence for phase 5: `atr > 0` is not a "this instrument
+    has volatility" gate.** A strategy eligibility filter or an ATR-divided
+    position sizer that trusts it will admit these runs.
 14. **OHLC internal consistency is measured, not enforced.** `low <= open <=
     high` is definitional, and a bar violating it makes §3.2 nonsense — but bar
     validity belongs to `price_quarantine`, not here. The harness counts
