@@ -403,6 +403,47 @@ Two things that made the fixtures reliable rather than approximate:
   a later fixture edit drifts off the boundary and the test keeps passing while
   testing nothing — which is the vacuous-test class this whole section is about.
 
+### ⚠ A reference implementation imports NONE of the constants it validates
+
+Precedent twice in one day (#2240 S-3 and S-4, 2026-08-06) — two of the three
+strategies written so far, which makes it the default mistake rather than a slip.
+Both had a reference re-derivation written by a deliberately different algorithm
+(S-4's `sorted(window).index(v)` against the module's count-of-comparisons), and
+both fed it the module's own constants. Probes that shifted the constants
+(S-3: period 14 → 13; S-4: window 100 → 50 and lookback 20 → 10) reported
+`NOT CAUGHT`: the reference moved with the code and both sides agreed on a rule
+neither was checking.
+
+**Independence of the ALGORITHM is not independence of the PARAMETERS**, and a
+parameter is exactly what a spec fixes. So: **a reference transcribes the spec's
+numbers by hand and imports none of them.** The divergence between the
+hand-written literal and the module's constant IS the test; sharing the constant
+deletes it while leaving everything looking right.
+
+**The shape that works, and it needs both halves:**
+
+1. Declare the spec's numbers as `SPEC_*` literals at the top of the test file,
+   with the rule quoted verbatim beside them. Every expected value reads those.
+2. Add exactly ONE bridge test (`TestSpecConstants`) asserting the module's
+   constants equal the `SPEC_*` ones, and let it be the only place the module's
+   constants are read as values. Without it the reference is independent but
+   nothing notices the code quietly using a different number — a constant change
+   then makes other tests silently wrong instead of failing one loudly.
+
+Scope, because over-applying this is its own defect: the rule binds the numbers
+an ASSERTION depends on. Using the module's constant as scaffolding — sizing a
+fixture window, indexing a warm-up boundary — is fine and often clearer; the
+bridge test is what keeps the two in step.
+
+Corollary for probe harnesses: **write a revert probe for a spec constant even
+when it looks inert.** Neither instance was visible until a probe mutated one —
+in S-4's case 37 tests, `ruff`, `pyright` and a clean 32.5M-bar full-population
+arm all passed, the arm clean *because* it was fed the same constants indirectly.
+A constant is the single thing a reference is most tempted to share.
+
+Live examples: `tests/test_strategy_s3.py` and `tests/test_strategy_s4.py`
+(`SPEC_*` block + `TestSpecConstants`).
+
 ## A "neutral" fixture is not neutral if the thing under test classifies it
 
 Bit twice in one PR (#2279, 2026-08-05), and both times the test failed against
