@@ -341,6 +341,36 @@ def _compare(
     # tie in `_margin`, since a tie is only sound where the RSI halves agree.
     rsi_python = rsi_series(series, universe=UNIVERSE, period=RSI_PERIOD).values
 
+    # ⚠ THE ALIGNMENT IS ENFORCED, NOT ASSUMED — and the distinction is this
+    # prevention log's own ("An independent verifier that is only ACCIDENTALLY
+    # right", #2240 4a): an arm that leans on an invariant must either enforce it
+    # or encode it, because a green run cannot tell you which it did.
+    #
+    # Every length here is equal BY CONSTRUCTION today — `BarSeries.__post_init__`
+    # pins dates against rows, the streaming loop appends once per row to all four
+    # lists, and `IndicatorSeries`' contract is `len(values) == len(input)`. But
+    # that last one is a documented promise each `*_series` function keeps, not
+    # something `IndicatorSeries` can validate (it holds no reference to the bars).
+    # So a future indicator that returns a trimmed series would surface here as an
+    # `IndexError` from a bare `[i]` — a stack trace naming the wrong thing —
+    # rather than as the alignment defect this arm exists to catch. (Review bot,
+    # PR #2322.)
+    lengths = {
+        "dates": len(dates),
+        "rows": len(rows),
+        "trend_sql": len(trend_sql),
+        "rsi_sql": len(rsi_sql),
+        "rsi_python": len(rsi_python),
+        "entries": len(entries),
+        "exits": len(exits),
+        "expected": len(expected),
+    }
+    if len(set(lengths.values())) != 1:
+        raise RuntimeError(
+            f"series {key} is misaligned across the two derivations: {lengths} — "
+            "every list must carry exactly one entry per bar before any of them is indexed"
+        )
+
     tally.series += 1
     tally.bars += len(series)
     for i in range(len(series)):
