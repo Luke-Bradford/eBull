@@ -55,6 +55,20 @@ STATUS="$STATE_DIR/status.md"
 MAX_ITERATIONS="${TA_LOOP_MAX:-0}"        # 0 = unbounded
 COOLDOWN_SECONDS="${TA_LOOP_COOLDOWN:-60}"
 
+# ⚠ An installed driver lives at <worktree>/var/autonomy/bin, so its own path
+# states which loop it is. If that disagrees with TA_LOOP_WORKTREE, the agent
+# is about to drive somebody else's checkout — refuse rather than discover it
+# through the other loop's lock. Observed 2026-08-06 standing up the second
+# loop: the plist set WorkingDirectory and the prompt but not the worktree, so
+# the ownership agent drove the TA worktree and hit its lock three times in 21
+# seconds under KeepAlive. The lock held, but nothing SAID what was wrong.
+inferred_worktree="${SELF_DIR%/var/autonomy/bin}"
+if [[ "$inferred_worktree" != "$SELF_DIR" && "$inferred_worktree" != "$WORKTREE" ]]; then
+  echo "FATAL installed under $inferred_worktree but TA_LOOP_WORKTREE=$WORKTREE" >&2
+  echo "      refusing to drive another loop's checkout -- set TA_LOOP_WORKTREE in the plist" >&2
+  exit 1
+fi
+
 mkdir -p "$STATE_DIR"
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
