@@ -374,6 +374,35 @@ or weaken the code until the probe "works". Both make things worse.
   load-bearing together, which is worth knowing before somebody deletes one as
   redundant.
 
+### ⚠ A boundary defect inside a CONJUNCTION needs one fixture per comparison
+
+Precedent (#2240 S-1, 2026-08-06). The rule is
+`close > sma_200 AND sma_50 > sma_200`. The obvious boundary fixture is a flat
+series, where `close == sma_50 == sma_200`, and it looks like it pins both `>`
+operators at once. It pins **neither**: relaxing one comparison to `>=` leaves
+the other one false, so the conjunction is still false and the verdict does not
+move. Two probes reported `NOT CAUGHT` against a test that reads as exactly the
+right test.
+
+**The rule: for `a > b AND c > d`, each operator needs a fixture where THAT
+comparison is an equality and the other is strictly true.** A degenerate fixture
+that satisfies every comparison at once satisfies none of them separately. The
+same applies to `OR` with the sense reversed — there, a fixture where both
+disjuncts are true cannot see either operator either.
+
+Two things that made the fixtures reliable rather than approximate:
+
+- **Construct the equality exactly.** Integer closes whose window sums stay
+  inside 2^53 make `sum/period` exact in float64, so "the close sits exactly on
+  the 200-day" is a fact rather than a hope. `49*90 + 101*100 + 49*110 + 100 =
+  20,000` over 200 bars gives `sma_200 == close == 100` with `sma_50 == 109.8`;
+  a period-50 saw-tooth over 200 bars (four whole periods) gives
+  `sma_50 == sma_200` exactly while the close sits well above both.
+- **Assert the precondition inside the test.** The test checks
+  `closes[i] == slow and fast > slow` before asserting the verdict. Without it
+  a later fixture edit drifts off the boundary and the test keeps passing while
+  testing nothing — which is the vacuous-test class this whole section is about.
+
 ## A "neutral" fixture is not neutral if the thing under test classifies it
 
 Bit twice in one PR (#2279, 2026-08-05), and both times the test failed against
