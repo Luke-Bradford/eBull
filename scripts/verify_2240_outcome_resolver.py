@@ -386,8 +386,29 @@ SELECT s.series_id,
        -- ⚠ Every touch filter is clamped to the WINDOW. The join reaches one
        -- bar further because the expiry exit fills at the open of bar
        -- `rn + hold`, which is outside the window it exits from.
-       min(b.rn) FILTER (WHERE b.rn <= s.rn + %(span)s AND b.low  <= s.stop)   AS k_sl,
-       min(b.rn) FILTER (WHERE b.rn <= s.rn + %(span)s AND b.high >= s.target) AS k_tp,
+       --
+       -- ⚠⚠ THE OPEN IS IN BOTH TOUCH FILTERS, and it is not redundant. The
+       -- resolver's "stop touched on this bar" predicate is rules 1 OR 4, i.e.
+       -- `open <= stop OR low <= stop`. On a bar satisfying `low <= open <=
+       -- high` the first disjunct IMPLIES the second, so `low <= stop` alone
+       -- would agree — but that identity is exactly what acceptance 14
+       -- MEASURES rather than assumes, and the corpus has 541 bars whose open
+       -- lies outside [low, high]:
+       --     SELECT count(*) FROM research_price_daily
+       --     WHERE open IS NOT NULL AND high IS NOT NULL AND low IS NOT NULL
+       --       AND NOT (low <= open AND open <= high);
+       -- On one of those the resolver can gap-through at the open while a
+       -- low/high-only filter sees nothing, and the arm reports a false
+       -- MISMATCH — or worse, silently stops checking rule 1/2 at all. The
+       -- full-corpus run was clean WITHOUT this, which is luck (the bar must
+       -- also be the decisive one, with `open <= stop < low`), not soundness.
+       -- Second instance of the same class as the mask tie-break fixed in
+       -- f602a760: a verifier that is only accidentally right fails the first
+       -- time the corpus shifts. Found by Codex at checkpoint 2.
+       min(b.rn) FILTER (WHERE b.rn <= s.rn + %(span)s
+                           AND (b.low  <= s.stop   OR b.open <= s.stop))   AS k_sl,
+       min(b.rn) FILTER (WHERE b.rn <= s.rn + %(span)s
+                           AND (b.high >= s.target OR b.open >= s.target)) AS k_tp,
        min(b.rn) FILTER (WHERE b.rn <= s.rn + %(span)s
                            AND (b.open IS NULL OR b.high IS NULL OR b.low IS NULL)) AS k_mask,
        count(*)  FILTER (WHERE b.rn <= s.rn + %(span)s)                        AS bars_in_window,
