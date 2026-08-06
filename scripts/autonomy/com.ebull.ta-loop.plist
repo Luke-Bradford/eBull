@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  eBull TA headless loop.
+
+  Install (once):
+    cp scripts/autonomy/com.ebull.ta-loop.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ebull.ta-loop.plist
+
+  Stop it gracefully (finishes the current iteration, then idles):
+    touch /Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/PAUSE
+
+  Stop it entirely:
+    launchctl bootout gui/$(id -u)/com.ebull.ta-loop
+
+  Check on it:
+    cat /Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/status.md
+
+  ⚠ KeepAlive is TRUE so a crashed iteration restarts, but the driver itself
+  stops after 3 consecutive failures. That pairing is deliberate: launchd
+  handles "the process died", the driver handles "the work keeps failing", and
+  neither pretends to do the other's job. The previous loop conflated them and
+  spun on a wedged state file for two weeks.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ebull.ta-loop</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/lukebradford/Dev/.ebull-autonomy/scripts/autonomy/ta_loop.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/lukebradford/Dev/.ebull-autonomy</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Homebrew first: `claude` and `uv` both live there. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- A pause between iterations so a fast-failing loop cannot hammer
+             the API or the review bot. -->
+        <key>TA_LOOP_COOLDOWN</key>
+        <string>120</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- ⚠ Not piped anywhere. The driver's own log is the record; these catch
+         anything that escapes it (a bad PATH, a missing binary) which is
+         precisely the class of failure that leaves no application-level trace. -->
+    <key>StandardOutPath</key>
+    <string>/Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/launchd.err.log</string>
+</dict>
+</plist>
