@@ -44,6 +44,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from functools import cached_property
 from pathlib import Path
 from typing import Literal
 
@@ -132,30 +133,28 @@ class BarSeries:
     # to 305.6 s against the spec's < 60 s acceptance, and conversion was the
     # dominant term, not the arithmetic.
     #
-    # `object.__setattr__` because the dataclass is frozen: the cache is
-    # derived state, not mutable content, and the alternative (dropping
-    # frozen) would give up the immutability the contract depends on.
+    # `cached_property` and not a hand-rolled dict: it writes straight into
+    # `instance.__dict__` instead of going through `__setattr__`, which is the
+    # method `frozen=True` overrides to raise — so it caches on a FROZEN
+    # dataclass without giving up the immutability the contract depends on.
+    #
+    # ⚠ `slots=True` would break this: there would be no instance `__dict__` to
+    # write into, and it fails at first access rather than at class definition.
+    # The cached values live outside the declared fields, so `__eq__` and
+    # `__hash__` still compare `(dates, rows)` alone.
 
     def _floats(self, field: str) -> list[float | None]:
-        cache: dict[str, list[float | None]] | None = getattr(self, "_float_cache", None)
-        if cache is None:
-            cache = {}
-            object.__setattr__(self, "_float_cache", cache)
-        cached = cache.get(field)
-        if cached is None:
-            cached = [None if (v := row.get(field)) is None else float(v) for row in self.rows]
-            cache[field] = cached
-        return cached
+        return [None if (v := row.get(field)) is None else float(v) for row in self.rows]
 
-    @property
+    @cached_property
     def float_closes(self) -> list[float | None]:
         return self._floats("close")
 
-    @property
+    @cached_property
     def float_highs(self) -> list[float | None]:
         return self._floats("high")
 
-    @property
+    @cached_property
     def float_lows(self) -> list[float | None]:
         return self._floats("low")
 
@@ -172,28 +171,17 @@ class BarSeries:
     # Built from the float cache rather than the Decimals so the conversion
     # still happens exactly once per field per series.
 
-    def _array(self, field: str) -> npt.NDArray[np.float64]:
-        cache: dict[str, npt.NDArray[np.float64]] | None = getattr(self, "_array_cache", None)
-        if cache is None:
-            cache = {}
-            object.__setattr__(self, "_array_cache", cache)
-        cached = cache.get(field)
-        if cached is None:
-            cached = np.array(self._floats(field), dtype=float)
-            cache[field] = cached
-        return cached
-
-    @property
+    @cached_property
     def array_closes(self) -> npt.NDArray[np.float64]:
-        return self._array("close")
+        return np.array(self.float_closes, dtype=float)
 
-    @property
+    @cached_property
     def array_highs(self) -> npt.NDArray[np.float64]:
-        return self._array("high")
+        return np.array(self.float_highs, dtype=float)
 
-    @property
+    @cached_property
     def array_lows(self) -> npt.NDArray[np.float64]:
-        return self._array("low")
+        return np.array(self.float_lows, dtype=float)
 
 
 # ---------------------------------------------------------------------------
