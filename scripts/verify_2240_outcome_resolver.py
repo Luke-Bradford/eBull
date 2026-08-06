@@ -287,25 +287,48 @@ def distribution(conn: psycopg.Connection[tuple]) -> int:
 # because `row_number()` must produce the SAME index the Python side sees. A
 # LEFT JOIN + COALESCE handles the sparse verdict table; absence of a verdict row
 # means clean, but ONLY inside an evaluated range.
+#
+# ⚠ MATERIALISED INTO AN INDEXED TEMP TABLE, not left as a CTE, and that is a
+# 10x wall-clock difference measured on this corpus. `row_number()` is computed
+# in a subquery, so a CTE form gives the planner nothing to index and the
+# `rn BETWEEN rn AND rn + hold` join degrades to a per-series nested loop —
+# 3,355 x 3,355 comparisons for an average series instead of 3,355 x 21. The
+# first attempt ran 500 of 7,693 series in 7m19s (~112 min projected); with the
+# index it is a fraction of that. The temp table is session-scoped, so it cleans
+# itself up.
+_CREATE_IDX = """
+CREATE TEMP TABLE equiv_idx (
+    series_id BIGINT NOT NULL,
+    rn        INT    NOT NULL,
+    open      NUMERIC,
+    high      NUMERIC,
+    low       NUMERIC
+)
+"""
+
+_INDEX_IDX = "CREATE INDEX equiv_idx_series_rn ON equiv_idx (series_id, rn)"
+
+_FILL_IDX = """
+INSERT INTO equiv_idx (series_id, rn, open, high, low)
+SELECT d.series_id,
+       row_number() OVER (PARTITION BY d.series_id ORDER BY d.bar_date),
+       d.open,
+       CASE WHEN COALESCE(q.range_usable, TRUE) THEN d.high END,
+       CASE WHEN COALESCE(q.range_usable, TRUE) THEN d.low  END
+FROM research_price_daily d
+JOIN research_price_quarantine_coverage cov
+  ON cov.series_id = d.series_id
+ AND cov.rule_set_version = %(qv)s
+ AND d.bar_date BETWEEN cov.first_bar AND cov.last_bar
+LEFT JOIN research_bar_quarantine q
+  ON q.series_id = d.series_id
+ AND q.bar_date = d.bar_date
+ AND q.rule_set_version = %(qv)s
+WHERE d.series_id = ANY(%(chunk)s::bigint[])
+"""
+
 _EQUIV_SQL = """
-WITH idx AS (
-    SELECT d.series_id,
-           row_number() OVER (PARTITION BY d.series_id ORDER BY d.bar_date) AS rn,
-           d.open,
-           CASE WHEN COALESCE(q.range_usable, TRUE) THEN d.high END AS high,
-           CASE WHEN COALESCE(q.range_usable, TRUE) THEN d.low  END AS low
-    FROM research_price_daily d
-    JOIN research_price_quarantine_coverage cov
-      ON cov.series_id = d.series_id
-     AND cov.rule_set_version = %(qv)s
-     AND d.bar_date BETWEEN cov.first_bar AND cov.last_bar
-    LEFT JOIN research_bar_quarantine q
-      ON q.series_id = d.series_id
-     AND q.bar_date = d.bar_date
-     AND q.rule_set_version = %(qv)s
-    WHERE d.series_id = ANY(%(chunk)s::bigint[])
-),
-sig AS (
+WITH sig AS (
     SELECT * FROM unnest(
         %(sids)s::bigint[], %(rns)s::int[], %(stops)s::numeric[], %(targets)s::numeric[]
     ) AS t(series_id, rn, stop, target)
@@ -322,7 +345,7 @@ SELECT s.series_id,
        count(*)  FILTER (WHERE b.rn <= s.rn + %(span)s)                        AS bars_in_window,
        bool_or(b.rn = s.rn + %(exit_span)s AND b.open IS NOT NULL)             AS exit_bar_usable
 FROM sig s
-JOIN idx b
+JOIN equiv_idx b
   ON b.series_id = s.series_id
  AND b.rn BETWEEN s.rn AND s.rn + %(exit_span)s
 GROUP BY s.series_id, s.rn
@@ -351,7 +374,18 @@ def _expected_class(
     """
     touches = [k for k in (k_sl, k_tp) if k is not None]
     first_touch = min(touches) if touches else None
-    if k_mask is not None and (first_touch is None or k_mask < first_touch):
+    # ⚠ `<=`, not `<`. The resolver checks open/high/low for None BEFORE applying
+    # any rule, so a bar that is masked AND satisfies a touch predicate is
+    # refused — the mask wins the tie. With `<` this verifier reports a false
+    # MISMATCH for exactly the inputs the resolver explicitly supports (`open`
+    # NULL with `high >= target`; `high` NULL with `low <= stop`).
+    #
+    # ⚠ Unreachable on THIS corpus and still wrong: `range_usable = false` masks
+    # high and low together, so a masked bar matches neither touch predicate,
+    # and `select count(*) - count(open) from research_price_daily` is 0. A
+    # verifier that is only accidentally right is a verifier that fails the
+    # first time the corpus gains a NULL open. Caught by Codex at checkpoint 2.
+    if k_mask is not None and (first_touch is None or k_mask <= first_touch):
         return "unresolved"
     if k_sl is not None and (k_tp is None or k_sl < k_tp):
         return "sl_hit"
@@ -370,6 +404,8 @@ def equivalence(conn: psycopg.Connection[tuple]) -> int:
     """Acceptance 12 — FULL corpus, Python walk vs SQL first-touch indices."""
     ids = _series_ids(conn)
     quarantined = _load_quarantined(conn)
+    conn.execute(_CREATE_IDX)
+    conn.execute(_INDEX_IDX)
     checked = mismatches = ties = 0
     sample: list[str] = []
     started = time.perf_counter()
@@ -411,11 +447,12 @@ def equivalence(conn: psycopg.Connection[tuple]) -> int:
         if not sids:
             continue
 
+        conn.execute("TRUNCATE equiv_idx")
+        conn.execute(_FILL_IDX, {"qv": QUARANTINE_RULE_SET_VERSION, "chunk": chunk})
+        conn.execute("ANALYZE equiv_idx")
         rows = conn.execute(
             _EQUIV_SQL,
             {
-                "qv": QUARANTINE_RULE_SET_VERSION,
-                "chunk": chunk,
                 "sids": sids,
                 "rns": rns,
                 "stops": stops,
