@@ -253,10 +253,18 @@ are consolidated into a multi-mandate parent's report (§2.1). On dev:
 `BlackRock Fund Advisors` (0001006249), `SSGA Funds Management` (0001257442) and
 `Invesco Capital Management` (0001224696) each have 13F-NT notices and **0 rows** in
 `ownership_institutions_current`; the mass sits in `BlackRock, Inc.` / `STATE STREET CORP`
-/ `VANGUARD GROUP INC`, whose books mix ETF and non-ETF mandates. **13F has no fund-level
-granularity, so `institutional_filers.filer_type` cannot carry an honest ETF/non-ETF
-split.** Fund-level attribution is N-PORT's job (§2.2). Reproduce with
+/ `VANGUARD GROUP INC`, whose books mix ETF and non-ETF mandates. **13F reports per
+MANAGER with no fund breakdown, so a `filer_type` value cannot mean "shares held by
+ETFs" — only "managed by an adviser that also advises ETFs".** Fund-level attribution is
+N-PORT's job (§2.2). The precise scope of what is unavailable: an *exact* ETF/non-ETF
+partition of the 13F book. A caveated `ETF-affiliated manager` bucket is buildable from
+the name join and is a labelling decision, not a data one. Reproduce with
 `scripts/audit_ncen_etf_advisers.py`.
+
+⚠ Not exhaustively ruled out: `ADVISER_CRD_NUM` / `ADVISER_LEI` could in principle bridge
+to a 13F manager through Form ADV / IAPD, which is **not an EDGAR dataset** and was not
+attempted. That would improve the *identity* join; it does not touch the allocation
+problem above, which is the binding one.
 
 ### 2.3 Form 3/4/5 — Section 16 insider transactions
 

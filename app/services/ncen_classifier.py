@@ -41,9 +41,10 @@ ordinary open-end mutual fund. The structured ETF flag is
 per-SERIES at Item C.3.a, reachable only through the DERA N-CEN
 data sets — see ``.claude/skills/data-sources/sec-edgar.md``
 §2.2.1 and ``scripts/audit_ncen_etf_advisers.py``. Do not "fix"
-the seeding here expecting the ``etfs`` ownership wedge to fill;
-13F reports per MANAGER and carries no fund breakdown, so
-``filer_type`` cannot express the split at all.
+the seeding here expecting the ``etfs`` ownership wedge to become
+an ETF-ownership figure: 13F reports per MANAGER with no fund
+breakdown, so a ``filer_type`` value can only mean "managed by an
+adviser that also advises ETFs", never "held by ETFs".
 
 Idempotent: re-running on the same accession UPSERTs in place;
 re-running with a newer accession promotes via UPSERT and
