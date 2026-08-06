@@ -77,7 +77,14 @@ while true; do
   # ⚠ NOT piped into head/tail. A pipe returns the pipe's status and buffers
   # the output, which cost 7 minutes of misdiagnosis on 2026-08-05. Redirect
   # to a file; read the file.
-  ( cd "$WORKTREE" && claude -p "$(cat "$PROMPT")" --permission-mode acceptEdits ) \
+  # ⚠ --output-format=stream-json so the transcript fills LIVE, not at exit.
+  # The first version buffered everything until the process ended, which made
+  # "is it progressing?" unanswerable from the loop's own instrumentation —
+  # you had to go and read git. That is the same invisibility failure as the
+  # month-long silent PAUSE, one layer down.
+  ( cd "$WORKTREE" && claude -p "$(cat "$PROMPT")" \
+        --permission-mode acceptEdits \
+        --output-format=stream-json --verbose --include-partial-messages ) \
       > "$transcript" 2>&1
   rc=$?
 
