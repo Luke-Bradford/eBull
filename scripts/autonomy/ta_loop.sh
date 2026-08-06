@@ -161,10 +161,15 @@ while true; do
   # "is it progressing?" unanswerable from the loop's own instrumentation —
   # you had to go and read git. That is the same invisibility failure as the
   # month-long silent PAUSE, one layer down.
+  # ⚠ stderr goes to its OWN file. Merged into the transcript it lands wherever
+  # it lands — the CLI's settings warnings arrive before the first event, and
+  # nothing stops a shutdown message arriving after the last one. The transcript
+  # is parsed below, so anything non-JSON in it is a correctness problem, not
+  # noise. Verified 2026-08-06: a plain run writes 157 bytes to stderr.
   ( cd "$WORKTREE" && claude -p "$(cat "$PROMPT")" \
         --permission-mode acceptEdits \
         --output-format=stream-json --verbose --include-partial-messages ) \
-      > "$transcript" 2>&1
+      > "$transcript" 2> "$transcript.err"
   rc=$?
 
   # ⚠ rc is not the whole answer under --output-format=stream-json. The stream
@@ -174,10 +179,18 @@ while true; do
   # one object containing "type":"result" and "is_error":false, and exits 0.
   # Require both, so a stream that terminates tidily on a failed task still
   # counts toward the 3-strike stop rather than looking like progress.
+  # ⚠ Find the result event by TYPE; do not trust the last line to be it, and
+  # do not match `is_error` anywhere in the stream. Under
+  # --include-partial-messages the transcript carries stream_event, message,
+  # text_delta and system events too, and any of them may grow an `is_error`
+  # field — matching the wrong event would report a verdict for something that
+  # is not the task. Anchored to a whole-line JSON object so a nested
+  # occurrence inside a larger payload cannot match.
   # (grep is the DOWNSTREAM command here and its status is the one being read
   # — this is not the `gate | tail` pattern that hides an exit code.)
   result_ok=0
-  if tail -1 "$transcript" | grep -q '"is_error":false'; then
+  result_line="$(grep -E '^\{.*"type":"result".*\}$' "$transcript" | tail -1)"
+  if [[ -n "$result_line" ]] && printf '%s\n' "$result_line" | grep -q '"is_error":false'; then
     result_ok=1
   fi
 
@@ -204,6 +217,15 @@ while true; do
     echo '```'
     tail -40 "$transcript" 2>/dev/null
     echo '```'
+    # stderr is its own file now, so it needs its own window or it becomes the
+    # thing nobody looks at.
+    if [[ -s "$transcript.err" ]]; then
+      echo
+      echo "## stderr (last 20)"
+      echo '```'
+      tail -20 "$transcript.err" 2>/dev/null
+      echo '```'
+    fi
   } > "$STATUS"
 
   # ⚠ Back off on repeated failure rather than hammering. Three in a row means
