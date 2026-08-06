@@ -522,9 +522,12 @@ def sweep_bulk_cusips_resolved_via_extid(
                    -- #740 — a CUSIP negatively tombstoned by the
                    -- OpenFIGI sweep that LATER lands a mapping by
                    -- another route (SEC-list backfill, fuzzy resolver,
-                   -- manual runbook upsert — all provider='sec') must
+                   -- manual runbook upsert — provider='sec'; or a
+                   -- later OpenFIGI pass — provider='openfigi') must
                    -- read resolved, not stay frozen on a stale
-                   -- negative.
+                   -- negative. Hence the wide EXISTS below: do not
+                   -- narrow it back to 'sec' on the strength of this
+                   -- list (that narrowing is #2213).
                    OR u.resolution_status IN (
                        'openfigi_unknown', 'openfigi_no_instrument'
                    )
@@ -969,8 +972,10 @@ class SweepReport:
     Counter semantics:
 
       * ``candidates_seen`` — rows whose CUSIP joined a row in
-        ``external_identifiers`` (provider='sec', identifier_type='cusip')
-        and were still pending (``resolution_status IS NULL``).
+        ``external_identifiers`` (provider IN ('sec', 'openfigi'),
+        identifier_type='cusip') and were still pending
+        (``resolution_status IS NULL``). One per CUSIP even when both
+        providers carry a mapping — see ``_select_resolvable_via_extid``.
       * ``promoted`` — rows transitioned to
         ``resolution_status='resolved_via_extid'`` by this sweep.
       * ``rewashed`` — rewash of ``last_accession_number`` returned
@@ -1009,6 +1014,26 @@ def _select_resolvable_via_extid(
     rewash, and bulk rows (sql/164 #1233 PR-1a) leave that NULL
     by design. PR-1b's OpenFIGI sweep handles the bulk partition
     via its own re-ingest path (``rewash_bulk_source_filings``).
+
+    Matches BOTH resolution providers (``sec`` | ``openfigi``). This
+    predicate said ``provider = 'sec'`` alone from #836 — written
+    2026-05-03, before OpenFIGI existed as a provider — and was not
+    widened when PR-1b (#1233) started writing ``provider='openfigi'``
+    CUSIP rows. #2213 measured the cost: 1,503 legacy rows sat pending
+    against a mapping this sweep could not see, so the daily job
+    reported ``promoted=0`` truthfully while the backlog never moved.
+
+    The pick is a LATERAL rather than a plain JOIN because widening the
+    provider set makes the join 1:N — 75 CUSIPs carry both a ``sec``
+    and an ``openfigi`` row, and a bare ``JOIN ... IN ('sec',
+    'openfigi')`` would emit each of those twice, double-counting
+    ``promoted`` and rewashing the same accession twice. ``LIMIT 1``
+    inside the LATERAL makes it 1:1 by construction while leaving the
+    outer ``observation_count DESC`` ordering (and therefore the outer
+    ``LIMIT``) intact, which a ``DISTINCT ON (u.cusip)`` would not —
+    that form forces ``u.cusip`` to lead the ORDER BY. SEC wins the
+    tiebreak: the curated mapping is authoritative, OpenFIGI is the
+    approved fallback (settled decision 2026-05-22).
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -1017,10 +1042,17 @@ def _select_resolvable_via_extid(
                    u.last_accession_number,
                    ei.instrument_id
             FROM unresolved_13f_cusips u
-            JOIN external_identifiers ei
-              ON ei.identifier_value = u.cusip
-             AND ei.provider = 'sec'
-             AND ei.identifier_type = 'cusip'
+            JOIN LATERAL (
+                SELECT e.instrument_id
+                  FROM external_identifiers e
+                 WHERE e.identifier_value = u.cusip
+                   AND e.identifier_type = 'cusip'
+                   AND e.provider IN ('sec', 'openfigi')
+                 ORDER BY CASE e.provider WHEN 'sec' THEN 0 ELSE 1 END,
+                          e.is_primary DESC,
+                          e.external_identifier_id ASC
+                 LIMIT 1
+            ) ei ON TRUE
             WHERE u.resolution_status IS NULL
               AND u.source IS NULL
             ORDER BY u.observation_count DESC, u.last_observed_at DESC
@@ -1049,8 +1081,8 @@ def sweep_resolvable_unresolved_cusips(
     closes the loop:
 
       1. Find every pending unresolved row whose CUSIP already exists
-         in ``external_identifiers`` (provider='sec',
-         identifier_type='cusip').
+         in ``external_identifiers`` (provider IN ('sec', 'openfigi'),
+         identifier_type='cusip'), SEC-curated mapping preferred.
       2. Mark the row ``resolution_status='resolved_via_extid'`` so a
          second pass is a no-op.
       3. Trigger ``rewash_filings._rewash_13f_accession`` against the
