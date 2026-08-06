@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 _BASE = {
     "strategy_id": "S-TEST",
@@ -17,6 +18,10 @@ _BASE = {
     "signal_kind": "entry",
     "verdict": "not_fired",
     "universe": "survivor_only",
+    # #2333 (sql/257). NOT NULL with no default, so it is stated here rather
+    # than defaulted — an insert omitting it must fail, which is its own case
+    # in the rejection matrix below.
+    "input_rule_set_versions": Jsonb({"indicator_series": "indicator-series-v1+abc123"}),
 }
 
 
@@ -28,11 +33,26 @@ _INSERT = """
     INSERT INTO strategy_signals (
         strategy_id, strategy_version, instrument_id, signal_bar_date,
         signal_kind, verdict, not_evaluable_reason, fill_bar_date,
-        fill_price, universe
+        fill_price, universe, input_rule_set_versions
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(signal_bar_date)s,
         %(signal_kind)s, %(verdict)s, %(not_evaluable_reason)s, %(fill_bar_date)s,
-        %(fill_price)s, %(universe)s
+        %(fill_price)s, %(universe)s, %(input_rule_set_versions)s
+    )
+"""
+
+#: ⚠ The same statement MINUS `input_rule_set_versions`, for the one case that
+#: cannot be expressed as an override: a writer that never mentions the column.
+#: NOT NULL with no default is what makes that fail, and a default would make
+#: it pass silently with an invented indicator version (#2288's argument for
+#: `universe`, inherited).
+_INSERT_WITHOUT_RULE_SETS = """
+    INSERT INTO strategy_signals (
+        strategy_id, strategy_version, instrument_id, signal_bar_date,
+        signal_kind, verdict, universe
+    ) VALUES (
+        %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(signal_bar_date)s,
+        %(signal_kind)s, %(verdict)s, %(universe)s
     )
 """
 
@@ -89,6 +109,16 @@ def instrument_id(ebull_test_conn: psycopg.Connection[tuple]) -> int:
         ("unknown verdict", {"verdict": "maybe"}),
         ("unknown universe", {"universe": "everything"}),
         ("unknown signal_kind", {"signal_kind": "hedge"}),
+        # #2333 / sql/257. Every one of these is a state NOT NULL alone admits:
+        # the column is PRESENT and records nothing usable.
+        ("empty rule-set object", {"input_rule_set_versions": Jsonb({})}),
+        ("blank rule-set version", {"input_rule_set_versions": Jsonb({"indicator_series": ""})}),
+        ("whitespace rule-set version", {"input_rule_set_versions": Jsonb({"indicator_series": "   "})}),
+        ("non-string rule-set version", {"input_rule_set_versions": Jsonb({"indicator_series": 5})}),
+        ("null rule-set version", {"input_rule_set_versions": Jsonb({"indicator_series": None})}),
+        ("rule sets as an array", {"input_rule_set_versions": Jsonb(["indicator_series"])}),
+        ("rule sets as a scalar", {"input_rule_set_versions": Jsonb("indicator-series-v1+abc123")}),
+        ("rule sets explicitly null", {"input_rule_set_versions": None}),
     ],
 )
 def test_ledger_rejects(
@@ -96,6 +126,28 @@ def test_ledger_rejects(
 ) -> None:
     with pytest.raises(psycopg.errors.Error), ebull_test_conn.transaction():
         _insert(ebull_test_conn, instrument_id, **overrides)
+
+
+def test_a_writer_that_omits_the_rule_sets_is_refused(
+    ebull_test_conn: psycopg.Connection[tuple], instrument_id: int
+) -> None:
+    """#2333. The column carries no default ON PURPOSE, so the failure mode is
+    a loud NOT NULL rather than a row claiming an indicator rule set nobody
+    stated. Not expressible as an override — it needs a statement that never
+    names the column."""
+    with pytest.raises(psycopg.errors.NotNullViolation), ebull_test_conn.transaction():
+        ebull_test_conn.execute(
+            _INSERT_WITHOUT_RULE_SETS,
+            {
+                "strategy_id": _BASE["strategy_id"],
+                "strategy_version": _BASE["strategy_version"],
+                "instrument_id": instrument_id,
+                "signal_bar_date": _BASE["signal_bar_date"],
+                "signal_kind": _BASE["signal_kind"],
+                "verdict": _BASE["verdict"],
+                "universe": _BASE["universe"],
+            },
+        )
 
 
 def test_ledger_accepts_the_valid_shapes(ebull_test_conn: psycopg.Connection[tuple], instrument_id: int) -> None:

@@ -25,12 +25,13 @@ would invent a fill on a day the instrument did not trade.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from app.services.indicator_series import BarSeries, Universe
 from app.services.strategy_registry import (
@@ -71,6 +72,11 @@ class LedgerRow:
     signal_kind: SignalKind
     verdict: Verdict
     universe: Universe
+    #: ⚠ Also from ``StrategyIdentity``, and for the same reason as
+    #: ``universe`` (#2333). It is hashed INTO ``strategy_version``, so taking
+    #: it as a separate argument would create a second source of truth that can
+    #: disagree with the version it is stored beside.
+    input_rule_set_versions: Mapping[str, str]
     not_evaluable_reason: NotEvaluableReason | None = None
     fill_bar_date: date | None = None
     fill_price: Decimal | None = None
@@ -105,6 +111,30 @@ class LedgerRow:
                 f"verdict {self.verdict!r} carries fill {(self.fill_bar_date, self.fill_price)!r}: "
                 "a fill exists exactly when the signal fired, and both fields move together"
             )
+        # strategy_signals_input_rule_sets_shape
+        #
+        # ⚠ An EXACT mirror of sql/257's CHECK — non-empty object, every value
+        # a non-empty string — and nothing more. A stricter rule here (say,
+        # rejecting a blank KEY, which the CHECK cannot express without a
+        # subquery) would break the property that makes mirroring worth
+        # anything: that a row this class accepts is a row the constraint
+        # accepts, and vice versa.
+        #
+        # The blank-VALUE half is the one that is easy to skip. `NOT NULL`
+        # passes `{"indicator_series": ""}` — present, correctly typed, and
+        # recording nothing, which is the #2286 shape.
+        if not isinstance(self.input_rule_set_versions, Mapping) or not self.input_rule_set_versions:
+            raise ValueError(
+                f"input_rule_set_versions must be a non-empty mapping, got {self.input_rule_set_versions!r} "
+                "— a signal whose indicator rule set is unrecorded cannot be told apart from one produced "
+                "under different indicator code (#2333)"
+            )
+        for module, version in self.input_rule_set_versions.items():
+            if not isinstance(version, str) or not version.strip():
+                raise ValueError(
+                    f"input_rule_set_versions[{module!r}] is {version!r}: every rule set must carry a "
+                    "non-empty version string"
+                )
         # strategy_signals_fill_after_signal
         if self.fill_bar_date is not None and self.fill_bar_date <= self.signal_bar_date:
             raise ValueError(
@@ -208,6 +238,7 @@ def resolve_fills(
                 signal_kind=signal.kind,
                 verdict=verdict,
                 universe=identity.universe,
+                input_rule_set_versions=identity.input_rule_set_versions,
                 not_evaluable_reason=reason,
                 fill_bar_date=fill_bar_date,
                 fill_price=fill_price,
@@ -220,11 +251,11 @@ _INSERT = """
     INSERT INTO strategy_signals (
         strategy_id, strategy_version, instrument_id, signal_bar_date,
         signal_kind, verdict, not_evaluable_reason, fill_bar_date,
-        fill_price, universe
+        fill_price, universe, input_rule_set_versions
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(signal_bar_date)s,
         %(signal_kind)s, %(verdict)s, %(not_evaluable_reason)s, %(fill_bar_date)s,
-        %(fill_price)s, %(universe)s
+        %(fill_price)s, %(universe)s, %(input_rule_set_versions)s
     )
 """
 
@@ -264,6 +295,11 @@ def store_signals(conn: psycopg.Connection[tuple], rows: Sequence[LedgerRow]) ->
                     "fill_bar_date": row.fill_bar_date,
                     "fill_price": row.fill_price,
                     "universe": row.universe,
+                    # ⚠ `Jsonb`, not `Json`: the column is JSONB, and psycopg's
+                    # `Json` adapts to the `json` type, which Postgres then has
+                    # to cast — and a `MappingProxyType` is not JSON-adaptable
+                    # without the explicit wrapper either way.
+                    "input_rule_set_versions": Jsonb(dict(row.input_rule_set_versions)),
                 }
                 for row in rows
             ],

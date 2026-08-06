@@ -6,17 +6,23 @@ Pure, no DB. Spec:
 
 from __future__ import annotations
 
+import ast
+import importlib
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
+from app.services import strategies, strategy_registry
+from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import (
     BarSeries,
     IndicatorSeries,
     sma_series,
 )
 from app.services.strategy_registry import (
+    INPUT_RULE_SETS,
     NOT_EVALUABLE_REASONS,
     OUR_ADDITIONAL_REASON_CODES,
     PARENT_REASON_CODES,
@@ -208,6 +214,33 @@ class TestIdentityCoversMoreThanSource:
     def test_identical_identities_agree(self) -> None:
         assert self._identity().version == self._identity().version
 
+    def test_the_indicator_rule_set_changes_the_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#2333. A strategy IS its indicators — S-1 is
+        ``sma_series(fast) > sma_series(slow)`` and has no other content — so a
+        change to how the SMA is COMPUTED is changed filter logic under
+        criterion 11. Before this, it produced different signals under an
+        unchanged version, and the ledger's uniqueness key treated the old and
+        new rows as the same row."""
+        before = self._identity().version
+        monkeypatch.setattr(
+            strategy_registry,
+            "INPUT_RULE_SETS",
+            {"indicator_series": "indicator-series-v1+ffffffffffff"},
+        )
+        assert self._identity().version != before
+
+    def test_the_stored_mapping_is_the_hashed_one(self) -> None:
+        """The writer stores ``identity.input_rule_set_versions`` and the hash
+        is built from the same object, so a disagreement is not expressible."""
+        assert self._identity().input_rule_set_versions is strategy_registry.INPUT_RULE_SETS
+        assert dict(INPUT_RULE_SETS) == {"indicator_series": INDICATOR_SERIES_RULE_SET_VERSION}
+
+    def test_the_registry_constant_is_read_only(self) -> None:
+        """A plain dict would let any importer mutate the identity of every
+        strategy in the process."""
+        with pytest.raises(TypeError):
+            INPUT_RULE_SETS["indicator_series"] = "tampered"  # type: ignore[index]
+
     def test_param_ordering_does_not_change_the_version(self) -> None:
         """Canonical JSON — otherwise a dict literal reordering would look like
         a new strategy and orphan every stored signal."""
@@ -251,6 +284,66 @@ class TestReasonCodesAreNotCollapsed:
         signals = evaluate(lambda i: True, inputs=[StrategyInput(sma, "quarantined_bar")], n_bars=len(series))
         assert signals[0].reason == "insufficient_warmup"
         assert signals[5].reason == "insufficient_warmup"
+
+
+class TestInputRuleSetsAreComplete:
+    """#2333 — the coverage of ``INPUT_RULE_SETS`` is CHECKED, not promised.
+
+    The defect being prevented is an omission: a strategy reads a versioned
+    pipeline whose version is not in the identity hash, so a change to that
+    pipeline reuses the old ``strategy_version``. A per-strategy ``inputs=[…]``
+    declaration would move the omission rather than remove it, so the registry
+    keeps one constant and this test walks the strategies package to prove it
+    covers what is actually imported.
+
+    S-5/S-6 are the live case: they are specced against ``price_structure``,
+    which carries its own ``RULE_SET_VERSION``. The day one of them imports it,
+    this test fails until the registry names it.
+
+    ⚠ DIRECT imports only. A strategy importing a helper that itself reads a
+    versioned pipeline is not caught, and no static rule short of a full import
+    graph would catch it. Stated rather than implied — a guard whose blind spot
+    is undocumented reads as covering more than it does.
+    """
+
+    _STRATEGIES_DIR = Path(strategies.__file__).parent
+
+    @classmethod
+    def _imported_service_modules(cls) -> dict[str, set[str]]:
+        """``{strategy module: {app.services module it imports}}``."""
+        found: dict[str, set[str]] = {}
+        for path in sorted(cls._STRATEGIES_DIR.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            names: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("app.services."):
+                    names.add(node.module)
+                elif isinstance(node, ast.Import):
+                    names.update(alias.name for alias in node.names if alias.name.startswith("app.services."))
+            found[path.name] = names
+        return found
+
+    def test_the_walk_finds_the_strategies(self) -> None:
+        """⚠ A completeness test that silently matched nothing would pass
+        forever. Pin that it is actually reading the modules it claims to."""
+        imports = self._imported_service_modules()
+        assert {"s1_time_series_momentum.py", "s3_mean_reversion_in_trend.py"} <= set(imports)
+        assert "app.services.indicator_series" in imports["s1_time_series_momentum.py"]
+
+    def test_every_versioned_pipeline_a_strategy_reads_is_in_the_hash(self) -> None:
+        missing: list[str] = []
+        for strategy_module, imported in sorted(self._imported_service_modules().items()):
+            for dotted in sorted(imported):
+                module = importlib.import_module(dotted)
+                if not hasattr(module, "RULE_SET_VERSION"):
+                    continue
+                if dotted.rsplit(".", 1)[-1] not in INPUT_RULE_SETS:
+                    missing.append(f"{strategy_module} reads {dotted}")
+        assert not missing, (
+            "these versioned rule sets are read by a strategy but absent from "
+            f"strategy_registry.INPUT_RULE_SETS, so a change to them would reuse the old "
+            f"strategy_version (#2333): {missing}"
+        )
 
 
 class TestClosedVocabulariesEnforcedAtRuntime:
