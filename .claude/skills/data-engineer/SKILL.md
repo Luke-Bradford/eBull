@@ -285,6 +285,33 @@ Service modules under `app/services/` (~96 modules). Canonical entry points by d
 
 `sec_13f_filer_directory.py`, `sec_nport_filer_directory.py`, `sec_13f_securities_list.py`, `sec_entity_profile.py`, `cusip_resolver.py`, `holder_name_resolver.py`, `instrument_history.py`, `cik_raw_filings.py`, `filer_seed_verification.py`. (CIK discovery now lives in the canonical `daily_cik_refresh` scheduled job + `app/services/filings.py::upsert_cik_mapping`; the legacy `cik_discovery.py` helper was deleted in #1091.)
 
+#### Widening an identifier allow-list — push it to every CONSUMER (#2213, 2026-08-06)
+
+CUSIP -> instrument resolution reads `external_identifiers` with `identifier_type='cusip'` and **two** providers:
+
+| provider | source | authority |
+|---|---|---|
+| `sec` | #740 backfill off the 13F Official List | authoritative |
+| `openfigi` | `cusip_resolver` PR-1b (#1233) | approved fallback (settled decision 2026-05-22) |
+
+**Every consumer must read both, SEC-first**, via `ORDER BY CASE provider WHEN 'sec' THEN 0 ELSE 1 END, is_primary DESC, external_identifier_id ASC`. A *writer* of one provider legitimately stays narrow; a *consumer* resolving an identifier does not.
+
+⚠ `openfigi` rows are written `is_primary=FALSE`, but so are many `sec` rows — `is_primary` does **not** discriminate provider. Only the CASE does.
+
+⚠ Widening makes a previously-1:1 join **1:N** (75 CUSIPs carry both). Use `JOIN LATERAL (... ORDER BY <priority> LIMIT 1) ON TRUE`, not a bare widened `JOIN` — a `DISTINCT ON (cusip)` also works but forces `cusip` to lead the ORDER BY, destroying any priority ordering the outer `LIMIT` depends on.
+
+Consumers, and their state after #2213:
+
+| site | reads both? |
+|---|---|
+| `cusip_resolver.load_bulk_cusip_map:282` · the post-bulk sweep `:555, :1344` | yes, since PR-1b |
+| `blockholders._resolve_issuer_to_instrument_id:487` | yes |
+| `institutional_holdings._resolve_cusip_to_instrument_id:697` | **yes, as of #2213** (3 call sites: 13F-HR ingest, rewash, manifest parser) |
+| `cusip_resolver._select_resolvable_via_extid:997` | **yes, as of #2213** (the daily `cusip_extid_sweep`) |
+| `n_port_ingest:691` · `blockholders._resolve_cusip_to_instrument_id:435` | **no — latent, #2329.** Harmless only because each has a provider-wide bulk twin |
+
+The #2213 failure mode is the one to remember: the narrow filters predated OpenFIGI, so **reviewing the diff that introduced the provider could never have found them**. Nothing errored — the sweep logged `promoted=0` truthfully and unresolved CUSIPs went to their documented destination. Detection took a full-population crosstab of `(has_sec, has_figi)` against "does this instrument have rows in the typed table": 1,483 of 1,503 OpenFIGI-only CUSIPs had zero `institutional_holdings` rows vs 3,062 of 3,083 SEC-mapped. Identical code does **not** imply identical exposure — measure each consumer before widening it.
+
 ### 2.3 SEC / filings ingest
 
 `sec_companyfacts_ingest.py`, `sec_insider_dataset_ingest.py`, `sec_13f_dataset_ingest.py`, `sec_nport_dataset_ingest.py`, `sec_submissions_ingest.py`, `sec_submissions_files_walk.py`, `sec_pipelined_fetcher.py`, `sec_bulk_download.py`, `sec_bulk_orchestrator_jobs.py`, `sec_filing_items.py`, `raw_filings.py`, `raw_persistence.py`, `filing_documents.py`, `eight_k_events.py`, `business_summary.py`, `dilution.py`.
