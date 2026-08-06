@@ -282,15 +282,40 @@ def _margin(
     return _relative(float(close), float(trend))
 
 
+#: How many failing bars are printed. Past this the run still COUNTS every one —
+#: a truncated sample with an honest total, never a silently capped total.
+_SAMPLE_LIMIT = 20
+
+
 class _Tally:
+    """Counts, plus a bounded sample of each failure kind.
+
+    ⚠ The count and the sample are separate fields ON PURPOSE. S-1's script keeps
+    one list and appends `""` past the cap so that `len()` stays the total, which
+    grows an unbounded list of empty strings over a corpus-sized failure — flagged
+    by the review bot on PR #2322. A counter says the same thing in 8 bytes.
+    """
+
     def __init__(self) -> None:
         self.series = 0
         self.bars = 0
-        self.mismatches: list[str] = []
-        self.rsi_mismatches: list[str] = []
+        self.mismatch_count = 0
+        self.mismatch_sample: list[str] = []
+        self.rsi_mismatch_count = 0
+        self.rsi_mismatch_sample: list[str] = []
         self.ties = 0
         self.max_tie_margin = 0.0
         self.min_real_margin = float("inf")
+
+    def record(self, kind: str, message: str) -> None:
+        if kind == "rsi":
+            self.rsi_mismatch_count += 1
+            sample = self.rsi_mismatch_sample
+        else:
+            self.mismatch_count += 1
+            sample = self.mismatch_sample
+        if len(sample) < _SAMPLE_LIMIT:
+            sample.append(message)
 
 
 def _compare(
@@ -319,12 +344,8 @@ def _compare(
     tally.series += 1
     tally.bars += len(series)
     for i in range(len(series)):
-        if rsi_python[i] == rsi_sql[i]:
-            continue
-        if len(tally.rsi_mismatches) < 20:
-            tally.rsi_mismatches.append(f"{key} {dates[i]}: python={rsi_python[i]!r} sql={rsi_sql[i]!r}")
-        else:  # keep counting past the printed sample
-            tally.rsi_mismatches.append("")
+        if rsi_python[i] != rsi_sql[i]:
+            tally.record("rsi", f"{key} {dates[i]}: python={rsi_python[i]!r} sql={rsi_sql[i]!r}")
 
     for i, (want_entry, want_exit) in enumerate(expected):
         for kind, got, want in (("entry", entries[i].verdict, want_entry), ("exit", exits[i].verdict, want_exit)):
@@ -336,10 +357,7 @@ def _compare(
                 tally.max_tie_margin = max(tally.max_tie_margin, margin)
                 continue
             tally.min_real_margin = min(tally.min_real_margin, margin)
-            if len(tally.mismatches) < 20:
-                tally.mismatches.append(f"{key} {dates[i]} {kind}: python={got} sql={want} margin={margin:.3e}")
-            else:  # keep counting past the printed sample
-                tally.mismatches.append("")
+            tally.record("verdict", f"{key} {dates[i]} {kind}: python={got} sql={want} margin={margin:.3e}")
 
 
 def _assert_no_null_closes(conn: psycopg.Connection[object], table: str) -> None:
@@ -391,7 +409,7 @@ def equivalence() -> int:
                             if tally.series % 500 == 0:
                                 print(
                                     f"  {tally.series} series, {tally.bars} bars, "
-                                    f"{len(tally.mismatches)} mismatches, {tally.ties} ties "
+                                    f"{tally.mismatch_count} mismatches, {tally.ties} ties "
                                     f"({time.monotonic() - started:.0f}s)",
                                     flush=True,
                                 )
@@ -403,8 +421,8 @@ def equivalence() -> int:
                 if current is not None:
                     _compare(current, dates, rows, trend_sql, rsi_sql, tally)
 
-        real = len(tally.mismatches)
-        rsi_real = len(tally.rsi_mismatches)
+        real = tally.mismatch_count
+        rsi_real = tally.rsi_mismatch_count
         print(f"  series            {tally.series}")
         print(f"  bars              {tally.bars}")
         print(f"  verdicts compared {2 * tally.bars}")
@@ -412,12 +430,12 @@ def equivalence() -> int:
         print(f"  MISMATCHES        {real}")
         print(f"  ties (< {TIE_TOLERANCE:g})   {tally.ties}   max margin {tally.max_tie_margin:.3e}")
         if rsi_real:
-            for problem in [m for m in tally.rsi_mismatches if m][:20]:
+            for problem in tally.rsi_mismatch_sample:
                 print("   ", problem)
             failures += 1
         if real:
             print(f"  smallest real margin {tally.min_real_margin:.3e}")
-            for problem in [m for m in tally.mismatches if m][:20]:
+            for problem in tally.mismatch_sample:
                 print("   ", problem)
             failures += 1
         print(f"  elapsed           {time.monotonic() - started:.1f}s", flush=True)
