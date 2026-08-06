@@ -463,6 +463,141 @@ class TestWindowedAtrMatchesPriceStructure:
         assert differing > 50, "the two ATR definitions should diverge after the seed"
 
 
+class TestVectorisedWindowIndicators:
+    """#2311 — bollinger and stochastic moved from Python loops to numpy.
+
+    ⚠ REPRESENTATION CHANGED, DEFINITIONS DID NOT. Equivalence with
+    `technical_analysis` is the invariant, and its binding check is the
+    full-corpus sweep (acceptance 2). What lives HERE is everything that sweep
+    structurally cannot see: the corpus carries zero NULL OHLC fields, so every
+    unevaluable path below is covered by these fixtures and nothing else.
+
+    Each of these is revert-probed by
+    `scripts/probe_2311_indicator_vectorisation.py`.
+    """
+
+    @staticmethod
+    def _flat_bars(n: int, *, null_close_at: int | None = None) -> BarSeries:
+        """Bars whose high, low and close are all identical — the flat-range
+        case the %K convention answers with 50.0."""
+        rows: list[ta.OHLCVRow] = [
+            {
+                "open": Decimal("100"),
+                "high": Decimal("100"),
+                "low": Decimal("100"),
+                "close": None if i == null_close_at else Decimal("100"),  # type: ignore[typeddict-item]
+                "volume": 1_000,
+            }
+            for i in range(n)
+        ]
+        start = date(2024, 1, 1)
+        return BarSeries(dates=tuple(start + timedelta(days=i) for i in range(n)), rows=tuple(rows))
+
+    def test_bollinger_every_prefix_matches_the_batch_form(self) -> None:
+        """The prefix form, not just the last value — an off-by-one in the
+        window offset moves every band by one bar and still matches at the end
+        of a long series."""
+        for k in range(2, len(_CLOSES) + 1):
+            bands = bollinger_series(_bars(_CLOSES[:k]), universe=U, period=20).components
+            expected = ta.bollinger_bands(CLOSES_D[:k], period=20)
+            if expected is None:
+                assert bands["upper"][-1] is None and bands["lower"][-1] is None, f"prefix {k}"
+                continue
+            assert bands["upper"][-1] == pytest.approx(expected[0], abs=1e-9), f"prefix {k}"
+            assert bands["lower"][-1] == pytest.approx(expected[1], abs=1e-9), f"prefix {k}"
+
+    def test_stochastic_every_prefix_matches_the_batch_form(self) -> None:
+        """⚠ Compared on %D, because that is what `ta.stochastic` gates on: it
+        needs k_period + d_period - 1 bars and returns both or neither, while
+        %K here is legitimately defined d_period - 1 bars earlier."""
+        for k in range(2, len(_CLOSES) + 1):
+            comps = stochastic_series(_bars(_CLOSES[:k]), universe=U, period=14, d_period=3).components
+            expected = ta.stochastic(ROWS[:k], 14, 3)
+            if expected is None:
+                assert comps["d"][-1] is None, f"prefix {k}"
+                continue
+            assert comps["k"][-1] == pytest.approx(expected[0], abs=1e-9), f"prefix {k}"
+            assert comps["d"][-1] == pytest.approx(expected[1], abs=1e-9), f"prefix {k}"
+
+    @pytest.mark.parametrize("n", [0, 1, 2, 13, 19])
+    def test_a_series_shorter_than_the_window_is_warm_up_not_a_crash(self, n: int) -> None:
+        """⚠ `sliding_window_view` RAISES when the window exceeds the array, so
+        the length guard is load-bearing rather than cosmetic: a newly-listed
+        instrument with 19 bars would abort a corpus sweep instead of reporting
+        warm-up. The Python loops it replaced simply never entered the body."""
+        series = _bars(_CLOSES[:n])
+        bands = bollinger_series(series, universe=U, period=20)
+        assert all(v is None for v in bands.components["middle"])
+        assert bands.not_evaluable_indices == ()
+        assert len(bands) == n
+
+        # ⚠ period=20 here too, deliberately: at the default 14 an n=19 series
+        # is WARM, not short, so the parametrisation would stop exercising the
+        # guard on the very case it was added for. The first draft did exactly
+        # that and the n=19 leg failed — correctly.
+        stoch = stochastic_series(series, universe=U, period=20, d_period=3)
+        assert all(v is None for v in stoch.components["k"])
+        assert all(v is None for v in stoch.components["d"])
+        assert stoch.not_evaluable_indices == ()
+        assert len(stoch) == n
+
+    def test_a_flat_window_with_a_null_close_is_unevaluable_not_fifty(self) -> None:
+        """⚠ The flat-range convention must not outrank a missing close.
+
+        Both conditions are true on this bar: the window high equals its low,
+        AND the close is NULL. Taking the 50.0 branch would emit an oscillator
+        reading for a bar that has no close — a fabricated observation at
+        exactly the index a caller pairs with a real one. The Python form got
+        this right structurally (it checked `close is None` before reaching the
+        convention); the vectorised form has to say so explicitly.
+        """
+        series = self._flat_bars(20, null_close_at=19)
+        result = stochastic_series(series, universe=U, period=14, d_period=3)
+        assert result.components["k"][19] is None
+        assert 19 in result.not_evaluable_indices
+        # ...and the convention still applies where the close IS present.
+        assert result.components["k"][18] == pytest.approx(50.0)
+
+    def test_no_nan_ever_reaches_the_result_contract(self) -> None:
+        """⚠ A NaN is strictly worse than a None here. `nan > x` and `nan < x`
+        are BOTH False, so a NaN band answers "no" to every comparison a
+        strategy makes and never announces itself — the vacuous-truth class
+        decision 5 exists to prevent. NaN is the internal missing-marker; it
+        must not survive the boundary."""
+        import math
+
+        rows = [dict(r) for r in SERIES.rows]
+        rows[25]["close"] = None  # type: ignore[typeddict-item]
+        rows[30]["high"] = None  # type: ignore[typeddict-item]
+        series = BarSeries(dates=SERIES.dates, rows=tuple(rows))  # type: ignore[arg-type]
+
+        for result in (
+            bollinger_series(series, universe=U, period=20),
+            stochastic_series(series, universe=U, period=14, d_period=3),
+        ):
+            for name, values in result.components.items():
+                for i, value in enumerate(values):
+                    assert value is None or not math.isnan(value), f"{name}[{i}] is NaN"
+            listed = list(result.not_evaluable_indices)
+            assert listed == sorted(set(listed)), "not_evaluable_indices must be sorted and unique"
+
+    def test_bollinger_lists_every_window_containing_the_null_and_no_warm_up(self) -> None:
+        """The warm-up prefix is None and NOT listed; a window containing the
+        NULL is None and IS listed. Collapsing the two is the exact ambiguity
+        `not_evaluable_indices` exists to remove."""
+        rows = [dict(r) for r in SERIES.rows]
+        rows[25]["close"] = None  # type: ignore[typeddict-item]
+        series = BarSeries(dates=SERIES.dates, rows=tuple(rows))  # type: ignore[arg-type]
+        result = bollinger_series(series, universe=U, period=20)
+
+        # Windows ending at 25..39 all contain index 25; 40 bars in, that is all
+        # of them to the end of the series.
+        assert set(result.not_evaluable_indices) == set(range(25, len(SERIES)))
+        assert result.components["upper"][25] is None
+        assert result.components["middle"][24] is not None
+        assert all(result.components["middle"][i] is None for i in range(19))
+
+
 class TestBollingerNumericalStability:
     """Pins the two-pass variance against a "faster" one-pass rewrite.
 

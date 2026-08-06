@@ -41,12 +41,15 @@ here closes those.
 from __future__ import annotations
 
 import hashlib
-from collections import deque
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
+
+import numpy as np
+import numpy.typing as npt
+from numpy.lib.stride_tricks import sliding_window_view
 
 from app.services.technical_analysis import OHLCVRow
 
@@ -156,6 +159,42 @@ class BarSeries:
     def float_lows(self) -> list[float | None]:
         return self._floats("low")
 
+    # ⚠ NaN, not None, and that is the load-bearing part (#2311).
+    #
+    # The window indicators below are vectorised, and NaN is the only "missing"
+    # marker that survives `max` / `min` / `mean` / `var` without a per-element
+    # Python branch: any window containing one produces NaN, so the unevaluable
+    # mask falls out of `isnan` instead of a hand-carried null counter. The
+    # counter and the monotonic deques it replaced were correct but cost
+    # 848-1,138 ns/bar in interpreter overhead, which is what put the corpus
+    # sweep at 83.3 s against a < 60 s acceptance.
+    #
+    # Built from the float cache rather than the Decimals so the conversion
+    # still happens exactly once per field per series.
+
+    def _array(self, field: str) -> npt.NDArray[np.float64]:
+        cache: dict[str, npt.NDArray[np.float64]] | None = getattr(self, "_array_cache", None)
+        if cache is None:
+            cache = {}
+            object.__setattr__(self, "_array_cache", cache)
+        cached = cache.get(field)
+        if cached is None:
+            cached = np.array(self._floats(field), dtype=float)
+            cache[field] = cached
+        return cached
+
+    @property
+    def array_closes(self) -> npt.NDArray[np.float64]:
+        return self._array("close")
+
+    @property
+    def array_highs(self) -> npt.NDArray[np.float64]:
+        return self._array("high")
+
+    @property
+    def array_lows(self) -> npt.NDArray[np.float64]:
+        return self._array("low")
+
 
 # ---------------------------------------------------------------------------
 # Output
@@ -242,6 +281,27 @@ def _check_period(period: int, name: str = "period") -> None:
 # Each is a single forward pass. The shape is always the same: walk the bars
 # once, carry the smoothing state, emit None until warm, emit None and record
 # the index when the input cannot support a value.
+#
+# ⚠ The RECURSIVE ones (EMA, RSI, ATR, MACD) stay Python loops on purpose.
+# Each value depends on the previous one, so there is nothing to vectorise
+# without changing the arithmetic, and at 51-222 ns/bar they are not the cost:
+# the window indicators were 1,986 of the 2,662 ns/bar total (#2311).
+
+
+def _to_optional(values: npt.NDArray[np.float64]) -> list[float | None]:
+    """``NaN`` -> ``None``, everything else a Python float.
+
+    ⚠ The contract is ``float | None``, never NaN — a NaN leaking into
+    ``IndicatorSeries.values`` would compare falsey-ish in every direction
+    (``nan > x`` and ``nan < x`` are both False), which is the vacuous-truth
+    class the result contract exists to prevent. Converting whole and then
+    patching the NaN positions is cheap because they are few: warm-up plus
+    whatever NULLs the input carried.
+    """
+    out: list[float | None] = values.tolist()
+    for i in np.flatnonzero(np.isnan(values)).tolist():
+        out[i] = None
+    return out
 
 
 def sma_series(series: BarSeries, *, universe: Universe, period: int) -> IndicatorSeries:
@@ -508,14 +568,14 @@ def bollinger_series(
     _check_period(period)
     if num_std < 0:
         raise ValueError(f"num_std must be >= 0, got {num_std}")
-    closes = series.float_closes
-    n = len(closes)
-    upper: list[float | None] = [None] * n
-    middle: list[float | None] = [None] * n
-    lower: list[float | None] = [None] * n
-    unevaluable: list[int] = []
+    closes = series.array_closes
+    n = closes.size
+    upper = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    unevaluable: tuple[int, ...] = ()
 
-    # ⚠ MEAN is a running sum (O(1)); VARIANCE deliberately walks the window.
+    # ⚠ THE VARIANCE MUST STAY TWO-PASS, AND VECTORISING DOES NOT CHANGE THAT.
     #
     # The O(1) one-pass form (`sumsq/n - mean^2`) was tried and REVERTED. It is
     # a cancellation hazard on price data — variance is tiny against mean^2, so
@@ -529,41 +589,33 @@ def bollinger_series(
     # cancellation bites. Half the speed win, none of the wrongness — and a
     # reminder that a favourable sample is not evidence of safety, which is the
     # same defect #2260 exists because of.
-    running = 0.0
-    nulls = 0
-    for i in range(n):
-        value = closes[i]
-        if value is None:
-            nulls += 1
-        else:
-            running += value
-        if i >= period:
-            dropped = closes[i - period]
-            if dropped is None:
-                nulls -= 1
-            else:
-                running -= dropped
-        if i + 1 < period:
-            continue
-        if nulls:
-            unevaluable.append(i)
-            continue
-        mean = running / period
-        acc = 0.0
-        for j in range(i - period + 1, i + 1):
-            centred = closes[j]
-            assert centred is not None
-            acc += (centred - mean) ** 2
-        variance = acc / period
-        std = variance**0.5
-        middle[i] = mean
-        upper[i] = mean + num_std * std
-        lower[i] = mean - num_std * std
+    #
+    # `ndarray.var` is safe here for a reason that was CHECKED rather than
+    # assumed: `numpy._core._methods._var` computes `arrmean` and then
+    # `sum((x - arrmean)**2)` — the same two passes the Python loop did, in C.
+    # ⚠ Do NOT "optimise" this to `(w**2).mean(axis=1) - means**2`. That is the
+    # reverted form wearing a numpy hat, and `TestBollingerNumericalStability`
+    # is what will tell you so.
+    if n >= period:
+        windows = sliding_window_view(closes, period)
+        means = windows.mean(axis=1)
+        stds = np.sqrt(windows.var(axis=1))
+        middle[period - 1 :] = means
+        upper[period - 1 :] = means + num_std * stds
+        lower[period - 1 :] = means - num_std * stds
+        # A NaN mean is a window containing a NULL close: unevaluable, not
+        # warm-up. Warm-up is the untouched `period - 1` prefix, which is
+        # exactly why the prefix is NOT in this list.
+        unevaluable = tuple((np.flatnonzero(np.isnan(means)) + (period - 1)).tolist())
 
     return MultiIndicatorSeries(
-        components={"upper": tuple(upper), "middle": tuple(middle), "lower": tuple(lower)},
+        components={
+            "upper": tuple(_to_optional(upper)),
+            "middle": tuple(_to_optional(middle)),
+            "lower": tuple(_to_optional(lower)),
+        },
         universe=universe,
-        not_evaluable_indices=tuple(unevaluable),
+        not_evaluable_indices=unevaluable,
     )
 
 
@@ -582,76 +634,54 @@ def stochastic_series(
     """
     _check_period(period)
     _check_period(d_period, "d_period")
-    rows = series.rows
-    n = len(rows)
-    k: list[float | None] = [None] * n
-    d: list[float | None] = [None] * n
-    unevaluable: list[int] = []
+    n = len(series)
+    highs = series.array_highs
+    lows = series.array_lows
+    closes = series.array_closes
 
-    highs = series.float_highs
-    lows = series.float_lows
-    closes = series.float_closes
-
-    # Monotonic deques — the standard sliding-window max/min. O(1) amortised
-    # per bar instead of O(period), and EXACT: max and min introduce no
-    # floating-point error, unlike a running-sum trick.
-    max_dq: deque[int] = deque()
-    min_dq: deque[int] = deque()
-    nulls = 0
-    for i in range(n):
-        high_i, low_i = highs[i], lows[i]
-        if high_i is None or low_i is None:
-            nulls += 1
-        else:
-            while max_dq and (highs[max_dq[-1]] or 0.0) <= high_i:
-                max_dq.pop()
-            max_dq.append(i)
-            while min_dq and (lows[min_dq[-1]] or 0.0) >= low_i:
-                min_dq.pop()
-            min_dq.append(i)
-        if i >= period:
-            j = i - period
-            if highs[j] is None or lows[j] is None:
-                nulls -= 1
-            if max_dq and max_dq[0] == j:
-                max_dq.popleft()
-            if min_dq and min_dq[0] == j:
-                min_dq.popleft()
-        if i + 1 < period:
-            continue
-        close = closes[i]
-        if nulls or close is None or not max_dq or not min_dq:
-            unevaluable.append(i)
-            continue
-        hi = highs[max_dq[0]]
-        lo = lows[min_dq[0]]
-        assert hi is not None and lo is not None
-        k[i] = 50.0 if hi == lo else (close - lo) / (hi - lo) * 100.0
+    # Sliding window max/min. ⚠ This is O(n x period) work, NOT the O(n)
+    # amortised monotonic deques it replaced — and it is ~60x faster anyway,
+    # because the deques' cost was 848 ns/bar of interpreter overhead and this
+    # is `period` float comparisons in C. Same exactness either way: max and
+    # min introduce no floating-point error.
+    k_values = np.full(n, np.nan)
+    unevaluable_k = np.zeros(n, dtype=bool)
+    if n >= period:
+        window_high = sliding_window_view(highs, period).max(axis=1)
+        window_low = sliding_window_view(lows, period).min(axis=1)
+        close_at = closes[period - 1 :]
+        span = window_high - window_low
+        # A NULL high, low or close anywhere in the window makes the span or
+        # the close NaN, which carries straight through the division.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            k_at = (close_at - window_low) / span * 100.0
+        # Flat-range convention, inherited from `technical_analysis.stochastic`
+        # ⚠ but NOT applied when the close is missing: a flat window with no
+        # close is unevaluable, not 50.0. `span == 0.0` is already False for a
+        # NaN span, so only the close needs the explicit guard.
+        k_values[period - 1 :] = np.where((span == 0.0) & ~np.isnan(close_at), 50.0, k_at)
+        unevaluable_k[period - 1 :] = np.isnan(k_values[period - 1 :])
 
     # ⚠ [C2] %D inherits %K's unevaluability. A NULL input makes %K unevaluable
     # at index j, and every %D window containing j is unevaluable too — for the
     # following d_period - 1 bars. The first draft left those as a bare None:
     # outside warm-up AND outside not_evaluable_indices, which is precisely the
     # warm-up/unevaluable collapse the result contract exists to prevent.
-    unevaluable_k = set(unevaluable)
-    for i in range(n):
-        if i + 1 < d_period:
-            continue
-        window_indices = range(i - d_period + 1, i + 1)
-        if any(j in unevaluable_k for j in window_indices):
-            if i not in unevaluable_k:
-                unevaluable.append(i)
-            continue
-        window_k = k[i - d_period + 1 : i + 1]
-        if any(v is None for v in window_k):
-            continue
-        d[i] = sum(v for v in window_k if v is not None) / d_period
-    unevaluable.sort()
+    #
+    # A NaN %K covers BOTH cases in the mean below, so `d` is None for warm-up
+    # and for unevaluable alike — the boolean mask is what tells them apart,
+    # and only the unevaluable one is listed.
+    d_values = np.full(n, np.nan)
+    unevaluable_d = np.zeros(n, dtype=bool)
+    if n >= d_period:
+        d_values[d_period - 1 :] = sliding_window_view(k_values, d_period).mean(axis=1)
+        unevaluable_d[d_period - 1 :] = sliding_window_view(unevaluable_k, d_period).any(axis=1)
 
+    unevaluable = tuple(np.flatnonzero(unevaluable_k | unevaluable_d).tolist())
     return MultiIndicatorSeries(
-        components={"k": tuple(k), "d": tuple(d)},
+        components={"k": tuple(_to_optional(k_values)), "d": tuple(_to_optional(d_values))},
         universe=universe,
-        not_evaluable_indices=tuple(unevaluable),
+        not_evaluable_indices=unevaluable,
     )
 
 
