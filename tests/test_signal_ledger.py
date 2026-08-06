@@ -107,8 +107,9 @@ class TestFillResolution:
 
     def test_a_fill_bar_with_no_open_price_is_no_fill_bar(self) -> None:
         """Both ``open`` columns are nullable. Measured 2026-08-06: zero NULL
-        opens across 6,702,877 + 25,818,944 rows, so this is unreachable today
-        — but nullable is not impossible, and the alternative to failing closed
+        opens in either ``price_daily`` or ``research_price_daily`` (the query
+        is in ``signal_ledger.resolve_fills``), so this is unreachable today —
+        but nullable is not impossible, and the alternative to failing closed
         is storing a fill price of None on a fired row."""
         series = _series(_CONSECUTIVE, opens=[Decimal("100"), None, Decimal("102"), Decimal("103")])
         rows = resolve_fills([_fired_at(0)], series=series, identity=_IDENTITY, instrument_id=1)

@@ -136,10 +136,19 @@ def resolve_fills(
        hand-built signal would otherwise slip a final-bar decision into the
        ledger.
     2. ⚠ **A** ``t+1`` **with no OPEN price is also** ``no_fill_bar``. Measured
-       2026-08-06 on the full population: ``price_daily`` 6,702,877 rows and
-       ``research_price_daily`` 25,818,944 rows, **zero NULL opens in either**
-       — so this branch is currently unreachable in practice. It is not
-       unreachable structurally: both ``open`` columns are nullable, and
+       2026-08-06 on the full population: **zero NULL opens in either**
+       ``price_daily`` or ``research_price_daily`` — so this branch is
+       currently unreachable in practice. Reproduce with::
+
+           select count(*) - count(open) from price_daily;
+           select count(*) - count(open) from research_price_daily;
+
+       ⚠ The row COUNTS are deliberately not written down here: the corpus is
+       live (``daily_candle_refresh`` moved ``price_daily`` by 7 rows during
+       this ticket alone), so a figure in a docstring goes stale in the place a
+       reader trusts most. The zero is the claim; the query reproduces it.
+
+       It is not unreachable structurally: both ``open`` columns are nullable, and
        ``price_structure`` builds ``OHLCVRow`` by passing ``bar.open`` through
        with no None check. Failing closed is what the rest of this codebase
        does with a masked bar.
