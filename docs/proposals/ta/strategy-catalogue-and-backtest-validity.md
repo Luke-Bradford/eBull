@@ -516,6 +516,11 @@ it simply never sees the non-US losers. Left undecided, that ends as validated o
 57% of the universe and allocated across 100% of it, with nothing in the output
 to say so — which is what the allocation invariant below exists to prevent.
 
+✅ The universe query lives in `app/services/strategies/validated_universe.py`,
+which resolves the type id through `etoro_instrument_types.description = 'Stocks'`
+and raises when that lookup does not resolve to exactly one row — the assertion
+this section asks for, rather than a hardcoded `5`.
+
 **Adopted: #2289 option (1) + option (3).**
 
 **(1) US-only validation universe.** Every §5 gate is run over the 6,733 US
@@ -642,6 +647,21 @@ Data: close-only. Needs ≥200 bars as-of the decision date.
 Note: `derive_trend_signals` (#1989) already exposes `price_vs_sma200` and
 `sma_50_200_regime` — but on the LATEST bar only. The backtest consumes
 phase-2 recomputed history, never the stored current-state columns.
+
+✅ **IMPLEMENTED 2026-08-06** — `app/services/strategies/s1_time_series_momentum.py`,
+a pure function against the phase-3a registry contract. Two notes it settles that
+this entry left open:
+
+- **Both legs share ONE warm-up.** The exit reads only `close` and `sma_50`, so
+  it is computable from bar 49; it is refused until bar 199 anyway, because
+  declaring per-leg input sets would make the same bar live for the exit and
+  warming for the entry — §3.1's branch-dependent evaluability one level up, and
+  this entry gives the strategy a single data requirement (*"Needs ≥200 bars"*).
+  ⚠ It is a narrowing, so it is counted, not asserted safe: **774,944 exit bars**
+  over the validated universe (`--census`).
+- **The exit leg is stateless** — `close < sma_50` fires whether or not an entry
+  is open, because the ledger records decisions and §7 requires every fired signal
+  recorded. Pairing an exit with the entry it closes is phase 5's.
 
 **S-2 · Cross-sectional momentum (12-1)**
 Rebalance trigger, defined causally: the **first bar whose calendar month
