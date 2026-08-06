@@ -1,0 +1,40 @@
+-- #2171 — index def14a_beneficial_holdings on accession_number.
+--
+-- Sibling of #2157 / migration 242, which fixed the same class of defect on
+-- ownership_def14a_observations. The DEF 14A rewash and the live DEF 14A
+-- ingest key FOUR statements on accession_number alone, and none of the four
+-- indexes present leads with that column
+-- (def14a_beneficial_holdings_pkey, idx_def14a_holdings_instrument_as_of,
+-- idx_def14a_holdings_issuer_holder,
+-- uq_def14a_holdings_instrument_accession_holder — the last CONTAINS
+-- accession_number but leads with instrument_id, so a lookup keyed on the
+-- accession alone cannot use it). All four were sequential scans of the whole
+-- table, per accession, on every rewashed row:
+--
+--   app/services/rewash_filings.py:518   cover-label guard      SELECT holder_name
+--   app/services/rewash_filings.py:587   existing-rows probe    SELECT issuer_cik, instrument_id … LIMIT 1
+--   app/services/rewash_filings.py:720   replace-then-insert    DELETE
+--   app/services/rewash_filings.py:851   sibling-instrument set SELECT DISTINCT instrument_id … AND instrument_id IS NOT NULL
+--
+-- A fifth (app/services/def14a_ingest.py:743) also filters on the accession
+-- but carries instrument_id = ANY(...) alongside, so it already leads with the
+-- unique index and was never a seq scan.
+--
+-- NOT the partial ``WHERE instrument_id IS NOT NULL`` index proposed on the
+-- issue. instrument_id is NULLABLE on this table, so Postgres cannot prove the
+-- predicate holds for the three statements that filter on accession_number
+-- alone, and could not use a partial index for any of them — it would have
+-- closed one of the four seq scans. (Measured on the dev corpus: 110,748 rows,
+-- 0 with a NULL instrument_id, so the partial form would not even have been
+-- smaller. Reproduce with: SELECT count(*), count(instrument_id) FROM
+-- def14a_beneficial_holdings;)
+--
+-- Second column is instrument_id so shape :851's SELECT DISTINCT instrument_id
+-- can be served index-only.
+--
+-- NOT CONCURRENTLY, following migration 242 on the sibling table: the heap is
+-- 18 MB / 110,748 rows on the dev corpus, so the build holds its SHARE lock
+-- for well under a second and does not need the autocommit directive plus the
+-- DROP-INVALID dance that migration 204 carries for the 1.46M-row manifest.
+CREATE INDEX IF NOT EXISTS idx_def14a_holdings_accession
+    ON def14a_beneficial_holdings (accession_number, instrument_id);
