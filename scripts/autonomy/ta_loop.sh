@@ -18,7 +18,19 @@
 #   scripts/autonomy/ta_loop.sh            # run until stopped
 #   touch var/autonomy/PAUSE               # graceful stop after current iteration
 #   tail -f var/autonomy/loop.log          # watch
-#   cat var/autonomy/status.md             # what it last did
+#   cat var/autonomy/status.md             # what it is doing / last did
+#
+# INSTALLED COPY — what launchd actually runs
+#   mkdir -p <worktree>/var/autonomy/bin
+#   cp scripts/autonomy/ta_loop.sh scripts/autonomy/ta_loop_prompt.md \
+#      <worktree>/var/autonomy/bin/
+#
+# ⚠ Run the INSTALLED copy, never the tracked one, for anything unattended.
+# The driver drives a worktree that changes branch every iteration; a driver
+# read from a tracked path is deleted by its own `git checkout` the moment it
+# branches off a commit older than itself. `/var/*` is gitignored, so a copy
+# under var/autonomy/bin/ is invisible to every checkout and cannot be moved
+# out from under a running loop.
 #
 # ⚠ Runs in its OWN git worktree. Two Claude instances on ~/Dev/eBull will
 # clobber each other's uncommitted work — there is a prevention-log entry for
@@ -28,7 +40,15 @@ set -uo pipefail
 
 WORKTREE="${TA_LOOP_WORKTREE:-/Users/lukebradford/Dev/.ebull-autonomy}"
 STATE_DIR="${TA_LOOP_STATE:-$WORKTREE/var/autonomy}"
-PROMPT="$WORKTREE/scripts/autonomy/ta_loop_prompt.md"
+
+# ⚠ The prompt is resolved next to THIS script, not at a fixed path inside the
+# checkout. The driver drives a worktree whose branch changes every iteration,
+# so anything it reads from a tracked path can vanish under it — check out a
+# branch based on a commit predating this PR and the loop deletes its own
+# prompt mid-run. Installed copies live in var/autonomy/bin/, which `/var/*`
+# in .gitignore keeps out of git's reach entirely.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROMPT="${TA_LOOP_PROMPT:-$SELF_DIR/ta_loop_prompt.md}"
 PAUSE="$STATE_DIR/PAUSE"
 LOG="$STATE_DIR/loop.log"
 STATUS="$STATE_DIR/status.md"
@@ -48,7 +68,26 @@ if [[ ! -f "$PROMPT" ]]; then
   exit 1
 fi
 
-log "=== ta_loop start (worktree=$WORKTREE, max=$MAX_ITERATIONS, cooldown=${COOLDOWN_SECONDS}s) ==="
+# ⚠ ONE driver per worktree. The dedicated worktree stops this loop clobbering
+# ~/Dev/eBull; it does nothing about a second copy of the loop itself, and
+# launchd's KeepAlive makes that reachable in one step — agent running, human
+# starts a manual run, two Claudes in one checkout (prevention log 2026-07-16).
+# mkdir is the atomic test-and-set available everywhere; macOS ships no flock(1).
+LOCK="$STATE_DIR/loop.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+    log "ABORT another ta_loop.sh holds $LOCK (pid $holder)"
+    exit 1
+  fi
+  log "clearing stale lock $LOCK (holder '${holder:-unknown}' is gone)"
+  rm -rf "$LOCK"
+  mkdir "$LOCK" || { log "FATAL cannot take lock $LOCK"; exit 1; }
+fi
+echo "$$" > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
+
+log "=== ta_loop start (worktree=$WORKTREE, max=$MAX_ITERATIONS, cooldown=${COOLDOWN_SECONDS}s, pid=$$) ==="
 
 iteration=0
 consecutive_failures=0
@@ -71,8 +110,24 @@ while true; do
 
   iteration=$((iteration + 1))
   started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  transcript="$STATE_DIR/iteration-$(date -u +%Y%m%dT%H%M%SZ).log"
+  # pid+iteration suffix: the timestamp alone is 1-second resolution, so a
+  # fast-failing iteration could otherwise overwrite the transcript that
+  # explains why it failed.
+  transcript="$STATE_DIR/iteration-$(date -u +%Y%m%dT%H%M%SZ)-$$.$iteration.log"
   log "--- iteration $iteration start"
+
+  # ⚠ status.md is written BEFORE the iteration as well as after. Written only
+  # at the end, the file a human is told to open does not exist at all during
+  # the first run — which is the same "instrumentation is silent exactly when
+  # you need it" failure as the month-long unnoticed PAUSE.
+  {
+    echo "# TA loop status"
+    echo
+    echo "- iteration: **$iteration** — IN FLIGHT"
+    echo "- started: $started"
+    echo "- pid: $$"
+    echo "- transcript: \`$transcript\`"
+  } > "$STATUS"
 
   # ⚠ NOT piped into head/tail. A pipe returns the pipe's status and buffers
   # the output, which cost 7 minutes of misdiagnosis on 2026-08-05. Redirect
@@ -88,12 +143,26 @@ while true; do
       > "$transcript" 2>&1
   rc=$?
 
-  if [[ $rc -eq 0 ]]; then
+  # ⚠ rc is not the whole answer under --output-format=stream-json. The stream
+  # is a sequence of JSON events and its LAST line is the result event, which
+  # carries the task-level verdict independently of how the process exited.
+  # Verified 2026-08-06 against the installed CLI: a successful run ends with
+  # one object containing "type":"result" and "is_error":false, and exits 0.
+  # Require both, so a stream that terminates tidily on a failed task still
+  # counts toward the 3-strike stop rather than looking like progress.
+  # (grep is the DOWNSTREAM command here and its status is the one being read
+  # — this is not the `gate | tail` pattern that hides an exit code.)
+  result_ok=0
+  if tail -1 "$transcript" | grep -q '"is_error":false'; then
+    result_ok=1
+  fi
+
+  if [[ $rc -eq 0 && $result_ok -eq 1 ]]; then
     consecutive_failures=0
     log "--- iteration $iteration OK (transcript: $(basename "$transcript"))"
   else
     consecutive_failures=$((consecutive_failures + 1))
-    log "--- iteration $iteration FAILED rc=$rc (failures in a row: $consecutive_failures)"
+    log "--- iteration $iteration FAILED rc=$rc result_ok=$result_ok (failures in a row: $consecutive_failures)"
   fi
 
   {
@@ -103,6 +172,7 @@ while true; do
     echo "- started: $started"
     echo "- finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "- exit code: $rc"
+    echo "- result event ok: $result_ok"
     echo "- consecutive failures: $consecutive_failures"
     echo "- transcript: \`$transcript\`"
     echo
