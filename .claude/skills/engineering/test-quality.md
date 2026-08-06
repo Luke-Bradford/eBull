@@ -347,6 +347,33 @@ have shipped as decoration.
 State the probe in the PR — "verified the test fails against the pre-fix
 ordering and passes after" — so a reviewer knows the assertion is load-bearing.
 
+### ⚠ The probe itself can be vacuous, and it reports as a missing test
+
+When probing by string replacement, `assert source.count(old) == 1` is the
+standing guard — a probe that silently matches nothing proves nothing. It is not
+enough. **It guards against matching nothing; it says nothing about whether the
+replacement changes behaviour.**
+
+Precedent (#2240 4a, 2026-08-06): a probe replaced `return "window_truncated"`
+with `return None if False else "window_truncated"`. Anchor unique, file
+changed, test still passed — because the replacement returns the same value. The
+harness reported `NOT CAUGHT`, which reads as *the test is inadequate* rather
+than *the probe is inert*, so the natural next move is to write a redundant test
+or weaken the code until the probe "works". Both make things worse.
+
+- **The tell:** a replacement that keeps the original expression inside it
+  (`X` → `f(X)`, `X` → `cond and X`, `X` → `A if False else X`), or that flips a
+  branch the test input never reaches.
+- **The rule:** a probe must DELETE or INVERT the behaviour, not wrap it. When a
+  probe reports NOT CAUGHT, read the injected source before touching the test.
+- ⚠ **Some invariants cannot be broken at a single site.** "Truncation must not
+  be absorbed into `expired`" needed the window clamp AND the exit-index clamp
+  changed together — either alone still refuses. So the harness takes a *list*
+  of (anchor, replacement) pairs per probe, with the uniqueness assertion per
+  anchor. A probe needing two sites is itself evidence that the two guards are
+  load-bearing together, which is worth knowing before somebody deletes one as
+  redundant.
+
 ## A "neutral" fixture is not neutral if the thing under test classifies it
 
 Bit twice in one PR (#2279, 2026-08-05), and both times the test failed against
