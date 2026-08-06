@@ -19,13 +19,19 @@ Postgres re-derivation of the same rule. Same shape as
 re-derives Wilder RSI itself**, through a recursive CTE, rather than being handed
 the Python value.
 
-⚠ THE TWO SIDES OF THE *RSI* COMPARISON AGREE BIT-FOR-BIT, AND THAT IS THE POINT.
-Both compute ``(gain*13 + up)/14`` in IEEE754 doubles in the same order, so the
-arithmetic is not what is being tested — the RECURSION STRUCTURE and the BAR
-ALIGNMENT are. Any disagreement on an RSI value is therefore a logic difference,
-not a rounding one, and is reported as a mismatch with no tie allowance.
-(Measured on the three deepest series before this script was written: 16,236 of
-16,236 values exactly equal, including the 14 leading nulls.)
+⚠ THE TWO SIDES OF THE *RSI* COMPARISON AGREE BIT-FOR-BIT, AND THAT IS ASSERTED
+ON THE FULL POPULATION, not assumed. Both compute ``(gain*13 + up)/14`` in
+IEEE754 doubles in the same order, so the arithmetic is not what is being tested
+— the RECURSION STRUCTURE and the BAR ALIGNMENT are. Any disagreement on an RSI
+value is therefore a logic difference, not a rounding one, and it is counted as a
+hard mismatch with no tie allowance.
+
+⚠ ``_compare`` compares the RSI VALUES directly, bar by bar, rather than only the
+verdicts they feed. The first version of this docstring rested on a THREE-SERIES
+measurement (16,236 of 16,236 exactly equal), which is the sample-not-population
+shape `.claude/CLAUDE.md` forbids; the claim is now produced by the run that
+makes it. It is also what licenses the conditional tie in ``_margin`` — see there
+for the entry-leg conjunction hole this closed.
 
 ⚠ THE TWO SIDES OF THE *SMA* COMPARISON DO NOT, deliberately — Postgres averages
 ``numeric`` exactly, ``sma_series`` accumulates ``float``. A bar whose close sits
@@ -248,17 +254,30 @@ def _margin(
     kind: str,
     close: Decimal | None,
     trend: Decimal | None,
-    rsi: float | None,
+    rsi_python: float | None,
+    rsi_sql: float | None,
 ) -> float:
     """How close the deciding comparison was, relatively.
 
-    ⚠ ONLY THE SMA COMPARISON EARNS A TIE, so only it contributes a finite margin
-    here. The RSI comparison is bit-for-bit identical on both sides by
-    construction (module docstring), so a disagreement there is a logic error and
-    must not be excused by a tolerance — returning ``inf`` for the exit leg is
-    what makes that non-negotiable rather than merely unlikely.
+    ⚠ ONLY THE SMA COMPARISON EARNS A TIE, and the entry leg is a CONJUNCTION, so
+    that is not automatic. An earlier version returned the close-vs-trend gap for
+    any entry disagreement — which silently attributed the disagreement to the SMA
+    comparison whenever the close happened to sit near its 200-day average. A real
+    RSI walk defect landing on such a bar would have been reclassified as a float
+    tie and swallowed, defeating the "no tie allowance for RSI" guarantee on
+    exactly the leg where both comparisons live. (Review bot, PR #2322.)
+
+    So the tie is CONDITIONAL on the RSI halves being provably identical at this
+    bar. If they differ by so much as an ULP, the disagreement might be theirs and
+    the margin is ``inf`` — a hard mismatch. The exit leg reads only the RSI, so it
+    never earns a tie at all.
     """
-    if kind == "exit" or close is None or trend is None or rsi is None:
+    if kind == "exit" or close is None or trend is None:
+        return float("inf")
+    # ⚠ Not `!=` on two Nones: a bar where one side has a value and the other does
+    # not is precisely the alignment defect this arm exists to find, so it must
+    # not be excused either.
+    if rsi_python is None or rsi_sql is None or rsi_python != rsi_sql:
         return float("inf")
     return _relative(float(close), float(trend))
 
@@ -268,6 +287,7 @@ class _Tally:
         self.series = 0
         self.bars = 0
         self.mismatches: list[str] = []
+        self.rsi_mismatches: list[str] = []
         self.ties = 0
         self.max_tie_margin = 0.0
         self.min_real_margin = float("inf")
@@ -288,13 +308,29 @@ def _compare(
     closes = series.closes
     expected = _sql_verdicts(closes, trend_sql, rsi_sql)
 
+    # ⚠ THE RSI VALUES ARE COMPARED DIRECTLY, not merely through the verdicts they
+    # produce. The module docstring's "bit-for-bit" claim rested on a THREE-SERIES
+    # measurement taken before this script existed, which is the sample-not-
+    # population shape `.claude/CLAUDE.md` forbids. Comparing them here turns it
+    # into a full-population assertion — and it is what licenses the conditional
+    # tie in `_margin`, since a tie is only sound where the RSI halves agree.
+    rsi_python = rsi_series(series, universe=UNIVERSE, period=RSI_PERIOD).values
+
     tally.series += 1
     tally.bars += len(series)
+    for i in range(len(series)):
+        if rsi_python[i] == rsi_sql[i]:
+            continue
+        if len(tally.rsi_mismatches) < 20:
+            tally.rsi_mismatches.append(f"{key} {dates[i]}: python={rsi_python[i]!r} sql={rsi_sql[i]!r}")
+        else:  # keep counting past the printed sample
+            tally.rsi_mismatches.append("")
+
     for i, (want_entry, want_exit) in enumerate(expected):
         for kind, got, want in (("entry", entries[i].verdict, want_entry), ("exit", exits[i].verdict, want_exit)):
             if got == want:
                 continue
-            margin = _margin(kind, closes[i], trend_sql[i], rsi_sql[i])
+            margin = _margin(kind, closes[i], trend_sql[i], rsi_python[i], rsi_sql[i])
             if margin < TIE_TOLERANCE:
                 tally.ties += 1
                 tally.max_tie_margin = max(tally.max_tie_margin, margin)
@@ -368,11 +404,17 @@ def equivalence() -> int:
                     _compare(current, dates, rows, trend_sql, rsi_sql, tally)
 
         real = len(tally.mismatches)
+        rsi_real = len(tally.rsi_mismatches)
         print(f"  series            {tally.series}")
         print(f"  bars              {tally.bars}")
         print(f"  verdicts compared {2 * tally.bars}")
+        print(f"  RSI VALUE MISMATCHES {rsi_real}   (exact equality, no tolerance)")
         print(f"  MISMATCHES        {real}")
         print(f"  ties (< {TIE_TOLERANCE:g})   {tally.ties}   max margin {tally.max_tie_margin:.3e}")
+        if rsi_real:
+            for problem in [m for m in tally.rsi_mismatches if m][:20]:
+                print("   ", problem)
+            failures += 1
         if real:
             print(f"  smallest real margin {tally.min_real_margin:.3e}")
             for problem in [m for m in tally.mismatches if m][:20]:
