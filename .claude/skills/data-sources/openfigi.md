@@ -114,9 +114,50 @@ Do NOT trust `data[0]` blindly without the filter — future API changes may reo
 
 Single key `warning`. No `error` key. No `data` key. Probed against `000000000`.
 
-### 4.3 Other observed entry shapes
+### 4.3 Per-item rejection — `{"error": ...}`
 
-(None in the probe set. OpenFIGI has documented behaviour for malformed `idType` values returning `{"error": "..."}` — the resolver defensively checks for `error` AND `warning` AND missing `data` and treats any of those three as "no result" (`_entry_to_mapping` in `openfigi_resolver.py`).)
+⚠ **This section said "None in the probe set… treated identically to `warning`" until 2026-08-06. That was wrong, and it stood behind a terminal mislabel on 14,477 distinct CUSIPs (#2304).**
+
+```json
+{"error": "Invalid idValue format."}
+```
+
+Single key `error`. **No structured error code** — the key set is exactly `{"error"}`, so a classifier over the message text is the only option available (checked before writing one).
+
+**OpenFIGI validates the CUSIP mod-10 check digit.** Probed live 2026-08-06 against `idType=ID_CUSIP`:
+
+| `idValue` | check digit | response entry |
+|---|---|---|
+| `037833100` (AAPL) | valid | `{"data": [...]}` |
+| `000000000` | valid | `{"warning": "No identifier found."}` |
+| `ZZZZZZZZZ` | **INVALID** | `{"error": "Invalid idValue format."}` |
+| `ABC`, `03783310`, `037833100X`, `""`, `03783310@`, `037833abc` | n/a | `{"error": "Invalid idValue format…"}` |
+
+So a **well-formed-looking 9-char uppercase-alphanumeric value is NOT enough** — `ZZZZZZZZZ` passes every shape test we apply locally and is still rejected. The discriminant is the check digit, not the character class.
+
+⚠ **The message comes back in TWO spellings from the same endpoint in a single probe** — `"Invalid idValue format"` and `"Invalid idValue format."`. An exact-literal match is not safe; `_classify_item_error` normalises case and trailing punctuation and compares to one value.
+
+**A rejection is NOT a no-match.** `warning` = "OpenFIGI accepted your identifier and has no mapping" (a coverage fact about the security). `error` = "OpenFIGI would not accept your identifier" (an input fact about filer data). Different owner, different remedy; collapsing them is what #2304 fixed.
+
+**Only the RECOGNISED rejection is terminal.** An unrecognised per-item `error` — provider bug, entitlement, throttling, a shape added after 2026-08-06 — is not proven deterministic and must stay retryable. Widening the classifier recreates #2304 one layer up.
+
+### 4.4 Outcome types (post-#2304)
+
+`resolve_cusips` returns a **TOTAL** `dict[str, OpenFigiOutcome]` — one entry per CUSIP sent, keyed by the caller's own string. There is no "absent means unresolved" convention; absence was itself a lossy fold.
+
+| outcome | shape that produces it | sweep writes |
+|---|---|---|
+| `OpenFigiMapping` | `data` with a US-primary common-stock row + non-empty `ticker` | `resolved_via_openfigi` / `openfigi_no_instrument` |
+| `OpenFigiNoMatch` | `warning`, `data: []`, no US-primary row, blank ticker | `openfigi_unknown` (terminal) |
+| `OpenFigiInvalidIdentifier` | recognised `Invalid idValue format` | `openfigi_invalid_identifier` (terminal, sql/257) |
+| `OpenFigiItemError` | any other `{"error": ...}` | **nothing** — row stays NULL, retries |
+| `OpenFigiMalformedEntry` | non-dict entry, non-list `data`, non-dict `data` row, no data/warning/error key | **nothing** — row stays NULL, retries |
+
+**Cross-source check on the check-digit rule (2026-08-06):** SEC's own authoritative 13F Official List (`13flist2025q4.txt`, all 12,282 lines parsed, 0 unmatched) contains **12,282 distinct CUSIPs of which 0 fail the mod-10 check digit** — including all 1,466 CINS (letter-leading, foreign) entries. CINS inherits the same check digit, so a failing `G`-prefixed value is a corrupt identifier, not a legitimate foreign one.
+
+⚠ The obvious regex `^[0-9A-Z]{9}\s` parses only 6,300 of those lines — CINS rows use `*` as the delimiter, so it silently drops the entire foreign half, which is exactly the population the rule most needs testing against. Use `^([0-9A-Z]{9})[\s*]` and assert matched + unmatched == total.
+
+Reproduce the corpus split with `uv run python scripts/audit_cusip_check_digit.py --census`.
 
 ## 5. eBull integration points (post PR-1b)
 
@@ -179,7 +220,7 @@ A CUSIP can map to several FIGI rows that share `compositeFIGI` (e.g. one row pe
 
 ### 7.5 Pink-sheet / OTC tickers
 
-OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_us_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. When no `US`-row exists the sweep tombstones the `unresolved_13f_cusips` row with `resolution_status='openfigi_unknown'` (sql/192, #740 — terminal in v1; `SET resolution_status=NULL` is the manual retry escape hatch). The sibling `openfigi_no_instrument` status is written when OpenFIGI returns a ticker but it has no unique `is_tradable` `instruments.symbol` match.
+OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_us_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. When no `US`-row exists the sweep tombstones the `unresolved_13f_cusips` row with `resolution_status='openfigi_unknown'` (sql/192, #740 — terminal in v1; `SET resolution_status=NULL` is the manual retry escape hatch). The sibling `openfigi_no_instrument` status is written when OpenFIGI returns a ticker but it has no unique `is_tradable` `instruments.symbol` match. The third negative, `openfigi_invalid_identifier` (sql/257, #2304), is written when OpenFIGI REJECTED the identifier — see §4.3; it is NOT a no-match and must not be read as one.
 
 ### 7.6 Per-instance limiter — single-process only
 

@@ -1338,9 +1338,7 @@ class OpenFigiSweepReport:
     passes: int = 1
 
 
-_SWEEP_COUNTER_FIELDS: Final[tuple[str, ...]] = tuple(
-    f.name for f in fields(OpenFigiSweepReport) if f.name != "passes"
-)
+_SWEEP_COUNTER_FIELDS: Final[tuple[str, ...]] = tuple(f.name for f in fields(OpenFigiSweepReport) if f.name != "passes")
 """Every summable counter on :class:`OpenFigiSweepReport`."""
 
 
@@ -1799,7 +1797,18 @@ def sweep_unresolved_cusips_via_openfigi(
         passes += 1
         for field_name in _SWEEP_COUNTER_FIELDS:
             totals[field_name] += getattr(report, field_name)
-        if report.candidates_seen == 0 or report.api_errors > 0:
+        # Stop on anything that left rows PENDING. #2304 introduced three
+        # outcomes that deliberately do not tombstone, and the selection
+        # is `ORDER BY cusip` over NULL rows — so without this the same
+        # alphabet-head window is re-selected and re-POSTed on every
+        # remaining pass (up to 60 on the keyed tier), burning the budget
+        # and starving every CUSIP behind it. Symmetric with the
+        # whole-batch `api_errors` break above it: an unrecognised error
+        # or a shape we cannot parse is a reason to stop hammering, not
+        # to retry harder. Both are rare by construction; if they are
+        # not, the counters degrade the run and the operator sees it.
+        stalled = report.item_errors + report.malformed_entries + report.not_returned
+        if report.candidates_seen == 0 or report.api_errors > 0 or stalled > 0:
             break
 
     return OpenFigiSweepReport(passes=passes, **totals)

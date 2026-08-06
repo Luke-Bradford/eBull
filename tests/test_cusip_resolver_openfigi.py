@@ -554,6 +554,101 @@ class TestPerItemOutcomeRouting:
         for cusip in ["TESTTRN001", "TESTTRN002"]:
             assert _status_of(ebull_test_conn, cusip) is None
 
+    def test_raced_tombstone_is_not_counted(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """#2304 second finding — the counters must report VERIFIED
+        tombstones, not attempts.
+
+        A row selected while NULL can be moved to a non-replaceable
+        status before the sweep tombstones it, so the UPDATE touches 0
+        rows. Pre-fix the counter incremented anyway and the run reported
+        a verdict it did not write.
+        """
+        conn = ebull_test_conn
+        cusip = "TESTRACE02"
+
+        class _StatusRacingResolver(FakeOpenFigiResolver):
+            """Moves the row out of the replaceable set DURING the call —
+            after the sweep's selection, before its tombstone."""
+
+            def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiOutcome]:
+                result = super().resolve_cusips(cusips)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE unresolved_13f_cusips SET resolution_status = 'resolved_via_extid' WHERE cusip = %s",
+                        (cusip,),
+                    )
+                return result
+
+        _seed_pending(ebull_test_conn, cusip)
+        ebull_test_conn.commit()
+        report = sweep_unresolved_cusips_via_openfigi(
+            ebull_test_conn,
+            resolver=_StatusRacingResolver(outcomes={cusip: OpenFigiNoMatch(reason="warning")}),
+        )
+        ebull_test_conn.commit()
+
+        assert report.candidates_seen == 1
+        # The row was NOT re-tombstoned — the racing status stands.
+        assert _status_of(ebull_test_conn, cusip) == "resolved_via_extid"
+        # ...so no verdict was written, and none may be reported.
+        assert report.unresolved_by_openfigi == 0
+
+    def test_drain_stops_when_a_pass_leaves_rows_pending(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Codex ckpt-2 (#2304) — the retryable outcomes must not spin.
+
+        Selection is ``ORDER BY cusip`` over NULL rows, so an outcome
+        that deliberately does not tombstone leaves the SAME window at
+        the head. Pre-fix the drain loop only broke on whole-batch
+        ``api_errors``, so a keyed run (``max_passes=60``) would re-POST
+        that window up to 60 times and starve every CUSIP behind it.
+        """
+        for cusip in ("TESTSPIN01", "TESTSPIN02"):
+            _seed_pending(ebull_test_conn, cusip)
+        ebull_test_conn.commit()
+
+        fake = FakeOpenFigiResolver(default=OpenFigiItemError(message="Service unavailable"))
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake, limit=1, max_passes=5)
+        ebull_test_conn.commit()
+
+        assert report.passes == 1
+        assert len(fake.calls) == 1, f"re-POSTed the same window: {fake.calls}"
+        assert fake.calls[0] == ["TESTSPIN01"]
+        assert report.item_errors == 1
+        assert _count_pending_bulk(ebull_test_conn) == 2
+
+    def test_drain_stops_on_malformed_entries_too(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Same guard, other retryable outcome — schema drift is equally
+        a reason to stop rather than retry harder."""
+        for cusip in ("TESTSPIN03", "TESTSPIN04"):
+            _seed_pending(ebull_test_conn, cusip)
+        ebull_test_conn.commit()
+
+        fake = FakeOpenFigiResolver(default=OpenFigiMalformedEntry(reason="drift"))
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake, limit=1, max_passes=5)
+        ebull_test_conn.commit()
+
+        assert report.passes == 1
+        assert len(fake.calls) == 1
+        assert report.malformed_entries == 1
+
+    def test_drain_still_walks_past_terminal_outcomes(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """The stall guard must NOT fire on tombstoning outcomes — those
+        advance the cursor, which is the whole point of #740."""
+        for cusip in ("TESTWALK01", "TESTWALK02", "TESTWALK03"):
+            _seed_pending(ebull_test_conn, cusip)
+        ebull_test_conn.commit()
+
+        fake = FakeOpenFigiResolver(default=OpenFigiInvalidIdentifier(message="Invalid idValue format."))
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=fake, limit=1, max_passes=5)
+        ebull_test_conn.commit()
+
+        # 3 tombstoning passes + a 4th that selects nothing and breaks on
+        # the pre-existing `candidates_seen == 0` guard.
+        assert report.passes == 4
+        assert len(fake.calls) == 3
+        assert report.invalid_identifier == 3
+        assert _count_pending_bulk(ebull_test_conn) == 0
+
     def test_rejected_row_still_flips_when_mapped_by_another_route(
         self, ebull_test_conn: psycopg.Connection[tuple]
     ) -> None:
