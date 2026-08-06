@@ -39,11 +39,22 @@ import psycopg
 import pytest
 
 from app.services.cusip_resolver import (
+    OPENFIGI_NEGATIVE_STATUSES,
+    STATUS_OPENFIGI_INVALID_IDENTIFIER,
     OpenFigiSweepReport,
     record_unresolved_cusip_from_bulk,
+    sweep_bulk_cusips_resolved_via_extid,
     sweep_unresolved_cusips_via_openfigi,
 )
-from app.services.openfigi_resolver import OpenFigiMapping
+from app.services.openfigi_resolver import (
+    OpenFigiInvalidIdentifier,
+    OpenFigiItemError,
+    OpenFigiMalformedEntry,
+    OpenFigiMapping,
+    OpenFigiNoMatch,
+    OpenFigiOutcome,
+    OpenFigiTransportError,
+)
 from tests.fixtures.ebull_test_db import ebull_test_conn
 from tests.fixtures.ebull_test_db import test_db_available as _test_db_available
 
@@ -70,17 +81,34 @@ class FakeOpenFigiResolver:
         responses: dict[str, OpenFigiMapping] | None = None,
         *,
         raise_on_call: Exception | None = None,
+        outcomes: dict[str, OpenFigiOutcome] | None = None,
+        default: OpenFigiOutcome | None = None,
     ) -> None:
         self._responses = responses or {}
+        self._outcomes = outcomes or {}
+        # #2304 made ``resolve_cusips`` TOTAL, so a fake must answer for
+        # every CUSIP it is asked about. The default preserves the
+        # pre-#2304 meaning of "not in ``responses``" — OpenFIGI accepted
+        # the identifier and had no mapping — so the existing sweep tests
+        # keep asserting the same behaviour.
+        self._default: OpenFigiOutcome = default if default is not None else OpenFigiNoMatch(reason="warning")
         self._raise = raise_on_call
         self.calls: list[list[str]] = []
 
-    def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiMapping]:
+    def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiOutcome]:
         cusip_list = [c.strip().upper() for c in cusips if c]
         self.calls.append(cusip_list)
         if self._raise is not None:
             raise self._raise
-        return {c: m for c, m in self._responses.items() if c in cusip_list}
+        out: dict[str, OpenFigiOutcome] = {}
+        for cusip in cusip_list:
+            if cusip in self._responses:
+                out[cusip] = self._responses[cusip]
+            elif cusip in self._outcomes:
+                out[cusip] = self._outcomes[cusip]
+            else:
+                out[cusip] = self._default
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +405,190 @@ class TestSweepHappyPath:
 # ---------------------------------------------------------------------------
 
 
+def _status_of(conn: psycopg.Connection[tuple], cusip: str) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT resolution_status FROM unresolved_13f_cusips WHERE cusip = %s", (cusip,))
+        row = cur.fetchone()
+    assert row is not None, f"no unresolved row for {cusip}"
+    return row[0]
+
+
+def _seed_pending(conn: psycopg.Connection[tuple], cusip: str) -> None:
+    record_unresolved_cusip_from_bulk(
+        conn,
+        cusip=cusip,
+        filer_cik="0001234567",
+        period_end=_PERIOD_END,
+        source="bulk_13f_dataset",
+        cutoff=_CUTOFF,
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
+class TestPerItemOutcomeRouting:
+    """#2304 — the four non-mapping outcomes must route to FOUR
+    different places, not one.
+
+    Pre-#2304 every one of these wrote ``openfigi_unknown``, a terminal
+    "OpenFIGI has no mapping for this CUSIP". Two of them are not that
+    fact, and one of them is not even a verdict.
+    """
+
+    def test_no_match_tombstones_openfigi_unknown(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_pending(ebull_test_conn, "TESTNOMAT1")
+        ebull_test_conn.commit()
+        report = sweep_unresolved_cusips_via_openfigi(
+            ebull_test_conn,
+            resolver=FakeOpenFigiResolver(outcomes={"TESTNOMAT1": OpenFigiNoMatch(reason="warning")}),
+        )
+        ebull_test_conn.commit()
+        assert _status_of(ebull_test_conn, "TESTNOMAT1") == "openfigi_unknown"
+        assert report.unresolved_by_openfigi == 1
+        assert (report.invalid_identifier, report.item_errors, report.malformed_entries) == (0, 0, 0)
+
+    def test_rejected_identifier_gets_its_own_terminal_status(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """The headline fix: a rejection is terminal but NOT
+        ``openfigi_unknown``, so it never again reads as a coverage gap."""
+        _seed_pending(ebull_test_conn, "TESTREJ001")
+        ebull_test_conn.commit()
+        report = sweep_unresolved_cusips_via_openfigi(
+            ebull_test_conn,
+            resolver=FakeOpenFigiResolver(
+                outcomes={"TESTREJ001": OpenFigiInvalidIdentifier(message="Invalid idValue format.")}
+            ),
+        )
+        ebull_test_conn.commit()
+        assert _status_of(ebull_test_conn, "TESTREJ001") == "openfigi_invalid_identifier"
+        assert report.invalid_identifier == 1
+        assert report.unresolved_by_openfigi == 0
+
+    def test_unrecognised_item_error_leaves_row_pending(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """An error we cannot classify must NOT become a permanent
+        verdict — that is #2304 recreated one layer up."""
+        _seed_pending(ebull_test_conn, "TESTERR001")
+        ebull_test_conn.commit()
+        report = sweep_unresolved_cusips_via_openfigi(
+            ebull_test_conn,
+            resolver=FakeOpenFigiResolver(outcomes={"TESTERR001": OpenFigiItemError(message="Service unavailable")}),
+        )
+        ebull_test_conn.commit()
+        assert _status_of(ebull_test_conn, "TESTERR001") is None
+        assert report.item_errors == 1
+        assert (report.invalid_identifier, report.unresolved_by_openfigi) == (0, 0)
+
+    def test_malformed_entry_leaves_row_pending(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        _seed_pending(ebull_test_conn, "TESTMAL001")
+        ebull_test_conn.commit()
+        report = sweep_unresolved_cusips_via_openfigi(
+            ebull_test_conn,
+            resolver=FakeOpenFigiResolver(
+                outcomes={"TESTMAL001": OpenFigiMalformedEntry(reason="data contains a non-dict row")}
+            ),
+        )
+        ebull_test_conn.commit()
+        assert _status_of(ebull_test_conn, "TESTMAL001") is None
+        assert report.malformed_entries == 1
+
+    def test_missing_outcome_is_not_a_verdict(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A resolver that breaks its totality contract must leave the
+        row pending, never tombstone it."""
+
+        class _SilentResolver(FakeOpenFigiResolver):
+            def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiOutcome]:
+                super().resolve_cusips(cusips)
+                return {}
+
+        _seed_pending(ebull_test_conn, "TESTGONE01")
+        ebull_test_conn.commit()
+        report = sweep_unresolved_cusips_via_openfigi(ebull_test_conn, resolver=_SilentResolver())
+        ebull_test_conn.commit()
+        assert _status_of(ebull_test_conn, "TESTGONE01") is None
+        assert report.not_returned == 1
+
+    def test_mixed_batch_splits_across_all_counters(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """The distribution is the deliverable — a single pass must be
+        able to report all five outcomes separately."""
+        _seed_instrument(ebull_test_conn, instrument_id=70101, symbol="MIXD", company_name="Mixed Inc")
+        for cusip in ["TESTMIX001", "TESTMIX002", "TESTMIX003", "TESTMIX004", "TESTMIX005"]:
+            _seed_pending(ebull_test_conn, cusip)
+        ebull_test_conn.commit()
+        report = sweep_unresolved_cusips_via_openfigi(
+            ebull_test_conn,
+            resolver=FakeOpenFigiResolver(
+                responses={
+                    "TESTMIX001": OpenFigiMapping(
+                        ticker="MIXD", name="Mixed Inc", exch_code="US", share_class_figi=None
+                    )
+                },
+                outcomes={
+                    "TESTMIX002": OpenFigiNoMatch(reason="no_us_primary"),
+                    "TESTMIX003": OpenFigiInvalidIdentifier(message="Invalid idValue format."),
+                    "TESTMIX004": OpenFigiItemError(message="unknown"),
+                    "TESTMIX005": OpenFigiMalformedEntry(reason="drift"),
+                },
+            ),
+        )
+        ebull_test_conn.commit()
+        assert (report.promoted, report.unresolved_by_openfigi, report.invalid_identifier) == (1, 1, 1)
+        assert (report.item_errors, report.malformed_entries) == (1, 1)
+        assert _status_of(ebull_test_conn, "TESTMIX001") == "resolved_via_openfigi"
+        assert _status_of(ebull_test_conn, "TESTMIX002") == "openfigi_unknown"
+        assert _status_of(ebull_test_conn, "TESTMIX003") == "openfigi_invalid_identifier"
+        assert _status_of(ebull_test_conn, "TESTMIX004") is None
+        assert _status_of(ebull_test_conn, "TESTMIX005") is None
+
+    def test_transport_error_overrides_every_outcome(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A whole-batch failure is not a per-item verdict — no row may
+        be tombstoned from a batch that never got an answer."""
+        for cusip in ["TESTTRN001", "TESTTRN002"]:
+            _seed_pending(ebull_test_conn, cusip)
+        ebull_test_conn.commit()
+        report = sweep_unresolved_cusips_via_openfigi(
+            ebull_test_conn,
+            resolver=FakeOpenFigiResolver(raise_on_call=OpenFigiTransportError("boom")),
+        )
+        ebull_test_conn.commit()
+        assert report.api_errors == 2
+        assert (report.invalid_identifier, report.unresolved_by_openfigi, report.item_errors) == (0, 0, 0)
+        for cusip in ["TESTTRN001", "TESTTRN002"]:
+            assert _status_of(ebull_test_conn, cusip) is None
+
+    def test_rejected_row_still_flips_when_mapped_by_another_route(
+        self, ebull_test_conn: psycopg.Connection[tuple]
+    ) -> None:
+        """Codex ckpt-1 (#2304): the extid sweep hardcoded the two old
+        negative statuses inline, so a THIRD status would have frozen
+        those rows on a stale negative forever. It now parameterises off
+        ``OPENFIGI_NEGATIVE_STATUSES``."""
+        assert STATUS_OPENFIGI_INVALID_IDENTIFIER in OPENFIGI_NEGATIVE_STATUSES
+        _seed_instrument(ebull_test_conn, instrument_id=70102, symbol="LATE", company_name="Late Inc")
+        cusip = "TESTLATE01"
+        _seed_pending(ebull_test_conn, cusip)
+        ebull_test_conn.commit()
+        sweep_unresolved_cusips_via_openfigi(
+            ebull_test_conn,
+            resolver=FakeOpenFigiResolver(
+                outcomes={cusip: OpenFigiInvalidIdentifier(message="Invalid idValue format.")}
+            ),
+        )
+        ebull_test_conn.commit()
+        assert _status_of(ebull_test_conn, cusip) == "openfigi_invalid_identifier"
+
+        # A mapping lands later by another route (SEC-list backfill).
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO external_identifiers"
+                " (instrument_id, provider, identifier_type, identifier_value, is_primary)"
+                " VALUES (70102, 'sec', 'cusip', %s, TRUE)",
+                (cusip,),
+            )
+        ebull_test_conn.commit()
+        assert sweep_bulk_cusips_resolved_via_extid(ebull_test_conn) == 1
+        ebull_test_conn.commit()
+        assert _status_of(ebull_test_conn, cusip) == "resolved_via_extid"
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(not _test_db_available(), reason="ebull_test DB unavailable")
 class TestSweepNegativeStatusAndDrain:
@@ -605,7 +817,7 @@ class TestSweepNegativeStatusAndDrain:
             """Writes the extid row DURING the resolver call — after
             the sweep's selection, before its promote."""
 
-            def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiMapping]:
+            def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiOutcome]:
                 result = super().resolve_cusips(cusips)
                 with conn.cursor() as cur:
                     cur.execute(
