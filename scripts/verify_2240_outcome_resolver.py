@@ -387,24 +387,35 @@ SELECT s.series_id,
        -- bar further because the expiry exit fills at the open of bar
        -- `rn + hold`, which is outside the window it exits from.
        --
-       -- ⚠⚠ THE OPEN IS IN BOTH TOUCH FILTERS, and it is not redundant. The
-       -- resolver's "stop touched on this bar" predicate is rules 1 OR 4, i.e.
-       -- `open <= stop OR low <= stop`. On a bar satisfying `low <= open <=
-       -- high` the first disjunct IMPLIES the second, so `low <= stop` alone
-       -- would agree — but that identity is exactly what acceptance 14
-       -- MEASURES rather than assumes, and the corpus has 541 bars whose open
-       -- lies outside [low, high]:
-       --     SELECT count(*) FROM research_price_daily
-       --     WHERE open IS NOT NULL AND high IS NOT NULL AND low IS NOT NULL
-       --       AND NOT (low <= open AND open <= high);
-       -- On one of those the resolver can gap-through at the open while a
-       -- low/high-only filter sees nothing, and the arm reports a false
-       -- MISMATCH — or worse, silently stops checking rule 1/2 at all. The
-       -- full-corpus run was clean WITHOUT this, which is luck (the bar must
-       -- also be the decisive one, with `open <= stop < low`), not soundness.
-       -- Second instance of the same class as the mask tie-break fixed in
-       -- f602a760: a verifier that is only accidentally right fails the first
-       -- time the corpus shifts. Found by Codex at checkpoint 2.
+       -- ⚠⚠ THE OPEN IS IN BOTH TOUCH FILTERS. The resolver's "stop touched on
+       -- this bar" predicate is rules 1 OR 4, i.e. `open <= stop OR low <=
+       -- stop`. On a bar satisfying `low <= open <= high` the first disjunct
+       -- IMPLIES the second, so `low <= stop` alone agrees — but that identity
+       -- is exactly what acceptance 14 MEASURES rather than assumes.
+       --
+       -- ⚠ Be precise about why this matters TODAY, because the obvious
+       -- stronger claim is false. The raw corpus holds 541 bars whose open lies
+       -- outside [low, high], and ALL 541 are currently `range_usable = false`
+       -- and inside quarantine coverage — so the masked view this arm and the
+       -- resolver both read contains NONE of them (acceptance 14 prints 0), and
+       -- a masked bar refuses the touch test before any rule runs. Measured:
+       --     WITH bad AS (SELECT series_id, bar_date FROM research_price_daily
+       --                  WHERE open IS NOT NULL AND high IS NOT NULL
+       --                    AND low IS NOT NULL
+       --                    AND NOT (low <= open AND open <= high))
+       --     SELECT (SELECT count(*) FROM bad),
+       --            (SELECT count(*) FROM bad b JOIN research_bar_quarantine q
+       --               ON q.series_id = b.series_id AND q.bar_date = b.bar_date
+       --              AND q.rule_set_version = <current> AND NOT q.range_usable);
+       --     -- (541, 541)
+       --
+       -- So the low/high-only form was right by the QUARANTINE'S GRACE at this
+       -- rule-set version, not by construction — nothing makes the range rule
+       -- target "open outside [low, high]" specifically, and a re-derivation
+       -- that stops flagging one of these, or a caller using a different
+       -- loader, breaks the implication silently. Encoding the full predicate
+       -- costs nothing and removes the dependency. Same class as the mask
+       -- tie-break fixed in f602a760. Found by Codex at checkpoint 2.
        min(b.rn) FILTER (WHERE b.rn <= s.rn + %(span)s
                            AND (b.low  <= s.stop   OR b.open <= s.stop))   AS k_sl,
        min(b.rn) FILTER (WHERE b.rn <= s.rn + %(span)s
