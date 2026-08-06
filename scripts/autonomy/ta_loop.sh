@@ -62,10 +62,22 @@ COOLDOWN_SECONDS="${TA_LOOP_COOLDOWN:-60}"
 # loop: the plist set WorkingDirectory and the prompt but not the worktree, so
 # the ownership agent drove the TA worktree and hit its lock three times in 21
 # seconds under KeepAlive. The lock held, but nothing SAID what was wrong.
-inferred_worktree="${SELF_DIR%/var/autonomy/bin}"
-if [[ "$inferred_worktree" != "$SELF_DIR" && "$inferred_worktree" != "$WORKTREE" ]]; then
-  echo "FATAL installed under $inferred_worktree but TA_LOOP_WORKTREE=$WORKTREE" >&2
-  echo "      refusing to drive another loop's checkout -- set TA_LOOP_WORKTREE in the plist" >&2
+#
+# ⚠ BOTH homes count. The first version stripped only `/var/autonomy/bin`, and
+# `${x%suffix}` returns `x` UNCHANGED when the suffix is absent — so for a
+# directly-run tracked script the two sides were equal, the first conjunct was
+# false, and the guard was skipped entirely (#2324). The bypass was the tracked
+# path, which is the one a human runs by hand: exactly the case where a wrong
+# TA_LOOP_WORKTREE is most likely and least expected.
+inferred_worktree=""
+case "$SELF_DIR" in
+  */var/autonomy/bin) inferred_worktree="${SELF_DIR%/var/autonomy/bin}" ;;
+  */scripts/autonomy) inferred_worktree="${SELF_DIR%/scripts/autonomy}" ;;
+esac
+if [[ -n "$inferred_worktree" && "$inferred_worktree" != "$WORKTREE" ]]; then
+  echo "FATAL running from $inferred_worktree but TA_LOOP_WORKTREE=$WORKTREE" >&2
+  echo "      refusing to drive another loop's checkout -- set TA_LOOP_WORKTREE to match," >&2
+  echo "      or run the driver installed under that worktree's var/autonomy/bin" >&2
   exit 1
 fi
 
