@@ -431,9 +431,32 @@ strategy at a time. So it is specified once, here, and applies to all of them.
    source of a fake edge in S-5/S-6, and it is why they are sequenced last.
 4. **Intrabar stop-and-target on the same bar is `ambiguous`, never a win.**
    If one bar spans both levels, the order of touch is unknowable from OHLC.
-   This is spike S5 (#2245), still open — until it is settled, such outcomes are
-   recorded `ambiguous` and excluded from the win rate with their count shown.
-   Silently resolving them favourably is how backtests manufacture edge.
+   Such outcomes are recorded `ambiguous` and excluded from the win rate with
+   their count shown. Silently resolving them favourably is how backtests
+   manufacture edge.
+
+   ✅ **Spike S5 (#2245) is ANSWERED (2026-08-06) and CONFIRMED this rule
+   rather than changing it.** Measured on 25,559,104 signals: the ambiguous
+   class runs 0.83% of signals at a 1.0×ATR target down to 0.09% at 4.0×.
+   Two additions it makes, both binding on phase 4:
+   - ⚠ **Never "assume SL first for conservatism".** It is not conservative,
+     it is a different bias — it penalises TP-first strategies, and the
+     distortion scales with how tight the target is, so it hits hardest
+     exactly the strategies the ambiguity affects most.
+   - **Intraday cannot rescue a historical bar.** `get_intraday_candles` has
+     no date parameter, no offset and no cursor, so a past date is not
+     addressable; forward signals are resolvable inside a ~2-session window
+     and historical ones never are. Hence every outcome carries a
+     `resolution_method` stamp, so a later intraday-backed resolution cannot
+     mix silently into daily-bar statistics.
+
+   ⚠ S5's sweep entered at the **close of bar `t`**, which is the same-bar
+   fill rule 1 forbids. That was right for sizing the ambiguous class and is
+   NOT a backtest baseline — phase 4's resolver enters at the open of `t+1`
+   per rule 1, so its distribution is comparable in magnitude to S5's table
+   and is not expected to reproduce it. Implemented in
+   `app/services/outcome_resolver.py`;
+   spec `docs/proposals/ta/2026-08-06-outcome-resolver.md`.
 5. **Eligibility filters are evaluated as-of the decision date**, never once
    against today's state. "Instruments with ≥273 bars" means ≥273 bars *as of
    that rebalance*, not "instruments that eventually accumulated 273 bars" —
