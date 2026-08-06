@@ -304,10 +304,10 @@ Consumers, and their state after #2213:
 
 | site | reads both? |
 |---|---|
-| `cusip_resolver.load_bulk_cusip_map:282` · the post-bulk sweep `:555, :1344` | yes, since PR-1b |
-| `blockholders._resolve_issuer_to_instrument_id:487` | yes |
+| `cusip_resolver.load_bulk_cusip_map:261` · the post-bulk sweep `:539, :1304` | yes, since PR-1b |
+| `blockholders._resolve_issuer_to_instrument_id:488` | yes |
 | `institutional_holdings._resolve_cusip_to_instrument_id:697` | **yes, as of #2213** (3 call sites: 13F-HR ingest, rewash, manifest parser) |
-| `cusip_resolver._select_resolvable_via_extid:997` | **yes, as of #2213** (the daily `cusip_extid_sweep`) |
+| `cusip_resolver._select_resolvable_via_extid:1002` | **yes, as of #2213** (the daily `cusip_extid_sweep`) |
 | `n_port_ingest:691` · `blockholders._resolve_cusip_to_instrument_id:435` | **no — latent, #2329.** Harmless only because each has a provider-wide bulk twin |
 
 The #2213 failure mode is the one to remember: the narrow filters predated OpenFIGI, so **reviewing the diff that introduced the provider could never have found them**. Nothing errored — the sweep logged `promoted=0` truthfully and unresolved CUSIPs went to their documented destination. Detection took a full-population crosstab of `(has_sec, has_figi)` against "does this instrument have rows in the typed table": 1,483 of 1,503 OpenFIGI-only CUSIPs had zero `institutional_holdings` rows vs 3,062 of 3,083 SEC-mapped. Identical code does **not** imply identical exposure — measure each consumer before widening it.
