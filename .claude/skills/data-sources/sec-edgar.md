@@ -161,6 +161,10 @@ the manual / sweep-adapter / Admin "Run now" path keeps the full cohort as a
 safety-net so a previously-inactive filer can re-enter when they resume HR
 filing.
 
+⚠ NT is not only a cohort/efficiency signal — it is **why an ETF-adviser entity has no
+holdings of its own**. The adviser files NT and the multi-mandate parent files the HR, so
+the ETF book is consolidated away at source. See §2.2.1.
+
 ### 2.2 N-PORT-P XML schema
 
 Source: <https://www.sec.gov/info/edgar/specifications/form-n-port-xml-tech-specs.htm>.
@@ -197,6 +201,62 @@ Critical fields: `cusip` (9 char), `lei` (20 char), `valUSD` (USD-converted rega
 **Fund hierarchy**: filings are at the **trust** CIK level; each holding belongs to a **series** (`S000123456`); each series has multiple **share classes** (`C000234567`). For ownership rollup at operating-issuer level, aggregate `valUSD` across funds without double-counting fund-of-funds. Aggregate by `(seriesId, issuerCusip)`, NOT by classId — share classes share the same portfolio.
 
 `<invstOrSec>` repeatability raised from 1000 → 500,000 — long lists are valid. eBull's parser is at [app/services/n_port_ingest.py](../../../app/services/n_port_ingest.py) (stdlib `xml.etree.ElementTree`, #917 closeout).
+
+### 2.2.1 Form N-CEN + the DERA N-CEN data sets — the ETF flag, and why it does not reach a 13F filer
+
+**Registrant is the TRUST, not the manager.** N-CEN is the annual census filing for
+registered investment companies, filed by the same registrant as N-PORT — the RIC trust
+(`VANGUARD INDEX FUNDS`), never the 13F manager (`VANGUARD GROUP INC`). Same disjointness
+#963 hit for N-PORT (see the `sec_nport_filer_directory` module docstring). Measured on
+dev, full population:
+
+```sql
+-- 11,465 / 2,036 / 8
+select (select count(*) from institutional_filers),
+       (select count(*) from sec_nport_filer_directory),
+       (select count(*) from institutional_filers f
+          join sec_nport_filer_directory n on lpad(f.cik,10,'0') = lpad(n.cik,10,'0'));
+```
+
+8 of 11,465 overlap, and those 8 are internally-managed closed-end funds (Adams
+Diversified Equity, Central Securities, General American Investors, Tocqueville Trust …)
+which file both because they *are* the fund. **Walking 13F-manager CIKs for N-CEN is
+therefore structurally empty** — that is what `ncen_classifier` does, and it is why
+`ncen_filer_classifications` has 0 rows.
+
+**Use the DERA data sets, not per-filing XML.** `https://www.sec.gov/files/dera/data/form-n-cen-data-sets/{YYYY}q{n}_ncen.zip`
+(6–17 MB/quarter) carries the whole quarter as TSVs — 50+ tables. One quarterly ZIP
+replaces ~2,000 `primary_doc.xml` fetches at ~1.1 MB each. N-CEN is annual, so **five
+consecutive quarters** covers every registrant's cycle with one quarter of overlap.
+Tables that matter here:
+
+| table | key | carries |
+| --- | --- | --- |
+| `FUND_REPORTED_INFO.tsv` | `FUND_ID` = `{accession}_{cik}_{seriesId}` | `IS_ETF` (Item C.3.a), `IS_INDEX`, `IS_ETMF`, `SERIES_ID` |
+| `ADVISER.tsv` | `FUND_ID` | Item C.7: `ADVISER_TYPE` (`Advisor` / `Subadvisor` / `Terminated …`), `ADVISER_NAME`, `FILE_NUM` (801-), `CRD_NUM`, `ADVISER_LEI` |
+| `ETF.tsv` | `FUND_ID` | creation-unit / AP mechanics for ETF series only |
+| `REGISTRANT.tsv` | `ACCESSION_NUMBER` | trust `CIK` **and** `LEI`, `INVESTMENT_COMPANY_TYPE` |
+
+⚠ **`IS_ETF` is the structured field — do not classify `INVESTMENT_COMPANY_TYPE`.** Every
+ETF is `N-1A` (open-end), the same code as an ordinary mutual fund, so the registrant-level
+type can never separate them. That is a source-level fact, not a parser limitation.
+
+⚠ **`ADVISER.tsv` identifies the adviser by name / 801-file-number / CRD / LEI and NEVER by
+CIK.** `REGISTRANT.tsv` carries a CIK, but that is the trust. So there is **no EDGAR-native
+join from an ETF to its adviser's 13F-manager CIK** — only a name match. Verified against
+the live XML too: the N-CEN tag set has `investmentAdviserName` / `investmentAdviserFileNo`
+/ `investmentAdviserCrdNo` / `investmentAdviserLei`, and `registrantCik` is the trust's.
+
+**The consequence for a filer-level ETF split (#2214).** Even given the name join, the
+adviser entities that N-CEN types precisely file **13F-NT**, not 13F-HR — their holdings
+are consolidated into a multi-mandate parent's report (§2.1). On dev:
+`BlackRock Fund Advisors` (0001006249), `SSGA Funds Management` (0001257442) and
+`Invesco Capital Management` (0001224696) each have 13F-NT notices and **0 rows** in
+`ownership_institutions_current`; the mass sits in `BlackRock, Inc.` / `STATE STREET CORP`
+/ `VANGUARD GROUP INC`, whose books mix ETF and non-ETF mandates. **13F has no fund-level
+granularity, so `institutional_filers.filer_type` cannot carry an honest ETF/non-ETF
+split.** Fund-level attribution is N-PORT's job (§2.2). Reproduce with
+`scripts/audit_ncen_etf_advisers.py`.
 
 ### 2.3 Form 3/4/5 — Section 16 insider transactions
 
