@@ -104,6 +104,13 @@ def _diff(control_path: str, treatment_path: str) -> None:
     lost: list[tuple[str, str]] = []
     gained: list[tuple[str, str]] = []
     share_drift: list[tuple[str, str, str | None, str | None]] = []
+    # ⚠ `percent` and `role` are NOT optional arms. Both are columns the change
+    # can write that arms 1 and 2 key nothing on, so a diff over holder identity
+    # and shares alone reports CLEAN while a column moves underneath it. This
+    # script shipped without the percent arm and a self-comparison of two
+    # treatment runs — not the A/B itself — is what exposed it: one accession
+    # (0001213900-26-076369) had gained nine fabricated percents.
+    percent_drift: list[tuple[str, str, str | None, str | None]] = []
     role_drift: list[tuple[str, str, str | None, str | None]] = []
     for accession, before in control.items():
         after = treatment[accession]
@@ -112,6 +119,8 @@ def _diff(control_path: str, treatment_path: str) -> None:
         for name in before.keys() & after.keys():
             if before[name]["shares"] != after[name]["shares"]:
                 share_drift.append((accession, name, before[name]["shares"], after[name]["shares"]))
+            if before[name]["percent"] != after[name]["percent"]:
+                percent_drift.append((accession, name, before[name]["percent"], after[name]["percent"]))
             if before[name]["role"] != after[name]["role"]:
                 role_drift.append((accession, name, before[name]["role"], after[name]["role"]))
 
@@ -135,6 +144,7 @@ def _diff(control_path: str, treatment_path: str) -> None:
     print(f"    of which >1000x         {len(order_of_magnitude):>8}   <- the #2358 corruption clearing")
     print(f"    amount -> NULL          {len(dropped_amount):>8}")
     print(f"    NULL -> amount          {len(gained_amount):>8}")
+    print(f"  percent drift             {len(percent_drift):>8}")
     print(f"  role drift                {len(role_drift):>8}")
 
     for label, rows in (("LOST", lost), ("GAINED", gained)):
@@ -145,6 +155,7 @@ def _diff(control_path: str, treatment_path: str) -> None:
         ("order-of-magnitude share drift", order_of_magnitude),
         ("amount -> NULL", dropped_amount),
         ("NULL -> amount", gained_amount),
+        ("percent drift", percent_drift),
         ("role drift", role_drift),
     ):
         print(f"\n== {label} — every one, enumerated ==")

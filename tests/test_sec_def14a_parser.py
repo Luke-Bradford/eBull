@@ -2595,12 +2595,18 @@ class TestBlockLevelLineStructure:
         Instruction 5 group captions sharing a cell with no blank line between
         them, which ``_stacked_name_blocks`` cannot separate. Storing the first
         amount under the two captions glued together adds a mangled identity to
-        a table keyed on ``lower(trim(holder_name))``."""
+        a table keyed on ``lower(trim(holder_name))``.
+
+        ⚠ The name cell carries a ``<br/>`` so the two grids DIFFER, as they do
+        on the cited accession. Without it the row short-circuits on
+        ``line_row == flat_row`` and this test pins nothing — which is exactly
+        what the revert probe reported when that short-circuit was added.
+        """
         body = (
             "<table>"
             "<tr><th>Name of Beneficial Owner</th>"
             "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
-            "<tr><td>All Non-Employee Directors \n All Executive Officers as a Group (18 Persons)</td>"
+            "<tr><td>All Non-Employee Directors<br/>All Executive Officers as a Group (18 Persons)</td>"
             "<td>471,042 \n 1,273,440</td><td>2.26% \n 6.12%</td></tr>"
             "</table>"
         )

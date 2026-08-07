@@ -42,8 +42,20 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         "the line grid is not built at all — every tag is a space again (pre-#2358)",
         [
             (
-                "                (_strip_inline_html(inner, block_breaks=True), rs, cs)",
-                "                (_strip_inline_html(inner), rs, cs)",
+                "_strip_inline_html(inner, block_breaks=True) if _LINE_STRUCTURE_TAG_RE.search(inner) else flat",
+                "flat",
+            )
+        ],
+        "test_br_stacked_amounts_do_not_glue_into_one_number",
+    ),
+    (
+        # The short-circuit's own precondition. Inverted, the line pass is
+        # skipped on precisely the cells that need it.
+        "the line pass is skipped on cells that DO carry line-structure markup",
+        [
+            (
+                "if _LINE_STRUCTURE_TAG_RE.search(inner) else flat",
+                "if not _LINE_STRUCTURE_TAG_RE.search(inner) else flat",
             )
         ],
         "test_br_stacked_amounts_do_not_glue_into_one_number",
@@ -106,8 +118,8 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         "the line structure leaks into the flat grid the SCT path and the scorer read",
         [
             (
-                "tuple((_strip_inline_html(inner), rs, cs) for",
-                "tuple((_strip_inline_html(inner, block_breaks=True), rs, cs) for",
+                "            flat = _strip_inline_html(inner)",
+                "            flat = _strip_inline_html(inner, block_breaks=True)",
             )
         ],
         "test_the_flat_grid_the_sct_path_reads_carries_no_tag_derived_newline or "

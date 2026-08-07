@@ -3390,8 +3390,22 @@ Two things S-4 adds to the prevention above:
   gate (every line of the cell parses as an amount or a percent) already excludes a
   name, so no fixture can construct the case. Removed, and the reasoning moved into
   the docstring; the probe now attacks the gate that is actually load-bearing.
+- ⚠ **An A/B harness that omits ONE writable column reports CLEAN while that column
+  moves.** The skill's rule "arm 3 must cover fields the harness does NOT key on" was
+  read as covering `holder_role` — the column #2164 burned — and `percent_of_class` was
+  carried in the summary JSON but never compared. What exposed it was not the A/B: it
+  was diffing two TREATMENT runs against each other to check that a performance
+  short-circuit was behaviour-neutral, which surfaced nine fabricated percents on
+  `0001213900-26-076369` that a mid-branch revision had been adding. The published
+  arm-1 numbers had said `0 lost / 0 gained / 0 role drift` throughout. **Enumerate the
+  writable columns from the row type, not from memory of which one bit last time**, and
+  make the self-comparison (branch vs branch across a refactor) a routine arm — it is
+  free once the control run exists and it is the only arm that catches a "no-op"
+  optimisation that is not one.
 - Enforced in: this prevention log;
-  `app/providers/implementations/sec_def14a.py::_strip_inline_html` (`block_breaks`,
+  `scripts/ab_2358_def14a_line_structure.py::_diff` (the percent arm and the ⚠ on why
+  it exists); `app/providers/implementations/sec_def14a.py::_strip_inline_html`
+  (`block_breaks`,
   off by default, with the why-not-shared comment) + `_RawTable.line_rows` +
   `_collapse_stacked_value_cells`;
   `tests/test_sec_def14a_parser.py::TestBlockLevelLineStructure` (the SCT/scorer pin

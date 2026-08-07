@@ -168,6 +168,11 @@ _BLOCK_BOUNDARY_RE: Final[re.Pattern[str]] = re.compile(
 )
 _BLOCK_TAG_RE: Final[re.Pattern[str]] = re.compile(rf"</?(?:{_BLOCK_ELEMENTS})(?=[\s/>])[^>]*>", re.IGNORECASE)
 _LINE_BREAK_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<br(?=[\s/>])[^>]*>", re.IGNORECASE)
+# Cheap precondition for the line-structured pass: a cell carrying none of these
+# renders identically with and without ``block_breaks``. Keep the alternation in
+# step with the rules that consume it — every one is keyed on ``br`` or on
+# ``_BLOCK_ELEMENTS``, and nothing else can introduce a sentinel.
+_LINE_STRUCTURE_TAG_RE: Final[re.Pattern[str]] = re.compile(rf"<(?:br|{_BLOCK_ELEMENTS})(?=[\s/>])", re.IGNORECASE)
 # Tag-derived breaks are marked with a SENTINEL, not a newline, so they can be
 # told apart from the source newlines that reach this function as ordinary text.
 # NUL cannot occur in an EDGAR document (SEC EDGAR Filer Manual vol. II §5.2.2
@@ -1118,15 +1123,23 @@ def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTabl
             )
             for attrs, _ in cells
         ]
-        spanned_rows.append(
-            tuple((_strip_inline_html(inner), rs, cs) for (_, inner), (rs, cs) in zip(cells, spans, strict=True))
-        )
-        line_spanned_rows.append(
-            tuple(
-                (_strip_inline_html(inner, block_breaks=True), rs, cs)
-                for (_, inner), (rs, cs) in zip(cells, spans, strict=True)
-            )
-        )
+        flat_cells: list[tuple[str, int, int]] = []
+        line_cells: list[tuple[str, int, int]] = []
+        for (_, inner), (rs, cs) in zip(cells, spans, strict=True):
+            flat = _strip_inline_html(inner)
+            # A cell carrying NO line-structure tag renders identically both
+            # ways — provably, not approximately: every rewrite `block_breaks`
+            # performs is keyed on one of these tags, and the sentinel-run
+            # collapse needs a sentinel that only they can introduce. So the
+            # second pass is skipped, which is most cells. Measured before and
+            # after on 250 payloads, paired against the control checkout under
+            # the same load; without it the second `_strip_inline_html` was a
+            # real cost on the rewash path (#2171's surface).
+            line = _strip_inline_html(inner, block_breaks=True) if _LINE_STRUCTURE_TAG_RE.search(inner) else flat
+            flat_cells.append((flat, rs, cs))
+            line_cells.append((line, rs, cs))
+        spanned_rows.append(tuple(flat_cells))
+        line_spanned_rows.append(tuple(line_cells))
     # The two grids MUST stay index-aligned, so the drop decisions are taken on
     # the FLAT grid and the same indices are applied to the line grid. Deriving
     # them independently would desync: ``_row_contributes_only_inherited_values``
@@ -2663,6 +2676,13 @@ def _collapse_stacked_value_cells(flat_row: tuple[str, ...], line_row: tuple[str
     :func:`_extract_holder_rows` picks the amount out of cell 7 —
     ``'500,183 11,362,250'``, stored as 50,018,311,362,250.
     """
+    # Review NITPICK on PR #2361. The two grids are equal cell-for-cell on the
+    # overwhelming majority of rows — a cell with no ``<br>`` and no block tag
+    # renders identically both ways, by construction — and a row that differs
+    # nowhere cannot contain a stack, so the per-cell segmentation below is pure
+    # waste on the common case. One tuple compare replaces it.
+    if line_row == flat_row:
+        return flat_row
     collapsed = list(flat_row)
     changed = False
     for index, line_cell in enumerate(line_row):
