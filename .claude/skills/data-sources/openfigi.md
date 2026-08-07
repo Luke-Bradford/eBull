@@ -153,7 +153,18 @@ So a **well-formed-looking 9-char uppercase-alphanumeric value is NOT enough** �
 | `OpenFigiItemError` | any other `{"error": ...}` | **nothing** — row stays NULL, retries |
 | `OpenFigiMalformedEntry` | non-dict entry, non-list `data`, non-dict `data` row, no data/warning/error key | **nothing** — row stays NULL, retries |
 
-**Cross-source check on the check-digit rule (2026-08-06):** SEC's own authoritative 13F Official List (`13flist2025q4.txt`, all 12,282 lines parsed, 0 unmatched) contains **12,282 distinct CUSIPs of which 0 fail the mod-10 check digit** — including all 1,466 CINS (letter-leading, foreign) entries. CINS inherits the same check digit, so a failing `G`-prefixed value is a corrupt identifier, not a legitimate foreign one.
+**Cross-source check on the check-digit rule (re-measured 2026-08-07 on `13flist2026q2-txt.txt`, 25,333 rows parsed via `parse_13f_list`, 0 unmatched):**
+
+| Official List slice | distinct CUSIPs | fail the mod-10 check digit |
+|---|---|---|
+| non-option (`COM`, `SHS`, `UNIT`, `NOTE`, `*W EXP`, …) | 13,107 | **0** |
+| option (`CALL` / `PUT`) | 12,226 rows | **11,825 rows** |
+
+So the rule holds exactly where it is meant to: a REAL security's CUSIP on SEC's own list never fails, CINS included (CINS inherits the same check digit, so a failing `G`-prefixed value is corrupt, not merely foreign).
+
+⚠ **But a check-digit failure does NOT imply a corrupt identifier**, and the earlier version of this note said it did. The Official List assigns CALL and PUT rows synthetic CUSIP-shaped identifiers — the issuer's first six characters then `9xx` / `95x` — which are SEC-published and deliberately not valid CUSIPs. Measured against the live bucket on 2026-08-07: of the **14,477** distinct check-digit-invalid `openfigi_unknown` CUSIPs, **9,389 are option rows on the current Official List**, 0 are non-option rows, and 5,088 are absent from 2026q2 entirely. The majority are options, not corruption.
+
+⚠ The prior figure ("12,282 distinct, 0 fail") was arithmetically right and its SUBJECT was narrower than the sentence — it counted the non-option slice while claiming "all lines". That is the defect `.claude/CLAUDE.md` warns about under "state the query and its two numbers, not a percentage whose subject the reader has to infer". Reproduce either half with the query above rather than trusting the table.
 
 ⚠ The obvious regex `^[0-9A-Z]{9}\s` parses only 6,300 of those lines — CINS rows use `*` as the delimiter, so it silently drops the entire foreign half, which is exactly the population the rule most needs testing against. Use `^([0-9A-Z]{9})[\s*]` and assert matched + unmatched == total.
 
