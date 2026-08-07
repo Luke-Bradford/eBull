@@ -36,6 +36,7 @@ _BASE: dict[str, object] = {
     # which is where the mechanism lives.
     "namespace": "in_sample",
     "ambiguity_arm": "worst_case",
+    "quarantine_arm": "masked",
     "window_start": "1962-01-02",
     "window_end": "2026-07-08",
     "universe_basis": "survivor_only",
@@ -142,7 +143,7 @@ _BOOTSTRAP: dict[str, object] = {
 _INSERT = """
     INSERT INTO strategy_results_store (
         strategy_id, strategy_version, result_version, result_scope, namespace,
-        ambiguity_arm, window_start, window_end, universe_basis, corpus_version,
+        ambiguity_arm, quarantine_arm, window_start, window_end, universe_basis, corpus_version,
         cost_model_id, carry_unmodelled, sizing_rule, position_rule_set_version,
         outcome_rule_set_version, input_rule_set_version,
         evaluated_instrument_count, trial_count, deflated_sharpe,
@@ -157,7 +158,7 @@ _INSERT = """
         dsr_measured_trials, dsr_model_id, trial_register_version
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
-        %(ambiguity_arm)s, %(window_start)s, %(window_end)s, %(universe_basis)s, %(corpus_version)s,
+        %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(universe_basis)s, %(corpus_version)s,
         %(cost_model_id)s, %(carry_unmodelled)s, %(sizing_rule)s, %(position_rule_set_version)s,
         %(outcome_rule_set_version)s, %(input_rule_set_version)s,
         %(evaluated_instrument_count)s, %(trial_count)s, %(deflated_sharpe)s,
@@ -182,7 +183,7 @@ _INSERT = """
 _INSERT_WITHOUT_BASIS = """
     INSERT INTO strategy_results_store (
         strategy_id, strategy_version, result_version, result_scope, namespace,
-        ambiguity_arm, window_start, window_end, corpus_version,
+        ambiguity_arm, quarantine_arm, window_start, window_end, corpus_version,
         cost_model_id, carry_unmodelled, sizing_rule, position_rule_set_version,
         outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
         expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
@@ -191,7 +192,7 @@ _INSERT_WITHOUT_BASIS = """
         unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
-        %(ambiguity_arm)s, %(window_start)s, %(window_end)s, %(corpus_version)s,
+        %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(corpus_version)s,
         %(cost_model_id)s, %(carry_unmodelled)s, %(sizing_rule)s, %(position_rule_set_version)s,
         %(outcome_rule_set_version)s, %(input_rule_set_version)s, %(evaluated_instrument_count)s,
         %(expectancy_per_trade_pct)s, %(profit_factor)s, %(cagr_pct)s, %(annualised_volatility_pct)s,
@@ -227,6 +228,8 @@ def _insert(conn: psycopg.Connection[tuple], **overrides: object) -> None:
         # §3.4's pair is exactly two arms. "Conservative" is the treatment the
         # spec rejects by name.
         ("unknown ambiguity arm", {"ambiguity_arm": "conservative"}),
+        # sql/267 — criterion 9's pair is closed in SQL as well as in Python.
+        ("unknown quarantine arm", {"quarantine_arm": "conservative"}),
         ("backwards window", {"window_start": "2026-07-08", "window_end": "1962-01-02"}),
         ("negative instrument count", {"evaluated_instrument_count": -1}),
         # Criterion 6 counts abandoned branches and discarded parameter values,

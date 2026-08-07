@@ -159,6 +159,7 @@ def build_result(**overrides: object) -> StrategyResult:
         "result_scope": "sleeve",
         "namespace": "hold_out",
         "ambiguity_arm": "worst_case",
+        "quarantine_arm": "masked",
         "sizing_rule": SIZING_RULE,
         "cost_model_id": "static-p75-insession-v1",
         "corpus_version": CORPUS_VERSION,

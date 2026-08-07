@@ -69,6 +69,7 @@ def _identity(**overrides: object) -> ResultIdentity:
         "result_scope": "sleeve",
         "namespace": "hold_out",
         "ambiguity_arm": "worst_case",
+        "quarantine_arm": "masked",
         "sizing_rule": SIZING_RULE,
         "cost_model_id": "static-p75-insession-v1",
         "corpus_version": CORPUS_VERSION,
@@ -182,6 +183,7 @@ def _clean_candidate(**overrides: object) -> PromotionCandidate:
         "holdout_evaluations": 1,
         "recorded_accesses": 1,
         "ambiguity_material": False,
+        "quarantine_arms_compared": True,
     }
     base.update(overrides)
     return PromotionCandidate(**base)  # type: ignore[arg-type]
@@ -603,6 +605,23 @@ class TestPromotionGateRefusals:
         assert "ambiguity_material" in refusals
         assert "ambiguity_arms_not_compared" not in refusals
 
+    def test_an_unrun_quarantine_sensitivity_arm_is_refused(self) -> None:
+        """Criterion 9 — *"so exclusion is visible rather than assumed
+        harmless"*. The default is ``False`` and therefore refused: a candidate
+        assembled by a caller that has never heard of the arm must not clear."""
+        assert "quarantine_arms_not_compared" in check_promotable(_clean_candidate(quarantine_arms_compared=False))
+
+    def test_the_quarantine_gate_has_no_materiality_twin(self) -> None:
+        """⚠⚠ THE ASYMMETRY WITH ``ambiguity_material`` IS THE ASSERTION.
+
+        §3.4 declares a materiality rule for the ambiguity arms; criterion 9
+        declares none, and no published rule fixes a "delta this large blocks
+        promotion" cut. A `quarantine_material` code appearing here would be an
+        invented threshold wearing a criterion's name, so its ABSENCE from the
+        closed vocabulary is pinned rather than left to review."""
+        assert "quarantine_arms_not_compared" in PROMOTION_REFUSALS
+        assert "quarantine_material" not in PROMOTION_REFUSALS
+
     def test_a_missing_effective_sample_size_is_refused_independently_of_the_dsr(self) -> None:
         """Criterion 3, and it is SEPARATE from ``deflated_sharpe_not_computed``
         on purpose. ⚠ Criterion 6's deflation CONSUMES the effective sample size,
@@ -700,6 +719,7 @@ class TestPromotionGateReportsEverything:
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "ambiguity_arms_not_compared",
+            "quarantine_arms_not_compared",
         }
 
     def test_todays_real_pipeline_state_is_refused(self) -> None:
@@ -719,6 +739,7 @@ class TestPromotionGateReportsEverything:
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "ambiguity_arms_not_compared",
+            "quarantine_arms_not_compared",
         }
         assert is_promotable(candidate) is False
 

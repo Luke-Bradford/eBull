@@ -76,6 +76,7 @@ from typing import Literal, get_args
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.equity_curve import SIZING_RULE_ID
+from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
 from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
 
 # ---------------------------------------------------------------------------
@@ -241,6 +242,14 @@ PromotionRefusal = Literal[
     "effective_sample_size_not_computed",
     "ambiguity_arms_not_compared",
     "ambiguity_material",
+    #: Criterion 9's sensitivity arm (stage 5e-5a). ⚠ There is NO
+    #: ``quarantine_material`` twin, and the asymmetry with the ambiguity pair
+    #: above is deliberate: §3.4 declares a materiality rule for the ambiguity
+    #: arms, and criterion 9 declares none — it requires the exclusion to be
+    #: *"visible rather than assumed harmless"*. A threshold invented here would
+    #: be the made-up constant the instruction set forbids, so the gate refuses
+    #: on the comparison being ABSENT and never on its size.
+    "quarantine_arms_not_compared",
 ]
 PROMOTION_REFUSALS: frozenset[str] = frozenset(get_args(PromotionRefusal))
 
@@ -378,6 +387,15 @@ class ResultIdentity:
     result_scope: ResultScope
     namespace: ResultNamespace
     ambiguity_arm: AmbiguityArm
+    #: Criterion 9's arm (stage 5e-5a). ⚠⚠ ON THE RESULT KEY AND HASHED, for the
+    #: reason ``ambiguity_arm`` is: two arms over the same corpus, same code and
+    #: same quarantine rule set are two MEASUREMENTS, and without this field
+    #: they hash to the same ``result_version`` and the second silently
+    #: overwrites the first. ⚠ It sits here rather than in the STRATEGY identity
+    #: because it is a property of how a result was measured, not of the rule
+    #: the strategy applies — the same place, and for the same reason, as
+    #: ``input_rule_set_version`` below.
+    quarantine_arm: QuarantineArm
     sizing_rule: str
     cost_model_id: str
     corpus_version: str
@@ -411,6 +429,7 @@ class ResultIdentity:
                 "result_scope": self.result_scope,
                 "namespace": self.namespace,
                 "ambiguity_arm": self.ambiguity_arm,
+                "quarantine_arm": self.quarantine_arm,
                 "sizing_rule": self.sizing_rule,
                 "cost_model_id": self.cost_model_id,
                 "corpus_version": self.corpus_version,
@@ -495,6 +514,10 @@ class StrategyResult:
         if self.identity.ambiguity_arm not in AMBIGUITY_ARMS:
             raise ValueError(
                 f"unknown ambiguity arm {self.identity.ambiguity_arm!r}; must be one of {sorted(AMBIGUITY_ARMS)}"
+            )
+        if self.identity.quarantine_arm not in QUARANTINE_ARMS:
+            raise ValueError(
+                f"unknown quarantine arm {self.identity.quarantine_arm!r}; must be one of {sorted(QUARANTINE_ARMS)}"
             )
         # ⚠ A BLANK version is PRESENT and meaningless, and a NOT NULL column
         # does not catch it — the #2286 shape, where an empty
@@ -602,6 +625,14 @@ class PromotionCandidate:
     #: "measured and bad" are different states and collapsing them is how a
     #: phase ships that cannot demonstrate it works.
     ambiguity_material: bool | None = None
+    #: Criterion 9 (stage 5e-5a): ``True`` once this strategy's masked and
+    #: admitted arms have both been measured and their delta reported.
+    #: ⚠ A BOOLEAN AND NOT A MAGNITUDE. Criterion 9 asks for the exclusion to be
+    #: visible, not for it to be small, and no source rule anywhere fixes a
+    #: "large enough to block" cut — so the gate refuses on the comparison being
+    #: missing and stops there. Compare ``ambiguity_material`` directly above,
+    #: which DOES carry a magnitude verdict because §3.4 declares one.
+    quarantine_arms_compared: bool = False
 
 
 def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, ...]:
@@ -683,6 +714,13 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
         refusals.append("ambiguity_arms_not_compared")
     elif candidate.ambiguity_material:
         refusals.append("ambiguity_material")
+
+    # Criterion 9 — the sensitivity arm. ⚠ ONE refusal, not two: the criterion
+    # requires the exclusion measured and reported, and declares no size at
+    # which it blocks. See the `quarantine_arms_not_compared` comment on
+    # PromotionRefusal for why a `quarantine_material` twin is absent.
+    if not candidate.quarantine_arms_compared:
+        refusals.append("quarantine_arms_not_compared")
 
     return tuple(refusals)
 

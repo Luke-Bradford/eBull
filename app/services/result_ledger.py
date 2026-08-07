@@ -175,7 +175,7 @@ _RECORD_ACCESS = """
 
 _RESULT_COLUMNS = """
     strategy_id, strategy_version, result_version, result_scope, namespace,
-    ambiguity_arm, window_start, window_end, universe_basis, corpus_version,
+    ambiguity_arm, quarantine_arm, window_start, window_end, universe_basis, corpus_version,
     cost_model_id, carry_unmodelled, sizing_rule, position_rule_set_version,
     outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
     trial_count, deflated_sharpe,
@@ -192,7 +192,7 @@ _RESULT_COLUMNS = """
 
 _RESULT_VALUES = """
     %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
-    %(ambiguity_arm)s, %(window_start)s, %(window_end)s, %(universe_basis)s, %(corpus_version)s,
+    %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(universe_basis)s, %(corpus_version)s,
     %(cost_model_id)s, %(carry_unmodelled)s, %(sizing_rule)s, %(position_rule_set_version)s,
     %(outcome_rule_set_version)s, %(input_rule_set_version)s, %(evaluated_instrument_count)s,
     %(trial_count)s, %(deflated_sharpe)s,
@@ -228,7 +228,7 @@ _SELECT_HOLDOUT = f"""
     WHERE strategy_id = %(strategy_id)s
       AND strategy_version = %(strategy_version)s
       AND namespace = 'hold_out'
-    ORDER BY result_version, result_scope, ambiguity_arm
+    ORDER BY result_version, result_scope, ambiguity_arm, quarantine_arm
 """  # noqa: S608 - as above
 
 _COUNT_HOLDOUT_RESULTS = """
@@ -259,6 +259,7 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         "result_scope": identity.result_scope,
         "namespace": identity.namespace,
         "ambiguity_arm": identity.ambiguity_arm,
+        "quarantine_arm": identity.quarantine_arm,
         "window_start": identity.window_start,
         "window_end": identity.window_end,
         "universe_basis": result.universe_basis,
@@ -364,6 +365,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         result_scope,
         namespace,
         ambiguity_arm,
+        quarantine_arm,
         window_start,
         window_end,
         universe_basis,
@@ -423,6 +425,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         result_scope=result_scope,  # type: ignore[arg-type]
         namespace=namespace,  # type: ignore[arg-type]
         ambiguity_arm=ambiguity_arm,  # type: ignore[arg-type]
+        quarantine_arm=quarantine_arm,  # type: ignore[arg-type]
         sizing_rule=str(sizing_rule),
         cost_model_id=str(cost_model_id),
         corpus_version=str(corpus_version),

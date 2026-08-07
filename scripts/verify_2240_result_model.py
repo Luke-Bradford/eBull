@@ -429,6 +429,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
         result_scope="sleeve",
         namespace="hold_out",
         ambiguity_arm="worst_case",
+        quarantine_arm="masked",
         sizing_rule=SIZING_RULE,
         cost_model_id=COST_MODEL_ID,
         corpus_version=CORPUS_VERSION,

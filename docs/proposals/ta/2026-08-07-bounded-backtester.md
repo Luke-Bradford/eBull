@@ -769,7 +769,14 @@ until the namespace has a mechanism.
 | **5e-2** | **Block bootstrap clustered by date** (criterion 3) → fills `effective_sample_size` and clears one of the seven standing refusals. `app/services/block_bootstrap.py`, `sql/265`. | ✅ shipped |
 | **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. `app/services/deflated_sharpe.py`, `app/services/trial_register.py`, `sql/266`. | ✅ shipped |
 | **5e-4** | **Purged walk-forward + embargo** (§5.3). `app/services/walk_forward.py`. ⚠ The "blocked on S-1 declaring a `max_hold_bars`" row was **struck**: the block was an unstarted measurement, not a decision, and the measurement adopted the leak-free in-sample p100 with S-1's identity untouched. | ✅ shipped |
-| **5e-5** | **Quarantine sensitivity arm** (criterion 9) and the **1,000-strategy random-entry control** (§9, *the harness itself*). | last |
+| **5e-5a** | **Quarantine sensitivity arm** (criterion 9) — the two-arm loader, the census, the metric delta, and `quarantine_arm` on the result identity. `app/services/quarantine_sensitivity.py`, `sql/267`. | ✅ shipped |
+| **5e-5b** | The **1,000-strategy random-entry control** (§9, *the harness itself*), and the per-fold walk-forward writer 5e-4 deliberately left unwritten. | last |
+
+⚠ **5e-5 was split at 5e-5a**, for the reason 5e was split at 5e-1: the first
+item turned out to change the RESULT IDENTITY (`quarantine_arm`, §8.5), and an
+identity change is cheap only while `strategy_results_store` is empty. The
+random-entry cohort writes rows; doing it second means it writes them under an
+identity that can already express which arm produced them.
 
 ### 8.1 ⚠⚠ Stage 5e-1's finding: RLS is not criterion 5's mechanism on this database
 
@@ -920,6 +927,47 @@ mismatch rather than correcting for it.
 validity gate and not a training loop; the walk-forward columns land with the
 per-fold writer in 5e-5, not before. See the end of §5.3.
 
+### 8.5 Stage 5e-5a: what the arm is, what it is NOT, and the identity it forced
+
+**Source rule: the spec's own C9**, which is where a sensitivity arm's
+"conservative handling" is defined for this project — *"re-run with quarantined
+bars admitted at their stored values rather than masked, and report the delta in
+every C7 metric"*. Parent criterion 9 fixes the census (*"the count and share of
+bars/trades excluded per strategy"*) and the reason for it (*"bad bars correlate
+with illiquidity and volatility"*). No external rule applies: the quarantine is
+ours (#2261 / `price_quarantine.RULE_SET_VERSION`), so its arm is ours too, and
+every choice below is declared rather than reasoned out from first principles.
+
+| choice | fixed by |
+| --- | --- |
+| The arm = flagged fields at their STORED values | **C9's own wording.** ⚠ Not a third "drop the whole bar" arm: C9 asks what the exclusion COST, and the only handling whose delta answers that is the one that stops excluding. |
+| Series-level fail-closed is **not** an arm | **OURS.** A series with no coverage row, or coverage at a stale rule-set version, has no stored value to admit — the rules have never seen it. It is excluded from BOTH arms and therefore never appears in a delta, so it is counted separately or it is invisible. |
+| Both arms off ONE fetch (`load_arms`) | **OURS**, for correctness before efficiency: two reads are two chances for the arms to differ by something other than the arm. `QuarantineCensus` refuses a pair whose bar, series or flag counts disagree. |
+| `*_flagged` counts are arm-invariant; `*_masked` are not | **OURS.** If the census followed the arm, the admitted run would report its own exclusion as empty — an arm measuring what masking cost, printing "nothing was masked". |
+| A metric null in one arm has **no** delta | **OURS**, from `strategy_statistics`' own nullability rules. A zero would render "the admitted arm gained a losing trade, so `profit_factor` became computable" as "unchanged". |
+| **No materiality threshold** | **Criterion 9 declares none.** It asks that the exclusion be *visible*, not small. §3.4's ambiguity pair has a materiality gate because the spec declares one; inventing a cut here would be the made-up constant `.claude/CLAUDE.md` forbids. The promotion gate refuses on `quarantine_arms_not_compared` and has no `quarantine_material` twin — asserted by test, so its absence is pinned rather than left to review. |
+| `quarantine_arm` on the RESULT key, not the strategy hash | **Criterion 11 + this table's own precedent.** It is a property of how a result was MEASURED, which is where `input_rule_set_version` already sits. A masked and an admitted run are the same strategy measured two ways. |
+
+⚠⚠ **The stage's finding is an AMPLIFICATION, and it is a decision already
+written down rather than a bug.** A masked close is not a one-bar hole. For S-1
+it suppresses the rolling windows that span it; for S-3 it suppresses **the rest
+of the series**, because Wilder smoothing carries state forward and
+`indicator_series.rsi_series` marks every index from the first NULL close onward
+unevaluable — which `s3_mean_reversion_in_trend`'s header states in full. So the
+delta the arm reports is not proportional to the flagged bar count, and reading
+the census alone would understate the exposure by orders of magnitude.
+
+⚠ **The arm runs S-1 and S-3 only**, for phase 5a's reason (S-2 needs its whole
+panel resident, S-4 needs the resolver over the corpus). That gap bites harder
+here than in earlier stages: **S-4 is the only sleeve that reads high and low**,
+and the RANGE verdict is the larger half of this corpus's quarantine. The metric
+delta is therefore measured against the smaller exposure, and the census reports
+both verdicts so the untested one is visible rather than absent.
+
+⚠ **Nothing is written by the sweep.** `sql/267` adds the identity column so a
+stored arm is expressible; the per-arm writer lands with 5e-5b, which is the
+first stage that has rows to write.
+
 ⚠ **Stage 5e is the phase, not an appendix.** The parent is explicit that
 reproducing #2260 is *"necessary but not sufficient"* and pairs it with the
 random-entry cohort at a stated threshold, because *"a stated threshold matters
@@ -1007,6 +1055,18 @@ shares are reported per strategy, **plus one sensitivity arm with conservative
 handling** — defined here as: re-run with quarantined bars *admitted* at their
 stored values rather than masked, and report the delta in every C7 metric. An
 arm that cannot be defined is an arm nobody ran.
+
+✅ **Shipped at stage 5e-5a** (`scripts/verify_2240_quarantine_sensitivity.py`,
+arms `--census` and `--arms`, full population, exit-code gated). Two exclusion
+channels are counted, not one: the masked FIELDS and the SERIES-level
+fail-closed refusal, which never reaches a delta because it removes the series
+from both arms. All **twelve** C7 metrics are compared per strategy, and a
+metric null in one arm reports a STATE rather than a zero delta. The gate refuses
+on `quarantine_arms_not_compared` and — deliberately — on nothing else: criterion
+9 requires the exclusion visible, not small, and no rule anywhere fixes a
+blocking magnitude (§8.5). ⚠ Measured against S-1 and S-3 only; the RANGE
+verdict's exposure belongs to S-4, which does not run here, and the census
+reports it so the gap is visible.
 
 **C10 — corporate actions declared.** `price_series_break` segments are **never
 spanned** by a position — asserted, since C3's block bootstrap would otherwise
