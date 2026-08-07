@@ -51,6 +51,7 @@ from app.config import settings
 from app.services.indicator_series import BarSeries
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION, load_masked_series
 from app.services.strategies.s2_cross_sectional_momentum import (
+    DECILE,
     ELIGIBILITY_BARS,
     LOOKBACK_BARS,
     MIN_CLOSE,
@@ -392,8 +393,16 @@ def _stream_panel(conn: psycopg.Connection[tuple], *, progress: bool = True) -> 
         run.verdicts["fired"] += len(winners)
         run.verdicts["not_fired"] += len(scores) - len(winners)
         # A tie SPANNING the cut is the only one that changes who is selected.
+        #
+        # ⚠ `DECILE`, not a literal 10 (review NITPICK). This arm is
+        # deliberately parameter-COUPLED to the module — it re-derives the
+        # algorithm independently, not the constants — and a second copy of the
+        # cut would silently disagree the day the decile moves. The literals
+        # that pin the constants against the SPEC live in
+        # `tests/test_strategy_s2.py::TestSpecConstants`, which is the right
+        # place for them: a script cannot fail a build.
         ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-        cut = len(scores) // 10
+        cut = len(scores) // DECILE
         if 0 < cut < len(ordered) and ordered[cut - 1][1] == ordered[cut][1]:
             run.boundary_ties += 1
     return run
@@ -540,7 +549,7 @@ def ranking() -> int:
                 "eligibility": ELIGIBILITY_BARS,
                 "floor": MIN_CLOSE,
                 "min_cross_section": MIN_CROSS_SECTION,
-                "decile": 10,
+                "decile": DECILE,
             },
         ).fetchall():
             sql_selected.setdefault(bar_date, set()).add(int(instrument_id))
