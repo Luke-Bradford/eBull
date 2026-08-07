@@ -231,8 +231,30 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "the raw-kurtosis guard removed from TradeMoments",
         DSR,
         DSR_TESTS,
-        [("        if self.kurtosis <= 0.0:", "        if False:")],
+        [("        if self.kurtosis < 1.0:", "        if False:")],
         "test_excess_kurtosis_is_refused_at_construction",
+    ),
+    (
+        # ⚠⚠ The kurtosis bound loosened back to `> 0` — the review NITPICK on
+        # PR #2372. `y4 >= y3^2 + 1` for any real distribution, so (0, 1) is
+        # impossible, and the looser bound admitted all of it while the message
+        # beside it claimed otherwise.
+        "the kurtosis bound loosened from 1 back to 0",
+        DSR,
+        DSR_TESTS,
+        [("        if self.kurtosis < 1.0:", "        if self.kurtosis <= 0.0:")],
+        "test_a_kurtosis_between_zero_and_one_is_refused",
+    ),
+    (
+        # ⚠⚠ A COVARIANCE matrix is square AND symmetric, so both earlier guards
+        # pass it. Without the unit-diagonal check eq. (8) averages its
+        # off-diagonal covariances into something shaped like a correlation and
+        # nothing downstream can tell. Review NITPICK on PR #2372.
+        "a covariance matrix admitted as a correlation matrix",
+        DSR,
+        DSR_TESTS,
+        [("    if not np.allclose(np.diag(matrix), 1.0):", "    if False:")],
+        "test_a_covariance_matrix_is_refused",
     ),
     (
         # ⚠ The moments taken with a sample standard deviation, double-counting

@@ -303,6 +303,11 @@ def _insert(conn: psycopg.Connection[tuple], **overrides: object) -> None:
         # ⚠ RAW kurtosis: a Normal is 3, so 0 means excess kurtosis was stored
         # under a column every reader will take as raw.
         ("excess kurtosis stored as raw", {**_DSR, "dsr_kurtosis": "0"}),
+        # ⚠⚠ THE BOUND IS 1, NOT 0. `y4 >= y3^2 + 1` for any real distribution,
+        # so (0, 1) is impossible — and a `> 0` CHECK admitted all of it while
+        # the column comment said otherwise. A near-Normal series passed as
+        # EXCESS kurtosis lands in exactly this range.
+        ("a kurtosis between zero and one", {**_DSR, "dsr_kurtosis": "0.4"}),
         # M >= 2 wherever a DSR exists — A.3 needs M > 1 for an average
         # correlation to exist at all. ⚠ Stricter than sql/262's `>= 1`, which
         # still governs a trial count standing on its own.

@@ -157,10 +157,18 @@ class TradeMoments:
     def __post_init__(self) -> None:
         if self.trade_count < 2:
             raise ValueError(f"trade_count must be at least 2 for a moment to exist, got {self.trade_count}")
-        if self.kurtosis <= 0.0:
+        # ⚠ THE BOUND IS 1, NOT 0. For any real distribution
+        # `y4 >= y3^2 + 1 >= 1`, with equality at a two-point symmetric
+        # distribution (Bernoulli(1/2) has y4 exactly 1) — which is a reachable
+        # trade population: every win the same size, every loss the same size.
+        # So 1 is attainable and anything below it is impossible, whereas the
+        # old `> 0` let the whole of (0, 1) through while the message claimed
+        # otherwise. A Normal passed as EXCESS kurtosis arrives as 0.0 and is
+        # still caught, which is the defect this guards.
+        if self.kurtosis < 1.0:
             raise ValueError(
-                f"kurtosis must be positive, got {self.kurtosis} — a RAW fourth moment is >= 1 for any real "
-                "distribution, so a value at or below zero means excess kurtosis was passed (see the header)"
+                f"kurtosis must be at least 1, got {self.kurtosis} — a RAW fourth moment is >= y3^2 + 1 for any real "
+                "distribution, so a value below 1 means excess kurtosis was passed (see the header)"
             )
 
 
@@ -272,6 +280,18 @@ def average_trial_correlation(correlation_matrix: npt.NDArray[np.float64]) -> fl
         raise ValueError(f"average correlation needs at least 2 trials, got {size} — A.3 requires M > 1 to exist")
     if not np.allclose(matrix, matrix.T, equal_nan=False):
         raise ValueError("correlation matrix is not symmetric, so rho_ij and rho_ji disagree")
+    # ⚠ SQUARE AND SYMMETRIC IS NOT ENOUGH — a COVARIANCE matrix is both, and
+    # eq. (8) would average its off-diagonal covariances into a number that
+    # looks like a correlation, feeds eq. (9) and lands in `N_hat` with nothing
+    # downstream able to tell. The two properties that separate the two are the
+    # unit diagonal and the [-1, 1] range, so both are checked here.
+    if not np.allclose(np.diag(matrix), 1.0):
+        raise ValueError(
+            "correlation matrix has a diagonal that is not all ones — a covariance matrix is also square and "
+            "symmetric, and averaging its off-diagonal entries would produce a meaningless rho"
+        )
+    if not (np.all(matrix >= -1.0) and np.all(matrix <= 1.0)):
+        raise ValueError("correlation matrix has an entry outside [-1, 1], so it is not a correlation matrix")
 
     upper = matrix[np.triu_indices(size, k=1)]
     return float(2.0 * upper.sum() / (size * (size - 1)))

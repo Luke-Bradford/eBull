@@ -154,12 +154,16 @@ BEGIN
                    OR (dsr_measured_trials >= 2 AND dsr_measured_trials <= trial_count));
     END IF;
 
-    -- ⚠ A RAW fourth moment is >= 1 for any real distribution, so a value at or
-    -- below zero means excess kurtosis was stored under a column the reader
-    -- will take as raw.
+    -- ⚠ THE BOUND IS 1, NOT 0, AND THE DIFFERENCE IS THE WHOLE POINT OF THE
+    -- CHECK. For any real distribution `y4 >= y3^2 + 1 >= 1`, with equality at
+    -- a two-point symmetric distribution — reachable here as a trade population
+    -- where every win is one size and every loss another. A `> 0` bound would
+    -- admit the whole of (0, 1) while the comment beside it claimed those
+    -- values were impossible, and excess kurtosis for a near-Normal series
+    -- lands in exactly that range.
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'strategy_results_dsr_kurtosis_raw') THEN
         ALTER TABLE strategy_results_store ADD CONSTRAINT strategy_results_dsr_kurtosis_raw
-            CHECK (dsr_kurtosis IS NULL OR dsr_kurtosis > 0);
+            CHECK (dsr_kurtosis IS NULL OR dsr_kurtosis >= 1);
     END IF;
 
     -- ⚠ A BLANK id is PRESENT and meaningless — the #2286 shape. It would

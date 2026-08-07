@@ -280,6 +280,23 @@ class TestImpliedIndependentTrials:
         with pytest.raises(ValueError, match="not symmetric"):
             average_trial_correlation(np.array([[1.0, 0.3], [0.7, 1.0]]))
 
+    def test_a_covariance_matrix_is_refused(self) -> None:
+        """⚠⚠ SQUARE AND SYMMETRIC IS NOT ENOUGH — a covariance matrix is both.
+
+        Eq. (8) would happily average its off-diagonal COVARIANCES into a
+        number that looks like a correlation, feed it to eq. (9) and land it in
+        `N_hat` with nothing downstream able to tell. The unit diagonal is what
+        separates the two.
+        """
+        covariance = np.array([[4.0, 1.2], [1.2, 9.0]])
+        assert np.allclose(covariance, covariance.T)  # symmetric, so the earlier guards pass
+        with pytest.raises(ValueError, match="diagonal that is not all ones"):
+            average_trial_correlation(covariance)
+
+    def test_an_out_of_range_entry_is_refused(self) -> None:
+        with pytest.raises(ValueError, match=r"outside \[-1, 1\]"):
+            average_trial_correlation(np.array([[1.0, 1.4], [1.4, 1.0]]))
+
     def test_more_correlation_means_a_lower_threshold(self) -> None:
         """Correlated trials are not independent evidence of a wide search."""
         independent = expected_max_sharpe(
@@ -455,6 +472,29 @@ class TestTradeMoments:
         """Passing ``y4 - 3`` for a Normal gives 0.0, which is not a raw moment."""
         with pytest.raises(ValueError, match="excess kurtosis"):
             TradeMoments(sharpe=0.1, skewness=0.0, kurtosis=0.0, trade_count=100)
+
+    def test_a_kurtosis_between_zero_and_one_is_refused(self) -> None:
+        """⚠ THE BOUND IS 1, NOT 0. For any real distribution ``y4 >= y3^2 + 1``.
+
+        A ``> 0`` guard admits the whole of ``(0, 1)`` while claiming those
+        values impossible — and a near-Normal series passed as EXCESS kurtosis
+        lands in exactly that range.
+        """
+        with pytest.raises(ValueError, match="at least 1"):
+            TradeMoments(sharpe=0.1, skewness=0.0, kurtosis=0.4, trade_count=100)
+
+    def test_a_two_point_distribution_attains_exactly_one(self) -> None:
+        """⚠ 1 is ATTAINABLE, so the bound is inclusive rather than strict.
+
+        Equal-sized wins and equal-sized losses in equal number is a Bernoulli
+        shape, whose raw kurtosis is exactly 1 — a reachable trade population,
+        not a mathematical curiosity. Computed here, not asserted from a
+        literal.
+        """
+        moments = trade_moments([1.0, -1.0, 1.0, -1.0])
+        assert moments is not None
+        assert moments.kurtosis == pytest.approx(1.0)
+        assert TradeMoments(sharpe=0.1, skewness=0.0, kurtosis=1.0, trade_count=4).kurtosis == 1.0
 
 
 class TestResultInvariants:
