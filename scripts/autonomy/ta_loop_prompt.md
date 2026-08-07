@@ -16,21 +16,46 @@ skills.
 Check `gh pr list --state open` and recent commits first — never duplicate work
 already in flight. Then take the first item below that is not done:
 
-1. **Phase 3c** — the signal-ledger writer. Resolves `fill_index = signal_index + 1`
-   from the series, fill price from that bar's OPEN, refuses when no next bar
-   exists (`no_fill_bar`), enforces the uniqueness key. `strategy_registry.py`
-   and `sql/255_strategy_signals.sql` already exist — read both.
-2. **Phase 4** — outcome resolver: `tp_hit` / `sl_hit` / `expired` / `ambiguous`.
-   Spike S5 (#2245) is ANSWERED — read its final comment for the rule and the
-   measured ambiguous rate.
-3. **Strategy catalogue** S-1 onward from the parent spec §4, each a pure
-   function against the phase 3a registry contract.
-4. **#2311** — vectorise `indicator_series` (currently 83.3 s against a < 60 s
-   acceptance). Ticket has the profile and the constraints.
+1. **Finish phase 5** — the bounded backtester, per §5 of the design spec and
+   the phase-5 spec (`docs/proposals/ta/…`). 5a/5b/5c are merged; continue from
+   wherever the ledger and the result model actually are, not from this list.
+2. **#2364 — the promotion gate's two missing refusals.** Operator DECIDED
+   2026-08-07; read the decision comment on the issue, it is not a menu:
+   - a win rate is NEVER displayed as a bare point estimate — always with its
+     **Wilson 95% interval**;
+   - promotion requires the interval's **LOWER bound** to beat the comparator,
+     so no magic minimum-n has to be defended;
+   - the binding quantity is **effective n** — distinct non-overlapping holding
+     windows, not raw position count (this also closes §7's correlated-signals
+     question);
+   - comparator (a) time-matched buy-and-hold on the same instrument is the
+     GATE; (b) random-entry bootstrap at matched hold length is the significance
+     test; (c) SPY over the same window is reporting context, not a gate;
+   - new refusals `sample_below_display_floor` and `comparator_not_beaten`,
+     added WITH the derived-contract test (#2229: a closed vocabulary in three
+     places produced live 500s with the suite green).
+3. **#2363 — FX is charged at zero on a GBP account buying USD instruments.**
+   A live-path defect, and the markup is measurable rather than assumable:
+   `GET /api/v1/balances` returns the `exchangeRate` eToro actually applied
+   (verified on the portal 2026-08-07), and `fx_rates_refresh` already gives an
+   independent mid. ⚠ Read the operator's comment first — a STANDALONE
+   conversion pays once, not per trade, so FX is an account-state cost and
+   charging it per position overstates a pre-funded balance. Carry stays zero
+   but the REASON must be written into the code (long-only + unleveraged = real
+   stock, not CFD, so no overnight financing — wrong the day v2 adds leverage).
+4. **Phase 6** — signals lens + strategy performance surface. The first
+   operator-visible TA surface. ⚠ Do NOT start it before 2 and 3 land: it
+   renders numbers, and both of those change what the numbers mean.
 
 ⚠ **ONE task. Do it completely — spec-conformant, tested, PR opened, review
 resolved, merged if green. Do not start a second.** A half-finished second task
 is worse than an idle iteration.
+
+⚠ **This list goes stale — the SPEC is the authority, not this prompt.** Items
+1-4 of the previous revision were all complete while still listed, and the loop
+correctly navigated off the phase table instead. If this list disagrees with
+`docs/superpowers/specs/2026-08-04-ta-strategy-platform-design.md` §5, the spec
+wins; say so in the run report so the prompt gets fixed.
 
 ## You HAVE a database — use it
 
