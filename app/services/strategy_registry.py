@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, get_args
@@ -102,6 +103,14 @@ SignalKind = Literal["entry", "exit"]
 #: there can never be filled, and none of the seven describes that. It is not a
 #: data gap — it is the edge of the series. If the parent's vocabulary is the
 #: authority, this needs adopting there too.
+#:
+#: ⚠ ``thin_cross_section`` is a NINTH, and the same flagging applies (sql/260
+#: widens the CHECK). It is the first code that is a property of the PANEL
+#: rather than of the bar: a strategy ranking within a cross-section of six
+#: names has no decile to be in the top of. The alternatives were both worse —
+#: rounding the decile up silently becomes "best of six", and reporting
+#: ``not_fired`` is criterion 8's exact prohibition, a data-availability fact
+#: wearing a rule verdict's clothes. See ``evaluate_cross_sectional``.
 NotEvaluableReason = Literal[
     "missing_volume",
     "missing_spread",
@@ -111,6 +120,7 @@ NotEvaluableReason = Literal[
     "not_listed",
     "ambiguous_intrabar",
     "no_fill_bar",
+    "thin_cross_section",
 ]
 
 # ⚠ DERIVED from the Literals above, never restated. Review flagged the
@@ -123,10 +133,11 @@ VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
 SIGNAL_KINDS: frozenset[str] = frozenset(get_args(SignalKind))
 NOT_EVALUABLE_REASONS: frozenset[str] = frozenset(get_args(NotEvaluableReason))
 
-#: The seven from parent criterion 8. `no_fill_bar` is OURS and is excluded
-#: deliberately — see NotEvaluableReason. Kept as an explicit subtraction so
-#: adding a parent code later cannot silently land on our side of the line.
-OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset({"no_fill_bar"})
+#: The seven from parent criterion 8. `no_fill_bar` and `thin_cross_section` are
+#: OURS and are excluded deliberately — see NotEvaluableReason. Kept as an
+#: explicit subtraction so adding a parent code later cannot silently land on
+#: our side of the line.
+OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset({"no_fill_bar", "thin_cross_section"})
 PARENT_REASON_CODES: frozenset[str] = NOT_EVALUABLE_REASONS - OUR_ADDITIONAL_REASON_CODES
 
 
@@ -334,3 +345,209 @@ def evaluate(
         fired = body(index)
         signals.append(StrategySignal(verdict="fired" if fired else "not_fired", signal_index=index, kind=kind))
     return signals
+
+
+# ---------------------------------------------------------------------------
+# The CROSS-SECTIONAL contract
+# ---------------------------------------------------------------------------
+#
+# ⚠⚠ WHY `evaluate` COULD NOT BE REUSED, AND WHAT MUST SURVIVE THE EXTENSION.
+#
+# `evaluate` runs a per-bar predicate over ONE series, because S-1, S-3 and S-4
+# read only their own instrument's bars. S-2 does not: "hold the top decile" is
+# a statement about the cross-section on a DATE, so the verdict for instrument A
+# at date D depends on B..Z at D. Nothing above can express that.
+#
+# The extension is a second runner, not a second contract. All three guarantees
+# `evaluate` buys are re-derived below rather than re-argued per strategy:
+# evaluability is decided before any score is read, no fill is expressible, and
+# the reason vocabulary stays the closed set at the top of this file.
+#
+# Spec: docs/proposals/ta/2026-08-06-cross-sectional-contract-and-s2.md.
+
+
+@dataclass(frozen=True)
+class CrossSectionalMember:
+    """One instrument's contribution to a ranked panel.
+
+    ⚠ ``score`` MUST ALSO BE DECLARED IN ``inputs`` and that is checked, not
+    documented. Codex found the hole at checkpoint 1: without it,
+    ``_unevaluable_reason_at`` can pass a bar whose ``score.values[i]`` is
+    ``None``, and the runner would then rank a member on a value it does not
+    have — precisely the "evaluability precedes the condition" guarantee this
+    contract exists to keep.
+
+    ⚠ ``dates`` are this member's OWN bar dates and are what the ranking groups
+    on. Grouping on the bar INDEX would rank a 2019 bar against a 2007 one,
+    because index ``i`` is a different date on every member.
+
+    ``decision_indices`` are the bars at which this member ranks — a rebalance
+    bar it is eligible for. Everything else is an ordinary ``not_fired``: the
+    rule is *"fire iff a decision bar AND selected"*, so a non-decision bar did
+    not fire. It is a verdict, not an absence.
+    """
+
+    dates: tuple[date, ...]
+    inputs: tuple[StrategyInput, ...]
+    score: IndicatorSeries
+    decision_indices: frozenset[int]
+
+    def __post_init__(self) -> None:
+        n = len(self.dates)
+        if len(self.score) != n:
+            raise ValueError(
+                f"score has {len(self.score)} values for {n} bars — an offset series is how an off-by-one "
+                "enters a backtest"
+            )
+        for declared in self.inputs:
+            if len(declared.series) != n:
+                raise ValueError(f"declared input has {len(declared.series)} values for {n} bars")
+        if not any(declared.series is self.score for declared in self.inputs):
+            raise ValueError(
+                "the ranking score must be DECLARED among inputs — otherwise a bar whose score is None "
+                "passes the evaluability check and gets ranked on a value it does not have"
+            )
+        for index in self.decision_indices:
+            if not 0 <= index < n:
+                raise ValueError(f"decision index {index} is outside the {n}-bar series")
+        for i in range(1, n):
+            if self.dates[i] <= self.dates[i - 1]:
+                raise ValueError(
+                    f"member dates are not strictly ascending at index {i}: {self.dates[i - 1]} then {self.dates[i]}"
+                )
+
+
+@dataclass(frozen=True)
+class StagedMember:
+    """One member's per-bar verdicts, with the ranked bars still undecided.
+
+    ``verdicts[i] is None`` means "this bar participates in the ranking at
+    ``dates[i]`` and cannot be decided until the whole cross-section is known".
+
+    ⚠ This intermediate is PUBLIC on purpose. A full-corpus census cannot hold
+    every member's bars in memory at once, so it stages one series at a time and
+    keeps only ``scores``. Without this split it would re-implement the staging
+    pass, which is how a census and the strategy it measures come to disagree.
+    """
+
+    verdicts: tuple[StrategySignal | None, ...]
+    #: Ranking score per participating bar, keyed by that bar's DATE.
+    scores: Mapping[date, float]
+
+
+def stage_cross_sectional_member(member: CrossSectionalMember, *, kind: SignalKind = "entry") -> StagedMember:
+    """Everything decidable about one member without seeing the others.
+
+    Same refusal order as ``evaluate``, for the same reasons:
+
+    1. the LAST bar is ``no_fill_bar`` — there is no ``t+1`` to fill at;
+    2. an unevaluable declared input refuses the bar with the caller's reason;
+    3. a non-decision bar is ``not_fired``;
+    4. otherwise the bar participates.
+
+    ⚠ (1) applies even to a non-decision bar, which looks over-strict on a
+    monthly calendar and is not: ``signal_ledger.resolve_fills`` re-stamps the
+    final bar ``no_fill_bar`` unconditionally, so any other verdict here would
+    be unstorable. One rule, in both places.
+    """
+    n = len(member.dates)
+    verdicts: list[StrategySignal | None] = []
+    scores: dict[date, float] = {}
+    for index in range(n):
+        if index == n - 1:
+            verdicts.append(
+                StrategySignal(verdict="not_evaluable", signal_index=index, kind=kind, reason="no_fill_bar")
+            )
+            continue
+        reason = _unevaluable_reason_at(member.inputs, index)
+        if reason is not None:
+            verdicts.append(StrategySignal(verdict="not_evaluable", signal_index=index, kind=kind, reason=reason))
+            continue
+        if index not in member.decision_indices:
+            verdicts.append(StrategySignal(verdict="not_fired", signal_index=index, kind=kind))
+            continue
+        value = member.score.values[index]
+        # Unreachable: `score` is a declared input, so a None was refused above.
+        # Present to narrow the type and to fail loudly for a direct caller.
+        assert value is not None
+        verdicts.append(None)
+        scores[member.dates[index]] = value
+    return StagedMember(verdicts=tuple(verdicts), scores=scores)
+
+
+#: Given a date and the scores of everyone ranking on it, the winners.
+#: ⚠ It receives scores and a date, so it CANNOT name a bar, a price or a fill.
+#: That is a narrower claim than "look-ahead is impossible": ``select`` is
+#: ordinary code and could close over anything. What is structural is that every
+#: score reaching it is a causal per-bar value, and that the runner hands it no
+#: route to the future.
+CrossSectionalSelect = Callable[[date, Mapping[int, float]], Set[int]]
+
+
+def evaluate_cross_sectional(
+    *,
+    members: Mapping[int, CrossSectionalMember],
+    select: CrossSectionalSelect,
+    min_participants: int,
+    kind: SignalKind = "entry",
+) -> dict[int, list[StrategySignal]]:
+    """Run a ranked strategy over a panel: one verdict per member per bar.
+
+    ``min_participants`` is the smallest cross-section the ranking rule is
+    defined on. Below it, every participant at that date is
+    ``not_evaluable("thin_cross_section")`` — the runner's call, not
+    ``select``'s, because an empty return from ``select`` cannot be told apart
+    from "the panel was too thin", and criterion 8 exists to keep exactly that
+    distinction countable.
+
+    ⚠ ``select`` returning a key that did not participate RAISES. Ignoring it
+    would hide a selector bug behind a plausible-looking ledger, and honouring
+    it would fire a signal on a bar the runner already judged unevaluable.
+    """
+    if min_participants < 1:
+        raise ValueError(f"min_participants must be at least 1, got {min_participants}")
+
+    staged = {key: stage_cross_sectional_member(member, kind=kind) for key, member in members.items()}
+
+    by_date: dict[date, dict[int, float]] = {}
+    for key, member_staged in staged.items():
+        for when, value in member_staged.scores.items():
+            by_date.setdefault(when, {})[key] = value
+
+    winners_by_date: dict[date, frozenset[int]] = {}
+    thin_dates: set[date] = set()
+    # Sorted so a `select` with any state sees dates in time order, and so two
+    # runs over the same panel are identical.
+    for when in sorted(by_date):
+        scores = by_date[when]
+        if len(scores) < min_participants:
+            thin_dates.add(when)
+            continue
+        winners = frozenset(select(when, scores))
+        unknown = winners - scores.keys()
+        if unknown:
+            raise ValueError(
+                f"select returned {sorted(unknown)} on {when}, which did not participate in that "
+                "cross-section — every winner must be one of the members offered"
+            )
+        winners_by_date[when] = winners
+
+    resolved: dict[int, list[StrategySignal]] = {}
+    for key, member_staged in staged.items():
+        member = members[key]
+        signals: list[StrategySignal] = []
+        for index, verdict in enumerate(member_staged.verdicts):
+            if verdict is not None:
+                signals.append(verdict)
+                continue
+            when = member.dates[index]
+            if when in thin_dates:
+                signals.append(
+                    StrategySignal(verdict="not_evaluable", signal_index=index, kind=kind, reason="thin_cross_section")
+                )
+            elif key in winners_by_date[when]:
+                signals.append(StrategySignal(verdict="fired", signal_index=index, kind=kind))
+            else:
+                signals.append(StrategySignal(verdict="not_fired", signal_index=index, kind=kind))
+        resolved[key] = signals
+    return resolved

@@ -685,6 +685,48 @@ against an equity move. Settled by §4.0 (§9 Q1 is resolved): US stocks, USD.
 dividend adjustment (`price_adjustments` is empty; see §5 criterion 10). This
 systematically understates high-yield names over a 12-month lookback.
 
+✅ **IMPLEMENTED 2026-08-06** — `app/services/strategies/s2_cross_sectional_momentum.py`,
+against a CROSS-SECTIONAL extension of the phase-3a contract
+(`strategy_registry.evaluate_cross_sectional`), specified in
+`docs/proposals/ta/2026-08-06-cross-sectional-contract-and-s2.md`. Five things it
+settles that this entry left open:
+
+- ⚠ **This entry's two numbers disagree and both are honoured.** The window
+  `t-252 .. t-21` needs 253 bars; the stated eligibility is 273 (= 252 + 21, i.e.
+  computed as though the window ran `t-273 .. t-21`). The window is taken
+  literally — it is also the published form, Fama-French's *prior (2-12)
+  returns* — and so is the eligibility, which is the only reading that
+  contradicts neither sentence. The 20-bar narrowing is counted: **99,469 bars**
+  over the validated universe (`--census`).
+- **The rebalance calendar is the PANEL's, not each member's.** Read per-series,
+  a name resuming after a halt on the 4th ranks against whoever else resumed
+  that day — a cross-section of two. Same rule on the union calendar: **774
+  rebalance dates**, 762 with any participant.
+- **§9 Q3's price floor ships** (`close ≥ $1`, as-of): a ranked strategy selects
+  on extremes, so tick-quantised sub-$1 names are not a rare contaminant of the
+  top decile, they *are* it. Cost measured: **31,746 decision bars rejected**.
+  ⚠ On split-adjusted closes it is an *adjusted*-price floor, so a name that
+  reverse-split 1-for-10 passes a floor it would have failed at the time — and
+  reverse splits happen because a price fell under $1.
+- **One leg, not two.** "Hold the top decile" makes an exit the exact complement
+  of the entry over that bar's participants, so an exit row could never disagree
+  with the entry beside it. Consequently S-2 declares **no** `max_hold_bars` —
+  its hold is *"until the next rebalance"*, a calendar fact, and phase 5 owns
+  both the pairing and the collapse of consecutive selections into one hold.
+- **Three by-construction rules, because "top decile" has no published cut**:
+  `k = N // 10` (floor); ties break on score descending then instrument id
+  ascending (**5 of 762** rebalance dates land the cut on an exact tie, so it is
+  load-bearing); and a cross-section below ten is
+  `not_evaluable("thin_cross_section")` — a ninth reason code (`sql/260`) rather
+  than a fake `not_fired`. ⚠ That code **never fires on today's validated
+  universe** (smallest cross-section: 18); it ships fixture-covered and probed
+  because the rule must be right before the panel narrows.
+
+⚠ **No performance claim is attached, deliberately.** S-2 is the only strategy in
+this table with **rank contamination**, and criterion 1 needs point-in-time
+*listing* membership, which is reconstructable (corpus first bar + Form 25) but
+not reconstructed. #2284's purchase is necessary and not sufficient.
+
 **S-3 · Mean reversion within trend**
 Signal: `rsi_14(t) < 30` and `close(t) > sma_200(t)` (reversion inside an
 uptrend, not a falling knife). Exit: `rsi_14(t) > 50`, or 10 bars elapsed,
@@ -1109,7 +1151,14 @@ survivorship claim is not evidence.
    when non-US validation is wanted.
 2. **Rebalance cadence for S-2.** Monthly is standard and cheap. Weekly triples
    turnover and cost for marginal responsiveness. Recommendation: **monthly**.
-3. **Minimum history and price floor for eligibility.** ≥273 bars for S-2
+3. ✅ **ADOPTED AS RECOMMENDED 2026-08-06 by S-2's implementation** — both
+   halves ship, as-of, and are hashed into the strategy identity, so reversing
+   either is a new strategy version rather than a silent redefinition. The
+   measured cost is on record (`--census`: 99,469 bars to the 273-bar gate,
+   31,746 decision bars to the floor), and the ⚠ the recommendation did not
+   anticipate is that on split-adjusted closes the floor is an *adjusted*-price
+   test — see the S-2 implementation note in §4.
+   **Minimum history and price floor for eligibility.** ≥273 bars for S-2
    excludes ~4,500 instruments today, many of them the newly-seeded sub-$1 names
    — probably a feature, given #2266 showed their p99.99 daily move runs to 800×
    on tick quantisation alone. Recommendation: **≥273 bars and close ≥ $1, both
