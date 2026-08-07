@@ -47,6 +47,7 @@ from typing import Final, Literal, get_args
 
 import psycopg
 
+from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.strategy_result import (
     ResultIdentity,
     StrategyResult,
@@ -183,7 +184,10 @@ _RESULT_COLUMNS = """
     return_vs_buy_and_hold_pct, losing_trade_count, losing_period_count, open_trade_count,
     unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id,
     expectancy_ci_low_pct, expectancy_ci_high_pct, bootstrap_block_length, bootstrap_cluster_count,
-    bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id
+    bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id,
+    dsr_trade_sharpe, dsr_skewness, dsr_kurtosis, dsr_expected_max_sharpe, dsr_independent_trials,
+    dsr_average_trial_correlation, dsr_trial_sharpe_variance, dsr_measured_trials, dsr_model_id,
+    trial_register_version
 """
 
 _RESULT_VALUES = """
@@ -199,7 +203,10 @@ _RESULT_VALUES = """
     %(total_return_pct)s, %(buy_and_hold_return_pct)s, %(metric_set_id)s,
     %(expectancy_ci_low_pct)s, %(expectancy_ci_high_pct)s, %(bootstrap_block_length)s,
     %(bootstrap_cluster_count)s, %(bootstrap_resamples)s, %(bootstrap_seed)s,
-    %(bootstrap_design_effect)s, %(bootstrap_model_id)s
+    %(bootstrap_design_effect)s, %(bootstrap_model_id)s,
+    %(dsr_trade_sharpe)s, %(dsr_skewness)s, %(dsr_kurtosis)s, %(dsr_expected_max_sharpe)s,
+    %(dsr_independent_trials)s, %(dsr_average_trial_correlation)s, %(dsr_trial_sharpe_variance)s,
+    %(dsr_measured_trials)s, %(dsr_model_id)s, %(trial_register_version)s
 """
 
 #: ⚠⚠ TARGETS THE VIEW. ``sql/264`` gave ``strategy_results`` a cascaded check
@@ -298,6 +305,47 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         "bootstrap_seed": metrics.bootstrap_seed,
         "bootstrap_design_effect": _numeric(metrics.bootstrap_design_effect),
         "bootstrap_model_id": metrics.bootstrap_model_id,
+        # ⚠ sql/266's criterion-6 block, and the same trap sql/265's block
+        # carries: all twelve columns (including `trial_count` and
+        # `deflated_sharpe` above) are bound by
+        # `strategy_results_dsr_all_or_nothing`, so omitting these ten would
+        # make every DSR-carrying result UNWRITABLE. `deflated` is None until
+        # 5e-3 runs, and the all-absent case is what existing rows satisfy.
+        **_dsr_params(result.deflated),
+    }
+
+
+def _dsr_params(deflated: DeflatedSharpeResult | None) -> dict[str, object]:
+    """``sql/266``'s ten columns, all present or all null.
+
+    ⚠ Written as one function returning every key rather than a conditional
+    spread, so the two branches cannot diverge in WHICH keys they set. A missing
+    key is a psycopg ``ProgrammingError`` at execute time, not a null.
+    """
+    if deflated is None:
+        return {
+            "dsr_trade_sharpe": None,
+            "dsr_skewness": None,
+            "dsr_kurtosis": None,
+            "dsr_expected_max_sharpe": None,
+            "dsr_independent_trials": None,
+            "dsr_average_trial_correlation": None,
+            "dsr_trial_sharpe_variance": None,
+            "dsr_measured_trials": None,
+            "dsr_model_id": None,
+            "trial_register_version": None,
+        }
+    return {
+        "dsr_trade_sharpe": _numeric(deflated.trade_sharpe),
+        "dsr_skewness": _numeric(deflated.skewness),
+        "dsr_kurtosis": _numeric(deflated.kurtosis),
+        "dsr_expected_max_sharpe": _numeric(deflated.expected_max_sharpe),
+        "dsr_independent_trials": _numeric(deflated.independent_trials),
+        "dsr_average_trial_correlation": _numeric(deflated.average_trial_correlation),
+        "dsr_trial_sharpe_variance": _numeric(deflated.trial_sharpe_variance),
+        "dsr_measured_trials": deflated.measured_trials,
+        "dsr_model_id": deflated.model_id,
+        "trial_register_version": deflated.trial_register_version,
     }
 
 
@@ -357,6 +405,16 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         bootstrap_seed,
         bootstrap_design_effect,
         bootstrap_model_id,
+        dsr_trade_sharpe,
+        dsr_skewness,
+        dsr_kurtosis,
+        dsr_expected_max_sharpe,
+        dsr_independent_trials,
+        dsr_average_trial_correlation,
+        dsr_trial_sharpe_variance,
+        dsr_measured_trials,
+        dsr_model_id,
+        trial_register_version,
     ) = row
 
     identity = ResultIdentity(
@@ -421,6 +479,30 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         bootstrap_design_effect=_as_float(bootstrap_design_effect),  # type: ignore[arg-type]
         bootstrap_model_id=None if bootstrap_model_id is None else str(bootstrap_model_id),
     )
+    # ⚠ sql/266, and the same NULL-preserving rule as the bootstrap block above.
+    # The set is all-or-nothing, so ONE probe decides it — `dsr_model_id`, which
+    # is the field a partial write is least likely to have set. `StrategyResult`
+    # then re-checks the reconstructed object against `trial_count` and
+    # `deflated_sharpe`, which is what makes the round trip a check.
+    deflated = (
+        None
+        if dsr_model_id is None
+        else DeflatedSharpeResult(
+            deflated_sharpe=float(deflated_sharpe),  # type: ignore[arg-type]
+            expected_max_sharpe=float(dsr_expected_max_sharpe),  # type: ignore[arg-type]
+            trade_sharpe=float(dsr_trade_sharpe),  # type: ignore[arg-type]
+            skewness=float(dsr_skewness),  # type: ignore[arg-type]
+            kurtosis=float(dsr_kurtosis),  # type: ignore[arg-type]
+            effective_sample_size=float(effective_sample_size),  # type: ignore[arg-type]
+            declared_trials=int(trial_count),  # type: ignore[arg-type]
+            independent_trials=float(dsr_independent_trials),  # type: ignore[arg-type]
+            average_trial_correlation=float(dsr_average_trial_correlation),  # type: ignore[arg-type]
+            trial_sharpe_variance=float(dsr_trial_sharpe_variance),  # type: ignore[arg-type]
+            measured_trials=int(dsr_measured_trials),  # type: ignore[arg-type]
+            trial_register_version=str(trial_register_version),
+            model_id=str(dsr_model_id),
+        )
+    )
     return StrategyResult(
         identity=identity,
         metrics=metrics,
@@ -429,6 +511,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         evaluated_instrument_count=int(evaluated_instrument_count),  # type: ignore[arg-type]
         trial_count=None if trial_count is None else int(trial_count),  # type: ignore[arg-type]
         deflated_sharpe=deflated_sharpe,  # type: ignore[arg-type]
+        deflated=deflated,
     )
 
 

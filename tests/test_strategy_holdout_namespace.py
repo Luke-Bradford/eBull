@@ -34,7 +34,12 @@ from app.services.result_ledger import (
     store_in_sample_result,
 )
 from app.services.strategy_result import PromotionCandidate, check_promotable
-from tests.test_result_ledger import BOOTSTRAP_BLOCK, build_metrics, build_result
+from tests.test_result_ledger import (
+    BOOTSTRAP_BLOCK,
+    build_metrics,
+    build_result,
+    build_result_with_dsr,
+)
 
 _ACTOR = "tests/test_strategy_holdout_namespace.py"
 _PURPOSE = "stage 5e-1 acceptance"
@@ -305,6 +310,49 @@ def test_a_result_carrying_the_criterion_3_block_survives_the_round_trip(
         assert read_back == (written,)
         assert read_back[0].metrics.bootstrap_model_id == "c3-block-bootstrap-v1"
         assert read_back[0].metrics.bootstrap_cluster_count == 15577
+
+
+def test_a_result_carrying_the_criterion_6_block_survives_the_round_trip(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ THE SAME GAP `sql/265` OPENED, ONE STAGE LATER.
+
+    ``build_result`` leaves the whole criterion-6 set NULL, so every one of
+    `sql/266`'s ten columns round-trips as ``None`` in the tests above — and a
+    ledger that omitted them, or read them back in the wrong positional order,
+    would pass all of them. That is exactly how the stage-5e-1 ledger went stale
+    when `sql/265` landed and made every bootstrap-carrying row unwritable.
+
+    ⚠ This row also carries the criterion-3 block, because `sql/266`'s DSR
+    consumes `effective_sample_size` — a DSR row with no bootstrap behind it is
+    a DSR deflated on a nominal n, which is the state the two stages exist to
+    make unreachable.
+    """
+    with ebull_test_conn.transaction():
+        written = build_result_with_dsr(strategy_id="S-C6TRIP")
+        store_holdout_result(ebull_test_conn, written, accessed_by=_ACTOR, purpose=_PURPOSE)
+
+        read_back = read_holdout_results(
+            ebull_test_conn,
+            "S-C6TRIP",
+            written.identity.strategy_version,
+            accessed_by=_ACTOR,
+            purpose=_PURPOSE,
+        )
+        assert read_back == (written,)
+        deflated = read_back[0].deflated
+        assert deflated is not None
+        assert deflated.model_id == "c6-deflated-sharpe-v1"
+        assert deflated.trial_register_version == "trial-register-2026-08-07"
+        # ⚠ The two integer fields are distinct so a swapped pair cannot hide,
+        # and the sample length must come back as the EFFECTIVE size, not the
+        # nominal trade count that sits beside it on the same row.
+        assert deflated.declared_trials == 11
+        assert deflated.measured_trials == 2
+        # ⚠ ONE sample size, and it is criterion 3's — the DSR has no column of
+        # its own. It must NOT be the nominal trade count sitting beside it.
+        assert deflated.effective_sample_size == read_back[0].metrics.effective_sample_size
+        assert read_back[0].metrics.trade_count != deflated.effective_sample_size
 
 
 def test_the_holdout_read_returns_only_the_withheld_side(

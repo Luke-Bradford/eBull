@@ -86,6 +86,40 @@ _BASE: dict[str, object] = {
     "bootstrap_seed": None,
     "bootstrap_design_effect": None,
     "bootstrap_model_id": None,
+    # --- sql/266, criterion 6's Deflated Sharpe ---------------------------
+    # ⚠ All NULL together: `num_nulls(...) IN (0, 11)` admits the wholly-absent
+    # set. ⚠⚠ `trial_count` is NOT in that set — it is governed by the one-way
+    # dependency `strategy_results_dsr_needs_trial_count`, because a declared
+    # count with no DSR yet is a real state while the reverse is what criterion
+    # 6 forbids.
+    "dsr_trade_sharpe": None,
+    "dsr_skewness": None,
+    "dsr_kurtosis": None,
+    "dsr_expected_max_sharpe": None,
+    "dsr_independent_trials": None,
+    "dsr_average_trial_correlation": None,
+    "dsr_trial_sharpe_variance": None,
+    "dsr_measured_trials": None,
+    "dsr_model_id": None,
+    "trial_register_version": None,
+}
+
+#: A COMPLETE criterion-6 block, on a declared trial count. ⚠ Includes
+#: `trial_count` because `strategy_results_dsr_needs_trial_count` requires one
+#: wherever a `deflated_sharpe` is present.
+_DSR: dict[str, object] = {
+    "trial_count": 11,
+    "deflated_sharpe": "0.7179",
+    "dsr_trade_sharpe": "0.017",
+    "dsr_skewness": "-0.40",
+    "dsr_kurtosis": "8.00",
+    "dsr_expected_max_sharpe": "0.015208",
+    "dsr_independent_trials": "9.0",
+    "dsr_average_trial_correlation": "0.20",
+    "dsr_trial_sharpe_variance": "0.0001",
+    "dsr_measured_trials": 2,
+    "dsr_model_id": "c6-deflated-sharpe-v1",
+    "trial_register_version": "trial-register-2026-08-07",
 }
 
 #: A COMPLETE criterion-3 block, for the cases that must start from a valid one
@@ -117,7 +151,10 @@ _INSERT = """
         return_vs_buy_and_hold_pct, losing_trade_count, losing_period_count, open_trade_count,
         unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id,
         expectancy_ci_low_pct, expectancy_ci_high_pct, bootstrap_block_length, bootstrap_cluster_count,
-        bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id
+        bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id,
+        dsr_trade_sharpe, dsr_skewness, dsr_kurtosis, dsr_expected_max_sharpe,
+        dsr_independent_trials, dsr_average_trial_correlation, dsr_trial_sharpe_variance,
+        dsr_measured_trials, dsr_model_id, trial_register_version
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
         %(ambiguity_arm)s, %(window_start)s, %(window_end)s, %(universe_basis)s, %(corpus_version)s,
@@ -131,7 +168,10 @@ _INSERT = """
         %(total_return_pct)s, %(buy_and_hold_return_pct)s, %(metric_set_id)s,
         %(expectancy_ci_low_pct)s, %(expectancy_ci_high_pct)s, %(bootstrap_block_length)s,
         %(bootstrap_cluster_count)s, %(bootstrap_resamples)s, %(bootstrap_seed)s,
-        %(bootstrap_design_effect)s, %(bootstrap_model_id)s
+        %(bootstrap_design_effect)s, %(bootstrap_model_id)s,
+        %(dsr_trade_sharpe)s, %(dsr_skewness)s, %(dsr_kurtosis)s, %(dsr_expected_max_sharpe)s,
+        %(dsr_independent_trials)s, %(dsr_average_trial_correlation)s, %(dsr_trial_sharpe_variance)s,
+        %(dsr_measured_trials)s, %(dsr_model_id)s, %(trial_register_version)s
     )
 """
 
@@ -227,6 +267,46 @@ def _insert(conn: psycopg.Connection[tuple], **overrides: object) -> None:
         ("profit factor with no losing trades", {"losing_trade_count": 0}),
         ("null sortino with losing periods", {"sortino": None}),
         ("sortino with no losing periods", {"losing_period_count": 0}),
+        # --- sql/266, criterion 6 -----------------------------------------
+        # ⚠⚠ THE ONE THE CRITERION IS ABOUT: a Deflated Sharpe with no declared
+        # trial count. "An undeclared trial count fails; it does not default to
+        # the number of shipped strategies."
+        ("a DSR with no declared trial count", {**_DSR, "trial_count": None}),
+        # ⚠ Each of these starts from a COMPLETE set and removes exactly one
+        # input, so the all-or-nothing constraint is what fires — a partial DSR
+        # is a correction whose correction cannot be judged.
+        ("a DSR with no trial variance", {**_DSR, "dsr_trial_sharpe_variance": None}),
+        ("a DSR with no threshold", {**_DSR, "dsr_expected_max_sharpe": None}),
+        ("a DSR naming no register", {**_DSR, "trial_register_version": None}),
+        # A blank id is PRESENT and meaningless — it satisfies all-or-nothing
+        # while naming no construction at all (#2286).
+        ("a blank model id", {**_DSR, "dsr_model_id": ""}),
+        ("a blank register version", {**_DSR, "trial_register_version": ""}),
+        # The DSR is a probability: equation (2) is a Normal CDF.
+        ("a DSR above one", {**_DSR, "deflated_sharpe": "1.4"}),
+        ("a negative DSR", {**_DSR, "deflated_sharpe": "-0.1"}),
+        # Appendix A.3: N_hat interpolates between 1 and M, so it can be neither
+        # below 1 nor above the declared count.
+        ("more independent trials than declared", {**_DSR, "dsr_independent_trials": "12.0"}),
+        ("independent trials at one", {**_DSR, "dsr_independent_trials": "1.0"}),
+        # rho is bounded by -1/(M-1) for a positive-definite matrix, which at
+        # M=11 is -0.1 — TIGHTER than -1, and the tighter bound is the one that
+        # catches a matrix that was never a correlation matrix.
+        ("a correlation below the positive-definite bound", {**_DSR, "dsr_average_trial_correlation": "-0.5"}),
+        ("a correlation above one", {**_DSR, "dsr_average_trial_correlation": "1.2"}),
+        # V[{SR_n}] is a variance and equation (1) takes its square root.
+        ("zero trial variance", {**_DSR, "dsr_trial_sharpe_variance": "0"}),
+        # A sample variance needs two measured trials, and a measured trial
+        # missing from the register is a trial missing from M.
+        ("one measured trial", {**_DSR, "dsr_measured_trials": 1}),
+        ("more measured trials than declared", {**_DSR, "dsr_measured_trials": 12}),
+        # ⚠ RAW kurtosis: a Normal is 3, so 0 means excess kurtosis was stored
+        # under a column every reader will take as raw.
+        ("excess kurtosis stored as raw", {**_DSR, "dsr_kurtosis": "0"}),
+        # M >= 2 wherever a DSR exists — A.3 needs M > 1 for an average
+        # correlation to exist at all. ⚠ Stricter than sql/262's `>= 1`, which
+        # still governs a trial count standing on its own.
+        ("a DSR on a single declared trial", {**_DSR, "trial_count": 1, "dsr_independent_trials": "1.0"}),
     ],
 )
 def test_results_table_rejects(ebull_test_conn: psycopg.Connection[tuple], label: str, overrides: dict) -> None:
@@ -253,13 +333,17 @@ def test_results_table_accepts_the_valid_shapes(ebull_test_conn: psycopg.Connect
     with ebull_test_conn.transaction():
         # Today's shape: survivor-only, carry unmodelled, no DSR yet.
         _insert(ebull_test_conn)
-        # 5e's shape, once a DSR exists on a declared trial count.
+        # A declared trial count with NO DSR yet — the register exists, the
+        # evaluation has not run. ⚠ Legal on purpose: the one-way dependency
+        # forbids the reverse only, and `check_promotable` has a live refusal
+        # (`deflated_sharpe_not_computed`) that describes exactly this row.
+        _insert(ebull_test_conn, result_version="strategy-result-v1+eee555", trial_count=11)
+        # 5e-3's shape: a DSR on a declared trial count, carrying every input.
         _insert(
             ebull_test_conn,
             result_version="strategy-result-v1+def456",
             namespace="in_sample",
-            trial_count=41,
-            deflated_sharpe="0.31",
+            **_DSR,
         )
         # A same-day window is legal — `window_end >= window_start`, not `>`.
         _insert(

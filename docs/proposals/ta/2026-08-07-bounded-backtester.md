@@ -690,7 +690,7 @@ until the namespace has a mechanism.
 | --- | --- | --- |
 | **5e-1** | **The hold-out namespace, its access log, and the first `strategy_results` writer** — criterion 5's mechanical inaccessibility, `sql/264`, `app/services/result_ledger.py`. | ✅ shipped |
 | **5e-2** | **Block bootstrap clustered by date** (criterion 3) → fills `effective_sample_size` and clears one of the seven standing refusals. `app/services/block_bootstrap.py`, `sql/265`. | ✅ shipped |
-| **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. | next |
+| **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. `app/services/deflated_sharpe.py`, `app/services/trial_register.py`, `sql/266`. | ✅ shipped |
 | **5e-4** | **Purged walk-forward + embargo** (§5.3). ⚠ Blocked on S-1 declaring a `max_hold_bars` — still free at 0 ledger rows, recommended for the fourth run running. | blocked |
 | **5e-5** | **Quarantine sensitivity arm** (criterion 9) and the **1,000-strategy random-entry control** (§9, *the harness itself*). | last |
 
@@ -763,6 +763,57 @@ claims `MAX_HOLD_BARS`' consumer is `outcome_resolver.ExitLevels.max_hold_bars`,
 which cannot be constructed for S-3 (§3). The docstring is wrong today, not once
 phase 5 lands. Filed as **#2348** rather than folded into this spec — a narrow
 doc fix should not wait on a phase.
+
+### 8.3 Stage 5e-3: the source rule, and the axis decision it forced
+
+**Source rule: Bailey, D. H. & López de Prado, M. (2014), *The Deflated Sharpe
+Ratio*, Journal of Portfolio Management 40(5):94-107, SSRN `2460551`** — read at
+implementation time, not recalled. Criterion 6 names the method and its four
+inputs; the paper supplies every constant, so none is ours:
+
+| choice | fixed by |
+| --- | --- |
+| DSR statistic | **Eq. (2)** — `Z[(SR − SR₀)√(T−1) / √(1 − γ₃SR + ((γ₄−1)/4)SR²)]`. |
+| Rejection threshold `SR₀` | **Eq. (1)/(6)**, under `H₀: SR = 0`, with the Euler-Mascheroni weighting of two Normal quantiles. |
+| Trials' correlation → `N̂` | **Appendix A.3, eqs. (8) and (9)** — `ρ` is the mean off-diagonal correlation, `N̂ = ρ̂ + (1 − ρ̂)M`. This is criterion 6's "their correlation" input, and it is a published rule rather than a heuristic. |
+| `γ₄` convention | **RAW** fourth moment (the paper's example uses `γ₄ = 10` and states a Normal is `γ₃ = 0, γ₄ = 3`). Excess kurtosis would shrink the denominator and inflate every DSR by a silent constant. |
+| Normal CDF / quantile | `statistics.NormalDist` — **stdlib, no new dependency**; scipy is absent from this project (verified). Reproduces all three of the paper's published values to 4 dp. |
+
+⚠⚠ **The paper's inputs are PER OBSERVATION, and its own worked example is where
+that is visible** — an annualised SR of 2.5 enters as `2.5/√250`, `V[{SRₙ}] = ½`
+enters as `1/(2·250)`, and `T = 1250`. Mixing an annualised Sharpe into eq. (2)
+would inflate the numerator by `√(periods per year)` and leave the denominator
+alone.
+
+⚠⚠ **WHICH AXIS THE FOUR INPUTS LIVE ON IS OURS, and 5e-2 fixed it.** Eq. (2)
+divides a Sharpe by the standard error of that same Sharpe, so `SR`, `γ₃`, `γ₄`
+and `T` must describe ONE series. §5.2 says the DSR consumes criterion 3's
+effective sample size, and 5e-2's ESS is **in units of trades**. Therefore the
+DSR is computed on the **trade axis** — `dsr_trade_sharpe` is a per-trade
+Sharpe and is **not** criterion 7's annualised `sharpe`, which is computed on
+the equity curve. The rejected alternative was to keep 5d's per-period Sharpe
+and divide its period count by the design effect: that carries a design effect
+measured by clustering TRADES onto a series of PERIODS, and no test on either
+side could see it. `sql/266` stores the two under different names for this
+reason.
+
+⚠ **The trial register is a DECLARATION and a documented FLOOR.** No query can
+produce criterion 6's count — a variant eyeballed in a session and dropped left
+no row anywhere — so `app/services/trial_register.py` is hand-declared, every entry
+carrying its evidence, and reviewed in git. What counts is a **search of price
+data**: the four shipped strategies and every #2260 RSI arm (including the
+withdrawn non-causal one — an artefact is still a search); S-5 and S-6 are
+specified but never run and are therefore **absent**. Under-counting `M` lowers
+`N̂`, lowers `SR₀` and **raises** the DSR, so a stored value is an **upper
+bound** on the honest one. `V[{SRₙ}]` is estimated only from the trials that
+carry a measured Sharpe, and those are the ones that survived to be measured —
+the same flattering direction. Both are stated in the module header rather than
+left for a reader to discover.
+
+⚠ Exhibit 3.1 measures eq. (1)'s own accuracy: it OVERSTATES the empirical
+expected maximum by under 0.05 for `N < 50` at `V = 1`. Our `N` is small, so we
+sit at the loose end of the published range — and it errs toward a higher `SR₀`,
+hence a lower DSR, which is the conservative direction.
 
 ⚠ **Stage 5e is the phase, not an appendix.** The parent is explicit that
 reproducing #2260 is *"necessary but not sufficient"* and pairs it with the

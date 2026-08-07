@@ -21,6 +21,7 @@ from typing import cast
 import psycopg
 import pytest
 
+from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.result_ledger import (
     HOLDOUT_ACCESS_KINDS,
     HoldoutAccess,
@@ -61,6 +62,53 @@ BOOTSTRAP_BLOCK: dict[str, object] = {
     "bootstrap_design_effect": 21.6449283,
     "bootstrap_model_id": "c3-block-bootstrap-v1",
 }
+
+
+def build_deflated(**overrides: object) -> DeflatedSharpeResult:
+    """A COMPLETE criterion-6 block (sql/266), same awkward-float discipline.
+
+    ⚠ Every float is deliberately distinct and irregular so a swapped pair of
+    same-typed columns cannot coincide — this object has SEVEN adjacent NUMERIC
+    fields, which is the largest run of interchangeable types in the row and so
+    the easiest place for a positional read to drift unnoticed.
+    """
+    base: dict[str, object] = {
+        "deflated_sharpe": 0.71792143,
+        "expected_max_sharpe": 0.01520778,
+        "trade_sharpe": 0.01703391,
+        "skewness": -0.40218764,
+        "kurtosis": 8.13472905,
+        # ⚠ MUST equal ``BOOTSTRAP_BLOCK``'s. The DSR has no sample-size column
+        # of its own — it consumes criterion 3's — and ``StrategyResult``
+        # refuses a pair that disagrees.
+        "effective_sample_size": BOOTSTRAP_BLOCK["effective_sample_size"],
+        "declared_trials": 11,
+        "independent_trials": 9.00341827,
+        "average_trial_correlation": 0.20419638,
+        "trial_sharpe_variance": 0.00010374,
+        "measured_trials": 2,
+        "trial_register_version": "trial-register-2026-08-07",
+    }
+    base.update(overrides)
+    return DeflatedSharpeResult(**base)  # type: ignore[arg-type]
+
+
+def build_result_with_dsr(**overrides: object) -> StrategyResult:
+    """``build_result`` carrying a full DSR, with the two scalars bound to it.
+
+    ⚠ ``trial_count`` and ``deflated_sharpe`` are NOT free here —
+    ``StrategyResult.__post_init__`` requires them to agree with the object, so
+    a caller cannot assemble a row whose stored count describes a different
+    correction from the one that was computed.
+    """
+    deflated = build_deflated()
+    return build_result(
+        deflated=deflated,
+        trial_count=deflated.declared_trials,
+        deflated_sharpe=Decimal(repr(deflated.deflated_sharpe)),
+        metrics=build_metrics(**BOOTSTRAP_BLOCK),
+        **overrides,
+    )
 
 
 def build_metrics(**overrides: object) -> StrategyMetrics:
