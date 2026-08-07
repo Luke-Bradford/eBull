@@ -14,9 +14,56 @@ model; see `docs/proposals/ta/strategy-catalogue-and-backtest-validity.md` §0.
 
 ## The one-line answer
 
-**Every free source is Yahoo, or downstream of Yahoo, and Yahoo has no delisting concept.**
-Cost is not the binding constraint on a research corpus — survivorship is, and no free
-source has it.
+**Free FEEDS are Yahoo or downstream of it and have no delisting concept — but free
+ARCHIVES do, because a scrape taken while a name was live keeps it forever.** Three
+GitHub archives serve 258 of the 259-name Form 25 cohort (99.6%), split-adjusted, with
+series terminating at the delisting. Survivorship is not a cost problem; it is a
+**capture-date** problem, and the question to ask a source is *when was this frozen*, not
+*what does it cost*.
+
+⚠ **Superseded 2026-08-07 (#2346).** This section previously read *"no free source has
+it"*, on the strength of the ten sources measured in #2284 — every one a live API or a
+Yahoo-derived dataset. The sweep was sound and its conclusion did not generalise: it never
+asked who had *stored a copy*. If you are about to conclude that some class of data cannot
+be obtained, check whether you have searched for the live source or for its archives.
+
+## Free archives that DO serve the delisted cohort (2026-08-07, #2346)
+
+Measured on the committed fixture `tests/fixtures/form25_2023_cohort.csv` (259 names), not
+a sample. All three are public GitHub repos — no key, no account, no payment.
+
+| archive | tickers | cohort served | notes |
+| --- | ---: | ---: | --- |
+| `Stonks/tickers` | 9,805 (`nasdaq/` 6,661 + `nyse/` 3,144) | **247 / 259** after Q-strip | split-adjusted; AAPL 10,797 bars to 1980-12-12; frozen **2023-10-10**; volume on some files only; **no licence** |
+| `icyDenev/Intrader` | 22,879 (`Data/Day/`) | **+11** (the AMEX residual) | runs later (2023-11-29); headerless OHLCV |
+| `Deamoner/ultimate-…-training-dataset` | 8,188 (`full_history/`) | partial | carries `volume` **and** `adjclose`; frozen 2019-04-18; date-DESCENDING |
+
+**258 / 259 (99.6%) served by at least one, with the series terminating at the delisting.**
+Only `MNKT` is absent everywhere. For contrast, every source in the #2284 sweep scored 0.
+
+⚠ **Mirror before use, do not fetch live.** None carries a licence and none owes us uptime.
+Local copies: `var/research_corpus/mirrors/` (gitignored, ~8.1 GB, 40,872 CSVs). Consume
+them; do not redistribute — the prices are facts, but a substantial extraction of someone's
+compilation is protected by UK database right even where the facts are not.
+
+### ⚠ The bankruptcy suffix — a symbol rule, not a lookup trick
+
+A Form 25 cover page carries the **post**-bankruptcy ticker (`BBBYQ`, `YELLQ`, `SRNEQ` —
+the `Q` is appended when an issuer files Chapter 11 and moves to OTC). **Every price
+archive keys the pre-bankruptcy one.** Resolving a Form 25 symbol against any archive must
+try the `Q`-stripped form: it recovered 13 of the 25 names that first read as absent.
+
+This is a data-treatment decision, not convenience. Skipping it loses precisely the
+**bankruptcies** and keeps the acquisitions — biasing the corpus along the one axis
+survivorship-free data exists to protect, and the same axis §"Known cohort bias" says the
+cohort cannot rule out.
+
+### Venue coverage is a directory, not a vendor claim
+
+`Stonks/tickers` ships `nasdaq/` and `nyse/` and nothing else, so the entire NYSE American
+(AMEX) residual — `CCF`, `EMAN`, `IMH`, `NAVB`, `PLM`, `TKAT`, `TMBR`, `UFAB`, `WLMS`,
+`WTT` — read as twelve missing names when it was one missing directory. Check the archive's
+*layout* before concluding a name is unserved.
 
 ## Measured landscape (2026-08-05, #2284)
 
@@ -248,3 +295,20 @@ unambiguous evidence of a wrong series.
 as a *delisted* series — nothing terminates, and the archive keys on the live ticker, so it
 structurally cannot distinguish `X` from `X-DELISTED`. The free path remains unusable for
 survivorship. The correction is to the *diagnosis*, not to the verdict.
+
+## ⚠ Why the #2284 sweep missed all three (2026-08-07)
+
+Worth keeping, because the sweep was competent and still produced a wrong general
+conclusion. It enumerated **who sells or serves price data** — ten vendors and dataset
+hosts — and every one is either a live API or a Yahoo redistribution, so every one scored
+zero and the pattern looked structural.
+
+What it never asked: **who stored a copy while the names were still trading.** A 2019 or
+2023 scrape of a live feed contains exactly the delisted history the live feed can no
+longer give you, and it sits in ordinary code repositories rather than in anything
+resembling a data vendor.
+
+The search that worked was `filename:<TICKER>.csv` for a name known to be delisted, which
+is a search over *artefacts* rather than over *sources*. Generalises past prices: when a
+sweep over providers returns uniform zero, the next question is not "which provider did I
+miss" but "who has a frozen copy".
