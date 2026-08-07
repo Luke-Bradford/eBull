@@ -549,9 +549,12 @@ def sweep_bulk_cusips_resolved_via_extid(
                    -- negative. Hence the wide EXISTS below: do not
                    -- narrow it back to 'sec' on the strength of this
                    -- list (that narrowing is #2213).
-                   OR u.resolution_status IN (
-                       'openfigi_unknown', 'openfigi_no_instrument'
-                   )
+                   -- ⚠ Parameterised off OPENFIGI_NEGATIVE_STATUSES, never
+                   -- listed inline. Codex checkpoint 1 on #2304 caught the
+                   -- inline form: adding a THIRD negative status left rows
+                   -- carrying it frozen on a stale negative forever, because
+                   -- this clause could not see it.
+                   OR u.resolution_status = ANY(%(negative_statuses)s)
                )
                AND EXISTS (
                    SELECT 1 FROM external_identifiers ei
