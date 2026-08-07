@@ -138,8 +138,6 @@ def _vested_unsettled(t: dict) -> bool:
     joined = " | ".join(cells)
     if _strong(joined):
         return True
-    import re
-
     if re.search(r"vested\b[^|]{0,20}?\b(but\s+)?(un(settled|issued|delivered|paid))", joined, re.IGNORECASE):
         return True
     if P._COMP_PCT_RE.search(joined) or _neo_veto(joined):
