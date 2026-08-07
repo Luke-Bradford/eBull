@@ -6,6 +6,9 @@ probe would only prove the first:
   A. the per-row test is ABSENT      -> the junk rows are stored again
   B. the test matches a SUBSTRING    -> it eats the 229.403(b) Instruction 5 row
   C. the test is the POSITIVE one    -> it eats genuine holders (#2176 §2)
+  D. class DESIGNATORS count as words -> 'Class B ...' escapes where 'Class A
+     ...' does not, and the per-row prune then lifts an all-junk table over
+     the identity floor (Codex checkpoint 2)
 
 Each probe names the tests that MUST fail and the tests that MUST still pass —
 a probe whose whole file goes red proves much less than one that moves exactly
@@ -29,6 +32,7 @@ _TESTS = "tests/test_sec_def14a_parser.py"
 _CLASS = "TestItem403RowIsABeneficialOwner"
 
 _GUARD = "        if _is_instrument_not_owner(holder_name):\n"
+_DESIGNATOR = '    if "class" in words or "series" in words:\n'
 
 _PROBES = (
     (
@@ -62,6 +66,16 @@ _PROBES = (
         ("test_a_bare_entity_name_without_a_corporate_designator_survives",),
         ("test_a_presentation_total_row_is_not_stored_as_a_holder",),
     ),
+    (
+        "D: class DESIGNATOR letters counted as ordinary words",
+        _DESIGNATOR,
+        "    if False:  # PROBE D — designator not stripped\n",
+        ("test_a_class_designator_letter_does_not_rescue_a_title_of_class_row",),
+        (
+            "test_a_real_entity_whose_name_contains_series_is_not_a_title_of_class",
+            "test_a_presentation_total_row_is_not_stored_as_a_holder",
+        ),
+    ),
 )
 
 
@@ -72,10 +86,11 @@ def _pytest(node_ids: tuple[str, ...]) -> int:
 
 def main() -> int:
     original = _PARSER.read_text()
-    if original.count(_GUARD) != 1:
+    for label, anchor in (("guard", _GUARD), ("designator", _DESIGNATOR)):
         # A probe that silently matches nothing proves nothing.
-        print(f"ABORT: guard anchor appears {original.count(_GUARD)} times, expected exactly 1")
-        return 2
+        if original.count(anchor) != 1:
+            print(f"ABORT: {label} anchor appears {original.count(anchor)} times, expected exactly 1")
+            return 2
 
     caught = 0
     try:

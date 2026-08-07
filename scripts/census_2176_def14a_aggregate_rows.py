@@ -102,6 +102,28 @@ def _census(parse_path: str) -> None:
     if not newly:
         print("  (none)")
 
+    # Arm 4 — what the CLASS-DESIGNATOR rule moves, on its own. Codex
+    # checkpoint 2 found that `a` sits in the vocabulary as a connective
+    # ARTICLE, so 'Class A Common Stock' tested as an instrument while 'Class B
+    # Common Stock' did not. Stripping the designator fixes the asymmetry; this
+    # arm enumerates every name whose verdict that strip changes, so the rule is
+    # sized against the corpus rather than against the two examples that
+    # prompted it.
+    designator_only: list[str] = []
+    for name in rows:
+        words = _WORD_RE.findall(name.lower())
+        if not words:
+            continue
+        plain = all(w in _INSTRUMENT_VOCAB for w in words)
+        if _is_instrument_not_owner(name) and not plain:
+            designator_only.append(name)
+    print("\n== arm 4: names the CLASS-DESIGNATOR strip newly rejects (Codex ckpt-2) ==")
+    print(f"  distinct names             {len(designator_only):>8}")
+    for name in sorted(designator_only):
+        print(f"  {rows[name]:>5} rows  {len(accessions[name]):>4} acc  {name}")
+    if not designator_only:
+        print("  (none)")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)

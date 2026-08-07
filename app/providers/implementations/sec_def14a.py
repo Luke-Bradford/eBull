@@ -1469,10 +1469,31 @@ def _is_instrument_not_owner(text: str) -> bool:
     token person pattern, so neither D1's person arm nor an address test rejects
     it. Rule 13d-3 makes the test principled: a beneficial owner is a person or
     entity holding voting or investment power, and an instrument is neither.
+
+    #2176 — a CLASS DESIGNATOR is not a word. 17 CFR 229.403 column 1 is 'Title
+    of class', and issuers spell its values 'Class A Common Stock' / 'Series B
+    Preferred Stock' / 'Class AA'. The designator itself carries no meaning the
+    vocabulary can hold, and leaving it out produced an absurd asymmetry:
+    ``a`` is in ``_INSTRUMENT_VOCAB`` as a connective ARTICLE, so 'Class A
+    Common Stock' tested as an instrument while 'Class B Common Stock' did not
+    — and the latter then PASSED ``_is_beneficial_owner_identity`` and was
+    stored as a beneficial owner. Codex checkpoint 2 caught it: the per-row
+    guard prunes the Class A row, which RAISES the identity fraction, so a
+    table of nothing but class labels could newly clear
+    ``_ROW_IDENTITY_FLOOR`` on the strength of its Class B row alone.
+
+    Scoped to names that actually name a class, so a stray initial elsewhere
+    cannot make an unrelated name test as an instrument.
     """
     words = _WORD_RE.findall(text.lower())
     if not words:
         return False
+    if "class" in words or "series" in words:
+        words = [w for w in words if len(w) > 2]
+    if not words:
+        # 'Class B' reduces to nothing but the designator — still a title of
+        # class, and the emptiness is the evidence, not a reason to bail.
+        return True
     return all(w in _INSTRUMENT_VOCAB for w in words)
 
 

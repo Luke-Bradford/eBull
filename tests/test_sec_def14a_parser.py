@@ -2746,6 +2746,48 @@ class TestItem403RowIsABeneficialOwner:
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
         assert [r.holder_name for r in parsed.rows] == ["Telephone and Data Systems, Inc."]
 
+    def test_a_class_designator_letter_does_not_rescue_a_title_of_class_row(self) -> None:
+        """Codex checkpoint 2. `a` is in ``_INSTRUMENT_VOCAB`` as a connective
+        ARTICLE, so 'Class A Common Stock' tested as an instrument while
+        'Class B Common Stock' did not — the latter reached
+        ``_is_beneficial_owner_identity`` and passed.
+
+        That asymmetry is load-bearing once the per-row guard exists: pruning
+        the Class A row RAISES ``_owner_identity_fraction``, so a table of
+        nothing but class labels could clear ``_ROW_IDENTITY_FLOOR`` on the
+        strength of its Class B row alone and store it as a holder. On the base
+        branch the same table scored 1/3 and was rejected outright.
+
+        17 CFR 229.403 column 1 is 'Title of class'; the designator letter is
+        not a word, so it is dropped before the vocabulary test."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Series A Common Shares</td><td>6,446,264</td><td>*</td></tr>"
+            "<tr><td>Common Shares</td><td>1,123,736</td><td>*</td></tr>"
+            "<tr><td>Class B Common Stock</td><td>2,000,000</td><td>4.1%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == []
+
+    def test_a_real_entity_whose_name_contains_series_is_not_a_title_of_class(self) -> None:
+        """The bound on the designator rule. Dropping short tokens is scoped to
+        names that actually name a class, and even there the remaining words
+        must ALL be instrument vocabulary — 'capital' and 'partners' are not in
+        it, so a fund named for a series survives."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Series B Capital Partners LP</td><td>4,000,000</td><td>8.2%</td></tr>"
+            "<tr><td>Class A Common Stock</td><td>1,000,000</td><td>*</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Series B Capital Partners LP"]
+
     def test_a_bare_entity_name_without_a_corporate_designator_survives(self) -> None:
         """The negative test must not drift into the positive one. ``BlackRock``
         carries no LLC/Inc/Trust token and does not reach the two-capitalised-
