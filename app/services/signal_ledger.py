@@ -202,7 +202,23 @@ def resolve_fills(
     seen: set[tuple[date, SignalKind]] = set()
 
     for signal in signals:
-        if signal.signal_index >= n_bars:
+        # ⚠ TWO-SIDED, and the lower half is load-bearing (#2317). A negative
+        # index passes `>= n_bars` and then WRAPS under Python list indexing —
+        # at `series.dates[...]` below and again at `signal_index + 1` — so
+        # rather than raising, the writer would resolve the signal against a bar
+        # near the END of the series and store the result as an ordinary fill. A
+        # ledger row that is wrong-but-plausible is worse than one that fails,
+        # because nothing downstream can tell.
+        #
+        # ⚠ `StrategySignal.__post_init__` already refuses a negative index, so
+        # this cannot fire on any path that goes through the contract, and it is
+        # not claimed to fix a live wrong-row bug. It is here for the reason
+        # refusal 1 above is repeated: the writer must not depend on which
+        # producer fed it, and `Sequence[StrategySignal]` is an annotation, not a
+        # runtime gate. `outcome_resolver.resolve_outcome` bounds its own
+        # `fill_index` two-sided already — this brings the two layers in line
+        # instead of leaving one of them trusting its caller.
+        if not 0 <= signal.signal_index < n_bars:
             raise ValueError(
                 f"signal_index {signal.signal_index} is outside the {n_bars}-bar series it was resolved against "
                 "— the signals and the series must come from the same run"

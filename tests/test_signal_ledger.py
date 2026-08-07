@@ -147,6 +147,39 @@ class TestBatchIntegrity:
         with pytest.raises(ValueError, match="outside the 4-bar series"):
             resolve_fills([_fired_at(9)], series=_series(_CONSECUTIVE), identity=_IDENTITY, instrument_id=1)
 
+    # ⚠ -1 and -2 are BOTH here because they fail differently, and a -1-only
+    # test would have passed before the bound was two-sided (#2317). Measured on
+    # this fixture against `5078c173`:
+    #
+    #   idx=-1: RAISED "fill_bar_date 2024-01-02 is not after signal_bar_date
+    #           2024-01-05" — caught, but by the fill-after-signal mirror and
+    #           with a misleading diagnosis. `fill_index = -1 + 1 = 0`, so the
+    #           fill resolves EARLIER than the signal and trips that CHECK.
+    #   idx=-2: STORED verdict=fired signal_bar=2024-01-04 fill_bar=2024-01-05
+    #           price=103 — a well-formed row, dates correctly ordered, wrong
+    #           bars. At -2 or below `fill_index` is still negative, so both
+    #           dates wrap TOGETHER and every mirrored constraint passes.
+    #
+    # So the backstop is blind below -1 by construction, and only the writer's
+    # own bound closes it.
+    @pytest.mark.parametrize("signal_index", [-1, -2])
+    def test_a_negative_signal_index_raises_rather_than_wrapping(self, signal_index: int) -> None:
+        """#2317. Python list indexing makes `series.dates[-2]` legal, so a
+        one-sided bound does not fail — it silently resolves a bar near the END
+        of the series.
+
+        ⚠ The state is built by mutating a frozen instance because
+        `StrategySignal.__post_init__` refuses a negative index at construction,
+        and the subject here is the WRITER's bound rather than the contract's.
+        `resolve_fills` takes `Sequence[StrategySignal]`, which is an annotation
+        and not a runtime gate — so this is a state the parameter type admits,
+        the same shape as the half-fill defect on this module.
+        """
+        signal = _fired_at(0)
+        object.__setattr__(signal, "signal_index", signal_index)
+        with pytest.raises(ValueError, match="outside the 4-bar series"):
+            resolve_fills([signal], series=_series(_CONSECUTIVE), identity=_IDENTITY, instrument_id=1)
+
     def test_duplicate_bar_and_kind_in_one_batch_raises(self) -> None:
         with pytest.raises(ValueError, match="duplicate signal"):
             resolve_fills(
