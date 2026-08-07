@@ -129,6 +129,16 @@ _PROBE_VISIBILITY = """
         (SELECT count(*) FROM strategy_results       WHERE strategy_id = %(sid)s) AS visible
 """
 
+_PROBE_STALE = """
+    SELECT
+        (SELECT count(*) FROM strategy_results_store    WHERE strategy_id = %(sid)s) AS results,
+        (SELECT count(*) FROM strategy_holdout_accesses WHERE strategy_id = %(sid)s) AS accesses
+"""
+
+#: The trigger's own SQLSTATE — ``integrity_constraint_violation``, chosen in
+#: ``sql/264`` and asserted rather than inferred from the exception class.
+_TRIGGER_SQLSTATE = "23000"
+
 
 class _Rollback(Exception):
     """Unwinds the probe transaction. ⚠ Never a real error — see ``_refusals``."""
@@ -146,6 +156,17 @@ def _refusals(conn: psycopg.Connection[tuple]) -> list[str]:
     """
     problems: list[str] = []
     params = {"sid": _PROBE_STRATEGY}
+
+    # ⚠ NOTHING OF OURS MAY BE HERE ALREADY. Every probe below writes the same
+    # key, so a leftover row would collide on `strategy_results_unique` — and a
+    # collision is ALSO an integrity error, which would read as "the trigger
+    # refused" while the trigger was doing nothing. Checked rather than assumed,
+    # even though the rollback makes it unreachable: an unreachable state that
+    # would be MISREPORTED if reached is worth one query.
+    stale = conn.execute(_PROBE_STALE, params).fetchone()
+    if stale is not None and stale != (0, 0):
+        return [f"{_PROBE_STRATEGY} rows already exist (results/accesses = {stale}) — refusing to probe over them"]
+
     try:
         with conn.transaction():
             # 1 — the trigger: a hold-out row with no evaluate record.
@@ -154,7 +175,18 @@ def _refusals(conn: psycopg.Connection[tuple]) -> list[str]:
                     conn.execute(_PROBE_INSERT_STORE, params)
                 problems.append("an unrecorded hold-out row was STORED — the trigger is not enforcing criterion 5")
             except psycopg.errors.IntegrityError as caught:
-                print(f"  trigger refusal          {caught.sqlstate} (unrecorded hold-out evaluation)", flush=True)
+                # ⚠⚠ THE SQLSTATE IS THE ASSERTION, not the exception class.
+                # `IntegrityError` also covers 23505 (unique), 23502 (not null)
+                # and 23503 (foreign key), so catching it bare would report any
+                # of those as the refusal under test. The trigger raises
+                # `integrity_constraint_violation` = 23000 specifically.
+                if caught.sqlstate != _TRIGGER_SQLSTATE:
+                    problems.append(
+                        f"the unrecorded hold-out row was refused with {caught.sqlstate}, not the trigger's "
+                        f"{_TRIGGER_SQLSTATE} — something else rejected it and the trigger was never reached: {caught}"
+                    )
+                else:
+                    print(f"  trigger refusal          {caught.sqlstate} (unrecorded hold-out evaluation)", flush=True)
 
             conn.execute(_PROBE_ACCESS, params)
 
@@ -165,7 +197,13 @@ def _refusals(conn: psycopg.Connection[tuple]) -> list[str]:
                     conn.execute(_PROBE_INSERT_VIEW, params)
                 problems.append("a hold-out row was inserted THROUGH THE VIEW — the check option is not enforcing")
             except psycopg.errors.WithCheckOptionViolation as caught:
-                print(f"  check-option refusal     {caught.sqlstate} (hold-out row through the in-sample view)")
+                # ⚠ This one's exception class IS specific to the mechanism —
+                # only a view's check option raises it — so no sqlstate check is
+                # needed and adding one would assert nothing extra.
+                print(
+                    f"  check-option refusal     {caught.sqlstate} (hold-out row through the in-sample view)",
+                    flush=True,
+                )
 
             # 3 — the filter: the recorded row stores, and stays invisible.
             conn.execute(_PROBE_INSERT_STORE, params)
