@@ -34,6 +34,7 @@ from app.providers.implementations.sec_def14a import (
     _detect_role_heading,
     _expand_row_spans,
     _has_item403_value_rows,
+    _header_caption_set,
     _is_address_fragment,
     _is_beneficial_owner_identity,
     _is_name_then_address,
@@ -49,6 +50,7 @@ from app.providers.implementations.sec_def14a import (
     _shares_cell_percent_signature,
     _split_stacked_holder_row,
     _strip_inline_html,
+    _subsection_sibling_tables,
     extract_plan_name_and_trustee,
     is_esop_plan,
     parse_beneficial_ownership_table,
@@ -2896,3 +2898,115 @@ class TestItem403RowIsABeneficialOwner:
         )
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
         assert [r.holder_name for r in parsed.rows] == ["BlackRock", "Vanguard Group, Inc."]
+
+
+# ---------------------------------------------------------------------------
+# #2176 class 1 — 229.403's OTHER subsection, vetoed by one component column
+# ---------------------------------------------------------------------------
+
+
+_403A_TABLE = """
+<table>
+  <tr><th></th><th>Name and address (1)</th><th>Shares</th><th>% (2)</th></tr>
+  <tr><td></td><td>Orogen Ventures II LLC</td><td>7,300,000</td><td>9.0%</td></tr>
+  <tr><td></td><td>BlackRock, Inc.</td><td>5,100,000</td><td>6.3%</td></tr>
+</table>
+"""
+
+# The SAME captions plus a Rule 13d-3(d)(1)(i) component column. ``Vested``
+# is Item 402 vocabulary, so ``_item403_value_signature`` vetoes the whole
+# table on the joined header.
+_403B_TABLE = """
+<table>
+  <tr><th></th><th>Name and address (1)</th><th>Shares</th><th>% (2)</th>
+      <th>Vested but unsettled RSUs (3)</th><th>Total</th></tr>
+  <tr><td></td><td>Rohit Kapoor</td><td>1,100,000</td><td>1.3%</td><td>40,000</td><td>1,140,000</td></tr>
+  <tr><td></td><td>Maurizio Nicolelli</td><td>90,000</td><td>*</td><td>12,000</td><td>102,000</td></tr>
+  <tr><td></td><td>All directors and executive officers as a group (13 persons)</td>
+      <td>2,400,000</td><td>2.9%</td><td>180,000</td><td>2,580,000</td></tr>
+</table>
+"""
+
+
+class TestItem403SubsectionSiblings:
+    """17 CFR 229.403 is ONE Item with TWO subsections, and issuers render
+    403(b) as 403(a)'s header plus the component columns Rule 13d-3(d)(1)(i)
+    makes part of beneficial ownership. Measured on ExlService
+    0001193125-25-103261 / 0001193125-26-181891: 3 holders extracted, 13 lost."""
+
+    def test_403b_with_a_component_column_joins_its_403a_sibling(self) -> None:
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=_403A_TABLE + _403B_TABLE))
+        names = [r.holder_name for r in parsed.rows]
+        assert "Orogen Ventures II LLC" in names
+        assert "Rohit Kapoor" in names
+        assert "All directors and executive officers as a group (13 persons)" in names
+
+    def test_the_403b_table_alone_is_still_vetoed(self) -> None:
+        """The sibling rule is not a licence — without an eligible anchor in the
+        window the same table stays rejected, so the widening cannot escape the
+        window it was measured in."""
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=_403B_TABLE))
+        assert parsed.rows == []
+
+    def test_a_comp_table_in_the_same_window_is_not_vouched_for(self) -> None:
+        """Superset of the anchor's CAPTIONS, not merely presence in the window.
+
+        ⚠ The comp table has to CLEAR ``_WINDOW_SCORE_FLOOR`` or the assertion
+        passes without the superset test ever running — the first draft scored 2
+        and the revert-probe reported NOT CAUGHT. ``Number of Shares`` normalises
+        to a different caption from the anchor's ``Shares``, so the header is a
+        near-miss rather than a superset."""
+        comp = (
+            "<table>"
+            "<tr><th></th><th>Name</th><th>Number of Shares</th><th>Percentage of Base Salary</th></tr>"
+            "<tr><td></td><td>Rohit Kapoor</td><td>1,200,000</td><td>140%</td></tr>"
+            "<tr><td></td><td>Maurizio Nicolelli</td><td>600,000</td><td>135%</td></tr>"
+            "</table>"
+        )
+        assert _score_table_headers(("", "Name", "Number of Shares", "Percentage of Base Salary")) >= 3
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=_403A_TABLE + comp))
+        assert [r.holder_name for r in parsed.rows] == ["Orogen Ventures II LLC", "BlackRock, Inc."]
+
+    def test_a_vouched_sibling_still_has_to_clear_the_row_identity_floor(self) -> None:
+        """The captions are the anchor's plus one, but no row NAMES an owner —
+        the widening admits a table the value-signature gate rejected, so D2 is
+        the only limb left standing over it.
+
+        ⚠ Class-label rows do NOT test this. #2373's per-row guard deletes them
+        at extraction whatever the floor does, so the probe reported NOT CAUGHT.
+        Bare single-token entity names are the shape that fails
+        ``_is_beneficial_owner_identity`` and survives ``_is_instrument_not_owner``."""
+        classes = (
+            "<table>"
+            "<tr><th></th><th>Name and address (1)</th><th>Shares</th><th>% (2)</th><th>Vesting Date</th></tr>"
+            "<tr><td></td><td>Fidelity</td><td>1,000</td><td>1.0%</td><td>2027-01-01</td></tr>"
+            "<tr><td></td><td>Wellington</td><td>2,000</td><td>2.0%</td><td>2027-01-01</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=_403A_TABLE + classes))
+        assert [r.holder_name for r in parsed.rows] == ["Orogen Ventures II LLC", "BlackRock, Inc."]
+
+    def test_a_two_caption_anchor_cannot_vouch_for_anything(self) -> None:
+        """``_SUBSECTION_CAPTION_FLOOR``. A one- or two-caption anchor is a
+        subset of most headers in a proxy, so it would vouch vacuously."""
+        anchor = _parse_table_html(
+            "<table><tr><th>Shares Beneficially Owned</th><th>Percent</th></tr>"
+            "<tr><td>Vanguard Group, Inc.</td><td>11.0%</td></tr></table>"
+        )
+        sibling = _parse_table_html(
+            "<table><tr><th>Shares Beneficially Owned</th><th>Percent</th><th>Vesting Date</th></tr>"
+            "<tr><td>Rohit Kapoor</td><td>1.3%</td><td>2027-01-01</td></tr></table>"
+        )
+        assert anchor is not None and sibling is not None
+        assert len(_header_caption_set(anchor)) == 2
+        assert _subsection_sibling_tables([anchor], [sibling]) == []
+
+    def test_caption_matching_ignores_footnote_markers_and_case(self) -> None:
+        """The two subsections footnote their columns independently, so the
+        captions compare equal only after the marker is stripped."""
+        table = _parse_table_html(
+            "<table><tr><th>Name and Address(3)</th><th>SHARES</th><th>% (2)</th></tr>"
+            "<tr><td>Vanguard Group, Inc.</td><td>1</td><td>1%</td></tr></table>"
+        )
+        assert table is not None
+        assert _header_caption_set(table) == frozenset({"name and address", "shares", "%"})
