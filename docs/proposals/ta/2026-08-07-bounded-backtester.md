@@ -681,6 +681,48 @@ verification.
 | **5d** | **Statistics** — criterion 7's full metric set on the equity curve; the `vectorbt` adoption decision (§4) is taken here against 5a's trade list. | 5c |
 | **5e** | **Validity gates** — frozen hold-out namespace with access logging (criterion 5), purged walk-forward + embargo (§5.3, including S-1's declared bound), block bootstrap clustered by date (criterion 3), Deflated Sharpe with a declared trial count (criterion 6), quarantine sensitivity arm (criterion 9), and the 1,000-strategy random-entry synthetic control. | 5d |
 
+⚠ **5e is five tickets, not one, and the sub-stages are sequenced by what each
+unblocks.** Split at stage 5e-1, which found the first item is also what the
+result WRITER depends on — the row keys on `namespace`, so nothing may be stored
+until the namespace has a mechanism.
+
+| sub-stage | what | state |
+| --- | --- | --- |
+| **5e-1** | **The hold-out namespace, its access log, and the first `strategy_results` writer** — criterion 5's mechanical inaccessibility, `sql/264`, `app/services/result_ledger.py`. | ✅ shipped |
+| **5e-2** | **Block bootstrap clustered by date** (criterion 3) → fills `effective_sample_size` and clears one of the seven standing refusals. | next |
+| **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. | after 5e-2 |
+| **5e-4** | **Purged walk-forward + embargo** (§5.3). ⚠ Blocked on S-1 declaring a `max_hold_bars` — still free at 0 ledger rows, recommended for the fourth run running. | blocked |
+| **5e-5** | **Quarantine sensitivity arm** (criterion 9) and the **1,000-strategy random-entry control** (§9, *the harness itself*). | last |
+
+### 8.1 ⚠⚠ Stage 5e-1's finding: RLS is not criterion 5's mechanism on this database
+
+C5 says the hold-out must be *"mechanically inaccessible to exploratory
+queries"*, and the textbook answer is row-level security. **Measured 2026-08-07
+rather than assumed**: a probe table with `ENABLE` + `FORCE ROW LEVEL SECURITY`
+and a `USING (ns = 'in_sample')` policy returned **both** rows, because this app
+connects as `postgres` with `rolsuper` and `rolbypassrls` both true. `FORCE`
+binds the table OWNER; it does not bind a superuser.
+
+What ships instead has no bypass bit, because a **view** filters and a
+**trigger** fires for every role including a superuser:
+
+- `strategy_results` is now a **VIEW**, `WHERE namespace = 'in_sample'`, `WITH
+  CASCADED CHECK OPTION`. The obvious name — the one in every doc and every
+  `select *` — cannot express a hold-out row. Storage moved to
+  `strategy_results_store`, a name you have to decide to type.
+- A **BEFORE INSERT OR UPDATE trigger** on the store refuses any hold-out row
+  whose `(strategy_id, strategy_version, result_version)` has no `evaluate`
+  record in `strategy_holdout_accesses`. An unrecorded hold-out evaluation is
+  unrepresentable, not discouraged.
+
+⚠ **The residual, stated rather than waved past.** This is not protection
+against a determined reader — naming the store is one word. It is protection
+against the failure mode C5 actually describes: withheld numbers arriving in a
+result set nobody asked for, and a strategy iterated against them. Restoring the
+read side as a hard boundary needs a **non-superuser application role**, which is
+a change to how every connection in the app authenticates; the test that
+measures the role FAILS if one ever appears, which is the signal to revisit.
+
 ⚠ **5b changes all four strategy versions** — `cost_model_id` is hashed into
 `version`. Signals stored under `undeclared-v0` are not reusable under the new
 id. This costs nothing today (M10: 0 rows) and would be expensive later, which

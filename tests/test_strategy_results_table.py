@@ -1,4 +1,4 @@
-"""Phase 5c — ``strategy_results``' constraints, exercised against a real database.
+"""Phase 5c — ``strategy_results_store``'s constraints, exercised against a real database.
 
 ⚠ ONE integration test file, per the repo's test-tiering rule: the genuinely-new
 SQL mechanism is this table's constraint set, and a mocked cursor asserts the
@@ -22,7 +22,19 @@ _BASE: dict[str, object] = {
     "strategy_version": "strategy-registry-v1+abc123",
     "result_version": "strategy-result-v1+abc123",
     "result_scope": "sleeve",
-    "namespace": "hold_out",
+    # ⚠ `in_sample`, and it was `hold_out` until phase 5e-1 (sql/264). Two
+    # reasons it had to move, and the first is the dangerous one:
+    #
+    # 1. The store's trigger now refuses a hold-out row with no `evaluate`
+    #    access record. Every `pytest.raises(psycopg.errors.Error)` case below
+    #    would still have PASSED — refused by the trigger rather than by the
+    #    constraint it names. A parametrised reject test that passes for the
+    #    wrong reason is indistinguishable from one that works.
+    # 2. The accepting cases would simply have failed.
+    #
+    # The hold-out path is exercised in tests/test_strategy_holdout_namespace.py,
+    # which is where the mechanism lives.
+    "namespace": "in_sample",
     "ambiguity_arm": "worst_case",
     "window_start": "1962-01-02",
     "window_end": "2026-07-08",
@@ -67,7 +79,7 @@ _BASE: dict[str, object] = {
 #: types `query` as `LiteralString` precisely to stop dynamic SQL, and the
 #: pre-push hook catches the f-string form — correctly.
 _INSERT = """
-    INSERT INTO strategy_results (
+    INSERT INTO strategy_results_store (
         strategy_id, strategy_version, result_version, result_scope, namespace,
         ambiguity_arm, window_start, window_end, universe_basis, corpus_version,
         cost_model_id, carry_unmodelled, sizing_rule, position_rule_set_version,
@@ -96,7 +108,7 @@ _INSERT = """
 #: with no default is what makes that fail, and a default would make it pass
 #: silently with the FAVOURABLE value — #2288 clause 2's whole argument.
 _INSERT_WITHOUT_BASIS = """
-    INSERT INTO strategy_results (
+    INSERT INTO strategy_results_store (
         strategy_id, strategy_version, result_version, result_scope, namespace,
         ambiguity_arm, window_start, window_end, corpus_version,
         cost_model_id, carry_unmodelled, sizing_rule, position_rule_set_version,
