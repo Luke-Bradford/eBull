@@ -1635,13 +1635,17 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 # later amendment, and the relationship is a property of the
                 # holder, not of the winning filing (#2230).
                 is_ten_percent_owner=any(c.is_ten_percent_owner for c in cands),
-                # ``any``, not ``all`` (#2386): the flag says "this nature string is
-                # attested by Table I somewhere", and the group is already keyed on
-                # ``ownership_nature``, so every candidate here carries the SAME string.
-                # One XML-attested row is enough to make it a real D/I value. ``any`` is
-                # also the fail-closed direction for :func:`_is_deemed_chain`, which
-                # counts ``direct`` AGAINST admission — under-claiming provenance would
-                # drop a genuine direct member out of ``n_direct`` and widen the gate.
+                # ``any``, not ``all`` and not the WINNER's flag (#2386): the group is
+                # already keyed on ``ownership_nature``, so every candidate here carries
+                # the SAME string, and one XML-attested row means this holder did report
+                # that D/I value on a Table I. Taking it from the winning candidate
+                # instead (Codex ckpt-2 P2) would drop an attested ``direct`` out of
+                # ``n_direct`` whenever a later dataset row won the tie-break — widening
+                # :func:`_is_deemed_chain`, which counts ``direct`` AGAINST admission.
+                # That is the false-positive direction #1652/#2230 exist to avoid, and
+                # the class is empty anyway: no (instrument, identity, nature) group in
+                # the corpus mixes the two provenances. Re-check with the mixed-group
+                # query recorded on #2386 before assuming otherwise.
                 nature_from_table_i=any(c.nature_from_table_i for c in cands),
                 dropped_sources=tuple(
                     DroppedSource(
@@ -1723,13 +1727,17 @@ def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
                 # later amendment, and the relationship is a property of the
                 # holder, not of the winning filing (#2230).
                 is_ten_percent_owner=any(c.is_ten_percent_owner for c in cands),
-                # ``any``, not ``all`` (#2386): the flag says "this nature string is
-                # attested by Table I somewhere", and the group is already keyed on
-                # ``ownership_nature``, so every candidate here carries the SAME string.
-                # One XML-attested row is enough to make it a real D/I value. ``any`` is
-                # also the fail-closed direction for :func:`_is_deemed_chain`, which
-                # counts ``direct`` AGAINST admission — under-claiming provenance would
-                # drop a genuine direct member out of ``n_direct`` and widen the gate.
+                # ``any``, not ``all`` and not the WINNER's flag (#2386): the group is
+                # already keyed on ``ownership_nature``, so every candidate here carries
+                # the SAME string, and one XML-attested row means this holder did report
+                # that D/I value on a Table I. Taking it from the winning candidate
+                # instead (Codex ckpt-2 P2) would drop an attested ``direct`` out of
+                # ``n_direct`` whenever a later dataset row won the tie-break — widening
+                # :func:`_is_deemed_chain`, which counts ``direct`` AGAINST admission.
+                # That is the false-positive direction #1652/#2230 exist to avoid, and
+                # the class is empty anyway: no (instrument, identity, nature) group in
+                # the corpus mixes the two provenances. Re-check with the mixed-group
+                # query recorded on #2386 before assuming otherwise.
                 nature_from_table_i=any(c.nature_from_table_i for c in cands),
                 dropped_sources=tuple(
                     DroppedSource(
