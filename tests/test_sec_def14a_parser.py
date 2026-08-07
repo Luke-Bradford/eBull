@@ -32,6 +32,7 @@ from app.providers.implementations.sec_def14a import (
     _clean_holder_name,
     _contains_specific_name,
     _detect_role_heading,
+    _expand_row_spans,
     _has_item403_value_rows,
     _is_address_fragment,
     _is_beneficial_owner_identity,
@@ -2076,3 +2077,201 @@ class TestAmpersandFirmNames:
     def test_ampersand_does_not_rescue_a_heading(self) -> None:
         for text in ("Directors and Executive Officers:", "5% Stockholders"):
             assert not _is_beneficial_owner_identity(text), text
+
+
+class TestRowSpanExpansion:
+    """#2175 — the HTML table model, which this parser did not implement.
+
+    A ``rowspan=N`` cell occupies the same COLUMN SLOT in the next N-1 rows
+    (HTML Living Standard §4.9.12, downward-growing cells), so those rows carry
+    fewer ``<td>``s and everything in them sits further LEFT than its markup
+    position. Reading markup position as column index mis-columns every
+    continuation row — which is why an Item 403 multi-series table stored the
+    'Title of Series' ticker as the beneficial owner.
+    """
+
+    def test_a_leading_span_is_carried_down_into_the_following_rows(self) -> None:
+        rows: list[tuple[tuple[str, int, int], ...]] = [
+            (("John C. Malone", 3, 1), ("LLYVA", 1, 1), ("251", 1, 1)),
+            (("LLYVB", 1, 1), ("18", 1, 1)),
+            (("LLYVK", 1, 1), ("5", 1, 1)),
+        ]
+        assert [row.cells for row in _expand_row_spans(rows)] == [
+            ("John C. Malone", "LLYVA", "251"),
+            ("John C. Malone", "LLYVB", "18"),
+            ("John C. Malone", "LLYVK", "5"),
+        ]
+
+    def test_a_span_beyond_a_short_rows_own_cells_still_occupies_its_slot(self) -> None:
+        """The trailing-remainder branch: the spanning cell's column index is
+        past the end of the next row's own cells, so the per-cell drain never
+        reaches it and only the after-the-loop pass places it."""
+        rows: list[tuple[tuple[str, int, int], ...]] = [
+            (("Common Stock", 1, 1), ("Vanguard", 1, 1), ("footnote (1)", 2, 1)),
+            (("Common Stock", 1, 1), ("BlackRock", 1, 1)),
+        ]
+        assert [row.cells for row in _expand_row_spans(rows)] == [
+            ("Common Stock", "Vanguard", "footnote (1)"),
+            ("Common Stock", "BlackRock", "footnote (1)"),
+        ]
+
+    def test_rowspan_zero_is_treated_as_one(self) -> None:
+        """HTML reads ``rowspan=0`` as 'to the end of the row group'. EDGAR
+        proxies do not use it, and the pandas reference treats it as 1 — so a
+        malformed attribute must not invent a span over the whole table."""
+        rows: list[tuple[tuple[str, int, int], ...]] = [
+            (("Name", 0, 1), ("100", 1, 1)),
+            (("Other", 1, 1), ("200", 1, 1)),
+        ]
+        assert [row.cells for row in _expand_row_spans(rows)] == [("Name", "100"), ("Other", "200")]
+
+    def test_a_carried_cell_is_placed_by_LAYOUT_column_not_markup_index(self) -> None:
+        """0001628280-26-025998: ``colspan=3 | colspan=6 | rowspan=4 colspan=3``.
+        The spanning caption's markup index is 2 and its layout column is 9. A
+        markup-index carry inserted it third in the label row, which wrecked the
+        promoted header and took a 16-holder Item 403 table to ZERO rows."""
+        rows: list[tuple[tuple[str, int, int], ...]] = [
+            (("Class A Common Stock", 1, 3), ("Class B Common Stock", 1, 6), ("% of Total Voting Power", 2, 3)),
+            (("Name of Beneficial Owner", 1, 3), ("Shares", 1, 3), ("%", 1, 3)),
+        ]
+        assert [row.cells for row in _expand_row_spans(rows)] == [
+            ("Class A Common Stock", "Class B Common Stock", "% of Total Voting Power"),
+            # Appended LAST — layout column 9 is right of every own cell.
+            ("Name of Beneficial Owner", "Shares", "%", "% of Total Voting Power"),
+        ]
+
+    def test_a_BLANK_cell_spacer_row_is_a_spacer_too(self) -> None:
+        """Codex ckpt-2 P2. EDGAR renders spacers both ways — no cells at all, and
+        a row of blank cells (`<tr><td>&nbsp;</td></tr>`, which
+        ``_strip_inline_html`` returns as ``''``). Testing only `not cells`
+        materialised the second into a phantom row carrying the spanning caption,
+        which is the shape that reaches the header promotion.
+
+        ⚠ A U+200B cell is NOT blank (`'\\u200b'` is a non-empty, non-whitespace
+        string) and is deliberately not covered — ``main`` kept those rows too, so
+        treating them as spacers would be a change this A/B has not measured."""
+        rows: list[tuple[tuple[str, int, int], ...]] = [
+            (("Name", 3, 1), ("Shares", 1, 1)),
+            (("", 1, 1), ("", 1, 1)),
+            (("100", 1, 1),),
+        ]
+        assert [row.cells for row in _expand_row_spans(rows)] == [("Name", "Shares"), (), ("Name", "100")]
+
+    def test_a_cell_less_spacer_row_emits_nothing_but_still_consumes_the_span(self) -> None:
+        """EDGAR's generated markup puts cell-less ``<tr>``s around header rows.
+        They are rows per the table model, so a span must decay across them —
+        but everything they could show repeats the row above, and emitting one
+        inserted a phantom header row that the promotion then adopted."""
+        rows: list[tuple[tuple[str, int, int], ...]] = [
+            (("Name", 3, 1), ("Shares", 1, 1)),
+            (),
+            (("100", 1, 1),),
+            (("200", 1, 1),),
+        ]
+        assert [row.cells for row in _expand_row_spans(rows)] == [
+            ("Name", "Shares"),
+            (),
+            ("Name", "100"),
+            # The span was 3 rows and the spacer consumed the second, so it has
+            # expired by here — a spacer that emitted would have shifted this.
+            ("200",),
+        ]
+
+    def test_a_second_percent_caption_does_not_win_the_shares_column(self) -> None:
+        """17 CFR 229.403 column 3 is a COUNT, column 4 a PERCENT. The percent
+        pass takes only the FIRST match, so on a multi-class table the second
+        percent caption stayed eligible for the shares tiering — and 'total' is
+        the top tier, so '% of Total Voting Power' outranked the real 'Shares'
+        column and filed a Class B count against a Class A percent."""
+        headers = ("Name of Beneficial Owner", "Shares", "%", "Shares", "%", "% of Total Voting Power †")
+        assert _resolve_columns(headers) == (0, 1, 2)
+
+    def test_a_stacked_address_row_does_not_inherit_the_holders_figures(self) -> None:
+        """0000107140-24-000176: the VALUE cells carry ``rowspan=2`` over a
+        stacked name/address pair. Before the expansion the address row parsed
+        no values and died on the 'neither shares nor percent' guard; after it,
+        the row inherited BlackRock's own 6,782,743 / 14.97% and stored a
+        verbatim duplicate under the name 'New York, NY 10055'."""
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>BlackRock, Inc.</td><td rowspan="2">6,782,743</td><td rowspan="2">14.97%</td></tr>
+          <tr><td>New York, NY 10055</td></tr>
+          <tr><td>The Vanguard Group, Inc.</td><td rowspan="2">5,466,211</td><td rowspan="2">12.07%</td></tr>
+          <tr><td>Malverne, PA 19355</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.percent_of_class) for r in parsed.rows] == [
+            ("BlackRock, Inc.", Decimal("6782743"), Decimal("14.97")),
+            ("The Vanguard Group, Inc.", Decimal("5466211"), Decimal("12.07")),
+        ]
+
+    def test_an_inherited_value_row_is_dropped_even_when_its_cell_reads_as_a_name(self) -> None:
+        """The same accession's other case, and the one no NAME test can reach:
+        E.P. Hamilton's address continuation is the law firm 'Baker Botts
+        L.L.P. 2001 Ross Avenue, Suite 900 Dallas, TX 75201' — a corporate name
+        with a street address, indistinguishable in isolation from a genuine
+        nominee holder. Only the markup separates them: every figure in the row
+        is inherited. Deliberately NOT an address-only cell, so this test fails
+        if the continuation rule is removed even though the address rule stays."""
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>
+          <tr><td>E.P. Hamilton Trusts, LLC (2)(7)</td>
+              <td rowspan="2">462,338</td><td rowspan="2">1.02%</td></tr>
+          <tr><td>Baker Botts L.L.P. 2001 Ross Avenue, Suite 900 Dallas, TX 75201</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.percent_of_class) for r in parsed.rows] == [
+            ("E.P. Hamilton Trusts, LLC", Decimal("462338"), Decimal("1.02")),
+        ]
+
+    def test_a_two_row_header_inheriting_a_spanning_caption_is_not_a_continuation(self) -> None:
+        """The rule above must test that the INHERITED cells are values. A
+        two-row header's second row also inherits (the spanning caption) and
+        also has no own value — dropping it left the table with no label row and
+        took 0001628280-26-025998's 16 holders to zero a second time."""
+        body = """
+        <table>
+          <tr><td colspan="3">Class A Common Stock</td><td colspan="3">Class B Common Stock</td>
+              <td colspan="3" rowspan="2">% of Total Voting Power</td></tr>
+          <tr><td colspan="3">Name of Beneficial Owner</td><td colspan="3">Shares</td></tr>
+          <tr><td>The Vanguard Group (1)</td><td>13,114,167</td><td>7.90%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["The Vanguard Group"]
+
+    def test_multi_series_table_names_the_holder_not_the_series_ticker(self) -> None:
+        """0001104659-25-029081 (Liberty Media) shape. On main this stored
+        'LLYVB' / 'LLYVK' as beneficial owners with share counts read from
+        whichever cell the recovery scan reached."""
+        body = """
+        <table>
+          <tr><th>Name</th><th>Title of Series</th>
+              <th>Amount and Nature of Beneficial Ownership</th><th>Percent of Series</th></tr>
+          <tr><td rowspan="3">Chase Carey, Director</td><td>LLYVA</td><td>1,200</td><td>1.1%</td></tr>
+          <tr><td>LLYVB</td><td>—</td><td>—</td></tr>
+          <tr><td>LLYVK</td><td>1,425</td><td>2.2%</td></tr>
+          <tr><td rowspan="2">Berkshire Hathaway, Inc.</td><td>LLYVA</td><td>4,986,588</td><td>8.4%</td></tr>
+          <tr><td>LLYVK</td><td>2,000,000</td><td>3.1%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        names = [r.holder_name for r in parsed.rows]
+        assert names == ["Chase Carey, Director", "Berkshire Hathaway, Inc."]
+        # No series ticker survives as a holder identity.
+        assert not [n for n in names if n in ("LLYVA", "LLYVB", "LLYVK")]
+        # The kept row is the FIRST series the issuer lists. Collapsing a
+        # holder's N series rows to one is the dedup in ``_extract_holder_rows``
+        # (identity-keyed, Item 403 counts a beneficial owner once) and there is
+        # no class column to key on — tracked separately, see the class
+        # docstring reference in the module.
+        assert [(r.shares, r.percent_of_class) for r in parsed.rows] == [
+            (Decimal("1200"), Decimal("1.1")),
+            (Decimal("4986588"), Decimal("8.4")),
+        ]

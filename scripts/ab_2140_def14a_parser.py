@@ -51,8 +51,14 @@ def _scan(limit: int | None) -> dict[str, Any]:
     original_parse_table = parser_mod._parse_table_html
     pending: dict[str, Any] = {}
 
-    def traced_parse_table(table_html: str) -> Any:
-        table = original_parse_table(table_html)
+    # ``**kwargs`` is load-bearing, not defensive (#2175). The SCT call site passes
+    # ``expand_spans=False``; a tracer that accepted only the positional argument
+    # raised TypeError inside the SCT arm, the harness swallowed it, and the run
+    # reported ``sct_rows: 67,828 -> 0`` — a total-collapse figure produced entirely
+    # by the harness while the parser itself returned 17 rows for the same filing.
+    # Any monkeypatch of a parser entry point must forward the full signature.
+    def traced_parse_table(table_html: str, **kwargs: Any) -> Any:
+        table = original_parse_table(table_html, **kwargs)
         if table is not None and table.column_headers != table.score_headers:
             pending.setdefault("promotions", []).append(
                 {"headers": list(table.column_headers), "width": len(table.column_headers)}
@@ -269,8 +275,9 @@ def _audit(limit: int | None) -> int:
         legacy_arm = len(parent) < max_data_width and parser_mod._looks_like_legacy_subheader(cols)
         return score if legacy_arm else parent
 
-    def patched(table_html: str) -> Any:
-        table = original_parse_table(table_html)
+    def patched(table_html: str, **kwargs: Any) -> Any:
+        # Forward the full signature — see the ``traced_parse_table`` comment above.
+        table = original_parse_table(table_html, **kwargs)
         if table is None:
             return None
         unfolded = unfolded_headers(table)
