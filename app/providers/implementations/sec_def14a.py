@@ -2268,6 +2268,13 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
         # rows and value columns instead.
         eligible = [t for _, t in window_qualifying if _is_item403_eligible(t)]
         if eligible:
+            # #2176 class 1 — 229.403's OTHER subsection, whose header is this
+            # one's plus a Rule 13d-3 component column. Strictly additive inside
+            # a window already won, so it cannot re-rank window selection.
+            chosen = {id(t) for t in eligible}
+            eligible = eligible + _subsection_sibling_tables(
+                eligible, [t for _, t in window_qualifying if id(t) not in chosen]
+            )
             best_score = window_best_score
             qualifying = eligible
             best_table = eligible[0]
@@ -2650,6 +2657,82 @@ def _is_item403_eligible(table: _RawTable) -> bool:
     if not _item403_value_signature(headers, data_row_evidence=_has_item403_value_rows(holders)):
         return False
     return _owner_identity_fraction(holders) >= _ROW_IDENTITY_FLOOR
+
+
+# Punctuation, footnote debris and unicode spaces, so two renderings of the same
+# prescribed caption ("Name and address (1)" / "Name and Address(3)") compare equal.
+_CAPTION_NOISE_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9%]+")
+# How many distinct captions an ANCHOR must carry before it may vouch for a
+# sibling. 229.403 prescribes four columns; a one- or two-caption anchor
+# ("Name", "Shares") is a subset of most headers in a proxy, so the superset
+# test would be satisfied vacuously.
+#
+# ⚠ The corpus does not distinguish 2 from 3 — both admit exactly the same one
+# table across the 25,954 accessions the arm ranking covered, because no anchor
+# that thin is eligible in practice. 3 is therefore chosen as the tighter of two
+# equal arms, not because a measurement separated them. Said plainly so the next
+# reader does not cite a number the data never supplied.
+_SUBSECTION_CAPTION_FLOOR: Final[int] = 3
+
+
+def _header_caption_set(table: _RawTable) -> frozenset[str]:
+    """TABLE's header as a set of normalised captions.
+
+    Reads BOTH header tuples, exactly as :func:`_is_item403_eligible` does — a
+    promoted sub-header row leaves the prescribed parent caption in
+    ``score_headers`` only.
+    """
+    cells = tuple(table.score_headers) + tuple(table.column_headers)
+    out = {_CAPTION_NOISE_RE.sub(" ", _FOOTNOTE_RE.sub("", cell).lower()).strip() for cell in cells}
+    return frozenset(caption for caption in out if caption)
+
+
+def _subsection_sibling_tables(eligible: list[_RawTable], others: list[_RawTable]) -> list[_RawTable]:
+    """Item 403's OTHER subsection, admitted on the Item's structure (#2176 class 1).
+
+    17 CFR 229.403 is ONE Item with TWO subsections — (a) beneficial owners of
+    more than five percent, (b) directors and management, plus the Instruction 5
+    group row — and issuers render them as two tables under one heading. That is
+    already why the window loop concatenates every eligible table instead of
+    taking the best-scoring one.
+
+    Both subsections carry 229.403's same prescribed captions, so 403(b) is
+    commonly 403(a)'s header plus extra columns. Rule 13d-3(d)(1)(i)
+    (17 CFR 240.13d-3) DEEMS a person the beneficial owner of securities they
+    have the right to acquire, so an issuer legitimately subdivides column 3
+    into its components: ExlService renders
+    ``Name and address | Shares | % | Vested but unsettled RSUs | Total``
+    (0001193125-25-103261, 0001193125-26-181891). ONE of those component columns
+    carries Item 402 vocabulary, and :func:`_item403_value_signature` vetoes on
+    the JOINED header, so that single column condemns a table whose other four
+    captions are byte-identical to the 403(a) table sitting above it — 13
+    holders each, including the Instruction 5 group row.
+
+    So admit on the Item's STRUCTURE rather than widening the comp veto's
+    vocabulary a fifth time (#2088 / #2094 / #2097 / #2169 were all vocabulary
+    patches): a table whose captions are a SUPERSET of an independently eligible
+    table's, in the same window, is that Item's other subsection.
+
+    Cannot move window SELECTION. It takes the eligible set as a precondition,
+    so it only ever runs inside a window some other table has already won — a
+    pure widening there, never a re-ranking. The row-identity floor still
+    applies, because this admits a table the value-signature gate rejected.
+    """
+    anchors = [
+        captions for captions in map(_header_caption_set, eligible) if len(captions) >= _SUBSECTION_CAPTION_FLOOR
+    ]
+    if not anchors:
+        return []
+    admitted: list[_RawTable] = []
+    for table in others:
+        captions = _header_caption_set(table)
+        if not any(anchor <= captions for anchor in anchors):
+            continue
+        holders = _extract_table_holders(table, drop_non_owner_rows=False)
+        if not holders or _owner_identity_fraction(holders) < _ROW_IDENTITY_FLOOR:
+            continue
+        admitted.append(table)
+    return admitted
 
 
 _VALUE_ROW_EVIDENCE_FLOOR: Final[float] = 0.5
