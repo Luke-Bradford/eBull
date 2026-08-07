@@ -888,8 +888,16 @@ def _expand_row_spans(rows: list[tuple[tuple[str, int, int], ...]]) -> list[_Exp
     # (layout_column, columns_spanned, text, rows_left), ascending by column.
     remainder: list[tuple[int, int, str, int]] = []
     for cells in rows:
-        if not cells:
-            # Cell-less spacer row: consume a row of every live span, emit nothing.
+        if not any(text for text, _, _ in cells):
+            # Spacer row: consume a row of every live span, emit nothing. Covers
+            # BOTH shapes EDGAR generates — a `<tr>` with no cells at all, and one
+            # whose cells are all blank (`<tr><td>&#8203;</td></tr>`). Codex
+            # checkpoint 2 (P2) caught the second: the first draft tested `not
+            # cells`, so a blank-cell spacer crossed by a span was materialised
+            # into a phantom row instead. Both shapes contribute nothing of their
+            # own, and ``main`` dropped both on its `any(c for c in cells)` filter,
+            # so treating them alike is what keeps this a pure re-COLUMNING of the
+            # rows main already saw.
             remainder = [(col, width, text, left - 1) for col, width, text, left in remainder if left > 1]
             out.append(_ExpandedRow((), (), ()))
             continue

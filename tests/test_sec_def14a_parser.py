@@ -2140,6 +2140,23 @@ class TestRowSpanExpansion:
             ("Name of Beneficial Owner", "Shares", "%", "% of Total Voting Power"),
         ]
 
+    def test_a_BLANK_cell_spacer_row_is_a_spacer_too(self) -> None:
+        """Codex ckpt-2 P2. EDGAR renders spacers both ways — no cells at all, and
+        a row of blank cells (`<tr><td>&nbsp;</td></tr>`, which
+        ``_strip_inline_html`` returns as ``''``). Testing only `not cells`
+        materialised the second into a phantom row carrying the spanning caption,
+        which is the shape that reaches the header promotion.
+
+        ⚠ A U+200B cell is NOT blank (`'\\u200b'` is a non-empty, non-whitespace
+        string) and is deliberately not covered — ``main`` kept those rows too, so
+        treating them as spacers would be a change this A/B has not measured."""
+        rows: list[tuple[tuple[str, int, int], ...]] = [
+            (("Name", 3, 1), ("Shares", 1, 1)),
+            (("", 1, 1), ("", 1, 1)),
+            (("100", 1, 1),),
+        ]
+        assert [row.cells for row in _expand_row_spans(rows)] == [("Name", "Shares"), (), ("Name", "100")]
+
     def test_a_cell_less_spacer_row_emits_nothing_but_still_consumes_the_span(self) -> None:
         """EDGAR's generated markup puts cell-less ``<tr>``s around header rows.
         They are rows per the table model, so a span must decay across them —
