@@ -171,6 +171,18 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #1594 — dated FX (standalone, no FK). Listed so DB tests inserting FX
     # rows don't leak across tests (Codex ckpt-3).
     "fx_rates_daily",
+    # #2240 phase 5c (sql/262) — backtest result provenance. STANDALONE: it
+    # carries an instrument COUNT rather than instrument ids (spec §6 — the set
+    # is thousands per row and the promotion gate compares it against a
+    # freshly-loaded universe), so it has no FK to `instruments` and nothing
+    # derives it from `pg_constraint`. ⚠ The decision that keeps the row narrow
+    # is the same one that makes it invisible to the cleanup planner; without
+    # this line `tests/test_strategy_results_table.py`'s committed rows leak
+    # and collide on `strategy_results_unique` under a reordered run.
+    # ⚠ `strategy_signals` / `strategy_outcomes` are NOT listed and must not be:
+    # both have an inbound-FK path (→ instruments, → strategy_signals) and are
+    # picked up automatically.
+    "strategy_results",
     "positions",
     "quotes",
     # #1919 — thesis generation attempts (FK → instruments + theses).
