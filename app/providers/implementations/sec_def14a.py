@@ -152,6 +152,63 @@ _HTML_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<[^>]+>")
 _NBSP_RE: Final[re.Pattern[str]] = re.compile(r"&nbsp;| ")
 _INLINE_WHITESPACE_RE: Final[re.Pattern[str]] = re.compile(r"[ \t\r\f\v]+")
 
+# Block-level markup, for the OPT-IN line-structured cell rendering (#2358).
+# HTML's line structure inside a cell is carried by these elements, NOT by the
+# source newlines that happen to survive ``_HTML_TAG_RE`` — a filer agent that
+# emits ``<p>A</p><p>B</p>`` on one source line renders two lines and parses as
+# one. ``ul`` / ``ol`` are listed for completeness; ``td`` / ``tr`` are not,
+# because ``_parse_table_html`` has already split on them and scrubbed nested
+# tables by the time a cell's interior reaches here.
+_BLOCK_ELEMENTS: Final[str] = r"p|div|li|ul|ol|blockquote|h[1-6]"
+# A close tag ADJACENT to the next open tag is ONE line boundary, not two. This
+# runs first so ``</p>\n  <p ...>`` collapses to a single ``\n`` and cannot be
+# mistaken for the empty block below.
+_BLOCK_BOUNDARY_RE: Final[re.Pattern[str]] = re.compile(
+    rf"</(?:{_BLOCK_ELEMENTS})\s*>\s*<(?:{_BLOCK_ELEMENTS})(?=[\s/>])[^>]*>", re.IGNORECASE
+)
+_BLOCK_TAG_RE: Final[re.Pattern[str]] = re.compile(rf"</?(?:{_BLOCK_ELEMENTS})(?=[\s/>])[^>]*>", re.IGNORECASE)
+_LINE_BREAK_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<br(?=[\s/>])[^>]*>", re.IGNORECASE)
+# Cheap precondition for the line-structured pass: a cell carrying none of these
+# renders identically with and without ``block_breaks``. Keep the alternation in
+# step with the rules that consume it — every one is keyed on ``br`` or on
+# ``_BLOCK_ELEMENTS``, and nothing else can introduce a sentinel.
+_LINE_STRUCTURE_TAG_RE: Final[re.Pattern[str]] = re.compile(rf"<(?:br|{_BLOCK_ELEMENTS})(?=[\s/>])", re.IGNORECASE)
+# Tag-derived breaks are marked with a SENTINEL, not a newline, so they can be
+# told apart from the source newlines that reach this function as ordinary text.
+# NUL cannot occur in an EDGAR document (SEC EDGAR Filer Manual vol. II §5.2.2
+# restricts primary documents to ASCII 32-127 plus tab/CR/LF/FF).
+_BREAK_SENTINEL: Final[str] = "\x00"
+# A RENDERED BLANK LINE, normalised to ``sentinel SPACE sentinel`` so the run
+# collapse below cannot swallow it. Two markup shapes produce one:
+#
+#   ``<p>&nbsp;</p>`` / ``<p><br/></p>``  a block with no content of its own
+#   ``A<br/><br/>B``                      consecutive explicit breaks
+#
+# ⚠ The ``<br>``-only block is Codex checkpoint 2's finding on this branch, and
+# it is not rare: over the first 4,000 accessions of the corpus it appears in
+# **293 Item 403 candidate cells across 59 accessions** (``<br><br>`` runs in
+# 444 / 124). Without it the sentinel run reads ``<p>A</p><p><br/></p><p>B</p>``
+# as adjacent boundaries, ``_stacked_name_blocks`` sees ONE block, and two
+# stacked owners merge into one holder identity.
+_BLANK_LINE: Final[str] = f"{_BREAK_SENTINEL} {_BREAK_SENTINEL}"
+_EMPTY_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
+    rf"<({_BLOCK_ELEMENTS})(?=[\s/>])[^>]*>(?:\s|&nbsp;|&#160;|&#xa0;|<br\b[^>]*>)*</\1\s*>", re.IGNORECASE
+)
+_BREAK_RUN_RE: Final[re.Pattern[str]] = re.compile(r"<br(?=[\s/>])[^>]*>(?:\s*<br(?=[\s/>])[^>]*>)+", re.IGNORECASE)
+# ⚠ Load-bearing for #2169's holder split, which separates stacked owners on a
+# BLANK line — and each of these shapes is in the corpus:
+#
+#   ``<br/></p> <p>``     two ADJACENT tag breaks; renders as ONE. Collapses.
+#   ``</p>\n<p>``         a tag break beside a source newline; ONE. Collapses.
+#   ``<p>&nbsp;</p>``     an empty block; a real blank line. Already rewritten
+#                         to ``_BLANK_LINE`` above, whose SPACE breaks this run.
+#
+# A run of literal source newlines carrying no sentinel is left exactly as the
+# flat rendering has it (``\n\n\n\n`` between two stacked holders on
+# 0000351998-18-000006 is that shape) — this must not re-cut line structure the
+# tags did not ask for.
+_SENTINEL_RUN_RE: Final[re.Pattern[str]] = re.compile(rf"\n*{_BREAK_SENTINEL}[\n{_BREAK_SENTINEL}]*")
+
 # Section heading variants. Case-insensitive; tolerate intervening
 # punctuation / line breaks. The proxy form mandates the heading
 # wording but issuers vary in casing and punctuation.
@@ -177,12 +234,37 @@ _AS_OF_DATE_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
-def _strip_inline_html(raw: str) -> str:
+def _strip_inline_html(raw: str, *, block_breaks: bool = False) -> str:
     """Strip HTML tags + entities, collapse whitespace. Used on cell
     contents so footnote-superscript ``<sup>(1)</sup>`` markers
     survive as plain ``(1)`` text and can be detected by the
     footnote-stripping regex below.
+
+    ``block_breaks`` (#2358) renders ``<br>`` and every block element as a
+    LINE BREAK instead of a space. **Off by default, and every existing caller
+    keeps the default** — this function feeds header text into
+    ``_score_table_headers`` / ``_resolve_columns``, both of which substring-
+    match SEC-prescribed multi-word captions on ``" ".join(headers).lower()``,
+    so a newline inside ``Amount<br/>and Nature of<br/>Beneficial Ownership``
+    would stop "amount and nature" matching and move which table wins. That is
+    the #2164 incident exactly (prevention log: "a fix placed at a shared
+    chokepoint reaches consumers you did not enumerate"), so the line-structured
+    rendering is carried on a PARALLEL grid — ``_RawTable.line_rows`` — and only
+    the Item 403 holder split reads it.
+
+    Without it, ``'486,340<br>658,400'`` arrives as ``'486,340 658,400'`` and
+    ``_parse_share_count`` — which strips spaces AND commas — returns
+    486,340,658,400.
     """
+    if block_breaks:
+        # Blank lines FIRST: both shapes contain the tags the rules below
+        # rewrite, and once ``<p><br/></p>`` has become three bare sentinels
+        # nothing can tell it from two adjacent block boundaries.
+        raw = _EMPTY_BLOCK_RE.sub(_BLANK_LINE, raw)
+        raw = _BREAK_RUN_RE.sub(_BLANK_LINE, raw)
+        raw = _BLOCK_BOUNDARY_RE.sub(_BREAK_SENTINEL, raw)
+        raw = _LINE_BREAK_TAG_RE.sub(_BREAK_SENTINEL, raw)
+        raw = _BLOCK_TAG_RE.sub(_BREAK_SENTINEL, raw)
     no_tags = _HTML_TAG_RE.sub(" ", raw)
     no_nbsp = _NBSP_RE.sub(" ", no_tags)
     decoded = html.unescape(no_nbsp)
@@ -197,6 +279,11 @@ def _strip_inline_html(raw: str) -> str:
     # No-op for the Item 402(c) path, which already folds these in ``_sct_norm``
     # and ``_split_name_position``.
     decoded = _UNICODE_SPACE_RE.sub(" ", decoded)
+    if block_breaks:
+        # AFTER the entity/unicode-space folding above, so an empty block's
+        # ``&nbsp;`` is already a plain space and breaks the run — see
+        # ``_SENTINEL_RUN_RE``.
+        decoded = _SENTINEL_RUN_RE.sub(_BREAK_SENTINEL, decoded).replace(_BREAK_SENTINEL, "\n")
     # Zero-width spacers are deliberately NOT stripped here (#2164). They are
     # scrubbed at the three points that consume a cell's MEANING —
     # ``_parse_share_count``, ``_parse_percent`` and
@@ -676,11 +763,21 @@ class _RawTable:
     single-row-header case ``column_headers == score_headers``; in
     the two-row case ``column_headers`` is just the sub-row so the
     ``Total`` sub-column wins over ``Sole`` / ``Shared``.
+
+    ``line_rows`` (#2358) is ``rows`` re-rendered with ``<br>`` and every block
+    element as a LINE BREAK. Same shape, same order, index-for-index — the
+    row-drop mask and the two-row-header trim are taken from the FLAT grid and
+    applied to both, so ``line_rows[i]`` is always ``rows[i]``. It exists as a
+    parallel grid rather than replacing ``rows`` because header scoring and
+    column resolution substring-match multi-word captions and would break on an
+    interior newline; see :func:`_strip_inline_html`. Read by
+    :func:`_split_stacked_holder_row` and nothing else.
     """
 
     score_headers: tuple[str, ...]
     column_headers: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
+    line_rows: tuple[tuple[str, ...], ...]
 
 
 _NUMERIC_LIKE_RE: Final[re.Pattern[str]] = re.compile(r"\d{2,}")
@@ -1016,30 +1113,59 @@ def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTabl
     # make an earlier ``rowspan`` decay one row too fast and shift the rows
     # after it back the way this expansion exists to fix.
     spanned_rows: list[tuple[tuple[str, int, int], ...]] = []
+    line_spanned_rows: list[tuple[tuple[str, int, int], ...]] = []
     for tr_match in _TR_RE.finditer(scrubbed):
-        spanned_rows.append(
-            tuple(
-                (
-                    _strip_inline_html(cell_inner),
-                    int(rs.group(1)) if (rs := _ROWSPAN_RE.search(attrs)) else 1,
-                    max(1, int(cs.group(1))) if (cs := _COLSPAN_RE.search(attrs)) else 1,
-                )
-                for attrs, cell_inner in _CELL_RE.findall(tr_match.group(1))
+        cells = _CELL_RE.findall(tr_match.group(1))
+        spans = [
+            (
+                int(rs.group(1)) if (rs := _ROWSPAN_RE.search(attrs)) else 1,
+                max(1, int(cs.group(1))) if (cs := _COLSPAN_RE.search(attrs)) else 1,
             )
-        )
+            for attrs, _ in cells
+        ]
+        flat_cells: list[tuple[str, int, int]] = []
+        line_cells: list[tuple[str, int, int]] = []
+        for (_, inner), (rs, cs) in zip(cells, spans, strict=True):
+            flat = _strip_inline_html(inner)
+            # A cell carrying NO line-structure tag renders identically both
+            # ways — provably, not approximately: every rewrite `block_breaks`
+            # performs is keyed on one of these tags, and the sentinel-run
+            # collapse needs a sentinel that only they can introduce. So the
+            # second pass is skipped, which is most cells. Measured before and
+            # after on 250 payloads, paired against the control checkout under
+            # the same load; without it the second `_strip_inline_html` was a
+            # real cost on the rewash path (#2171's surface).
+            line = _strip_inline_html(inner, block_breaks=True) if _LINE_STRUCTURE_TAG_RE.search(inner) else flat
+            flat_cells.append((flat, rs, cs))
+            line_cells.append((line, rs, cs))
+        spanned_rows.append(tuple(flat_cells))
+        line_spanned_rows.append(tuple(line_cells))
+    # The two grids MUST stay index-aligned, so the drop decisions are taken on
+    # the FLAT grid and the same indices are applied to the line grid. Deriving
+    # them independently would desync: ``_row_contributes_only_inherited_values``
+    # asks ``_parse_share_count``, and a glued ``'118,028 165,426'`` parses on
+    # the flat side and does not on the line side — which is the whole point of
+    # the second grid.
     if expand_spans:
-        cells_per_row: list[tuple[str, ...]] = [
-            row.cells
-            for row in _expand_row_spans(spanned_rows)
+        flat_expanded = _expand_row_spans(spanned_rows)
+        line_expanded = _expand_row_spans(line_spanned_rows)
+        kept = [
+            index
+            for index, row in enumerate(flat_expanded)
             if any(row.cells) and not _row_contributes_only_inherited_values(row)
         ]
+        cells_per_row: list[tuple[str, ...]] = [flat_expanded[index].cells for index in kept]
+        line_per_row: list[tuple[str, ...]] = [line_expanded[index].cells for index in kept]
     else:
-        cells_per_row = [cells for row in spanned_rows if any(cells := tuple(text for text, _, _ in row))]
+        kept = [index for index, row in enumerate(spanned_rows) if any(text for text, _, _ in row)]
+        cells_per_row = [tuple(text for text, _, _ in spanned_rows[index]) for index in kept]
+        line_per_row = [tuple(text for text, _, _ in line_spanned_rows[index]) for index in kept]
     if not cells_per_row:
         return None
 
     parent_headers = cells_per_row[0]
     body = cells_per_row[1:]
+    line_body = line_per_row[1:]
     column_headers = parent_headers
     score_headers = parent_headers
 
@@ -1099,8 +1225,14 @@ def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTabl
             # promoted rows and scorer identity evidence.
             score_headers = parent_headers + body[0]
             body = body[1:]
+            line_body = line_body[1:]
 
-    return _RawTable(score_headers=score_headers, column_headers=column_headers, rows=tuple(body))
+    return _RawTable(
+        score_headers=score_headers,
+        column_headers=column_headers,
+        rows=tuple(body),
+        line_rows=tuple(line_body),
+    )
 
 
 # Footnote / asterisk markers stripped from holder-name cells. The
@@ -2497,6 +2629,97 @@ def _has_item403_value_rows(holders: list[Def14ABeneficialHolder]) -> bool:
     return shares >= floor and percents >= floor
 
 
+def _collapse_stacked_value_cells(flat_row: tuple[str, ...], line_row: tuple[str, ...]) -> tuple[str, ...]:
+    """Read a value cell the markup stacks as its FIRST entry (#2358).
+
+    Source rule: 17 CFR 229.403(a) column 3 — "Amount and nature of beneficial
+    ownership" — states ONE amount for ONE entry, and column 1 is the "Title of
+    class" that entry is scoped to. A cell rendering ``118,028<br/>165,426``
+    beside ``Class A<br/>Class B`` is therefore TWO entries for one holder, one
+    per class, not one entry with two figures.
+
+    Reached only AFTER :func:`_split_stacked_holder_row` has declined the row —
+    a stack the NAME column corroborates is N distinct holders and is recovered
+    there. This is the residue: one holder across N classes.
+
+    Taking the first entry is not a new convention, it is the one this parser
+    already applies to the ``rowspan`` rendering of the identical shape. Liberty
+    Media (``0001104659-25-029081``) renders Chase Carey's six series as six
+    ``<tr>``s under a spanning name cell; ``_extract_holder_rows`` dedups on
+    ``lower(trim(holder_name))`` and keeps the FIRST — see
+    ``test_multi_series_table_names_the_holder_not_the_series_ticker``. The
+    class is dropped either way because ``def14a_beneficial_holdings`` has
+    nowhere to put it (#2176). Rendering the same filing shape two ways must not
+    produce two different answers.
+
+    Doing nothing is not an option, because the flat rendering PARSES:
+    ``'486,340<br>658,400'`` reaches ``_parse_share_count`` as
+    ``'486,340 658,400'``, which strips spaces and commas and returns
+    **486,340,658,400** — a stored value wrong by five orders of magnitude.
+
+    ONE gate, deliberately #2169's: ``_value_stack_state == "stack"`` — every
+    line of the cell is a whole share count, or every line is a percent,
+    explicit placeholders aside. That is also what keeps the NAME column safe
+    without a special case for it, and the reasoning is worth stating because
+    the special case looks obligatory: a 229.403 column-2 name never has every
+    line parse as a value, so the wrapped-name shape #2140 D5's flatten exists
+    for (``'Michael\\nO. Johnson'`` — 704 rows / 117 instruments split across
+    two holder identities) lands on ``none`` or ``veto`` and is never reached.
+    An explicit ``index != name_idx`` exemption was written first and removed:
+    no fixture can construct the case it guards, so no test can hold it, and an
+    unreachable guard reads as coverage it does not have.
+
+    Applied to EVERY cell rather than to ``shares_idx``, because the
+    resolved shares column is frequently not where the value is read from: on
+    0001193125-26-140058 (Lamar) ``_resolve_columns`` puts ``shares_idx`` on an
+    empty layout cell and the ragged-row recovery scan in
+    :func:`_extract_holder_rows` picks the amount out of cell 7 —
+    ``'500,183 11,362,250'``, stored as 50,018,311,362,250.
+    """
+    # Review NITPICK on PR #2361. The two grids are equal cell-for-cell on the
+    # overwhelming majority of rows — a cell with no ``<br>`` and no block tag
+    # renders identically both ways, by construction — and a row that differs
+    # nowhere cannot contain a stack, so the per-cell segmentation below is pure
+    # waste on the common case. One tuple compare replaces it.
+    if line_row == flat_row:
+        return flat_row
+    collapsed = list(flat_row)
+    changed = False
+    for index, line_cell in enumerate(line_row):
+        # CORRECTIVE ONLY — the flat cell must already parse, i.e. it is one of
+        # the cells storing a wrong number today. A stacked cell that does NOT
+        # parse flat is a row the parser drops, and resurrecting it is a
+        # different ticket: the full-population A/B found exactly one
+        # (0001999371-25-003796), where the two 229.403 Instruction 5 group
+        # captions share a cell with a single ``\n`` and no blank line, so
+        # ``_stacked_name_blocks`` cannot separate them. Storing the first
+        # amount under ``'All Non-Employee Directors All Executive Officers and
+        # Directors as a Group (18 Persons)'`` adds a mangled holder identity to
+        # a table keyed on ``lower(trim(holder_name))`` — #2176's junk-floor
+        # class. Left dropped, which is what main does.
+        if index >= len(flat_row) or _parse_share_count(flat_row[index]) is None:
+            continue
+        # AMOUNTS only, and there is no percent arm to add — review WARNING on
+        # PR #2361 read the missing one as an oversight. A percent column cannot
+        # reach the corruption this function repairs: ``_is_percent_segment``
+        # requires ``%`` or a bare ``*``, so a percent STACK always leaves one of
+        # those inside the flat cell, and ``_parse_share_count`` — which strips
+        # spaces, commas and a TRAILING footnote, never an interior ``%`` or
+        # ``*`` — then returns ``None``. Measured, not argued: '5.86% 7.94%',
+        # '10% 20%', '* *' and '* **' all parse to None as a share count AND as
+        # a percent. So a glued percent stores NULL on main and on this branch,
+        # which is what #2359's review settled ("one percent beside two amounts
+        # belongs to at most ONE of them, and the markup does not say which").
+        # Collapsing it would ADD a figure, and the full-population A/B caught a
+        # mid-branch revision doing exactly that on 0001213900-26-076369.
+        segments = _cell_segments(line_cell)
+        if _value_stack_state(segments, _is_whole_share_segment) != "stack" or segments[0] == flat_row[index]:
+            continue
+        collapsed[index] = segments[0]
+        changed = True
+    return tuple(collapsed) if changed else flat_row
+
+
 def _extract_holder_rows(
     table: _RawTable,
     *,
@@ -2531,10 +2754,21 @@ def _extract_holder_rows(
     # it: the stacked-name/address recovery above looks at ``raw_rows[idx + 1]``,
     # so the sequence it walks must already be the expanded one or a split row's
     # successor is the un-split original.
+    #
+    # The split reads ``line_rows``, NOT ``rows`` (#2358): the issuer's row
+    # separator inside the cell is ``<br>`` or a block boundary, and the flat
+    # grid renders both as a space, so the stack is only visible on the
+    # line-structured grid. A row the split declines keeps its FLAT cells — the
+    # two grids differ in the whole corpus, not just on the stacked shape, and
+    # every other consumer here (role headings, address fragments, the value
+    # recovery scans) is tuned against the flat text.
     raw_rows: list[tuple[str, ...]] = []
-    for source_row in table.rows:
-        split = _split_stacked_holder_row(source_row, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx)
-        raw_rows.extend(split if split is not None else [source_row])
+    for source_row, line_row in zip(table.rows, table.line_rows, strict=True):
+        split = _split_stacked_holder_row(line_row, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx)
+        if split is not None:
+            raw_rows.extend(split)
+            continue
+        raw_rows.append(_collapse_stacked_value_cells(source_row, line_row))
     for idx, raw_row in enumerate(raw_rows):
         # The diversions below are gated on the NEXT row actually being an
         # address row, so the behaviour change is bounded to the stacked shape

@@ -3333,3 +3333,90 @@ Two things S-4 adds to the prevention above:
 - Prevention: **when you add a table-wide refusal (trigger, new NOT NULL, new CHECK over the whole row), grep for every test fixture that constructs a row of that table and check whether the fixture's base row now trips it.** If it does, move the fixture off the tripping value — do not add the satisfying precondition to the fixture, because that makes the new refusal a silent precondition of 35 unrelated tests. Here `_BASE["namespace"]` moved to `in_sample` and the hold-out path got its own file.
 - ⚠ Same test-quality shape as the phase-5d probe finding *"a test named after a branch that cannot fire is a test that passes for the wrong reason"* — both are tests that are green while asserting something other than what their name claims.
 - Enforced in: this prevention log; `tests/test_strategy_results_table.py::_BASE` (the comment states both reasons and points at the file that owns the hold-out path); `tests/test_strategy_holdout_namespace.py`.
+## A parser whose line structure comes from SOURCE newlines is reading the filer's formatting, not the document (#2358, 2026-08-07)
+
+- First seen in: #2358, filed off #2169's Codex checkpoint-2 pass, then measured.
+  `_strip_inline_html` replaced EVERY tag with a space, `<br>` included. Interior
+  newlines survived only because `_INLINE_WHITESPACE_RE` is `[ \t\r\f\v]+` and does not
+  include `\n` — so the "lines" of a table cell were whichever newlines the filer
+  agent happened to emit into the source, not the line breaks the markup specifies.
+  Two filers rendering the identical Item 403 row parsed differently.
+- Symptom: it does not surface as a dropped row, which is the tell. `<br>` → space →
+  `'486,340 658,400'`, and `_parse_share_count` strips spaces AND commas, so the cell
+  parses to **486,340,658,400** and is STORED. Full population of
+  `def14a_beneficial_holdings` on 2026-08-07: 30 rows above 1e10 across 9 accessions,
+  worst `3,183,454,219,115,736`. The name side collapses the same way — `Karen
+  David-Green George Damiris Rodney Eads` is three people in one holder identity — so
+  one defect costs a wrong amount AND a wrong holder count. Every other gate is
+  silent: the row exists, the table scores, the job reports success.
+- Prevention: (1) when a parser segments text extracted from HTML, the segmentation
+  must come from BLOCK-LEVEL MARKUP (`<br>`, `<p>`, `<div>`, `<li>`), never from
+  source newlines — those are formatting and vary by filer agent; (2) the fix belongs
+  on a PARALLEL grid, not in the shared cell extractor. `_strip_inline_html` feeds
+  `_score_table_headers` and `_resolve_columns`, which substring-match SEC-prescribed
+  multi-word captions on `" ".join(headers).lower()` — `Amount<br/>and Nature
+  of<br/>Beneficial Ownership` stops matching `"amount and nature"` the moment the tag
+  becomes a newline, and table selection moves corpus-wide. That is the #2164 incident
+  and the `expand_spans=False` pin of #2350, third occurrence. `_RawTable.line_rows`
+  carries the line-structured grid, `rows` stays byte-identical, and the Item 403
+  holder split is its only reader — a structural pin rather than a flag a future
+  caller can forget.
+- ⚠ **Mark tag-derived breaks with a SENTINEL, not with `\n`.** Once both are `\n` you
+  cannot tell "the markup asked for a break" from "the filer wrapped the source", and
+  every collapse rule you write is wrong for one of them. Four shapes all had to
+  survive and they are only separable before the sentinel is resolved: `</p>\n<p>`
+  (adjacent boundaries, ONE break), `<p>&nbsp;</p>` **and `<p><br/></p>`** (an empty
+  block — a real BLANK line, which is the separator #2169's holder split reads), a run
+  of consecutive `<br>`s (also a blank line), and a run of literal source newlines
+  (leave exactly as the flat rendering has it). The first draft collapsed `\n{2,}` and
+  silently un-fixed #2169's own accession; the unit test caught it, but only because
+  that test existed.
+- ⚠ **"Empty block" is a property of the block's CONTENT, not of its entity.** The
+  second draft normalised `<p>&nbsp;</p>` and missed `<p><br/></p>`, which is the same
+  rendered blank line written differently — found by the mandated Codex checkpoint-2
+  pass, then measured rather than accepted: over the first 4,000 accessions the
+  break-only block appears in 293 Item 403 candidate cells across 59 accessions, and
+  `<br><br>` runs in 444 / 124. Enumerate what "empty" can be spelt as
+  (`&nbsp;` / `&#160;` / `&#xa0;` / `<br>` / whitespace) before writing the predicate.
+  Codex earning here is consistent with the file's own note that it pays on judgement
+  artefacts: the finding was about the MODEL of a blank line, not a line of code.
+- ⚠ **Blanking the resolved column is not enough when a recovery scan reads the other
+  cells.** On `0001193125-26-140058` (Lamar) `_resolve_columns` puts `shares_idx` on an
+  empty layout cell and the ragged-row recovery picks the amount out of cell 7. A
+  row-level repair has to cover every cell of the row, not the one the resolver named.
+- ⚠ **An unreachable guard reads as coverage it does not have — delete it.** An
+  explicit `index != name_idx` exemption was written to keep the collapse off the
+  holder name. The revert probe reported NOT CAUGHT, and the reason was that the stack
+  gate (every line of the cell parses as an amount or a percent) already excludes a
+  name, so no fixture can construct the case. Removed, and the reasoning moved into
+  the docstring; the probe now attacks the gate that is actually load-bearing.
+- ⚠ **An A/B harness that omits ONE writable column reports CLEAN while that column
+  moves.** The skill's rule "arm 3 must cover fields the harness does NOT key on" was
+  read as covering `holder_role` — the column #2164 burned — and `percent_of_class` was
+  carried in the summary JSON but never compared. What exposed it was not the A/B: it
+  was diffing two TREATMENT runs against each other to check that a performance
+  short-circuit was behaviour-neutral, which surfaced nine fabricated percents on
+  `0001213900-26-076369` that a mid-branch revision had been adding. The published
+  arm-1 numbers had said `0 lost / 0 gained / 0 role drift` throughout. **Enumerate the
+  writable columns from the row type, not from memory of which one bit last time**, and
+  make the self-comparison (branch vs branch across a refactor) a routine arm — it is
+  free once the control run exists and it is the only arm that catches a "no-op"
+  optimisation that is not one.
+- Enforced in: this prevention log;
+  `scripts/ab_2358_def14a_line_structure.py::_diff` (the percent arm and the ⚠ on why
+  it exists); `app/providers/implementations/sec_def14a.py::_strip_inline_html`
+  (`block_breaks`,
+  off by default, with the why-not-shared comment) + `_RawTable.line_rows` +
+  `_collapse_stacked_value_cells`;
+  `tests/test_sec_def14a_parser.py::TestBlockLevelLineStructure` (the SCT/scorer pin
+  is `test_the_flat_grid_the_sct_path_reads_carries_no_tag_derived_newline` and
+  `test_a_multi_line_header_caption_still_matches_its_prescribed_phrase`);
+  `scripts/probe_2358_line_structure.py` (7/7 caught).
+
+## A PR whose branch CONFLICTS never gets a CI run at all, and it looks exactly like an Actions outage (#2358, 2026-08-07)
+
+- Symptom: a push lands (`origin/<branch>` moves, `gh pr view` shows the new head), and then **no workflow run is ever created** — `gh pr checks` says `no checks reported`, `gh run list --branch` shows nothing for the new SHA, and there is nothing to `gh run rerun` because no run exists. Waited 35 minutes across two pushes. `githubstatus.com` read `operational` with no unresolved incidents, and the previous session's playbook for this shape (an empty commit to force event creation) did nothing.
+- Root cause: every workflow in this repo triggers on `pull_request: branches: [main]`, and a `pull_request` event runs against the **merge ref**. When the branch conflicts with `main`, GitHub cannot compute that ref, so the event produces no run. `gh api repos/<owner>/<repo>/pulls/<n> --jq .mergeable` returned **false**. Two sibling loops merge into this repo, so `main` moves within the hour and a branch that was rebased 40 minutes ago is routinely stale.
+- ⚠ **The discriminator is one API call, and the whole-repo view is what points at it.** `gh run list --limit 5` showed the SIBLING branch getting runs 20 seconds earlier — so run creation was healthy and the problem was mine. A branch-scoped poll cannot tell "Actions is down" from "this PR cannot be merged", and the previous session diagnosed a genuine outage from exactly the same branch-scoped evidence.
+- Prevention: when checks do not appear within a few minutes of a push, run **both** of these before concluding anything about Actions — `gh api repos/.../pulls/<n> --jq .mergeable` (false → rebase and force-push, the run appears immediately) and `gh run list --limit 5` (other branches getting runs → it is not an outage). Only if run creation is dead repo-wide is the empty-commit recovery the right move. Corollary for this loop: **rebase immediately before every push, not once per session** — the instruction set already says so for review-bot accuracy, and this is the harder failure, because a stale base does not report a wrong finding, it reports nothing at all.
+- Enforced in: this prevention log.
