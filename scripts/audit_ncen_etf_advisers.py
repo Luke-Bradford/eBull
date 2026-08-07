@@ -79,18 +79,35 @@ _VANGUARD_GROUP_CIK = "0000102909"
 # "Brown Advisory Ltd" are different registered entities and a normaliser that
 # drops the suffix silently merges them.
 _LEGAL_FORM_ALIASES = {
-    "L L C": "LLC",
-    "L P": "LP",
     "INCORPORATED": "INC",
     "LIMITED": "LTD",
 }
 
+# Legal forms that punctuation-stripping SPLITS into several tokens: `L.L.C.`
+# becomes `L L C`, which no per-word alias can ever reach. These must be folded
+# against the joined string, after tokenisation. Codex caught the earlier form,
+# where both sat in the per-word table and were therefore dead entries —
+# `L.L.C.` and `LLC` canonicalised differently and never matched.
+_SPACED_LEGAL_FORMS = {
+    "L L C": "LLC",
+    "L P": "LP",
+}
+
 
 def _canonical_name(raw: str) -> str:
-    """Case/punctuation-insensitive entity name, legal form PRESERVED."""
+    """Case/punctuation-insensitive entity name, legal form PRESERVED.
+
+    ⚠ The spaced-form fold is whole-token, so a name whose trailing initials
+    happen to read `… L P` folds too. Preferred over leaving `L.P.` unmatchable:
+    an initials collision needs two entities identical up to those initials,
+    where the miss it replaces was systematic across every punctuated filer.
+    """
     upper = raw.upper().replace("&", " AND ")
     words = re.sub(r"[^A-Z0-9]+", " ", upper).split()
-    return " ".join(_LEGAL_FORM_ALIASES.get(w, w) for w in words)
+    joined = " ".join(_LEGAL_FORM_ALIASES.get(w, w) for w in words)
+    for spaced, folded in _SPACED_LEGAL_FORMS.items():
+        joined = re.sub(rf"(?:^|(?<= )){re.escape(spaced)}(?=$| )", folded, joined)
+    return joined
 
 
 def _download(quarter: str, cache_dir: Path, user_agent: str) -> Path:
