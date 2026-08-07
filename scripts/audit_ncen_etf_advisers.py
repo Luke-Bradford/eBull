@@ -51,6 +51,7 @@ import argparse
 import collections
 import csv
 import io
+import os
 import re
 import sys
 import urllib.request
@@ -93,14 +94,27 @@ def _canonical_name(raw: str) -> str:
 
 
 def _download(quarter: str, cache_dir: Path, user_agent: str) -> Path:
+    """Fetch one DERA quarter into the cache, atomically.
+
+    The cache-hit test is `st_size > 0`, which a truncated file passes — so an
+    interrupted download must never be visible at `dest`. Write to a sibling
+    `.part` and `os.replace` it, which is atomic within one filesystem. The
+    `finally` clears the `.part` on an exception; a hard kill can still leave one
+    behind, but nothing ever reads it, so the next run re-downloads either way.
+    """
     dest = cache_dir / f"{quarter}_ncen.zip"
     if dest.exists() and dest.stat().st_size > 0:
         return dest
     cache_dir.mkdir(parents=True, exist_ok=True)
     url = _DERA_URL.format(quarter=quarter)
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})  # noqa: S310 — fixed https SEC host.
-    with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310
-        dest.write_bytes(resp.read())
+    partial = dest.with_suffix(".zip.part")
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310
+            partial.write_bytes(resp.read())
+        os.replace(partial, dest)
+    finally:
+        partial.unlink(missing_ok=True)
     return dest
 
 
