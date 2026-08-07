@@ -3009,3 +3009,27 @@ add an entry here as part of resolving the comment (`EXTRACTED docs/review-preve
 - ⚠ Third: `.claude/skills/data-sources/finra.md` §2.7 asserted the bimonthly CDN returns **404** and that its provider "only maps 404". Both false — it returns 403 with a 111-byte body, and the provider had mapped both since #916. The skill had drifted away from the code in the direction that makes the bug harder to see.
 - Prevention: before deriving any reporting calendar, grep the governing rule for *designated*/*prescribed*/*published by*; if present, the calendar is a list to be read or probed, not computed. Where probing is the only route, validate the fetched artefact against its own self-description before storing it.
 - Enforced in: this prevention log; `app/jobs/finra_short_interest_refresh.py` (`_fetch_designated_file` + the `_MAX_ANCHOR_WALKBACK_DAYS` rationale comment); `app/services/finra_short_interest_ingest.py` (body-date contract in the module docstring); `scripts/audit_finra_settlement_calendar.py` (re-runnable full-population scan).
+
+⚠ **RECURRED THE SAME DAY, INDEPENDENTLY (#2240 S-4, 2026-08-06).** Recorded here
+rather than as a second section, because a recurrence is worth more than a
+restatement — and because the two happened in parallel branches, so S-4's tests
+were written before this entry existed on `main`. `tests/test_strategy_s4.py`
+imported `COMPRESSION_WINDOW` and `BREAKOUT_LOOKBACK` into its reference and the
+probes for "window shortened 100 → 50" and "lookback shortened 20 → 10" both
+reported `*** NOT CAUGHT ***` — the identical failure, in a reference that was
+independent in algorithm (`sorted(window).index(v)` against the module's
+count-of-comparisons) and shared in parameters. Two strategies out of three hit
+it, which is the number that says this is the default mistake and not a slip.
+
+Two things S-4 adds to the prevention above:
+
+- **Scope.** The rule binds the numbers the ASSERTION depends on, not the ones a
+  fixture is built from. Using the module's constant as scaffolding — sizing a
+  window, indexing a warm-up boundary — is fine and often clearer; it is the
+  expected-value path that must carry hand-transcribed literals.
+- **Write the probe even when the constant looks inert.** Neither instance was
+  visible until a probe mutated the constant: 35 tests, `ruff`, `pyright` and a
+  clean 32.5M-bar full-population arm all passed in the S-4 case, and the arm was
+  clean *because* it was fed the module's constants indirectly too. A spec
+  constant is the single thing a reference is most tempted to share, so it is the
+  one most worth probing.

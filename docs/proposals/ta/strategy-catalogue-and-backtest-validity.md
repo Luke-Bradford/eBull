@@ -752,6 +752,70 @@ Data: OHLC only, but requires **complete** OHLC — instruments with NULL high/l
 and any bar inside a `price_series_break` segment are `not_evaluable`, not
 absent.
 
+✅ **IMPLEMENTED 2026-08-06** — `app/services/strategies/s4_volatility_compression_breakout.py`,
+a pure function against the phase-3a registry contract. Four notes it settles
+that this entry left open:
+
+- ⚠⚠ **"Bottom quartile" had no membership rule, and there is no published one to
+  cite** — so it is fixed **by construction** and said out loud, per the
+  instruction set's rule for exactly this case. Bollinger's Squeeze has a
+  published formulation (BandWidth at its lowest in six months); "ATR in the
+  bottom quartile of its own trailing 100 bars" is this document's own
+  construction, and it states the window and the quartile but not the test.
+  Sample quantiles are not one thing — NumPy ships nine interpolation methods —
+  so membership is defined by **rank**, which has no interpolation and no free
+  parameter: `compression(t) = #{w ∈ W : w < atr_14(t)} / |W|` over
+  `W = atr_14[t-99 .. t]`, and the setup holds iff that is `< 0.25`. With 100
+  distinct values the k-th smallest scores `(k-1)/100`, so exactly the bottom 25
+  qualify. ⚠ Ties are **forced** favourable, not chosen: counting `w ≤ atr(t)`
+  would let two bars with identical ATRs in one window rank differently by
+  position, i.e. read arbitrary order as signal.
+- ⚠⚠ **S-4 has NO exit signal leg, and cannot have one.** S-1 and S-3 exit on a
+  per-bar price condition; all three of S-4's — stop, target, max-hold — are
+  measured *from the entry*, so all three are position state and a pure per-bar
+  verdict function has none. This is S-3's `MAX_HOLD_BARS` reasoning applied to a
+  whole exit bracket. The parameters are not dropped: `ATR_STOP_MULTIPLE`,
+  `ATR_TARGET_MULTIPLE` and `MAX_HOLD_BARS` are hashed into the identity
+  (criterion 11) and consumed by `outcome_resolver.ExitLevels` (phase 4a).
+  **Nothing in the module reads them**, so the identity hash is the only thing
+  holding them to this rule — which is why the revert probe that drops one from
+  `S4_PARAMS` is the one that matters most on this module.
+- **The two windows keep DIFFERENT boundaries, deliberately.** Compression is
+  *"computed on bars ≤ t"* (inclusive — today's ATR is ranked against a
+  distribution it is in); the breakout excludes `t` for the reason this entry
+  already gives. Making them consistent would be a spec violation, so each is
+  pinned by its own test.
+- ⚠ **A masked bar refuses the whole TAIL of the series**, inherited from Wilder
+  smoothing exactly as S-3's RSI is, and **much larger here** — `atr_14` needs
+  high, low *and* the previous close, so more fields can kill it. Counted, not
+  asserted away: over the validated universe **361 of 5,266 series carry a masked
+  bar, and they cost 611,092 bars** on which the 20-bar breakout frame had
+  recovered and the ATR never will (`--census`, 2026-08-06). Both legs also share
+  ONE warm-up at 113 bars (`atr_14`'s seed plus the 100-bar window), a narrowing
+  of **484,594 bars** whose breakout leg was evaluable.
+
+**Full-population verification** (`scripts/verify_2240_s4_volatility_breakout.py`),
+2026-08-06. ⚠ The ATR and the prior-20 high are compared as VALUES, bar by bar,
+not merely through the verdicts they feed — both sides compute in float64 in the
+same order, so agreement is expected to be bit-for-bit and any difference is
+logic rather than rounding:
+
+| corpus | series | bars | values compared | value mismatches | verdict mismatches | ties |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `research_price_daily` | 7,693 | 25,818,944 | 51,637,888 | **0** | **0** | 0 |
+| `price_daily` | 12,185 | 6,702,891 | 13,405,782 | **0** | **0** | 0 |
+| | | **32,521,835** | **65,043,670** | **0** | **0** | **0** |
+
+Census over the §4.0 validated universe on masked bars: 23,339,583 bars —
+fired 699,632 (2.998%), not_fired 21,432,155 (91.827%), not_evaluable 1,207,796
+(5.175%; `quarantined_bar` 613,835 · `insufficient_warmup` 588,695 ·
+`no_fill_bar` 5,266). Revert probes 16/16 caught.
+
+⚠ **No performance claim is attached, deliberately** — the same reason S-3 ships
+without one. §4's survivorship table grades every strategy's *omission* bias on a
+survivor-only corpus, the fired share above is a count of signals rather than of
+outcomes, and §5's acceptance criteria are phase 5's work, not this module's.
+
 **S-5 · Support/resistance retest** *(blocked on #2279)*
 Level formation: cluster swing pivots into levels using **only bars strictly
 before the break**, with each pivot subject to its confirmation lag (§3.5
