@@ -97,7 +97,10 @@ DenominatorBasis = Literal["pie_wedge", "institution_subset", "proxy_disclosure"
 # ``stale_denominator`` — a row exists but its ``as_of`` is too old to use
 #   (the #1581 dual-class dimension-only trap, or an ingest-coverage gap);
 #   percentages would be nonsense against it, so we suppress them.
-NoDataReason = Literal["absent", "stale_denominator"]
+# ``partial_class_denominator`` — a FRESH row exists but it does not cover the
+#   whole entity (#2232): the issuer files no cover-page DEI count at all, and a
+#   single disclosed beneficial owner exceeds the figure we would divide by.
+NoDataReason = Literal["absent", "stale_denominator", "partial_class_denominator"]
 
 
 @dataclass(frozen=True)
@@ -646,6 +649,11 @@ class OwnershipRollup:
     # DRS registered-vs-street overlay (#844 PR-2). None off-cohort, on
     # extraction absence, or past the 400-day staleness bound.
     drs: DrsInfo | None = None
+    # Why the denominator is unusable, on the ``no_data`` path only (#2232).
+    # ``None`` on every rendering payload. Explicit because the FE previously
+    # inferred the reason from ``shares_outstanding_as_of`` being non-null, which
+    # cannot distinguish a third reason that also carries an as_of.
+    no_data_reason: NoDataReason | None = None
 
     @classmethod
     def no_data(
@@ -674,6 +682,15 @@ class OwnershipRollup:
           discriminator (``absent`` keeps it null). ``stale_as_of`` is
           required for this reason — it is the only provenance that
           survives once the denominator is nulled.
+        * ``partial_class_denominator`` — a fresh row exists but does not
+          cover the whole entity (#2232). ``stale_as_of`` is optional here
+          and, when given, carries the (fresh) as_of of the partial figure.
+
+        ⚠ The reason is now carried EXPLICITLY in ``no_data_reason``. Until
+        #2232 the frontend inferred "stale" from ``shares_outstanding_as_of``
+        being non-null on a ``no_data`` payload, which a third reason with a
+        real as_of would silently mis-label (prevention log: two surfaces, one
+        copy source). Consumers branch on ``no_data_reason``, not on as_of.
 
         ``historical_symbols`` is threaded through so the BBBY-style
         callout still renders on instruments missing
@@ -695,6 +712,10 @@ class OwnershipRollup:
             banner = _stale_denominator_banner(stale_as_of)
             info_chip = "Shares-outstanding figure on file is too stale to use as a denominator."
             as_of_out: date | None = stale_as_of
+        elif reason == "partial_class_denominator":
+            banner = _partial_class_denominator_banner()
+            info_chip = "Shares-outstanding figure on file does not cover the whole company."
+            as_of_out = stale_as_of
         else:
             banner = _banner_for_state("no_data", coverage, Decimal(0))
             info_chip = "No shares-outstanding figure on file."
@@ -720,6 +741,7 @@ class OwnershipRollup:
             denominator_cross_check=DenominatorCrossCheck.unavailable(),
             computed_at=datetime.now(tz=UTC),
             def14a_drift=def14a_drift,
+            no_data_reason=reason,
         )
 
 
@@ -3572,6 +3594,113 @@ def _stale_denominator_banner(as_of: date) -> BannerCopy:
     )
 
 
+def _partial_class_denominator_banner() -> BannerCopy:
+    """Honest ``no_data`` banner when the shares-outstanding row on file is fresh
+    but does not cover the whole entity (#2232).
+
+    Cause-named, unlike the ``stale_denominator`` copy, because here we DO know
+    why: the issuer publishes no cover-page count we can read, and the balance-sheet
+    count we fell back to is smaller than a single disclosed holder's position. Like
+    #1581 it must NOT tell the operator to trigger a fundamentals sync — re-fetching
+    companyfacts returns the same dimension-stripped payload (sec-edgar §7.17), so
+    that instruction can never work."""
+    return BannerCopy(
+        state="no_data",
+        variant="error",
+        headline="Cannot compute ownership",
+        body=(
+            "The only shares-outstanding figure on file for this issuer is a "
+            "balance-sheet count that does not cover the whole company — a single "
+            "disclosed holder already reports more shares than it contains. "
+            "Ownership percentages are suppressed rather than computed against a "
+            "partial denominator. The breakdown returns once an entity-wide share "
+            "count is on file."
+        ),
+    )
+
+
+def _read_has_dei_cover_share_count(conn: psycopg.Connection[Any], instrument_id: int) -> bool:
+    """Does this issuer have ANY cover-page ``dei:EntityCommonStockSharesOutstanding``
+    fact on file (#2232)?
+
+    Source rule: that element is a REQUIRED cover-page disclosure on Form 10-K /
+    10-Q / 20-F — "the number of shares outstanding of each of the registrant's
+    classes of common stock, as of the latest practicable date". So its total
+    absence from ``financial_facts_raw`` is not "the issuer didn't say"; per
+    sec-edgar §7.17 it means every cover value carried a
+    ``us-gaap:StatementClassOfStockAxis`` member and companyfacts stripped it —
+    i.e. the issuer is MULTI-CLASS and the undimensioned
+    ``us-gaap:CommonStockSharesOutstanding`` we fell back to has unknown scope.
+
+    Verified live 2026-08-08 against ``data.sec.gov/api/xbrl/companyconcept`` for
+    AEVEX (CIK 0002096300), SOLV Energy (0002065636), Galaxy Digital (0001859392)
+    and HMH Holding (0002021880) — HTTP 404 on the ``dei`` concept for all four,
+    while AEVEX's rendered 10-Q cover reports Class A 50,744,176 + Class B
+    63,297,524 against the 1,000-share undimensioned parenthetical we store.
+
+    Deliberately NOT keyed on the winning row's taxonomy: an instrument whose
+    LATEST period happens to come from us-gaap while a dei fact exists at an
+    earlier period is a different (single-class, stale-cover) case, and the §7.17
+    argument does not hold for it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM financial_facts_raw
+                WHERE instrument_id = %(iid)s
+                  AND taxonomy = 'dei'
+                  AND concept = 'EntityCommonStockSharesOutstanding'
+                  AND unit = 'shares'
+                  AND val IS NOT NULL
+            )
+            """,
+            {"iid": instrument_id},
+        )
+        row = cur.fetchone()
+    assert row is not None  # SELECT EXISTS always returns one row
+    return bool(row[0])
+
+
+def denominator_is_partial_class(
+    *,
+    has_dei_cover_share_count: bool,
+    largest_single_holder_pct: Decimal,
+    per_class_denominator_applied: bool,
+) -> bool:
+    """Pure fail-closed policy: is the operative denominator provably NOT the whole
+    entity's share count (#2232)? Table-tested without a DB.
+
+    Both conditions are impossibility arguments, not thresholds — the issue's own
+    worked examples (``PKG`` 1,001x correction vs ``AVAL`` 1.08e9x error) show that
+    magnitude cannot separate a bad denominator from a real reverse split, and the
+    previous attempt's cross-check was ``unavailable`` for 24 of the 47 instruments
+    in the cohort because those issuers file only ONE shares concept.
+
+      1. **No cover-page count exists** — see :func:`_read_has_dei_cover_share_count`.
+         Establishes that the figure we are dividing by is a balance-sheet
+         parenthetical of unknown scope, not the entity-wide cover disclosure.
+      2. **Holdings-plausibility** — a single reconciled pie-wedge holder reports
+         more shares than the denominator contains. Impossible under Rule 13d-3 /
+         Section 16 for one beneficial owner of one class, so either the
+         denominator is partial or the numerator is unadjusted; the percentage is
+         unpublishable either way (#1662: fail closed, never publish the
+         structurally-wrong product).
+
+    This is :func:`_should_use_class_denominator` condition 3 — already worded in
+    this file as "no resolved pie-wedge holder owns more shares than exist in the
+    class (catches a mis-mapped too-small denominator, the %-inflating direction)"
+    — applied to the denominator the rollup ACTUALLY divides by, instead of only to
+    the FSDS per-class swap it was written for.
+
+    ``per_class_denominator_applied`` short-circuits to ``False``: that swap already
+    ran this exact plausibility guard against the class count before taking it, so a
+    verified per-class denominator is never the partial one."""
+    if per_class_denominator_applied:
+        return False
+    return not has_dei_cover_share_count and largest_single_holder_pct > 1
+
+
 def _read_shares_outstanding(
     conn: psycopg.Connection[Any], instrument_id: int
 ) -> tuple[Decimal | None, date | None, SharesOutstandingSource]:
@@ -4345,6 +4474,30 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     residual = _compute_residual(effective_outstanding, slices)
     concentration = _compute_concentration(effective_outstanding, slices)
     sanity = _compute_sanity(slices, effective_outstanding)
+    # #2232 — the denominator is fresh but does not cover the whole entity. Placed
+    # AFTER the pie is built on purpose: the plausibility test reads the RECONCILED
+    # largest holder, not a raw table max, so a control-group collapse or an NT
+    # supersession cannot leave a phantom over-100% row behind to fire on.
+    #
+    # The leading ``largest_single_holder_pct > 1`` is a pure PERFORMANCE pre-filter
+    # — it restates a condition :func:`denominator_is_partial_class` already owns, so
+    # that the ~94% of instruments with no over-100% holder skip the extra DB
+    # round-trip. It is redundant by construction and a revert-probe that removes it
+    # changes no output; the policy's enforcement point is the pure function, pinned
+    # by its own table tests (same shape as the sql/259 note on restated predicates).
+    if sanity.largest_single_holder_pct > 1 and denominator_is_partial_class(
+        has_dei_cover_share_count=_read_has_dei_cover_share_count(conn, instrument_id),
+        largest_single_holder_pct=sanity.largest_single_holder_pct,
+        per_class_denominator_applied=per_class_denominator is not None,
+    ):
+        return OwnershipRollup.no_data(
+            symbol=symbol,
+            instrument_id=instrument_id,
+            historical_symbols=historical_symbols,
+            reason="partial_class_denominator",
+            stale_as_of=effective_as_of,
+            def14a_drift=def14a_drift,
+        )
     # Independent denominator tie-out (#1647 part 5) — reads the comparison figure from
     # the same snapshot; facts only, never changes a share count. ``effective_*`` are the
     # post-swap denominator the rollup actually used; per_class set ⟹ dual-class path.

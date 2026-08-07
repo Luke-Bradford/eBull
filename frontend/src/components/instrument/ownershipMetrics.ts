@@ -25,7 +25,11 @@
  * returns NUMERICs as strings); :func:`parseShareCount` normalises.
  */
 
-import type { OwnershipCoverageState, OwnershipHolder } from "@/api/ownership";
+import type {
+  OwnershipCoverageState,
+  OwnershipHolder,
+  OwnershipRollupResponse,
+} from "@/api/ownership";
 
 export interface OwnershipSliceInput {
   /** Sum of long-equity shares for this slice. ``null`` = no data. */
@@ -233,29 +237,42 @@ export function topHoldersByShares(
 }
 
 /**
- * Stale-denominator empty-state copy (#1581), or ``null`` when the no_data
- * state is the ordinary "absent" case.
+ * Empty-state copy for a ``no_data`` payload whose denominator EXISTS but is
+ * unusable, or ``null`` when the no_data state is the ordinary "absent" case
+ * (each surface keeps its own absent-case copy; this is the single source of
+ * truth for the two suppressed-denominator reasons).
  *
- * A no_data payload that still carries a ``shares_outstanding_as_of`` is the
- * stale-denominator case: a shares-outstanding figure IS on file but too old
- * to use as a denominator, so ownership percentages are suppressed. ``absent``
- * payloads null the as_of. Returning ``null`` lets each surface keep its own
- * absent-case copy while sharing one source of truth for the stale copy.
+ * Two reasons, both of which must avoid telling the operator to trigger a
+ * fundamentals sync — that instruction is futile for either one:
  *
- * Cause-agnostic by design — the stale figure may be the dual-class
- * dimension-only trap (BRK.B's newest un-dimensioned count is 2011) OR an
- * ingest-coverage gap, so it states only what we know (the figure is stale),
- * never why, and does NOT tell the operator to trigger a sync (futile for the
- * dual-class case — it re-fetches the same ancient row). The server-owned
- * coverage banner carries the dated detail.
+ * - ``stale_denominator`` (#1581) — a figure is on file but too old to divide
+ *   by. Cause-agnostic copy: it may be the dual-class dimension-only trap
+ *   (BRK.B's newest un-dimensioned count is 2011) or an ingest-coverage gap, so
+ *   it states only what we know. A sync re-fetches the same ancient row.
+ * - ``partial_class_denominator`` (#2232) — a FRESH figure is on file but it
+ *   does not cover the whole entity, proved by a single disclosed holder
+ *   exceeding it. A sync re-fetches the same dimension-stripped companyfacts
+ *   payload (sec-edgar §7.17).
+ *
+ * ⚠ Branch on ``noDataReason``, never on ``sharesOutstandingAsOf``. Until #2232
+ * this function inferred "stale" from a non-null as_of on a no_data payload,
+ * which silently mis-labels the second reason (it carries a fresh as_of too).
+ * The as_of argument survives ONLY as the back-compat fallback for a payload
+ * predating the ``no_data_reason`` field.
  */
-export function ownershipStaleDenominatorCopy(
+export function ownershipSuppressedDenominatorCopy(
   bannerState: OwnershipCoverageState,
+  noDataReason: OwnershipRollupResponse["no_data_reason"],
   sharesOutstandingAsOf: string | null,
 ): string | null {
-  const isStaleDenominator =
-    bannerState === "no_data" && sharesOutstandingAsOf !== null;
-  return isStaleDenominator
-    ? "Shares-outstanding figure on file is too stale to use as a denominator — ownership percentages are suppressed until a current figure is ingested (next SEC filing or fundamentals refresh)."
-    : null;
+  if (bannerState !== "no_data") return null;
+  const reason =
+    noDataReason ?? (sharesOutstandingAsOf !== null ? "stale_denominator" : null);
+  if (reason === "stale_denominator") {
+    return "Shares-outstanding figure on file is too stale to use as a denominator — ownership percentages are suppressed until a current figure is ingested (next SEC filing or fundamentals refresh).";
+  }
+  if (reason === "partial_class_denominator") {
+    return "Shares-outstanding figure on file does not cover the whole company — a single disclosed holder already reports more shares than it contains, so ownership percentages are suppressed until an entity-wide share count is on file.";
+  }
+  return null;
 }

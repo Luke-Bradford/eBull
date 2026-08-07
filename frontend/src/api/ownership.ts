@@ -447,6 +447,16 @@ export interface OwnershipRollupResponse {
   /** DRS registered-vs-street overlay (#844 PR-2). Null off-cohort /
    *  absent / stale. Optional for back-compat. */
   readonly drs?: OwnershipDrs | null;
+  /** Why the denominator is unusable, on the ``no_data`` path only (#2232). Null
+   *  on every rendering payload. Branch on THIS, never on
+   *  ``shares_outstanding_as_of`` — ``partial_class_denominator`` also carries a
+   *  (fresh) as_of, so the old "no_data + as_of ⇒ stale" inference mis-labels it.
+   *  Optional for back-compat with pre-#2232 payloads. */
+  readonly no_data_reason?:
+    | "absent"
+    | "stale_denominator"
+    | "partial_class_denominator"
+    | null;
   readonly computed_at: string;
 }
 

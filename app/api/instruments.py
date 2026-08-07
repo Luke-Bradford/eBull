@@ -5067,6 +5067,11 @@ class OwnershipRollupResponse(BaseModel):
     # DRS registered-vs-street overlay (#844 PR-2). Null off-cohort /
     # absent / stale (400d bound).
     drs: _DrsModel | None = None
+    # Why the denominator is unusable, on the ``no_data`` path only (#2232). Null on
+    # every rendering payload. The FE branches on THIS, not on
+    # ``shares_outstanding_as_of`` — ``partial_class_denominator`` also carries a
+    # (fresh) as_of, so the old "no_data + as_of ⇒ stale" inference would mis-label it.
+    no_data_reason: Literal["absent", "stale_denominator", "partial_class_denominator"] | None = None
     computed_at: datetime
 
 
@@ -5283,6 +5288,7 @@ def _rollup_to_response(
             status=rollup.denominator_cross_check.status,
             note=rollup.denominator_cross_check.note,
         ),
+        no_data_reason=rollup.no_data_reason,
         computed_at=rollup.computed_at,
     )
 
