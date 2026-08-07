@@ -84,7 +84,20 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
                 "        stacks_amounts = len(segments) >= 2",
             )
         ],
-        "test_a_wrapped_name_is_not_re_cut_by_the_value_collapse",
+        "test_a_footnote_line_above_the_amount_is_not_read_as_the_amount",
+    ),
+    (
+        # The corrective precondition. Without it the collapse RESURRECTS rows
+        # main drops, and the full-population A/B showed the one real instance
+        # is a mangled two-caption holder identity.
+        "the collapse resurrects rows that never parsed instead of only correcting",
+        [
+            (
+                "        if index >= len(flat_row) or _parse_share_count(flat_row[index]) is None:",
+                "        if index >= len(flat_row):",
+            )
+        ],
+        "test_a_row_that_never_parsed_is_not_resurrected_by_the_collapse",
     ),
     (
         # The pin. Injecting the line structure into `rows` is the obvious

@@ -2587,6 +2587,41 @@ class TestBlockLevelLineStructure:
         # holders that way and #2169 reads it.
         assert _strip_inline_html("A\n\n\nB", block_breaks=True) == "A\n\n\nB"
 
+    def test_a_row_that_never_parsed_is_not_resurrected_by_the_collapse(self) -> None:
+        """The collapse is CORRECTIVE only. This row's values stack on SOURCE
+        newlines, so the flat cell already fails to parse and ``main`` drops the
+        row — collapsing it would ADD a holder, and the full-population A/B
+        found the one real instance (0001999371-25-003796) is two 229.403
+        Instruction 5 group captions sharing a cell with no blank line between
+        them, which ``_stacked_name_blocks`` cannot separate. Storing the first
+        amount under the two captions glued together adds a mangled identity to
+        a table keyed on ``lower(trim(holder_name))``."""
+        body = (
+            "<table>"
+            "<tr><th>Name of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>All Non-Employee Directors \n All Executive Officers as a Group (18 Persons)</td>"
+            "<td>471,042 \n 1,273,440</td><td>2.26% \n 6.12%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == []
+
+    def test_a_footnote_line_above_the_amount_is_not_read_as_the_amount(self) -> None:
+        """The stack gate, on a shape the corrective precondition does not
+        already cover. ``'(3)<br/>1,234'`` parses FLAT — ``_FOOTNOTE_RE`` drops
+        the marker — but its lines are not all values, so it is not a stack and
+        must not collapse to its first line, which parses to nothing."""
+        body = (
+            "<table>"
+            "<tr><th>Name of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>The Vanguard Group</td><td>(3)<br/>1,234</td><td>7.9%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares) for r in parsed.rows] == [("The Vanguard Group", Decimal("1234"))]
+
     def test_a_wrapped_name_is_not_re_cut_by_the_value_collapse(self) -> None:
         """#2140 D5: a render wrap inside the name cell split ONE person across
         two holder identities on 704 rows / 117 instruments. The value columns

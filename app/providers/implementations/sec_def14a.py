@@ -2666,7 +2666,18 @@ def _collapse_stacked_value_cells(flat_row: tuple[str, ...], line_row: tuple[str
     collapsed = list(flat_row)
     changed = False
     for index, line_cell in enumerate(line_row):
-        if index >= len(flat_row):
+        # CORRECTIVE ONLY — the flat cell must already parse, i.e. it is one of
+        # the cells storing a wrong number today. A stacked cell that does NOT
+        # parse flat is a row the parser drops, and resurrecting it is a
+        # different ticket: the full-population A/B found exactly one
+        # (0001999371-25-003796), where the two 229.403 Instruction 5 group
+        # captions share a cell with a single ``\n`` and no blank line, so
+        # ``_stacked_name_blocks`` cannot separate them. Storing the first
+        # amount under ``'All Non-Employee Directors All Executive Officers and
+        # Directors as a Group (18 Persons)'`` adds a mangled holder identity to
+        # a table keyed on ``lower(trim(holder_name))`` — #2176's junk-floor
+        # class. Left dropped, which is what main does.
+        if index >= len(flat_row) or _parse_share_count(flat_row[index]) is None:
             continue
         segments = _cell_segments(line_cell)
         stacks_amounts = _value_stack_state(segments, _is_whole_share_segment) == "stack"
