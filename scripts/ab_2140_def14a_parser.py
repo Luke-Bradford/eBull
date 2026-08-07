@@ -303,6 +303,7 @@ def _audit(limit: int | None) -> int:
                 score_headers=unfolded,
                 column_headers=table.column_headers,
                 rows=table.rows,
+                line_rows=table.line_rows,
             )
         return table
 

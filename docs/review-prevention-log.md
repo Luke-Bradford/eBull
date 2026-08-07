@@ -3333,3 +3333,58 @@ Two things S-4 adds to the prevention above:
 - Prevention: **when you add a table-wide refusal (trigger, new NOT NULL, new CHECK over the whole row), grep for every test fixture that constructs a row of that table and check whether the fixture's base row now trips it.** If it does, move the fixture off the tripping value — do not add the satisfying precondition to the fixture, because that makes the new refusal a silent precondition of 35 unrelated tests. Here `_BASE["namespace"]` moved to `in_sample` and the hold-out path got its own file.
 - ⚠ Same test-quality shape as the phase-5d probe finding *"a test named after a branch that cannot fire is a test that passes for the wrong reason"* — both are tests that are green while asserting something other than what their name claims.
 - Enforced in: this prevention log; `tests/test_strategy_results_table.py::_BASE` (the comment states both reasons and points at the file that owns the hold-out path); `tests/test_strategy_holdout_namespace.py`.
+## A parser whose line structure comes from SOURCE newlines is reading the filer's formatting, not the document (#2358, 2026-08-07)
+
+- First seen in: #2358, filed off #2169's Codex checkpoint-2 pass, then measured.
+  `_strip_inline_html` replaced EVERY tag with a space, `<br>` included. Interior
+  newlines survived only because `_INLINE_WHITESPACE_RE` is `[ \t\r\f\v]+` and does not
+  include `\n` — so the "lines" of a table cell were whichever newlines the filer
+  agent happened to emit into the source, not the line breaks the markup specifies.
+  Two filers rendering the identical Item 403 row parsed differently.
+- Symptom: it does not surface as a dropped row, which is the tell. `<br>` → space →
+  `'486,340 658,400'`, and `_parse_share_count` strips spaces AND commas, so the cell
+  parses to **486,340,658,400** and is STORED. Full population of
+  `def14a_beneficial_holdings` on 2026-08-07: 30 rows above 1e10 across 9 accessions,
+  worst `3,183,454,219,115,736`. The name side collapses the same way — `Karen
+  David-Green George Damiris Rodney Eads` is three people in one holder identity — so
+  one defect costs a wrong amount AND a wrong holder count. Every other gate is
+  silent: the row exists, the table scores, the job reports success.
+- Prevention: (1) when a parser segments text extracted from HTML, the segmentation
+  must come from BLOCK-LEVEL MARKUP (`<br>`, `<p>`, `<div>`, `<li>`), never from
+  source newlines — those are formatting and vary by filer agent; (2) the fix belongs
+  on a PARALLEL grid, not in the shared cell extractor. `_strip_inline_html` feeds
+  `_score_table_headers` and `_resolve_columns`, which substring-match SEC-prescribed
+  multi-word captions on `" ".join(headers).lower()` — `Amount<br/>and Nature
+  of<br/>Beneficial Ownership` stops matching `"amount and nature"` the moment the tag
+  becomes a newline, and table selection moves corpus-wide. That is the #2164 incident
+  and the `expand_spans=False` pin of #2350, third occurrence. `_RawTable.line_rows`
+  carries the line-structured grid, `rows` stays byte-identical, and the Item 403
+  holder split is its only reader — a structural pin rather than a flag a future
+  caller can forget.
+- ⚠ **Mark tag-derived breaks with a SENTINEL, not with `\n`.** Once both are `\n` you
+  cannot tell "the markup asked for a break" from "the filer wrapped the source", and
+  every collapse rule you write is wrong for one of them. Three shapes all had to
+  survive and they are only separable before the sentinel is resolved: `</p>\n<p>`
+  (adjacent boundaries, ONE break), `<p>&nbsp;</p>` (an empty block — a real BLANK
+  line, which is the separator #2169's holder split reads), and a run of literal
+  source newlines (leave exactly as the flat rendering has it). The first draft
+  collapsed `\n{2,}` and silently un-fixed #2169's own accession; the unit test caught
+  it, but only because that test existed.
+- ⚠ **Blanking the resolved column is not enough when a recovery scan reads the other
+  cells.** On `0001193125-26-140058` (Lamar) `_resolve_columns` puts `shares_idx` on an
+  empty layout cell and the ragged-row recovery picks the amount out of cell 7. A
+  row-level repair has to cover every cell of the row, not the one the resolver named.
+- ⚠ **An unreachable guard reads as coverage it does not have — delete it.** An
+  explicit `index != name_idx` exemption was written to keep the collapse off the
+  holder name. The revert probe reported NOT CAUGHT, and the reason was that the stack
+  gate (every line of the cell parses as an amount or a percent) already excludes a
+  name, so no fixture can construct the case. Removed, and the reasoning moved into
+  the docstring; the probe now attacks the gate that is actually load-bearing.
+- Enforced in: this prevention log;
+  `app/providers/implementations/sec_def14a.py::_strip_inline_html` (`block_breaks`,
+  off by default, with the why-not-shared comment) + `_RawTable.line_rows` +
+  `_collapse_stacked_value_cells`;
+  `tests/test_sec_def14a_parser.py::TestBlockLevelLineStructure` (the SCT/scorer pin
+  is `test_the_flat_grid_the_sct_path_reads_carries_no_tag_derived_newline` and
+  `test_a_multi_line_header_caption_still_matches_its_prescribed_phrase`);
+  `scripts/probe_2358_line_structure.py` (7/7 caught).

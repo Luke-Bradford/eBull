@@ -43,6 +43,7 @@ from app.providers.implementations.sec_def14a import (
     _looks_like_subheader,
     _parse_percent,
     _parse_share_count,
+    _parse_table_html,
     _resolve_columns,
     _score_table_headers,
     _shares_cell_percent_signature,
@@ -2468,3 +2469,130 @@ York, NY 10022</td><td>486,340
             ("Alpha Capital LLC", "486,340", ""),
             ("Beta Partners LP", "658,400", ""),
         ]
+
+
+class TestBlockLevelLineStructure:
+    """#2358 — a ``<br>`` with no source newline glues two Item 403 amounts.
+
+    ``_strip_inline_html`` replaces every tag with a SPACE, so a cell's line
+    structure came from whichever source newlines the filer agent happened to
+    emit rather than from the markup. ``'486,340<br>658,400'`` arrived as
+    ``'486,340 658,400'`` and ``_parse_share_count`` — which strips spaces AND
+    commas — returned 486,340,658,400.
+
+    The line-structured rendering is carried on a PARALLEL grid
+    (``_RawTable.line_rows``) rather than replacing ``rows``, because header
+    scoring and column resolution substring-match SEC-prescribed multi-word
+    captions on ``" ".join(headers).lower()`` and would break on an interior
+    newline. That pin is asserted below, not assumed.
+    """
+
+    def test_br_stacked_amounts_do_not_glue_into_one_number(self) -> None:
+        """The defect, cell-for-cell: no source newline anywhere in the row."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th>"
+            "<th>Percent of Shares Outstanding</th></tr>"
+            "<tr><td><p>Penbrook Management, LLC</p><p>&nbsp;</p>"
+            "<p>Renaissance Technologies LLC</p></td>"
+            "<td>486,340<br/>658,400</td>"
+            "<td>5.86%<br/>7.94%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares, r.percent_of_class) for r in parsed.rows] == [
+            ("Penbrook Management, LLC", Decimal("486340"), Decimal("5.86")),
+            ("Renaissance Technologies LLC", Decimal("658400"), Decimal("7.94")),
+        ]
+
+    def test_one_holder_across_two_classes_reads_as_the_first_class(self) -> None:
+        """0000043920-25-000004 (Greif). One NAME against ``Class A<br/>Class B``
+        and ``118,028<br/>165,426`` is two 229.403 entries for one holder, one
+        per class — not one entry of 118,028,165,426.
+
+        Reads as the FIRST class, which is what this parser already does for the
+        ``rowspan`` rendering of the identical shape (Liberty Media, see
+        ``test_multi_series_table_names_the_holder_not_the_series_ticker``).
+        """
+        body = (
+            "<table>"
+            "<tr><th>Name of Beneficial Owner</th><th>Title of Class</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Lawrence A. Hilsheimer</td><td>Class A<br/>Class B</td>"
+            "<td>118,028<br/>165,426</td><td>*<br/>*</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares) for r in parsed.rows] == [
+            ("Lawrence A. Hilsheimer", Decimal("118028")),
+        ]
+
+    def test_a_multi_line_header_caption_still_matches_its_prescribed_phrase(self) -> None:
+        """The pin. 229.403 column 3's caption is routinely rendered across
+        ``<br/>``; scoring it as ``'Amount\\nand Nature of\\nBeneficial
+        Ownership'`` would stop ``'amount and nature'`` matching and move which
+        table wins corpus-wide — the #2164 incident exactly."""
+        table = _parse_table_html(
+            "<table>"
+            "<tr><th>Name of<br/>Beneficial Owner</th>"
+            "<th>Amount<br/>and Nature of<br/>Beneficial Ownership</th>"
+            "<th>Percent<br/>of Class</th></tr>"
+            "<tr><td>The Vanguard Group</td><td>13,114,167</td><td>7.9%</td></tr>"
+            "</table>"
+        )
+        assert table is not None
+        assert "\n" not in " ".join(table.score_headers)
+        assert "amount and nature" in " ".join(table.score_headers).lower()
+        assert _resolve_columns(table.column_headers) == (0, 1, 2)
+
+    def test_the_flat_grid_the_sct_path_reads_carries_no_tag_derived_newline(self) -> None:
+        """Item 402(c) splits a NEO's name from their title on ``\\n``
+        (``_split_name_position``), so injecting one per ``<br/>`` would re-cut
+        every SCT name cell. ``rows`` is what that path reads and it must stay
+        byte-identical; ``line_rows`` is the new grid."""
+        table = _parse_table_html(
+            "<table>"
+            "<tr><th>Name and Principal Position</th><th>Salary</th></tr>"
+            "<tr><td>Jane Roe<br/>Chief Executive Officer</td><td>1,000,000</td></tr>"
+            "</table>"
+        )
+        assert table is not None
+        assert table.rows == (("Jane Roe Chief Executive Officer", "1,000,000"),)
+        assert table.line_rows == (("Jane Roe\nChief Executive Officer", "1,000,000"),)
+
+    def test_an_empty_block_is_a_blank_line_and_adjacent_breaks_are_one(self) -> None:
+        """Both halves are load-bearing for #2169's holder split, which
+        separates stacked owners on a BLANK line.
+
+        ``<p>&nbsp;</p>`` is a real blank line and must survive.
+        ``</p>`` immediately followed by ``<p>`` — and a trailing ``<br/>``
+        before a close tag (0001193125-25-061365, Coca-Cola Consolidated) —
+        render as ONE break and must not fabricate one.
+        """
+        assert _strip_inline_html("<p>A</p><p>&nbsp;</p><p>B</p>", block_breaks=True) == "A\n \nB"
+        assert _strip_inline_html("<p>A</p>\n  <p>B</p>", block_breaks=True) == "A\nB"
+        assert _strip_inline_html("<p>A<br/></p> <p>B</p>", block_breaks=True) == "A\nB"
+        # A run of literal SOURCE newlines carries no tag break and is left as
+        # the flat rendering has it — 0000351998-18-000006 separates its two
+        # holders that way and #2169 reads it.
+        assert _strip_inline_html("A\n\n\nB", block_breaks=True) == "A\n\n\nB"
+
+    def test_a_wrapped_name_is_not_re_cut_by_the_value_collapse(self) -> None:
+        """#2140 D5: a render wrap inside the name cell split ONE person across
+        two holder identities on 704 rows / 117 instruments. The value columns
+        stack here, so the row DOES reach the collapse — what protects the name
+        is the stack gate, which requires every line of a cell to parse as a
+        value. There is no ``name_idx`` exemption and deliberately so; this is
+        the test that would fail if the gate were relaxed to "any multi-line
+        cell"."""
+        body = (
+            "<table>"
+            "<tr><th>Name of Beneficial Owner</th><th>Title of Class</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Napoleon B. Rutledge,<br/>Jr.</td><td>Class A<br/>Class B</td>"
+            "<td>118,028<br/>165,426</td><td>*<br/>*</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Napoleon B. Rutledge, Jr."]
