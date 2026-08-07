@@ -78,6 +78,7 @@ from app.services.strategy_result import (
     namespace_for_bar,
     namespace_for_signal,
 )
+from app.services.strategy_statistics import StrategyMetrics
 
 #: §5.2's split fraction. ⚠ Criterion 5's own words — *"the final 25% of history
 #: is withheld"* — so the in-sample share is what the boundary search targets.
@@ -185,6 +186,39 @@ def _one(conn: psycopg.Connection[tuple], sql: str, params: dict[str, object]) -
     if row is None:
         raise RuntimeError(f"expected exactly one row from:{sql}")
     return row
+
+
+def _metrics(*, effective_sample_size: float | None) -> StrategyMetrics:
+    """A criterion-7 set for the gate arms.
+
+    ⚠ THE VALUES ARE PLACEHOLDERS AND THE NULL IS NOT. Stage 5d always returns
+    ``effective_sample_size=None`` (criterion 3's block bootstrap is 5e), so the
+    "today" arm passes ``None`` to exercise the real state, and the "clean" arm
+    passes a figure to prove the gate can be cleared at all. Everything else on
+    the row is shape, not measurement — this script verifies the GATE, and
+    ``scripts/verify_2240_statistics.py`` is where the metrics are measured.
+    """
+    return StrategyMetrics(
+        expectancy_per_trade_pct=0.0,
+        profit_factor=None,
+        cagr_pct=0.0,
+        annualised_volatility_pct=0.0,
+        sharpe=0.0,
+        sortino=None,
+        max_drawdown_pct=0.0,
+        exposure_time_pct=0.0,
+        turnover_annualised=0.0,
+        trade_count=0,
+        effective_sample_size=effective_sample_size,
+        return_vs_buy_and_hold_pct=0.0,
+        losing_trade_count=0,
+        losing_period_count=0,
+        open_trade_count=0,
+        unpriced_trade_count=0,
+        periods_per_year=251.66,
+        total_return_pct=0.0,
+        buy_and_hold_return_pct=0.0,
+    )
 
 
 def _fail(message: str) -> int:
@@ -410,6 +444,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
     today = PromotionCandidate(
         result=StrategyResult(
             identity=identity,
+            metrics=_metrics(effective_sample_size=None),
             universe_basis="survivor_only",
             carry_unmodelled=CARRY_UNMODELLED,
             evaluated_instrument_count=len(evaluated),
@@ -431,6 +466,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
     clean = PromotionCandidate(
         result=StrategyResult(
             identity=identity,
+            metrics=_metrics(effective_sample_size=128.5),
             universe_basis="survivorship_free",
             carry_unmodelled=False,
             evaluated_instrument_count=len(evaluated),

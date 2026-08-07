@@ -41,10 +41,13 @@ WHAT THIS MODULE IS NOT
 ``execution_guard`` (phase 7) — *"A ledger label is observability; this needs
 enforcement"*. This is the RESULT-layer refusal that the guard consults.
 
-⚠ NOT a statistics module. Criterion 7's twelve metrics are stage 5d's, and
-``sql/262`` carries no metric column for the same reason: 5d must write them
-INTO a row whose basis is already ``NOT NULL``, rather than inventing a shape
-with the basis bolted on afterwards.
+⚠ NOT a statistics module. Criterion 7's metric set is COMPUTED in
+``strategy_statistics`` (stage 5d) and merely CARRIED here, on
+``StrategyResult.metrics``, so that the gate can refuse a result whose
+effective sample size was never computed. ``sql/262`` deliberately shipped with
+no metric column and ``sql/263`` added them afterwards, in that order: 5d writes
+its numbers INTO a row whose basis is already ``NOT NULL``, rather than
+inventing a metrics shape with the basis bolted on later.
 
 ⚠ NOT the hold-out access log. Stage 5e owns the mechanically-inaccessible
 namespace and the access records (criterion 5). This module's gate READS two
@@ -52,10 +55,11 @@ counts and refuses when they do not line up; today nothing produces them, so
 they are zero and the gate refuses — which is §6's *"the gate's initial state is
 'nothing is promotable'. That is correct, not a bug to work around."*
 
-⚠ NEAR-LEAF BY DESIGN. It imports ``cost_model`` (itself a leaf) and nothing
-else from the app. ``position_builder``'s rule-set version reaches a result row
-as a string the WRITER stamps, not as an import — the same split that let
-``strategy_registry`` depend on ``cost_model`` without dragging phase 5 into
+⚠ NEAR-LEAF BY DESIGN. It imports ``cost_model`` (a leaf) and
+``strategy_statistics`` (which imports only ``equity_curve``, also a leaf) and
+nothing else from the app. ``position_builder``'s rule-set version reaches a
+result row as a string the WRITER stamps, not as an import — the same split that
+let ``strategy_registry`` depend on ``cost_model`` without dragging phase 5 into
 phase 3a.
 """
 
@@ -70,6 +74,8 @@ from decimal import Decimal
 from typing import Literal, get_args
 
 from app.services.cost_model import COST_MODEL_ID
+from app.services.equity_curve import SIZING_RULE_ID
+from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
 
 # ---------------------------------------------------------------------------
 # The frozen corpus and window (§5.2)
@@ -156,7 +162,12 @@ HOLDOUT_WEIGHTING = "bar"
 #: sizing give materially different drawdowns from identical signals … Naming it
 #: as an input is what stops a later sizing change reading as a performance
 #: improvement."*
-SIZING_RULE = "equal_weight_concurrent_v1"
+#:
+#: ⚠ RE-EXPORTED, NOT RESTATED. Stage 5c shipped this as its own string literal
+#: while nothing implemented it; stage 5d built the engine, and a second copy of
+#: the id would let the rule change in ``equity_curve`` while the hash on every
+#: result row kept claiming the old one. The engine owns it.
+SIZING_RULE = SIZING_RULE_ID
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +231,13 @@ PromotionRefusal = Literal[
     "holdout_accesses_unrecorded",
     "deflated_sharpe_not_computed",
     "trial_count_undeclared",
+    #: Criterion 3's overlap-corrected sample size, from stage 5e's block
+    #: bootstrap. ⚠ SEPARATE from ``deflated_sharpe_not_computed`` even though
+    #: both are null today and both come from 5e: criterion 6's DSR CONSUMES the
+    #: effective sample size (§5.2), so a DSR present with the sample size
+    #: missing is a DSR computed on a nominal n — which criterion 3 forbids
+    #: outright. Collapsing them would make that state unreportable.
+    "effective_sample_size_not_computed",
     "ambiguity_arms_not_compared",
     "ambiguity_material",
 ]
@@ -414,13 +432,15 @@ class ResultIdentity:
 
 @dataclass(frozen=True)
 class StrategyResult:
-    """One ``strategy_results`` row's provenance and gate inputs.
+    """One ``strategy_results`` row: its provenance, its metrics and the gate inputs.
 
-    ⚠ NO METRICS. Criterion 7's twelve are stage 5d's, and their absence here is
-    the point: 5d writes them into a row whose ``universe_basis`` is already
-    ``NOT NULL`` with no default, rather than designing a metrics table and
-    bolting a basis onto it. #2288 clause 2 — *"A metric whose basis cannot be
-    established is not written."*
+    ⚠ ``metrics`` IS REQUIRED AND HAS NO DEFAULT, which is #2288 clause 2's
+    argument applied to criterion 7: *"a result missing any of the twelve is
+    incomplete"*, and ``sql/263`` makes sixteen of the columns ``NOT NULL`` with
+    no default, so a row cannot be written without them. A defaulted or optional
+    field here would be a shape the table refuses — the mismatch would surface
+    as an integrity error at write time instead of a type error at assembly
+    time, which is strictly later and strictly less informative.
 
     ⚠ THIS ONE RAISES, unlike the gate. It is a WRITER-side shape: a caller
     assembling a malformed row has a bug, and the loud failure is what stops it
@@ -429,6 +449,11 @@ class StrategyResult:
     """
 
     identity: ResultIdentity
+    #: ``strategy_statistics.compute_metrics`` output. ⚠ Its own
+    #: ``effective_sample_size`` is ``None`` until stage 5e, and the gate below
+    #: refuses on that — the metric set being PRESENT is not the same as it
+    #: being COMPLETE.
+    metrics: StrategyMetrics
     universe_basis: str
     #: ``cost_model.CARRY_UNMODELLED`` AS AT COMPUTE TIME, stamped per row and
     #: never re-read from the module at gate time. ⚠ Deliberate: when carry is
@@ -598,6 +623,14 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
     if result.trial_count is None:
         refusals.append("trial_count_undeclared")
 
+    # Criterion 3 — the effective sample size that criterion 6's deflation
+    # consumes. ⚠ Checked SEPARATELY from the DSR: a DSR present with no
+    # effective sample size is a DSR deflated on a nominal n, and criterion 3
+    # forbids reporting a nominal n anywhere. Stage 5e's block bootstrap fills
+    # it; until then this refusal fires on every result.
+    if result.metrics.effective_sample_size is None:
+        refusals.append("effective_sample_size_not_computed")
+
     # §3.4 — the ambiguity arms. ⚠ NOT one of §6's five bullets; its source is
     # §3.4's "the result is `ambiguity_material` and is not promotable", and it
     # is enforced here rather than left in prose because a rule with no gate is
@@ -630,6 +663,7 @@ CURRENT_RESULT_PROVENANCE: Mapping[str, object] = {
     "universe_basis": "survivor_only",
     "corpus_version": CORPUS_VERSION,
     "cost_model_id": COST_MODEL_ID,
+    "metric_set_id": METRIC_SET_ID,
     "sizing_rule": SIZING_RULE,
     "window_start": EVALUATION_WINDOW_START,
     "window_end": EVALUATION_WINDOW_END,

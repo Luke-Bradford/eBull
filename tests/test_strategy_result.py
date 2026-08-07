@@ -42,6 +42,7 @@ from app.services.strategy_result import (
     namespace_for_position,
     namespace_for_signal,
 )
+from app.services.strategy_statistics import StrategyMetrics
 
 # --- transcribed from the spec, never imported -----------------------------
 
@@ -80,9 +81,40 @@ def _identity(**overrides: object) -> ResultIdentity:
     return ResultIdentity(**base)  # type: ignore[arg-type]
 
 
+def _metrics(**overrides: object) -> StrategyMetrics:
+    """A complete criterion-7 set. ⚠ ``effective_sample_size`` is SET here even
+    though stage 5d always produces ``None`` — the clean candidate must be able
+    to clear every check, and a helper that could not would make the
+    effective-sample-size refusal untestable in isolation."""
+    base: dict[str, object] = {
+        "expectancy_per_trade_pct": 0.5,
+        "profit_factor": 1.2,
+        "cagr_pct": 4.0,
+        "annualised_volatility_pct": 12.0,
+        "sharpe": 0.33,
+        "sortino": 0.44,
+        "max_drawdown_pct": -18.0,
+        "exposure_time_pct": 61.0,
+        "turnover_annualised": 2.5,
+        "trade_count": 100,
+        "effective_sample_size": 41.0,
+        "return_vs_buy_and_hold_pct": -1.5,
+        "losing_trade_count": 40,
+        "losing_period_count": 300,
+        "open_trade_count": 2,
+        "unpriced_trade_count": 1,
+        "periods_per_year": 251.7,
+        "total_return_pct": 21.0,
+        "buy_and_hold_return_pct": 22.5,
+    }
+    base.update(overrides)
+    return StrategyMetrics(**base)  # type: ignore[arg-type]
+
+
 def _result(**overrides: object) -> StrategyResult:
     base: dict[str, object] = {
         "identity": _identity(),
+        "metrics": _metrics(),
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
         "evaluated_instrument_count": 3,
@@ -462,6 +494,35 @@ class TestPromotionGateRefusals:
         refusals = check_promotable(_clean_candidate(ambiguity_material=True))
         assert "ambiguity_material" in refusals
         assert "ambiguity_arms_not_compared" not in refusals
+
+    def test_a_missing_effective_sample_size_is_refused_independently_of_the_dsr(self) -> None:
+        """Criterion 3, and it is SEPARATE from ``deflated_sharpe_not_computed``
+        on purpose. ⚠ Criterion 6's deflation CONSUMES the effective sample size,
+        so a DSR present with the sample size missing is a DSR deflated on a
+        nominal n — the number criterion 3 forbids reporting anywhere. Collapsing
+        the two codes would make that exact state unreportable."""
+        candidate = _clean_candidate(
+            result=_result(
+                metrics=_metrics(effective_sample_size=None),
+                universe_basis="survivorship_free",
+                carry_unmodelled=False,
+                trial_count=9,
+                deflated_sharpe=Decimal("1.1"),
+            )
+        )
+        refusals = check_promotable(candidate)
+        assert "effective_sample_size_not_computed" in refusals
+        assert "deflated_sharpe_not_computed" not in refusals
+
+    def test_every_result_stage_5d_can_produce_is_refused_on_the_sample_size(self) -> None:
+        """⚠ THE SHIPPED STATE, asserted rather than described. ``compute_metrics``
+        always returns ``effective_sample_size=None`` (the block bootstrap is
+        stage 5e), so no result this stage writes can be promoted — §6's *"the
+        gate's initial state is 'nothing is promotable'. That is correct, not a
+        bug to work around."*"""
+        assert "effective_sample_size_not_computed" in check_promotable(
+            _clean_candidate(result=_result(metrics=_metrics(effective_sample_size=None)))
+        )
 
 
 class TestBoundaryDerivation:

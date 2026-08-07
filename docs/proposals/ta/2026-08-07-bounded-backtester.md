@@ -250,6 +250,41 @@ an `ambiguous` outcome at all (§3: it is the only level-based strategy).
 
 ## 4. Adopting `vectorbt` — the evidence, and the residual
 
+> ⚠⚠ **RESOLVED AT STAGE 5d, 2026-08-07: NOT ADOPTED.** §8 defers the decision to
+> here, and here is the answer with the measurements that produced it. Two of
+> them contradict the section below, which is kept as the design record.
+>
+> 1. **The metrics this section wanted REFUSE on our index — the killer.**
+>    `sharpe_ratio()`, `sortino_ratio()`, `annualized_volatility()` and
+>    `annualized_return()` all raise `ValueError: Index frequency is None` on a
+>    `DatetimeIndex` of real trading dates. The only way through is declaring a
+>    fixed `freq`, and `freq="1D"` imposes an annualisation factor of **exactly
+>    365.0** — measured by dividing the library's Sharpe by the per-period one —
+>    against an index carrying ~196 observations per calendar year, inflating
+>    Sharpe by `sqrt(365/196) = 1.37x`. The one thing the library was to be
+>    adopted FOR is the thing that does not work on this data.
+> 2. **It wants a dense date x instrument panel; ours is 27.3% dense.** Measured
+>    against the dev corpus 2026-08-07 (5,266 series, 23,339,583 bars, 16,236
+>    trading dates → 85,498,776 cells, so 72.7% NaN padding).
+>    `Portfolio.from_signals` at that exact shape completes in 5.9 s and peaks at
+>    **4.05 GiB RSS**. Reproduce the density with
+>    `PYTHONPATH=. uv run python scripts/verify_2240_statistics.py --panel`.
+> 3. **Its default fill semantics still import the look-ahead §3.5 rule 1
+>    forbids** — reproduced on the current install, a bar-1 signal fills at that
+>    bar's own close (101.0).
+> 4. ⚠ **"It pulls no numba" is FALSIFIED.** The resolution carries **58
+>    packages** including `numba` 0.66.0 and `llvmlite`, plus `scikit-learn`,
+>    `scipy`, `matplotlib`, `plotly`, `ipywidgets`, `requests` and `tqdm` —
+>    against a repo running `pip-audit --strict` in CI. The packaging residual is
+>    LARGER than this section recorded, not smaller.
+>
+> What ships instead is `app/services/equity_curve.py` +
+> `app/services/strategy_statistics.py`, whose annualisation is derived from the
+> evaluation window's own axis. Parent §8's *"Do not hand-roll"* is overridden on
+> point 1 specifically, and the counter-argument is recorded in both modules'
+> headers so the decision can be re-opened with evidence rather than re-argued.
+
+
 §8 says *"Do not hand-roll"* and names `vectorbt 1.1.0` as verified on Python
 3.14. Inherited premise, so it was re-tested rather than trusted.
 
@@ -524,6 +559,34 @@ return on almost no capital at work"*.
   result identity**, and v1 declares **equal weight across concurrent positions,
   rebalanced only on position open/close**. Naming it as an input is what stops
   a later sizing change reading as a performance improvement.
+
+  > ⚠⚠ **STAGE 5d TOOK THREE SUB-DECISIONS THIS SENTENCE DOES NOT.** No
+  > published rule fixes them and each changes every number downstream, so they
+  > are fixed by construction and frozen inside `equal_weight_concurrent_v1`
+  > (`app/services/equity_curve.py::SIZING_RULE_ID`, hashed into
+  > `ResultIdentity.version`):
+  >
+  > 1. **WHEN the equal weight is re-imposed** — only on an EVENT DATE, a date
+  >    on which at least one leg opens or closes, which is the clause read
+  >    literally. Between event dates the weights DRIFT. ⚠ The rejected reading
+  >    is "rebalance every bar", which is a different and busier strategy and
+  >    charges turnover the declared rule never incurs.
+  > 2. **AT WHAT PRICE the rebalance trades** — at the event date's close.
+  >    Entries and exits, the only LEDGER-DERIVED orders, transact at their
+  >    stored fill prices at the open, which is what keeps §2.1's equality
+  >    exact. A rebalance trade is produced by the sizing rule and has no stored
+  >    fill price to equal.
+  > 3. **SELLS BEFORE BUYS, buys capped by cash on hand.** ⚠ A single-pass
+  >    rebalance to `equity / n` leaves cash at MINUS the cost it just charged —
+  >    arithmetically small, and leverage, which the project posture forbids
+  >    outright. Selling first makes `cash >= 0` hold by construction rather
+  >    than by tolerance, and the under-investment it leaves is exactly the cost
+  >    charged.
+  >
+  > ⚠ A fourth was rejected as degenerate rather than adopted: *"size a new
+  > position at `equity / n` and never resize the existing ones"*. The first
+  > position takes 100% of a flat pot, so the second is funded at zero and every
+  > subsequent one too. It is not a viable reading of the clause.
 
 ---
 
