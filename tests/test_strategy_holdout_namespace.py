@@ -64,7 +64,7 @@ def _raw_holdout_insert(conn: psycopg.Connection[tuple], table: str) -> None:
 
 
 _RAW_TAIL = """
-        'sleeve', 'hold_out', 'worst_case', '1962-01-02', '2026-07-08', 'survivor_only',
+        'sleeve', 'hold_out', 'worst_case', 'masked', '1962-01-02', '2026-07-08', 'survivor_only',
         'paperswithbacktest/Stocks-Daily-Price@2026-07-08', 'static-p75-insession-v1', true,
         'equal_weight_concurrent_v1', 'p1', 'o1', 'i1', 10,
         0.5, 1.18, 3.9, 14.2, 0.27, 0.39, -31.4, 62.1, 3.05, 100, -2.4, 50, 20, 4, 0, 251.67, 418.0, 420.4,
@@ -73,7 +73,7 @@ _RAW_TAIL = """
 
 _RAW_COLUMNS = """
         strategy_id, strategy_version, result_version, result_scope, namespace,
-        ambiguity_arm, window_start, window_end, universe_basis, corpus_version,
+        ambiguity_arm, quarantine_arm, window_start, window_end, universe_basis, corpus_version,
         cost_model_id, carry_unmodelled, sizing_rule, position_rule_set_version,
         outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
         expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
@@ -484,6 +484,10 @@ def test_the_counts_move_the_promotion_gate_off_holdout_never_evaluated(
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "effective_sample_size_not_computed",
+            # Stage 5e-5a's, and it is the honest state here: this candidate
+            # records no quarantine sensitivity arm, and criterion 9 requires
+            # one before a result is promotable.
+            "quarantine_arms_not_compared",
         }
 
 
@@ -541,6 +545,42 @@ def test_a_second_arm_is_a_second_evaluation_and_a_second_record(
         assert (counts.holdout_evaluations, counts.recorded_accesses) == (2, 2)
 
 
+def test_the_two_quarantine_arms_do_not_collide(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ WHAT ``sql/267`` EXISTS FOR (criterion 9, stage 5e-5a).
+
+    A masked run and an admitted run are the same strategy, over the same
+    corpus, at the same quarantine RULE SET — every other identity field
+    identical. Before ``quarantine_arm`` joined the hash they produced the same
+    ``result_version`` and the second write hit ``strategy_results_unique``,
+    which is a sensitivity arm silently unable to be stored beside the arm it is
+    measured against.
+
+    ⚠ Asserted on the DATABASE and not only on the hash: the column carries its
+    own CHECK and the store-vs-view parity is what makes an in-sample read see
+    it, so a Python-only assertion would pass against a schema that lost it."""
+    with ebull_test_conn.transaction():
+        masked = build_result(strategy_id="S-QARM", quarantine_arm="masked")
+        admitted = build_result(strategy_id="S-QARM", quarantine_arm="admitted")
+        assert masked.identity.version != admitted.identity.version
+
+        store_holdout_result(ebull_test_conn, masked, accessed_by=_ACTOR, purpose=_PURPOSE)
+        store_holdout_result(ebull_test_conn, admitted, accessed_by=_ACTOR, purpose=_PURPOSE)
+
+        stored = ebull_test_conn.execute(
+            "SELECT quarantine_arm FROM strategy_results_store WHERE strategy_id = 'S-QARM' ORDER BY quarantine_arm"
+        ).fetchall()
+        assert [row[0] for row in stored] == ["admitted", "masked"]
+
+    # ⚠ The vocabulary is closed in SQL as well as in Python — a third arm
+    # nobody defined must not be storable by a writer that bypasses the model.
+    with pytest.raises(psycopg.errors.IntegrityError), ebull_test_conn.transaction():
+        ebull_test_conn.execute(
+            "UPDATE strategy_results_store SET quarantine_arm = 'conservative' WHERE strategy_id = 'S-QARM'"
+        )
+
+
 def test_an_evaluate_record_authorises_only_its_own_result_version(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
@@ -559,13 +599,15 @@ def test_an_evaluate_record_authorises_only_its_own_result_version(
     with pytest.raises(psycopg.errors.IntegrityError), ebull_test_conn.transaction():
         ebull_test_conn.execute(
             "INSERT INTO strategy_results_store (strategy_id, strategy_version, result_version, result_scope, "
-            "namespace, ambiguity_arm, window_start, window_end, universe_basis, corpus_version, cost_model_id, "
+            "namespace, ambiguity_arm, quarantine_arm, window_start, window_end, universe_basis, corpus_version, "
+            "cost_model_id, "
             "carry_unmodelled, sizing_rule, position_rule_set_version, outcome_rule_set_version, "
             "input_rule_set_version, evaluated_instrument_count, expectancy_per_trade_pct, profit_factor, cagr_pct, "
             "annualised_volatility_pct, sharpe, sortino, max_drawdown_pct, exposure_time_pct, turnover_annualised, "
             "trade_count, return_vs_buy_and_hold_pct, losing_trade_count, losing_period_count, open_trade_count, "
             "unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id) "
-            "VALUES (%(sid)s, %(sver)s, %(rver)s, 'sleeve', 'hold_out', 'best_case', '1962-01-02', '2026-07-08', "
+            "VALUES (%(sid)s, %(sver)s, %(rver)s, 'sleeve', 'hold_out', 'best_case', 'masked', '1962-01-02', "
+            "'2026-07-08', "
             "'survivor_only', 'cv', 'cm', true, 'sr', 'p1', 'o1', 'i1', 10, 0.5, 1.18, 3.9, 14.2, 0.27, 0.39, "
             "-31.4, 62.1, 3.05, 100, -2.4, 50, 20, 4, 0, 251.67, 418.0, 420.4, 'criterion7-v1')",
             {

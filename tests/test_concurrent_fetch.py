@@ -259,7 +259,22 @@ class TestRateLimitSafetyUnderConcurrency:
         # Build a ResilientClient with no real httpx underneath — we
         # only exercise ``_throttle_and_stamp`` directly. The lock
         # protects the read-modify-write of ``_last_request_at[0]``.
-        clock: list[float] = [0.0]
+        recorded: list[float] = []
+
+        class _RecordingClock(list[float]):
+            """The client's stamp slot, which records every write.
+
+            ⚠ ``_throttle_and_stamp`` assigns ``_last_request_at[0]`` while
+            holding ``_throttle_lock``, so this ``__setitem__`` runs inside the
+            critical section. That is what makes the recorded sequence the
+            throttle's own, rather than an observation of it taken later.
+            """
+
+            def __setitem__(self, index: int, value: float) -> None:  # type: ignore[override]
+                super().__setitem__(index, value)
+                recorded.append(value)
+
+        clock: list[float] = _RecordingClock([0.0])
         lock = threading.Lock()
         # min_interval=0 path still locks for a deterministic stamp
         # write; min_interval>0 path tests the throttle branch.
@@ -269,26 +284,32 @@ class TestRateLimitSafetyUnderConcurrency:
         rc._throttle_lock = lock
         rc._gate = None  # #1484: no cross-process gate -> exercise the in-process floor
 
-        stamps: list[float] = []
-        stamps_lock = threading.Lock()
-
         def fire() -> None:
             rc._throttle_and_stamp()  # pyright: ignore[reportPrivateUsage]
-            with stamps_lock:
-                stamps.append(time.monotonic())
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for _ in range(40):
                 pool.submit(fire)
 
-        stamps.sort()
-        # No two consecutive successful fires can be within the floor.
-        # Allow 2 ms slack for OS sleep imprecision.
-        slack = 0.002
-        for prev, cur in zip(stamps, stamps[1:], strict=False):
-            assert cur - prev >= rc._min_interval - slack, (
-                f"throttle violation: {cur - prev:.4f}s < {rc._min_interval}s floor"
-            )
+        # ⚠⚠ THE STAMPS ARE THE ONES THE THROTTLE WROTE, captured INSIDE its own
+        # lock — not `time.monotonic()` read after `_throttle_and_stamp` returns.
+        #
+        # The earlier form timed the wrong instant. A thread that was correctly
+        # spaced by the throttle could be descheduled between returning and
+        # taking its own reading, so two readings landed closer together than
+        # the floor while the floor itself had held. Measured 2026-08-07 on an
+        # otherwise idle box: 2 failures in 5 consecutive runs of this class,
+        # against no change in `resilient_client` — a wall-clock assertion about
+        # thread scheduling, wearing a rate-limit invariant's name. Reading the
+        # sequence the throttle ASSIGNED removes the gap entirely: `__setitem__`
+        # below runs while `_throttle_lock` is held, so the recorded order is
+        # the assignment order and no post-return scheduling can reach it.
+        #
+        # The invariant asserted is unchanged and is checked on MORE stamps than
+        # before (every write, including the initial 0.0 seed's successors).
+        assert len(recorded) == 40, f"expected 40 stamps under the throttle lock, recorded {len(recorded)}"
+        for prev, cur in zip(recorded, recorded[1:], strict=False):
+            assert cur - prev >= rc._min_interval, f"throttle violation: {cur - prev:.4f}s < {rc._min_interval}s floor"
 
 
 # ---------------------------------------------------------------------------
