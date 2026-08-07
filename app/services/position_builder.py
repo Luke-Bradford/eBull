@@ -568,8 +568,11 @@ def build_positions(
             f"{len(outcomes)} outcomes supplied for a regime that is not level-based — they would be read by "
             "nothing, and a close source nobody applies is a close source nobody notices is missing"
         )
-    if outcome_pin is None and outcomes:
-        raise ValueError("outcomes supplied without a version pin — see OutcomePin")
+    # ⚠ NO third check for "outcomes without a pin". It would be unreachable:
+    # a non-empty `outcomes` forces `level_based` through the check above, and
+    # `level_based` forces a non-null pin through the one above that. Written
+    # out because the absence looks like an omission — the pin IS required
+    # whenever outcomes are supplied, by those two checks composed.
     if exits and not regime.signal_pair:
         raise ValueError(
             f"{len(exits)} exit fills supplied for a regime that declares no exit leg — the ledger and the "
