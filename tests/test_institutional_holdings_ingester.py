@@ -1293,3 +1293,101 @@ class TestSeedFiler:
             assert row[0] == "BERKSHIRE HATHAWAY"
             assert row[1] == "updated"
             assert row[2] is True
+
+
+# ---------------------------------------------------------------------------
+# #2213 — CUSIP resolution must read BOTH resolution providers
+# ---------------------------------------------------------------------------
+
+
+def _seed_cusip_mapping_for_provider(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    cusip: str,
+    provider: str,
+    is_primary: bool = False,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary)
+        VALUES (%s, %s, 'cusip', %s, %s)
+        ON CONFLICT (provider, identifier_type, identifier_value)
+            WHERE NOT (provider = 'sec' AND identifier_type = 'cik')
+        DO NOTHING
+        """,
+        (instrument_id, provider, cusip.upper(), is_primary),
+    )
+
+
+class TestCusipResolutionReadsBothProviders:
+    """``_resolve_cusip_to_instrument_id`` filtered ``provider = 'sec'``
+    from #740 — written before OpenFIGI existed as a provider — so the
+    OpenFIGI mappings #1233 PR-1b started writing were invisible to
+    the 13F-HR ingest path, its rewash, and the manifest parser (all
+    three import this one function).
+
+    Measured on dev 2026-08-06: of the 1,503 CUSIPs mapped by OpenFIGI
+    *only*, 1,483 had zero ``institutional_holdings`` rows, against
+    3,062 of 3,083 for SEC-mapped CUSIPs. GOOGL, GOOG, XOM, TSLA, BAC,
+    KO and BRK.B all sat at zero.
+    """
+
+    def test_openfigi_only_mapping_resolves(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The regression guard. Pre-#2213 this returned ``None``."""
+        from app.services.institutional_holdings import _resolve_cusip_to_instrument_id
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_213_101, symbol="TSLA")
+        _seed_cusip_mapping_for_provider(conn, instrument_id=2_213_101, cusip="88160R101", provider="openfigi")
+        conn.commit()
+
+        assert _resolve_cusip_to_instrument_id(conn, "88160R101") == 2_213_101
+
+    def test_sec_mapping_wins_when_both_providers_present(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The SEC curated mapping stays authoritative; OpenFIGI is the
+        approved fallback (settled decision 2026-05-22).
+
+        Both rows are seeded ``is_primary=FALSE`` — the shape dev
+        actually holds — and the OpenFIGI row is inserted FIRST, so
+        neither the ``is_primary DESC`` nor the
+        ``external_identifier_id ASC`` tiebreak can produce the right
+        answer. Only the provider CASE can. That isolation is the
+        point: without it this test would pass against a query that
+        had lost the provider ordering entirely.
+        """
+        from app.services.institutional_holdings import _resolve_cusip_to_instrument_id
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_213_110, symbol="SECX")
+        _seed_instrument(conn, iid=2_213_111, symbol="FIGX")
+        _seed_cusip_mapping_for_provider(
+            conn, instrument_id=2_213_111, cusip="00191U102", provider="openfigi", is_primary=False
+        )
+        _seed_cusip_mapping_for_provider(
+            conn, instrument_id=2_213_110, cusip="00191U102", provider="sec", is_primary=False
+        )
+        conn.commit()
+
+        assert _resolve_cusip_to_instrument_id(conn, "00191U102") == 2_213_110
+
+    def test_unmapped_cusip_still_returns_none(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The widening must not turn an unmapped CUSIP into a match —
+        an unresolved holding still belongs in ``unresolved_13f_cusips``,
+        not attributed to an arbitrary instrument."""
+        from app.services.institutional_holdings import _resolve_cusip_to_instrument_id
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=2_213_120, symbol="NOPE")
+        conn.commit()
+
+        assert _resolve_cusip_to_instrument_id(conn, "999999999") is None

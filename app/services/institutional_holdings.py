@@ -699,17 +699,41 @@ def _resolve_cusip_to_instrument_id(
     cusip: str,
 ) -> int | None:
     """Look up the instrument_id mapped to a CUSIP via
-    external_identifiers. CUSIPs use ``provider='sec'``,
-    ``identifier_type='cusip'``. The backfill that populates these
-    rows is tracked in #740."""
+    ``external_identifiers`` (``identifier_type='cusip'``).
+
+    Reads BOTH resolution providers. ``provider='sec'`` is the #740
+    backfill off the 13F Official List; ``provider='openfigi'`` is the
+    approved CUSIP-resolution fallback (settled decision 2026-05-22)
+    written by ``cusip_resolver`` PR-1b. This function said
+    ``provider = 'sec'`` alone from #740 until #2213, which predated
+    OpenFIGI existing as a provider — the bulk-partition call sites
+    added by PR-1b were written ``IN ('sec', 'openfigi')`` from the
+    start (`cusip_resolver.py` load_bulk_cusip_map / the post-bulk
+    sweep) and this one was never widened to match. The cost was
+    measurable: of the 1,503 CUSIPs mapped by OpenFIGI *only*, 1,483
+    had zero ``institutional_holdings`` rows, against 3,062 of 3,083
+    for SEC-mapped ones — every 13F-HR holding of GOOGL, GOOG, XOM,
+    TSLA, BAC, KO and BRK.B was dropped at ingest into
+    ``unresolved_13f_cusips`` and never recovered.
+
+    SEC wins when a CUSIP carries both mappings (75 do), matching the
+    ``is_primary=FALSE`` posture ``_promote_to_external_identifier``
+    writes OpenFIGI rows under: the SEC curated mapping is
+    authoritative, OpenFIGI is the fallback. Same provider-priority
+    ordering as ``blockholders._resolve_issuer_to_instrument_id``
+    (`app/services/blockholders.py:487-495`), which is where the 13D/G
+    path already got this right.
+    """
     cur = conn.execute(
         """
         SELECT instrument_id
         FROM external_identifiers
-        WHERE provider = 'sec'
+        WHERE provider IN ('sec', 'openfigi')
           AND identifier_type = 'cusip'
           AND identifier_value = %(cusip)s
-        ORDER BY is_primary DESC, external_identifier_id ASC
+        ORDER BY CASE provider WHEN 'sec' THEN 0 ELSE 1 END,
+                 is_primary DESC,
+                 external_identifier_id ASC
         LIMIT 1
         """,
         {"cusip": cusip.strip().upper()},
