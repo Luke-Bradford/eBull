@@ -22,6 +22,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.strategy_result import (
     CORPUS_VERSION,
     EVALUATION_WINDOW_END,
@@ -418,6 +419,77 @@ class TestStrategyResultValidation:
         """NULL is a real state — 5d writes results before 5e computes the DSR.
         The GATE refuses on it; the shape does not."""
         assert _result(trial_count=None).trial_count is None
+
+
+class TestTheDeflatedSharpeBindsItsScalars:
+    """Stage 5e-3 — ``sql/266``'s all-or-nothing, checked where the field is named.
+
+    ⚠ The binding is ONE WAY. A ``deflated`` object forces the two scalars to
+    agree with it; a declared trial count with no DSR stays legal, because the
+    gate has a live refusal describing exactly that row.
+    """
+
+    def _deflated(self, **overrides: object) -> DeflatedSharpeResult:
+        base: dict[str, object] = {
+            "deflated_sharpe": 0.72,
+            "expected_max_sharpe": 0.015,
+            "trade_sharpe": 0.017,
+            "skewness": -0.4,
+            "kurtosis": 8.0,
+            "effective_sample_size": 104291.8,
+            "declared_trials": 11,
+            "independent_trials": 9.0,
+            "average_trial_correlation": 0.2,
+            "trial_sharpe_variance": 1e-4,
+            "measured_trials": 2,
+            "trial_register_version": "trial-register-2026-08-07",
+        }
+        base.update(overrides)
+        return DeflatedSharpeResult(**base)  # type: ignore[arg-type]
+
+    def _with(self, **overrides: object):  # noqa: ANN202 - local helper
+        deflated = self._deflated()
+        kwargs: dict[str, object] = {
+            "deflated": deflated,
+            "trial_count": deflated.declared_trials,
+            "deflated_sharpe": Decimal(repr(deflated.deflated_sharpe)),
+            "metrics": _metrics(effective_sample_size=deflated.effective_sample_size),
+        }
+        kwargs.update(overrides)
+        return _result(**kwargs)
+
+    def test_a_consistent_set_constructs(self) -> None:
+        assert self._with().deflated is not None
+
+    def test_a_disagreeing_trial_count_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="disagrees with the 11 trials"):
+            self._with(trial_count=41)
+
+    def test_a_missing_trial_count_beside_a_dsr_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="disagrees with the 11 trials"):
+            self._with(trial_count=None)
+
+    def test_a_disagreeing_deflated_sharpe_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="two copies of one number"):
+            self._with(deflated_sharpe=Decimal("0.31"))
+
+    def test_a_sample_size_the_metric_set_does_not_carry_is_refused(self) -> None:
+        """⚠⚠ ONE SAMPLE SIZE, ONE COLUMN.
+
+        ``sql/266`` gives the DSR no ``effective_sample_size`` of its own — it
+        consumes criterion 3's, and the ledger rebuilds the field FROM that
+        column. Without this, a row could be deflated against one sample size
+        and stored declaring another, and the round trip would silently swap
+        the first for the second.
+        """
+        with pytest.raises(ValueError, match="criterion 6 consumes criterion 3's number"):
+            self._with(metrics=_metrics_without_bootstrap())
+
+    def test_a_declared_count_without_a_dsr_stays_legal(self) -> None:
+        """The converse is NOT bound — and the gate is what reports it."""
+        result = _result(trial_count=11, deflated_sharpe=None, deflated=None)
+        assert result.deflated is None
+        assert result.trial_count == 11
 
 
 class TestPromotionGateClears:

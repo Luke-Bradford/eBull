@@ -21,7 +21,7 @@ of the corpus and moves with every harvest.
 through the real path (``s1_signals`` / ``s3_signals`` →
 ``signal_ledger.resolve_fills`` → ``build_positions`` → ``cost_positions``),
 run the sleeve equity curve over the whole corpus, compute criterion 7's metric
-set, and assert seven properties.
+set, and assert eleven properties.
 
   P1  **§2.1's EQUALITY, on the whole trade list.** Every leg's entry date
       EQUALS the position's ``entry_fill_bar_date``, every leg's entry price
@@ -48,6 +48,24 @@ set, and assert seven properties.
       wiring slip that put one sleeve's design effect beside another's sample
       size. The block length is inside its own cluster axis and the interval is
       not inverted.
+  P8  **Criterion 6's Deflated Sharpe computes** (stage 5e-3) on the declared
+      trial register, or refuses visibly. The moments are taken on the TRADE
+      axis, which is the axis criterion 3's effective sample size counts.
+  P9  ⚠⚠ **`T` IS THE EFFECTIVE SAMPLE SIZE, NEVER THE NOMINAL TRADE COUNT.**
+      The DSR is recomputed on the nominal count purely as a CONTRAST and must
+      come out strictly MORE CONFIDENT — further from 0.5 — §5.2 being explicit
+      that a DSR on a nominal *n* is the number criterion 3 forbids. ⚠ The
+      assertion is sign-agnostic on purpose: eq. (2) multiplies `(SR - SR_0)` by
+      `sqrt(T-1)`, so a larger T amplifies whatever sign that difference already
+      has. An earlier draft required the nominal arm to be strictly HIGHER and
+      failed on the full population, because both sleeves sit BELOW their
+      threshold. ⚠ The contrast is printed and asserted, never stored;
+      `sql/266` has no column it could go in.
+  P10 **The implied independent trial count obeys Appendix A.3** — inside
+      `[1, M]`, and strictly below `M` whenever the measured correlation is
+      positive, because correlated trials are not independent evidence.
+  P11 **The trials' correlation is MEASURED**, off their realised per-entry-date
+      return series on the dates both traded — not declared.
 
   ⚠ WHAT IS NOT COVERED, STATED SO THE GAP IS A DECISION. Only S-1 and S-3 run
   here, for phase 5a's reason: C2 (``level``) needs the resolver over the whole
@@ -69,10 +87,19 @@ from datetime import date
 from decimal import Decimal
 from typing import Final
 
+import numpy as np
 import psycopg
 
 from app.config import settings
 from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, half_spread_for
+from app.services.deflated_sharpe import (
+    MIN_MEASURED_TRIALS,
+    TradeMoments,
+    average_trial_correlation,
+    deflated_sharpe,
+    implied_independent_trials,
+    trade_moments,
+)
 from app.services.equity_curve import SIZING_RULE_ID, EquityCurve, LegBook, build_equity_curve
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import Window, build_positions
@@ -84,6 +111,7 @@ from app.services.strategies.s3_mean_reversion_in_trend import S3_STRATEGY_ID, s
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_result import EVALUATION_WINDOW_END, EVALUATION_WINDOW_START
 from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics, TradeReturns, compute_metrics
+from app.services.trial_register import TRIAL_REGISTER
 
 # ⚠ REUSED, not re-derived. Phase 5a built the corpus→positions path and 5b the
 # costing on top of it; a second copy here would be a second place for the fill
@@ -155,6 +183,25 @@ class _Sleeve:
         self.open_at_end = 0
         self.excluded: Counter[str] = Counter()
         self.problems: list[str] = []
+        #: Stage 5e-3's per-trade moments, set by ``report``. ⚠ On the TRADE
+        #: axis, so they are commensurable with the block bootstrap's effective
+        #: sample size — which is what criterion 6's `T` consumes.
+        self.moments: TradeMoments | None = None
+
+    def daily_trade_returns(self) -> dict[date, float]:
+        """Mean trade return per ENTRY date — this trial's return series.
+
+        ⚠ THE AXIS IS OURS AND IT IS DECLARED. Equation (8) needs a correlation
+        BETWEEN trials, and a trial's natural return series is the one it
+        realised. The entry date is used because it is already criterion 3's
+        cluster key, so the two correlation constructions in this phase agree on
+        what "the same day" means. Dates where only one sleeve traded carry no
+        pairwise information and are dropped by the caller.
+        """
+        totals: dict[date, list[float]] = {}
+        for value, day in zip(self.returns, self.entry_dates, strict=True):
+            totals.setdefault(day, []).append(value)
+        return {day: sum(values) / len(values) for day, values in totals.items()}
 
     def absorb(
         self,
@@ -335,7 +382,204 @@ class _Sleeve:
             )
         if (metrics.expectancy_ci_low_pct or 0.0) > (metrics.expectancy_ci_high_pct or 0.0):
             self.problems.append(f"{self.label}: P7 the reported interval is inverted")
+
+        # --- criterion 6, stage 5e-3 --------------------------------------
+        # ⚠ The moments are computed on the TRADE axis, the same axis the ESS
+        # above counts. The Sharpe printed here is therefore NOT the annualised
+        # curve Sharpe two blocks up, and the two are labelled so nobody reads
+        # one for the other.
+        self.moments = trade_moments(list(self.returns))
+        if self.moments is None:
+            self.problems.append(f"{self.label}: P8 the trade population has no moments")
+            return metrics
+        print(f"      per-trade Sharpe       {self.moments.sharpe:>12.6f}   (NOT the annualised {metrics.sharpe:.4f})")
+        print(f"      trade skewness         {self.moments.skewness:>12.4f}")
+        print(f"      trade kurtosis         {self.moments.kurtosis:>12.4f}   (RAW — Normal is 3)")
         return metrics
+
+
+#: Which register entry each sleeve IS. ⚠ Explicit rather than derived from the
+#: label: a measured Sharpe filed under an id the register does not declare
+#: means the trial is missing from `M`, and `TrialRegister.sharpe_variance`
+#: raises on exactly that — which it cannot do if the key is manufactured from
+#: whatever string the sleeve happened to be called.
+_SLEEVE_TRIAL_IDS: Final = {
+    "S-1": "s1-time-series-momentum",
+    "S-3": "s3-mean-reversion-in-trend",
+}
+
+
+def _criterion6(sleeves: dict[str, _Sleeve], measured: dict[str, StrategyMetrics]) -> list[str]:
+    """Stage 5e-3 — the Deflated Sharpe on the declared trial count.
+
+    Asserts P8-P11:
+
+      P8   the DSR computes for every sleeve that produced moments and an
+           effective sample size, and refuses cleanly where one is missing;
+      P9   ⚠⚠ **`T` is the effective sample size, never the nominal count.**
+           Recomputed here on the nominal count as a CONTRAST and required to
+           come out strictly MORE CONFIDENT — further from 0.5 — because eq. (2)
+           multiplies `(SR - SR_0)` by `sqrt(T-1)` and so amplifies whatever
+           SIGN that difference already has. §5.2 is explicit that a DSR on a
+           nominal *n* is the number criterion 3 forbids, and a contrast that
+           did not move would mean the ESS was never wired in;
+      P10  the implied independent trials sit inside `[1, M]` and below `M`
+           whenever the measured correlation is positive (Appendix A.3);
+      P11  the trials' correlation is MEASURED off their realised return series,
+           not declared.
+    """
+    problems: list[str] = []
+    print("\n  [criterion 6 — the Deflated Sharpe]")
+
+    usable = {
+        label: sleeve
+        for label, sleeve in sleeves.items()
+        if sleeve.moments is not None and measured.get(label) is not None
+    }
+    print(f"      declared trials (M)    {TRIAL_REGISTER.declared_count:>12,}   ({TRIAL_REGISTER.version})")
+    print(f"      measured this run      {len(usable):>12,}")
+    if len(usable) < MIN_MEASURED_TRIALS:
+        # ⚠ NOT a failure. Fewer than two measured trials is a real state and the
+        # refusal is the correct output — but it must be visible, not silent.
+        print(f"      → refused: fewer than {MIN_MEASURED_TRIALS} measured trials, V[SR_n] does not exist")
+        return problems
+
+    # ⚠ A sleeve with no register entry is a MEASURED trial that criterion 6's
+    # `M` does not count — the exact under-count the criterion calls decorative.
+    # Reported as a refusal rather than raised: a bare `KeyError` here would be
+    # the one path in this function that crashes instead of failing visibly, and
+    # adding a fifth sleeve is how it would be reached.
+    unregistered = sorted(label for label in usable if label not in _SLEEVE_TRIAL_IDS)
+    if unregistered:
+        problems.append(
+            f"P8 sleeves {unregistered} have no trial_register entry — their Sharpes would be measured but "
+            "uncounted in M, which under-counts the search and RAISES the DSR"
+        )
+        return problems
+
+    # ⚠ THE MAPPING CAN BE STALE OR COLLIDING, AND BOTH FAIL QUIETLY OTHERWISE.
+    # A mapped id the register no longer declares makes `sharpe_variance` RAISE
+    # (its undeclared-key guard) rather than report; and two labels mapped to one
+    # id silently collapse in the dict below, shrinking `measured_trials` without
+    # anything saying so. Both are checked here so the harness reports instead of
+    # crashing or under-counting.
+    mapped = {label: _SLEEVE_TRIAL_IDS[label] for label in usable}
+    stale = sorted(trial for trial in mapped.values() if trial not in TRIAL_REGISTER.trial_ids)
+    if stale:
+        problems.append(
+            f"P8 sleeve trial ids {stale} are not declared in {TRIAL_REGISTER.version} — the mapping and the "
+            "register have drifted, so M would not count the trials actually measured"
+        )
+        return problems
+    if len(set(mapped.values())) != len(mapped):
+        problems.append(
+            f"P8 two sleeves map to one trial id ({sorted(mapped.items())}) — their Sharpes would collapse into "
+            "one entry and silently reduce the measured-trial count"
+        )
+        return problems
+
+    sharpes = {mapped[label]: sleeve.moments.sharpe for label, sleeve in usable.items()}  # type: ignore[union-attr]
+    variance = TRIAL_REGISTER.sharpe_variance(sharpes)
+    if variance is None or variance <= 0.0:
+        print("      → refused: V[SR_n] is zero or undefined")
+        return problems
+
+    # P11 — the correlation is measured, on the dates both trials traded.
+    labels = sorted(usable)
+    series = {label: usable[label].daily_trade_returns() for label in labels}
+    common = sorted(set.intersection(*(set(series[label]) for label in labels)))
+    if len(common) < 2:
+        print("      → refused: the trials share fewer than 2 active dates, so no correlation exists")
+        return problems
+    matrix = np.corrcoef(np.array([[series[label][day] for day in common] for label in labels]))
+    # ⚠ `np.corrcoef` returns NaN for a CONSTANT series — its denominator is that
+    # series' own standard deviation. Reachable: a trial whose per-date mean
+    # return never varies over the shared dates. `average_trial_correlation`
+    # would then raise on the range check rather than report, so it is caught.
+    if not np.all(np.isfinite(matrix)):
+        print("      → refused: a trial's return series is constant over the shared dates, so no correlation exists")
+        return problems
+    rho = average_trial_correlation(matrix)
+    print(f"      shared active dates    {len(common):>12,}   (dates BOTH trials traded)")
+    print(f"      avg trial correlation  {rho:>12.6f}   (MEASURED, eq. 8)")
+    print(f"      V[SR_n]                {variance:>12.8f}   (ddof=1 over {len(sharpes)} measured)")
+
+    # ⚠ A.3 bounds rho at `-1/(M-1)` for a positive-definite matrix, and
+    # `implied_independent_trials` RAISES outside it. A measured rho can land
+    # there on other data — this run's is +0.126 — so it is reported rather than
+    # allowed to crash before P10 below can describe it.
+    correlation_floor = -1.0 / (TRIAL_REGISTER.declared_count - 1)
+    if not correlation_floor < rho <= 1.0:
+        problems.append(
+            f"P11 measured correlation {rho} is outside A.3's ({correlation_floor}, 1] bound for "
+            f"M = {TRIAL_REGISTER.declared_count} — the matrix it came from is not positive-definite"
+        )
+        return problems
+
+    independent = implied_independent_trials(rho, TRIAL_REGISTER.declared_count)
+    print(f"      independent trials (N) {independent:>12.4f}   of {TRIAL_REGISTER.declared_count} declared (eq. 9)")
+    # P10 — A.3's interpolation bounds.
+    if not 1.0 <= independent <= TRIAL_REGISTER.declared_count:
+        problems.append(f"P10 implied independent trials {independent} is outside [1, {TRIAL_REGISTER.declared_count}]")
+    if rho > 0.0 and independent >= TRIAL_REGISTER.declared_count:
+        problems.append(f"P10 correlation {rho} is positive but N {independent} did not fall below M")
+
+    for label in labels:
+        sleeve = usable[label]
+        metrics = measured[label]
+        assert sleeve.moments is not None
+        ess = metrics.effective_sample_size
+        if ess is None:
+            problems.append(f"{label}: P8 no effective sample size, so criterion 6 cannot consume one")
+            continue
+        common_args = {
+            "trial_sharpe_variance": variance,
+            "declared_trials": TRIAL_REGISTER.declared_count,
+            "average_correlation": rho,
+            "measured_trials": len(sharpes),
+            "trial_register_version": TRIAL_REGISTER.version,
+        }
+        result = deflated_sharpe(sleeve.moments, effective_sample_size=ess, **common_args)  # type: ignore[arg-type]
+        if result is None:
+            print(f"      [{label}] → refused (a degenerate input; the gate refuses on the null)")
+            continue
+        # P9 — the contrast. ⚠ The nominal arm is computed ONLY to be reported
+        # and asserted against; it is never stored, and `sql/266` has no column
+        # it could go in.
+        on_nominal = deflated_sharpe(sleeve.moments, effective_sample_size=float(metrics.trade_count), **common_args)  # type: ignore[arg-type]
+        print(f"      [{label}] threshold SR_0  {result.expected_max_sharpe:>12.6f}   (eq. 1 under H0)")
+        print(f"      [{label}] DSR on ESS      {result.deflated_sharpe:>12.6f}   T = {ess:,.1f}")
+        if on_nominal is None:
+            problems.append(f"{label}: P9 the nominal-n contrast did not compute")
+            continue
+        print(
+            f"      [{label}] DSR on nominal  {on_nominal.deflated_sharpe:>12.6f}   T = {metrics.trade_count:,} "
+            f"← the number criterion 3 forbids"
+        )
+        # ⚠⚠ THE INVARIANT IS SIGN-AGNOSTIC, AND THE FULL POPULATION IS WHAT
+        # TAUGHT US THAT. An earlier draft asserted the nominal arm comes out
+        # HIGHER — i.e. that a nominal n always flatters. It does not. Equation
+        # (2) multiplies `(SR - SR_0)` by `sqrt(T-1)`, so a larger T amplifies
+        # whatever SIGN that difference already has: it flatters a strategy
+        # above the threshold and buries one below it. Both sleeves here sit
+        # BELOW (S-1's per-trade Sharpe is negative — its expectancy is
+        # -0.44%/trade), so the nominal arm drove both DSRs to ~0 and the
+        # one-sided assertion failed on a correct implementation.
+        #
+        # What a nominal n always does is overstate CONFIDENCE — it pushes the
+        # DSR further from 0.5 in whichever direction it already leans. That is
+        # the property asserted, and it holds for either sign.
+        nominal_confidence = abs(on_nominal.deflated_sharpe - 0.5)
+        effective_confidence = abs(result.deflated_sharpe - 0.5)
+        if nominal_confidence <= effective_confidence:
+            problems.append(
+                f"{label}: P9 the nominal-n DSR {on_nominal.deflated_sharpe} is no more confident than the "
+                f"effective-n {result.deflated_sharpe} — the {metrics.trade_count:,}-trade count should have "
+                f"overstated the evidence relative to {ess:,.1f}"
+            )
+        if result.effective_sample_size != ess:
+            problems.append(f"{label}: P9 the stored sample length is not the effective sample size")
+    return problems
 
 
 def _benchmark_leg(
@@ -556,9 +800,14 @@ def curve(*, limit: int | None) -> int:
     )
 
     problems: list[str] = []
-    for sleeve in sleeves.values():
-        sleeve.report(axis=axis, benchmark_curve=benchmark_curve)
+    measured: dict[str, StrategyMetrics] = {}
+    for label, sleeve in sleeves.items():
+        sleeve_metrics = sleeve.report(axis=axis, benchmark_curve=benchmark_curve)
+        if sleeve_metrics is not None:
+            measured[label] = sleeve_metrics
         problems.extend(sleeve.problems)
+
+    problems.extend(_criterion6(sleeves, measured))
 
     print(f"\n  property violations: {len(problems)}")
     for problem in problems[:20]:

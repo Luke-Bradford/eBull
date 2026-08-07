@@ -74,6 +74,7 @@ from decimal import Decimal
 from typing import Literal, get_args
 
 from app.services.cost_model import COST_MODEL_ID
+from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.equity_curve import SIZING_RULE_ID
 from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
 
@@ -471,6 +472,15 @@ class StrategyResult:
     #: number of shipped strategies"*.
     trial_count: int | None = None
     deflated_sharpe: Decimal | None = None
+    #: Stage 5e-3's declared inputs (``sql/266``). ⚠ OPTIONAL and SEPARATE from
+    #: the two scalars above rather than replacing them, which keeps both of the
+    #: gate's criterion-6 refusals reachable: a caller may declare a trial count
+    #: with no DSR yet (the register exists, the evaluation has not run), and
+    #: the gate must still be able to say which of the two is missing. When it
+    #: IS present, ``__post_init__`` binds the scalars to it — the same
+    #: all-or-nothing ``sql/266`` enforces, checked at assembly time where the
+    #: error names the field.
+    deflated: DeflatedSharpeResult | None = None
 
     def __post_init__(self) -> None:
         if self.identity.result_scope not in RESULT_SCOPES:
@@ -512,6 +522,40 @@ class StrategyResult:
                 f"trial_count must be >= 1 when declared, got {self.trial_count} — criterion 6 counts abandoned "
                 "branches and discarded parameter values, so zero trials is not a state that can be reached"
             )
+        # ⚠ THE DSR PROVENANCE BINDS THE TWO SCALARS, ONE WAY ONLY. A `deflated`
+        # object present alongside a null or disagreeing `trial_count` /
+        # `deflated_sharpe` is the exact row `sql/266`'s all-or-nothing CHECK
+        # refuses — caught here, where the message names the field, rather than
+        # as an integrity error at write time. The converse is deliberately NOT
+        # required: a declared trial count with no DSR yet is a real state and
+        # the gate has a refusal for it.
+        if self.deflated is not None:
+            if self.trial_count != self.deflated.declared_trials:
+                raise ValueError(
+                    f"trial_count {self.trial_count} disagrees with the {self.deflated.declared_trials} trials the "
+                    "Deflated Sharpe was deflated against — the stored count would not describe the correction"
+                )
+            if self.deflated_sharpe is None or float(self.deflated_sharpe) != self.deflated.deflated_sharpe:
+                raise ValueError(
+                    f"deflated_sharpe {self.deflated_sharpe} disagrees with the computed "
+                    f"{self.deflated.deflated_sharpe} — two copies of one number is how they diverge"
+                )
+            # ⚠⚠ ONE SAMPLE SIZE, ONE COLUMN. `sql/266` gives the DSR no
+            # `effective_sample_size` of its own — it consumes criterion 3's,
+            # and `result_ledger` therefore rebuilds this field FROM that
+            # column. Without this check a caller could deflate against one
+            # sample size and store a row declaring another, and the round trip
+            # would silently replace the first with the second: the stored DSR
+            # would then be a number no stored input produces. Caught by
+            # `tests/test_strategy_holdout_namespace.py`'s criterion-6 round
+            # trip, which is what surfaced it.
+            if self.deflated.effective_sample_size != self.metrics.effective_sample_size:
+                raise ValueError(
+                    f"the Deflated Sharpe was computed on an effective sample size of "
+                    f"{self.deflated.effective_sample_size} but the metric set carries "
+                    f"{self.metrics.effective_sample_size} — criterion 6 consumes criterion 3's number, and there is "
+                    "only one column for it"
+                )
 
 
 # ---------------------------------------------------------------------------
