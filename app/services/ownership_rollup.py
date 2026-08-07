@@ -241,6 +241,12 @@ class Holder:
     # candidate so :func:`_reconcile_insider_control_groups` can gate the
     # deemed-chain tier on it (#2230). ``False`` for every non-Section-16 holder.
     is_ten_percent_owner: bool = False
+    # ``True`` when this holder's ``ownership_nature`` came from Form 4/3 Table I
+    # column 5 rather than from the DERA insider dataset's relationship flags
+    # (#2386). ``ownership_nature`` has four writers and only three agree on its
+    # meaning, so any read-path branch on the string must also check this flag —
+    # see :func:`_is_deemed_chain`. ``False`` for every non-Section-16 holder.
+    nature_from_table_i: bool = False
     # Per-lot breakdown when this owner's additive Section-16 lots (direct +
     # indirect) were collapsed to one display line (#1942). Display-only; the
     # lots SUM to ``shares`` (already counted once). Empty for single-lot owners.
@@ -758,6 +764,14 @@ class _Candidate:
     # source leaves it ``False``. Fail-closed: a row whose accession/CIK does
     # not join carries ``False`` and cannot admit a deemed-chain collapse.
     is_ten_percent_owner: bool = False
+    # Provenance of ``ownership_nature`` (#2386). ``True`` only when the value was
+    # read off Form 4 Table I column 5 / Form 3 Table I ``directOrIndirectOwnership``
+    # by one of the three XML ingest paths. ``False`` for a ``:NDT:``/``:NDH:`` row
+    # from ``sec_insider_dataset_ingest``, whose ``_map_relationship`` writes the
+    # DERA RELATIONSHIP flags into the same column (officer/director → ``direct``,
+    # ten-percent-owner → ``beneficial``) and never reads the D/I field at all.
+    # ``False`` for every non-Section-16 source, whose nature is not Table I either.
+    nature_from_table_i: bool = False
 
 
 def edgar_archive_url(accession_number: str | None) -> str | None:
@@ -859,7 +873,13 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
             """
             SELECT oc.holder_cik, oc.holder_name, oc.ownership_nature,
                    oc.source, oc.source_accession, oc.shares, oc.period_end,
-                   COALESCE(f.is_ten_percent_owner, FALSE) AS is_ten_percent_owner
+                   COALESCE(f.is_ten_percent_owner, FALSE) AS is_ten_percent_owner,
+                   -- #2386: same marker the de-collision predicate below uses, kept as a
+                   -- COLUMN so the read path can tell a Table I nature from a DERA
+                   -- relationship-derived one. A dataset row only survives that predicate
+                   -- when no manifest parse of its accession exists, so the two are not
+                   -- redundant: this flags the survivors.
+                   (oc.source_document_id !~ ':(NDT|NDH):') AS nature_from_table_i
             FROM ownership_insiders_current oc
             LEFT JOIN insider_filers f
               ON f.accession_number = oc.source_accession
@@ -896,6 +916,7 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                     source_row_id=next(next_row_id),
                     ownership_nature=str(row["ownership_nature"]),
                     is_ten_percent_owner=bool(row["is_ten_percent_owner"]),
+                    nature_from_table_i=bool(row["nature_from_table_i"]),
                 )
             )
 
@@ -1614,6 +1635,18 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 # later amendment, and the relationship is a property of the
                 # holder, not of the winning filing (#2230).
                 is_ten_percent_owner=any(c.is_ten_percent_owner for c in cands),
+                # ``any``, not ``all`` and not the WINNER's flag (#2386): the group is
+                # already keyed on ``ownership_nature``, so every candidate here carries
+                # the SAME string, and one XML-attested row means this holder did report
+                # that D/I value on a Table I. Taking it from the winning candidate
+                # instead (Codex ckpt-2 P2) would drop an attested ``direct`` out of
+                # ``n_direct`` whenever a later dataset row won the tie-break — widening
+                # :func:`_is_deemed_chain`, which counts ``direct`` AGAINST admission.
+                # That is the false-positive direction #1652/#2230 exist to avoid, and
+                # the class is empty anyway: no (instrument, identity, nature) group in
+                # the corpus mixes the two provenances. Re-check with the mixed-group
+                # query recorded on #2386 before assuming otherwise.
+                nature_from_table_i=any(c.nature_from_table_i for c in cands),
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,
@@ -1694,6 +1727,18 @@ def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
                 # later amendment, and the relationship is a property of the
                 # holder, not of the winning filing (#2230).
                 is_ten_percent_owner=any(c.is_ten_percent_owner for c in cands),
+                # ``any``, not ``all`` and not the WINNER's flag (#2386): the group is
+                # already keyed on ``ownership_nature``, so every candidate here carries
+                # the SAME string, and one XML-attested row means this holder did report
+                # that D/I value on a Table I. Taking it from the winning candidate
+                # instead (Codex ckpt-2 P2) would drop an attested ``direct`` out of
+                # ``n_direct`` whenever a later dataset row won the tie-break — widening
+                # :func:`_is_deemed_chain`, which counts ``direct`` AGAINST admission.
+                # That is the false-positive direction #1652/#2230 exist to avoid, and
+                # the class is empty anyway: no (instrument, identity, nature) group in
+                # the corpus mixes the two provenances. Re-check with the mixed-group
+                # query recorded on #2386 before assuming otherwise.
+                nature_from_table_i=any(c.nature_from_table_i for c in cands),
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,  # type: ignore[arg-type]
@@ -2462,7 +2507,9 @@ _INSIDER_GROUP_MIN_SHARES: Final[Decimal] = Decimal(1_000_000)
 #     that are overwhelmingly equal DIRECTOR grants (FLG 11,220 across 11 CIKs,
 #     BBT 2,595 across 10, NWFL 825 across 8) — the #1659 false-positive class.
 #   * Form 4 Table I column 5, "Ownership Form: Direct (D) or Indirect (I)"
-#     (``ownership_nature``). A Rule 16a-1(a)(2) control chain has ONE direct
+#     (``ownership_nature``, counted on ``nature_from_table_i`` rows ONLY — the
+#     column has a fourth writer that means something else by it, #2386).
+#     A Rule 16a-1(a)(2) control chain has ONE direct
 #     holder — the fund that actually holds — and N deemed owners restating the
 #     same block INDIRECTLY. The false-positive class inverts that shape: four
 #     family trusts each *fbo* a different beneficiary, or four individuals with
@@ -2498,13 +2545,27 @@ def _is_deemed_chain(insiders: list[Holder]) -> bool:
     ``indirect``. Fail-closed on every axis: an unjoined relationship row carries
     ``is_ten_percent_owner=False``, and a nature outside {direct, indirect}
     (legacy ``beneficial``) counts toward neither side, so it cannot satisfy the
-    indirect floor."""
+    indirect floor.
+
+    ⚠ The shape test counts only members whose nature is **Table I-attested**
+    (``Holder.nature_from_table_i``), because ``ownership_nature`` is an OVERLOADED
+    column (#2386). Three writers derive it from Form 4/3
+    ``directOrIndirectOwnership`` — the field this gate is about — while
+    ``sec_insider_dataset_ingest._map_relationship`` writes the DERA insider
+    dataset's RELATIONSHIP flags into the same column (officer/director →
+    ``direct``, ten-percent-owner → ``beneficial``) and never reads the D/I field.
+    A DERA officer row is not a Rule 16a-1(a)(2) direct holder and must not count
+    against ``_DEEMED_CHAIN_MAX_DIRECT``; a role-derived row counts toward neither
+    side, the same posture already taken for legacy ``beneficial``. The provenance
+    check is what makes the counters mean what the docstring says they mean — it is
+    NOT a loosening of the thresholds, which are unchanged."""
     if len({h.filer_cik for h in insiders}) < _DEEMED_CHAIN_MIN_CIKS:
         return False
     if not all(h.is_ten_percent_owner for h in insiders):
         return False
-    n_direct = sum(1 for h in insiders if h.ownership_nature == "direct")
-    n_indirect = sum(1 for h in insiders if h.ownership_nature == "indirect")
+    attested = [h for h in insiders if h.nature_from_table_i]
+    n_direct = sum(1 for h in attested if h.ownership_nature == "direct")
+    n_indirect = sum(1 for h in attested if h.ownership_nature == "indirect")
     return n_direct <= _DEEMED_CHAIN_MAX_DIRECT and n_indirect >= _DEEMED_CHAIN_MIN_INDIRECT
 
 

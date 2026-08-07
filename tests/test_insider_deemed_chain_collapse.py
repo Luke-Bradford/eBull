@@ -21,8 +21,10 @@ from decimal import Decimal
 from app.services.ownership_rollup import (
     Holder,
     SourceTag,
+    _Candidate,
     _collapse_insider_control_group,
     _control_group_rep_key,
+    _dedup_by_priority,
     _is_deemed_chain,
     _reconcile_insider_control_groups,
 )
@@ -47,6 +49,7 @@ def _h(
     nature: str | None = "indirect",
     ten_pct: bool = True,
     source: SourceTag = "form4",
+    table_i: bool = True,
 ) -> Holder:
     acc = f"acc-{cik}"
     return Holder(
@@ -62,6 +65,7 @@ def _h(
         dropped_sources=(),
         ownership_nature=nature,
         is_ten_percent_owner=ten_pct,
+        nature_from_table_i=table_i,
     )
 
 
@@ -267,6 +271,85 @@ def test_is_deemed_chain_requires_two_indirect_members() -> None:
         _h("000000003", "Odd One", _SUB_FLOOR, nature="beneficial"),
     ]
     assert _is_deemed_chain(holders) is False
+
+
+# ---------------------------------------------------------------------------
+# ``ownership_nature`` provenance (#2386)
+#
+# The column has four writers and only three mean Form 4/3 Table I column 5 by it.
+# ``sec_insider_dataset_ingest._map_relationship`` maps the DERA insider dataset's
+# RELATIONSHIP flags onto the same column — officer/director → ``direct``,
+# ten-percent-owner → ``beneficial``. The shape test counts Table I-attested rows only.
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_carries_nature_provenance_with_any_semantics() -> None:
+    """The flag has to survive the merge or the gate reads ``False`` on every holder and
+    silently refuses everything. ``any``, not ``all``: candidates are already grouped by
+    ``ownership_nature``, so one XML-attested row proves the string is a real Table I
+    value — and over-claiming here is the direction that KEEPS a direct member counted,
+    which is fail-closed for :func:`_is_deemed_chain`."""
+
+    def _c(nature: str, table_i: bool, row_id: int) -> _Candidate:
+        return _Candidate(
+            source="form4",
+            priority_rank=1,
+            filer_cik="000000001",
+            filer_name="Sponsor Fund L.P.",
+            filer_type=None,
+            shares=Decimal(_SUB_FLOOR),
+            as_of_date=_P,
+            accession_number=f"acc-{row_id}",
+            source_row_id=row_id,
+            ownership_nature=nature,
+            nature_from_table_i=table_i,
+        )
+
+    mixed = _dedup_by_priority([_c("direct", False, 1), _c("direct", True, 2)])
+    assert [h.nature_from_table_i for h in mixed] == [True]
+    role_only = _dedup_by_priority([_c("direct", False, 1), _c("direct", False, 2)])
+    assert [h.nature_from_table_i for h in role_only] == [False]
+
+
+def test_role_derived_direct_does_not_count_against_the_direct_cap() -> None:
+    """A DERA officer row is not a Rule 16a-1(a)(2) direct holder. Counting its
+    ``direct`` string pushes a genuine chain past ``_DEEMED_CHAIN_MAX_DIRECT`` and
+    refuses it — the coverage defect #2386 records."""
+    chain = _chain(_SUB_FLOOR, n=3)  # 1 Table I direct + 2 Table I indirect
+    chain.append(_h("000000009", "Officer Person", _SUB_FLOOR, nature="direct", table_i=False))
+    assert _is_deemed_chain(chain) is True
+
+
+def test_role_derived_row_cannot_satisfy_the_indirect_floor() -> None:
+    """Fail-closed in the other direction too: provenance gating is not a blanket
+    loosening. Two role-derived ``indirect`` rows do not make a chain, so the floor
+    still has to be met by Table I-attested members."""
+    holders = [
+        _h("000000001", "Fund L.P.", _SUB_FLOOR, nature="direct"),
+        _h("000000002", "GP L.L.C.", _SUB_FLOOR, nature="indirect", table_i=False),
+        _h("000000003", "GP II L.L.C.", _SUB_FLOOR, nature="indirect", table_i=False),
+    ]
+    assert _is_deemed_chain(holders) is False
+
+
+def test_role_derived_member_still_faces_the_ten_percent_gate() -> None:
+    """Provenance gates the NATURE counters only. The relationship-box requirement is
+    joined from ``insider_filers``, a different source, and still binds every member."""
+    chain = _chain(_SUB_FLOOR, n=3)
+    chain.append(_h("000000009", "Officer Person", _SUB_FLOOR, nature="direct", ten_pct=False, table_i=False))
+    assert _is_deemed_chain(chain) is False
+
+
+def test_role_derived_member_folds_end_to_end() -> None:
+    """Through the real pass, not just the predicate: the cluster that the overloaded
+    column was refusing now collapses to one holder at the block value."""
+    chain = _chain(_SUB_FLOOR, n=3)
+    chain.append(_h("000000009", "Officer Person", _SUB_FLOOR, nature="direct", table_i=False))
+    out_s, out_b, corrs = _reconcile_insider_control_groups(chain, [])
+    assert len(out_s) == 1
+    assert out_s[0].shares == Decimal(_SUB_FLOOR)
+    assert out_b == []
+    assert _kinds(corrs) == ["insider_control_group_collapse"]
 
 
 def test_duplicate_cik_does_not_inflate_the_cluster_size() -> None:
