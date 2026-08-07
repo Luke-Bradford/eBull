@@ -417,6 +417,51 @@ def test_fetch_latest_picks_amended_filing_for_same_period(
     assert val == 200  # amendment wins on filed-desc tie-break
 
 
+def test_fetch_skips_non_positive_dei_values(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2232 — a filer whose classes are tagged dimensionally publishes a
+    literal ``0`` for the undimensioned cover-page count, and empirically that
+    zero is the row with the highest ``end``. The stored side (sql/259) selects
+    positive values only, so this side must too — otherwise the check compares
+    two different selection rules and reports the difference as drift.
+
+    Real shapes, from companyconcept: CIK 0002078416 has ONE row,
+    ``2025-10-31 = 0``; CIK 0002019103's newest of three is ``2025-12-31 = 0``.
+    """
+    masked: dict[str, Any] = {
+        "facts": {
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {
+                    "units": {
+                        "shares": [
+                            {"end": "2024-12-31", "filed": "2025-02-20", "val": 66_950_736},
+                            {"end": "2025-12-31", "filed": "2026-03-06", "val": 0},
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(reconciliation, "_fetch_companyfacts_payload", lambda _conn, _cik: masked)
+    assert reconciliation._fetch_latest_dei_shares_outstanding(ebull_test_conn, "0000999998") == 66_950_736
+
+    zero_only: dict[str, Any] = {
+        "facts": {
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {
+                    "units": {"shares": [{"end": "2025-10-31", "filed": "2025-11-13", "val": 0}]}
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(reconciliation, "_fetch_companyfacts_payload", lambda _conn, _cik: zero_only)
+    # None, not 0 — routes to the both-sides-empty clean path rather than a
+    # false "No stored shares_outstanding for instrument with SEC CIK".
+    assert reconciliation._fetch_latest_dei_shares_outstanding(ebull_test_conn, "0000999997") is None
+
+
 def test_fetch_uses_cik_raw_cache(
     ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
