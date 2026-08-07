@@ -2494,7 +2494,9 @@ class TestBlockLevelLineStructure:
             "<tr><th>Name and Address</th>"
             "<th>Amount and Nature of Beneficial Ownership</th>"
             "<th>Percent of Shares Outstanding</th></tr>"
-            "<tr><td><p>Penbrook Management, LLC</p><p>&nbsp;</p>"
+            # The separator is a BREAK-ONLY paragraph, not ``&nbsp;`` — the
+            # shape Codex checkpoint 2 found this branch merging.
+            "<tr><td><p>Penbrook Management, LLC</p><p><br/></p>"
             "<p>Renaissance Technologies LLC</p></td>"
             "<td>486,340<br/>658,400</td>"
             "<td>5.86%<br/>7.94%</td></tr>"
@@ -2571,6 +2573,13 @@ class TestBlockLevelLineStructure:
         render as ONE break and must not fabricate one.
         """
         assert _strip_inline_html("<p>A</p><p>&nbsp;</p><p>B</p>", block_breaks=True) == "A\n \nB"
+        # Codex checkpoint 2 on this branch: a block whose only content is a
+        # ``<br>`` is empty too, and so is a run of consecutive breaks. Over the
+        # first 4,000 accessions of the corpus the first shape appears in 293
+        # Item 403 candidate cells across 59 accessions, the second in 444 / 124
+        # — without these two the stacked owners merge into one identity.
+        assert _strip_inline_html("<p>A</p><p><br/></p><p>B</p>", block_breaks=True) == "A\n \nB"
+        assert _strip_inline_html("A<br/><br/>B", block_breaks=True) == "A\n \nB"
         assert _strip_inline_html("<p>A</p>\n  <p>B</p>", block_breaks=True) == "A\nB"
         assert _strip_inline_html("<p>A<br/></p> <p>B</p>", block_breaks=True) == "A\nB"
         # A run of literal SOURCE newlines carries no tag break and is left as

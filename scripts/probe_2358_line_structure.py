@@ -101,6 +101,20 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         "test_a_multi_line_header_caption_still_matches_its_prescribed_phrase",
     ),
     (
+        # Codex checkpoint 2's finding. A block whose only content is a <br> is
+        # an EMPTY block; without the pre-pass it reads as adjacent boundaries
+        # and two stacked owners merge into one holder identity.
+        "a break-only block is no longer recognised as a blank line",
+        [("        raw = _EMPTY_BLOCK_RE.sub(_BLANK_LINE, raw)\n", "")],
+        "test_br_stacked_amounts_do_not_glue_into_one_number",
+    ),
+    (
+        # Same shape, rendered without the enclosing block.
+        "a run of consecutive breaks is no longer a blank line",
+        [("        raw = _BREAK_RUN_RE.sub(_BLANK_LINE, raw)\n", "")],
+        "test_an_empty_block_is_a_blank_line_and_adjacent_breaks_are_one",
+    ),
+    (
         # The blank-line separator #2169 splits on is an EMPTY BLOCK. Widening
         # the run to swallow the space between two sentinels erases it.
         "the sentinel run widens over whitespace, erasing the empty-block blank line",

@@ -173,14 +173,30 @@ _LINE_BREAK_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<br(?=[\s/>])[^>]*>", 
 # NUL cannot occur in an EDGAR document (SEC EDGAR Filer Manual vol. II §5.2.2
 # restricts primary documents to ASCII 32-127 plus tab/CR/LF/FF).
 _BREAK_SENTINEL: Final[str] = "\x00"
+# A RENDERED BLANK LINE, normalised to ``sentinel SPACE sentinel`` so the run
+# collapse below cannot swallow it. Two markup shapes produce one:
+#
+#   ``<p>&nbsp;</p>`` / ``<p><br/></p>``  a block with no content of its own
+#   ``A<br/><br/>B``                      consecutive explicit breaks
+#
+# ⚠ The ``<br>``-only block is Codex checkpoint 2's finding on this branch, and
+# it is not rare: over the first 4,000 accessions of the corpus it appears in
+# **293 Item 403 candidate cells across 59 accessions** (``<br><br>`` runs in
+# 444 / 124). Without it the sentinel run reads ``<p>A</p><p><br/></p><p>B</p>``
+# as adjacent boundaries, ``_stacked_name_blocks`` sees ONE block, and two
+# stacked owners merge into one holder identity.
+_BLANK_LINE: Final[str] = f"{_BREAK_SENTINEL} {_BREAK_SENTINEL}"
+_EMPTY_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
+    rf"<({_BLOCK_ELEMENTS})(?=[\s/>])[^>]*>(?:\s|&nbsp;|&#160;|&#xa0;|<br\b[^>]*>)*</\1\s*>", re.IGNORECASE
+)
+_BREAK_RUN_RE: Final[re.Pattern[str]] = re.compile(r"<br(?=[\s/>])[^>]*>(?:\s*<br(?=[\s/>])[^>]*>)+", re.IGNORECASE)
 # ⚠ Load-bearing for #2169's holder split, which separates stacked owners on a
-# BLANK line — and each of the three shapes below is in the corpus:
+# BLANK line — and each of these shapes is in the corpus:
 #
 #   ``<br/></p> <p>``     two ADJACENT tag breaks; renders as ONE. Collapses.
 #   ``</p>\n<p>``         a tag break beside a source newline; ONE. Collapses.
-#   ``<p>&nbsp;</p>``     an EMPTY BLOCK — a real blank line. By the time this
-#                         runs the ``&nbsp;`` is a SPACE, so the run is broken
-#                         by a non-sentinel character and it SURVIVES.
+#   ``<p>&nbsp;</p>``     an empty block; a real blank line. Already rewritten
+#                         to ``_BLANK_LINE`` above, whose SPACE breaks this run.
 #
 # A run of literal source newlines carrying no sentinel is left exactly as the
 # flat rendering has it (``\n\n\n\n`` between two stacked holders on
@@ -236,6 +252,11 @@ def _strip_inline_html(raw: str, *, block_breaks: bool = False) -> str:
     486,340,658,400.
     """
     if block_breaks:
+        # Blank lines FIRST: both shapes contain the tags the rules below
+        # rewrite, and once ``<p><br/></p>`` has become three bare sentinels
+        # nothing can tell it from two adjacent block boundaries.
+        raw = _EMPTY_BLOCK_RE.sub(_BLANK_LINE, raw)
+        raw = _BREAK_RUN_RE.sub(_BLANK_LINE, raw)
         raw = _BLOCK_BOUNDARY_RE.sub(_BREAK_SENTINEL, raw)
         raw = _LINE_BREAK_TAG_RE.sub(_BREAK_SENTINEL, raw)
         raw = _BLOCK_TAG_RE.sub(_BREAK_SENTINEL, raw)

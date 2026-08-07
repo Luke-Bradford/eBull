@@ -3363,13 +3363,23 @@ Two things S-4 adds to the prevention above:
   caller can forget.
 - ⚠ **Mark tag-derived breaks with a SENTINEL, not with `\n`.** Once both are `\n` you
   cannot tell "the markup asked for a break" from "the filer wrapped the source", and
-  every collapse rule you write is wrong for one of them. Three shapes all had to
+  every collapse rule you write is wrong for one of them. Four shapes all had to
   survive and they are only separable before the sentinel is resolved: `</p>\n<p>`
-  (adjacent boundaries, ONE break), `<p>&nbsp;</p>` (an empty block — a real BLANK
-  line, which is the separator #2169's holder split reads), and a run of literal
-  source newlines (leave exactly as the flat rendering has it). The first draft
-  collapsed `\n{2,}` and silently un-fixed #2169's own accession; the unit test caught
-  it, but only because that test existed.
+  (adjacent boundaries, ONE break), `<p>&nbsp;</p>` **and `<p><br/></p>`** (an empty
+  block — a real BLANK line, which is the separator #2169's holder split reads), a run
+  of consecutive `<br>`s (also a blank line), and a run of literal source newlines
+  (leave exactly as the flat rendering has it). The first draft collapsed `\n{2,}` and
+  silently un-fixed #2169's own accession; the unit test caught it, but only because
+  that test existed.
+- ⚠ **"Empty block" is a property of the block's CONTENT, not of its entity.** The
+  second draft normalised `<p>&nbsp;</p>` and missed `<p><br/></p>`, which is the same
+  rendered blank line written differently — found by the mandated Codex checkpoint-2
+  pass, then measured rather than accepted: over the first 4,000 accessions the
+  break-only block appears in 293 Item 403 candidate cells across 59 accessions, and
+  `<br><br>` runs in 444 / 124. Enumerate what "empty" can be spelt as
+  (`&nbsp;` / `&#160;` / `&#xa0;` / `<br>` / whitespace) before writing the predicate.
+  Codex earning here is consistent with the file's own note that it pays on judgement
+  artefacts: the finding was about the MODEL of a blank line, not a line of code.
 - ⚠ **Blanking the resolved column is not enough when a recovery scan reads the other
   cells.** On `0001193125-26-140058` (Lamar) `_resolve_columns` puts `shares_idx` on an
   empty layout cell and the ragged-row recovery picks the amount out of cell 7. A
