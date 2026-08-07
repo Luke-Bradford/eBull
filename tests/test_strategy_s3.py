@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
 from app.services.outcome_resolver import ExitLevels
 from app.services.signal_ledger import resolve_fills
@@ -436,20 +437,20 @@ class TestIdentity:
             s3_identity(universe=UNIVERSE, cost_model_id="   ")
 
     def test_the_version_moves_with_the_universe(self) -> None:
-        a = s3_identity(universe="survivor_only", cost_model_id="undeclared-v0")
-        b = s3_identity(universe="survivorship_free", cost_model_id="undeclared-v0")
+        a = s3_identity(universe="survivor_only", cost_model_id=COST_MODEL_ID)
+        b = s3_identity(universe="survivorship_free", cost_model_id=COST_MODEL_ID)
         assert a.version != b.version
 
     def test_the_version_moves_with_the_cost_model(self) -> None:
-        a = s3_identity(universe=UNIVERSE, cost_model_id="undeclared-v0")
+        a = s3_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
         b = s3_identity(universe=UNIVERSE, cost_model_id="static-p75-v1")
         assert a.version != b.version
 
     def test_the_identity_is_distinct_from_s1s(self) -> None:
         from app.services.strategies.s1_time_series_momentum import s1_identity
 
-        s1 = s1_identity(universe=UNIVERSE, cost_model_id="undeclared-v0")
-        s3 = s3_identity(universe=UNIVERSE, cost_model_id="undeclared-v0")
+        s1 = s1_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
+        s3 = s3_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
         assert s3.strategy_id == S3_STRATEGY_ID != s1.strategy_id
         assert s3.version != s1.version
 
@@ -458,7 +459,7 @@ class TestIdentity:
         §4's exit is *"rsi_14 > 50, or 10 bars elapsed, whichever first"*; the
         second half is position state and cannot be a per-bar verdict, so it is
         carried as a hashed parameter instead of being dropped."""
-        identity = s3_identity(universe=UNIVERSE, cost_model_id="undeclared-v0")
+        identity = s3_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
         assert dict(identity.params) == {
             "rsi_period": 14,
             "oversold_threshold": 30.0,
@@ -508,7 +509,7 @@ class TestLedgerRoundTrip:
         rows = resolve_fills(
             s3_signals(series, universe=UNIVERSE, close_reason=REASON),
             series=series,
-            identity=s3_identity(universe=UNIVERSE, cost_model_id="undeclared-v0"),
+            identity=s3_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID),
             instrument_id=1,
         )
         return series, list(rows)

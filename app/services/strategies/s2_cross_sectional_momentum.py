@@ -154,13 +154,13 @@ def s2_identity(*, universe: Universe, cost_model_id: str) -> StrategyIdentity:
     Both arguments are required and neither has a default, for the reason S-1
     gives at length: criterion 11 puts universe and cost model *inside* the
     identity, so a default would silently register a strategy the caller never
-    declared. No cost model exists yet (§5 criterion 2 specifies one, §8
-    sequences it), so the honest value today is an explicit placeholder.
+    declared. The model is ``app.services.cost_model.COST_MODEL_ID`` (stage 5b);
+    it stays an argument rather than a module constant for the reason S-1 gives.
     """
     if not cost_model_id.strip():
         raise ValueError(
             "cost_model_id must be a non-empty declaration (criterion 11 hashes it); "
-            "no cost model exists yet, so pass an explicit placeholder rather than an empty string"
+            "pass app.services.cost_model.COST_MODEL_ID rather than an empty string"
         )
     return StrategyIdentity(
         strategy_id=S2_STRATEGY_ID,

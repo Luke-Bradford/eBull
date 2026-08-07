@@ -49,6 +49,7 @@ import psycopg
 from psycopg import sql as pgsql
 
 from app.config import settings
+from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries, sma_series
 from app.services.research_price_structure_store import load_masked_series
 from app.services.strategies.s1_time_series_momentum import (
@@ -67,10 +68,9 @@ from app.services.technical_analysis import OHLCVRow
 #: Both are ``survivor_only`` and every figure below inherits that label (#2288).
 UNIVERSE = "survivor_only"
 
-#: No cost model exists yet — §5 criterion 2 specifies one and §8 sequences it.
-#: The placeholder is explicit so the identity hash records that absence rather
-#: than defaulting past it.
-COST_MODEL_ID = "undeclared-v0"
+#: ⚠ IMPORTED, never restated. Stage 5b froze the model, so the identity hash
+#: records a real cost basis; a local literal here would be a second source of
+#: truth for a value that is hashed into every stored strategy version.
 
 #: Relative margin below which a disagreement is arithmetic, not logic. One part
 #: in 1e-9 of the price is ~150x looser than float64's ~1e-16 and ~7 orders

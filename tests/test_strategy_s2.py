@@ -21,6 +21,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
 from app.services.signal_ledger import resolve_fills
 from app.services.strategies.s2_cross_sectional_momentum import (
@@ -44,7 +45,7 @@ from app.services.technical_analysis import OHLCVRow
 
 UNIVERSE = "survivor_only"
 REASON = "quarantined_bar"
-COST_MODEL = "undeclared-v0"
+COST_MODEL = COST_MODEL_ID
 
 #: Enough bars to clear the 273-bar eligibility and leave a live tail.
 BARS = ELIGIBILITY_BARS + 40

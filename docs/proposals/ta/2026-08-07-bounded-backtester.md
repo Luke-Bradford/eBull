@@ -333,6 +333,18 @@ is an artefact and must not be quoted as a confound-adjusted effect.
 
 **The model that ships:**
 
+⚠ **SUPERSEDED BY THE IMPLEMENTATION — `app/services/cost_model.py::BANDS` is the
+authority and the table below is not it.** Stage 5b recalibrated on the §4.0
+validated universe (limit 2 below says the `us_equity` set *"is not even the
+right set"*, so the model is calibrated on the population it is applied to) with
+the session resolved from `market_calendar`, and `quotes` had gained rows in
+between — 1,528 → 1,557 total — which moves a percentile most in the thinnest
+band. Shipped, quantised to 0.001pp with ROUND_CEILING: `<$5` **1.450** ·
+`$5–20` **0.571** · `$20–100` **0.509** · `>=$100` **0.322**, on
+n = 76 / 244 / 625 / 210. Reproduce with
+`PYTHONPATH=. uv run python scripts/verify_2240_cost_model.py --calibrate`. The
+table below is kept as the design record, not as a live number.
+
 | price band (`us_equity`) | p75 spread | **half-spread per side** |
 | --- | ---: | ---: |
 | `<$5` | 1.600% | 0.800% |
@@ -640,7 +652,10 @@ historical signals. The promotion check refuses `survivor_only`.
 fill prices, never subtracted from `gross_return_pct` (§5.1). (b) Both sides are
 charged on a closed position and **one side** on an open-at-window-end mark
 (§3.2 rule 5). (c) The band table is keyed on the entry fill price and pinned by
-test to the §5.1 figures. (d) `cost_model_id` is hashed into `strategy_version`
+test — ⚠ to the SHIPPED figures (`app/services/cost_model.py::BANDS`), not to
+§5.1's, which were measured on a `quotes` snapshot that no longer exists and
+cannot be reproduced from any later database. What the pin buys is the same
+either way: no silent recalibration. (d) `cost_model_id` is hashed into `strategy_version`
 — asserted by changing the model and requiring every version to move. (e)
 `carry_bps` and `fx_bps` are NULL, every result carries `carry_unmodelled`, and
 the promotion check refuses on it.

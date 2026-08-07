@@ -71,6 +71,7 @@ from datetime import date
 import psycopg
 
 from app.config import settings
+from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import RULE_SET_VERSION as BUILDER_RULE_SET_VERSION
 from app.services.position_builder import (
@@ -94,9 +95,11 @@ from app.services.technical_analysis import OHLCVRow
 #: that label (#2288).
 UNIVERSE = "survivor_only"
 
-#: No cost model exists yet — §5 criterion 2 specifies one and stage 5b builds
-#: it. ⚠ Every price below is therefore GROSS.
-COST_MODEL_ID = "undeclared-v0"
+#: ⚠ IMPORTED, never restated. Stage 5b froze the model, so the identity hash
+#: records a real cost basis; a local literal here would be a second source of
+#: truth for a value that is hashed into every stored strategy version.
+#: ⚠ Prices in this run are still GROSS — costing is `position_costing`, and
+#: this constant only names the model the identity declares.
 
 #: Spec §5.2's frozen bar-weighted 75/25 boundary and evaluation end. ⚠ Frozen
 #: LITERALS, deliberately: recomputing them walks the split forward as the

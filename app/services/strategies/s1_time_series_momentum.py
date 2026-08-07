@@ -98,16 +98,19 @@ def s1_identity(*, universe: Universe, cost_model_id: str) -> StrategyIdentity:
 
     ⚠ ``cost_model_id`` is rejected when blank. ``str`` does not distinguish
     "not supplied" from ``""``, and a present-but-empty declaration is the #2286
-    shape: it passes every type check and records nothing. **No cost model is
-    built yet** (§5 criterion 2 specifies one; §8 sequences it), so the honest
-    value today is a placeholder that says so — and it belongs in the caller's
-    hands, not defaulted here, because the day a real model lands every identity
-    must move.
+    shape: it passes every type check and records nothing.
+
+    ⚠ The model now EXISTS — ``app.services.cost_model.COST_MODEL_ID``, stage 5b
+    — so the placeholder this argument used to carry is gone and every identity
+    moved when it landed, exactly as the earlier note here predicted. It stays a
+    caller argument rather than becoming a module constant because §5.1 makes a
+    recalibration a NEW id, and stage 5e's sensitivity arms have to be able to
+    evaluate the same strategy under two of them in one process.
     """
     if not cost_model_id.strip():
         raise ValueError(
             "cost_model_id must be a non-empty declaration (criterion 11 hashes it); "
-            "no cost model exists yet, so pass an explicit placeholder rather than an empty string"
+            "pass app.services.cost_model.COST_MODEL_ID rather than an empty string"
         )
     return StrategyIdentity(
         strategy_id=S1_STRATEGY_ID,
