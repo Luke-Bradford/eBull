@@ -83,9 +83,6 @@ def _percents(segs: list[str]) -> list[str]:
 _GLUED_AMOUNTS_RE = re.compile(r"^[\s(\[]*\d[\d,]{2,}(?:\s+\d[\d,]{2,})+[\s)\]]*$")
 
 
-_SCORE_FLOOR = 3
-
-
 def _candidate_rows(body: str) -> list[dict[str, Any]]:
     """Every data row of every CANDIDATE Item 403 table, censused.
 
@@ -105,7 +102,7 @@ def _candidate_rows(body: str) -> list[dict[str, Any]]:
             table = P._parse_table_html(body[start:end])
             if table is None or not table.rows:
                 continue
-            if P._score_table_headers(table.score_headers) < _SCORE_FLOOR:
+            if P._score_table_headers(table.score_headers) < P._WINDOW_SCORE_FLOOR:
                 continue
             name_idx, shares_idx, percent_idx = P._resolve_columns(table.column_headers)
             for raw_row in table.rows:

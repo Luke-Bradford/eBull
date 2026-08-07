@@ -1997,6 +1997,21 @@ def extract_plan_name_and_trustee(holder_name: str) -> tuple[str, str | None]:
 # ---------------------------------------------------------------------------
 
 
+# Score floor for a table to be a WINDOW CANDIDATE — below this we don't trust
+# the match. Empirically tuned: a minimal-header beneficial-ownership table
+# (``Name`` / ``Shares`` / ``Percent``) scores 3; tables with SEC-prescribed
+# wording score 6+. Compensation / option-grant tables typically score 0-2 even
+# when they include a "Name" column, because they lack ``shares`` / ``percent``
+# cues.
+#
+# Module-level rather than a local of ``parse_beneficial_ownership_table``
+# because the offline census scripts have to reproduce the same candidate set —
+# ``scripts/census_def14a_stacked_cell_holders.py`` re-derived it as its own
+# literal 3, and a local cannot be imported, so the two would have drifted the
+# first time this moved (review NITPICK on PR #2359).
+_WINDOW_SCORE_FLOOR: Final[int] = 3
+
+
 def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershipTable:
     """Parse a DEF 14A primary doc HTML body and extract the
     Item 12 beneficial-ownership table.
@@ -2012,14 +2027,6 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     """
     if not html_text:
         return Def14ABeneficialOwnershipTable(as_of_date=None, rows=[], raw_table_score=0)
-
-    # Score floor — below this we don't trust the match. Empirically
-    # tuned: a minimal-header beneficial-ownership table
-    # (``Name`` / ``Shares`` / ``Percent``) scores 3; tables with
-    # SEC-prescribed wording score 6+. Compensation / option-grant
-    # tables typically score 0-2 even when they include a "Name"
-    # column because they lack ``shares``/``percent`` cues.
-    SCORE_FLOOR = 3
 
     candidate_windows = _find_section_windows(html_text)
     best_score = 0
@@ -2062,7 +2069,7 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             score = _score_table_headers(parsed.score_headers)
             if score > window_best_score:
                 window_best_score = score
-            if score >= SCORE_FLOOR:
+            if score >= _WINDOW_SCORE_FLOOR:
                 window_qualifying.append((score, parsed))
         # D2 / D3 (#2160) — ELIGIBILITY decides both which table wins the window
         # and which tables join it as Item 403 siblings. Header score no longer
