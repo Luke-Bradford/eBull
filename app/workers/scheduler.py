@@ -1521,7 +1521,7 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "against ``instruments.symbol``; promotions land in "
             "``external_identifiers (provider='openfigi')`` and "
             "negative verdicts tombstone ``openfigi_unknown`` / "
-            "``openfigi_no_instrument`` so the selection cursor "
+            "``openfigi_no_instrument`` / ``openfigi_invalid_identifier`` so the selection cursor "
             "advances (pre-#740 the sweep re-scanned the same "
             "alphabet-head 1000 forever). Also runs the pre-sweep "
             "extid tombstone, the post-sweep coverage compute, and "
@@ -6738,15 +6738,22 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
         # ⚠ `unresolved_by_openfigi` is the one worth defending, because it looks
         # like a miss. It cannot mean a transport/HTTP failure —
         # `OpenFigiResolver` raises `OpenFigiTransportError` / `OpenFigiRateLimited`
-        # on those, so they land in `api_errors`. It is NOT, however, exclusively
-        # "OpenFIGI said no": `_parse_entry` returns None for a per-item
-        # `{"error": ...}` too, and that is indistinguishable here from a real
-        # no-match (#2304). The justification for keeping it an outcome is the
-        # DISTRIBUTION, not purity: `select
-        # resolution_status, count(*) from unresolved_13f_cusips group by 1`
-        # returns 60,011 `openfigi_unknown` against 3,027 `resolved_via_openfigi`.
-        # Excluding it from `outcomes` would degrade nearly every real run — the
-        # false-alarm direction #2218 explicitly warns against.
+        # on those, so they land in `api_errors`.
+        #
+        # #2304 CLOSED the caveat this comment used to carry. It read: the counter
+        # "is NOT exclusively 'OpenFIGI said no' — `_parse_entry` returns None for a
+        # per-item `{"error": ...}` too", so the justification rested on the
+        # DISTRIBUTION rather than purity. `_entry_to_outcome` now discriminates,
+        # and `unresolved_by_openfigi` counts ONLY `OpenFigiNoMatch` — OpenFIGI
+        # accepted the identifier and has no US-primary mapping. It is a clean
+        # outcome on purity now, not on volume.
+        #
+        # `invalid_identifier` joins it as an outcome: OpenFIGI rejected the
+        # identifier, the row is tombstoned terminally, the work is complete.
+        # The other three are ERRORS and SHOULD degrade the run — each leaves its
+        # row pending, so nothing was decided. `item_errors` in particular is the
+        # tripwire for OpenFIGI returning a per-item error shape we have not
+        # classified; if it fires, do not widen the classifier without probing.
         tracker.progress = JobProgress(
             candidates_seen=report.candidates_seen,
             outcomes={
@@ -6754,12 +6761,19 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
                 "promoted": report.promoted,
                 "no_instrument_match": report.no_instrument_match,
                 "unresolved_by_openfigi": report.unresolved_by_openfigi,
+                "invalid_identifier": report.invalid_identifier,
             },
-            errors={"api_errors": report.api_errors},
+            errors={
+                "api_errors": report.api_errors,
+                "item_errors": report.item_errors,
+                "malformed_entries": report.malformed_entries,
+                "not_returned": report.not_returned,
+            },
         )
         logger.info(
             "cusip_resolver_post_bulk_sweep: passes=%d candidates=%d resolved=%d promoted=%d "
-            "no_instrument_match=%d unresolved_by_openfigi=%d api_errors=%d "
+            "no_instrument_match=%d unresolved_by_openfigi=%d invalid_identifier=%d "
+            "item_errors=%d malformed_entries=%d not_returned=%d api_errors=%d "
             "coverage=%d/%d=%.2f%% floor=%.0f%% met=%s",
             report.passes,
             report.candidates_seen,
@@ -6767,6 +6781,10 @@ def cusip_resolver_post_bulk_sweep(params: Mapping[str, Any]) -> None:
             report.promoted,
             report.no_instrument_match,
             report.unresolved_by_openfigi,
+            report.invalid_identifier,
+            report.item_errors,
+            report.malformed_entries,
+            report.not_returned,
             report.api_errors,
             coverage.mapped,
             coverage.cohort,
