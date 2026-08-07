@@ -182,7 +182,17 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # ⚠ `strategy_signals` / `strategy_outcomes` are NOT listed and must not be:
     # both have an inbound-FK path (→ instruments, → strategy_signals) and are
     # picked up automatically.
-    "strategy_results",
+    #
+    # ⚠⚠ #2240 phase 5e-1 (sql/264) RENAMED the storage. `strategy_results` is
+    # now a VIEW (in-sample only, criterion 5), and naming a view here would
+    # wipe half the rows while reporting success — the hold-out half survives
+    # and collides on the next test. The STORE is the relation to truncate.
+    "strategy_results_store",
+    # #2240 phase 5e-1 (sql/264) — criterion 5's access log. Also STANDALONE, and
+    # for a reason worth stating: an access may name a result_version that no row
+    # carries yet (the record is written BEFORE the row it authorises), so an FK
+    # would refuse the exact ordering the trigger requires.
+    "strategy_holdout_accesses",
     "positions",
     "quotes",
     # #1919 — thesis generation attempts (FK → instruments + theses).
