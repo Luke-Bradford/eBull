@@ -2685,18 +2685,31 @@ class TestItem403RowIsABeneficialOwner:
     def test_a_title_of_class_value_in_the_name_column_is_not_a_holder(self) -> None:
         """229.403 column 1 is ``Title of class``. When it leaks into the name
         column its values ('Series A Common Shares') are securities, not
-        owners — #2176 class 2's residue after #2175 fixed the alignment."""
+        owners — #2176 class 2's residue after #2175 fixed the alignment.
+
+        ⚠ The table carries enough genuine holders to clear
+        ``_ROW_IDENTITY_FLOOR`` on its UNPRUNED rows, because that is the shape
+        the corpus actually has: on `0001051512-25-000021` the class rows are a
+        small minority of an otherwise-genuine 18-holder table. A table that is
+        mostly class labels is not rescued by this guard and must not be — see
+        ``test_the_row_guard_is_not_a_table_selection_change``."""
         body = (
             "<table>"
             "<tr><th>Shareholder's Name and Address</th>"
             "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
             "<tr><td>Telephone and Data Systems, Inc.</td><td>7,570,000</td><td>96.4%</td></tr>"
+            "<tr><td>BlackRock, Inc.</td><td>2,100,000</td><td>4.1%</td></tr>"
+            "<tr><td>The Vanguard Group, Inc.</td><td>1,900,000</td><td>3.7%</td></tr>"
             "<tr><td>Series A Common Shares</td><td>6,446,264</td><td>*</td></tr>"
             "<tr><td>Common Shares</td><td>1,123,736</td><td>*</td></tr>"
             "</table>"
         )
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
-        assert [r.holder_name for r in parsed.rows] == ["Telephone and Data Systems, Inc."]
+        assert [r.holder_name for r in parsed.rows] == [
+            "Telephone and Data Systems, Inc.",
+            "BlackRock, Inc.",
+            "The Vanguard Group, Inc.",
+        ]
 
     def test_the_instruction_5_group_row_survives(self) -> None:
         """⚠ The test that bounds the guard. 229.403(b) Instruction 5 requires
@@ -2727,14 +2740,20 @@ class TestItem403RowIsABeneficialOwner:
             "Total shares owned by executive officers and directors (13 persons)",
         ]
 
-    def test_dropping_class_rows_lifts_a_genuine_table_over_the_identity_floor(self) -> None:
-        """The gate direction, pinned. ``_owner_identity_fraction`` is computed
-        over the EXTRACTED holders, so removing non-owner rows raises it. Here
-        one genuine holder sits under two class-label rows: 1/3 = 0.33 is below
-        ``_ROW_IDENTITY_FLOOR`` (0.5) and the whole table was rejected, taking
-        the real holder with it. That is #2176 class 2's failure mode, and the
-        per-row test resolves it as a side effect rather than needing a second
-        gate tweak."""
+    def test_the_row_guard_is_not_a_table_selection_change(self) -> None:
+        """⚠ The invariant the full-population A/B forced, and the reason
+        ``_is_item403_eligible`` extracts with ``drop_non_owner_rows=False``.
+
+        The guard is a STORAGE filter. If it also feeds
+        ``_owner_identity_fraction`` it becomes a SELECTION change: pruning
+        non-owner rows raises the fraction for every table, so tables that
+        correctly failed ``_ROW_IDENTITY_FLOOR`` start clearing it.
+
+        Here one genuine holder sits under two class labels — 1/3 = 0.33,
+        below the floor. Eligibility must still see 1/3 and reject, exactly as
+        ``origin/main`` does. An earlier revision of this branch let the prune
+        lift this table to 1/1 and admit it; the A/B showed that lifted ZERO
+        genuine holders corpus-wide and admitted 10 Item 402 plan rows."""
         body = (
             "<table>"
             "<tr><th>Shareholder's Name and Address</th>"
@@ -2745,7 +2764,40 @@ class TestItem403RowIsABeneficialOwner:
             "</table>"
         )
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
-        assert [r.holder_name for r in parsed.rows] == ["Telephone and Data Systems, Inc."]
+        assert [r.holder_name for r in parsed.rows] == []
+
+    def test_an_item_402_plan_table_is_not_admitted_by_pruning(self) -> None:
+        """The regression the A/B caught, pinned on its own shape.
+
+        `0000950170-25-008792` and `0000950170-25-058781` newly emitted four
+        equity-compensation-plan rows each once the prune fed eligibility.
+        These are Item 402 plan disclosures, not 229.403 beneficial ownership.
+
+        The row mix is taken from those accessions and reproduces the arithmetic
+        that broke, rather than merely looking like a plan table. Filings render
+        these in title case, and the two predicates were measured on the real
+        strings:
+
+        - ``Total Shares Outstanding`` / ``Restricted Stock Units Outstanding``
+          — every word is instrument vocabulary, so the guard prunes them;
+        - ``Weighted Average Exercise Price`` — three capitalised tokens, so it
+          PASSES the person arm of ``_is_beneficial_owner_identity``.
+
+        Unpruned that is 1 owner-identity row of 4 = 0.25, correctly under
+        ``_ROW_IDENTITY_FLOOR``. Pruned it becomes 1 of 2 = 0.5 and clears it.
+        The floor must see 0.25."""
+        body = (
+            "<table>"
+            "<tr><th>Plan Category</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Total Shares Outstanding</td><td>4,200,000</td><td>*</td></tr>"
+            "<tr><td>Restricted Stock Units Outstanding</td><td>900,000</td><td>*</td></tr>"
+            "<tr><td>Weighted Average Exercise Price</td><td>27</td><td>*</td></tr>"
+            "<tr><td>Number of shares remaining available for grant</td><td>1,800,000</td><td>*</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == []
 
     def test_a_class_designator_letter_does_not_rescue_a_title_of_class_row(self) -> None:
         """Codex checkpoint 2. `a` is in ``_INSTRUMENT_VOCAB`` as a connective
@@ -2760,18 +2812,28 @@ class TestItem403RowIsABeneficialOwner:
         branch the same table scored 1/3 and was rejected outright.
 
         17 CFR 229.403 column 1 is 'Title of class'; the designator letter is
-        not a word, so it is dropped before the vocabulary test."""
+        not a word, so it is dropped before the vocabulary test.
+
+        ⚠ Exercised on an ELIGIBLE table (3 genuine holders of 4 rows), because
+        eligibility now scores unpruned rows — on an all-class table the row
+        guard never runs and this would pass whether or not the designator is
+        stripped, which is a test that proves nothing."""
         body = (
             "<table>"
             "<tr><th>Name and Address of Beneficial Owner</th>"
             "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
-            "<tr><td>Series A Common Shares</td><td>6,446,264</td><td>*</td></tr>"
-            "<tr><td>Common Shares</td><td>1,123,736</td><td>*</td></tr>"
+            "<tr><td>Telephone and Data Systems, Inc.</td><td>7,570,000</td><td>96.4%</td></tr>"
+            "<tr><td>BlackRock, Inc.</td><td>2,100,000</td><td>4.1%</td></tr>"
+            "<tr><td>The Vanguard Group, Inc.</td><td>1,900,000</td><td>3.7%</td></tr>"
             "<tr><td>Class B Common Stock</td><td>2,000,000</td><td>4.1%</td></tr>"
             "</table>"
         )
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
-        assert [r.holder_name for r in parsed.rows] == []
+        assert [r.holder_name for r in parsed.rows] == [
+            "Telephone and Data Systems, Inc.",
+            "BlackRock, Inc.",
+            "The Vanguard Group, Inc.",
+        ]
 
     def test_a_real_entity_whose_name_contains_series_is_not_a_title_of_class(self) -> None:
         """The bound on the designator rule. Dropping short tokens is scoped to

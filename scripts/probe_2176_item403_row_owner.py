@@ -7,8 +7,10 @@ probe would only prove the first:
   B. the test matches a SUBSTRING    -> it eats the 229.403(b) Instruction 5 row
   C. the test is the POSITIVE one    -> it eats genuine holders (#2176 §2)
   D. class DESIGNATORS count as words -> 'Class B ...' escapes where 'Class A
-     ...' does not, and the per-row prune then lifts an all-junk table over
-     the identity floor (Codex checkpoint 2)
+     ...' does not (Codex checkpoint 2)
+  E. the guard RE-COUPLED to table eligibility -> pruning raises
+     ``_owner_identity_fraction`` and Item 402 plan tables clear the floor.
+     Found by the full-population A/B, not by any of A-D.
 
 Each probe names the tests that MUST fail and the tests that MUST still pass —
 a probe whose whole file goes red proves much less than one that moves exactly
@@ -31,8 +33,11 @@ _PARSER = Path("app/providers/implementations/sec_def14a.py")
 _TESTS = "tests/test_sec_def14a_parser.py"
 _CLASS = "TestItem403RowIsABeneficialOwner"
 
-_GUARD = "        if _is_instrument_not_owner(holder_name):\n"
+_GUARD = "        if drop_non_owner_rows and _is_instrument_not_owner(holder_name):\n"
 _DESIGNATOR = '    if "class" in words or "series" in words:\n'
+# E — the guard re-coupled to table selection. This is the defect the
+# full-population A/B found, so it gets a probe of its own.
+_DECOUPLE = "    holders = _extract_table_holders(table, drop_non_owner_rows=False)\n"
 
 _PROBES = (
     (
@@ -42,11 +47,13 @@ _PROBES = (
         (
             "test_a_presentation_total_row_is_not_stored_as_a_holder",
             "test_a_title_of_class_value_in_the_name_column_is_not_a_holder",
-            "test_dropping_class_rows_lifts_a_genuine_table_over_the_identity_floor",
+            "test_a_class_designator_letter_does_not_rescue_a_title_of_class_row",
         ),
         (
             "test_the_instruction_5_group_row_survives",
             "test_a_bare_entity_name_without_a_corporate_designator_survives",
+            "test_the_row_guard_is_not_a_table_selection_change",
+            "test_an_item_402_plan_table_is_not_admitted_by_pruning",
         ),
     ),
     (
@@ -76,6 +83,19 @@ _PROBES = (
             "test_a_presentation_total_row_is_not_stored_as_a_holder",
         ),
     ),
+    (
+        "E: the row guard RE-COUPLED to table eligibility",
+        _DECOUPLE,
+        "    holders = _extract_table_holders(table)  # PROBE E — prune feeds the floor\n",
+        (
+            "test_the_row_guard_is_not_a_table_selection_change",
+            "test_an_item_402_plan_table_is_not_admitted_by_pruning",
+        ),
+        (
+            "test_a_presentation_total_row_is_not_stored_as_a_holder",
+            "test_the_instruction_5_group_row_survives",
+        ),
+    ),
 )
 
 
@@ -86,7 +106,7 @@ def _pytest(node_ids: tuple[str, ...]) -> int:
 
 def main() -> int:
     original = _PARSER.read_text()
-    for label, anchor in (("guard", _GUARD), ("designator", _DESIGNATOR)):
+    for label, anchor in (("guard", _GUARD), ("designator", _DESIGNATOR), ("decouple", _DECOUPLE)):
         # A probe that silently matches nothing proves nothing.
         if original.count(anchor) != 1:
             print(f"ABORT: {label} anchor appears {original.count(anchor)} times, expected exactly 1")

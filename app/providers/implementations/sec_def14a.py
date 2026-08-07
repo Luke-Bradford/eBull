@@ -2559,6 +2559,7 @@ def _extract_table_holders(
     *,
     rows: list[Def14ABeneficialHolder] | None = None,
     seen: set[str] | None = None,
+    drop_non_owner_rows: bool = True,
 ) -> list[Def14ABeneficialHolder]:
     """Resolve TABLE's columns and extract its holders into ROWS.
 
@@ -2585,6 +2586,7 @@ def _extract_table_holders(
         percent_idx=percent_idx,
         rows=out,
         seen=set() if seen is None else seen,
+        drop_non_owner_rows=drop_non_owner_rows,
     )
     return out
 
@@ -2610,7 +2612,21 @@ def _is_item403_eligible(table: _RawTable) -> bool:
     only in ``score_headers`` — so reading the narrower tuple rejected the most
     prescribed shape the reg has, at scores 14 and 16.
     """
-    holders = _extract_table_holders(table)
+    # ⚠ #2176 — eligibility scores the UNPRUNED rows, deliberately. The per-row
+    # owner guard is a STORAGE filter; letting it also feed this function makes
+    # it a SELECTION change, and the two must not be coupled. Pruning non-owner
+    # rows raises ``_owner_identity_fraction`` for every table, which is exactly
+    # what this limb exists to stop — see the docstring above: "row identity
+    # alone admits Item 402 compensation tables".
+    #
+    # Not hypothetical. The full-population A/B for the coupled version gained
+    # 10 rows across 3 accessions, every one an Item 402 equity-compensation
+    # plan row ('weighted average exercise price', 'total shares subject to
+    # outstanding awards') newly clearing ``_ROW_IDENTITY_FLOOR`` on tables that
+    # correctly failed it on origin/main — the #2158 failure mode the A/B skill
+    # documents. The same run gained ZERO genuine holders, so the coupling paid
+    # nothing and cost 10 junk admissions.
+    holders = _extract_table_holders(table, drop_non_owner_rows=False)
     if not holders:
         return False
     headers = tuple(table.score_headers) + tuple(table.column_headers)
@@ -2749,6 +2765,7 @@ def _extract_holder_rows(
     percent_idx: int,
     rows: list[Def14ABeneficialHolder],
     seen: set[str],
+    drop_non_owner_rows: bool = True,
 ) -> None:
     """Append one :class:`Def14ABeneficialHolder` per data row of ONE Item 403
     table, skipping rows already collected from a sibling table.
@@ -2858,7 +2875,7 @@ def _extract_holder_rows(
         if not holder_name:
             pending_owner_name = None
             continue
-        if _is_instrument_not_owner(holder_name):
+        if drop_non_owner_rows and _is_instrument_not_owner(holder_name):
             # #2176 — the row names no beneficial owner. 17 CFR 229.403 column
             # 2 is "Name and address of beneficial owner", and Rule 13d-3
             # defines that as a person or entity holding voting or investment
