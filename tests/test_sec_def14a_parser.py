@@ -2442,3 +2442,29 @@ York, NY 10022</td><td>486,340
             )
             is None
         )
+
+    def test_a_single_percent_beside_a_stacked_amount_column_is_not_copied_to_both(self) -> None:
+        """Review WARNING on PR #2359. When the amounts stack to k=2 and the
+        percent cell holds ONE value, that value is blanked rather than
+        duplicated across the split rows.
+
+        17 CFR 229.403 column 4 is per-owner: one percent beside two amounts
+        belongs to at most ONE of them, and the markup does not say which.
+        Copying it would fabricate a figure for the other — and
+        `ownership_def14a_*` reads `percent_of_class` as the holder's own. NULL
+        is the honest value; the amounts, which the markup DOES align, survive.
+
+        Measured before it was chosen: the full-population A/B over 42,705
+        payloads loses zero distinct holders, and no accession in the corpus
+        carries this shape today — so this test pins a decision, not a
+        behaviour anyone has observed.
+        """
+        assert _split_stacked_holder_row(
+            ("Alpha Capital LLC\n\nBeta Partners LP", "486,340\n\n658,400", "5.86%"),
+            name_idx=0,
+            shares_idx=1,
+            percent_idx=2,
+        ) == [
+            ("Alpha Capital LLC", "486,340", ""),
+            ("Beta Partners LP", "658,400", ""),
+        ]

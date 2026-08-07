@@ -38,33 +38,27 @@ import psycopg
 import app.providers.implementations.sec_def14a as P
 from app.config import settings
 
-
-def _segments(cell: str) -> list[str]:
-    """Non-empty lines of CELL, in document order."""
-    return [seg.strip() for seg in cell.split("\n") if seg.strip()]
+# The segmentation and the two value classifiers are the PARSER's, imported
+# rather than restated (review NITPICK on PR #2359, and the same drift the
+# `_SCORE_FLOOR` nitpick before it named): a census whose definition of "this
+# segment is a 229.403 amount" differs from the code's is measuring a different
+# population than the one the fix acts on.
+#
+# ⚠ Consequence, and it is deliberate: this script is coupled to a tree where
+# `_is_whole_share_segment` / `_is_percent_segment` exist, so it cannot be run
+# unmodified against a pre-#2169 checkout. The control-arm numbers in the PR
+# were taken with the self-contained earlier revision for exactly that reason.
+_segments = P._cell_segments
 
 
 def _whole_counts(segs: list[str]) -> list[str]:
-    """Segments that parse as a WHOLE share count (229.403 column 3 is a count)."""
-    out = []
-    for seg in segs:
-        if "%" in seg:
-            continue
-        value = P._parse_share_count(seg)
-        if value is not None and value == value.to_integral_value():
-            out.append(seg)
-    return out
+    """Segments that are a 229.403 column-3 amount — a WHOLE share count."""
+    return [seg for seg in segs if P._is_whole_share_segment(seg)]
 
 
 def _percents(segs: list[str]) -> list[str]:
-    """Segments that are UNAMBIGUOUSLY a percent (carry '%' or the '*' marker)."""
-    out = []
-    for seg in segs:
-        if "%" not in seg and seg not in ("*", "**"):
-            continue
-        if P._parse_percent(seg) is not None:
-            out.append(seg)
-    return out
+    """Segments that are UNAMBIGUOUSLY a 229.403 column-4 percent."""
+    return [seg for seg in segs if P._is_percent_segment(seg)]
 
 
 # Arm 2 (Codex checkpoint 2, #2169). ``<br>`` is stripped to a SPACE by
