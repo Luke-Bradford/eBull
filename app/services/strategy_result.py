@@ -174,10 +174,15 @@ SIZING_RULE = "equal_weight_concurrent_v1"
 UniverseBasis = Literal["survivor_only", "survivorship_free"]
 UNIVERSE_BASES: frozenset[str] = frozenset(get_args(UniverseBasis))
 
-#: ⚠ THE ALLOWLIST HAS ONE MEMBER. Written as a set difference from the
-#: vocabulary rather than as a literal, so adding a basis to ``UniverseBasis``
-#: cannot silently make it promotable — a new label lands on the refused side
-#: by construction and has to be moved here on purpose.
+#: ⚠ THE ALLOWLIST HAS ONE MEMBER, and it is an EXPLICIT LITERAL rather than
+#: anything derived from ``UniverseBasis``. That is the point: widening the
+#: vocabulary must not widen this. A basis added above lands on the refused side
+#: because it is simply absent here, so promoting it takes a deliberate edit to
+#: this line — which is what ``check_promotable``'s allowlist reading buys.
+#:
+#: ⚠ Deriving it (``UNIVERSE_BASES - {"survivor_only"}``) would invert exactly
+#: that property: a new label would arrive PROMOTABLE by default, and the
+#: default is the direction #2288 clause 2 is about.
 PROMOTABLE_UNIVERSE_BASES: frozenset[str] = frozenset({"survivorship_free"})
 
 #: §5.4's three levels. ⚠ ``signal`` is absent DELIBERATELY: *"Drawdown and
