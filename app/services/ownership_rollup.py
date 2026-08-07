@@ -237,6 +237,10 @@ class Holder:
     # additive-vs-overlapping regime (#905 / prevention-log 1835). ``None`` for
     # holders where nature is not meaningful (13F / family reps / treasury).
     ownership_nature: str | None = None
+    # Form 3/4 relationship box "10% Owner" checkbox, carried from the winning
+    # candidate so :func:`_reconcile_insider_control_groups` can gate the
+    # deemed-chain tier on it (#2230). ``False`` for every non-Section-16 holder.
+    is_ten_percent_owner: bool = False
     # Per-lot breakdown when this owner's additive Section-16 lots (direct +
     # indirect) were collapsed to one display line (#1942). Display-only; the
     # lots SUM to ``shares`` (already counted once). Empty for single-lot owners.
@@ -749,6 +753,11 @@ class _Candidate:
     # unmatched slice-build can surface it as a display label (#2121). Only the
     # DEF 14A read path sets it; every other source leaves it ``None``.
     holder_role: str | None = None
+    # Form 3/4 relationship box "10% Owner" checkbox (#2230), joined from
+    # ``insider_filers``. Only the Section 16 read path sets it; every other
+    # source leaves it ``False``. Fail-closed: a row whose accession/CIK does
+    # not join carries ``False`` and cannot admit a deemed-chain collapse.
+    is_ten_percent_owner: bool = False
 
 
 def edgar_archive_url(accession_number: str | None) -> str | None:
@@ -848,9 +857,13 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
         # manifest never parsed.
         cur.execute(
             """
-            SELECT holder_cik, holder_name, ownership_nature,
-                   source, source_accession, shares, period_end
+            SELECT oc.holder_cik, oc.holder_name, oc.ownership_nature,
+                   oc.source, oc.source_accession, oc.shares, oc.period_end,
+                   COALESCE(f.is_ten_percent_owner, FALSE) AS is_ten_percent_owner
             FROM ownership_insiders_current oc
+            LEFT JOIN insider_filers f
+              ON f.accession_number = oc.source_accession
+             AND f.filer_cik = oc.holder_cik
             WHERE instrument_id = %s
               AND shares IS NOT NULL
               AND NOT (
@@ -882,6 +895,7 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                     accession_number=str(row.get("source_accession") or ""),
                     source_row_id=next(next_row_id),
                     ownership_nature=str(row["ownership_nature"]),
+                    is_ten_percent_owner=bool(row["is_ten_percent_owner"]),
                 )
             )
 
@@ -1595,6 +1609,11 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 as_of_date=winner.as_of_date,
                 filer_type=winner.filer_type,
                 ownership_nature=winner.ownership_nature,
+                # ANY candidate row for this identity, not just the winning one:
+                # a filer can check "10% Owner" on one accession and omit it on a
+                # later amendment, and the relationship is a property of the
+                # holder, not of the winning filing (#2230).
+                is_ten_percent_owner=any(c.is_ten_percent_owner for c in cands),
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,
@@ -1670,6 +1689,11 @@ def _dedup_within_source(candidates: Iterable[_Candidate]) -> list[Holder]:
                 as_of_date=winner.as_of_date,
                 filer_type=winner.filer_type,
                 ownership_nature=winner.ownership_nature,
+                # ANY candidate row for this identity, not just the winning one:
+                # a filer can check "10% Owner" on one accession and omit it on a
+                # later amendment, and the relationship is a property of the
+                # holder, not of the winning filing (#2230).
+                is_ten_percent_owner=any(c.is_ten_percent_owner for c in cands),
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,  # type: ignore[arg-type]
@@ -2422,6 +2446,67 @@ _GROUP_ELIGIBLE_SOURCES: Final[frozenset[SourceTag]] = _INSIDER_GROUP_SOURCES | 
 # stays un-collapsed, the conservative direction (matches the round-lot residual).
 _INSIDER_GROUP_MIN_SHARES: Final[Decimal] = Decimal(1_000_000)
 
+# --- Deemed-chain tier (#2230) -------------------------------------------------
+# The magnitude floor and the roundness guard above are NOT truths about deemed
+# ownership — they are stand-ins for group-membership evidence this pass has to
+# INFER. :func:`_reconcile_same_accession_groups` says so explicitly: a shared
+# accession "IS the group evidence", so that pass "needs NO magnitude floor or
+# roundness proxy". The same logic licenses retiring them wherever equally direct
+# evidence exists — and for a cross-accession Section 16 chain it does, in two
+# structured Form 3/4 fields we already store:
+#
+#   * Form 3/4 relationship box, "10% Owner" checkbox (``insider_filers
+#     .is_ten_percent_owner``). Rule 13d-5(b)(1) group members are 10% owners by
+#     aggregation; a director or officer receiving an equal grant is not. Measured
+#     on the full population: dropping this requirement admits 26 further clusters
+#     that are overwhelmingly equal DIRECTOR grants (FLG 11,220 across 11 CIKs,
+#     BBT 2,595 across 10, NWFL 825 across 8) — the #1659 false-positive class.
+#   * Form 4 Table I column 5, "Ownership Form: Direct (D) or Indirect (I)"
+#     (``ownership_nature``). A Rule 16a-1(a)(2) control chain has ONE direct
+#     holder — the fund that actually holds — and N deemed owners restating the
+#     same block INDIRECTLY. The false-positive class inverts that shape: four
+#     family trusts each *fbo* a different beneficiary, or four individuals with
+#     equal grants, each hold DIRECTLY (GSHD 9,787 × 4 trusts, 3 direct; ASST
+#     150,000 × 4, all direct). So "≤1 direct AND ≥2 indirect" is not a threshold
+#     picked to fit — it is the shape the rule prescribes.
+#
+# Cluster size stays gated at ≥3 distinct CIKs, matching the tier #1645/I17 already
+# settled for the 13D channel: a 3-way exact coincidence is negligible, while the
+# 2-member case is not separable from source data. The all-natural-person pair is
+# the unresolvable residue and is deliberately left double-counted — TEAM's two
+# co-founders hold near-identical stakes independently and BY DESIGN, and merging
+# them would erase half of Atlassian's reported insider ownership, a worse error
+# than the double-count this tier exists to remove.
+#
+# Full-population gain side: 40 clusters, every one inspected — Blackstone, NEA,
+# KKR, Benchmark, ARCH, Lubert-Adler, Foresite, SPAC sponsor LLCs, and the
+# Ledbetter family trust with its three deemed members. No false positive found.
+_DEEMED_CHAIN_MIN_CIKS: Final[int] = 3
+_DEEMED_CHAIN_MAX_DIRECT: Final[int] = 1
+_DEEMED_CHAIN_MIN_INDIRECT: Final[int] = 2
+
+
+def _is_deemed_chain(insiders: list[Holder]) -> bool:
+    """True when ``insiders`` (the Section 16 members of one exact-value bucket)
+    carry the structured Rule 16a-1(a)(2) control-chain signature, and the
+    magnitude/roundness proxies can therefore be retired for this bucket (#2230).
+
+    Requires ALL THREE: ≥``_DEEMED_CHAIN_MIN_CIKS`` distinct non-null CIKs; every
+    member flagged ``is_ten_percent_owner`` on the Form 3/4 relationship box; and
+    the chain's ownership-form shape — at most ``_DEEMED_CHAIN_MAX_DIRECT`` member
+    reporting ``direct`` and at least ``_DEEMED_CHAIN_MIN_INDIRECT`` reporting
+    ``indirect``. Fail-closed on every axis: an unjoined relationship row carries
+    ``is_ten_percent_owner=False``, and a nature outside {direct, indirect}
+    (legacy ``beneficial``) counts toward neither side, so it cannot satisfy the
+    indirect floor."""
+    if len({h.filer_cik for h in insiders}) < _DEEMED_CHAIN_MIN_CIKS:
+        return False
+    if not all(h.is_ten_percent_owner for h in insiders):
+        return False
+    n_direct = sum(1 for h in insiders if h.ownership_nature == "direct")
+    n_indirect = sum(1 for h in insiders if h.ownership_nature == "indirect")
+    return n_direct <= _DEEMED_CHAIN_MAX_DIRECT and n_indirect >= _DEEMED_CHAIN_MIN_INDIRECT
+
 
 def _collapse_insider_control_group(cluster: list[Holder]) -> tuple[Holder, CorrectionApplied]:
     """Collapse a confirmed control-group ``cluster`` (≥2 distinct CIKs, ≥1 insider
@@ -2612,12 +2697,26 @@ def _reconcile_insider_control_groups(
     block value, counted once (#1652). Pure read-path.
 
     Operates on the union of insider survivors (``form4``/``form3``) and blockholders
-    (``13d``/``13g``), bucketed by EXACT ``shares`` value. A bucket collapses when it has
-    **≥2 distinct non-null CIKs** AND **≥1 insider-source member** (a Form-4 footprint —
-    the #1652 explosion). A purely-13D/G bucket (a co-investor group with no insider) is
-    left untouched for :func:`_reconcile_13d_groups` (#1645); the two passes partition the
-    work. Only **non-round** (:func:`_is_group_block`), positive, non-null-CIK rows are
-    eligible; everything else passes through to its channel unchanged.
+    (``13d``/``13g``), bucketed by EXACT ``shares`` value. A purely-13D/G bucket (a
+    co-investor group with no insider) is left untouched for
+    :func:`_reconcile_13d_groups` (#1645); the two passes partition the work.
+
+    A bucket with **≥1 insider-source member** collapses via EITHER route:
+
+    * **Value proxies (#1652, original).** ≥2 distinct non-null CIKs at an exact
+      **non-round** (:func:`_is_group_block`) value ≥ ``_INSIDER_GROUP_MIN_SHARES``.
+      Membership is INFERRED from the improbable precision of the shared figure.
+    * **Deemed chain (#2230).** The insider members carry the structured Rule
+      16a-1(a)(2) signature — see :func:`_is_deemed_chain`. Membership is READ from
+      the Form 3/4 relationship box and Table I column 5 rather than inferred, so the
+      magnitude floor and roundness guard do not apply; they exist only to substitute
+      for the evidence this route supplies directly (the same argument
+      :func:`_reconcile_same_accession_groups` makes for a shared accession).
+
+    Bucketing admission (:func:`_is_eligible`) is only positivity + non-null CIK +
+    eligible source, so a bucket failing the value proxies can still be tested against
+    the deemed-chain tier. A bucket satisfying neither is re-emitted to its origin
+    channel unchanged.
 
     Consumption is **exact-value only**: a consumed CIK's 13D/G row at a *different* value
     (usually the larger full group block) stays in ``blockholders`` for #1645/owner-once —
@@ -2633,31 +2732,92 @@ def _reconcile_insider_control_groups(
     eligible_by_value: dict[Decimal, list[tuple[str, Holder]]] = {}
 
     def _is_eligible(h: Holder) -> bool:
+        """Bucketing admission. Deliberately WIDER than the collapse gate: the
+        magnitude floor and roundness guard moved down to :func:`_passes_value_proxies`
+        so a bucket that fails them can still be re-examined under the deemed-chain
+        tier (#2230). A bucket that satisfies neither tier is re-emitted to its origin
+        list unchanged, so widening here is behaviour-preserving."""
         cik = h.filer_cik
-        return (
-            h.shares >= _INSIDER_GROUP_MIN_SHARES
-            and cik is not None
-            and bool(cik.strip())
-            and _is_group_block(h.shares)
-            and h.winning_source in _GROUP_ELIGIBLE_SOURCES
-        )
+        return h.shares > 0 and cik is not None and bool(cik.strip()) and h.winning_source in _GROUP_ELIGIBLE_SOURCES
 
+    def _passes_value_proxies(shares: Decimal) -> bool:
+        """The original #1652 inference gate: an exact non-round block at a magnitude
+        that can actually explode a float."""
+        return shares >= _INSIDER_GROUP_MIN_SHARES and _is_group_block(shares)
+
+    # Every row, indexed by holder identity, so a fold can also claim a folded member's
+    # rows in OTHER channels. See the release hazard below.
+    by_identity: dict[str, list[tuple[str, Holder]]] = {}
     for origin, source_list, out_list in (
         ("s", survivors, survivors_out),
         ("b", blockholders, blockholders_out),
     ):
         for h in source_list:
+            by_identity.setdefault(_identity_key(h.filer_cik, h.filer_name), []).append((origin, h))
             if _is_eligible(h):
                 eligible_by_value.setdefault(h.shares, []).append((origin, h))
             else:
                 out_list.append(h)
 
     corrections: list[CorrectionApplied] = []
-    for members in eligible_by_value.values():
+    for shares, members in eligible_by_value.items():
         holders = [h for _, h in members]
         distinct_ciks = {h.filer_cik for h in holders}
-        has_insider = any(h.winning_source in _INSIDER_GROUP_SOURCES for h in holders)
-        if len(distinct_ciks) >= 2 and has_insider:
+        insiders = [h for h in holders if h.winning_source in _INSIDER_GROUP_SOURCES]
+        has_insider = bool(insiders)
+        # Two independent routes to the same collapse. The value proxies infer
+        # membership from an improbably precise shared figure; the deemed-chain tier
+        # reads it off the Form 3/4 relationship box and ownership-form column
+        # instead, and so does not need them (#2230). Nature/10%-owner flags are
+        # meaningful only on Section 16 rows, so the tier is evaluated over the
+        # insider members; any 13D/G row in the same value bucket still folds into
+        # the rep exactly as before.
+        collapsible = len(distinct_ciks) >= 2 and has_insider and _passes_value_proxies(shares)
+        if not collapsible and has_insider:
+            collapsible = _is_deemed_chain(insiders)
+        # --- Release hazard (#2230) ------------------------------------------------
+        # Folding a member removes its identity from ``survivors`` and therefore from
+        # the owner-once identity grouping downstream. Any OTHER row that identity holds
+        # — most consequentially its 13F institutional row — is then no longer grouped
+        # with an insider row, so :func:`_reconcile_owner_once` stops classifying it as
+        # that insider and RELEASES it into the institutions wedge as a standalone
+        # owner. The pass then removes a small block and adds a large position: measured
+        # on CQP, folding Blackstone Group L.P. (CIK 0001393818) out of a 462,922 deemed
+        # block released its 13F row and the PIE GREW by 101,420,487 shares — the exact
+        # opposite of what this pass exists to do.
+        #
+        # Claiming the folded identity's other rows would fix it and is NOT available:
+        # #1652 settled consumption as exact-value-only precisely so that a member's
+        # larger genuine 13D block is not deleted (spec, Codex ckpt-1 MED; guarded by
+        # ``test_non_exact_13d_residual_stays_for_1645`` and
+        # ``test_rep_residual_split_documented``). Reversing that is a bigger decision
+        # than this ticket.
+        #
+        # So the NEW tier fails closed instead: if folding would strand a non-rep
+        # member's other-channel rows, leave the whole cluster alone. The residual
+        # double-count is the conservative direction and matches the posture the rest of
+        # this pass takes. The original value-proxy route is deliberately NOT gated on
+        # this — its behaviour is unchanged from #1652.
+        if collapsible and not (len(distinct_ciks) >= 2 and has_insider and _passes_value_proxies(shares)):
+            rep_preview = max(
+                holders,
+                key=lambda h: (
+                    h.winning_source in _INSIDER_GROUP_SOURCES,
+                    h.shares,
+                    h.filer_cik or "",
+                    h.winning_accession,
+                ),
+            )
+            rep_identity = _identity_key(rep_preview.filer_cik, rep_preview.filer_name)
+            in_cluster = {id(h) for h in holders}
+            for member in holders:
+                member_identity = _identity_key(member.filer_cik, member.filer_name)
+                if member_identity == rep_identity:
+                    continue
+                if any(id(sib) not in in_cluster for _o, sib in by_identity.get(member_identity, [])):
+                    collapsible = False
+                    break
+        if collapsible:
             collapsed, correction = _collapse_insider_control_group(holders)
             # The rep is always an insider-source row (≥1 insider member + rep preference),
             # so it routes to the insiders slice via owner-once → goes to survivors.
