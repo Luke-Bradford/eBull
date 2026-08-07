@@ -14,6 +14,14 @@ unchanged:
    and the triage order is selector → fixture → code (prevention log, #2240
    S-2).
 
+Plus two this harness adds, both from #2214's entry and neither present in the
+5a sister:
+
+4. ⚠⚠ **Gate on exit code 1, never on "non-zero"** — see ``PYTEST_TEST_FAILED``.
+5. ⚠ **Run a BASELINE first.** The selected test must PASS on unmutated source
+   before anything is injected; otherwise "the mutation broke it" and "it was
+   already broken" are the same observation, and the second reads as ``CAUGHT``.
+
 ⚠ TWO SOURCE FILES, so each probe names its own — ``cost_model`` is a leaf and
 ``position_costing`` is its consumer, and a defect in either is a different
 class. The harness restores both regardless of which one a probe touched.
@@ -50,6 +58,16 @@ SOURCES = (MODEL, COSTING)
 
 MODEL_TESTS = "tests/test_cost_model.py"
 COSTING_TESTS = "tests/test_position_costing.py"
+
+#: ⚠⚠ GATE ON EXIT CODE 1, NEVER ON "NON-ZERO" (prevention log, #2214). pytest
+#: exits 1 for a test failure and 2/3/4/5 for interrupted / internal error /
+#: USAGE error / no tests collected. A harness reading "non-zero" as CAUGHT
+#: reports a clean sweep for mutations that were never evaluated — a syntax
+#: break in the injected source exits 4 and reads as a catch. That direction is
+#: the dangerous one: NOT CAUGHT is loud and gets triaged, a false CAUGHT is
+#: silent and its conclusion is exactly what nobody re-checks.
+PYTEST_PASSED = 0
+PYTEST_TEST_FAILED = 1
 
 #: (what the injected defect IS, source file, test file, [(anchor, replacement), ...], -k selector)
 PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
@@ -356,13 +374,27 @@ def main() -> int:
             if bad_anchor:
                 print(f"  {'*** BAD ANCHOR ***':<20} {name}", flush=True)
                 continue
+            # ⚠⚠ BASELINE FIRST — assert the selected test PASSES on unmutated
+            # source before mutating anything. Without it a probe cannot tell
+            # "the mutation broke the test" from "the test was already broken",
+            # and the second reads as CAUGHT (prevention log, #2214).
+            rc_baseline = run([tests], selector)
+            if rc_baseline != PYTEST_PASSED:
+                failures.append(f"{name}: baseline exit {rc_baseline} on unmutated source — probe proves nothing")
+                print(f"  {'*** BAD BASELINE ***':<20} {name}  (exit {rc_baseline})", flush=True)
+                continue
             source.write_text(mutated)
             rc = run([tests], selector)
             source.write_text(originals[source])
-            verdict = "CAUGHT" if rc != 0 else "*** NOT CAUGHT ***"
-            print(f"  {verdict:<20} {name}  ({count} test{'' if count == 1 else 's'})", flush=True)
-            if rc == 0:
+            if rc == PYTEST_TEST_FAILED:
+                verdict = "CAUGHT"
+            elif rc == PYTEST_PASSED:
+                verdict = "*** NOT CAUGHT ***"
                 failures.append(name)
+            else:
+                verdict = f"*** HARNESS FAULT {rc} ***"
+                failures.append(f"{name}: pytest exit {rc} is not a test result — the mutation was never evaluated")
+            print(f"  {verdict:<20} {name}  ({count} test{'' if count == 1 else 's'})", flush=True)
     finally:
         # ⚠ Restored even on KeyboardInterrupt. A harness that can leave a
         # tracked source file mutated is one Ctrl-C away from a defect committed
@@ -371,9 +403,10 @@ def main() -> int:
             source.write_text(text)
 
     rc_suite = run([MODEL_TESTS, COSTING_TESTS], "test_")
-    print(f"\n  restored suite: {'PASS' if rc_suite == 0 else '*** FAIL ***'}", flush=True)
-    if rc_suite:
-        failures.append("restored suite does not pass")
+    suite = "PASS" if rc_suite == PYTEST_PASSED else f"*** FAIL (exit {rc_suite}) ***"
+    print(f"\n  restored suite: {suite}", flush=True)
+    if rc_suite != PYTEST_PASSED:
+        failures.append(f"restored suite exits {rc_suite}")
     if failures:
         print("\nUNCAUGHT:\n  " + "\n  ".join(failures), flush=True)
         return 1
