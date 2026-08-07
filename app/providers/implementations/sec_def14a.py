@@ -1505,11 +1505,12 @@ def _is_instrument_not_owner(text: str, *, strip_class_designator: bool = False)
     if not words:
         return False
     if strip_class_designator and ("class" in words or "series" in words):
+        # The trigger token always SURVIVES its own filter (`class` / `series`
+        # are both longer than 2), so this cannot empty `words` — 'Class B'
+        # reduces to ['class'], which is in the vocabulary and returns True on
+        # the line below. An earlier revision guarded an empty result here;
+        # review NITPICK on PR #2373 showed the branch was unreachable.
         words = [w for w in words if len(w) > 2]
-    if not words:
-        # 'Class B' reduces to nothing but the designator — still a title of
-        # class, and the emptiness is the evidence, not a reason to bail.
-        return True
     return all(w in _INSTRUMENT_VOCAB for w in words)
 
 
