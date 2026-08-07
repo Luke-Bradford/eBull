@@ -173,8 +173,12 @@ def census() -> int:
     print(f"  series fail-closed   {fail_closed:>12,}   (no coverage row / stale rule set — excluded from BOTH arms)")
     print(f"  bars read            {bars:>12,}")
     print(f"  bars flagged         {bars_flagged:>12,}   on {series_flagged:,} series")
-    share = 100.0 * bars_flagged / bars if bars else 0.0
-    print(f"  flagged bar share    {share:>12.6f}%   ⚠ computed, never transcribed")
+    # ⚠ "—" and not "0.000000%" on an empty read, which is the rule
+    # ``ArmCensus.flagged_bar_share_pct`` enforces for the same reason: a run
+    # whose coverage join matched nothing would otherwise print a reassuring
+    # zero produced by having read no bars at all.
+    rendered_share = "—" if bars == 0 else f"{100.0 * bars_flagged / bars:.6f}%"
+    print(f"  flagged bar share    {rendered_share:>12}   ⚠ computed, never transcribed")
     print(f"    range verdicts     {range_flagged:>12,}   (high/low — read by S-4 only, which does not run here)")
     print(f"    return verdicts    {return_flagged:>12,}   (close — read by every sleeve)")
     print(f"  bars the arms differ {differing:>12,}   of {bars_flagged:,} flagged")
