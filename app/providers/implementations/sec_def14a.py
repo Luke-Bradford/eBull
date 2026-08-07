@@ -65,7 +65,7 @@ import re
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Final
+from typing import Final, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,11 @@ class Def14ABeneficialOwnershipTable:
 _TABLE_OPEN_RE: Final[re.Pattern[str]] = re.compile(r"<table\b[^>]*>", re.IGNORECASE)
 _TABLE_CLOSE_RE: Final[re.Pattern[str]] = re.compile(r"</table\s*>", re.IGNORECASE)
 _TR_RE: Final[re.Pattern[str]] = re.compile(r"<tr\b[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
-_CELL_RE: Final[re.Pattern[str]] = re.compile(r"<(?:t[hd])\b[^>]*>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL)
+# Group 1 is the tag's ATTRIBUTES, group 2 the cell contents. The attributes
+# are needed for ``rowspan`` — see :func:`_expand_row_spans`.
+_CELL_RE: Final[re.Pattern[str]] = re.compile(r"<(?:t[hd])\b([^>]*)>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL)
+_ROWSPAN_RE: Final[re.Pattern[str]] = re.compile(r"\browspan\s*=\s*[\"']?\s*(\d+)", re.IGNORECASE)
+_COLSPAN_RE: Final[re.Pattern[str]] = re.compile(r"\bcolspan\s*=\s*[\"']?\s*(\d+)", re.IGNORECASE)
 _HTML_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<[^>]+>")
 _NBSP_RE: Final[re.Pattern[str]] = re.compile(r"&nbsp;| ")
 _INLINE_WHITESPACE_RE: Final[re.Pattern[str]] = re.compile(r"[ \t\r\f\v]+")
@@ -811,7 +815,161 @@ def _looks_like_label_row(cells: tuple[str, ...]) -> bool:
     return "name" in matched and len(matched) >= 2
 
 
-def _parse_table_html(table_html: str) -> _RawTable | None:
+class _ExpandedRow(NamedTuple):
+    """One row after :func:`_expand_row_spans`.
+
+    ``own_cells`` is the row's own ``<td>``s, unshifted; ``inherited_cells`` is
+    what a live ``rowspan`` places into the row; ``cells`` is both, in layout
+    order. ``inherited_cells`` is empty exactly when the row inherited nothing.
+    """
+
+    cells: tuple[str, ...]
+    own_cells: tuple[str, ...]
+    inherited_cells: tuple[str, ...]
+
+
+def _expand_row_spans(rows: list[tuple[tuple[str, int, int], ...]]) -> list[_ExpandedRow]:
+    """Restore a ``rowspan`` cell into the rows it covers, at the right position.
+
+    ROWS is one ``(text, rowspan, colspan)`` triple per ``<td>``/``<th>`` in
+    document order. Returns one text tuple per row.
+
+    Source rule — the HTML Living Standard's table model (§4.9.12 "Forming a
+    table", *downward-growing cells*): a cell whose ``rowspan`` is N occupies the
+    same COLUMN SLOT in the next N-1 rows, so those rows carry fewer ``<td>``s in
+    the markup and every later cell in them sits further LEFT than its own markup
+    position suggests. Reading ``<td>`` position as column index — which this
+    parser did — mis-columns every continuation row of a spanned table.
+
+    Concretely (#2175, ``0001104659-25-029081``, Liberty Media): the holder cell
+    carries ``rowspan="6"`` over the issuer's six share series, so rows 2-6 lose
+    three leading cells. ``Title of Series`` then landed on ``name_idx`` and the
+    parser stored ``LLYVB`` / ``FWONK`` / ``LLYVK`` as beneficial owners, with the
+    share count read from whichever cell the value-recovery scan reached.
+
+    Two properties are deliberate, and BOTH were forced by the full-population
+    A/B — the naive form (markup-index carry, every row expanded) regressed three
+    accession classes:
+
+    1. **``colspan`` is read but NOT expanded.** A carried cell is placed by
+       LAYOUT column, which needs the colspan arithmetic; but it is emitted ONCE,
+       not ``colspan`` times. Expanding it would multiply captions inside
+       ``score_headers``, and :func:`_score_table_headers` SUMS keyword weights —
+       so a ``colspan=6`` caption would score six times and reshuffle table
+       selection corpus-wide. Ignoring colspan entirely is equally wrong: the
+       carry index is then a markup index, and on ``0001628280-26-025998``
+       (``colspan=3|6`` before a ``rowspan=4`` caption) it inserted the caption
+       three columns early, wrecked the promoted header and took a 16-holder
+       Item 403 table to ZERO.
+    2. **A ``<tr>`` carrying no cells of its own emits nothing, but still consumes
+       one row of every live span.** Consuming is the table model and is what
+       keeps the span decaying at the right rate. Emitting is not: EDGAR's
+       generated markup is full of cell-less spacer ``<tr>``s (the same accession
+       has two before its header row and one after), every cell such a row could
+       show is a repeat of one already emitted above, and materialising it
+       inserted a phantom one-cell row between the two header rows — which the
+       two-row-header promotion then adopted as ``column_headers``.
+
+    Reuse check (standard-filing rule). ``pandas.read_html`` implements the full
+    model and was tested on that exact Liberty table: pandas 3.0.2 returns a
+    uniform 24-column frame with ``Chase Carey Director`` repeated across all six
+    series rows, where this parser returned 24 cells then 21. Not adoptable
+    wholesale — it also expands colspan (see 1) and re-does cell-text extraction,
+    which every header-scoring constant here is tuned against. So the ALGORITHM
+    is mirrored from ``pandas.io.html._HtmlFrameParser._expand_colspan_rowspan``
+    (a remainder list drained ahead of each source cell) and the extraction is
+    left alone.
+
+    ``rowspan="0"`` (HTML: "span to the end of the row group") is treated as 1,
+    matching the pandas reference. EDGAR proxies do not use it and inventing a
+    to-end-of-table span for a malformed attribute is the riskier reading.
+    """
+    out: list[_ExpandedRow] = []
+    # (layout_column, columns_spanned, text, rows_left), ascending by column.
+    remainder: list[tuple[int, int, str, int]] = []
+    for cells in rows:
+        if not cells:
+            # Cell-less spacer row: consume a row of every live span, emit nothing.
+            remainder = [(col, width, text, left - 1) for col, width, text, left in remainder if left > 1]
+            out.append(_ExpandedRow((), (), ()))
+            continue
+        texts: list[str] = []
+        inherited: list[str] = []
+        next_remainder: list[tuple[int, int, str, int]] = []
+        column = 0
+        pending = iter(remainder)
+        carried = next(pending, None)
+        for text, rowspan, colspan in cells:
+            # Layout slots claimed by an earlier row's spanning cell come first.
+            while carried is not None and carried[0] <= column:
+                col, width, prev_text, left = carried
+                texts.append(prev_text)
+                inherited.append(prev_text)
+                column = max(column, col) + width
+                if left > 1:
+                    next_remainder.append((col, width, prev_text, left - 1))
+                carried = next(pending, None)
+            texts.append(text)
+            if rowspan > 1:
+                next_remainder.append((column, colspan, text, rowspan - 1))
+            column += colspan
+        while carried is not None:
+            col, width, prev_text, left = carried
+            texts.append(prev_text)
+            inherited.append(prev_text)
+            if left > 1:
+                next_remainder.append((col, width, prev_text, left - 1))
+            carried = next(pending, None)
+        out.append(_ExpandedRow(tuple(texts), tuple(text for text, _, _ in cells), tuple(inherited)))
+        # A span opened by THIS row can start left of one carried into it, so the
+        # append order is not sorted; the drain above requires that it is.
+        next_remainder.sort(key=lambda entry: entry[0])
+        remainder = next_remainder
+    return out
+
+
+def _row_contributes_only_inherited_values(row: _ExpandedRow) -> bool:
+    """True when ROW inherited a cell and contributes no value of its OWN.
+
+    #2175, third regression class. Issuers put ``rowspan="2"`` on a holder's
+    VALUE cells and stack the holder's name and address as two ``<tr>``s under
+    it. Restoring the span hands the address row the holder's own figures, and
+    it stores as a second holder at an identical share count —
+    ``0000107140-24-000176`` gained 'New York, NY 10055' at BlackRock's
+    6,782,743 / 14.97% and 'Baker Botts L.L.P. 2001 Ross Avenue…' at E.P.
+    Hamilton's 462,338 / 1.02%. A name test cannot separate these: the Baker
+    Botts line is a law firm's name and address, indistinguishable in isolation
+    from a genuine nominee holder.
+
+    The markup separates them. A row whose every number is INHERITED is a
+    continuation of the row that opened those spans — it is one holder rendered
+    over two lines, not two holders. A row with a value of its own is a holder
+    (Liberty's per-series continuation rows carry their own share counts).
+
+    ⚠ This test makes the value-carry class strictly non-regressive against
+    ``main``: for any row with an inherited cell, ``main`` saw the same ``<tr>``
+    with its own cells only, so ``main`` kept it exactly when it had an own value
+    — the same decision this makes. What changes for a kept row is its column
+    ALIGNMENT, which is the point of the expansion.
+
+    ⚠ The inherited cells must themselves be VALUES. Testing only "no own value"
+    also matched the second row of a two-row HEADER, whose own cells are captions
+    and which inherits a spanning caption — dropping it left the table with no
+    label row and took the same two accessions to zero a second time.
+    """
+    if not row.inherited_cells:
+        return False
+    if not any(_is_value_cell(cell) for cell in row.inherited_cells):
+        return False
+    return not any(_is_value_cell(cell) for cell in row.own_cells)
+
+
+def _is_value_cell(cell: str) -> bool:
+    """True when CELL parses as an Item 403 share count or percent."""
+    return _parse_share_count(cell) is not None or _parse_percent(cell) is not None
+
+
+def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTable | None:
     """Extract one ``<table>`` block. Mirrors the helper in
     business_summary but kept inlined so this module is provider-
     side / self-contained (parsers should not import from
@@ -843,11 +1001,31 @@ def _parse_table_html(table_html: str) -> _RawTable | None:
         scrubbed = "".join(pieces)
     else:
         scrubbed = inner
-    cells_per_row: list[tuple[str, ...]] = []
+    # Two passes, and the ORDER is load-bearing: the row-span expansion below
+    # counts rows, so every ``<tr>`` must reach it — including the all-empty
+    # spacer rows the old single pass dropped here. Dropping a row first would
+    # make an earlier ``rowspan`` decay one row too fast and shift the rows
+    # after it back the way this expansion exists to fix.
+    spanned_rows: list[tuple[tuple[str, int, int], ...]] = []
     for tr_match in _TR_RE.finditer(scrubbed):
-        cells = tuple(_strip_inline_html(cell) for cell in _CELL_RE.findall(tr_match.group(1)))
-        if any(c for c in cells):
-            cells_per_row.append(cells)
+        spanned_rows.append(
+            tuple(
+                (
+                    _strip_inline_html(cell_inner),
+                    int(rs.group(1)) if (rs := _ROWSPAN_RE.search(attrs)) else 1,
+                    max(1, int(cs.group(1))) if (cs := _COLSPAN_RE.search(attrs)) else 1,
+                )
+                for attrs, cell_inner in _CELL_RE.findall(tr_match.group(1))
+            )
+        )
+    if expand_spans:
+        cells_per_row: list[tuple[str, ...]] = [
+            row.cells
+            for row in _expand_row_spans(spanned_rows)
+            if any(row.cells) and not _row_contributes_only_inherited_values(row)
+        ]
+    else:
+        cells_per_row = [cells for row in spanned_rows if any(cells := tuple(text for text, _, _ in row))]
     if not cells_per_row:
         return None
 
@@ -1547,6 +1725,19 @@ def _resolve_columns(headers: tuple[str, ...]) -> tuple[int, int, int]:
         if i == percent_idx:
             continue
         lower = h.lower()
+        # …and excluding every OTHER percent caption too, unless it carries a
+        # strong AMOUNT keyword. This is the exact mirror of the rule the percent
+        # pass above applies, and the same source rule drives it: 17 CFR 229.403
+        # column 3 is a COUNT, column 4 a PERCENT. The percent pass takes only the
+        # FIRST match, so on a multi-class table a SECOND percent caption stayed
+        # eligible for the shares tiering — and ``total`` is a tier-4 keyword, so
+        # '% of Total Voting Power' outranked the genuine 'Shares' column
+        # (#2175, 0001628280-26-025998: Dustin Moskovitz's Class B count filed
+        # against his Class A percent). The docstring above already states this
+        # for the percent side — "'Total as a Percentage of Shares Outstanding'
+        # is a real percent column" — it simply was not applied here.
+        if ("percent" in lower or "%" in lower) and not any(k in lower for k in _STRONG_SHARES_KEYWORDS):
+            continue
         for keyword, weight in SHARES_TIERS:
             if keyword in lower:
                 shares_tier_priority.append((str(i), weight))
@@ -2684,10 +2875,32 @@ _ADDRESS_ONLY_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
+# The SECOND line of a split US address — locality, state, ZIP and nothing else
+# ('New York, NY 10055', 'Bloomfield Hills, MI 48304'). It carries no street
+# number, so ``_ADDRESS_ONLY_RE`` above does not see it.
+#
+# #2175: this was a latent gap that the row-span expansion turned into a live
+# defect. Issuers put ``rowspan="2"`` on the VALUE cells of a holder whose name
+# and address are stacked; before the expansion the address row parsed no values
+# and died on the "neither shares nor percent" guard, and afterwards it inherited
+# the holder's own figures — so ``0000107140-24-000176`` gained 'New York, NY
+# 10055' at BlackRock's 6,782,743 / 14.97%, a verbatim duplicate of the row above
+# it. The prevention log already recorded 'malvern, pa 19355' as this shape
+# (#2164); that one lowercases, which is why the state anchor is a case-sensitive
+# two-letter group inside an otherwise case-insensitive pattern.
+#
+# Anchored at BOTH ends and capped at four locality words: a holder whose name
+# merely ENDS in this shape ('BlackRock, Inc. 55 East 52nd Street New York, NY
+# 10055') must keep passing, and does, because it does not match from the start.
+_CITY_STATE_ZIP_ONLY_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z][A-Za-z.'\-]*(?:\s+[A-Za-z][A-Za-z.'\-]*){0,3}\s*,\s*(?i:[A-Z]{2})\.?\s+\d{5}(?:-\d{4})?\.?$"
+)
+
 
 def _is_address_fragment(name: str) -> bool:
-    """True when a holder-name cell holds only address material (#2140)."""
-    return bool(_ADDRESS_ONLY_RE.match(name.strip()))
+    """True when a holder-name cell holds only address material (#2140, #2175)."""
+    stripped = name.strip()
+    return bool(_ADDRESS_ONLY_RE.match(stripped) or _CITY_STATE_ZIP_ONLY_RE.match(stripped))
 
 
 # D1 clause 4-5 (#2160) — the tail after the name must carry ADDRESS evidence,
@@ -3256,7 +3469,21 @@ def parse_summary_compensation_table(html_text: str) -> Def14ASummaryCompTable:
     best_table: _RawTable | None = None
     for window_start, window_end in _find_sct_windows(html_text):
         for start, end in _scan_outer_tables(html_text, start=window_start, end=window_end):
-            parsed = _parse_table_html(html_text[start:end])
+            # ``expand_spans=False``: the Item 402(c) path carries its OWN
+            # compensation for rowspan-shifted rows (see the module comment above
+            # `Def14AExecCompRow` — "name-cell rowspan → continuation-year rows
+            # are index-shifted (AAPL/MSFT)"), built and tuned across #1945,
+            # #1967, #2088, #2094 and #2097. Feeding it the span-restored rows
+            # re-bases that machinery, and the full-population A/B measured the
+            # result: **580 accessions** drifted, every one of them the same way
+            # — ``executive_name``, ``fiscal_year``, ``salary`` and ``total_comp``
+            # identical, and ``principal_position`` repeated once per
+            # continuation year ('Executive Vice President and Chief Financial
+            # Officer' ×3 on 0000004904-25-000043). Re-basing this arm on the
+            # table model is the right end state and is NOT this ticket — #2175
+            # is Item 403. Keeping the SCT input byte-identical is what makes
+            # that separable. See the follow-up issue in the PR description.
+            parsed = _parse_table_html(html_text[start:end], expand_spans=False)
             if parsed is None:
                 continue
             score = _score_sct_headers(parsed.score_headers)

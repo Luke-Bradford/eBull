@@ -3065,3 +3065,106 @@ Two things S-4 adds to the prevention above:
 - Prevention: when an arm re-implements a ranked rule, resolve the ranking key to the SAME identifier the rule names, before the `row_number()`, and say so in the SQL. If the two identifiers are 1:1 today, that is a property of today's corpus, not of the rule.
 - Caught by: the arm's own per-date set comparison on its first full-population run. A count-only comparison (`762 dates, 101,318 picks` on both sides) would have reported PASS — the two selections have the same SIZE on every date.
 - Enforced in: this prevention log; `scripts/verify_2240_s2_cross_sectional.py` (`_RANKING_SQL`'s `eligible` CTE carries the incident and the two dates).
+### An HTML-table parser that reads `<td>` position as column index has not implemented the table model — and the symptom looks like bad DATA, not bad indexing (#2175, 2026-08-07)
+
+- Symptom: DEF 14A Item 403 multi-series tables stored the *Title of Series* ticker
+  as the beneficial owner — `LLYVB`, `FWONK`, `LBRDK`, `QRTEP`, `BATRK` — with a
+  share count taken from whichever cell the value-recovery scan happened to reach.
+  103 rows / 40 distinct ticker-shaped names / 50 accessions
+  (`SELECT … WHERE holder_name ~ '^[A-Z]{3,5}$'`). Four prior tickets patched this
+  family per-case (#2088 / #2094 / #2097 and #2169's lineage) and a fifth was
+  scoped as a name-rejection test.
+- Root cause: `_parse_table_html` extracted cells with
+  `<(?:t[hd])\b[^>]*>(.*?)</t[hd]\s*>` and used each cell's ordinal as its column.
+  That identity holds only for a table with no spans. Liberty Media's holder cell
+  carries `rowspan="6"` over the issuer's six share series, so rows 2-6 are three
+  `<td>`s short and every cell in them sits three columns left of where the parser
+  looked. Nothing about the output says "indexing"; it says "the parser thinks a
+  ticker is a person", which is why four rounds went after the names.
+- ⚠ **The reuse check answers this in one command and was worth running.**
+  `pandas.read_html` (already a dependency) implements the model: on that exact
+  table pandas 3.0.2 returns a uniform 24-column frame with `Chase Carey Director`
+  repeated across all six series rows where our parser returned 24 cells then 21.
+  Not adoptable wholesale — it also expands `colspan` and re-does cell-text
+  extraction — but it settled the diagnosis in minutes and supplied the reference
+  algorithm (`_HtmlFrameParser._expand_colspan_rowspan`).
+- ⚠ **Half the table model is worse than none, and only the full-population A/B
+  said so.** The naive form (carry by markup index, expand every row) passed 118
+  unit tests, the AAPL/GME/MSFT/JPM/HD panel with ZERO drift, and Codex — and
+  regressed three classes:
+  1. **Carry placed by markup index.** With `colspan=3|6` before a `rowspan=4`
+     caption the carry landed three columns early, wrecked the promoted header and
+     took `0001628280-26-025998` from 16 holders to **0**. Fix: read `colspan` for
+     the layout arithmetic, but emit the carried cell ONCE — expanding it would
+     multiply captions inside `score_headers`, which SUMS keyword weights.
+  2. **Cell-less spacer `<tr>`s materialised.** EDGAR's generated markup wraps
+     header rows in `<tr>`s with no `<td>` at all; filling them with carried text
+     inserted a phantom one-cell row that the two-row-header promotion then adopted
+     as `column_headers`. Fix: such a row emits nothing but still CONSUMES a row of
+     every live span — consuming is the table model, emitting is not.
+  3. **Stacked name/address rows inherited the holder's figures.** Issuers put
+     `rowspan="2"` on the VALUE cells; the address row previously died on the
+     "neither shares nor percent" guard and now inherited real numbers, so
+     `0000107140-24-000176` gained `New York, NY 10055` at BlackRock's exact
+     6,782,743 / 14.97%. Fix: a row that inherits a cell and contributes no value
+     of its OWN is a continuation, not a holder. ⚠ The first cut of that rule also
+     matched the second row of a two-row HEADER (own cells are captions, inherits a
+     spanning caption) and took the same accession to zero a SECOND time — the
+     inherited cells must themselves be values.
+- ⚠ **A shared cell extractor is shared with a caller that already compensated for
+  the same defect.** `parse_summary_compensation_table` uses the same
+  `_parse_table_html`, and the Item 402(c) path has carried its own rowspan-shift
+  compensation since #1945. Restoring the spans re-based it: **580 accessions**
+  drifted, all the same way — `executive_name`, `fiscal_year`, `salary` and
+  `total_comp` identical, `principal_position` repeated once per continuation year.
+  Fixed by keeping that caller's input byte-identical (`expand_spans=False`) rather
+  than re-tuning an arm this ticket has no mandate over. Same shape as the #2356
+  `_strip_inline_html` incident: **a fix placed at a shared chokepoint reaches
+  callers that never asked for it, and the second caller's compensating machinery
+  is exactly what makes the damage invisible to its unit tests.**
+- Prevention: (1) before adding an Nth per-case patch to a markup parser, ask
+  whether the parser implements the format's own model — for HTML tables that is
+  `rowspan`/`colspan`, and `pandas.read_html` is the one-command oracle for
+  whether it matters on YOUR failing document; (2) a span-restoration change is a
+  corpus change at the top review rung — its regressions are re-SELECTION of which
+  table wins, which no panel and no unit test can see; (3) when the fix lands in a
+  shared extractor, enumerate the other callers FIRST and decide per caller whether
+  its input may move.
+- Enforced in: this prevention log;
+  `app/providers/implementations/sec_def14a.py::_expand_row_spans` (both deliberate
+  departures from the pandas reference carry the measured accession that forced
+  them), `::_row_contributes_only_inherited_values`, `::_CITY_STATE_ZIP_ONLY_RE`,
+  `::_resolve_columns` (the mirrored percent-caption guard) and the
+  `expand_spans=False` comment at the SCT call site;
+  `tests/test_sec_def14a_parser.py::TestRowSpanExpansion` (8 revert-probed
+  invariants); `scripts/audit_def14a_rowspan.py` (arm-3 mechanism audit).
+
+### A monkeypatched parser entry point must forward the FULL signature — the harness reported a total collapse the code never had (#2175, 2026-08-07)
+
+- Symptom: the DEF 14A full-population A/B reported `sct_rows 67,828 -> 0` — every
+  Item 402(c) exec-comp row in the corpus gone. The parser had not regressed: the
+  same filing (`0000004904-25-000043`) returned 17 SCT rows when called directly.
+- Root cause: `scripts/ab_2140_def14a_parser.py` monkeypatches
+  `parser_mod._parse_table_html` with `def traced_parse_table(table_html: str)` to
+  instrument header promotions. The branch under test had added a keyword to that
+  entry point (`expand_spans=False` at the SCT call site), so every SCT call raised
+  `TypeError`, the harness's per-accession `except` swallowed it, and the counter
+  stayed at zero. The Item 403 arm passes no keyword, so its numbers were fine —
+  which is what made the output look like a targeted collapse of one arm rather
+  than a harness fault.
+- ⚠ The direction is the dangerous one. **A harness bug of this shape produces a
+  DRAMATIC number, and a dramatic number reads as a finding.** Ten minutes went on
+  "which of my changes emptied the SCT" before running the parser by hand. The
+  existing skill rule ("treat a clean result with more suspicion than a dirty one")
+  covers the false-negative direction; this is the false-POSITIVE one, and it costs
+  the same.
+- Prevention: (1) any monkeypatch of a function under test takes `**kwargs` and
+  forwards them — a wrapper that narrows the signature is a silent behaviour change
+  in every caller that uses the part it dropped; (2) when a harness reports a
+  total-collapse figure for ONE arm, reproduce it with a direct call to the parser
+  before reading it as a result; (3) changing a parser entry point's signature means
+  grepping `scripts/` for monkeypatches of that name in the same commit
+  (`grep -rn "parser_mod\._parse_table_html" scripts/`).
+- Enforced in: this prevention log; `scripts/ab_2140_def14a_parser.py`
+  (`traced_parse_table` and `patched` both take `**kwargs`, with the measured
+  `67,828 -> 0` in the why-comment).
