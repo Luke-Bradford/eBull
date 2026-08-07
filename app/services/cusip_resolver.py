@@ -1668,13 +1668,17 @@ def _sweep_pass(
             # value — but recorded as its OWN status so it never again
             # reads as "OpenFIGI has no mapping" (#2304,
             # sql/261_unresolved_13f_openfigi_invalid_identifier.sql).
+            # ⚠ Log INSIDE the truthy branch. On a race _tombstone_verified
+            # already logged "updated 0 rows"; an unconditional line here
+            # then asserts a verdict that was not written, contradicting it
+            # in the same run's output.
             if _tombstone_verified(cusip, STATUS_OPENFIGI_INVALID_IDENTIFIER):
                 invalid_identifier += 1
-            logger.info(
-                "openfigi sweep: cusip %s rejected by OpenFIGI as malformed (%s)",
-                cusip,
-                outcome.message,
-            )
+                logger.info(
+                    "openfigi sweep: cusip %s rejected by OpenFIGI as malformed (%s)",
+                    cusip,
+                    outcome.message,
+                )
             continue
         if isinstance(outcome, OpenFigiItemError):
             # An error we do NOT recognise as an identifier rejection.
@@ -1705,13 +1709,17 @@ def _sweep_pass(
             # Terminal verdict (#740): the security is not in (or is
             # ambiguous within) the eToro universe. Spec §7 documents
             # the manual reset escape hatch for universe expansions.
+            # Same shape as the rejection branch above, and the same fix.
+            # Pre-existing (#740), not introduced by #2304 — corrected here
+            # because leaving one of two identical branches contradictory
+            # inside the function this PR rewrote just defers the finding.
             if _tombstone_verified(cusip, STATUS_OPENFIGI_NO_INSTRUMENT):
                 no_instrument += 1
-            logger.info(
-                "openfigi sweep: ticker %s for cusip %s has no unique instrument match",
-                ticker,
-                cusip,
-            )
+                logger.info(
+                    "openfigi sweep: ticker %s for cusip %s has no unique instrument match",
+                    ticker,
+                    cusip,
+                )
             continue
         inserted = _promote_openfigi_mapping(
             conn,

@@ -31,6 +31,7 @@ Verifies:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from datetime import date
 from typing import Any
@@ -599,6 +600,50 @@ class TestPerItemOutcomeRouting:
         assert _status_of(ebull_test_conn, cusip) == "resolved_via_extid"
         # ...so no verdict was written, and none may be reported.
         assert report.unresolved_by_openfigi == 0
+
+    def test_raced_rejection_does_not_log_a_verdict(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Review round 4 NITPICK — the per-outcome ``info`` line must sit
+        INSIDE the verified-tombstone branch.
+
+        ``_tombstone_verified`` already logs a ``warning`` when the UPDATE
+        touches 0 rows. An unconditional ``info`` after it then asserts
+        "rejected by OpenFIGI as malformed" for a row whose verdict was
+        never written — two lines in one run's output that contradict each
+        other, with the confident one last.
+        """
+        conn = ebull_test_conn
+        cusip = "TESTRACE03"
+
+        class _StatusRacingResolver(FakeOpenFigiResolver):
+            def resolve_cusips(self, cusips: Iterable[str]) -> dict[str, OpenFigiOutcome]:
+                result = super().resolve_cusips(cusips)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE unresolved_13f_cusips SET resolution_status = 'resolved_via_extid' WHERE cusip = %s",
+                        (cusip,),
+                    )
+                return result
+
+        _seed_pending(ebull_test_conn, cusip)
+        ebull_test_conn.commit()
+        with caplog.at_level(logging.INFO, logger="app.services.cusip_resolver"):
+            report = sweep_unresolved_cusips_via_openfigi(
+                ebull_test_conn,
+                resolver=_StatusRacingResolver(
+                    outcomes={cusip: OpenFigiInvalidIdentifier(message="Invalid idValue format.")}
+                ),
+            )
+        ebull_test_conn.commit()
+
+        assert report.invalid_identifier == 0
+        assert _status_of(ebull_test_conn, cusip) == "resolved_via_extid"
+        messages = [rec.getMessage() for rec in caplog.records]
+        assert any("updated 0 rows" in m for m in messages), messages
+        assert not any("rejected by OpenFIGI as malformed" in m for m in messages), messages
 
     def test_drain_stops_when_a_pass_leaves_rows_pending(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
         """Codex ckpt-2 (#2304) — the retryable outcomes must not spin.
