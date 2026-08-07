@@ -1462,17 +1462,55 @@ _OWNER_NAME_THEN_ADDRESS_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
-def _is_instrument_not_owner(text: str) -> bool:
+def _is_instrument_not_owner(text: str, *, strip_class_designator: bool = False) -> bool:
     """True when every word in TEXT is equity/award vocabulary.
 
     'Authorized But Unissued' is Title-Cased and matches the two-capitalised-
     token person pattern, so neither D1's person arm nor an address test rejects
     it. Rule 13d-3 makes the test principled: a beneficial owner is a person or
     entity holding voting or investment power, and an instrument is neither.
+
+    #2176 — a CLASS DESIGNATOR is not a word. 17 CFR 229.403 column 1 is 'Title
+    of class', and issuers spell its values 'Class A Common Stock' / 'Series B
+    Preferred Stock' / 'Class AA'. The designator itself carries no meaning the
+    vocabulary can hold, and leaving it out produced an absurd asymmetry:
+    ``a`` is in ``_INSTRUMENT_VOCAB`` as a connective ARTICLE, so 'Class A
+    Common Stock' tested as an instrument while 'Class B Common Stock' did not
+    — and the latter then PASSED ``_is_beneficial_owner_identity`` and was
+    stored as a beneficial owner. Codex checkpoint 2 caught it: the per-row
+    guard prunes the Class A row, which RAISES the identity fraction, so a
+    table of nothing but class labels could newly clear
+    ``_ROW_IDENTITY_FLOOR`` on the strength of its Class B row alone.
+
+    Scoped to names that actually name a class, so a stray initial elsewhere
+    cannot make an unrelated name test as an instrument.
+
+    ⚠ ``strip_class_designator`` is OFF by default and the STORAGE guard is its
+    only caller, because this predicate is not private to that guard:
+    ``_is_beneficial_owner_identity`` short-circuits on it, and that feeds
+    ``_owner_identity_fraction`` and so ``_ROW_IDENTITY_FLOOR``. Turning the
+    strip on unconditionally therefore narrows OWNER IDENTITY and de-admits
+    tables — a selection change wearing a row-filter's clothes.
+
+    Measured, which is the only reason this parameter exists: on
+    ``0000062234-25-000015`` the strip flips 'Class B Shares' from owner to
+    instrument, taking the table from 2/3 = 0.667 to 1/3 = 0.333. It falls under
+    the floor and the whole table goes, including its 229.403(b) Instruction 5
+    group row — the row this change exists to protect. Same on
+    ``0000062234-26-000018``. Default-off keeps eligibility byte-identical to
+    ``origin/main``; the guard opts in, where the only effect is which rows are
+    STORED.
     """
     words = _WORD_RE.findall(text.lower())
     if not words:
         return False
+    if strip_class_designator and ("class" in words or "series" in words):
+        # The trigger token always SURVIVES its own filter (`class` / `series`
+        # are both longer than 2), so this cannot empty `words` — 'Class B'
+        # reduces to ['class'], which is in the vocabulary and returns True on
+        # the line below. An earlier revision guarded an empty result here;
+        # review NITPICK on PR #2373 showed the branch was unreachable.
+        words = [w for w in words if len(w) > 2]
     return all(w in _INSTRUMENT_VOCAB for w in words)
 
 
@@ -2538,6 +2576,7 @@ def _extract_table_holders(
     *,
     rows: list[Def14ABeneficialHolder] | None = None,
     seen: set[str] | None = None,
+    drop_non_owner_rows: bool = True,
 ) -> list[Def14ABeneficialHolder]:
     """Resolve TABLE's columns and extract its holders into ROWS.
 
@@ -2564,6 +2603,7 @@ def _extract_table_holders(
         percent_idx=percent_idx,
         rows=out,
         seen=set() if seen is None else seen,
+        drop_non_owner_rows=drop_non_owner_rows,
     )
     return out
 
@@ -2589,7 +2629,21 @@ def _is_item403_eligible(table: _RawTable) -> bool:
     only in ``score_headers`` — so reading the narrower tuple rejected the most
     prescribed shape the reg has, at scores 14 and 16.
     """
-    holders = _extract_table_holders(table)
+    # ⚠ #2176 — eligibility scores the UNPRUNED rows, deliberately. The per-row
+    # owner guard is a STORAGE filter; letting it also feed this function makes
+    # it a SELECTION change, and the two must not be coupled. Pruning non-owner
+    # rows raises ``_owner_identity_fraction`` for every table, which is exactly
+    # what this limb exists to stop — see the docstring above: "row identity
+    # alone admits Item 402 compensation tables".
+    #
+    # Not hypothetical. The full-population A/B for the coupled version gained
+    # 10 rows across 3 accessions, every one an Item 402 equity-compensation
+    # plan row ('weighted average exercise price', 'total shares subject to
+    # outstanding awards') newly clearing ``_ROW_IDENTITY_FLOOR`` on tables that
+    # correctly failed it on origin/main — the #2158 failure mode the A/B skill
+    # documents. The same run gained ZERO genuine holders, so the coupling paid
+    # nothing and cost 10 junk admissions.
+    holders = _extract_table_holders(table, drop_non_owner_rows=False)
     if not holders:
         return False
     headers = tuple(table.score_headers) + tuple(table.column_headers)
@@ -2728,6 +2782,7 @@ def _extract_holder_rows(
     percent_idx: int,
     rows: list[Def14ABeneficialHolder],
     seen: set[str],
+    drop_non_owner_rows: bool = True,
 ) -> None:
     """Append one :class:`Def14ABeneficialHolder` per data row of ONE Item 403
     table, skipping rows already collected from a sibling table.
@@ -2835,6 +2890,34 @@ def _extract_holder_rows(
             holder_name = pending_owner_name or ""
             pending_owner_name = None
         if not holder_name:
+            pending_owner_name = None
+            continue
+        if drop_non_owner_rows and _is_instrument_not_owner(holder_name, strip_class_designator=True):
+            # #2176 — the row names no beneficial owner. 17 CFR 229.403 column
+            # 2 is "Name and address of beneficial owner", and Rule 13d-3
+            # defines that as a person or entity holding voting or investment
+            # power. A name composed ENTIRELY of equity/award vocabulary is
+            # neither: it is either the table's own column-1 'Title of class'
+            # value leaking into the name column ('Series A Common Shares') or
+            # a presentation aggregate ('Total', 'Total Shares Outstanding').
+            #
+            # The predicate is not new and neither is the vocabulary. What was
+            # missing is a place to apply it PER ROW: #2176 §1 measured
+            # ``_is_beneficial_owner_identity`` down to a single call site,
+            # inside ``_owner_identity_fraction``, which gates TABLE selection
+            # only — so an admitted table wrote every row it produced, and
+            # ``_ROW_IDENTITY_FLOOR`` tolerates up to 49% non-owners by design.
+            #
+            # Deliberately the NEGATIVE test and not the positive one. Applying
+            # ``_is_beneficial_owner_identity`` per row was measured on the full
+            # population (#2176 §2) and rejects genuine holders — bare
+            # 'BlackRock', 'Margareth Øvrum', and the 229.403(b) Instruction 5
+            # group row itself — at many times the rate it removes junk.
+            #
+            # Removing these rows RAISES ``_owner_identity_fraction`` for the
+            # table, which is the intended direction: #2176 class 2 is a
+            # genuine Item 403 table pushed under the floor by its own
+            # class-label rows.
             pending_owner_name = None
             continue
         shares = _parse_share_count(shares_raw)

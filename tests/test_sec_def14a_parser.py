@@ -2646,3 +2646,253 @@ class TestBlockLevelLineStructure:
         )
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
         assert [r.holder_name for r in parsed.rows] == ["Napoleon B. Rutledge, Jr."]
+
+
+class TestItem403RowIsABeneficialOwner:
+    """#2176 class 4 — a row whose NAME is not a person or entity at all.
+
+    17 CFR 229.403 column 2 is "Name and address of beneficial owner"; Rule
+    13d-3 makes that a holder of voting or investment power. A row named
+    ``Total`` or ``Series A Common Shares`` is neither, and both were stored as
+    beneficial owners because ``_is_beneficial_owner_identity`` has exactly one
+    call site — inside ``_owner_identity_fraction``, which gates the TABLE and
+    never the row. ``_ROW_IDENTITY_FLOOR`` is 0.5, so an admitted table could
+    write up to 49% non-owner rows.
+
+    The guard is the NEGATIVE test (``_is_instrument_not_owner``), never the
+    positive one. #2176 §2 measured the positive predicate per row against all
+    110,748 stored rows and it rejects genuine holders — bare ``BlackRock``,
+    ``Margareth Øvrum``, and the Instruction 5 group row — far faster than it
+    removes junk.
+    """
+
+    def test_a_presentation_total_row_is_not_stored_as_a_holder(self) -> None:
+        """The ticket's own shape (``0001308179-25-000114``): a ``Total`` row
+        carrying a share count, sitting below the real holders. It reaches the
+        person arm as a single capitalised token and was stored."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>H. Lawrence Culp, Jr.</td><td>1,210,834</td><td>0.5%</td></tr>"
+            "<tr><td>The Vanguard Group, Inc.</td><td>3,000,000</td><td>11.0%</td></tr>"
+            "<tr><td>Total</td><td>17,967</td><td>0.5%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["H. Lawrence Culp, Jr.", "The Vanguard Group, Inc."]
+
+    def test_a_title_of_class_value_in_the_name_column_is_not_a_holder(self) -> None:
+        """229.403 column 1 is ``Title of class``. When it leaks into the name
+        column its values ('Series A Common Shares') are securities, not
+        owners — #2176 class 2's residue after #2175 fixed the alignment.
+
+        ⚠ The table carries enough genuine holders to clear
+        ``_ROW_IDENTITY_FLOOR`` on its UNPRUNED rows, because that is the shape
+        the corpus actually has: on `0001051512-25-000021` the class rows are a
+        small minority of an otherwise-genuine 18-holder table. A table that is
+        mostly class labels is not rescued by this guard and must not be — see
+        ``test_the_row_guard_is_not_a_table_selection_change``."""
+        body = (
+            "<table>"
+            "<tr><th>Shareholder's Name and Address</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Telephone and Data Systems, Inc.</td><td>7,570,000</td><td>96.4%</td></tr>"
+            "<tr><td>BlackRock, Inc.</td><td>2,100,000</td><td>4.1%</td></tr>"
+            "<tr><td>The Vanguard Group, Inc.</td><td>1,900,000</td><td>3.7%</td></tr>"
+            "<tr><td>Series A Common Shares</td><td>6,446,264</td><td>*</td></tr>"
+            "<tr><td>Common Shares</td><td>1,123,736</td><td>*</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == [
+            "Telephone and Data Systems, Inc.",
+            "BlackRock, Inc.",
+            "The Vanguard Group, Inc.",
+        ]
+
+    def test_the_instruction_5_group_row_survives(self) -> None:
+        """⚠ The test that bounds the guard. 229.403(b) Instruction 5 requires
+        the directors-and-officers-as-a-group aggregate — "in computing the
+        aggregate number of shares owned by directors and officers of the
+        registrant as a group, the same shares shall not be counted more than
+        once". Issuers label it with the word ``Total``.
+
+        The widening this rules out is "the name CONTAINS the aggregate noun",
+        which is what probe B injects. It deletes the mandated row, and the size
+        of that is measured rather than asserted — ``census_2176_def14a_
+        aggregate_rows.py`` arm 5 recomputes it against a control parse, so the
+        figure cannot go stale here the way a hand-copied one would. Hence the
+        test is "every word is instrument vocabulary" and never "contains an
+        aggregate noun"."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Jane Smith, Director</td><td>250,000</td><td>*</td></tr>"
+            "<tr><td>Total shares owned by executive officers and directors (13 persons)</td>"
+            "<td>4,120,000</td><td>7.1%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == [
+            "Jane Smith, Director",
+            "Total shares owned by executive officers and directors (13 persons)",
+        ]
+
+    def test_the_row_guard_is_not_a_table_selection_change(self) -> None:
+        """⚠ The invariant the full-population A/B forced, and the reason
+        ``_is_item403_eligible`` extracts with ``drop_non_owner_rows=False``.
+
+        The guard is a STORAGE filter. If it also feeds
+        ``_owner_identity_fraction`` it becomes a SELECTION change: pruning
+        non-owner rows raises the fraction for every table, so tables that
+        correctly failed ``_ROW_IDENTITY_FLOOR`` start clearing it.
+
+        Here one genuine holder sits under two class labels — 1/3 = 0.33,
+        below the floor. Eligibility must still see 1/3 and reject, exactly as
+        ``origin/main`` does. An earlier revision of this branch let the prune
+        lift this table to 1/1 and admit it; the A/B showed that lifted ZERO
+        genuine holders corpus-wide and admitted 10 Item 402 plan rows."""
+        body = (
+            "<table>"
+            "<tr><th>Shareholder's Name and Address</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Series A Common Shares</td><td>6,446,264</td><td>*</td></tr>"
+            "<tr><td>Common Shares</td><td>1,123,736</td><td>*</td></tr>"
+            "<tr><td>Telephone and Data Systems, Inc.</td><td>7,570,000</td><td>96.4%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == []
+
+    def test_the_designator_strip_does_not_de_admit_an_instruction_5_table(self) -> None:
+        """⚠ The second selection change, and the A/B is what found it.
+
+        ``_is_beneficial_owner_identity`` SHORT-CIRCUITS on
+        ``_is_instrument_not_owner``, so turning the class-designator strip on
+        unconditionally does not just widen the storage guard — it narrows
+        OWNER IDENTITY, lowers ``_owner_identity_fraction`` and de-admits whole
+        tables. Hence ``strip_class_designator`` is a keyword the guard opts
+        into and this predicate's other caller does not.
+
+        Shape and numbers from `0000062234-25-000015` (Marcus Corporation),
+        measured against both trees: `main` scores this table 2/3 = 0.667 and
+        admits it; with the strip unconditional it scores 1/3 = 0.333 and the
+        table goes, taking its 229.403(b) Instruction 5 group row with it.
+        `Class B Shares` is the pivot — three capitalised tokens, so it passes
+        the person arm unless the strip reaches it first."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Common Shares</td><td>67,006</td><td>*</td></tr>"
+            "<tr><td>All directors and executive officers as a group (13 persons)</td>"
+            "<td>2,569,425</td><td>10.4%</td></tr>"
+            "<tr><td>Class B Shares</td><td>2,444,278</td><td>35.0%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["All directors and executive officers as a group (13 persons)"]
+
+    def test_an_item_402_plan_table_is_not_admitted_by_pruning(self) -> None:
+        """The regression the A/B caught, pinned on its own shape.
+
+        `0000950170-25-008792` and `0000950170-25-058781` newly emitted four
+        equity-compensation-plan rows each once the prune fed eligibility.
+        These are Item 402 plan disclosures, not 229.403 beneficial ownership.
+
+        The row mix is taken from those accessions and reproduces the arithmetic
+        that broke, rather than merely looking like a plan table. Filings render
+        these in title case, and the two predicates were measured on the real
+        strings:
+
+        - ``Total Shares Outstanding`` / ``Restricted Stock Units Outstanding``
+          — every word is instrument vocabulary, so the guard prunes them;
+        - ``Weighted Average Exercise Price`` — three capitalised tokens, so it
+          PASSES the person arm of ``_is_beneficial_owner_identity``.
+
+        Unpruned that is 1 owner-identity row of 4 = 0.25, correctly under
+        ``_ROW_IDENTITY_FLOOR``. Pruned it becomes 1 of 2 = 0.5 and clears it.
+        The floor must see 0.25."""
+        body = (
+            "<table>"
+            "<tr><th>Plan Category</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Total Shares Outstanding</td><td>4,200,000</td><td>*</td></tr>"
+            "<tr><td>Restricted Stock Units Outstanding</td><td>900,000</td><td>*</td></tr>"
+            "<tr><td>Weighted Average Exercise Price</td><td>27</td><td>*</td></tr>"
+            "<tr><td>Number of shares remaining available for grant</td><td>1,800,000</td><td>*</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == []
+
+    def test_a_class_designator_letter_does_not_rescue_a_title_of_class_row(self) -> None:
+        """Codex checkpoint 2. `a` is in ``_INSTRUMENT_VOCAB`` as a connective
+        ARTICLE, so 'Class A Common Stock' tested as an instrument while
+        'Class B Common Stock' did not — the latter reached
+        ``_is_beneficial_owner_identity`` and passed.
+
+        That asymmetry is load-bearing once the per-row guard exists: pruning
+        the Class A row RAISES ``_owner_identity_fraction``, so a table of
+        nothing but class labels could clear ``_ROW_IDENTITY_FLOOR`` on the
+        strength of its Class B row alone and store it as a holder. On the base
+        branch the same table scored 1/3 and was rejected outright.
+
+        17 CFR 229.403 column 1 is 'Title of class'; the designator letter is
+        not a word, so it is dropped before the vocabulary test.
+
+        ⚠ Exercised on an ELIGIBLE table (3 genuine holders of 4 rows), because
+        eligibility now scores unpruned rows — on an all-class table the row
+        guard never runs and this would pass whether or not the designator is
+        stripped, which is a test that proves nothing."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Telephone and Data Systems, Inc.</td><td>7,570,000</td><td>96.4%</td></tr>"
+            "<tr><td>BlackRock, Inc.</td><td>2,100,000</td><td>4.1%</td></tr>"
+            "<tr><td>The Vanguard Group, Inc.</td><td>1,900,000</td><td>3.7%</td></tr>"
+            "<tr><td>Class B Common Stock</td><td>2,000,000</td><td>4.1%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == [
+            "Telephone and Data Systems, Inc.",
+            "BlackRock, Inc.",
+            "The Vanguard Group, Inc.",
+        ]
+
+    def test_a_real_entity_whose_name_contains_series_is_not_a_title_of_class(self) -> None:
+        """The bound on the designator rule. Dropping short tokens is scoped to
+        names that actually name a class, and even there the remaining words
+        must ALL be instrument vocabulary — 'capital' and 'partners' are not in
+        it, so a fund named for a series survives."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Series B Capital Partners LP</td><td>4,000,000</td><td>8.2%</td></tr>"
+            "<tr><td>Class A Common Stock</td><td>1,000,000</td><td>*</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["Series B Capital Partners LP"]
+
+    def test_a_bare_entity_name_without_a_corporate_designator_survives(self) -> None:
+        """The negative test must not drift into the positive one. ``BlackRock``
+        carries no LLC/Inc/Trust token and does not reach the two-capitalised-
+        token person pattern, so ``_is_beneficial_owner_identity`` returns False
+        for it — 28 rows in the #2176 §2 census. It is a real 13G filer and must
+        be stored."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>BlackRock</td><td>64,137,817</td><td>8.7%</td></tr>"
+            "<tr><td>Vanguard Group, Inc.</td><td>94,052,723</td><td>12.76%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["BlackRock", "Vanguard Group, Inc."]
