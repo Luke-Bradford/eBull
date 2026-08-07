@@ -2705,11 +2705,12 @@ class TestItem403RowIsABeneficialOwner:
         registrant as a group, the same shares shall not be counted more than
         once". Issuers label it with the word ``Total``.
 
-        Full-population measurement on the parsed corpus: of the names carrying
-        an aggregate word that the vocabulary does NOT reject, the large
-        majority are exactly this row. Any widening of the vocabulary to catch
-        'grand total' by matching the word ``total`` eats them, which is why the
-        test is "every word is instrument vocabulary" and not "contains an
+        The widening this rules out is "the name CONTAINS the aggregate noun",
+        which is what probe B injects. It deletes the mandated row, and the size
+        of that is measured rather than asserted — ``census_2176_def14a_
+        aggregate_rows.py`` arm 5 recomputes it against a control parse, so the
+        figure cannot go stale here the way a hand-copied one would. Hence the
+        test is "every word is instrument vocabulary" and never "contains an
         aggregate noun"."""
         body = (
             "<table>"

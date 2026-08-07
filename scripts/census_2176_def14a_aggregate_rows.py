@@ -1,9 +1,14 @@
 """Census for #2176 class 4 — rows whose NAME is not a beneficial owner at all.
 
-Reads a full-population parse emitted by ``ab_2176_def14a_aggregate_rows.py``
-(or ``ab_2358_def14a_line_structure.py`` — same JSON shape) and enumerates,
-over every distinct ``lower(trim(holder_name))`` the parser produces, the names
-a per-row application of ``_is_instrument_not_owner`` would reject.
+Reads a full-population parse emitted by ``ab_2358_def14a_line_structure.py``
+and enumerates, over every distinct ``lower(trim(holder_name))`` the parser
+produces, the names a per-row application of ``_is_instrument_not_owner`` would
+reject.
+
+⚠ Point it at a CONTROL (pre-guard) parse. Run against a treatment parse the
+guard has already applied, arms 1/2/4 all report zero — which is
+indistinguishable from "the rule matches nothing" and is the same clean-result
+trap the A/B skill warns about.
 
 Why the census reads a PARSE and not ``def14a_beneficial_holdings``: the #2175
 and #2169 fixes have not been backfilled, so 110,091 of the table's 110,748
@@ -18,6 +23,9 @@ waiting on an operator step.
 Prints every rejected name in full — the population is the deliverable, not a
 summary of it, and a "top 20" would hide exactly the genuine holder this test
 must not be allowed to eat.
+
+Arm 5 sizes the widening the guard deliberately does NOT take, so the test
+suite can cite a computed figure instead of carrying a hand-written one.
 """
 
 from __future__ import annotations
@@ -40,6 +48,8 @@ from app.providers.implementations.sec_def14a import _INSTRUMENT_VOCAB, _WORD_RE
 _CANDIDATE_EXTENSIONS = frozenset({"grand", "overall", "aggregate", "sum", "combined"})
 # Words that make a row the Instruction 5 aggregate — a row that MUST survive.
 _INSTRUCTION_5_MARKERS = re.compile(r"\b(director|directors|officer|officers|group|nominee|nominees|person|persons)\b")
+# Arm 5 — the aggregate noun a substring rule would key on (probe B's defect).
+_AGGREGATE_NOUN = re.compile(r"\btotals?\b")
 
 
 def _census(parse_path: str) -> None:
@@ -123,6 +133,23 @@ def _census(parse_path: str) -> None:
         print(f"  {rows[name]:>5} rows  {len(accessions[name]):>4} acc  {name}")
     if not designator_only:
         print("  (none)")
+
+    # Arm 5 — the widening NOT taken, sized. The shipped rule is "every word is
+    # instrument vocabulary"; the tempting simplification is "the name contains
+    # the aggregate noun", which is what probe B injects. 229.403(b)
+    # Instruction 5 REQUIRES the directors-and-officers-as-a-group row, and
+    # issuers spell it with that very noun — so the substring rule deletes a row
+    # the reg mandates. Computed here rather than written into a test docstring:
+    # a hand-copied figure goes stale silently the moment the vocabulary moves.
+    contains_total = [name for name in rows if _AGGREGATE_NOUN.search(name) and not _is_instrument_not_owner(name)]
+    mandated = [name for name in contains_total if _INSTRUCTION_5_MARKERS.search(name)]
+    survives_rows = sum(rows[n] for n in contains_total)
+    mandated_rows = sum(rows[n] for n in mandated)
+    print("\n== arm 5: what a `contains the aggregate noun` rule would delete (the widening NOT taken) ==")
+    print(f"  survives the shipped guard   {len(contains_total):>6} names  {survives_rows:>6} rows")
+    print(f"    of which Instruction 5     {len(mandated):>6} names  {mandated_rows:>6} rows  <- 229.403(b) MANDATES")
+    for name in sorted(mandated, key=lambda n: -rows[n])[:15]:
+        print(f"  {rows[name]:>5} rows  {len(accessions[name]):>4} acc  {name[:100]}")
 
 
 def main() -> int:
