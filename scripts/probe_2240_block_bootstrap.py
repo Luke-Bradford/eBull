@@ -109,6 +109,16 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_it_matches_an_independent_transcription_of_the_published_formula",
     ),
     (
+        # ⚠⚠ The two nominal counts allowed to diverge: Kish's denominator would
+        # then be a different population from the point estimate's, inside one
+        # result, with nothing downstream able to tell. Review WARNING on #2370.
+        "a declared trade_count disagreeing with the cluster axis admitted",
+        BOOT,
+        BOOT_TESTS,
+        [("        if pooled != self.trade_count:", "        if False:")],
+        "test_a_declared_trade_count_disagreeing_with_the_axis_is_refused",
+    ),
+    (
         # ⚠ The wrap-around removed. Blocks starting near the end of the axis run
         # off it — the moving-block scheme, which the 4/3 constant does not match.
         "the circular wrap removed from the block index",

@@ -155,6 +155,19 @@ class DateClusters:
             raise ValueError("cluster dates are not ascending, so a contiguous block is not a contiguous span")
         if len(self.trade_counts) and int(self.trade_counts.min()) < 1:
             raise ValueError("a cluster with no trades is not a cluster and must be absent from the axis")
+        # ⚠⚠ THE TWO NOMINAL COUNTS MUST BE THE SAME COUNT.
+        # ``trade_count`` feeds Kish's denominator (``iid_variance`` and hence
+        # the design effect), while the point estimate divides by
+        # ``trade_counts.sum()``. ``cluster_by_date`` always sets them
+        # consistently, but a caller constructing this directly could not — and
+        # the result would mix two different nominal counts inside one
+        # ``BootstrapResult`` with nothing downstream able to tell.
+        pooled = int(self.trade_counts.sum())
+        if pooled != self.trade_count:
+            raise ValueError(
+                f"the cluster axis holds {pooled} trades but trade_count declares {self.trade_count} — the design "
+                "effect and the point estimate would then divide by different nominal counts"
+            )
 
     @property
     def cluster_count(self) -> int:
@@ -342,6 +355,10 @@ def _circular_block_statistics(
     n = clusters.cluster_count
     counts = clusters.trade_counts
     sums = clusters.return_sums
+    # ⚠ The index matrix is `batch x blocks_per_resample x block_length`, so its
+    # width scales with `n / block_length` — NOT with `n`. A very small block on
+    # a large axis is therefore the expensive case, not a large one; `_BATCH` is
+    # what bounds it, and it is the knob to turn if that case ever shows up.
     blocks_per_resample = math.ceil(n / block_length)
     offsets = np.arange(block_length, dtype=np.int64)
 

@@ -183,6 +183,26 @@ class TestDateClustersInvariants:
                 trade_count=1,
             )
 
+    def test_a_declared_trade_count_disagreeing_with_the_axis_is_refused(self) -> None:
+        """⚠⚠ TWO NOMINAL COUNTS IN ONE RESULT.
+
+        ``trade_count`` is Kish's denominator (via ``iid_variance``, and hence
+        the design effect); the point estimate divides by
+        ``trade_counts.sum()``. If they diverge, one ``BootstrapResult`` reports
+        an effective sample size and a point estimate computed against different
+        populations, and nothing downstream can tell. ``cluster_by_date`` cannot
+        produce the state — a direct construction can, which is why the guard is
+        on the dataclass rather than on the factory.
+        """
+        with pytest.raises(ValueError, match="declares"):
+            DateClusters(
+                dates=tuple(_days(2)),
+                trade_counts=np.asarray([2, 3], dtype=np.int64),
+                return_sums=np.asarray([1.0, 2.0], dtype=np.float64),
+                trade_variance=0.5,
+                trade_count=4,
+            )
+
 
 class TestOptimalBlockLength:
     def test_a_persistent_series_gets_a_longer_block_than_white_noise(self) -> None:
