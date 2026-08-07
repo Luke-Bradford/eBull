@@ -1266,7 +1266,8 @@ OPENFIGI_NEGATIVE_STATUSES: Final[tuple[str, ...]] = (
 
 ⚠ This tuple is the SINGLE source for the negative set — the extid
 sweep and the tombstone helper both parameterise off it. A fourth
-status added here needs the sql CHECK widened (sql/257) and nothing
+status added here needs the sql CHECK widened
+(``sql/261_unresolved_13f_openfigi_invalid_identifier.sql``) and nothing
 else; the #2304 Codex pass caught that the extid sweep had the two
 statuses hardcoded inline, so a new status would silently have frozen
 those rows on a stale negative forever.
@@ -1665,7 +1666,8 @@ def _sweep_pass(
             # OpenFIGI REJECTED the identifier. Terminal because the
             # rejection is a deterministic function of a fixed stored
             # value — but recorded as its OWN status so it never again
-            # reads as "OpenFIGI has no mapping" (#2304, sql/257).
+            # reads as "OpenFIGI has no mapping" (#2304,
+            # sql/261_unresolved_13f_openfigi_invalid_identifier.sql).
             if _tombstone_verified(cusip, STATUS_OPENFIGI_INVALID_IDENTIFIER):
                 invalid_identifier += 1
             logger.info(

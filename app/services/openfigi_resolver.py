@@ -155,7 +155,8 @@ class OpenFigiInvalidIdentifier:
     An input fact, not a coverage fact — the remedy is upstream filer
     data, not a universe expansion. Deterministic for a fixed identifier
     (the check-digit rule cannot change its answer between passes), so
-    the sweep may write a terminal tombstone from it (#2304, sql/257).
+    the sweep may write a terminal tombstone from it (#2304,
+    ``sql/261_unresolved_13f_openfigi_invalid_identifier.sql``).
     """
 
     message: str

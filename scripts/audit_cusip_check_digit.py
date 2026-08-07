@@ -50,6 +50,22 @@ from psycopg import sql
 
 from app.config import settings
 
+_RESET_SCOPE: Final[str] = "resolution_status = 'openfigi_unknown'\n   AND source IS NOT NULL"
+"""The rows ``--reset-invalid`` is allowed to touch, as one predicate.
+
+Used verbatim by BOTH the SELECT that counts the affected CUSIPs and the
+UPDATE that is emitted for them, so the printed count cannot drift from
+what the pasted SQL actually changes. They were separate strings and the
+source clause was on the UPDATE only.
+
+⚠ ``source IS NOT NULL`` is a SCOPE guard, not a filter on the check
+digit. ``unresolved_13f_cusips`` is shared by two producers, and a NULL
+``source`` marks the OTHER one's queue (#2213) — resetting such a row to
+``NULL`` would hand it back to a worker that did not tombstone it. It
+selects nothing away today; run ``--census`` for the current split rather
+than trusting a figure written here.
+"""
+
 _CHAR_VALUES: Final[dict[str, int]] = {
     **{c: i for i, c in enumerate("0123456789")},
     **{c: 10 + i for i, c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ")},
@@ -112,9 +128,7 @@ def _census(conn: psycopg.Connection[tuple]) -> int:
 def _reset_invalid(conn: psycopg.Connection[tuple]) -> None:
     """Print the reset SQL. Deliberately does NOT execute it."""
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT cusip FROM unresolved_13f_cusips WHERE resolution_status = 'openfigi_unknown'",
-        )
+        cur.execute(f"SELECT DISTINCT cusip FROM unresolved_13f_cusips WHERE {_RESET_SCOPE}")
         invalid = sorted(row[0] for row in cur.fetchall() if not is_valid_cusip(row[0]))
 
     print(f"-- {len(invalid)} distinct check-digit-invalid CUSIPs currently tombstoned openfigi_unknown.")
@@ -126,8 +140,7 @@ def _reset_invalid(conn: psycopg.Connection[tuple]) -> None:
     print("-- ⚠ Clearing tombstones is a data change. Review before running.")
     print("BEGIN;")
     print("UPDATE unresolved_13f_cusips SET resolution_status = NULL")
-    print(" WHERE resolution_status = 'openfigi_unknown'")
-    print("   AND source IS NOT NULL")
+    print(f" WHERE {_RESET_SCOPE}")
     print("   AND cusip IN (")
     # ⚠ Quote through psycopg, never an f-string. These values come from filer
     # 13F submissions, so a stored CUSIP containing a single quote would close

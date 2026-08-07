@@ -149,7 +149,7 @@ So a **well-formed-looking 9-char uppercase-alphanumeric value is NOT enough** �
 |---|---|---|
 | `OpenFigiMapping` | `data` with a US-primary common-stock row + non-empty `ticker` | `resolved_via_openfigi` / `openfigi_no_instrument` |
 | `OpenFigiNoMatch` | `warning`, `data: []`, no US-primary row, blank ticker | `openfigi_unknown` (terminal) |
-| `OpenFigiInvalidIdentifier` | recognised `Invalid idValue format` | `openfigi_invalid_identifier` (terminal, sql/257) |
+| `OpenFigiInvalidIdentifier` | recognised `Invalid idValue format` | `openfigi_invalid_identifier` (terminal — `sql/261_unresolved_13f_openfigi_invalid_identifier.sql`) |
 | `OpenFigiItemError` | any other `{"error": ...}` | **nothing** — row stays NULL, retries |
 | `OpenFigiMalformedEntry` | non-dict entry, non-list `data`, non-dict `data` row, no data/warning/error key | **nothing** — row stays NULL, retries |
 
@@ -220,7 +220,7 @@ A CUSIP can map to several FIGI rows that share `compositeFIGI` (e.g. one row pe
 
 ### 7.5 Pink-sheet / OTC tickers
 
-OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_us_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. When no `US`-row exists the sweep tombstones the `unresolved_13f_cusips` row with `resolution_status='openfigi_unknown'` (sql/192, #740 — terminal in v1; `SET resolution_status=NULL` is the manual retry escape hatch). The sibling `openfigi_no_instrument` status is written when OpenFIGI returns a ticker but it has no unique `is_tradable` `instruments.symbol` match. The third negative, `openfigi_invalid_identifier` (sql/257, #2304), is written when OpenFIGI REJECTED the identifier — see §4.3; it is NOT a no-match and must not be read as one.
+OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_us_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. When no `US`-row exists the sweep tombstones the `unresolved_13f_cusips` row with `resolution_status='openfigi_unknown'` (sql/192, #740 — terminal in v1; `SET resolution_status=NULL` is the manual retry escape hatch). The sibling `openfigi_no_instrument` status is written when OpenFIGI returns a ticker but it has no unique `is_tradable` `instruments.symbol` match. The third negative, `openfigi_invalid_identifier` (`sql/261_unresolved_13f_openfigi_invalid_identifier.sql`, #2304), is written when OpenFIGI REJECTED the identifier — see §4.3; it is NOT a no-match and must not be read as one.
 
 ### 7.6 Per-instance limiter — single-process only
 

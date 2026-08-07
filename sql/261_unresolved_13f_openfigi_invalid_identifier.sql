@@ -1,4 +1,4 @@
--- 260_unresolved_13f_openfigi_invalid_identifier.sql
+-- 261_unresolved_13f_openfigi_invalid_identifier.sql
 --
 -- #2304 — split the OpenFIGI sweep's per-item REJECTION out of
 -- ``openfigi_unknown``.
