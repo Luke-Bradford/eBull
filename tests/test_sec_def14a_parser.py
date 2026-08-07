@@ -46,6 +46,7 @@ from app.providers.implementations.sec_def14a import (
     _resolve_columns,
     _score_table_headers,
     _shares_cell_percent_signature,
+    _split_stacked_holder_row,
     _strip_inline_html,
     extract_plan_name_and_trustee,
     is_esop_plan,
@@ -2275,3 +2276,169 @@ class TestRowSpanExpansion:
             (Decimal("1200"), Decimal("1.1")),
             (Decimal("4986588"), Decimal("8.4")),
         ]
+
+
+class TestStackedCellHolders:
+    """#2169 — one ``<tr>`` holding N beneficial owners, ``<br>``-stacked.
+
+    17 CFR 229.403(a)/(b) prescribe a table with one entry per beneficial owner
+    and ONE amount per entry (column 3), so a value cell holding two whole share
+    counts on separate lines is two owners rendered inside one ``<tr>``, not one
+    owner with two figures. ``0000351998-18-000006`` scores 12 on a textbook
+    Item 403 header and stored ZERO holders: neither value parser accepts the
+    stacked cell, so the row died on the "neither shares nor percent" guard.
+
+    Every gate has its own test, because the risk here is the OPPOSITE
+    direction — #2140 D5 flattens interior line breaks precisely because a
+    render wrap otherwise splits one person across two holder identities
+    (704 rows / 117 instruments full-pop). The trigger is the VALUE side.
+    """
+
+    def test_one_tr_holding_two_holders_yields_two_rows(self) -> None:
+        """The ticket's accession, cell-for-cell: two amounts, two percents,
+        two footnote markers, and a name cell whose two blocks are separated by
+        a blank line and internally wrapped mid-address."""
+        body = """
+        <table>
+          <tr><th>Name and Address</th><th>Amount and Nature of Beneficial Ownership</th>
+              <th></th><th>Percent of Shares Outstanding</th></tr>
+          <tr><td>Penbrook Management, LLC
+AnKap Partners, L.P.
+880 Third Avenue, 16 th
+Floor
+New York, NY 10022
+
+Renaissance Technologies LLC
+800
+Third Avenue
+New
+York, NY 10022</td><td>486,340
+
+
+
+658,400</td><td>(1)
+
+
+
+(2)</td><td>5.86%
+
+
+
+7.94%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.shares, r.percent_of_class) for r in parsed.rows] == [
+            (Decimal("486340"), Decimal("5.86")),
+            (Decimal("658400"), Decimal("7.94")),
+        ]
+        assert parsed.rows[0].holder_name.startswith("Penbrook Management, LLC AnKap Partners, L.P.")
+        assert parsed.rows[1].holder_name.startswith("Renaissance Technologies LLC")
+
+    def test_a_wrapped_name_over_a_single_amount_is_not_split(self) -> None:
+        """#2140 D5's flatten must survive intact. A render wrap puts interior
+        line breaks in the name cell — including a blank one — but the value
+        side does not stack, so the row is one holder and the name flattens."""
+        body = """
+        <table>
+          <tr><th>Name and Address of Beneficial Owner</th>
+              <th>Number of Shares</th><th>Percent of Class</th></tr>
+          <tr><td>Michael
+ O. Johnson
+
+ 55 East 52nd Street</td><td>1,500,000</td><td>5.5%</td></tr>
+          <tr><td>The Vanguard Group</td><td>3,000,000</td><td>11.0%</td></tr>
+        </table>
+        """
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [(r.holder_name, r.shares) for r in parsed.rows] == [
+            ("Michael O. Johnson 55 East 52nd Street", Decimal("1500000")),
+            ("The Vanguard Group", Decimal("3000000")),
+        ]
+
+    def test_a_partially_numeric_value_stack_is_not_split(self) -> None:
+        """Gate 1. A stacked value cell whose segments do not ALL parse as
+        whole share counts is not evidence of k owners — the count would then
+        rest on whichever lines happened to be numeric, and the name blocks
+        would be aligned against it."""
+        assert (
+            _split_stacked_holder_row(
+                ("Alpha Capital LLC\n\nBeta Partners LP", "486,340\nsee note\n658,400", "5.86%\n\n7.94%"),
+                name_idx=0,
+                shares_idx=1,
+                percent_idx=2,
+            )
+            is None
+        )
+
+    def test_value_columns_that_disagree_on_the_count_are_not_split(self) -> None:
+        """Gate 2. Two amounts against three percents cannot both be right, and
+        picking either would align the name blocks against a count the other
+        column contradicts."""
+        assert (
+            _split_stacked_holder_row(
+                ("Alpha Capital LLC\n\nBeta Partners LP", "486,340\n\n658,400", "5.86%\n7.10%\n7.94%"),
+                name_idx=0,
+                shares_idx=1,
+                percent_idx=2,
+            )
+            is None
+        )
+
+    def test_a_name_cell_with_no_blank_line_separator_is_not_split(self) -> None:
+        """Gate 3. Without a blank line the name cell yields ONE block, so
+        there is no construction that assigns the second amount an owner — the
+        row is left exactly as it is today rather than guessed at."""
+        assert (
+            _split_stacked_holder_row(
+                ("Alpha Capital LLC\nBeta Partners LP", "486,340\n\n658,400", "5.86%\n\n7.94%"),
+                name_idx=0,
+                shares_idx=1,
+                percent_idx=2,
+            )
+            is None
+        )
+
+    def test_a_stacked_row_distributes_every_aligned_cell_by_ordinal(self) -> None:
+        """The split is positional across the row: a non-value column carrying
+        exactly k non-empty lines (the footnote column of the cited accession)
+        is distributed, and one that does not align is blanked rather than left
+        holding a two-value string the recovery scans would then read."""
+        assert _split_stacked_holder_row(
+            (
+                "Alpha Capital LLC\n\nBeta Partners LP",
+                "486,340\n\n658,400",
+                "(1)\n\n(2)",
+                "unaligned",
+                "5.86%\n\n7.94%",
+            ),
+            name_idx=0,
+            shares_idx=1,
+            percent_idx=4,
+        ) == [
+            ("Alpha Capital LLC", "486,340", "(1)", "", "5.86%"),
+            ("Beta Partners LP", "658,400", "(2)", "", "7.94%"),
+        ]
+
+    def test_a_percent_only_stack_splits_when_the_amounts_are_absent(self) -> None:
+        """229.403 column 4 is as prescribed as column 3, and issuers omit the
+        count column outright. Two percents over two name blocks is the same
+        evidence."""
+        assert _split_stacked_holder_row(
+            ("Alpha Capital LLC\n\nBeta Partners LP", "—\n\n—", "5.86%\n\n7.94%"),
+            name_idx=0,
+            shares_idx=1,
+            percent_idx=2,
+        ) == [
+            ("Alpha Capital LLC", "—", "5.86%"),
+            ("Beta Partners LP", "—", "7.94%"),
+        ]
+
+    def test_an_ordinary_single_holder_row_is_never_split(self) -> None:
+        """The whole corpus is this shape; the expansion must be inert on it."""
+        assert (
+            _split_stacked_holder_row(
+                ("The Vanguard Group, Inc.", "3,000,000", "11.0%"), name_idx=0, shares_idx=1, percent_idx=2
+            )
+            is None
+        )
