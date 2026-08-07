@@ -20,7 +20,17 @@
 
 set -uo pipefail
 
-# name|worktree|branch-glob-for-PR-listing
+# name|worktree|branch-globs
+#
+# ⚠ THREE fields, but `|` appears more than twice: the third field is the
+# REMAINDER of the line, so any `|` after the second is part of the glob's own
+# alternation rather than a fourth field. That is a real property of
+# `IFS='|' read -r name worktree pr_glob` — the last variable takes what is
+# left, delimiters included — not an accident, and it is written down here
+# because the row does not look like it parses (#2324). Verified: the
+# `ownership` row yields the full `fix/*|chore/ownership-*|docs/ownership-*`,
+# not just `fix/*`. If it kept only the first, that loop's `chore/` and `docs/`
+# PRs would vanish from its own status view.
 #
 # ⚠ The glob must match ONLY the branches that loop opens, or the section is
 # worse than useless — it shows another loop's PR under this loop's heading and
