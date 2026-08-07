@@ -140,6 +140,47 @@ Exception: work that must be exercised against the running dev stack, which
 serves `~/Dev/eBull` only. Branch in the main checkout for the dev-verify step,
 and re-detach at `origin/main` afterwards.
 
+## Answer the question yourself when you hold the facts — "wants an operator call" is not a status
+
+The gating rule already exists twice — "Surface to the operator ONLY: visual taste /
+scope-sequencing / irreversible loss / a settled-decision reversal", and
+"operator-gated = **EVIDENCE**-gated, not person-gated". What keeps failing is not the
+rule, it is the moment it is applied: a question gets labelled "needs an explicit call"
+**at the point of noticing it**, before anyone checks whether the facts to answer it are
+already available. The label then travels — into a ticket comment, a handoff note, a
+session summary — and every later reader inherits "blocked on the operator" as if it were
+a measured state. It is not. It is an unstarted research step wearing a status.
+
+**Before writing that a decision needs the operator, do the research that would answer it.**
+Then one of two things is true: you now have the answer and there is nothing to escalate,
+or you have a specific, evidenced conflict that genuinely sits in one of the four gated
+categories — and you present it with the researched recommendation, never as a menu.
+
+Concretely, these are NOT operator calls, whatever they feel like:
+
+- picking a threshold, window or parameter → **source-rule before design** governs it; find
+  the published formulation, or fix it **by construction** and freeze it in a version hash.
+- minting a new `model_version` / strategy id on evidence → evidence-gated. Ship it on
+  skill-invariants + full-population A/B + cross-source + rollback intact.
+- choosing an execution order, a scope, a schema shape, a fix approach → yours.
+- "which of these two designs" where both are measurable → **measure them**.
+
+Only these are person-gated: live-trade or capital exposure, irreversible data loss,
+reversing a settled decision, and visual/product taste.
+
+⚠ **Two phrasings that are always a tell**: *"that wants an explicit call before X starts"*
+and *"doesn't need a decision tonight"*. The first outsources a question you have not yet
+tried to answer; the second reframes your own inaction as a schedule. Precedent
+(2026-08-07, supervisor session): stage 5e-4's `max_hold_bars` was carried across
+**three** consecutive session summaries as "a strategy-identity decision, so it wants an
+explicit call", and the operator had to ask "what is the question?" before anyone looked
+for one. Nothing about it was person-gated — the strategy has 0 ledger rows, so a new
+version costs nothing, and the purge/embargo window it feeds has a published formulation.
+The cost of the label was three sessions of a real blocker sitting unexamined.
+
+**Test: if you cannot state the question in one sentence AND name the evidence that would
+settle it, you have not researched it enough to escalate it.**
+
 ## Standing retrospective checkpoint (#2075)
 
 After each epic close, or every ~10 merged PRs, run one "inheriting-team
