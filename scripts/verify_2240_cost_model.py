@@ -117,10 +117,15 @@ HALF_DAY_CLOSE = clock_time(13, 0)
 #: support is small. Phase 5a's `holds` Counter, applied to a continuous value.
 _BP = Decimal("0.01")
 
+#: ⚠ NO JOIN TO ``instruments``. An earlier draft joined it to reach
+#: ``exchanges.asset_class``; the calibration now selects on the §4.0 validated
+#: universe's own id list, which already carries that predicate, so the join was
+#: dead weight over 1,500 rows and — worse — read as a filter that was doing
+#: something. ``quotes.instrument_id`` is an FK to ``instruments``, so it could
+#: never have dropped a row.
 _QUOTES_SQL = """
     SELECT q.instrument_id, q.quoted_at, q.last, q.spread_pct
     FROM quotes q
-    JOIN instruments i ON i.instrument_id = q.instrument_id
     WHERE q.instrument_id = ANY(%(ids)s)
 """
 

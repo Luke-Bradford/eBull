@@ -214,7 +214,7 @@ BANDS: tuple[PriceBand, ...] = (
     PriceBand(label="$5-20", lower=Decimal("5"), upper=Decimal("20"), p75_spread_pct=Decimal("0.571"), sample_size=244),
     PriceBand(
         label="$20-100", lower=Decimal("20"), upper=Decimal("100"), p75_spread_pct=Decimal("0.509"), sample_size=625
-    ),  # noqa: E501
+    ),
     PriceBand(label=">=$100", lower=Decimal("100"), upper=None, p75_spread_pct=Decimal("0.322"), sample_size=210),
 )
 
