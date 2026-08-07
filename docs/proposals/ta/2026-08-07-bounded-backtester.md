@@ -1,0 +1,757 @@
+# Phase 5 — the bounded backtester
+
+Refs #2240. Refs #2288. Refs #2284. Refs #2277. Closes the design half of §5.
+
+Parent spec: `docs/proposals/ta/strategy-catalogue-and-backtest-validity.md`
+(execution semantics §3.5, validated universe §4.0, **acceptance criteria §5**,
+allocation §7, sequencing §8).
+Milestone table: `docs/superpowers/specs/2026-08-04-ta-strategy-platform-design.md` §5.
+
+Phase 5's three gates are met: phase 2 ✅ (`indicator_series`), phase 3 ✅
+(`5078c173`), and #2260 closed 2026-08-05 — ⚠ but it closed by **falsification**,
+which amends the parent's harness acceptance rather than satisfying it. See §9.1.
+
+**Every figure here was computed against the dev corpus on 2026-08-07, and each
+appears beside the query that produced it (§7).** None is carried from an
+earlier section of the parent spec; two of them contradict it, which is what
+§5.1 and §5.2 are about.
+
+---
+
+## 1. Scope
+
+Phase 5 turns **stored** signals and outcomes into performance statistics
+satisfying §5's eleven criteria, with the window and eligible universe stated on
+every number.
+
+It is **not** a signal generator (phase 3, shipped), an outcome resolver
+(phase 4, shipped), allocation or paper trading (phase 7), or a UI (phase 6).
+
+The deliverable is a *result model*, the statistics computed into it, and the
+gate that stops an unvalidated result being quoted as a validated one.
+
+---
+
+## 2. The load-bearing architectural decision
+
+> **The backtester reads the ledger. It never recomputes a signal, and it never
+> resolves a fill.**
+
+§3.5 rule 1 — *signal on the close of bar t, fill at the open of t+1* — is
+enforced **structurally** in two independent places: `StrategySignal` carries a
+bar index and no fill field, so a same-bar fill cannot be expressed; and
+`sql/255`'s `strategy_signals_fill_after_signal` backstops it. A backtester that
+re-derived entries from a price series steps outside both, and nothing
+downstream can tell a t+1 fill from a t fill by inspection.
+
+**Measured this run** against `vectorbt==1.1.0`, the library §8 names:
+
+| call | order timestamp | order price |
+| --- | --- | --- |
+| `Portfolio.from_signals(close, entries, exits)` — the documented default | 2024-01-02 | **101.0 = `close` of the signal bar** |
+| entries/exits shifted +1, `price=open_` | 2024-01-03 | 92.0 = `open` of the next bar |
+
+The signal sat on bar index 1 (2024-01-02); the default filled it at that bar's
+own close. **Adopting any simulator on its defaults imports the exact look-ahead
+§3.5's opening paragraph exists to prevent** — *"the most common backtest error
+there is"*.
+
+### 2.1 The contract, and the assertion that holds it
+
+The simulator is handed events indexed on the **fill bar**, priced at the
+**stored `fill_price`**. It never sees `signal_bar_date`.
+
+- Opens come from `strategy_signals` where
+  `verdict = 'fired' AND signal_kind = 'entry'`, at `(fill_bar_date, fill_price)`.
+- Closes come from §3, also always a pre-resolved `(date, price)` pair.
+- No `close` series is ever passed as a fill-price source. Where the simulator
+  needs a close series for mark-to-market it gets one, but `price=` is always
+  the explicit resolved array.
+
+**Asserted over the whole generated trade list, not a fixture** — and the
+assertion is an equality, not an inequality:
+
+1. every order timestamp **equals** the `fill_bar_date` of the ledger row that
+   produced it;
+2. every order price **equals** that row's `fill_price`;
+3. `fill_bar_date > signal_bar_date` for every row consumed.
+
+⚠ An earlier draft asserted only *"no order timestamp equals a
+`signal_bar_date`"*. That is too weak — it passes for a simulator filling on the
+wrong future bar, which is a different error with the same sign.
+
+---
+
+## 3. Three exit regimes, and the pyramiding rule
+
+`strategy_outcomes` is **not** "the exits table"; building phase 5 as though it
+were would drop most of the catalogue's position history. Read from the shipped
+modules, not from the parent's prose:
+
+| strategy | exit mechanism | `max_hold_bars` | exit leg? |
+| --- | --- | --- | --- |
+| **S-1** | signal-pair only — `close < sma_50` (`s1_time_series_momentum.py:203-206`, `exit_`) | **none** | yes |
+| **S-2** | calendar — hold until next rebalance | absent by design | no |
+| **S-3** | signal-pair — `rsi_14 > 50` (`s3_mean_reversion_in_trend.py:250-253`, `exit_`) — **plus** max-hold expiry | `10` | yes |
+| **S-4** | level-based — stop at `entry − 2×ATR`, target, max-hold; resolved by `outcome_resolver` | `40` | **no** |
+
+⚠ **Only S-4 is level-based.** A draft of this table described S-3 as TP/SL and
+was wrong: S-3 has no stop and no target, and inventing one would have specified
+a different strategy from the one that shipped. Caught at Codex checkpoint 1.
+
+⚠⚠ **S-3's `MAX_HOLD_BARS = 10` is currently enforceable by nothing, and phase 5
+must own it.** `ExitLevels` (`outcome_resolver.py:118-131`) requires
+`take_profit` **and** `stop_loss` and asserts `stop_loss < take_profit`; S-3
+declares neither, so the object cannot be constructed for it. S-3's own
+docstring (`s3_mean_reversion_in_trend.py:114`) nonetheless states *"Its consumer
+is `outcome_resolver.ExitLevels.max_hold_bars`"*. The parameter is hashed into
+S-3's identity and applied by no code path. **Consequence for §3.2: max-hold
+expiry is a close source owned by position construction, not exclusively by the
+resolver.** The stale docstring is filed separately (§8, incidental finding).
+
+### 3.1 ⚠ Entries are STATES, not crossovers — so pyramiding must be ruled out
+
+S-1's entry is `close > sma_200 AND sma_50 > sma_200` (`FAST_PERIOD = 50`,
+`SLOW_PERIOD = 200`). S-3's is `rsi_14 < 30 AND close > sma_200`
+(`OVERSOLD_THRESHOLD = 30.0`, `TREND_PERIOD = 200`). **Neither is
+edge-triggered.** Both fire on
+*every bar* the condition holds, so a naive "one position per fired entry" opens
+a new position on every day of a sustained uptrend and multiplies every
+statistic by the length of the run.
+
+The ledger is *correct* to record them all — §7 requires that *"every fired
+signal is recorded whether or not it was acted on"*, because recording only
+taken trades biases the record toward periods of spare capacity. **The collapse
+therefore belongs to position construction, and is specified here:**
+
+> **An entry signal for an instrument with an open position in the same strategy
+> version is recorded as `superseded_open_position` and opens nothing.** One
+> position per instrument per strategy version at a time. No pyramiding, no
+> averaging down.
+
+This is the long-only/no-leverage posture applied consistently, and the
+suppressed count is reported per criterion 9's *"measure what you reject"* — a
+narrowing that is not counted is a narrowing asserted safe.
+
+### 3.2 Position construction
+
+One position per `(strategy_version, instrument_id, entry fill bar)` that
+survives §3.1, closed at the **earliest** of these four sources. They are
+evaluated together and the earliest date wins; they are not alternatives
+selected by strategy.
+
+| # | source | applies to | close date | close price |
+| --- | --- | --- | --- | --- |
+| C1 | **signal-pair** — the next `signal_kind = 'exit'` fill for that strategy version and instrument, **strictly after** the entry fill bar | S-1, S-3 | `fill_bar_date` | `fill_price` |
+| C2 | **level-based** — the matching `strategy_outcomes` row with outcome `tp_hit` / `sl_hit` / `expired` | S-4 | `exit_bar_date` | `exit_price` |
+| C3 | **max-hold expiry** — `entry fill index + max_hold_bars`, applied by position construction | S-3 (10), S-4 (40) | that bar | its **open**, per §3.5 rule 1 |
+| C4 | **calendar** — the next rebalance at which the name is **not** reselected | S-2 | that rebalance's fill bar | its open |
+
+⚠ **C3 exists because of the S-3 gap above.** For S-4 it is redundant with C2's
+`expired` and must agree with it; a disagreement is a failure, not a
+tie-break — it means the resolver and position construction disagree about the
+window, and `outcome_resolver.py:470` (`exit_index = fill_index + max_hold_bars`)
+is the reference.
+
+Five rules that close the remaining gaps:
+
+1. **Version pinning is mandatory.** The `strategy_outcomes` join pins **both**
+   `rule_set_version` **and** `input_rule_set_version`. `sql/256` makes the pair
+   the uniqueness key precisely so two resolver versions cannot be pooled; an
+   unpinned join double-counts every signal once per resolver version present.
+2. **`ambiguous` is a terminal close with NO price** — a fifth close source,
+   listed apart from C2 because it breaks C2's `(date, price)` shape. `sql/256`'s
+   `strategy_outcomes_location_matches_outcome` gives `ambiguous` an
+   `exit_bar_date` and its `strategy_outcomes_booked_matches_outcome`
+   deliberately withholds `exit_price` — *the bar is known, only the touch order
+   is not*. So the position **closes on that bar with an unknown return**, and
+   §3.4 governs what each statistic does with it. An earlier draft folded it
+   into C2, which is a contradiction: C2 reads `exit_price`, and for `ambiguous`
+   that column is null by constraint.
+   `unresolved` is the opposite case — no location at all — and leaves the
+   position open, handled by rule 5.
+4. **Same-bar ordering is fixed:** exit before entry. An exit row whose fill bar
+   equals a new entry's fill bar closes the *older* position; it never closes the
+   position opened that bar. This is why the signal-pair clause says *strictly
+   after*. §3.5 rule 1's own justification for keying on `signal_kind` is that
+   *"a strategy exiting one position and entering another on the same bar for
+   the same instrument is legitimate"* — so the order has to be stated, not left
+   to sort stability.
+5. **Open at window end** — a position with no close inside the evaluation
+   window is neither a win nor a loss. It is reported with its count and an
+   unrealised mark taken at **the last usable close of the evaluation window for
+   that instrument, minus one side of the cost model** (the exit that has not
+   happened). It is never dropped: dropping it biases toward positions that
+   closed, and positions close faster in trending regimes. Positions left open
+   by an `unresolved` outcome are counted separately from those open because the
+   window ended, since the two say different things.
+
+### 3.3 S-2's calendar regime, in full
+
+The rebalance calendar is the **panel's**, fixed by `8bd51c0e`. So:
+
+- a name selected in consecutive rebalances is **one hold, not two entries** —
+  the second rebalance's entry signal hits §3.1 and opens nothing, and **C4 does
+  not fire because the name WAS reselected**. This is why C4 is worded as *"the
+  next rebalance at which the name is not reselected"* rather than *"the next
+  rebalance"*: the latter would close and reopen the position every month,
+  charging two sides of the cost model for a hold that never ended;
+- a name **dropped** at a rebalance closes at that rebalance's fill even though
+  no entry signal exists for it — this is why the close clause cannot be
+  "the entry that supersedes it";
+- a name dropped and later reselected is **two positions**, correctly;
+- a name **halted** across a rebalance has no fill bar at that date; the position
+  stays open to the next date on which its own series has a bar, and the
+  divergence between the panel calendar and the instrument calendar is counted.
+
+### 3.4 What ambiguity does to each statistic
+
+Criterion 7 lists **twelve** metrics, and §3.5 rule 4 only says `ambiguous` is
+*"excluded from the win rate with their count shown"*. That is under-specified
+for the other eleven, so:
+
+| outcome | win rate | expectancy / profit factor | equity curve, CAGR, drawdown | exposure |
+| --- | --- | --- | --- | --- |
+| `tp_hit` / `sl_hit` / `expired` | in | in | in | in |
+| `ambiguous` | **excluded, counted** | **excluded, counted** | ⚠ see below — **no single treatment is honest** | **in** — capital was committed |
+| `unresolved` | excluded, counted | excluded, counted | position stays open (§3.2 rule 5) | in |
+| open at window end | excluded, counted | excluded, counted | unrealised mark only | in |
+
+⚠ **The equity curve is where `ambiguous` has no good answer, and saying so is
+the point.** The capital was committed and returned; the return is *unknown*,
+not zero. Recording zero is a treatment — it silently asserts break-even, which
+is favourable for a strategy whose ambiguous bars span a stop. Dropping the
+position is also a treatment, and a worse one: it removes the capital commitment
+too.
+
+So the equity curve is computed **twice**, as a declared sensitivity pair:
+
+- **worst-case arm** — every `ambiguous` position resolves at its stop
+  (`sl_hit`);
+- **best-case arm** — every one resolves at its target.
+
+Both are reported. **If the two arms' Sharpe differ by more than the gap between
+the strategy and the random cohort's 95th percentile (§9, *the harness
+itself*), the result is
+`ambiguity_material` and is not promotable.** ⚠ This is deliberately *not* the
+"assume SL first for conservatism" rule, which §3.5 rule 4 and spike S5
+explicitly reject — *"it is not conservative, it is a different bias"*. A
+declared two-sided bound is not a point estimate dressed as caution.
+
+⚠ **The ceiling is a gate, not a reassurance.** S5 measured the ambiguous class
+at 0.83% of signals at a 1.0×ATR target down to 0.09% at 4.0×, which suggests
+the arms will be close — **but that measurement entered at the close of bar `t`,
+the same-bar fill §3.5 rule 1 forbids**, and §3.5 says its distribution *"is not
+expected to reproduce"* under a t+1 open entry. So S5's figures do not bound
+phase 5's, the ceiling is checked rather than assumed, and only S-4 can produce
+an `ambiguous` outcome at all (§3: it is the only level-based strategy).
+
+---
+
+## 4. Adopting `vectorbt` — the evidence, and the residual
+
+§8 says *"Do not hand-roll"* and names `vectorbt 1.1.0` as verified on Python
+3.14. Inherited premise, so it was re-tested rather than trusted.
+
+**Confirmed.** `vectorbt==1.1.0` resolves, installs and imports against Python
+3.14.4 in a throwaway venv, and `Portfolio.from_signals` returns
+`total_return` / `sharpe_ratio` / `trades.count()`. It pulls **no numba**, which
+is why it succeeds where `pandas-ta` was found uninstallable on 3.14.
+
+**The residual, stated rather than waved past.** Resolution drags in ~40 packages
+including `scikit-learn`, `scipy`, `requests`, `tqdm` and a notebook-widget
+chain. This repo runs `pip-audit --strict` in CI and has taken four
+advisory-driven floor bumps already (`pyproject.toml:12-25`), so that tree is a
+standing supply-chain surface, not a one-off.
+
+**Therefore the dependency lands in stage 5d, not stage 5a** (§8). Stages 5a–5c
+are pure functions over the ledger and need nothing new, so the adoption
+decision is taken against a working trade list rather than up front. What
+`vectorbt` is genuinely worth buying is criterion 7's **portfolio-level,
+path-dependent** max drawdown plus Sharpe / Sortino / exposure / turnover on a
+cash-inclusive equity curve; hand-rolling portfolio accounting is the largest
+correctness surface in the phase.
+
+⚠ Whatever is adopted is wired per §2.1. A library's default fill semantics are
+not a detail discovered during implementation; they are the defect.
+
+---
+
+## 5. Four decisions, with the source rule for each
+
+Per `.claude/CLAUDE.md`, the trigger is *"am I about to pick a threshold, ratio
+or window"*, and it does not care whether a regulator is involved. Each
+subsection states whether a published rule exists.
+
+### 5.1 Costs — a static model calibrated on IN-SESSION quotes
+
+**Source rule: criterion 2**, which fixes the shape — static, conservative,
+keyed on asset class and price band, calibrated at **p75 not the median**, and a
+declared input to the identity hash (criterion 11).
+`StrategyIdentity.cost_model_id` already exists and is already hashed into
+`version` (`strategy_registry.py:204,235`); every call site passes the literal
+`"undeclared-v0"`. The hook is built; the model is not.
+
+**What is new is the calibration base, and it is a correction.** Parent §1
+reports `quotes.spread_pct` at p50 0.110% / p75 0.235%. Re-measured on the same
+table on 2026-08-07: **p50 0.284% / p75 0.930%** — 2.6× and 4.0× wider.
+
+`quotes` holds **one row per instrument** (measured: 1,497 rows / 1,497
+`us_equity` instruments) stamped `quoted_at`, so the table is a snapshot of
+whatever session state each row was written in. Split by UTC capture hour:
+
+| bucket | quoted | p50 | p75 | p90 |
+| --- | ---: | ---: | ---: | ---: |
+| in-session (14–19 UTC) | 1,151 | **0.194%** | **0.501%** | 1.107% |
+| out-of-session | 346 | 1.608% | 2.670% | 3.610% |
+
+**The confound was tested, not assumed.** Because there is one row per
+instrument the two buckets are **disjoint instrument sets**, so no paired test is
+possible and composition is a live alternative explanation. Stratifying by price
+band, the gap survives inside every band that has both:
+
+| band | in-session p75 | out-of-session p75 | ratio |
+| --- | ---: | ---: | ---: |
+| `$5–20` | 0.564% (n=237) | 2.585% (n=6) | 4.6× |
+| `$20–100` | 0.509% (n=623) | 2.908% (n=103) | 5.7× |
+| `>=$100` | 0.316% (n=215) | 2.576% (n=234) | 8.1× |
+
+Composition does differ — the out-of-session set holds no `<$5` quotes and is
+68% `>=$100`. **Stratification weakens composition as an explanation; it does not
+eliminate it.** The `$5–20` cell rests on **6** out-of-session quotes, and the
+`<$5` band cannot be tested at all because that bucket has none. The defensible
+claim is the narrow one: *within the two bands that carry enough
+out-of-session quotes to compare (`$20–100`, n=103, and `>=$100`, n=234), the
+gap persists at 5.7× and 8.1×.* It is not *"the effect is not composition"*.
+
+⚠ **`spread_flag` is NOT a valid control and was nearly used as one.** It is set
+by `_upsert_quote` as `spread_pct > DEFAULT_MAX_SPREAD_PCT`, i.e. `> 1.0%`
+(`market_data.py:147`) — derived from the very column under test. Stratifying by
+it conditions on the outcome and mechanically truncates the distribution, which
+is why the gap appears to shrink to 2.1× in the unflagged stratum. That number
+is an artefact and must not be quoted as a confound-adjusted effect.
+
+**The model that ships:**
+
+| price band (`us_equity`) | p75 spread | **half-spread per side** |
+| --- | ---: | ---: |
+| `<$5` | 1.600% | 0.800% |
+| `$5–20` | 0.564% | 0.282% |
+| `$20–100` | 0.509% | 0.254% |
+| `>=$100` | 0.316% | 0.158% |
+
+- **Arithmetic, stated so it cannot be guessed:** a buy fills at
+  `fill_price × (1 + h)` and a sell at `fill_price × (1 − h)`, where `h` is the
+  half-spread for the band. Net return is computed from those adjusted prices,
+  never by subtracting a cost from `gross_return_pct` — `sql/256` names that
+  column GROSS precisely so nothing averages it as performance.
+- **The band is keyed on the ENTRY fill price**, fixed for the life of the
+  position. A position that crosses a band boundary does not re-key: the cost is
+  a property of the trade, and re-keying mid-hold would make the cost depend on
+  the outcome.
+- **Frozen as `cost_model_id = "static-p75-insession-v1"`**, so a recalibration
+  is a new strategy version rather than a silent improvement (criterion 11).
+- **FX is a declared field, and setting it to zero requires a fact not yet
+  established.** §4.0 restricts the validated universe to `us_equity`, which
+  quotes in USD — but *"quotes in USD"* and *"needs no conversion"* are the same
+  only if the account currency is USD, and the account currency has **not** been
+  verified here (the eToro portal is unreachable from this environment). So
+  `fx_bps` ships **NULL like `carry_bps`**, not zero, and the implementation
+  ticket resolves it against the portal per the `etoro-api` skill's
+  live-verification protocol. ⚠ Writing zero would be the #2286 shape: a value
+  that is *present* and wrong beats a value that is absent and refused.
+
+⚠ **Four limits, all stated on every result:**
+
+1. **The "in-session" sample is really one hour.** 1,140 of the 1,151 in-session
+   quotes sit at UTC hour 19 = 15:00–15:59 ET, the session's final hour. This is
+   a closing-hour spread, not a session average, and closing-hour liquidity is
+   at the favourable end of the day.
+2. **The coverage denominator is a sample and its numerator is not even the
+   right set.** The 1,151 in-session rows are `us_equity` quotes — that predicate
+   is `exchanges.asset_class`, and it is **not** §4.0's validated universe, which
+   additionally requires `instrument_type_id = Stocks` (ex-ETF). So "1,151 of
+   6,735" is an *upper* bound on validated-universe coverage, not a measurement
+   of it; the true overlap is smaller and was not computed. Either way the model
+   is calibrated on well under a fifth of the universe and applied to all of it,
+   and the `<$5` band rests on **72** quotes. This is criterion 2's own
+   trade-off — `quotes` is all there is — but it is a sample, flagged as one.
+3. **The session window is an approximation and its edges are wrong in both DST
+   regimes.** The regular US session is 09:30–16:00 ET. Under **EDT** (UTC−4)
+   that is 13:30–20:00 UTC, so `14–19 UTC` covers 10:00–15:59 ET and **misses
+   the opening 30 minutes** — the most volatile and widest-spread part of the
+   day, so the omission biases the model *optimistic*. Under **EST** (UTC−5) the
+   session is 14:30–21:00 UTC, so the same literal would admit the 09:00–09:29
+   ET pre-open and drop the 15:00–16:00 ET closing hour. The snapshot spans
+   2026-06-18 → 2026-08-06, entirely EDT, so only the EDT error is live in these
+   figures. **The implementation resolves the session from the exchange
+   calendar, never from this literal**, and the recalibration under a correct
+   window is a new `cost_model_id`.
+4. **Carry is NULL, not zero.** Criterion 2 requires overnight/weekend CFD fees
+   and FX, and says their magnitude *"is not established here"*. The eToro
+   portal is unreachable from this environment, so it is not established here
+   either. `carry_bps` is a declared field set to **NULL**; zero is a
+   measurement nobody made. #2277 covers the standing re-check.
+
+⚠ **What NULL carry does, precisely** — because every S-1/S-2 position and most
+S-3/S-4 positions hold overnight, "refuse to report" would mean phase 5 reports
+nothing. So: **statistics are computed and published with an explicit
+`carry_unmodelled` marker; they are not promotable** (§6). Incomplete and
+invisible are different states, and conflating them is how a phase ships that
+cannot demonstrate it works.
+
+### 5.2 The hold-out split is weighted by BAR, not by trading date
+
+**The source rule for the split is criterion 5 itself** — *"the final 25% of
+history is withheld"* — and it is followed. What criterion 5 does not say, and
+what no published rule this environment can verify does say, is **how to weight
+"history" on an unbalanced panel**. That sub-decision is fixed by construction
+and frozen. On a balanced panel it would not arise. This panel is not balanced — measured, the validated
+universe carries **30 series in 1970 and 5,245 in 2026** — so the phrase has two
+readings eleven years apart:
+
+| weighting | boundary | in-sample bars | hold-out bars |
+| --- | --- | ---: | ---: |
+| by trading date (16,236 dates) | 2010-05-18 | 9,392,777 (40.2%) | **13,946,806 (59.8%)** |
+| **by bar (23,339,583 bars)** ✅ | **2021-06-29** | **17,501,058 (75.0%)** | **5,838,525 (25.0%)** |
+
+The date reading is not a defensible alternative — it yields a hold-out **larger
+than the training set**, trains on thin 1960s–2000s data and withholds the dense
+modern era. Recorded so the ambiguity is not rediscovered and resolved the other
+way.
+
+**Adopted: bar-weighted.** Hold-out is `2021-06-29 → 2026-07-08`, 1,261 trading
+dates, 5,266 series.
+
+- **Inclusivity is fixed:** the boundary date is the **first hold-out bar**. A
+  signal whose `signal_bar_date` is in-sample but whose `fill_bar_date` is on or
+  after the boundary is **purged** — it is neither, because acting on it needs a
+  price from the withheld side.
+- **A position that spans the boundary belongs to the hold-out** and its entry is
+  purged from the in-sample result. Splitting its return across namespaces would
+  put hold-out prices into an in-sample number.
+- ⚠ **The boundary is frozen as a literal, together with the corpus version and
+  the evaluation end date** (`2026-07-08`). It is a function of the corpus, and
+  the corpus grows; a recomputed boundary walks forward silently and re-admits
+  hold-out data into training between runs. Appended data therefore sits outside
+  the frozen window until a **deliberate re-freeze**, which is a corpus-version
+  event that invalidates prior hold-out results and must be visible as one.
+- ⚠ **The split is over corpus bars, not over each strategy's own signals.** A
+  strategy whose signals cluster outside the modern era gets a hold-out that is
+  25% of *bars* and some other fraction of its *trades*. The realised
+  in-sample/hold-out **trade** counts are therefore reported per strategy.
+  ⚠ **The minimum is not invented here.** Criterion 3 already requires an
+  effective sample size from a date-clustered block bootstrap, and criterion 6's
+  Deflated Sharpe consumes it — so the hold-out gate is *"the hold-out arm's
+  **effective** sample size must be large enough for its own confidence interval
+  to exclude the random cohort's 95th percentile"*, which is a computed
+  quantity, not a threshold somebody picked. A strategy whose hold-out cannot
+  meet that fails criterion 5 rather than passing on the panel-level split.
+
+### 5.3 Purged walk-forward with an embargo
+
+**Source rule: López de Prado, *Advances in Financial Machine Learning* ch. 7**
+(purging and embargoing), which criterion 5 names by mechanism.
+
+**The mechanism, stated in the correct direction** — an earlier draft had it
+backwards:
+
+- **Purge:** drop **training** observations whose label window overlaps the test
+  fold.
+- **Embargo:** drop **training** observations immediately *following* the test
+  fold. Both act on the training side; serial correlation means a training
+  sample drawn just after the test window still carries information from it.
+
+⚠ **The embargo length is not quoted from memory.** AFML gives a proportional
+rule of thumb which this environment cannot verify against the source, so the
+implementation ticket must either cite ch. 7 directly **or** take the
+construction below, which is available now and tighter because it is
+mechanism-derived:
+
+> The leak across a fold boundary is bounded by the strategy's own maximum
+> holding period. So the embargo is `max_hold_bars` wherever one is declared —
+> **S-3: 10** and **S-4: 40** — and one rebalance interval for a calendar
+> strategy (**S-2**: one month of panel trading dates).
+
+⚠ **S-1 declares no maximum and this is a genuine open problem, not a solved
+one.** Two candidate answers were considered and both are flawed:
+
+- *measured p99 realised hold* — leaves 1% of holds leaking **by construction**,
+  and worse, the measurement would be taken over the full history including the
+  test folds, which leaks test information into the embargo that is supposed to
+  prevent leakage. **Rejected.**
+- *the in-sample p100 (maximum) realised hold* — computed on the training side
+  only, so it does not leak, but it is unbounded above and a single long hold
+  makes the embargo swallow the fold.
+
+**The implementation ticket must resolve this before S-1 walk-forwards**, and
+the recommended direction is to give S-1 a declared `max_hold_bars` — which is a
+change to S-1's identity and therefore a new strategy version, free today
+because the ledgers hold 0 rows (M10). An undeclared holding period is not a
+property phase 5 can measure its way out of.
+
+### 5.4 Exposure, cash and the return denominator
+
+**Source rule: §7**, quoted rather than re-derived — *"define cash return as
+zero, report return on the full allocated pot, and state exposure time alongside
+it"*, because *"a strategy invested 10% of the time can post a spectacular
+return on almost no capital at work"*.
+
+- **exposure time** = invested capital-days ÷ allocated capital-days over the
+  window, at sleeve level. It is **not** `sum(bars_held)`; `sql/256` says
+  `bars_held` *"is a bar count and NOT exposure time"*, and the difference is
+  concurrency.
+- **return denominator** = the full allocated pot; cash earns 0%.
+- **three levels, never conflated** (§7): per-signal, per-strategy sleeve, total
+  paper portfolio. Drawdown and Sharpe are computed at the latter two **only** —
+  a per-trade max drawdown does not compose.
+- ⚠ **Position sizing is NOT decided here.** §7 defines allocated pots, not
+  slots, and equal-weight-per-signal, fixed-fraction and volatility-targeted
+  sizing give materially different drawdowns from identical signals. Phase 5
+  computes statistics **for a declared sizing rule, which is an input to the
+  result identity**, and v1 declares **equal weight across concurrent positions,
+  rebalanced only on position open/close**. Naming it as an input is what stops
+  a later sizing change reading as a performance improvement.
+
+---
+
+## 6. #2288's remaining clauses land here
+
+#2288 has four clauses. **Clause 1 is already shipped** and the ticket should
+not be re-read as open: `strategy_signals.universe` is `NOT NULL` with **no
+default** (`sql/255:87`), and `outcome_ledger.PendingFill` carries the label
+forward rather than leaving it a join away.
+
+Clauses 2–4 had no home until now, because they are about *results*:
+
+2. **Fail closed on absence.** The result row's universe basis is `NOT NULL`
+   with no default, exactly as `sql/255` does it. A metric whose basis cannot be
+   established is not written.
+3. **Surface it wherever a number is shown.** Phase 6 renders it; phase 5's
+   obligation is that the field is on the row and non-null, so phase 6 *cannot*
+   render a number without one.
+4. **A promotion gate.** ⚠ #2288's own warning — *"a label nobody gates on is
+   worse than no label"* — means the gate ships **with** the label. The hard
+   pre-trade enforcement point is `execution_guard` (phase 7); what phase 5 owns
+   is the **refusal at the result layer**: one function, returning a reason,
+   failing closed, that phase 7's guard calls. It refuses on **any** of:
+   - basis missing, or `survivor_only`;
+   - `carry_unmodelled` set (§5.1);
+   - instrument outside the §4.0 validated universe — §4.0's allocation
+     invariant 2 is a universe rule, not only a survivorship one;
+   - hold-out never evaluated, or evaluated more than once without a recorded
+     access (criterion 5);
+   - DSR not computed, or computed on an undeclared trial count (criterion 6).
+
+⚠ **The binary label is not sufficient and the result model must not pretend
+otherwise.** `survivor_only | survivorship_free` loses §4.0's measured nuance:
+US survivorship is **partially** correctable at 86.2% issuer resolution, with
+CEF/FPI-shaped residue and eToro-listing bias, and non-US is not correctable at
+all. The result row therefore carries the **corpus version** alongside the basis,
+and `survivorship_free` is not a value any current corpus can produce.
+
+Today every result is `survivor_only` — measured, the corpus holds **7,693
+series of which 2,424 have no `instruments` row**, and the delisted half is the
+purchase that lands at the validation gate (#2284). The gate's initial state is
+*"nothing is promotable"*. That is correct, not a bug to work around.
+
+---
+
+## 7. What was measured, and the queries that produced it
+
+Run 2026-08-07 against the dev corpus, read-only, nothing written. Each figure
+is reproduced by the query printed beside it in the run log; the labels below
+are those of that run.
+
+| # | figure | value |
+| --- | --- | --- |
+| M1 | §4.0 validated universe (`load_validated_universe`) | **6,735** instruments ⚠ parent §4.0 records **6,733** on 2026-08-05. Same predicate, four days apart — `is_tradable` moves with every `sync_universe`. This is drift to expect, not a discrepancy to reconcile, and it is why `validated_universe.py` returns ids rather than a count |
+| M2 | research corpus, all series | 7,693 series · 25,818,944 bars · 1962-01-02 → 2026-07-08 |
+| M3 | corpus ∩ validated universe | **5,266** series · **23,339,583** bars |
+| M4 | per-series depth in that slice | min 3 · p25 1,294 · median 3,072 · p75 7,204 · max 16,236; **4,953** ≥273 bars, **4,018** ≥1,260 |
+| M5 | trading dates in the slice | 16,236 |
+| M12 | universe instruments with any corpus series | 5,266 of 6,735 (**78.2%**) |
+| M13 | panel imbalance | 1970: 30 series / 7,620 bars → 2026: 5,245 series / 648,630 bars |
+| M14 | bar-weighted 75/25 boundary | **2021-06-29** |
+| M18 | slices at that boundary | 17,501,058 / 5,838,525 · 1,261 dates · 5,266 series |
+| M19 | slices at the **date**-weighted boundary (rejected) | 9,392,777 / 13,946,806 |
+| M6 | `quotes` spread, raw, all classes | n=1,528 · p50 **0.284%** · p75 **0.930%** · p99 4.829% |
+| M9 | quote freshness | 2026-06-10 → 2026-08-07 · 1,492 of 1,528 within 7d · 356 `spread_flag` |
+| M16 | `us_equity` in-session vs out | 0.194% / 0.501% (n=1,151) vs 1.608% / 2.670% (n=346) |
+| M17 | in-session p75 by price band | 1.600% · 0.564% · 0.509% · 0.316% |
+| M20 | `quotes` grain | 1,497 rows / 1,497 `us_equity` instruments — one row each, buckets disjoint |
+| M21 | within-band in/out ratio | 4.6× · 5.7× · 8.1× |
+| M22 | in-session rows with NULL `last` | **4** — reconciles M17's 1,147 against M16's 1,151 |
+| M23 | in-session hour concentration | **1,140 of 1,151 at UTC hour 19**; span 2026-06-18 → 2026-08-06, all EDT |
+| M24 | `spread_flag` stratum (⚠ invalid as a control, §5.1) | in-session 0.361% unflagged vs 2.520% flagged |
+| M10 | ledger occupancy | `strategy_signals` **0** rows / 0 versions · `strategy_outcomes` **0** |
+| M11 | corpus vs delisting register | 1,282 Form 25 rows · 2,424 corpus series with no `instruments` row |
+
+M10 is why the result-model schema and the S-1 `max_hold_bars` change are cheap
+**now**: there is nothing to backfill, and a `NOT NULL` basis column added after
+the ledgers fill is a column somebody has to invent history for.
+
+---
+
+## 8. Stages
+
+Five tickets, each independently mergeable with its own full-population
+verification.
+
+| stage | what | depends on |
+| --- | --- | --- |
+| **5a** | **Position construction** — §3 in full: the three regimes, the §3.1 pyramiding rule, version pinning, `ambiguous` as terminal, same-bar ordering, S-2's drop-out close. Pure function over ledger rows. | resolver version selection (an input, not new code) |
+| **5b** | **Cost model** — table + `static-p75-insession-v1` per §5.1, `carry_bps` NULL, session resolved from the exchange calendar. Threads `cost_model_id` through the four `*_identity()` functions in place of `"undeclared-v0"`. | 5a |
+| **5c** | **Result model + #2288 clauses 2–4** — the result table, basis `NOT NULL` no default, corpus version, and the promotion-refusal function. | 5b |
+| **5d** | **Statistics** — criterion 7's full metric set on the equity curve; the `vectorbt` adoption decision (§4) is taken here against 5a's trade list. | 5c |
+| **5e** | **Validity gates** — frozen hold-out namespace with access logging (criterion 5), purged walk-forward + embargo (§5.3, including S-1's declared bound), block bootstrap clustered by date (criterion 3), Deflated Sharpe with a declared trial count (criterion 6), quarantine sensitivity arm (criterion 9), and the 1,000-strategy random-entry synthetic control. | 5d |
+
+⚠ **5b changes all four strategy versions** — `cost_model_id` is hashed into
+`version`. Signals stored under `undeclared-v0` are not reusable under the new
+id. This costs nothing today (M10: 0 rows) and would be expensive later, which
+is an argument for doing 5b early rather than a problem with it.
+
+**Incidental finding, filed not fixed.** `s3_mean_reversion_in_trend.py:114`
+claims `MAX_HOLD_BARS`' consumer is `outcome_resolver.ExitLevels.max_hold_bars`,
+which cannot be constructed for S-3 (§3). The docstring is wrong today, not once
+phase 5 lands. Filed as **#2348** rather than folded into this spec — a narrow
+doc fix should not wait on a phase.
+
+⚠ **Stage 5e is the phase, not an appendix.** The parent is explicit that
+reproducing #2260 is *"necessary but not sufficient"* and pairs it with the
+random-entry cohort at a stated threshold, because *"a stated threshold matters
+more than the test"*. A phase 5 shipping 5a–5d is a number generator, not a
+backtester.
+
+---
+
+## 9. Acceptance
+
+One block per parent §5 criterion, in the parent's own order, so a missing
+criterion is visible as a missing heading rather than inferred.
+
+**C1 — point-in-time universe.** Every result row carries a non-null universe
+basis and the corpus version (§6). Eligibility predicates are evaluated as-of
+each decision date, never once against today's state (§3.5 rule 5) — asserted by
+replaying one strategy at two different "today" values and requiring identical
+historical signals. The promotion check refuses `survivor_only`.
+
+**C2 — costs.** (a) Costs are non-zero on every position, applied as adjusted
+fill prices, never subtracted from `gross_return_pct` (§5.1). (b) Both sides are
+charged on a closed position and **one side** on an open-at-window-end mark
+(§3.2 rule 5). (c) The band table is keyed on the entry fill price and pinned by
+test to the §5.1 figures. (d) `cost_model_id` is hashed into `strategy_version`
+— asserted by changing the model and requiring every version to move. (e)
+`carry_bps` and `fx_bps` are NULL, every result carries `carry_unmodelled`, and
+the promotion check refuses on it.
+
+**C3 — overlap-corrected statistics.** Effective sample size and confidence
+intervals come from a **block bootstrap over calendar blocks with errors
+clustered by date**. No bare percentage and no nominal *n* is reported anywhere.
+
+**C4 — causal indicator computation.** ⚠ Not discharged by C-execution alone.
+Two separate assertions: (a) the §2.1 equality — every order's timestamp and
+price equal the stored `fill_bar_date` / `fill_price`, and
+`fill_bar_date > signal_bar_date`, over the whole trade list; **and** (b) the
+criterion-4 truncation test proper — recompute a mid-series bar from a truncated
+series and assert equality against the full-series value, over the full
+population, for every indicator any strategy reads. (b) is the one that catches
+look-ahead *inside* an indicator, which (a) cannot see.
+
+**C5 — out-of-sample hold-out.** The hold-out is a **separate result namespace
+that is mechanically inaccessible** to exploratory queries — logging alone is
+not the criterion, which says governance fails. Every access records timestamp
+and strategy id. The frozen boundary literal must equal the corpus's
+bar-weighted boundary or the run **fails** rather than re-splitting (§5.2).
+Purge and embargo both act on the **training** side (§5.3); every strategy
+entering walk-forward has a declared holding bound. Per-strategy in-sample and
+hold-out **trade** counts are reported, gated on effective sample size (§5.2).
+
+**C6 — multiple-testing control.** Deflated Sharpe computed with **all four**
+parent inputs: the trial count, the trials' **correlation**, and the returns'
+**skew and kurtosis**. The trial count is explicitly declared and includes
+abandoned branches, manual eyeballing and discarded parameter values. An
+undeclared trial count **fails**; it does not default to the number of shipped
+strategies.
+
+**C7 — a metric set that cannot flatter.** All **twelve** present on every
+sleeve-level and portfolio-level result: expectancy per trade, profit factor,
+CAGR, annualised volatility, Sharpe, Sortino, portfolio-level max drawdown,
+exposure time, turnover, trade count, effective sample size, and return relative
+to buy-and-hold. Drawdown and Sharpe are computed at **both** the sleeve and the
+total-portfolio level (§5.4), never at signal level. A result missing any of the
+twelve is incomplete, and a strategy failing to beat buy-and-hold after costs is
+reported as not a strategy.
+
+**C8 — `not_evaluable` reason codes.** The criterion-9 census is reported per
+strategy from the ledger's closed vocabulary (`sql/255`), never collapsed to a
+single total, and phase 5 adds no code of its own without flagging it as ours.
+The §3.1 `superseded_open_position` count and §3.3's panel-vs-instrument
+calendar divergence are reported alongside, since both are narrowings phase 5
+introduces.
+
+**C9 — quarantine exclusion is measured.** Excluded bar and trade counts and
+shares are reported per strategy, **plus one sensitivity arm with conservative
+handling** — defined here as: re-run with quarantined bars *admitted* at their
+stored values rather than masked, and report the delta in every C7 metric. An
+arm that cannot be defined is an arm nobody ran.
+
+**C10 — corporate actions declared.** `price_series_break` segments are **never
+spanned** by a position — asserted, since C3's block bootstrap would otherwise
+average across a discontinuity. The dividend/split treatment is stated per
+strategy, including that eToro candles are price-not-total-return.
+
+**C11 — strategy identity.** The identity hash covers code, params, universe,
+cost model, **ranking tie-break** and **execution assumption**. Asserted by
+mutating each in turn and requiring `version` to move — six assertions, not one.
+⚠ The **position-sizing rule and the ambiguity arm** (§3.4, §5.4) are execution
+assumptions and are hashed too; a sizing change that did not move the version
+would let a different strategy inherit a track record.
+
+**The harness itself.** The random-entry cohort is 1,000 strategies matched to
+each real strategy's **universe, dates, exposure and turnover**, under the
+**same cost model**, with the seed recorded. Acceptance is **both** parent
+thresholds: the cohort's mean net return lies within its own 95% bootstrap CI of
+zero, **and** each real strategy's Sharpe exceeds the cohort's **95th
+percentile** to count as evidence at all. Plus §9.1.
+
+### 9.1 ⚠ The parent's #2260 acceptance needs amending, and this is the amendment
+
+Parent §5 requires: *"reproduce issue #2260's 76.8% figure, then attribute it to
+criteria 1/3/4."* **That is now unsatisfiable as written.** #2260 closed
+2026-08-05 because the figure **did not reproduce** — causal Wilder RSI gave
+51.8% / 50.4%, and the "survivorship eliminated" claim was withdrawn.
+
+Reproducing a figure that does not exist is not a gate. The amendment, which the
+parent should carry:
+
+> **Replaced by:** the harness must reproduce the **51.8% / 50.4%** causal-Wilder
+> result on the same cohort, and must reproduce the **76.8% artefact** when
+> deliberately run with the non-causal indicator that produced it. Recovering the
+> bug on demand is the stronger test — it demonstrates the harness is sensitive
+> to exactly the look-ahead class criterion 4 exists to catch, rather than merely
+> agreeing with a number.
+
+The random-entry synthetic control is unaffected and remains mandatory.
+
+---
+
+## 10. What this document does NOT claim
+
+- **No performance claim is made or implied.** S-1..S-4 each shipped
+  deliberately without one; this spec is the machinery that would let one be
+  made, and until stage 5e passes, it has not been.
+- **The cost model is not validated against eToro's fee schedule.** It is
+  calibrated from our own `quotes` snapshot, on 17.1% of the universe, at one
+  hour of the trading day, with carry null (§5.1).
+- **The corpus is survivor-only and every number inherits that** (#2284, #2288).
+  The hold-out, embargo and synthetic control address *overfitting*. None
+  addresses survivorship, and no arrangement of them can.
+- **1962 is not 64 years of usable evidence for any strategy.** Median
+  per-series depth is 3,072 bars, and **1,469 of the 6,735** universe
+  instruments (6,735 − 5,266; M1 vs M12) have no corpus series at all. Depth is
+  per-series, not per-corpus.
+- **Nothing here establishes that any of S-1..S-4 works.** The most likely
+  outcome of stage 5e, given §10 of the parent and a survivor-only corpus, is
+  that some or all of them fail the random-cohort threshold. That is a result,
+  not a failure of the phase.
