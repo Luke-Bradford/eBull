@@ -302,6 +302,15 @@ class _CostTally:
                         self.net_wins += 1
                     self.gross_bp[int(row.gross_return_pct / _BP)] += 1
                     self.net_bp[int(row.net_return_pct / _BP)] += 1
+                    # ⚠⚠ `gross − net` SCALES WITH THE WINNER, and its maximum
+                    # looks like a defect if that is not said. Algebraically
+                    # `gross − net = (exit / entry) × 100 × 2h/(1+h)`, so a
+                    # 270-fold gain carries a "cost" of ~390 percentage points
+                    # while a flat trade carries ~2h. The measured max on this
+                    # corpus is 39,064 bp for S-1 and it is arithmetic, not a
+                    # mis-charge: the half-spread is a fraction of the EXIT
+                    # value expressed against the ENTRY basis. Read the median
+                    # (53 bp), not the max.
                     self.cost_bp[int((row.gross_return_pct - row.net_return_pct) / _BP)] += 1
 
             if position.entry_fill_bar_date < HOLDOUT_BOUNDARY:
