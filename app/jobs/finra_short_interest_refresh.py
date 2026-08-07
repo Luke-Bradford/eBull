@@ -14,9 +14,16 @@ ScheduledJob body. Per-fire flow:
      where revision_window = candidates[-2:] — the two most-recent
      candidates are always re-probed so FINRA in-place revisions
      (revisionFlag='Y') don't get masked.
-  5. For each settlement_date in targets:
-       a. provider.fetch_settlement_file(...) — 404 = benign skip;
-          other errors = per-file failure.
+  5. For each anchor in targets:
+       a. ``_fetch_designated_file`` resolves the anchor to the
+          settlement date FINRA actually DESIGNATED, walking the probe
+          back up to ``_MAX_ANCHOR_WALKBACK_DAYS`` when the CDN does
+          not serve the weekend-adjusted date (US market holidays —
+          e.g. Good Friday 2022-04-15 → designated 2022-04-14).
+          Nothing served in range = benign skip; other errors =
+          per-file failure. Anchors younger than
+          ``_DISSEMINATION_LAG_DAYS`` get a single probe with no
+          walk-back — there a 403/404 means "not disseminated yet".
        b. Empty-file guard: 0 bytes → per-file failure.
        c. Phase 1: raw_filings.store_raw(...) + conn.commit() —
           raw payload durable BEFORE parse (#1168).
@@ -76,24 +83,56 @@ class FinraRefreshStats:
         return sum(1 for s in self.settlement_files if s.failed)
 
 
+# Holiday walk-back bound (#2234). The settlement calendar is
+# DESIGNATED by FINRA, not derivable — Rule 4560(a) requires reports
+# "no later than the second business day after the reporting settlement
+# date designated by FINRA", and FINRA publishes the designated dates
+# as per-year tables rather than a formula. Every designated date
+# observed is the 15th / last calendar day walked back to the preceding
+# BUSINESS day, and ``_walk_back_to_weekday`` only knows about
+# weekends, so US market holidays land the probe on a date the CDN does
+# not serve.
+#
+# The bound is structural rather than a guess at the longest market
+# closure: the two anchors in a month are >=13 days apart, so 5 days of
+# walk-back can never cross into the adjacent half-month and mis-attribute
+# one settlement date's file to the other's anchor. Every anchor from
+# 2021-07 onward resolves within it — see the #2234 PR's full-population
+# calendar scan.
+_MAX_ANCHOR_WALKBACK_DAYS: int = 5
+
+# Dissemination lag (#2234). FINRA publishes on a delay: Rule 4560(a)
+# puts the member's report due "no later than the second business day
+# after the reporting settlement date", and FINRA's own published
+# schedule runs PUBLICATION about a week after that due date (the
+# short-interest reporting-dates table pairs, e.g., a Nov 18 due date
+# with a Nov 25 publication date). Inside that window a 403 means "not
+# disseminated yet" and walking the probe back would spend
+# _MAX_ANCHOR_WALKBACK_DAYS requests a day rediscovering a file that
+# does not exist. Past it, a 403 means the date was never designated —
+# which is the case worth probing for.
+_DISSEMINATION_LAG_DAYS: int = 15
+
+
+def _is_disseminated(anchor: date, now: datetime) -> bool:
+    """Has FINRA had long enough to publish a file for ``anchor``?"""
+    return (now.date() - anchor).days >= _DISSEMINATION_LAG_DAYS
+
+
 def _walk_back_to_weekday(d: date) -> date:
     """If ``d`` falls on Saturday/Sunday, walk BACK to the prior Friday.
 
     FINRA publishes ``shrt{YYYYMMDD}.csv`` keyed by the last business
     day of the half-month, not the calendar day.
 
-    **Federal-holiday EOM/15th handling** (Codex 2 r1 MED 1): this
-    helper handles weekends only — NOT US federal holidays (Good
-    Friday, MLK day, Memorial Day, July 4, Labor Day, Thanksgiving,
-    Christmas). On those rare cases, the probe lands on the holiday
-    date itself and returns 404; the JOB's ``FinraNotFound`` catch
-    treats it as a benign skip + the next-fire cron tries again
-    (which will keep returning 404 until the operator runs the REPL
-    backfill to pick up the actual prior-business-day file). This is
-    an accepted v1 limitation — adding a US holiday calendar dep
-    (pandas-market-calendars / exchange_calendars) is gated by
-    settled-decisions #532 minimal-dependency posture and a tracked
-    monitoring/alert path that doesn't exist yet.
+    **Federal holidays are NOT handled here** — this helper is pure
+    weekend arithmetic. The holiday case is handled at fetch time by
+    ``_fetch_designated_file``, which walks the probe back further when
+    the CDN does not serve the derived date. Deriving holidays instead
+    would need a US market calendar dependency, which
+    settled-decisions #532 (minimal-dependency posture) gates; probing
+    needs no dependency and is validated against the file's own
+    ``settlementDate`` column at parse time.
     """
     while d.weekday() >= 5:  # 5=Saturday, 6=Sunday
         d -= timedelta(days=1)
@@ -151,6 +190,42 @@ def _already_parsed_settlement_dates(conn: psycopg.Connection[Any]) -> set[date]
     return out
 
 
+def _fetch_designated_file(
+    provider: FinraShortInterestProvider,
+    anchor: date,
+    *,
+    allow_walkback: bool,
+    skip_dates: frozenset[date] = frozenset(),
+) -> tuple[date, bytes] | None:
+    """Resolve ``anchor`` to the settlement date FINRA actually designated.
+
+    Probes ``anchor`` first, then walks back one calendar day at a time
+    up to ``_MAX_ANCHOR_WALKBACK_DAYS``. Returns ``(designated_date,
+    payload)`` for the first date the CDN serves, or ``None`` when
+    nothing in range is served (not yet published, before the archive
+    floor, or already ingested under a shifted date).
+
+    ``allow_walkback=False`` restricts this to a single probe. The job
+    passes that for anchors younger than ``_DISSEMINATION_LAG_DAYS``,
+    where a 403/404 means "not published yet" rather than "not the
+    designated date". Walking back there would burn a request per day
+    per anchor to re-discover a file that simply does not exist yet.
+
+    Non-``FinraNotFound`` errors propagate; the caller records them as a
+    per-file failure.
+    """
+    probe = anchor
+    attempts = _MAX_ANCHOR_WALKBACK_DAYS + 1 if allow_walkback else 1
+    for _ in range(attempts):
+        if probe in skip_dates:
+            return None
+        try:
+            return probe, provider.fetch_settlement_file(probe)
+        except FinraNotFound:
+            probe -= timedelta(days=1)
+    return None
+
+
 def _compute_targets(
     candidate_dates: list[date],
     already_parsed: set[date],
@@ -193,25 +268,53 @@ def run_finra_short_interest_refresh(
     ingest_run_id = uuid4()
     stats_list: list[SettlementIngestStats] = []
 
-    for settlement_date in targets:
-        url = provider_.settlement_file_url(settlement_date)
+    revision_window = set(sorted(candidate_dates)[-2:])
+    # A holiday-shifted date already ingested must not be re-downloaded
+    # every fire just because its unshifted anchor keeps failing to
+    # resolve.
+    skip_dates = frozenset(already_parsed - revision_window)
+
+    for anchor in targets:
+        # Inside the revision window the skip list is dropped entirely
+        # (Codex ckpt 2, #2234). Otherwise a holiday-shifted date gets NO
+        # revision coverage at all: its designated date is never itself an
+        # anchor, so it only ever appears in ``skip_dates``, and the
+        # walk-back that would reach it returns None before fetching. The
+        # anchor being in the window is what makes its shifted date due a
+        # re-fetch.
+        in_revision_window = anchor in revision_window
         try:
-            raw_bytes = provider_.fetch_settlement_file(settlement_date)
-        except FinraNotFound:
-            logger.info(
-                "finra_short_interest_refresh: skip not-yet-published settlement=%s",
-                settlement_date.isoformat(),
+            resolved = _fetch_designated_file(
+                provider_,
+                anchor,
+                allow_walkback=_is_disseminated(anchor, now_),
+                skip_dates=frozenset() if in_revision_window else skip_dates,
             )
-            continue
         except Exception as exc:  # noqa: BLE001 — captured into stats
             stats_list.append(
                 SettlementIngestStats(
-                    settlement_date=settlement_date,
+                    settlement_date=anchor,
                     failed=True,
                     error_detail=f"fetch: {type(exc).__name__}: {exc}",
                 )
             )
             continue
+
+        if resolved is None:
+            logger.info(
+                "finra_short_interest_refresh: skip unresolved anchor=%s",
+                anchor.isoformat(),
+            )
+            continue
+
+        settlement_date, raw_bytes = resolved
+        if settlement_date != anchor:
+            logger.info(
+                "finra_short_interest_refresh: anchor=%s resolved to designated settlement=%s",
+                anchor.isoformat(),
+                settlement_date.isoformat(),
+            )
+        url = provider_.settlement_file_url(settlement_date)
 
         # Empty-file guard. raw_filings.store_raw rejects empty
         # payloads at app/services/raw_filings.py:105 ("payload is

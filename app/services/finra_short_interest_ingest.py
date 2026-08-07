@@ -23,6 +23,11 @@ are ``None`` or ``''``. The per-row defect path explicitly checks
 ``symbolCode`` + ``currentShortPositionQuantity`` + ``settlementDate``
 required-presence and skips rows where any are blank/None.
 
+Body-date contract (#2234): every parsed row's ``settlementDate``
+column MUST equal the caller-supplied ``settlement_date``. Mismatch is
+file-level fatal (``HeaderCorruptionError``), same posture as the
+RegSHO daily sibling's ``Date``-column assertion.
+
 Raw-payload-before-parse contract (#1168) is JOB-enforced: the caller
 MUST run ``raw_filings.store_raw(...)`` + ``conn.commit()`` BEFORE
 calling this function.
@@ -157,6 +162,27 @@ def build_preloaded_symbol_resolver(
     return resolver
 
 
+def parse_body_settlement_date(raw: Any) -> date | None:
+    """Parse the body ``settlementDate`` column; ``None`` if unparseable.
+
+    Every archive file probed on 2026-08-06 (``shrt20180112`` —
+    the oldest file the CDN still serves — through ``shrt20260715``)
+    carries ISO ``YYYY-MM-DD``. The compact ``YYYYMMDD`` form is
+    accepted as well because the sibling ``accountingYearMonthNumber``
+    column and the CDN filename both use it, so it is a live shape in
+    this feed rather than a hypothetical one.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def _opt_int(v: Any) -> int | None:
     if v is None or v == "":
         return None
@@ -226,6 +252,23 @@ def ingest_settlement_file(
             except ValueError, TypeError:
                 skipped_invalid_row += 1
                 continue
+
+            # Body-date validation — mirrors the RegSHO daily sibling
+            # (``finra_regsho_ingest`` asserts ``row.Date == trade_date``;
+            # skill ``data-sources/finra.md`` §2.6). Without it this
+            # parser DISCARDS the body's own ``settlementDate`` and
+            # stores the caller's, so a file fetched under the wrong URL
+            # date would be silently mis-dated. That matters because the
+            # settlement calendar is DESIGNATED by FINRA rather than
+            # derivable (Rule 4560(a)), so the job resolves holiday-
+            # shifted dates by probing — and a probe must be validated
+            # against the file it lands on, not assumed correct.
+            body_settlement = parse_body_settlement_date(settlement_raw)
+            if body_settlement != settlement_date:
+                raise HeaderCorruptionError(
+                    f"FINRA body settlementDate mismatch at settlement_date={settlement_date}: "
+                    f"symbolCode={symbol!r} carries settlementDate={settlement_raw!r}"
+                )
 
             # Ambiguity check BEFORE resolver call (resolver returns None
             # for both ambiguous + no-match; disambiguate for the counter).
