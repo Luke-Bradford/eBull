@@ -2766,6 +2766,35 @@ class TestItem403RowIsABeneficialOwner:
         parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
         assert [r.holder_name for r in parsed.rows] == []
 
+    def test_the_designator_strip_does_not_de_admit_an_instruction_5_table(self) -> None:
+        """⚠ The second selection change, and the A/B is what found it.
+
+        ``_is_beneficial_owner_identity`` SHORT-CIRCUITS on
+        ``_is_instrument_not_owner``, so turning the class-designator strip on
+        unconditionally does not just widen the storage guard — it narrows
+        OWNER IDENTITY, lowers ``_owner_identity_fraction`` and de-admits whole
+        tables. Hence ``strip_class_designator`` is a keyword the guard opts
+        into and this predicate's other caller does not.
+
+        Shape and numbers from `0000062234-25-000015` (Marcus Corporation),
+        measured against both trees: `main` scores this table 2/3 = 0.667 and
+        admits it; with the strip unconditional it scores 1/3 = 0.333 and the
+        table goes, taking its 229.403(b) Instruction 5 group row with it.
+        `Class B Shares` is the pivot — three capitalised tokens, so it passes
+        the person arm unless the strip reaches it first."""
+        body = (
+            "<table>"
+            "<tr><th>Name and Address of Beneficial Owner</th>"
+            "<th>Amount and Nature of Beneficial Ownership</th><th>Percent of Class</th></tr>"
+            "<tr><td>Common Shares</td><td>67,006</td><td>*</td></tr>"
+            "<tr><td>All directors and executive officers as a group (13 persons)</td>"
+            "<td>2,569,425</td><td>10.4%</td></tr>"
+            "<tr><td>Class B Shares</td><td>2,444,278</td><td>35.0%</td></tr>"
+            "</table>"
+        )
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=body))
+        assert [r.holder_name for r in parsed.rows] == ["All directors and executive officers as a group (13 persons)"]
+
     def test_an_item_402_plan_table_is_not_admitted_by_pruning(self) -> None:
         """The regression the A/B caught, pinned on its own shape.
 

@@ -52,6 +52,17 @@ _INSTRUCTION_5_MARKERS = re.compile(r"\b(director|directors|officer|officers|gro
 _AGGREGATE_NOUN = re.compile(r"\btotals?\b")
 
 
+def _guard_rejects(name: str) -> bool:
+    """Exactly the STORAGE guard's predicate, designator strip and all.
+
+    ⚠ Not ``_is_instrument_not_owner(name)`` bare. The strip is a keyword the
+    guard opts into and ``_is_beneficial_owner_identity`` deliberately does not,
+    so a census calling the bare predicate measures the ELIGIBILITY semantics
+    and silently under-reports what the guard drops.
+    """
+    return _is_instrument_not_owner(name, strip_class_designator=True)
+
+
 def _census(parse_path: str) -> None:
     # name -> (rows, accessions). "rows" is the per-accession appearance count,
     # which is what a DELETE would remove; "accessions" is the blast radius.
@@ -68,7 +79,7 @@ def _census(parse_path: str) -> None:
                 rows[name] += 1
                 accessions.setdefault(name, set()).add(entry["acc"])
 
-    rejected = sorted(name for name in rows if _is_instrument_not_owner(name))
+    rejected = sorted(name for name in rows if _guard_rejects(name))
     rejected_rows = sum(rows[name] for name in rejected)
     rejected_accessions = {acc for name in rejected for acc in accessions[name]}
 
@@ -81,7 +92,7 @@ def _census(parse_path: str) -> None:
         for line in fh:
             entry = json.loads(line)
             names = list(entry["holders"])
-            if names and all(_is_instrument_not_owner(n) for n in names):
+            if names and all(_guard_rejects(n) for n in names):
                 wiped += 1
 
     print("== corpus ==")
@@ -100,7 +111,7 @@ def _census(parse_path: str) -> None:
     extended = _INSTRUMENT_VOCAB | _CANDIDATE_EXTENSIONS
     newly: list[str] = []
     for name in rows:
-        if _is_instrument_not_owner(name):
+        if _guard_rejects(name):
             continue
         words = _WORD_RE.findall(name.lower())
         if words and all(w in extended for w in words):
@@ -125,7 +136,7 @@ def _census(parse_path: str) -> None:
         if not words:
             continue
         plain = all(w in _INSTRUMENT_VOCAB for w in words)
-        if _is_instrument_not_owner(name) and not plain:
+        if _guard_rejects(name) and not plain:
             designator_only.append(name)
     print("\n== arm 4: names the CLASS-DESIGNATOR strip newly rejects (Codex ckpt-2) ==")
     print(f"  distinct names             {len(designator_only):>8}")
@@ -141,7 +152,7 @@ def _census(parse_path: str) -> None:
     # issuers spell it with that very noun — so the substring rule deletes a row
     # the reg mandates. Computed here rather than written into a test docstring:
     # a hand-copied figure goes stale silently the moment the vocabulary moves.
-    contains_total = [name for name in rows if _AGGREGATE_NOUN.search(name) and not _is_instrument_not_owner(name)]
+    contains_total = [name for name in rows if _AGGREGATE_NOUN.search(name) and not _guard_rejects(name)]
     mandated = [name for name in contains_total if _INSTRUCTION_5_MARKERS.search(name)]
     survives_rows = sum(rows[n] for n in contains_total)
     mandated_rows = sum(rows[n] for n in mandated)

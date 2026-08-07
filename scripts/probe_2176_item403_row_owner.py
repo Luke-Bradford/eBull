@@ -33,8 +33,12 @@ _PARSER = Path("app/providers/implementations/sec_def14a.py")
 _TESTS = "tests/test_sec_def14a_parser.py"
 _CLASS = "TestItem403RowIsABeneficialOwner"
 
-_GUARD = "        if drop_non_owner_rows and _is_instrument_not_owner(holder_name):\n"
-_DESIGNATOR = '    if "class" in words or "series" in words:\n'
+_GUARD = "        if drop_non_owner_rows and _is_instrument_not_owner(holder_name, strip_class_designator=True):\n"
+_DESIGNATOR = '    if strip_class_designator and ("class" in words or "series" in words):\n'
+# F — the designator strip made UNCONDITIONAL. It then reaches
+# _is_beneficial_owner_identity, which short-circuits on this predicate, and
+# de-admits Instruction 5 tables. Found by the A/B, not by A-E.
+_STRIP_DEFAULT = "def _is_instrument_not_owner(text: str, *, strip_class_designator: bool = False) -> bool:\n"
 # E — the guard re-coupled to table selection. This is the defect the
 # full-population A/B found, so it gets a probe of its own.
 _DECOUPLE = "    holders = _extract_table_holders(table, drop_non_owner_rows=False)\n"
@@ -84,6 +88,16 @@ _PROBES = (
         ),
     ),
     (
+        "F: the class-designator strip made UNCONDITIONAL",
+        _STRIP_DEFAULT,
+        "def _is_instrument_not_owner(text: str, *, strip_class_designator: bool = True) -> bool:\n",
+        ("test_the_designator_strip_does_not_de_admit_an_instruction_5_table",),
+        (
+            "test_a_presentation_total_row_is_not_stored_as_a_holder",
+            "test_a_class_designator_letter_does_not_rescue_a_title_of_class_row",
+        ),
+    ),
+    (
         "E: the row guard RE-COUPLED to table eligibility",
         _DECOUPLE,
         "    holders = _extract_table_holders(table)  # PROBE E — prune feeds the floor\n",
@@ -106,7 +120,13 @@ def _pytest(node_ids: tuple[str, ...]) -> int:
 
 def main() -> int:
     original = _PARSER.read_text()
-    for label, anchor in (("guard", _GUARD), ("designator", _DESIGNATOR), ("decouple", _DECOUPLE)):
+    anchors = (
+        ("guard", _GUARD),
+        ("designator", _DESIGNATOR),
+        ("decouple", _DECOUPLE),
+        ("strip-default", _STRIP_DEFAULT),
+    )
+    for label, anchor in anchors:
         # A probe that silently matches nothing proves nothing.
         if original.count(anchor) != 1:
             print(f"ABORT: {label} anchor appears {original.count(anchor)} times, expected exactly 1")

@@ -1462,7 +1462,7 @@ _OWNER_NAME_THEN_ADDRESS_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
-def _is_instrument_not_owner(text: str) -> bool:
+def _is_instrument_not_owner(text: str, *, strip_class_designator: bool = False) -> bool:
     """True when every word in TEXT is equity/award vocabulary.
 
     'Authorized But Unissued' is Title-Cased and matches the two-capitalised-
@@ -1484,11 +1484,27 @@ def _is_instrument_not_owner(text: str) -> bool:
 
     Scoped to names that actually name a class, so a stray initial elsewhere
     cannot make an unrelated name test as an instrument.
+
+    ⚠ ``strip_class_designator`` is OFF by default and the STORAGE guard is its
+    only caller, because this predicate is not private to that guard:
+    ``_is_beneficial_owner_identity`` short-circuits on it, and that feeds
+    ``_owner_identity_fraction`` and so ``_ROW_IDENTITY_FLOOR``. Turning the
+    strip on unconditionally therefore narrows OWNER IDENTITY and de-admits
+    tables — a selection change wearing a row-filter's clothes.
+
+    Measured, which is the only reason this parameter exists: on
+    ``0000062234-25-000015`` the strip flips 'Class B Shares' from owner to
+    instrument, taking the table from 2/3 = 0.667 to 1/3 = 0.333. It falls under
+    the floor and the whole table goes, including its 229.403(b) Instruction 5
+    group row — the row this change exists to protect. Same on
+    ``0000062234-26-000018``. Default-off keeps eligibility byte-identical to
+    ``origin/main``; the guard opts in, where the only effect is which rows are
+    STORED.
     """
     words = _WORD_RE.findall(text.lower())
     if not words:
         return False
-    if "class" in words or "series" in words:
+    if strip_class_designator and ("class" in words or "series" in words):
         words = [w for w in words if len(w) > 2]
     if not words:
         # 'Class B' reduces to nothing but the designator — still a title of
@@ -2875,7 +2891,7 @@ def _extract_holder_rows(
         if not holder_name:
             pending_owner_name = None
             continue
-        if drop_non_owner_rows and _is_instrument_not_owner(holder_name):
+        if drop_non_owner_rows and _is_instrument_not_owner(holder_name, strip_class_designator=True):
             # #2176 — the row names no beneficial owner. 17 CFR 229.403 column
             # 2 is "Name and address of beneficial owner", and Rule 13d-3
             # defines that as a person or entity holding voting or investment
