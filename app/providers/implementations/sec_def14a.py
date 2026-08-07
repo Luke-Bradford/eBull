@@ -62,6 +62,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -1996,6 +1997,21 @@ def extract_plan_name_and_trustee(holder_name: str) -> tuple[str, str | None]:
 # ---------------------------------------------------------------------------
 
 
+# Score floor for a table to be a WINDOW CANDIDATE — below this we don't trust
+# the match. Empirically tuned: a minimal-header beneficial-ownership table
+# (``Name`` / ``Shares`` / ``Percent``) scores 3; tables with SEC-prescribed
+# wording score 6+. Compensation / option-grant tables typically score 0-2 even
+# when they include a "Name" column, because they lack ``shares`` / ``percent``
+# cues.
+#
+# Module-level rather than a local of ``parse_beneficial_ownership_table``
+# because the offline census scripts have to reproduce the same candidate set —
+# ``scripts/census_def14a_stacked_cell_holders.py`` re-derived it as its own
+# literal 3, and a local cannot be imported, so the two would have drifted the
+# first time this moved (review NITPICK on PR #2359).
+_WINDOW_SCORE_FLOOR: Final[int] = 3
+
+
 def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershipTable:
     """Parse a DEF 14A primary doc HTML body and extract the
     Item 12 beneficial-ownership table.
@@ -2011,14 +2027,6 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
     """
     if not html_text:
         return Def14ABeneficialOwnershipTable(as_of_date=None, rows=[], raw_table_score=0)
-
-    # Score floor — below this we don't trust the match. Empirically
-    # tuned: a minimal-header beneficial-ownership table
-    # (``Name`` / ``Shares`` / ``Percent``) scores 3; tables with
-    # SEC-prescribed wording score 6+. Compensation / option-grant
-    # tables typically score 0-2 even when they include a "Name"
-    # column because they lack ``shares``/``percent`` cues.
-    SCORE_FLOOR = 3
 
     candidate_windows = _find_section_windows(html_text)
     best_score = 0
@@ -2061,7 +2069,7 @@ def parse_beneficial_ownership_table(html_text: str) -> Def14ABeneficialOwnershi
             score = _score_table_headers(parsed.score_headers)
             if score > window_best_score:
                 window_best_score = score
-            if score >= SCORE_FLOOR:
+            if score >= _WINDOW_SCORE_FLOOR:
                 window_qualifying.append((score, parsed))
         # D2 / D3 (#2160) — ELIGIBILITY decides both which table wins the window
         # and which tables join it as Item 403 siblings. Header score no longer
@@ -2130,6 +2138,195 @@ def _pad_row(raw_row: tuple[str, ...], *, name_idx: int, shares_idx: int, percen
     """Pad short rows (some issuers omit trailing cells when the value is
     blank) so positional access doesn't IndexError."""
     return list(raw_row) + [""] * max(0, max(name_idx, shares_idx, percent_idx) + 1 - len(raw_row))
+
+
+def _cell_segments(cell: str) -> list[str]:
+    """Non-empty LINES of CELL, in document order.
+
+    ``_strip_inline_html`` collapses every whitespace class EXCEPT ``\\n``
+    (``_INLINE_WHITESPACE_RE``), so a cell's interior line breaks survive into
+    the parsed table. That is deliberate — the Item 402(c) SCT path splits a
+    name from its title on exactly that character — and it is what makes the
+    ``<br>``-stacked Item 403 row below recoverable at all.
+
+    ⚠ **It recovers only the half of that shape where a SOURCE newline follows
+    the tag.** ``_strip_inline_html`` replaces ``<br>`` itself with a SPACE, so
+    ``'486,340<br>658,400'`` arrives as one line and nothing here can segment
+    it — and ``_parse_share_count`` strips spaces and commas, so that cell
+    parses to 486,340,658,400. Measured, not hypothetical: 30 rows across 9
+    accessions of ``def14a_beneficial_holdings`` hold a share count above 1e10.
+    Filed as **#2358** rather than fixed here, because representing ``<br>`` as
+    a line break has to happen in the cell extractor that
+    ``parse_summary_compensation_table`` also uses — the shared-chokepoint class
+    #2175's prevention-log entry was written about, where the same move drifted
+    580 accessions of Item 402(c) output.
+    """
+    return [line.strip() for line in cell.split("\n") if line.strip()]
+
+
+def _stacked_name_blocks(cell: str) -> list[str]:
+    """Split a stacked Item 403 NAME cell into one block per beneficial owner.
+
+    Split on BLANK LINES, then flatten each block the way
+    ``_clean_beneficial_holder_name`` flattens a whole cell.
+
+    ⚠ Line ordinal cannot be used to align the name cell against the value
+    cells, and the ticket's own accession is the proof: on
+    ``0000351998-18-000006`` the value cells run 10 lines (``486,340`` at 0,
+    ``658,400`` at 9) while the name cell runs 17, because the issuer's
+    ``880 Third Avenue, 16 th`` / ``Floor`` and ``New`` / ``York, NY 10022``
+    are SOURCE WRAPS inside one holder's address. Index 9 of the name cell is
+    blank; the second holder starts at 10.
+
+    No published rule governs this — 17 CFR 229.403 prescribes the columns, not
+    the markup — so the split is fixed BY CONSTRUCTION on the blank line, and
+    the caller gates it on the block count matching the value count exactly.
+    A cell with no blank-line separator yields one block, the gate fails, and
+    the row is left exactly as it is today.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in cell.split("\n"):
+        if line.strip():
+            current.append(line.strip())
+        elif current:
+            blocks.append(" ".join(current))
+            current = []
+    if current:
+        blocks.append(" ".join(current))
+    return blocks
+
+
+# The placeholders ``_parse_share_count`` and ``_parse_percent`` already accept
+# as "no value stated". A stacked value column may legitimately carry one per
+# line — an issuer reporting a percent for a holder whose count it omits — so
+# they neither evidence a holder nor contradict one.
+_ABSENT_VALUE_SEGMENTS: Final[frozenset[str]] = frozenset({"-", "—", "–", "N/A", "n/a"})
+
+
+def _is_whole_share_segment(segment: str) -> bool:
+    """True when SEGMENT is a 229.403 column-3 amount — a WHOLE share count."""
+    if "%" in segment:
+        return False
+    value = _parse_share_count(segment)
+    return value is not None and value == value.to_integral_value()
+
+
+def _is_percent_segment(segment: str) -> bool:
+    """True when SEGMENT is UNAMBIGUOUSLY a 229.403 column-4 percent.
+
+    Same bar as the ragged-row percent recovery in ``_extract_holder_rows``: a
+    bare number is not accepted, because ``_parse_percent``'s [0, 100] clamp
+    reads a small share count as a percent.
+    """
+    if "%" not in segment and segment not in ("*", "**"):
+        return False
+    return _parse_percent(segment) is not None
+
+
+def _value_stack_state(segments: list[str], is_value: Callable[[str], bool]) -> str:
+    """Classify a value column's line stack: ``none`` / ``stack`` / ``veto``.
+
+    ``none``  — fewer than two lines, or no line states a value at all.
+    ``stack`` — two or more lines, every one either a value or an explicit
+                placeholder, at least one a value.
+    ``veto``  — a multi-line cell carrying something that is neither.
+    """
+    if len(segments) < 2 or not any(is_value(segment) for segment in segments):
+        return "none"
+    if all(is_value(segment) or segment in _ABSENT_VALUE_SEGMENTS for segment in segments):
+        return "stack"
+    return "veto"
+
+
+def _split_stacked_holder_row(
+    raw_row: tuple[str, ...],
+    *,
+    name_idx: int,
+    shares_idx: int,
+    percent_idx: int,
+) -> list[tuple[str, ...]] | None:
+    """Expand ONE ``<tr>`` holding N beneficial owners into N rows, or ``None``.
+
+    Source rule: 17 CFR 229.403(a) and (b) prescribe a TABLE with one entry per
+    beneficial owner, and column 3 ("Amount and nature of beneficial
+    ownership") states ONE amount for ONE owner. A value cell that holds two
+    whole share counts on separate lines is therefore two owners the issuer
+    rendered inside a single ``<tr>`` with ``<br>``, not one owner with two
+    figures — the same class of defect as #2175, where the parser had not
+    implemented the ``rowspan`` half of the table model. Here the issuer's row
+    model is the LINE STACK and ours is the ``<tr>``.
+
+    Neither value parser tolerates the stack (``_parse_share_count`` of
+    ``'486,340 \\n \\n 658,400'`` is ``None``, and so is ``_parse_percent`` of
+    ``'5.86% \\n \\n 7.94%'``), so today the row dies on the "neither shares nor
+    percent parsed" guard and takes every holder in it with it —
+    ``0000351998-18-000006`` scores 12 on a textbook Item 403 header and stores
+    zero holders.
+
+    The trigger is the VALUE side, never the name side. A name cell with
+    interior line breaks is ambiguous by itself: a render wrap produces exactly
+    that, which is why ``_clean_beneficial_holder_name`` flattens it (#2140 D5 —
+    an interior wrap otherwise split ONE person across two holder identities on
+    704 rows / 117 instruments). Requiring the amounts to stack first is what
+    keeps that flatten intact: a wrapped name over a single amount never
+    reaches this function.
+
+    Every gate below must hold, or the row is returned unsplit:
+
+    1. A value column stacks ``k >= 2`` segments and **every** segment parses —
+       all whole share counts, or all percents. A partial stack ('486,340' and
+       a stray footnote line) is not evidence of k owners, and admitting it
+       would align the columns by a count nothing supports.
+    2. When BOTH value columns stack, they agree on ``k``.
+    3. The name cell yields exactly ``k`` blank-line-separated blocks.
+
+    Cells other than the name and the aligned value columns are distributed
+    when they carry exactly ``k`` non-empty lines (the footnote column of the
+    cited accession does: ``'(1)'`` and ``'(2)'``) and blanked otherwise —
+    leaving a stacked string in place would feed the value-recovery scans a
+    two-number cell that neither parser accepts.
+    """
+    cells = _pad_row(raw_row, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx)
+
+    share_segs = _cell_segments(cells[shares_idx]) if 0 <= shares_idx < len(cells) else []
+    percent_segs = _cell_segments(cells[percent_idx]) if 0 <= percent_idx < len(cells) else []
+    shares_state = _value_stack_state(share_segs, _is_whole_share_segment)
+    percent_state = _value_stack_state(percent_segs, _is_percent_segment)
+
+    # A value column that stacks but does not fully resolve CONTRADICTS whatever
+    # count the other column offers, so it vetoes the split rather than being
+    # ignored. Without this, '486,340 / see note / 658,400' against two percents
+    # splits on the percent column's count of 2 and drops both amounts.
+    if "veto" in (shares_state, percent_state):
+        return None
+
+    if shares_state == "stack" and percent_state == "stack":
+        if len(share_segs) != len(percent_segs):
+            return None
+        count = len(share_segs)
+    elif shares_state == "stack":
+        count = len(share_segs)
+    elif percent_state == "stack":
+        count = len(percent_segs)
+    else:
+        return None
+
+    name_blocks = _stacked_name_blocks(cells[name_idx]) if 0 <= name_idx < len(cells) else []
+    if len(name_blocks) != count:
+        return None
+
+    split: list[tuple[str, ...]] = []
+    for ordinal in range(count):
+        row: list[str] = []
+        for index, cell in enumerate(cells):
+            if index == name_idx:
+                row.append(name_blocks[ordinal])
+                continue
+            segments = _cell_segments(cell)
+            row.append(segments[ordinal] if len(segments) == count else "")
+        split.append(tuple(row))
+    return split
 
 
 def _resolve_row_name(cells: list[str], *, name_idx: int, shares_idx: int) -> tuple[int, str]:
@@ -2330,7 +2527,14 @@ def _extract_holder_rows(
     # Carrying the name forward is purely ADDITIVE at the row level: it fires
     # only on a pair where BOTH rows are already being dropped.
     pending_owner_name: str | None = None
-    raw_rows = list(table.rows)
+    # One-<tr>-N-holders expansion (#2169), BEFORE the loop rather than inside
+    # it: the stacked-name/address recovery above looks at ``raw_rows[idx + 1]``,
+    # so the sequence it walks must already be the expanded one or a split row's
+    # successor is the un-split original.
+    raw_rows: list[tuple[str, ...]] = []
+    for source_row in table.rows:
+        split = _split_stacked_holder_row(source_row, name_idx=name_idx, shares_idx=shares_idx, percent_idx=percent_idx)
+        raw_rows.extend(split if split is not None else [source_row])
     for idx, raw_row in enumerate(raw_rows):
         # The diversions below are gated on the NEXT row actually being an
         # address row, so the behaviour change is bounded to the stacked shape

@@ -3234,3 +3234,37 @@ Two things S-4 adds to the prevention above:
 - Caught by: running `--calibrate` and reading its output against the constants, in the same session. Not by any test — pinning the provenance constants by test would pin them to themselves.
 - Prevention: when a spec figure is copied into code, **re-measure it against the population the code uses** before writing it down, and put the reproducing command beside it. Where a figure must be written (a result row needs it, as here for stage 5c), have the verify script PRINT the live value next to the frozen one so a divergence is visible on every run rather than on the day somebody re-derives it.
 - Enforced in: this prevention log; `app/services/cost_model.py::CALIBRATION_LIMITS` (the corrected figures, with a note recording that two of them had been carried over); `scripts/verify_2240_cost_model.py::calibrate` (prints n, capture-hour concentration and distinct capture dates on every run).
+### A census hooked into the SELECTION path cannot see a defect that empties its own table (#2169, 2026-08-07)
+
+- Symptom: the first cut of `scripts/census_def14a_stacked_cell_holders.py` counted
+  the one-`<tr>`-N-holders shape by tracing `_extract_table_holders` at the
+  concatenation loop in `parse_beneficial_ownership_table` — the natural hook, because
+  that loop runs over exactly the tables the parser accepted. It reported **0 flagged
+  accessions in 300 payloads**, and **0 on the ticket's own known accession**.
+- Root cause: the shape being counted makes the table extract zero holders, so
+  `_is_item403_eligible` returns `False`, the window never qualifies, `best_table`
+  stays `None` and the concatenation loop never runs. On `0000351998-18-000006` the
+  table scores 12 on a textbook Item 403 header and is still never selected. **The
+  census was measuring the population of a defect over a set the defect removes
+  itself from.**
+- Fix: census over CANDIDATE tables — walk `_find_section_windows` →
+  `_scan_outer_tables` → `_parse_table_html` → score floor, and count rows there. The
+  full population then returned 3 accessions / 3 rows, of which the two nobody knew
+  about (`0000894671-25-000016`, `0001140361-26-013025`, the same issuer in
+  consecutive years) are the class the ticket flagged as uncounted: the shape riding
+  alongside 13 genuine holders, silently losing the second holder in the row.
+- ⚠ **Generalise past "def14a".** Whenever a census measures how often a parser
+  FAILS, ask which stage of the pipeline discards the failing item, and hook the
+  census UPSTREAM of that stage. A hook downstream of any rejection reports the
+  population of what survived rejection, which for a "how often does this break"
+  question is guaranteed to be an undercount — and it undercounts silently, with a
+  clean-looking zero.
+- ⚠ Second, independent failure on the same script and worth its own line: the rewrite
+  left a dangling `P._extract_table_holders = original` from the deleted monkeypatch,
+  which would have raised `NameError` **after** the scan loop and discarded a
+  40-minute full-population run before it wrote its JSON. `ruff` finds it in one
+  second (`F821 Undefined name`). **Lint the harness before launching it, not after —
+  a long-running measurement script is the one place where a name error costs
+  wall-clock instead of a traceback.**
+- Enforced in: this prevention log; `scripts/census_def14a_stacked_cell_holders.py`
+  (`_candidate_rows`'s docstring carries the measured zero that forced it).
