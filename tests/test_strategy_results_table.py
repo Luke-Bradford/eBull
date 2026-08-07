@@ -60,9 +60,11 @@ _BASE: dict[str, object] = {
     "exposure_time_pct": "62.10",
     "turnover_annualised": "3.05",
     "trade_count": 3135355,
-    # ⚠ NULL is stage 5d's ONLY value — criterion 3's block bootstrap is 5e's —
-    # and the promotion gate refuses on it. The accepting test below stores a
-    # non-null one too, so the CHECK's positive branch is exercised.
+    # ⚠ NULL, and at stage 5e-2 that is now the "caller declared no bootstrap
+    # seed" case rather than "nothing can compute it". The promotion gate still
+    # refuses on it. ⚠⚠ It is one of NINE columns bound together by
+    # `strategy_results_bootstrap_all_or_nothing` (sql/265), so it cannot be
+    # made non-null on its own — see `_BOOTSTRAP` below.
     "effective_sample_size": None,
     "return_vs_buy_and_hold_pct": "-2.40",
     "losing_trade_count": 1500000,
@@ -73,6 +75,31 @@ _BASE: dict[str, object] = {
     "total_return_pct": "418.00",
     "buy_and_hold_return_pct": "420.40",
     "metric_set_id": "criterion7-v1",
+    # --- sql/265, criterion 3's block bootstrap ----------------------------
+    # ⚠ All NULL together: `num_nulls(...) IN (0, 9)` admits the wholly-absent
+    # set, which is what a result carrying no criterion-3 measurement looks like.
+    "expectancy_ci_low_pct": None,
+    "expectancy_ci_high_pct": None,
+    "bootstrap_block_length": None,
+    "bootstrap_cluster_count": None,
+    "bootstrap_resamples": None,
+    "bootstrap_seed": None,
+    "bootstrap_design_effect": None,
+    "bootstrap_model_id": None,
+}
+
+#: A COMPLETE criterion-3 block, for the cases that must start from a valid one
+#: and break exactly one thing. ⚠ Applied on top of `_BASE`, which is all-null.
+_BOOTSTRAP: dict[str, object] = {
+    "effective_sample_size": "144750.0",
+    "expectancy_ci_low_pct": "-0.4801",
+    "expectancy_ci_high_pct": "-0.4031",
+    "bootstrap_block_length": 14,
+    "bootstrap_cluster_count": 15577,
+    "bootstrap_resamples": 2000,
+    "bootstrap_seed": 20260807,
+    "bootstrap_design_effect": "21.66",
+    "bootstrap_model_id": "c3-block-bootstrap-v1",
 }
 
 #: ⚠ A FIXED statement, never an f-string built from the override keys. psycopg
@@ -88,7 +115,9 @@ _INSERT = """
         expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
         max_drawdown_pct, exposure_time_pct, turnover_annualised, trade_count, effective_sample_size,
         return_vs_buy_and_hold_pct, losing_trade_count, losing_period_count, open_trade_count,
-        unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id
+        unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id,
+        expectancy_ci_low_pct, expectancy_ci_high_pct, bootstrap_block_length, bootstrap_cluster_count,
+        bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
         %(ambiguity_arm)s, %(window_start)s, %(window_end)s, %(universe_basis)s, %(corpus_version)s,
@@ -99,7 +128,10 @@ _INSERT = """
         %(sharpe)s, %(sortino)s, %(max_drawdown_pct)s, %(exposure_time_pct)s, %(turnover_annualised)s,
         %(trade_count)s, %(effective_sample_size)s, %(return_vs_buy_and_hold_pct)s, %(losing_trade_count)s,
         %(losing_period_count)s, %(open_trade_count)s, %(unpriced_trade_count)s, %(periods_per_year)s,
-        %(total_return_pct)s, %(buy_and_hold_return_pct)s, %(metric_set_id)s
+        %(total_return_pct)s, %(buy_and_hold_return_pct)s, %(metric_set_id)s,
+        %(expectancy_ci_low_pct)s, %(expectancy_ci_high_pct)s, %(bootstrap_block_length)s,
+        %(bootstrap_cluster_count)s, %(bootstrap_resamples)s, %(bootstrap_seed)s,
+        %(bootstrap_design_effect)s, %(bootstrap_model_id)s
     )
 """
 
@@ -183,7 +215,11 @@ def _insert(conn: psycopg.Connection[tuple], **overrides: object) -> None:
         ("more losers than trades", {"trade_count": 10, "losing_trade_count": 11}),
         ("negative open count", {"open_trade_count": -1}),
         ("zero annualisation", {"periods_per_year": "0"}),
-        ("zero effective sample size", {"effective_sample_size": "0"}),
+        # ⚠ The WHOLE bootstrap set, with only the sample size zeroed. Setting it
+        # alone would now trip sql/265's all-or-nothing constraint instead of
+        # sql/263's positivity CHECK — the case would still be "refused" and the
+        # test would still pass, for a reason its label does not name.
+        ("zero effective sample size", {**_BOOTSTRAP, "effective_sample_size": "0"}),
         # ⚠⚠ THE TWO THAT MAKE A NULL MEAN SOMETHING. Without these CHECKs a
         # null profit factor could equally be "no losing trade" or "nobody
         # computed it", and the second is the state #2288 clause 2 refuses.
@@ -235,10 +271,13 @@ def test_results_table_accepts_the_valid_shapes(ebull_test_conn: psycopg.Connect
         # sql/263's positive branches: an effective sample size once 5e computes
         # one, and the two "denominator was empty" shapes, which are REAL states
         # and must store rather than being refused as missing measurements.
+        # ⚠ At stage 5e-2 the sample size can no longer be set ALONE — sql/265
+        # binds it to the other eight block-bootstrap columns — so this arm
+        # carries the whole set.
         _insert(
             ebull_test_conn,
             result_version="strategy-result-v1+bbb222",
-            effective_sample_size="128.5",
+            **{**_BOOTSTRAP, "effective_sample_size": "128.5"},
         )
         _insert(
             ebull_test_conn,
@@ -280,4 +319,77 @@ def test_the_two_ambiguity_arms_coexist_and_the_same_arm_collides(
             ebull_test_conn,
             strategy_version="strategy-registry-v1+moved9",
             result_version="strategy-result-v1+worst1",
+        )
+
+
+# ---------------------------------------------------------------------------
+# sql/265 — criterion 3's block bootstrap.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("label", "overrides"),
+    [
+        # ⚠⚠ THE ALL-OR-NOTHING SET. Each of these is a row carrying a corrected
+        # sample size whose correction cannot be judged, or an interval with no
+        # sample size behind it. Criterion 3 asks for both.
+        ("sample size with no interval", {"expectancy_ci_low_pct": None, "expectancy_ci_high_pct": None}),
+        ("interval with no sample size", {"effective_sample_size": None}),
+        ("no block length", {"bootstrap_block_length": None}),
+        ("no cluster count", {"bootstrap_cluster_count": None}),
+        ("no resample count", {"bootstrap_resamples": None}),
+        ("no seed", {"bootstrap_seed": None}),
+        ("no design effect", {"bootstrap_design_effect": None}),
+        ("no model id", {"bootstrap_model_id": None}),
+        # An inverted interval is a swapped write, not a wide interval.
+        ("inverted interval", {"expectancy_ci_low_pct": "1.0", "expectancy_ci_high_pct": "-1.0"}),
+        # ⚠ A block longer than the axis it was measured on means the length
+        # came from somewhere other than that axis.
+        ("block longer than the axis", {"bootstrap_block_length": 15578}),
+        ("zero block length", {"bootstrap_block_length": 0}),
+        # ⚠ Efron & Tibshirani's floor for INTERVAL estimation. Below it the
+        # interval's ends are noise.
+        ("resamples below the interval floor", {"bootstrap_resamples": 999}),
+        ("zero design effect", {"bootstrap_design_effect": "0"}),
+        ("negative design effect", {"bootstrap_design_effect": "-1.5"}),
+        # ⚠ PRESENT and naming no construction — the #2286 blank-value shape,
+        # which would satisfy the all-or-nothing count while meaning nothing.
+        ("blank model id", {"bootstrap_model_id": ""}),
+    ],
+)
+def test_the_block_bootstrap_block_rejects(
+    ebull_test_conn: psycopg.Connection[tuple], label: str, overrides: dict
+) -> None:
+    with pytest.raises(psycopg.errors.Error), ebull_test_conn.transaction():
+        _insert(ebull_test_conn, **{**_BOOTSTRAP, **overrides})
+
+
+def test_a_complete_block_bootstrap_set_is_accepted(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """⚠ The positive branch. Without it every rejection above could be passing
+    because the whole `_BOOTSTRAP` shape is unwritable for some other reason —
+    a parametrised reject suite that passes for the wrong reason is
+    indistinguishable from one that works (this file's own opening warning)."""
+    with ebull_test_conn.transaction():
+        _insert(ebull_test_conn, **_BOOTSTRAP)
+        stored = ebull_test_conn.execute(
+            "SELECT bootstrap_model_id, bootstrap_block_length FROM strategy_results_store WHERE strategy_id = %s",
+            ("S-TEST",),
+        ).fetchone()
+    assert stored == ("c3-block-bootstrap-v1", 14)
+
+
+def test_an_effective_sample_size_above_the_trade_count_is_permitted(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ NOT A CONSTRAINT, AND DELIBERATELY SO.
+
+    A design effect below 1 (negatively autocorrelated clusters) puts the
+    effective sample size above the nominal trade count. That is a real
+    measurement, and clipping it to the nominal count would hide the one case
+    where the overlap correction says the opposite of what criterion 3 expects.
+    `bootstrap_design_effect` is stored precisely so a reader can see which
+    direction it went.
+    """
+    with ebull_test_conn.transaction():
+        _insert(
+            ebull_test_conn,
+            **{**_BOOTSTRAP, "effective_sample_size": "4000000.0", "bootstrap_design_effect": "0.78"},
         )

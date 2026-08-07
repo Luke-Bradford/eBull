@@ -181,7 +181,9 @@ _RESULT_COLUMNS = """
     expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
     max_drawdown_pct, exposure_time_pct, turnover_annualised, trade_count, effective_sample_size,
     return_vs_buy_and_hold_pct, losing_trade_count, losing_period_count, open_trade_count,
-    unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id
+    unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id,
+    expectancy_ci_low_pct, expectancy_ci_high_pct, bootstrap_block_length, bootstrap_cluster_count,
+    bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id
 """
 
 _RESULT_VALUES = """
@@ -194,7 +196,10 @@ _RESULT_VALUES = """
     %(sharpe)s, %(sortino)s, %(max_drawdown_pct)s, %(exposure_time_pct)s, %(turnover_annualised)s,
     %(trade_count)s, %(effective_sample_size)s, %(return_vs_buy_and_hold_pct)s, %(losing_trade_count)s,
     %(losing_period_count)s, %(open_trade_count)s, %(unpriced_trade_count)s, %(periods_per_year)s,
-    %(total_return_pct)s, %(buy_and_hold_return_pct)s, %(metric_set_id)s
+    %(total_return_pct)s, %(buy_and_hold_return_pct)s, %(metric_set_id)s,
+    %(expectancy_ci_low_pct)s, %(expectancy_ci_high_pct)s, %(bootstrap_block_length)s,
+    %(bootstrap_cluster_count)s, %(bootstrap_resamples)s, %(bootstrap_seed)s,
+    %(bootstrap_design_effect)s, %(bootstrap_model_id)s
 """
 
 #: ⚠⚠ TARGETS THE VIEW. ``sql/264`` gave ``strategy_results`` a cascaded check
@@ -280,6 +285,19 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         "total_return_pct": _numeric(metrics.total_return_pct),
         "buy_and_hold_return_pct": _numeric(metrics.buy_and_hold_return_pct),
         "metric_set_id": metrics.metric_set_id,
+        # ⚠ sql/265's criterion-3 block. All nine columns (including
+        # `effective_sample_size` above) are bound by
+        # `strategy_results_bootstrap_all_or_nothing`, so omitting these eight
+        # would make every bootstrap-carrying result UNWRITABLE — the row would
+        # arrive with one field set and eight null and be refused.
+        "expectancy_ci_low_pct": _numeric(metrics.expectancy_ci_low_pct),
+        "expectancy_ci_high_pct": _numeric(metrics.expectancy_ci_high_pct),
+        "bootstrap_block_length": metrics.bootstrap_block_length,
+        "bootstrap_cluster_count": metrics.bootstrap_cluster_count,
+        "bootstrap_resamples": metrics.bootstrap_resamples,
+        "bootstrap_seed": metrics.bootstrap_seed,
+        "bootstrap_design_effect": _numeric(metrics.bootstrap_design_effect),
+        "bootstrap_model_id": metrics.bootstrap_model_id,
     }
 
 
@@ -331,6 +349,14 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         total_return_pct,
         buy_and_hold_return_pct,
         metric_set_id,
+        expectancy_ci_low_pct,
+        expectancy_ci_high_pct,
+        bootstrap_block_length,
+        bootstrap_cluster_count,
+        bootstrap_resamples,
+        bootstrap_seed,
+        bootstrap_design_effect,
+        bootstrap_model_id,
     ) = row
 
     identity = ResultIdentity(
@@ -381,6 +407,19 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         total_return_pct=float(total_return_pct),  # type: ignore[arg-type]
         buy_and_hold_return_pct=float(buy_and_hold_return_pct),  # type: ignore[arg-type]
         metric_set_id=str(metric_set_id),
+        # ⚠ sql/265. `int(...)`/`str(...)` would turn the wholly-absent set into
+        # `0`/`"None"` and construct a metric set claiming a bootstrap that never
+        # ran, so each of these preserves NULL — `StrategyMetrics` then refuses
+        # any partial set on the way back in, which is what makes the round trip
+        # a check rather than a copy.
+        expectancy_ci_low_pct=_as_float(expectancy_ci_low_pct),  # type: ignore[arg-type]
+        expectancy_ci_high_pct=_as_float(expectancy_ci_high_pct),  # type: ignore[arg-type]
+        bootstrap_block_length=None if bootstrap_block_length is None else int(bootstrap_block_length),  # type: ignore[arg-type]
+        bootstrap_cluster_count=None if bootstrap_cluster_count is None else int(bootstrap_cluster_count),  # type: ignore[arg-type]
+        bootstrap_resamples=None if bootstrap_resamples is None else int(bootstrap_resamples),  # type: ignore[arg-type]
+        bootstrap_seed=None if bootstrap_seed is None else int(bootstrap_seed),  # type: ignore[arg-type]
+        bootstrap_design_effect=_as_float(bootstrap_design_effect),  # type: ignore[arg-type]
+        bootstrap_model_id=None if bootstrap_model_id is None else str(bootstrap_model_id),
     )
     return StrategyResult(
         identity=identity,

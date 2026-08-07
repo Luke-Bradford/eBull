@@ -689,8 +689,8 @@ until the namespace has a mechanism.
 | sub-stage | what | state |
 | --- | --- | --- |
 | **5e-1** | **The hold-out namespace, its access log, and the first `strategy_results` writer** — criterion 5's mechanical inaccessibility, `sql/264`, `app/services/result_ledger.py`. | ✅ shipped |
-| **5e-2** | **Block bootstrap clustered by date** (criterion 3) → fills `effective_sample_size` and clears one of the seven standing refusals. | next |
-| **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. | after 5e-2 |
+| **5e-2** | **Block bootstrap clustered by date** (criterion 3) → fills `effective_sample_size` and clears one of the seven standing refusals. `app/services/block_bootstrap.py`, `sql/265`. | ✅ shipped |
+| **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. | next |
 | **5e-4** | **Purged walk-forward + embargo** (§5.3). ⚠ Blocked on S-1 declaring a `max_hold_bars` — still free at 0 ledger rows, recommended for the fourth run running. | blocked |
 | **5e-5** | **Quarantine sensitivity arm** (criterion 9) and the **1,000-strategy random-entry control** (§9, *the harness itself*). | last |
 
@@ -722,6 +722,36 @@ result set nobody asked for, and a strategy iterated against them. Restoring the
 read side as a hard boundary needs a **non-superuser application role**, which is
 a change to how every connection in the app authenticates; the test that
 measures the role FAILS if one ever appears, which is the signal to revisit.
+
+### 8.2 Stage 5e-2: which rule fixed each constant, and which are ours
+
+Criterion 3 names the method and rejects the shortcut it could have taken
+(*"'Effective n ≈ nominal/20' is too crude"*), but leaves the block length open.
+Every constant below is either taken from a published rule and cited, or
+declared as ours and frozen in `BOOTSTRAP_MODEL_ID` — none is reasoned out.
+
+| choice | fixed by |
+| --- | --- |
+| Block length | **Politis & White (2004)**, DOI `10.1081/ETC-120028836`, with **Patton, Politis & White (2009)**, DOI `10.1080/07474930802459016`. MEASURED off the cluster axis' own autocovariance, never declared. |
+| Circular (wrap-around) blocks | **Politis & Romano (1992)**. ⚠ Also what makes `4/3` the right constant — `2` is the stationary bootstrap's, and crossing them mis-sizes every block silently. |
+| Effective sample size | **Kish (1965)** §8.2 design effect: `ESS = n / deff`, `deff = Var_boot(mean) / Var_iid(mean)`. Units of TRADES, so it is commensurable with `trade_count` beside it in criterion 7. |
+| Interval | **Efron & Tibshirani (1993)** ch. 13 percentile method. ⚠ First-order accurate only; BCa needs a cluster jackknife over the full population and is NOT computed. Stated, not silently omitted. |
+| Resample count = 2,000 | **OURS**, above Efron & Tibshirani's 1,000 floor for interval estimation. `sql/265` enforces the floor. |
+| Cluster key = **entry fill date** | **OURS**, from criterion 3's own stated reason — *"signals are correlated across instruments on the same day"* is a statement about the day they FIRED. An exit-date key would scatter one market-wide entry across as many clusters as it had holding periods. |
+| Cluster axis = **active dates**, not the full trading calendar | **OURS.** Padding with zero-trade dates would make a block a fixed calendar span but fill it with dates carrying no error to cluster, diluting the correlation being corrected for. Consequence: a block of `b` clusters spans more calendar time in a sparse period. |
+
+⚠ **What makes the ~10^6-trade population tractable** is that pooled expectancy
+is a RATIO — `sum(cluster sums) / sum(cluster counts)` — so a cluster enters a
+resample fully described by its `(count, sum)` pair and resampling gathers over
+~10^4 dates rather than ~10^6 trades. This is exact, not an approximation of a
+per-trade resample: it is the same arithmetic.
+
+⚠ **The refusal is unchanged in shape.** `effective_sample_size` is still NULL
+whenever the caller declares no `bootstrap_seed`, or the measurement is
+degenerate (one cluster, zero trade variance, zero bootstrap variance), and the
+promotion gate still refuses on it. Criterion 3 forbids a nominal-*n* fallback
+anywhere, so a bootstrap that could not run must leave the column empty rather
+than fill it with the number the criterion exists to replace.
 
 ⚠ **5b changes all four strategy versions** — `cost_model_id` is hashed into
 `version`. Signals stored under `undeclared-v0` are not reusable under the new

@@ -46,6 +46,23 @@ SPEC_ACCESS_KINDS = {"evaluate", "read"}
 _IDENTITY_FIELDS = frozenset(f.name for f in fields(ResultIdentity))
 
 
+#: A COMPLETE criterion-3 block (sql/265), with the same awkward-float
+#: discipline as ``build_metrics`` below. ⚠ Its nine columns are bound
+#: all-or-nothing, so this is applied as a SET — passing one field alone raises
+#: in ``StrategyMetrics`` before the database is reached.
+BOOTSTRAP_BLOCK: dict[str, object] = {
+    "effective_sample_size": 144749.30217,
+    "expectancy_ci_low_pct": -0.48013926,
+    "expectancy_ci_high_pct": -0.40317744,
+    "bootstrap_block_length": 14,
+    "bootstrap_cluster_count": 15577,
+    "bootstrap_resamples": 2000,
+    "bootstrap_seed": 20260807,
+    "bootstrap_design_effect": 21.6449283,
+    "bootstrap_model_id": "c3-block-bootstrap-v1",
+}
+
+
 def build_metrics(**overrides: object) -> StrategyMetrics:
     """A complete criterion-7 set with DELIBERATELY AWKWARD floats.
 
