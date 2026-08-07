@@ -53,9 +53,14 @@ set, and assert eleven properties.
       axis, which is the axis criterion 3's effective sample size counts.
   P9  ⚠⚠ **`T` IS THE EFFECTIVE SAMPLE SIZE, NEVER THE NOMINAL TRADE COUNT.**
       The DSR is recomputed on the nominal count purely as a CONTRAST and must
-      come out strictly higher — §5.2 is explicit that a DSR on a nominal *n* is
-      the number criterion 3 forbids. ⚠ The contrast is printed and asserted,
-      never stored; `sql/266` has no column it could go in.
+      come out strictly MORE CONFIDENT — further from 0.5 — §5.2 being explicit
+      that a DSR on a nominal *n* is the number criterion 3 forbids. ⚠ The
+      assertion is sign-agnostic on purpose: eq. (2) multiplies `(SR - SR_0)` by
+      `sqrt(T-1)`, so a larger T amplifies whatever sign that difference already
+      has. An earlier draft required the nominal arm to be strictly HIGHER and
+      failed on the full population, because both sleeves sit BELOW their
+      threshold. ⚠ The contrast is printed and asserted, never stored;
+      `sql/266` has no column it could go in.
   P10 **The implied independent trial count obeys Appendix A.3** — inside
       `[1, M]`, and strictly below `M` whenever the measured correlation is
       positive, because correlated trials are not independent evidence.
@@ -413,9 +418,11 @@ def _criterion6(sleeves: dict[str, _Sleeve], measured: dict[str, StrategyMetrics
            effective sample size, and refuses cleanly where one is missing;
       P9   ⚠⚠ **`T` is the effective sample size, never the nominal count.**
            Recomputed here on the nominal count as a CONTRAST and required to
-           come out strictly higher — §5.2 is explicit that a DSR on a nominal
-           *n* is the number criterion 3 forbids, and a contrast that did not
-           move would mean the ESS was never wired in;
+           come out strictly MORE CONFIDENT — further from 0.5 — because eq. (2)
+           multiplies `(SR - SR_0)` by `sqrt(T-1)` and so amplifies whatever
+           SIGN that difference already has. §5.2 is explicit that a DSR on a
+           nominal *n* is the number criterion 3 forbids, and a contrast that
+           did not move would mean the ESS was never wired in;
       P10  the implied independent trials sit inside `[1, M]` and below `M`
            whenever the measured correlation is positive (Appendix A.3);
       P11  the trials' correlation is MEASURED off their realised return series,
@@ -450,7 +457,28 @@ def _criterion6(sleeves: dict[str, _Sleeve], measured: dict[str, StrategyMetrics
         )
         return problems
 
-    sharpes = {_SLEEVE_TRIAL_IDS[label]: sleeve.moments.sharpe for label, sleeve in usable.items()}  # type: ignore[union-attr]
+    # ⚠ THE MAPPING CAN BE STALE OR COLLIDING, AND BOTH FAIL QUIETLY OTHERWISE.
+    # A mapped id the register no longer declares makes `sharpe_variance` RAISE
+    # (its undeclared-key guard) rather than report; and two labels mapped to one
+    # id silently collapse in the dict below, shrinking `measured_trials` without
+    # anything saying so. Both are checked here so the harness reports instead of
+    # crashing or under-counting.
+    mapped = {label: _SLEEVE_TRIAL_IDS[label] for label in usable}
+    stale = sorted(trial for trial in mapped.values() if trial not in TRIAL_REGISTER.trial_ids)
+    if stale:
+        problems.append(
+            f"P8 sleeve trial ids {stale} are not declared in {TRIAL_REGISTER.version} — the mapping and the "
+            "register have drifted, so M would not count the trials actually measured"
+        )
+        return problems
+    if len(set(mapped.values())) != len(mapped):
+        problems.append(
+            f"P8 two sleeves map to one trial id ({sorted(mapped.items())}) — their Sharpes would collapse into "
+            "one entry and silently reduce the measured-trial count"
+        )
+        return problems
+
+    sharpes = {mapped[label]: sleeve.moments.sharpe for label, sleeve in usable.items()}  # type: ignore[union-attr]
     variance = TRIAL_REGISTER.sharpe_variance(sharpes)
     if variance is None or variance <= 0.0:
         print("      → refused: V[SR_n] is zero or undefined")
@@ -464,10 +492,29 @@ def _criterion6(sleeves: dict[str, _Sleeve], measured: dict[str, StrategyMetrics
         print("      → refused: the trials share fewer than 2 active dates, so no correlation exists")
         return problems
     matrix = np.corrcoef(np.array([[series[label][day] for day in common] for label in labels]))
+    # ⚠ `np.corrcoef` returns NaN for a CONSTANT series — its denominator is that
+    # series' own standard deviation. Reachable: a trial whose per-date mean
+    # return never varies over the shared dates. `average_trial_correlation`
+    # would then raise on the range check rather than report, so it is caught.
+    if not np.all(np.isfinite(matrix)):
+        print("      → refused: a trial's return series is constant over the shared dates, so no correlation exists")
+        return problems
     rho = average_trial_correlation(matrix)
     print(f"      shared active dates    {len(common):>12,}   (dates BOTH trials traded)")
     print(f"      avg trial correlation  {rho:>12.6f}   (MEASURED, eq. 8)")
     print(f"      V[SR_n]                {variance:>12.8f}   (ddof=1 over {len(sharpes)} measured)")
+
+    # ⚠ A.3 bounds rho at `-1/(M-1)` for a positive-definite matrix, and
+    # `implied_independent_trials` RAISES outside it. A measured rho can land
+    # there on other data — this run's is +0.126 — so it is reported rather than
+    # allowed to crash before P10 below can describe it.
+    correlation_floor = -1.0 / (TRIAL_REGISTER.declared_count - 1)
+    if not correlation_floor < rho <= 1.0:
+        problems.append(
+            f"P11 measured correlation {rho} is outside A.3's ({correlation_floor}, 1] bound for "
+            f"M = {TRIAL_REGISTER.declared_count} — the matrix it came from is not positive-definite"
+        )
+        return problems
 
     independent = implied_independent_trials(rho, TRIAL_REGISTER.declared_count)
     print(f"      independent trials (N) {independent:>12.4f}   of {TRIAL_REGISTER.declared_count} declared (eq. 9)")
