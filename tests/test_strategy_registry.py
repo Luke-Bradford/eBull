@@ -28,10 +28,13 @@ from app.services.strategy_registry import (
     PARENT_REASON_CODES,
     SIGNAL_KINDS,
     VERDICTS,
+    CrossSectionalMember,
     StrategyIdentity,
     StrategyInput,
     StrategySignal,
     evaluate,
+    evaluate_cross_sectional,
+    stage_cross_sectional_member,
 )
 from app.services.technical_analysis import OHLCVRow
 
@@ -372,16 +375,46 @@ class TestVocabularyIsDefinedOnce:
     """
 
     @staticmethod
-    def _check_values(constraint: str, column: str) -> set[str]:
+    def _defining_migration(table: str, column: str) -> tuple[str, set[str]]:
+        """The LATEST migration that defines ``column``'s IN-list, and the list.
+
+        ⚠ Not sql/255 by name any more. sql/260 widens the reason vocabulary, so
+        pinning the Python Literal against 255 alone would compare it to a
+        superseded list — and the test would pass while the applied schema
+        rejected the ninth code.
+
+        ⚠ Comments are stripped BEFORE matching. sql/256's prose quotes
+        ``WHERE signal_kind = 'entry' AND verdict = 'fired'``, and the regex
+        would otherwise run from that comment into the next CHECK's ``IN (…)``
+        and return that constraint's values — a false match in the file that
+        sorts first.
+
+        ⚠ Reverse lexicographic ordering is the migration order only while the
+        numbers stay three digits. At sql/1000 this needs a numeric key.
+        """
         import re
         from pathlib import Path
 
-        sql = (Path(__file__).resolve().parents[1] / "sql" / "255_strategy_signals.sql").read_text()
-        # The CHECK bodies are multi-line; grab from the column name to the
-        # closing paren of its IN (...) list.
-        match = re.search(rf"{column}[^;]*?IN \(([^)]*)\)", sql, re.DOTALL)
-        assert match is not None, f"no IN-list found for {column}"
-        return {value.strip().strip("'") for value in match.group(1).split(",") if value.strip()}
+        sql_dir = Path(__file__).resolve().parents[1] / "sql"
+        pattern = re.compile(rf"{column}[^;]*?IN \(([^)]*)\)", re.DOTALL)
+        for path in sorted(sql_dir.glob("*.sql"), reverse=True):
+            body = re.sub(r"--[^\n]*", "", path.read_text())
+            if table not in body:
+                continue
+            match = pattern.search(body)
+            if match is not None:
+                return path.name, {v.strip().strip("'") for v in match.group(1).split(",") if v.strip()}
+        raise AssertionError(f"no migration defines an IN-list for {table}.{column}")
+
+    @classmethod
+    def _check_values(cls, table: str, column: str) -> set[str]:
+        return cls._defining_migration(table, column)[1]
+
+    def test_the_reason_vocabulary_comes_from_the_widening_migration(self) -> None:
+        """Pins the resolution itself: a helper that silently fell back to 255
+        would agree with a stale Python Literal and prove nothing."""
+        name, _ = self._defining_migration("strategy_signals", "not_evaluable_reason")
+        assert name == "260_strategy_signals_thin_cross_section.sql"
 
     def test_sql_reason_codes_match_the_python_vocabulary(self) -> None:
         assert self._check_values("strategy_signals", "not_evaluable_reason") == NOT_EVALUABLE_REASONS
@@ -395,3 +428,199 @@ class TestVocabularyIsDefinedOnce:
     def test_parent_codes_are_the_derived_set_minus_ours(self) -> None:
         assert PARENT_REASON_CODES == NOT_EVALUABLE_REASONS - OUR_ADDITIONAL_REASON_CODES
         assert len(PARENT_REASON_CODES) == 7
+
+
+# ---------------------------------------------------------------------------
+# The cross-sectional contract (S-2's half of 3a)
+# ---------------------------------------------------------------------------
+
+
+def _days(count: int, start: date = date(2020, 1, 1)) -> tuple[date, ...]:
+    return tuple(start + timedelta(days=i) for i in range(count))
+
+
+def _x_member(
+    dates: tuple[date, ...],
+    scores: list[float | None],
+    *,
+    decisions: set[int],
+    unevaluable: tuple[int, ...] = (),
+) -> CrossSectionalMember:
+    series = IndicatorSeries(values=tuple(scores), universe=U, not_evaluable_indices=unevaluable)
+    return CrossSectionalMember(
+        dates=dates,
+        inputs=(StrategyInput(series=series, reason="quarantined_bar"),),
+        score=series,
+        decision_indices=frozenset(decisions),
+    )
+
+
+class TestCrossSectionalMemberValidation:
+    def test_the_score_must_be_declared_as_an_input(self) -> None:
+        """⚠ Codex, checkpoint 1. Without this, `_unevaluable_reason_at` passes a
+        bar whose score is None and the runner ranks a member on a value it does
+        not have — the "evaluability precedes the condition" guarantee, gone."""
+        dates = _days(3)
+        score = IndicatorSeries(values=(1.0, 2.0, 3.0), universe=U)
+        other = IndicatorSeries(values=(1.0, 2.0, 3.0), universe=U)
+        with pytest.raises(ValueError, match="must be DECLARED among inputs"):
+            CrossSectionalMember(
+                dates=dates,
+                inputs=(StrategyInput(series=other, reason="quarantined_bar"),),
+                score=score,
+                decision_indices=frozenset({1}),
+            )
+
+    def test_a_score_of_the_wrong_length_is_rejected(self) -> None:
+        score = IndicatorSeries(values=(1.0, 2.0), universe=U)
+        with pytest.raises(ValueError, match="an offset series"):
+            CrossSectionalMember(
+                dates=_days(3),
+                inputs=(StrategyInput(series=score, reason="quarantined_bar"),),
+                score=score,
+                decision_indices=frozenset(),
+            )
+
+    def test_an_input_of_the_wrong_length_is_rejected(self) -> None:
+        score = IndicatorSeries(values=(1.0, 2.0, 3.0), universe=U)
+        short = IndicatorSeries(values=(1.0,), universe=U)
+        with pytest.raises(ValueError, match="declared input has"):
+            CrossSectionalMember(
+                dates=_days(3),
+                inputs=(
+                    StrategyInput(series=score, reason="quarantined_bar"),
+                    StrategyInput(series=short, reason="quarantined_bar"),
+                ),
+                score=score,
+                decision_indices=frozenset(),
+            )
+
+    def test_unordered_dates_are_rejected(self) -> None:
+        score = IndicatorSeries(values=(1.0, 2.0), universe=U)
+        with pytest.raises(ValueError, match="strictly ascending"):
+            CrossSectionalMember(
+                dates=(date(2020, 1, 2), date(2020, 1, 1)),
+                inputs=(StrategyInput(series=score, reason="quarantined_bar"),),
+                score=score,
+                decision_indices=frozenset(),
+            )
+
+    def test_a_decision_index_outside_the_series_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="outside the 3-bar series"):
+            _x_member(_days(3), [1.0, 2.0, 3.0], decisions={7})
+
+
+class TestCrossSectionalStaging:
+    def test_the_last_bar_is_no_fill_even_at_a_decision_bar(self) -> None:
+        staged = stage_cross_sectional_member(_x_member(_days(3), [1.0, 2.0, 3.0], decisions={0, 1, 2}))
+        last = staged.verdicts[2]
+        assert last is not None
+        assert (last.verdict, last.reason) == ("not_evaluable", "no_fill_bar")
+        assert list(staged.scores) == [date(2020, 1, 1), date(2020, 1, 2)]
+
+    def test_a_non_decision_bar_is_not_fired_not_absent(self) -> None:
+        staged = stage_cross_sectional_member(_x_member(_days(3), [1.0, 2.0, 3.0], decisions={1}))
+        first = staged.verdicts[0]
+        assert first is not None and first.verdict == "not_fired"
+        assert staged.verdicts[1] is None
+
+    def test_an_unevaluable_input_refuses_the_bar_before_it_is_ranked(self) -> None:
+        staged = stage_cross_sectional_member(_x_member(_days(3), [1.0, None, 3.0], decisions={0, 1}, unevaluable=(1,)))
+        refused = staged.verdicts[1]
+        assert refused is not None
+        assert (refused.verdict, refused.reason) == ("not_evaluable", "quarantined_bar")
+        assert date(2020, 1, 2) not in staged.scores
+
+    def test_a_cold_score_is_warm_up_not_a_data_gap(self) -> None:
+        staged = stage_cross_sectional_member(_x_member(_days(3), [None, 2.0, 3.0], decisions={0, 1}))
+        cold = staged.verdicts[0]
+        assert cold is not None
+        assert (cold.verdict, cold.reason) == ("not_evaluable", "insufficient_warmup")
+
+
+class TestEvaluateCrossSectional:
+    @staticmethod
+    def _panel(count: int, bars: int = 3) -> dict[int, CrossSectionalMember]:
+        dates = _days(bars)
+        return {
+            key: _x_member(dates, [float(key)] * bars, decisions=set(range(bars - 1))) for key in range(1, count + 1)
+        }
+
+    def test_members_are_grouped_by_date_not_by_index(self) -> None:
+        """⚠ The bug this contract exists to prevent.
+
+        The two members trade different calendars AND start ranking at different
+        indices: the early one skips its first bar, the late one does not. Both
+        therefore participate on 2020-01-02 and 2020-01-03 — from indices 1,2 and
+        0,1 respectively. Anything that keys the cross-section on the INDEX (or
+        on how many bars a member has already contributed) offers 2020-01-01,
+        which is a date the early member did not rank on and the late member had
+        not listed for.
+        """
+        early = _x_member(_days(4, date(2020, 1, 1)), [1.0] * 4, decisions={1, 2})
+        late = _x_member(_days(4, date(2020, 1, 2)), [2.0] * 4, decisions={0, 1})
+        seen: list[tuple[date, set[int]]] = []
+
+        def select(when: date, scores: dict[int, float]) -> set[int]:
+            seen.append((when, set(scores)))
+            return set()
+
+        evaluate_cross_sectional(members={1: early, 2: late}, select=select, min_participants=1)  # type: ignore[arg-type]
+        assert seen == [
+            (date(2020, 1, 2), {1, 2}),
+            (date(2020, 1, 3), {1, 2}),
+        ]
+
+    def test_select_sees_only_evaluable_participants(self) -> None:
+        panel = self._panel(3)
+        panel[2] = _x_member(_days(3), [1.0, None, 1.0], decisions={0, 1}, unevaluable=(1,))
+        offered: dict[date, set[int]] = {}
+
+        def select(when: date, scores: dict[int, float]) -> set[int]:
+            offered[when] = set(scores)
+            return set()
+
+        evaluate_cross_sectional(members=panel, select=select, min_participants=1)  # type: ignore[arg-type]
+        assert offered[date(2020, 1, 1)] == {1, 2, 3}
+        assert offered[date(2020, 1, 2)] == {1, 3}
+
+    def test_a_winner_that_did_not_participate_raises(self) -> None:
+        with pytest.raises(ValueError, match="did not participate"):
+            evaluate_cross_sectional(
+                members=self._panel(2),
+                select=lambda when, scores: {99},
+                min_participants=1,
+            )
+
+    def test_a_thin_cross_section_is_refused_and_select_is_never_called(self) -> None:
+        calls: list[date] = []
+
+        def select(when: date, scores: dict[int, float]) -> set[int]:
+            calls.append(when)
+            return set(scores)
+
+        signals = evaluate_cross_sectional(members=self._panel(3), select=select, min_participants=4)  # type: ignore[arg-type]
+        assert calls == []
+        reasons = {s.reason for member in signals.values() for s in member if s.verdict == "not_evaluable"}
+        assert "thin_cross_section" in reasons
+        assert not [s for member in signals.values() for s in member if s.verdict == "fired"]
+
+    def test_selected_members_fire_and_the_rest_do_not(self) -> None:
+        signals = evaluate_cross_sectional(
+            members=self._panel(4),
+            select=lambda when, scores: {max(scores, key=lambda key: scores[key])},
+            min_participants=1,
+        )
+        fired = {key: [s.signal_index for s in member if s.verdict == "fired"] for key, member in signals.items()}
+        assert fired[4] == [0, 1]
+        assert fired[1] == fired[2] == fired[3] == []
+
+    def test_one_verdict_per_bar_survives_the_ranking(self) -> None:
+        panel = self._panel(3, bars=5)
+        signals = evaluate_cross_sectional(members=panel, select=lambda when, scores: set(), min_participants=1)
+        for key, member in panel.items():
+            assert [s.signal_index for s in signals[key]] == list(range(len(member.dates)))
+
+    def test_min_participants_below_one_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="min_participants"):
+            evaluate_cross_sectional(members=self._panel(2), select=lambda when, scores: set(), min_participants=0)
