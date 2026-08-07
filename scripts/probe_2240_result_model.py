@@ -113,6 +113,34 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
         "test_a_position_spanning_the_boundary_is_hold_out",
     ),
     (
+        # Review NITPICK, PR #2360. Unreachable through `position_builder`, but
+        # the function is public and takes two bare dates — and its sibling
+        # `namespace_for_signal` already refuses ITS corrupt pair.
+        "the reversed entry/close refusal removed (a backwards position answers on the close)",
+        MODEL,
+        [
+            (
+                "    if close_bar_date < entry_fill_bar_date:\n"
+                "        raise ValueError(\n"
+                '            f"position closes {close_bar_date} before its entry fill {entry_fill_bar_date} — '
+                'a reversed pair has "\n'
+                '            "no namespace, and answering on the close alone would be a verdict with no signal '
+                'attached"\n'
+                "        )\n",
+                "",
+            )
+        ],
+        "test_a_close_before_its_entry_raises",
+    ),
+    (
+        # ⚠ The discriminator: sql/256 says `bars_held = 0` IS LEGAL, so a
+        # same-bar open-and-close is a real trade. `<=` would reject it.
+        "the reversed-pair guard made inclusive (a legal same-bar trade is refused)",
+        MODEL,
+        [("    if close_bar_date < entry_fill_bar_date:", "    if close_bar_date <= entry_fill_bar_date:")],
+        "test_a_same_bar_open_and_close_is_allowed",
+    ),
+    (
         "the promotable allowlist widened to admit survivor_only",
         MODEL,
         [

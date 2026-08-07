@@ -275,17 +275,37 @@ def namespace_for_position(entry_fill_bar_date: date, close_bar_date: date | Non
     ALWAYS hold-out, whichever side its entry is on — which is why this branch
     ignores ``entry_fill_bar_date`` entirely rather than testing it. An open
     position's mark is taken at the last usable close of the EVALUATION WINDOW,
-    and the window ends at ``EVALUATION_WINDOW_END``, which is 2021-06-29 or
-    later by construction. So the mark is priced off a withheld bar in every
-    case. Treating "no close" as "no span" would put that mark into a training
-    number, which is the same leak the closed case guards.
+    and ``EVALUATION_WINDOW_END`` is itself on or after ``HOLDOUT_BOUNDARY``
+    (2026-07-08 against 2021-06-29 — asserted by
+    ``tests/test_strategy_result.py::TestFrozenSplit``). So the mark is priced
+    off a withheld bar in every case. Treating "no close" as "no span" would put
+    that mark into a training number, which is the same leak the closed case
+    guards.
 
-    ⚠ ``entry_fill_bar_date`` is therefore unused on this path and is kept in
-    the signature deliberately: it is what a caller has, and a function taking
-    only the close would push the "is it open" test back out to every call site.
+    ⚠ A CLOSE BEFORE ITS ENTRY RAISES. Unreachable through
+    ``position_builder`` — every close it emits is at or after the entry fill
+    bar, and ``sql/256`` bounds ``bars_held >= 0`` — but this function is public
+    and takes two bare dates, so nothing at the call site says which is which.
+    ``namespace_for_signal`` already refuses its own corrupt pair (it returns
+    ``purged``); the asymmetry was the real finding, not the reachability.
+    ⚠ It RAISES rather than returning a verdict because there is no third state
+    to return: ``ResultNamespace`` is two members, and silently answering
+    ``namespace_for_bar(close_bar_date)`` on a reversed pair is a number with no
+    signal attached. Same shape as ``EntryFill``/``ExitFill`` refusing a
+    non-positive price (#2354).
+
+    ⚠ ``entry_fill_bar_date`` is therefore unused on the OPEN path and is kept
+    in the signature deliberately: it is what a caller has, it is what the
+    ordering check below reads, and a function taking only the close would push
+    the "is it open" test back out to every call site.
     """
     if close_bar_date is None:
         return "hold_out"
+    if close_bar_date < entry_fill_bar_date:
+        raise ValueError(
+            f"position closes {close_bar_date} before its entry fill {entry_fill_bar_date} — a reversed pair has "
+            "no namespace, and answering on the close alone would be a verdict with no signal attached"
+        )
     return namespace_for_bar(close_bar_date)
 
 

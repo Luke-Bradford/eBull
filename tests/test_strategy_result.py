@@ -230,6 +230,24 @@ class TestPositionNamespace:
     def test_an_open_position_entered_in_hold_out_is_hold_out(self) -> None:
         assert namespace_for_position(date(2022, 1, 3), None) == "hold_out"
 
+    def test_a_close_before_its_entry_raises(self) -> None:
+        """⚠ Unreachable through `position_builder` (every close it emits is at
+        or after the entry fill bar, and sql/256 bounds `bars_held >= 0`), but
+        the function is public and takes two bare dates. `namespace_for_signal`
+        already refuses ITS corrupt pair by returning `purged`; the asymmetry was
+        the finding. It raises rather than returning because `ResultNamespace`
+        has no third member — answering on the close alone would be a verdict
+        with no signal attached. Review NITPICK, PR #2360."""
+        with pytest.raises(ValueError, match="before its entry fill"):
+            namespace_for_position(date(2022, 1, 3), date(2019, 1, 3))
+
+    def test_a_same_bar_open_and_close_is_allowed(self) -> None:
+        """⚠ The discriminator for the guard above: `<`, not `<=`. sql/256 says
+        `bars_held = 0` IS LEGAL — a TP or SL touched on the fill bar — so a
+        position opening and closing on one bar is a real trade, not a reversed
+        pair. A `<=` here would reject it."""
+        assert namespace_for_position(date(2022, 1, 3), date(2022, 1, 3)) == "hold_out"
+
 
 class TestResultIdentity:
     """Criterion 11, asserted MEMBER BY MEMBER rather than once in aggregate.
