@@ -336,6 +336,26 @@ class TestRefusals:
         """
         assert self._call(average_correlation=1.0) is None
 
+    def test_negatively_correlated_trials_refuse_rather_than_raise(self) -> None:
+        """⚠⚠ THE OTHER END OF THE SAME BOUND, AND IT WAS MISSED FIRST TIME.
+
+        A NEGATIVE average correlation gives ``N_hat > M`` — at ``M = 11,
+        rho = -0.09``, ``N_hat = 11.9`` — and ``DeflatedSharpeResult`` refuses
+        ``N > M``. A.3 derives the interpolation only between ``rho -> 1``
+        (``N -> 1``) and ``rho -> 0`` (``N -> M``), so this is outside the
+        published rule, and clamping to ``M`` would invent a treatment the
+        paper does not give.
+
+        ⚠ Realistic, not a corner case: a momentum sleeve against a
+        mean-reversion one. Codex's checkpoint-2 P2 fixed only the ``rho == 1``
+        end; the review bot on PR #2372 found this one still raising.
+        """
+        # The correlation is INSIDE A.3's positive-definite bound of -1/(M-1),
+        # so `implied_independent_trials` accepts it — the refusal has to be the
+        # N-hat bound, not the rho bound.
+        assert implied_independent_trials(-0.09, 11) > 11
+        assert self._call(average_correlation=-0.09) is None
+
     def test_the_threshold_helper_still_raises_on_a_single_trial(self) -> None:
         """⚠ The RAISE is kept where a direct caller could pass nonsense.
 

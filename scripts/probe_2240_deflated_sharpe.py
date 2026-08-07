@@ -191,11 +191,29 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # helper's RAISE escapes into the caller instead of failing closed —
         # and two register entries running one rule over two corpora is exactly
         # that shape, so it is reachable rather than theoretical.
-        "perfectly correlated trials raising instead of refusing",
+        "an out-of-range implied trial count raising instead of refusing",
         DSR,
         DSR_TESTS,
-        [("    if independent <= 1.0:\n        return None", "    if False:\n        return None")],
-        "test_perfectly_correlated_trials_refuse_rather_than_raise",
+        [
+            (
+                "    if not 1.0 < independent <= declared_trials:\n        return None",
+                "    if False:\n        return None",
+            )
+        ],
+        "test_perfectly_correlated_trials_refuse_rather_than_raise "
+        "or test_negatively_correlated_trials_refuse_rather_than_raise",
+    ),
+    (
+        # ⚠⚠ THE UPPER HALF OF THAT BOUND ON ITS OWN. The first version of this
+        # guard was `independent <= 1.0`, which fixes only the rho==1 end and
+        # leaves any NEGATIVE correlation raising — the review bot's BLOCKING
+        # finding on PR #2372. This probe reverts to exactly that half, so a
+        # future edit cannot silently drop the upper bound again.
+        "the N-hat bound narrowed back to its lower end only",
+        DSR,
+        DSR_TESTS,
+        [("    if not 1.0 < independent <= declared_trials:", "    if not 1.0 < independent:")],
+        "test_negatively_correlated_trials_refuse_rather_than_raise",
     ),
     (
         # ⚠ An imaginary standard error admitted. `math.sqrt` of a negative

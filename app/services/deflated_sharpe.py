@@ -357,7 +357,7 @@ def deflated_sharpe(
     5.5 on the test statistic — and produce a confident DSR from evidence the
     block bootstrap already showed was not there.
 
-    ⚠ RETURNS ``None`` IN THREE STATES, AND EACH IS REAL:
+    ⚠ RETURNS ``None`` IN FOUR STATES, AND EACH IS REAL:
 
     1. **Fewer than ``MIN_MEASURED_TRIALS`` measured trials.** ``V[{SR_n}]``
        does not exist, so there is no distribution of trial Sharpes to take a
@@ -368,14 +368,25 @@ def deflated_sharpe(
        denominator. The estimated standard error of the Sharpe is then
        imaginary, which happens for a large negative skew against a large
        Sharpe, and no real DSR exists for it.
-    4. **Perfectly correlated trials.** At ``rho_hat == 1`` equation (9) gives
-       ``N_hat == 1``, and ``Z^-1[1 - 1/N]`` is ``Z^-1[0] == -inf`` — there is
-       no expected maximum of one trial to deflate against. ⚠ REACHABLE, not
-       theoretical: two register entries running the same rule over two corpora
-       have near-identical return series, and the #2260 arms are exactly that
-       shape. Caught by Codex at checkpoint 2, where it was a RAISE — which
-       would have crashed the caller instead of failing closed the way this
-       function documents and ``sql/266`` expects.
+    4. **An implied independent trial count outside ``(1, M]``**, at either
+       end. ⚠ BOTH ENDS ARE REACHABLE and each was found separately:
+
+       - ``rho_hat == 1`` gives ``N_hat == 1``, where ``Z^-1[1 - 1/N]`` is
+         ``Z^-1[0] == -inf`` — there is no expected maximum of one trial to
+         deflate against. Two register entries running the same rule over two
+         corpora have near-identical return series, and the #2260 arms are
+         exactly that shape. *Caught by Codex at checkpoint 2.*
+       - A NEGATIVE ``rho_hat`` gives ``N_hat > M`` (at ``M = 11, rho = -0.09``,
+         ``N_hat = 11.9``). Negative average correlation is realistic — a
+         momentum sleeve against a mean-reversion one — and A.3 derives the
+         interpolation only between ``rho -> 1`` (``N -> 1``) and ``rho -> 0``
+         (``N -> M``), so ``N_hat > M`` is OUTSIDE the published rule. Clamping
+         it to ``M`` would be inventing a treatment the paper does not give.
+         *Caught by the review bot on PR #2372, where it was still a raise —
+         the same class as the first, fixed at only one end.*
+
+       Both would otherwise crash the caller instead of failing closed the way
+       this function documents and ``sql/266`` expects.
 
     In each the caller leaves ``deflated_sharpe`` NULL and the promotion gate
     refuses on ``deflated_sharpe_not_computed``. Criterion 6 says an undeclared
@@ -390,12 +401,18 @@ def deflated_sharpe(
         return None
 
     independent = implied_independent_trials(average_correlation, declared_trials)
-    # ⚠ Refusal 4 — see the docstring. ``expected_max_sharpe`` RAISES at or
-    # below 1, which is right for a direct caller passing a nonsense N but wrong
-    # here: this function's contract is to return ``None`` for a DSR that cannot
-    # be computed, and perfectly correlated trials are a real state rather than
-    # a caller bug. The raise is kept there and converted here.
-    if independent <= 1.0:
+    # ⚠⚠ Refusal 4, BOTH ENDS — see the docstring. A.3 derives eq. (9) only
+    # between `rho -> 1` (`N -> 1`) and `rho -> 0` (`N -> M`), so anything
+    # outside `(1, M]` is outside the published rule: at the low end
+    # `Z^-1[1 - 1/N]` is `-inf`, and at the high end (any NEGATIVE rho)
+    # `DeflatedSharpeResult` refuses `N > M`. Both are real states rather than
+    # caller bugs — duplicate trials at one end, a momentum sleeve against a
+    # mean-reversion one at the other — and this function's contract is to fail
+    # closed on them. The raises are kept where they are (a direct caller
+    # passing a nonsense N IS a bug) and converted here.
+    #
+    # ⚠ Clamping to `M` instead would invent a treatment the paper does not give.
+    if not 1.0 < independent <= declared_trials:
         return None
     threshold = expected_max_sharpe(
         trial_sharpe_variance=trial_sharpe_variance,
