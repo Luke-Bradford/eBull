@@ -509,33 +509,110 @@ backwards:
   fold. Both act on the training side; serial correlation means a training
   sample drawn just after the test window still carries information from it.
 
+⚠ **Both sides of the test fold carry training data, so this is ch. 7's purged
+K-FOLD over contiguous time blocks, not a strictly anchored walk-forward.** An
+anchored design has no training data after the test fold at all, which makes the
+embargo — half of what criterion 5 asks for — unreachable. §2.2's own wording is
+*"around each fold boundary"*, both sides.
+
 ⚠ **The embargo length is not quoted from memory.** AFML gives a proportional
-rule of thumb which this environment cannot verify against the source, so the
-implementation ticket must either cite ch. 7 directly **or** take the
-construction below, which is available now and tighter because it is
-mechanism-derived:
+rule of thumb which this environment cannot verify against the source (checked
+twice: two independent secondary treatments of ch. 7 were fetched and neither
+carries a numeric rule; the commonly-repeated `pctEmbargo = 0.01` appears in
+discussion of the chapter's exercises). **It must not be cited.** The
+construction below is mechanism-derived and available now.
 
-> The leak across a fold boundary is bounded by the strategy's own maximum
-> holding period. So the embargo is `max_hold_bars` wherever one is declared —
-> **S-3: 10** and **S-4: 40** — and one rebalance interval for a calendar
-> strategy (**S-2**: one month of panel trading dates).
+#### ✅ RESOLVED at stage 5e-4 (2026-08-07). The embargo is MEASURED, per fold, on the PANEL axis.
 
-⚠ **S-1 declares no maximum and this is a genuine open problem, not a solved
-one.** Two candidate answers were considered and both are flawed:
+The rule that shipped, in `app/services/walk_forward.py::training_embargo_bars`:
 
-- *measured p99 realised hold* — leaves 1% of holds leaking **by construction**,
-  and worse, the measurement would be taken over the full history including the
-  test folds, which leaks test information into the embargo that is supposed to
-  prevent leakage. **Rejected.**
-- *the in-sample p100 (maximum) realised hold* — computed on the training side
-  only, so it does not leak, but it is unbounded above and a single long hold
-  makes the embargo swallow the fold.
+> `embargo(fold)` = the maximum panel-axis label-window span among the
+> observations lying **wholly outside** the fold — its post-purge, pre-embargo
+> training set.
 
-**The implementation ticket must resolve this before S-1 walk-forwards**, and
-the recommended direction is to give S-1 a declared `max_hold_bars` — which is a
-change to S-1's identity and therefore a new strategy version, free today
-because the ledgers hold 0 rows (M10). An undeclared holding period is not a
-property phase 5 can measure its way out of.
+Leak-free by construction (§5.3's own concession: a p100 taken on the training
+side *"does not leak"*), non-circular (purge depends on the fold; embargo
+depends on the purge; nothing depends on the embargo), and it needs **no
+declared constant for any strategy, S-1 included**.
+
+⚠⚠ **THE EARLIER DRAFT OF THIS SECTION WAS WRONG ON THE AXIS, and the
+correction is the stage's main finding.** It said *"the embargo is
+`max_hold_bars` wherever one is declared — S-3: 10 and S-4: 40"*. Those
+constants count an **instrument's own bars**; folds are cut on the **panel
+axis**, the union of every instrument's dates, of which each instrument's dates
+are a subset. A hold of `h` instrument bars therefore spans `h` panel dates **or
+more** — never fewer — so reading the constant straight onto a panel-axis window
+under-covers, in the direction that leaks. Measured over 2,456,097 S-1
+in-sample positions: the panel span exceeded `bars_held` on **3** of them, by up
+to **374 dates**. Rare, real, and exactly the class the 5e-3 prevention-log
+entry names. The measured rule subsumes `max_hold_bars` rather than
+contradicting it — a strategy declaring one must measure a span at least that
+large, which `verify_2240_walk_forward.py` F4 asserts.
+
+**The two rejected candidates stay rejected as stated:** *measured p99* leaks 1%
+by construction and its measurement spans the test folds; the surviving rule is
+the *in-sample p100* §5.3 already conceded is leak-free, narrowed to one fold's
+own training side so it does not span that fold either.
+
+⚠ **§5.3's sole remaining objection to p100 — "unbounded above, and a single
+long hold makes the embargo swallow the fold" — was a claim about a number
+nobody had looked at. Measured** (`verify_2240_walk_forward.py --all`, full
+population, in-sample only, 5,266 series / 14,975 dates / 17,501,058 bars,
+0 property violations):
+
+| | S-1 | S-3 (`max_hold_bars = 10`) |
+| --- | ---: | ---: |
+| closed in-sample positions | 2,456,097 | 22,811 |
+| unlabelled at window end (excluded) | 2,661 | 166 |
+| panel-axis span p50 / p95 / p99 / p100 | 1 / 13 / 60 / **931** | 10 / 10 / 10 / **10** |
+| instrument `bars_held` p100 | 930 | 10 |
+| positions within 10% of p100 | **1** of 2,456,097 | 17,346 of 22,811 |
+
+| fold | dates | embargo `h` | `h / N_train` | embargoed share of the training side (S-1) |
+| --- | ---: | ---: | ---: | ---: |
+| 0 (1962-01-02 … 1999-09-02) | 9,486 | 615 | 615/5,489 = **11.204%** | 122,530 of 1,816,633 = 6.74% |
+| 1 (1999-09-03 … 2009-03-19) | 2,399 | 931 | 931/12,576 = **7.403%** | 332,214 of 1,873,632 = 17.73% |
+| 2 (2009-03-20 … 2016-03-22) | 1,764 | 931 | 931/13,211 = **7.047%** | 399,280 of 1,805,665 = 22.11% |
+| 3 (2016-03-23 … 2021-06-28) | 1,326 | 931 | 931/13,649 = **6.821%** | 0 (nothing follows the last fold) |
+
+**Verdict: the first branch of the decision rule.** The embargo costs at most
+**22.11%** of one fold's training observations and leaves 78% standing; it does
+not swallow any fold. So the in-sample p100 is adopted directly and **S-1 does
+NOT declare a `max_hold_bars`** — its identity is untouched and no new strategy
+version is minted.
+
+⚠ **The structure of §5.3's fear is nonetheless real and is recorded rather than
+waved past: the embargo IS set by a single observation.** Exactly 1 of 2,456,097
+S-1 holds sits within 10% of p100, and p99 is 60 bars — **15.5× smaller** than
+the 931 that binds. The bound is still the correct one (a bound must cover the
+longest hold, not the typical one), and its cost is measured above rather than
+assumed. What is rejected is paying for it by truncating real trades: declaring
+a `max_hold_bars` would change what S-1 *does* in order to buy back training
+observations in a cross-validation that fits no parameters — S-1's lookbacks are
+*"fixed, never tuned"* (§4).
+
+⚠ **Positions still open at the in-sample window end are EXCLUDED** — 2,661 for
+S-1, 166 for S-3 — because their label is unresolved, not "as long as the data".
+Admitting them with an end index at the axis end would set every early fold's
+embargo to most of the corpus. It biases p100 **downward** (the longest holds
+are the likeliest to be censored), so 931 is a lower bound and is reported as
+one.
+
+⚠ **The fold count is OURS and fixed by construction**, since AFML takes it as
+an argument and fixes no value. It reuses a rule this phase already has:
+criterion 5 withholds *"the final 25% of history"*, so a test fold is the same
+share of the sample as the hold-out is of the corpus — **four folds**, cut
+bar-weighted per §5.2 (realised: 25.00% / 24.99% / 25.00% / 25.01% of bars). It
+is a module constant rather than an argument, because a fold count that can be
+passed in is a fold count that can be swept, and a swept validity gate is a
+search over validity gates. It is frozen in `WALK_FORWARD_MODEL_ID`.
+
+⚠ **Nothing is STORED by 5e-4 and that is deliberate.** These strategies fit no
+parameters, so the split is a validity gate rather than a training loop, and
+there is no per-fold result row to write yet. Adding nullable walk-forward
+columns nobody populates is precisely the defect `sql/266`'s own header records
+(*"sql/262 shipped two of criterion 6's columns and none of its inputs"*). The
+columns land with the writer, in 5e-5.
 
 ### 5.4 Exposure, cash and the return denominator
 
@@ -691,7 +768,7 @@ until the namespace has a mechanism.
 | **5e-1** | **The hold-out namespace, its access log, and the first `strategy_results` writer** — criterion 5's mechanical inaccessibility, `sql/264`, `app/services/result_ledger.py`. | ✅ shipped |
 | **5e-2** | **Block bootstrap clustered by date** (criterion 3) → fills `effective_sample_size` and clears one of the seven standing refusals. `app/services/block_bootstrap.py`, `sql/265`. | ✅ shipped |
 | **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. `app/services/deflated_sharpe.py`, `app/services/trial_register.py`, `sql/266`. | ✅ shipped |
-| **5e-4** | **Purged walk-forward + embargo** (§5.3). ⚠ Blocked on S-1 declaring a `max_hold_bars` — still free at 0 ledger rows, recommended for the fourth run running. | blocked |
+| **5e-4** | **Purged walk-forward + embargo** (§5.3). `app/services/walk_forward.py`. ⚠ The "blocked on S-1 declaring a `max_hold_bars`" row was **struck**: the block was an unstarted measurement, not a decision, and the measurement adopted the leak-free in-sample p100 with S-1's identity untouched. | ✅ shipped |
 | **5e-5** | **Quarantine sensitivity arm** (criterion 9) and the **1,000-strategy random-entry control** (§9, *the harness itself*). | last |
 
 ### 8.1 ⚠⚠ Stage 5e-1's finding: RLS is not criterion 5's mechanism on this database
@@ -815,6 +892,34 @@ expected maximum by under 0.05 for `N < 50` at `V = 1`. Our `N` is small, so we
 sit at the loose end of the published range — and it errs toward a higher `SR₀`,
 hence a lower DSR, which is the conservative direction.
 
+### 8.4 Stage 5e-4: which constants are AFML's, which are ours, and the one that was a query
+
+**Source rule: López de Prado, *Advances in Financial Machine Learning* (2018)
+ch. 7** — purging and embargoing — which criterion 5 names by mechanism. It
+fixes the two OPERATIONS and nothing else, so every remaining choice is declared
+as ours and frozen in `WALK_FORWARD_MODEL_ID`:
+
+| choice | fixed by |
+| --- | --- |
+| Purge = drop training observations whose LABEL WINDOW overlaps the test fold | **AFML ch. 7.** ⚠ Tested on the INTERVAL, not the endpoints — an observation spanning the fold entirely is the case an endpoint test calls training data. |
+| Embargo = drop training observations STARTING in the window after the test fold | **AFML ch. 7.** ⚠ Keyed on the entry, closed on the right: an `h`-bar embargo covers `h` dates. |
+| Purged K-fold rather than an anchored walk-forward | **AFML ch. 7 + §2.2's "around each fold boundary".** An anchored design has no training data after the test fold, so it cannot have an embargo at all. |
+| Embargo LENGTH | **OURS**, mechanism-derived — the per-fold measured maximum panel-axis span over the post-purge training set. ⚠ AFML's proportional rule of thumb is **unverifiable from this environment** and is NOT cited; see §5.3. |
+| Fold count = 4 | **OURS**, by construction from criterion 5's own 25%: a test fold is the same share of the sample as the hold-out is of the corpus. Not a round number chosen for looking reasonable. |
+| Fold boundaries weighted by BAR | **§5.2**, reused verbatim including its "cumulative strictly exceeds" selection rule. |
+| Observations = CLOSED positions only | **OURS.** An open position's label is unresolved; admitting it with an end index at the axis end makes every early fold's embargo an artefact of where the data stops. Counted and reported, both sleeves. |
+
+⚠⚠ **The stage's finding is an AXIS error in this document's own earlier
+construction**, and it is the second instance of the class §8.3 recorded. See
+§5.3: `max_hold_bars` counts instrument bars, folds are cut on panel dates, and
+the panel span exceeded `bars_held` on 3 of 2,456,097 S-1 positions by up to 374
+dates. Measuring the embargo on the axis the window is cut on removes the
+mismatch rather than correcting for it.
+
+⚠ **Nothing is stored.** These strategies fit no parameters, so 5e-4 is a
+validity gate and not a training loop; the walk-forward columns land with the
+per-fold writer in 5e-5, not before. See the end of §5.3.
+
 ⚠ **Stage 5e is the phase, not an appendix.** The parent is explicit that
 reproducing #2260 is *"necessary but not sufficient"* and pairs it with the
 random-entry cohort at a stated threshold, because *"a stated threshold matters
@@ -864,9 +969,15 @@ that is mechanically inaccessible** to exploratory queries — logging alone is
 not the criterion, which says governance fails. Every access records timestamp
 and strategy id. The frozen boundary literal must equal the corpus's
 bar-weighted boundary or the run **fails** rather than re-splitting (§5.2).
-Purge and embargo both act on the **training** side (§5.3); every strategy
-entering walk-forward has a declared holding bound. Per-strategy in-sample and
-hold-out **trade** counts are reported, gated on effective sample size (§5.2).
+Purge and embargo both act on the **training** side (§5.3) — asserted over the
+full in-sample population by `scripts/verify_2240_walk_forward.py --folds` (F2,
+F3), which restates both predicates from §5.3's wording rather than calling the
+function under test. Every strategy entering walk-forward has a holding bound:
+**declared** where §3 gives one (S-3: 10, S-4: 40) and **measured on the panel
+axis per fold** otherwise, since a declared bound counts instrument bars and the
+fold window counts panel dates (§5.3, §8.4). F4 asserts the measured bound
+covers the declared one. Per-strategy in-sample and hold-out **trade** counts
+are reported, gated on effective sample size (§5.2).
 
 **C6 — multiple-testing control.** Deflated Sharpe computed with **all four**
 parent inputs: the trial count, the trials' **correlation**, and the returns'
