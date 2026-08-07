@@ -337,13 +337,16 @@ def expected_max_sharpe(
     *,
     trial_sharpe_variance: float,
     independent_trials: float,
-    trial_sharpe_mean: float = 0.0,
 ) -> float:
-    """Equations (1)/(6) — the expected maximum Sharpe after ``N`` independent trials.
+    """Equations (1)/(6) under ``H0`` — the expected maximum Sharpe after ``N`` trials.
 
-    ``trial_sharpe_mean`` defaults to ``0.0`` because equation (2) evaluates
-    this under the null ``H0: SR = 0``; the paper carries the mean through (1)
-    for the general statement and drops it in ``SR_0``.
+    ⚠ ``E[{SR_n}]`` IS FIXED AT ZERO AND IS NOT A PARAMETER. The paper carries
+    the trials' mean through (1) for the general statement and then drops it in
+    equation (2)'s ``SR_0``, which is evaluated under the null ``H0: SR = 0`` —
+    the only form this module ever needs. An earlier version exposed it as a
+    defaulted keyword no caller ever set, which is unreachable and untested
+    flexibility rather than a capability; if a non-null form is ever wanted, it
+    should arrive with the caller that needs it.
 
     ⚠ ``independent_trials`` is a FLOAT because equation (9) interpolates. The
     paper's ``N`` is a count, but ``N_hat`` is not — rounding it would move the
@@ -363,7 +366,9 @@ def expected_max_sharpe(
     tail = 1.0 - 1.0 / independent_trials
     tail_over_e = 1.0 - (1.0 / independent_trials) * math.exp(-1.0)
     max_z = (1.0 - EULER_MASCHERONI) * _NORMAL.inv_cdf(tail) + EULER_MASCHERONI * _NORMAL.inv_cdf(tail_over_e)
-    return trial_sharpe_mean + math.sqrt(trial_sharpe_variance) * max_z
+    # ⚠ `E[{SR_n}] = 0` under H0, so (1)'s leading term vanishes. Written as the
+    # bare product rather than `0.0 + ...` so nothing reads as a placeholder.
+    return math.sqrt(trial_sharpe_variance) * max_z
 
 
 def deflated_sharpe(

@@ -437,6 +437,19 @@ def _criterion6(sleeves: dict[str, _Sleeve], measured: dict[str, StrategyMetrics
         print(f"      → refused: fewer than {MIN_MEASURED_TRIALS} measured trials, V[SR_n] does not exist")
         return problems
 
+    # ⚠ A sleeve with no register entry is a MEASURED trial that criterion 6's
+    # `M` does not count — the exact under-count the criterion calls decorative.
+    # Reported as a refusal rather than raised: a bare `KeyError` here would be
+    # the one path in this function that crashes instead of failing visibly, and
+    # adding a fifth sleeve is how it would be reached.
+    unregistered = sorted(label for label in usable if label not in _SLEEVE_TRIAL_IDS)
+    if unregistered:
+        problems.append(
+            f"P8 sleeves {unregistered} have no trial_register entry — their Sharpes would be measured but "
+            "uncounted in M, which under-counts the search and RAISES the DSR"
+        )
+        return problems
+
     sharpes = {_SLEEVE_TRIAL_IDS[label]: sleeve.moments.sharpe for label, sleeve in usable.items()}  # type: ignore[union-attr]
     variance = TRIAL_REGISTER.sharpe_variance(sharpes)
     if variance is None or variance <= 0.0:
