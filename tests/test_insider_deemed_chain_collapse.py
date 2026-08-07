@@ -21,6 +21,8 @@ from decimal import Decimal
 from app.services.ownership_rollup import (
     Holder,
     SourceTag,
+    _collapse_insider_control_group,
+    _control_group_rep_key,
     _is_deemed_chain,
     _reconcile_insider_control_groups,
 )
@@ -271,3 +273,20 @@ def test_duplicate_cik_does_not_inflate_the_cluster_size() -> None:
         _h("000000002", "GP L.L.C. (second lot)", _SUB_FLOOR, nature="indirect"),
     ]
     assert _is_deemed_chain(holders) is False
+
+
+def test_rep_preview_and_fold_pick_the_same_holder() -> None:
+    """The release-hazard preview and the fold must agree on WHO the rep is, or the
+    check protects one identity and strands another. They now share
+    ``_control_group_rep_key``; this pins that they still agree, including on the
+    ``sorted(reverse=True)[0]`` vs ``max`` equivalence (review WARNING, PR #2384)."""
+    cluster = [
+        _h("000000003", "Tie B", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "Sponsor Fund L.P.", _SUB_FLOOR, nature="direct"),
+        _h("000000002", "Tie A", _SUB_FLOOR, nature="indirect"),
+        _h("000000009", "Blockholder Co", _SUB_FLOOR, nature=None, source="13d"),
+    ]
+    folded, _corr = _collapse_insider_control_group(cluster)
+    preview = max(cluster, key=_control_group_rep_key)
+    assert (folded.filer_cik, folded.filer_name) == (preview.filer_cik, preview.filer_name)
+    assert sorted(cluster, key=_control_group_rep_key, reverse=True)[0] is preview

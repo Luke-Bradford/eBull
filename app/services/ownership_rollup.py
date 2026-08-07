@@ -2508,6 +2508,18 @@ def _is_deemed_chain(insiders: list[Holder]) -> bool:
     return n_direct <= _DEEMED_CHAIN_MAX_DIRECT and n_indirect >= _DEEMED_CHAIN_MIN_INDIRECT
 
 
+def _control_group_rep_key(h: Holder) -> tuple[bool, Decimal, str, str]:
+    """Sort key selecting a control-group cluster's representative: prefer an insider
+    source (so the rep routes to the insiders slice via owner-once), then a deterministic
+    ``(shares, filer_cik, winning_accession)`` tie-break, all DESCENDING.
+
+    Shared by :func:`_collapse_insider_control_group`, which performs the fold, and the
+    release-hazard preview in :func:`_reconcile_insider_control_groups`, which must
+    identify the SAME holder to know whose other-channel rows would be stranded. Kept in
+    one place so the two cannot drift (review WARNING on PR #2384)."""
+    return (h.winning_source in _INSIDER_GROUP_SOURCES, h.shares, h.filer_cik or "", h.winning_accession)
+
+
 def _collapse_insider_control_group(cluster: list[Holder]) -> tuple[Holder, CorrectionApplied]:
     """Collapse a confirmed control-group ``cluster`` (≥2 distinct CIKs, ≥1 insider
     member, all at the same exact non-round block value) to ONE holder at that value
@@ -2520,16 +2532,7 @@ def _collapse_insider_control_group(cluster: list[Holder]) -> tuple[Holder, Corr
     provenance preserved) and folded into one ``insider_control_group_collapse`` correction
     whose ``detail`` carries each folded member's CIK + name + shares (``DroppedSource`` has
     no CIK/name field — same limitation as #1645)."""
-    rep = sorted(
-        cluster,
-        key=lambda h: (
-            h.winning_source in _INSIDER_GROUP_SOURCES,
-            h.shares,
-            h.filer_cik or "",
-            h.winning_accession,
-        ),
-        reverse=True,
-    )[0]
+    rep = sorted(cluster, key=_control_group_rep_key, reverse=True)[0]
     losers = [h for h in cluster if h is not rep]
     dropped = list(rep.dropped_sources)
     for loser in losers:
@@ -2799,15 +2802,11 @@ def _reconcile_insider_control_groups(
         # this pass takes. The original value-proxy route is deliberately NOT gated on
         # this — its behaviour is unchanged from #1652.
         if collapsible and not (len(distinct_ciks) >= 2 and has_insider and _passes_value_proxies(shares)):
-            rep_preview = max(
-                holders,
-                key=lambda h: (
-                    h.winning_source in _INSIDER_GROUP_SOURCES,
-                    h.shares,
-                    h.filer_cik or "",
-                    h.winning_accession,
-                ),
-            )
+            # Same key, same tie-break, same winner as the fold itself — see
+            # :func:`_control_group_rep_key`. ``sorted(..., reverse=True)[0]`` there and
+            # ``max`` here agree: Python's sort is stable, so both return the FIRST
+            # maximal element.
+            rep_preview = max(holders, key=_control_group_rep_key)
             rep_identity = _identity_key(rep_preview.filer_cik, rep_preview.filer_name)
             in_cluster = {id(h) for h in holders}
             for member in holders:
