@@ -201,8 +201,13 @@ def test_fold_is_allowed_when_the_other_row_belongs_to_the_REP() -> None:
     — only a NON-rep member's are. Guards against the check being written too broadly
     and refusing every cluster whose rep has a 13F footprint."""
     holders = _chain(_SUB_FLOOR, n=3)
-    rep_cik = max(holders, key=lambda h: (True, h.shares, h.filer_cik or "", h.winning_accession)).filer_cik
-    holders.append(_h(rep_cik or "", "Sponsor Fund L.P.", "999999999", nature=None, source="13f"))
+    # ⚠ Ask the module for the rep. This line used to re-spell the key inline as
+    # ``(True, shares, cik, accession)``. #2385 prototyped an extra component and the
+    # inline copy would have attached the 13F row to a holder that is no longer the rep
+    # — i.e. set up the OPPOSITE scenario from the one this test's name describes, while
+    # still asserting on the same output.
+    rep = max(holders, key=_control_group_rep_key)
+    holders.append(_h(rep.filer_cik or "", rep.filer_name, "999999999", nature=None, source="13f"))
     _out_s, _b, corrs = _reconcile_insider_control_groups(holders, [])
     assert _kinds(corrs) == ["insider_control_group_collapse"]
 
