@@ -165,10 +165,18 @@ class TradeMoments:
         # old `> 0` let the whole of (0, 1) through while the message claimed
         # otherwise. A Normal passed as EXCESS kurtosis arrives as 0.0 and is
         # still caught, which is the defect this guards.
-        if self.kurtosis < 1.0:
+        # ⚠ THE BOUND IS `y3^2 + 1`, NOT A BARE 1. Pearson's inequality relates
+        # the two moments, so a large skew REQUIRES a large kurtosis — at
+        # `y3 = 2` the floor is 5, and `y4 = 1` beside it is not merely unusual
+        # but impossible. `trade_moments` cannot produce such a pair (it
+        # computes both from one series), so this catches a DIRECT caller, which
+        # is the only way an inconsistent pair can enter.
+        floor = self.skewness**2 + 1.0
+        if self.kurtosis < floor:
             raise ValueError(
-                f"kurtosis must be at least 1, got {self.kurtosis} — a RAW fourth moment is >= y3^2 + 1 for any real "
-                "distribution, so a value below 1 means excess kurtosis was passed (see the header)"
+                f"kurtosis {self.kurtosis} is below y3^2 + 1 = {floor} for skewness {self.skewness} — Pearson's "
+                "inequality makes that pair impossible for any real distribution, and a value below 1 in particular "
+                "means excess kurtosis was passed (see the header)"
             )
 
 
@@ -385,9 +393,15 @@ def deflated_sharpe(
     2. **``T <= 1``.** ``sqrt(T - 1)`` is zero or imaginary. An effective sample
        size at or below one trade is not a sample.
     3. **A non-positive variance term** under the square root in (2)'s
-       denominator. The estimated standard error of the Sharpe is then
-       imaginary, which happens for a large negative skew against a large
-       Sharpe, and no real DSR exists for it.
+       denominator — in practice ZERO, because strictly negative is
+       unreachable. ⚠ The bracket is a quadratic in ``SR`` with discriminant
+       ``y3^2 - (y4 - 1)``, and ``TradeMoments`` enforces Pearson's
+       ``y4 >= y3^2 + 1``, so that discriminant is always ``<= 0``: the bracket
+       touches zero at the Pearson boundary (at ``SR = 2*y3/(y4-1)``) and is
+       positive everywhere else. Zero is enough — the standard error is then
+       zero and (2) divides by it — so the guard stays ``<= 0`` rather than
+       being narrowed to an equality that would read as if the negative case
+       were still live.
     4. **An implied independent trial count outside ``(1, M]``**, at either
        end. ⚠ BOTH ENDS ARE REACHABLE and each was found separately:
 

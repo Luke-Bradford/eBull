@@ -129,10 +129,19 @@ BEGIN
     -- ⚠ A.3's own bound: for a positive-definite MxM correlation matrix the
     -- average correlation lies in (-1/(M-1), 1]. Tighter than (-1, 1], and the
     -- tighter one is what catches a matrix that was never a correlation matrix.
+    -- ⚠ `trial_count > 1` GUARDS THE DIVISION, and it is not redundant with
+    -- `strategy_results_dsr_trials_above_one`. Postgres does not guarantee the
+    -- order CHECK constraints are evaluated in, so at `trial_count = 1` this
+    -- one can run first and raise DivisionByZero (SQLSTATE 22012, measured)
+    -- instead of the intended check violation. The other constraint still
+    -- REJECTS that row; this clause only decides which error the writer sees.
+    -- ⚠ A test asserting "any exception" cannot tell the two apart, which is
+    -- why the reject-case test pins the SQLSTATE.
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'strategy_results_dsr_correlation_bounded') THEN
         ALTER TABLE strategy_results_store ADD CONSTRAINT strategy_results_dsr_correlation_bounded
             CHECK (dsr_average_trial_correlation IS NULL
-                   OR (dsr_average_trial_correlation > -1.0 / (trial_count - 1)
+                   OR (trial_count > 1
+                       AND dsr_average_trial_correlation > -1.0 / (trial_count - 1)
                        AND dsr_average_trial_correlation <= 1));
     END IF;
 

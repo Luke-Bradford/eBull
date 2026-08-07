@@ -319,6 +319,26 @@ def test_results_table_rejects(ebull_test_conn: psycopg.Connection[tuple], label
         _insert(ebull_test_conn, **overrides)
 
 
+def test_a_single_declared_trial_is_a_check_violation_not_a_division_by_zero(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ "ANY EXCEPTION" IS WHY THIS WENT UNNOTICED.
+
+    ``strategy_results_dsr_correlation_bounded`` divides by ``trial_count - 1``
+    for A.3's positive-definite bound, and Postgres does NOT guarantee the order
+    CHECK constraints evaluate in. At ``trial_count = 1`` the division could run
+    before ``strategy_results_dsr_trials_above_one`` rejects the row, raising
+    ``DivisionByZero`` (SQLSTATE 22012, measured) instead of a check violation —
+    the row is refused either way, but the writer sees an arithmetic error
+    naming nothing.
+
+    The parametrised reject-case above accepts ``psycopg.errors.Error``, so it
+    passes for BOTH outcomes and cannot tell them apart. This pins the class.
+    """
+    with pytest.raises(psycopg.errors.CheckViolation), ebull_test_conn.transaction():
+        _insert(ebull_test_conn, **{**_DSR, "trial_count": 1, "dsr_independent_trials": "1.0"})
+
+
 def test_a_writer_that_omits_the_basis_is_refused(ebull_test_conn: psycopg.Connection[tuple]) -> None:
     """#2288 clause 2, and the reason this migration ships before its writer.
 

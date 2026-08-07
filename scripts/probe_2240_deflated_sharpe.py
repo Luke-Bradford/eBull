@@ -216,14 +216,18 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_negatively_correlated_trials_refuse_rather_than_raise",
     ),
     (
-        # ⚠ An imaginary standard error admitted. `math.sqrt` of a negative
-        # raises, so this surfaces as a crash rather than a wrong number — but
-        # the refusal is what makes it a stated state instead of a traceback.
-        "a negative variance term admitted into the square root",
+        # ⚠ A ZERO standard error admitted, so eq. (2) divides by `sqrt(0)`.
+        # Surfaces as a crash rather than a wrong number — the refusal is what
+        # makes it a stated state instead of a traceback.
+        # ⚠⚠ ZERO, not negative: once the moment guard enforces Pearson's
+        # `y4 >= y3^2 + 1`, the bracket's discriminant is always <= 0 and it can
+        # only TOUCH zero, never go below. The strictly-negative case is
+        # unreachable, which is why the named test sits on the Pearson boundary.
+        "a zero variance term admitted into the square root",
         DSR,
         DSR_TESTS,
         [("    if variance_term <= 0.0 or not math.isfinite(variance_term):", "    if False:")],
-        "test_an_imaginary_standard_error_is_refused",
+        "test_a_zero_standard_error_is_refused",
     ),
     (
         # ⚠ Kurtosis validated as excess rather than raw, so a Normal's 0.0
@@ -231,19 +235,31 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "the raw-kurtosis guard removed from TradeMoments",
         DSR,
         DSR_TESTS,
-        [("        if self.kurtosis < 1.0:", "        if False:")],
+        [("        if self.kurtosis < floor:", "        if False:")],
         "test_excess_kurtosis_is_refused_at_construction",
     ),
     (
-        # ⚠⚠ The kurtosis bound loosened back to `> 0` — the review NITPICK on
-        # PR #2372. `y4 >= y3^2 + 1` for any real distribution, so (0, 1) is
+        # ⚠⚠ The kurtosis bound loosened back to `> 0` — the first review
+        # NITPICK on PR #2372. `y4 >= 1` for any real distribution, so (0, 1) is
         # impossible, and the looser bound admitted all of it while the message
         # beside it claimed otherwise.
-        "the kurtosis bound loosened from 1 back to 0",
+        "the kurtosis bound loosened from the Pearson floor back to 0",
         DSR,
         DSR_TESTS,
-        [("        if self.kurtosis < 1.0:", "        if self.kurtosis <= 0.0:")],
+        [("        if self.kurtosis < floor:", "        if self.kurtosis <= 0.0:")],
         "test_a_kurtosis_between_zero_and_one_is_refused",
+    ),
+    (
+        # ⚠⚠ The SKEW TIE dropped — the second review NITPICK on PR #2372. A
+        # bare `>= 1` floor is right for y3 = 0 and wrong for every other skew:
+        # Pearson gives `y4 >= y3^2 + 1`, so at y3 = 2 the floor is 5 and a
+        # kurtosis of 1 beside it is impossible. This probe keeps the guard but
+        # unties it from the skew, which is the version that passed review once.
+        "the kurtosis floor untied from the skewness",
+        DSR,
+        DSR_TESTS,
+        [("        floor = self.skewness**2 + 1.0", "        floor = 1.0")],
+        "test_a_kurtosis_below_the_skewness_floor_is_refused",
     ),
     (
         # ⚠⚠ A COVARIANCE matrix is square AND symmetric, so both earlier guards

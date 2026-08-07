@@ -384,16 +384,33 @@ class TestRefusals:
         with pytest.raises(ValueError, match="must exceed 1"):
             expected_max_sharpe(trial_sharpe_variance=1e-4, independent_trials=1.0)
 
-    def test_an_imaginary_standard_error_is_refused(self) -> None:
-        """A large negative skew against a large Sharpe drives (2)'s bracket negative.
+    def test_a_zero_standard_error_is_refused(self) -> None:
+        """⚠⚠ ZERO IS THE REACHABLE CASE; STRICTLY NEGATIVE IS NOT.
 
-        ⚠ Constructed to make ``1 - y3*SR + (y4-1)/4*SR^2`` negative: no real
-        DSR exists, and returning one would mean taking a square root of a
-        negative number somewhere upstream.
+        Equation (2)'s bracket is a quadratic in ``SR`` whose discriminant is
+        ``y3^2 - (y4 - 1)``. Pearson's inequality gives ``y4 >= y3^2 + 1``,
+        i.e. ``y4 - 1 >= y3^2``, so that discriminant is **always <= 0** and the
+        bracket can never go below zero for a valid moment pair — it only
+        TOUCHES zero, at the Pearson boundary and the single Sharpe
+        ``2*y3/(y4-1)``.
+
+        ⚠ This became true only once the moment guard enforced ``y3^2 + 1``
+        rather than a bare 1 (review NITPICK on PR #2372). The earlier version
+        of this test used ``y3=-1, y4=1`` — a pair Pearson forbids — to drive
+        the bracket negative, so it was asserting a refusal on an input that
+        cannot exist. The refusal is still live, because zero is reachable and
+        dividing by ``sqrt(0)`` is just as fatal.
         """
-        moments = TradeMoments(sharpe=-4.0, skewness=-1.0, kurtosis=1.0, trade_count=1000)
+        skewness, kurtosis = 3.0, 10.0
+        assert kurtosis == skewness**2 + 1.0  # exactly on Pearson's bound
+        moments = TradeMoments(
+            sharpe=2.0 * skewness / (kurtosis - 1.0),
+            skewness=skewness,
+            kurtosis=kurtosis,
+            trade_count=1000,
+        )
         variance_term = 1.0 - moments.skewness * moments.sharpe + (moments.kurtosis - 1.0) / 4.0 * moments.sharpe**2
-        assert variance_term < 0.0
+        assert variance_term == pytest.approx(0.0, abs=1e-12)
         assert (
             deflated_sharpe(
                 moments,
@@ -480,8 +497,25 @@ class TestTradeMoments:
         values impossible — and a near-Normal series passed as EXCESS kurtosis
         lands in exactly that range.
         """
-        with pytest.raises(ValueError, match="at least 1"):
+        with pytest.raises(ValueError, match="excess kurtosis"):
             TradeMoments(sharpe=0.1, skewness=0.0, kurtosis=0.4, trade_count=100)
+
+    def test_a_kurtosis_below_the_skewness_floor_is_refused(self) -> None:
+        """⚠⚠ THE FLOOR IS ``y3^2 + 1``, NOT A BARE 1.
+
+        Pearson's inequality ties the two moments, so a large skew REQUIRES a
+        large kurtosis: at ``y3 = 2`` the floor is 5, and ``y4 = 1`` beside it
+        is impossible rather than merely unusual — yet it clears a bare ``>= 1``
+        guard. ``trade_moments`` cannot emit such a pair (it computes both from
+        one series), so this catches a DIRECT caller, which is the only way an
+        inconsistent pair can enter.
+        """
+        with pytest.raises(ValueError, match=r"below y3\^2 \+ 1"):
+            TradeMoments(sharpe=0.1, skewness=2.0, kurtosis=1.0, trade_count=100)
+
+    def test_a_consistent_skew_kurtosis_pair_constructs(self) -> None:
+        """The same skew with a kurtosis above its floor is fine."""
+        assert TradeMoments(sharpe=0.1, skewness=2.0, kurtosis=5.5, trade_count=100).kurtosis == 5.5
 
     def test_a_two_point_distribution_attains_exactly_one(self) -> None:
         """⚠ 1 is ATTAINABLE, so the bound is inclusive rather than strict.
