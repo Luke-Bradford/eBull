@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 import app.services.strategies.s4_volatility_compression_breakout as s4_module
+from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries, IndicatorSeries, atr_series
 from app.services.signal_ledger import resolve_fills
 from app.services.strategies.s4_volatility_compression_breakout import (
@@ -599,17 +600,17 @@ class TestIdentity:
             s4_identity(universe=UNIVERSE, cost_model_id="   ")
 
     def test_the_version_moves_with_the_universe(self) -> None:
-        a = s4_identity(universe="survivor_only", cost_model_id="undeclared-v0")
-        b = s4_identity(universe="survivorship_free", cost_model_id="undeclared-v0")
+        a = s4_identity(universe="survivor_only", cost_model_id=COST_MODEL_ID)
+        b = s4_identity(universe="survivorship_free", cost_model_id=COST_MODEL_ID)
         assert a.version != b.version
 
     def test_the_version_moves_with_the_cost_model(self) -> None:
-        a = s4_identity(universe=UNIVERSE, cost_model_id="undeclared-v0")
+        a = s4_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
         b = s4_identity(universe=UNIVERSE, cost_model_id="static-p75-v1")
         assert a.version != b.version
 
     def test_the_identity_carries_every_parameter_of_the_rule(self) -> None:
-        identity = s4_identity(universe=UNIVERSE, cost_model_id="undeclared-v0")
+        identity = s4_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
         assert identity.strategy_id == S4_STRATEGY_ID
         assert dict(identity.params) == {
             "atr_period": SPEC_ATR_PERIOD,
@@ -641,7 +642,7 @@ class TestLedgerRoundTrip:
         rows = resolve_fills(
             s4_signals(series, universe=UNIVERSE, masked_reason=REASON),
             series=series,
-            identity=s4_identity(universe=UNIVERSE, cost_model_id="undeclared-v0"),
+            identity=s4_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID),
             instrument_id=1,
         )
         fired = [row for row in rows if row.verdict == "fired"]
@@ -657,7 +658,7 @@ class TestLedgerRoundTrip:
         rows = resolve_fills(
             s4_signals(series, universe=UNIVERSE, masked_reason=REASON),
             series=series,
-            identity=s4_identity(universe=UNIVERSE, cost_model_id="undeclared-v0"),
+            identity=s4_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID),
             instrument_id=1,
         )
         assert len(rows) == len(CYCLE_CLOSES)

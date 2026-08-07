@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
 from app.services.signal_ledger import resolve_fills
 from app.services.strategies.s1_time_series_momentum import (
@@ -325,17 +326,17 @@ class TestIdentity:
             s1_identity(universe=UNIVERSE, cost_model_id="   ")
 
     def test_the_version_moves_with_the_universe(self) -> None:
-        a = s1_identity(universe="survivor_only", cost_model_id="undeclared-v0")
-        b = s1_identity(universe="survivorship_free", cost_model_id="undeclared-v0")
+        a = s1_identity(universe="survivor_only", cost_model_id=COST_MODEL_ID)
+        b = s1_identity(universe="survivorship_free", cost_model_id=COST_MODEL_ID)
         assert a.version != b.version
 
     def test_the_version_moves_with_the_cost_model(self) -> None:
-        a = s1_identity(universe=UNIVERSE, cost_model_id="undeclared-v0")
+        a = s1_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
         b = s1_identity(universe=UNIVERSE, cost_model_id="static-p75-v1")
         assert a.version != b.version
 
     def test_the_identity_carries_the_two_lookbacks_and_nothing_else(self) -> None:
-        identity = s1_identity(universe=UNIVERSE, cost_model_id="undeclared-v0")
+        identity = s1_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
         assert identity.strategy_id == S1_STRATEGY_ID
         assert dict(identity.params) == {"fast_period": 50, "slow_period": 200}
         assert dict(S1_PARAMS) == dict(identity.params)
@@ -360,7 +361,7 @@ class TestLedgerRoundTrip:
         rows = resolve_fills(
             signals,
             series=series,
-            identity=s1_identity(universe=UNIVERSE, cost_model_id="undeclared-v0"),
+            identity=s1_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID),
             instrument_id=1,
         )
         assert len(rows) == 2 * len(CYCLE)
@@ -372,7 +373,7 @@ class TestLedgerRoundTrip:
         rows = resolve_fills(
             s1_signals(series, universe=UNIVERSE, close_reason=REASON),
             series=series,
-            identity=s1_identity(universe=UNIVERSE, cost_model_id="undeclared-v0"),
+            identity=s1_identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID),
             instrument_id=1,
         )
         fired = [row for row in rows if row.verdict == "fired"]

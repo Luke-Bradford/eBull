@@ -48,6 +48,7 @@ import psycopg
 from psycopg import sql as pgsql
 
 from app.config import settings
+from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION, load_masked_series
 from app.services.strategies.s2_cross_sectional_momentum import (
@@ -74,8 +75,9 @@ from app.services.technical_analysis import OHLCVRow
 #: Both are ``survivor_only`` and every figure below inherits that label (#2288).
 UNIVERSE = "survivor_only"
 
-#: No cost model exists yet — §5 criterion 2 specifies one, §8 sequences it.
-COST_MODEL_ID = "undeclared-v0"
+#: ⚠ IMPORTED, never restated. Stage 5b froze the model, so the identity hash
+#: records a real cost basis; a local literal here would be a second source of
+#: truth for a value that is hashed into every stored strategy version.
 
 #: Relative margin below which a disagreement is arithmetic, not logic. Postgres
 #: divides ``numeric`` exactly; the module divides ``float``.

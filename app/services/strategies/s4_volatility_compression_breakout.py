@@ -214,7 +214,7 @@ def s4_identity(*, universe: Universe, cost_model_id: str) -> StrategyIdentity:
     if not cost_model_id.strip():
         raise ValueError(
             "cost_model_id must be a non-empty declaration (criterion 11 hashes it); "
-            "no cost model exists yet, so pass an explicit placeholder rather than an empty string"
+            "pass app.services.cost_model.COST_MODEL_ID rather than an empty string"
         )
     return StrategyIdentity(
         strategy_id=S4_STRATEGY_ID,
