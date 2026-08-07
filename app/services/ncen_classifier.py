@@ -26,6 +26,26 @@ Broker-dealer (``BD``) classification is NOT addressable from
 N-CEN — broker-dealers file Form ADV / FOCUS reports instead.
 That's a separate ticket; v1 stays at the N-CEN-derivable subset.
 
+⚠ **This module's discovery walk is structurally empty, measured
+2026-08-06 on #2214.** N-CEN is filed by the RIC TRUST, not by the
+13F manager — the same disjointness #963 documented for N-PORT in
+:mod:`app.services.sec_nport_filer_directory`. This walk iterates
+``institutional_filer_seeds``, which holds 13F-manager CIKs, and 8
+of ``institutional_filers``' 11,465 CIKs appear in the 2,036-row
+``sec_nport_filer_directory`` at all (all 8 internally-managed
+closed-end funds that file both because they *are* the fund). So
+``no_ncen_found`` for every seed is the correct outcome, not a
+symptom. ⚠ And even given a filing, the ``N-1A`` mapping above can
+never yield ``ETF``: every ETF is ``N-1A``, identical to an
+ordinary open-end mutual fund. The structured ETF flag is
+per-SERIES at Item C.3.a, reachable only through the DERA N-CEN
+data sets — see ``.claude/skills/data-sources/sec-edgar.md``
+§2.2.1 and ``scripts/audit_ncen_etf_advisers.py``. Do not "fix"
+the seeding here expecting the ``etfs`` ownership wedge to become
+an ETF-ownership figure: 13F reports per MANAGER with no fund
+breakdown, so a ``filer_type`` value can only mean "managed by an
+adviser that also advises ETFs", never "held by ETFs".
+
 Idempotent: re-running on the same accession UPSERTs in place;
 re-running with a newer accession promotes via UPSERT and
 refreshes ``fetched_at``. The downstream 13F-HR ingester reads
