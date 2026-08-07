@@ -2837,6 +2837,34 @@ def _extract_holder_rows(
         if not holder_name:
             pending_owner_name = None
             continue
+        if _is_instrument_not_owner(holder_name):
+            # #2176 — the row names no beneficial owner. 17 CFR 229.403 column
+            # 2 is "Name and address of beneficial owner", and Rule 13d-3
+            # defines that as a person or entity holding voting or investment
+            # power. A name composed ENTIRELY of equity/award vocabulary is
+            # neither: it is either the table's own column-1 'Title of class'
+            # value leaking into the name column ('Series A Common Shares') or
+            # a presentation aggregate ('Total', 'Total Shares Outstanding').
+            #
+            # The predicate is not new and neither is the vocabulary. What was
+            # missing is a place to apply it PER ROW: #2176 §1 measured
+            # ``_is_beneficial_owner_identity`` down to a single call site,
+            # inside ``_owner_identity_fraction``, which gates TABLE selection
+            # only — so an admitted table wrote every row it produced, and
+            # ``_ROW_IDENTITY_FLOOR`` tolerates up to 49% non-owners by design.
+            #
+            # Deliberately the NEGATIVE test and not the positive one. Applying
+            # ``_is_beneficial_owner_identity`` per row was measured on the full
+            # population (#2176 §2) and rejects genuine holders — bare
+            # 'BlackRock', 'Margareth Øvrum', and the 229.403(b) Instruction 5
+            # group row itself — at many times the rate it removes junk.
+            #
+            # Removing these rows RAISES ``_owner_identity_fraction`` for the
+            # table, which is the intended direction: #2176 class 2 is a
+            # genuine Item 403 table pushed under the floor by its own
+            # class-label rows.
+            pending_owner_name = None
+            continue
         shares = _parse_share_count(shares_raw)
         # #2163 — 17 CFR 229.403 column 3 is a COUNT, column 4 is a PERCENT.
         # A percent-signatured value at shares_idx is not a holding; hold it
