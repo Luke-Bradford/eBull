@@ -4,10 +4,20 @@
 
 Two arms, and they answer different questions:
 
-``--mechanism``  the relations themselves, against the dev database. Read-only:
-                 every write happens inside a transaction that is rolled back,
-                 and the arm re-counts all three relations afterwards to prove
-                 it. Seconds.
+``--mechanism``  the relations themselves, and the three refusals they carry,
+                 against the DEV database. ⚠ It DOES write — the refusals cannot
+                 be observed without attempting the writes they refuse — and
+                 every attempt sits inside a transaction that is rolled back, so
+                 the arm re-counts all three relations afterwards and FAILS if
+                 anything survived. Seconds.
+
+                 ⚠ Exercising them here is not redundant with
+                 ``tests/test_strategy_holdout_namespace.py``: those run against
+                 the test template, and a migration that half-applied to the DEV
+                 database would leave the tests green and this arm red. The
+                 sequence behind ``strategy_holdout_accesses.access_id`` DOES
+                 advance across the rollback, which is what sequences do and is
+                 harmless — no row survives.
 
 ``--census``     ⚠⚠ THE FULL-POPULATION ARM, and the number spec §5.2 requires
                  and nothing has yet measured: *"The split is over corpus bars,
@@ -74,6 +84,100 @@ _OCCUPANCY_SQL = """
         (SELECT count(*) FROM strategy_holdout_accesses)   AS accesses
 """
 
+#: ⚠ A strategy id no real strategy uses, so the rolled-back probe rows can be
+#: counted apart from anything a future writer stores.
+_PROBE_STRATEGY = "S-VERIFY-5E1"
+
+_PROBE_ACCESS = """
+    INSERT INTO strategy_holdout_accesses
+        (strategy_id, strategy_version, result_version, access_kind, accessed_by, purpose)
+    VALUES (%(sid)s, 'verify-5e1', 'verify-5e1-result', 'evaluate', 'verify_2240_holdout_namespace.py',
+            'mechanism arm — rolled back')
+"""
+
+#: ⚠ FIXED statements, never built from a column list. Both write the SAME row;
+#: only the relation differs, which is the whole point of the pair.
+_PROBE_TAIL = """
+        'verify-5e1', 'verify-5e1-result', 'sleeve', 'hold_out', 'worst_case', '1962-01-02', '2026-07-08',
+        'survivor_only', 'verify', 'verify', true, 'verify', 'p', 'o', 'i', 1,
+        0.5, 1.18, 3.9, 14.2, 0.27, 0.39, -31.4, 62.1, 3.05, 100, -2.4, 50, 20, 4, 0, 251.67, 418.0, 420.4,
+        'criterion7-v1'
+"""
+
+_PROBE_COLUMNS = """
+        strategy_id, strategy_version, result_version, result_scope, namespace,
+        ambiguity_arm, window_start, window_end, universe_basis, corpus_version,
+        cost_model_id, carry_unmodelled, sizing_rule, position_rule_set_version,
+        outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
+        expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
+        max_drawdown_pct, exposure_time_pct, turnover_annualised, trade_count,
+        return_vs_buy_and_hold_pct, losing_trade_count, losing_period_count, open_trade_count,
+        unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id
+"""
+
+_PROBE_INSERT_STORE = f"""
+    INSERT INTO strategy_results_store ({_PROBE_COLUMNS}) VALUES (%(sid)s, {_PROBE_TAIL})
+"""  # noqa: S608 - both fragments are module-level literals, no caller input reaches them
+
+_PROBE_INSERT_VIEW = f"""
+    INSERT INTO strategy_results ({_PROBE_COLUMNS}) VALUES (%(sid)s, {_PROBE_TAIL})
+"""  # noqa: S608 - as above
+
+_PROBE_VISIBILITY = """
+    SELECT
+        (SELECT count(*) FROM strategy_results_store WHERE strategy_id = %(sid)s) AS stored,
+        (SELECT count(*) FROM strategy_results       WHERE strategy_id = %(sid)s) AS visible
+"""
+
+
+class _Rollback(Exception):
+    """Unwinds the probe transaction. ⚠ Never a real error — see ``_refusals``."""
+
+
+def _refusals(conn: psycopg.Connection[tuple]) -> list[str]:
+    """The three refusals, attempted for real and then rolled back.
+
+    ⚠⚠ THE ORDER OF THE FIRST TWO IS FORCED AND IS EASY TO GET WRONG. The
+    store's BEFORE INSERT trigger fires before the view's ``WITH CHECK OPTION``
+    is evaluated, so a hold-out INSERT through the view with NO access record is
+    refused by the TRIGGER (23000) and says nothing about the check option. The
+    access record has to be written first to reach it (44000). A single
+    "it was refused" assertion would pass while testing the wrong mechanism.
+    """
+    problems: list[str] = []
+    params = {"sid": _PROBE_STRATEGY}
+    try:
+        with conn.transaction():
+            # 1 — the trigger: a hold-out row with no evaluate record.
+            try:
+                with conn.transaction():
+                    conn.execute(_PROBE_INSERT_STORE, params)
+                problems.append("an unrecorded hold-out row was STORED — the trigger is not enforcing criterion 5")
+            except psycopg.errors.IntegrityError as caught:
+                print(f"  trigger refusal          {caught.sqlstate} (unrecorded hold-out evaluation)", flush=True)
+
+            conn.execute(_PROBE_ACCESS, params)
+
+            # 2 — the check option: same row, through the view, now that the
+            # trigger is satisfied.
+            try:
+                with conn.transaction():
+                    conn.execute(_PROBE_INSERT_VIEW, params)
+                problems.append("a hold-out row was inserted THROUGH THE VIEW — the check option is not enforcing")
+            except psycopg.errors.WithCheckOptionViolation as caught:
+                print(f"  check-option refusal     {caught.sqlstate} (hold-out row through the in-sample view)")
+
+            # 3 — the filter: the recorded row stores, and stays invisible.
+            conn.execute(_PROBE_INSERT_STORE, params)
+            seen = conn.execute(_PROBE_VISIBILITY, params).fetchone()
+            print(f"  recorded hold-out row    stored/visible = {seen}", flush=True)
+            if seen != (1, 0):
+                problems.append(f"a recorded hold-out row reads as {seen}, expected (1, 0) — the view filter is gone")
+            raise _Rollback
+    except _Rollback:
+        pass
+    return problems
+
 
 def mechanism() -> int:
     """The relations, asserted against the real database. Nothing is left behind."""
@@ -133,9 +237,16 @@ def mechanism() -> int:
         occupancy = conn.execute(_OCCUPANCY_SQL).fetchone()
         print(f"  occupancy                stored/visible/accesses = {occupancy}", flush=True)
 
+        problems.extend(_refusals(conn))
+
+        # ⚠ NOW this comparison can fail: `_refusals` really wrote three rows
+        # and really rolled them back, so an unequal count means the rollback
+        # did not happen. Run before any write it would be a check that cannot
+        # fire — the dead-branch shape phase 5d's probes caught.
         after = conn.execute(_OCCUPANCY_SQL).fetchone()
+        print(f"  occupancy after probes   stored/visible/accesses = {after}", flush=True)
         if after != occupancy:
-            problems.append(f"this arm changed the database: {occupancy} → {after}")
+            problems.append(f"the probe transaction did not roll back: {occupancy} → {after}")
 
     print(f"\n  problems: {len(problems)}", flush=True)
     for problem in problems:
