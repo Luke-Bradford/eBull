@@ -92,8 +92,8 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         "the collapse fires on any multi-line cell instead of a pure value stack",
         [
             (
-                '        stacks_amounts = _value_stack_state(segments, _is_whole_share_segment) == "stack"',
-                "        stacks_amounts = len(segments) >= 2",
+                '_value_stack_state(segments, _is_whole_share_segment) != "stack" or',
+                "len(segments) < 2 or",
             )
         ],
         "test_a_footnote_line_above_the_amount_is_not_read_as_the_amount",

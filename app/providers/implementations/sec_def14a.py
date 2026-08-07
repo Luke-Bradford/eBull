@@ -2699,10 +2699,21 @@ def _collapse_stacked_value_cells(flat_row: tuple[str, ...], line_row: tuple[str
         # class. Left dropped, which is what main does.
         if index >= len(flat_row) or _parse_share_count(flat_row[index]) is None:
             continue
+        # AMOUNTS only, and there is no percent arm to add — review WARNING on
+        # PR #2361 read the missing one as an oversight. A percent column cannot
+        # reach the corruption this function repairs: ``_is_percent_segment``
+        # requires ``%`` or a bare ``*``, so a percent STACK always leaves one of
+        # those inside the flat cell, and ``_parse_share_count`` — which strips
+        # spaces, commas and a TRAILING footnote, never an interior ``%`` or
+        # ``*`` — then returns ``None``. Measured, not argued: '5.86% 7.94%',
+        # '10% 20%', '* *' and '* **' all parse to None as a share count AND as
+        # a percent. So a glued percent stores NULL on main and on this branch,
+        # which is what #2359's review settled ("one percent beside two amounts
+        # belongs to at most ONE of them, and the markup does not say which").
+        # Collapsing it would ADD a figure, and the full-population A/B caught a
+        # mid-branch revision doing exactly that on 0001213900-26-076369.
         segments = _cell_segments(line_cell)
-        stacks_amounts = _value_stack_state(segments, _is_whole_share_segment) == "stack"
-        stacks_percents = _value_stack_state(segments, _is_percent_segment) == "stack"
-        if not (stacks_amounts or stacks_percents) or segments[0] == flat_row[index]:
+        if _value_stack_state(segments, _is_whole_share_segment) != "stack" or segments[0] == flat_row[index]:
             continue
         collapsed[index] = segments[0]
         changed = True
