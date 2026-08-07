@@ -28,13 +28,14 @@ calendar year, inflating Sharpe by ``sqrt(365/196) = 1.37x``. See
 ⚠⚠ TWO METRICS ARE NULLABLE AND NEITHER IS A GAP LEFT OPEN.
 
 - ``effective_sample_size`` is criterion 3's, from a *"block bootstrap over
-  calendar blocks with errors clustered by date"*, and spec §8 assigns that to
-  **stage 5e**. It is ``None`` here and the promotion gate refuses on it — the
-  same construction ``deflated_sharpe`` already has. ⚠ Computing a nominal *n*
-  instead would be worse than leaving it null: criterion 3 says *"no bare
-  percentage and no nominal n is reported anywhere"*, so a filled-in overlap-
-  ignoring count would be the exact number the criterion forbids, wearing the
-  name of the one it requires.
+  calendar blocks with errors clustered by date"*. **Stage 5e-2 computes it**
+  (``app/services/block_bootstrap.py``), but only when the caller declares a
+  ``bootstrap_seed`` — with no seed it stays ``None`` and the promotion gate
+  refuses on it, the same construction ``deflated_sharpe`` still has. ⚠
+  Computing a nominal *n* instead would be worse than leaving it null:
+  criterion 3 says *"no bare percentage and no nominal n is reported anywhere"*,
+  so a filled-in overlap-ignoring count would be the exact number the criterion
+  forbids, wearing the name of the one it requires.
 - ``profit_factor`` and ``sortino`` are ``None`` only when their DENOMINATOR is
   empty — no losing trade, no losing period. That is a real state, not a missing
   measurement, and ``sql/263`` ties each null to its own count with a CHECK so
@@ -51,6 +52,7 @@ from typing import Final
 import numpy as np
 import numpy.typing as npt
 
+from app.services.block_bootstrap import block_bootstrap_expectancy, cluster_by_date
 from app.services.equity_curve import EquityCurve
 
 #: Days in a mean Gregorian year, for turning a date span into years.
@@ -82,10 +84,23 @@ class TradeReturns:
     #: ``gross_return_pct``, which ``sql/256`` names GROSS so nothing averages
     #: it as performance.
     net_return_pct: tuple[float, ...]
+    #: The entry fill date of each trade above, positionally parallel to it.
+    #: ⚠ REQUIRED, not defaulted, and criterion 3 is the reason: it is the key
+    #: the block bootstrap clusters on (``block_bootstrap.cluster_by_date``), so
+    #: a default would let a caller silently produce a metric set with no
+    #: effective sample size and no error.
+    entry_fill_date: tuple[date, ...]
     #: Positions still open at the window end, and positions whose close
     #: carried no price. Counted, never dropped (§3.2 rule 5).
     open_count: int
     unpriced_count: int
+
+    def __post_init__(self) -> None:
+        if len(self.net_return_pct) != len(self.entry_fill_date):
+            raise ValueError(
+                f"{len(self.net_return_pct)} returns against {len(self.entry_fill_date)} entry dates — the two are "
+                "positionally parallel, and a mismatch would cluster returns under the wrong dates"
+            )
 
 
 @dataclass(frozen=True)
@@ -126,6 +141,24 @@ class StrategyMetrics:
     periods_per_year: float
     total_return_pct: float
     buy_and_hold_return_pct: float
+
+    # --- criterion 3's interval and its provenance ------------------------
+    #: The 95% block-bootstrap interval on ``expectancy_per_trade_pct``. ⚠ The
+    #: criterion requires BOTH halves — *"report the effective sample size and
+    #: confidence interval"* — so these travel with the ESS and never without
+    #: it; ``__post_init__`` refuses any partial set.
+    expectancy_ci_low_pct: float | None = None
+    expectancy_ci_high_pct: float | None = None
+    #: ⚠ Declared inputs, stored because criterion 11 makes them part of what a
+    #: result MEANS: the same trades under a different block length, seed or
+    #: resample count are a different measurement, and a reader holding the row
+    #: cannot re-derive any of the three from it.
+    bootstrap_block_length: int | None = None
+    bootstrap_cluster_count: int | None = None
+    bootstrap_resamples: int | None = None
+    bootstrap_seed: int | None = None
+    bootstrap_design_effect: float | None = None
+    bootstrap_model_id: str | None = None
     metric_set_id: str = METRIC_SET_ID
 
     def __post_init__(self) -> None:
@@ -156,6 +189,36 @@ class StrategyMetrics:
             raise ValueError(f"exposure_time_pct {self.exposure_time_pct} is outside 0-100")
         if self.effective_sample_size is not None and self.effective_sample_size <= 0.0:
             raise ValueError(f"effective_sample_size must be positive when declared, got {self.effective_sample_size}")
+        # ⚠⚠ ALL-OR-NOTHING, and it is criterion 3's own wording that makes it so:
+        # the criterion asks for the effective sample size AND the interval, so a
+        # row carrying one without the other reports a corrected number whose
+        # correction cannot be judged. Enforced here and again by `sql/265` — a
+        # partial set is a bug in the caller, not a state the model admits.
+        bootstrap_fields = (
+            self.effective_sample_size,
+            self.expectancy_ci_low_pct,
+            self.expectancy_ci_high_pct,
+            self.bootstrap_block_length,
+            self.bootstrap_cluster_count,
+            self.bootstrap_resamples,
+            self.bootstrap_seed,
+            self.bootstrap_design_effect,
+            self.bootstrap_model_id,
+        )
+        present = sum(field is not None for field in bootstrap_fields)
+        if present not in (0, len(bootstrap_fields)):
+            raise ValueError(
+                f"{present} of {len(bootstrap_fields)} block-bootstrap fields are set: criterion 3 requires the "
+                "effective sample size and its interval together, so the set is present or absent as a whole"
+            )
+        if (
+            self.expectancy_ci_low_pct is not None
+            and self.expectancy_ci_high_pct is not None
+            and self.expectancy_ci_low_pct > self.expectancy_ci_high_pct
+        ):
+            raise ValueError(
+                f"expectancy interval [{self.expectancy_ci_low_pct}, {self.expectancy_ci_high_pct}] is inverted"
+            )
 
 
 def periods_per_year(dates: tuple[date, ...]) -> float:
@@ -215,6 +278,7 @@ def compute_metrics(
     trades: TradeReturns,
     buy_and_hold: EquityCurve | None,
     starting_equity: float = 1.0,
+    bootstrap_seed: int | None = None,
 ) -> StrategyMetrics:
     """Criterion 7's metric set for one curve. Pure; reads no database.
 
@@ -233,6 +297,15 @@ def compute_metrics(
     the relative return is reported against zero and the absolute one is
     reported beside it. It is NOT a silent 0% benchmark: ``buy_and_hold_return_pct``
     carries the same 0.0 and the two are distinguishable on the row.
+
+    ⚠⚠ ``bootstrap_seed`` IS REQUIRED FOR CRITERION 3 AND DEFAULTS TO OFF.
+
+    ``None`` leaves ``effective_sample_size`` and its interval NULL, and the
+    promotion gate refuses on ``effective_sample_size_not_computed`` — the
+    fail-closed state phase 5c shipped. It defaults to off rather than to an
+    arbitrary seed because the seed is a DECLARED input under criterion 11: a
+    default would let two runs of "the same" evaluation differ in a number
+    nobody chose, or agree by a coincidence nobody recorded.
     """
     equity = curve.equity
     if len(equity) != len(dates):
@@ -319,6 +392,17 @@ def compute_metrics(
     else:
         benchmark_return = 0.0
 
+    # Criterion 3. ⚠ The bootstrap runs over the CLUSTER axis, not the trade
+    # list — see ``block_bootstrap``'s header for why that is exact rather than
+    # an approximation, and why it is what makes a 10^6-trade population
+    # tractable at all.
+    bootstrap = None
+    if bootstrap_seed is not None:
+        bootstrap = block_bootstrap_expectancy(
+            cluster_by_date(net_returns, trades.entry_fill_date),
+            seed=bootstrap_seed,
+        )
+
     return StrategyMetrics(
         expectancy_per_trade_pct=expectancy,
         profit_factor=profit_factor,
@@ -330,9 +414,7 @@ def compute_metrics(
         exposure_time_pct=exposure,
         turnover_annualised=turnover,
         trade_count=trade_count,
-        # ⚠ Criterion 3's block bootstrap is stage 5e's (spec §8). Null, and the
-        # promotion gate refuses on it — see the module header.
-        effective_sample_size=None,
+        effective_sample_size=bootstrap.effective_sample_size if bootstrap else None,
         return_vs_buy_and_hold_pct=total_return - benchmark_return,
         losing_trade_count=losing_trades,
         losing_period_count=losing_periods,
@@ -341,6 +423,14 @@ def compute_metrics(
         periods_per_year=ppy,
         total_return_pct=total_return,
         buy_and_hold_return_pct=benchmark_return,
+        expectancy_ci_low_pct=bootstrap.ci_low_pct if bootstrap else None,
+        expectancy_ci_high_pct=bootstrap.ci_high_pct if bootstrap else None,
+        bootstrap_block_length=bootstrap.block_length if bootstrap else None,
+        bootstrap_cluster_count=bootstrap.cluster_count if bootstrap else None,
+        bootstrap_resamples=bootstrap.resamples if bootstrap else None,
+        bootstrap_seed=bootstrap.seed if bootstrap else None,
+        bootstrap_design_effect=bootstrap.design_effect if bootstrap else None,
+        bootstrap_model_id=bootstrap.model_id if bootstrap else None,
     )
 
 

@@ -52,8 +52,23 @@ def _curve(equity: list[float], *, invested: list[float] | None = None, traded: 
     )
 
 
-def _trades(returns: list[float], *, open_count: int = 0, unpriced_count: int = 0) -> TradeReturns:
-    return TradeReturns(net_return_pct=tuple(returns), open_count=open_count, unpriced_count=unpriced_count)
+def _trades(
+    returns: list[float],
+    *,
+    open_count: int = 0,
+    unpriced_count: int = 0,
+    dates: list[date] | None = None,
+) -> TradeReturns:
+    # ⚠ Default entry dates are DISTINCT ascending days, not one repeated day:
+    # a single shared date would collapse the whole trade list into one cluster
+    # and quietly make every bootstrap in this file degenerate.
+    entry_dates = dates if dates is not None else [date(2020, 1, 1) + timedelta(days=i) for i in range(len(returns))]
+    return TradeReturns(
+        net_return_pct=tuple(returns),
+        entry_fill_date=tuple(entry_dates),
+        open_count=open_count,
+        unpriced_count=unpriced_count,
+    )
 
 
 class TestAnnualisation:
@@ -397,3 +412,141 @@ class TestCurveAndAxisMustAgree:
     def test_a_curve_of_a_different_length_from_its_axis_is_refused(self) -> None:
         with pytest.raises(ValueError, match="points against"):
             compute_metrics(_curve([1.0, 1.1]), dates=_dates(5), trades=_trades([]), buy_and_hold=None)
+
+
+class TestCriterion3IsWiredIn:
+    """Stage 5e-2 — the block bootstrap reaching the metric set.
+
+    ⚠ The bootstrap's own arithmetic is covered in
+    ``tests/test_block_bootstrap.py``. What is asserted here is only the WIRING:
+    that a declared seed fills criterion 3's fields and an undeclared one leaves
+    the whole set null.
+    """
+
+    def _inputs(self, count: int = 200) -> tuple[EquityCurve, tuple[date, ...], TradeReturns]:
+        rng = np.random.default_rng(101)
+        equity = list(np.cumprod(1.0 + rng.standard_normal(count) * 0.01))
+        returns = [float(v) for v in rng.standard_normal(count)]
+        return _curve(equity), _dates(count), _trades(returns)
+
+    def test_no_seed_leaves_the_whole_criterion_3_block_null(self) -> None:
+        """⚠ The fail-closed default. The promotion gate refuses on the null ESS,
+        so a caller that forgets the seed gets a REFUSED result rather than a
+        silently uncorrected one."""
+        curve, dates, trades = self._inputs()
+        metrics = compute_metrics(curve, dates=dates, trades=trades, buy_and_hold=None)
+
+        assert metrics.effective_sample_size is None
+        assert metrics.expectancy_ci_low_pct is None
+        assert metrics.expectancy_ci_high_pct is None
+        assert metrics.bootstrap_model_id is None
+        assert metrics.bootstrap_seed is None
+
+    def test_a_declared_seed_fills_the_sample_size_and_the_interval(self) -> None:
+        curve, dates, trades = self._inputs()
+        metrics = compute_metrics(curve, dates=dates, trades=trades, buy_and_hold=None, bootstrap_seed=42)
+
+        assert metrics.effective_sample_size is not None
+        assert metrics.effective_sample_size > 0.0
+        assert metrics.expectancy_ci_low_pct is not None
+        assert metrics.expectancy_ci_high_pct is not None
+        assert metrics.expectancy_ci_low_pct <= metrics.expectancy_ci_high_pct
+        assert metrics.bootstrap_seed == 42
+        assert metrics.bootstrap_model_id == "c3-block-bootstrap-v1"
+        assert metrics.bootstrap_cluster_count == 200
+        # ⚠ The trade count is untouched by the correction — criterion 7 reports
+        # BOTH, and a reader compares them. Overwriting the nominal count with
+        # the effective one would destroy the comparison the criterion is for.
+        assert metrics.trade_count == 200
+
+    def test_a_degenerate_trade_population_leaves_the_block_null_rather_than_guessing(self) -> None:
+        """A seed was declared but the measurement could not be made (every trade
+        on one date). ⚠ Criterion 3 forbids a nominal-n fallback, so the correct
+        output is the same null the gate refuses on."""
+        curve, dates, _ = self._inputs(60)
+        single_day = _trades([1.0, 2.0, 3.0], dates=[date(2020, 3, 2)] * 3)
+        metrics = compute_metrics(curve, dates=dates, trades=single_day, buy_and_hold=None, bootstrap_seed=42)
+
+        assert metrics.trade_count == 3
+        assert metrics.effective_sample_size is None
+        assert metrics.bootstrap_model_id is None
+
+
+class TestTradeReturnsParallelism:
+    def test_returns_and_entry_dates_must_be_parallel(self) -> None:
+        """⚠ A mismatch would cluster returns under the wrong dates, which does
+        not raise anywhere downstream — it just produces a wrong effective sample
+        size that looks entirely plausible."""
+        with pytest.raises(ValueError, match="positionally parallel"):
+            TradeReturns(
+                net_return_pct=(1.0, 2.0, 3.0),
+                entry_fill_date=(date(2020, 1, 1), date(2020, 1, 2)),
+                open_count=0,
+                unpriced_count=0,
+            )
+
+
+class TestBootstrapFieldsAreAllOrNothing:
+    """Criterion 3 asks for the sample size AND the interval, so a partial set is
+    a corrected number whose correction cannot be judged."""
+
+    def _full(self) -> dict[str, object]:
+        return {
+            "expectancy_per_trade_pct": 0.5,
+            "profit_factor": 1.2,
+            "cagr_pct": 4.0,
+            "annualised_volatility_pct": 12.0,
+            "sharpe": 0.33,
+            "sortino": 0.44,
+            "max_drawdown_pct": -18.0,
+            "exposure_time_pct": 61.0,
+            "turnover_annualised": 2.5,
+            "trade_count": 100,
+            "return_vs_buy_and_hold_pct": -1.5,
+            "losing_trade_count": 40,
+            "losing_period_count": 300,
+            "open_trade_count": 2,
+            "unpriced_trade_count": 1,
+            "periods_per_year": 251.7,
+            "total_return_pct": 21.0,
+            "buy_and_hold_return_pct": 22.5,
+            "effective_sample_size": 41.0,
+            "expectancy_ci_low_pct": -0.2,
+            "expectancy_ci_high_pct": 1.1,
+            "bootstrap_block_length": 9,
+            "bootstrap_cluster_count": 80,
+            "bootstrap_resamples": 2_000,
+            "bootstrap_seed": 1,
+            "bootstrap_design_effect": 2.44,
+            "bootstrap_model_id": "c3-block-bootstrap-v1",
+        }
+
+    def test_the_complete_set_constructs(self) -> None:
+        assert StrategyMetrics(**self._full()).effective_sample_size == 41.0  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "dropped",
+        [
+            "effective_sample_size",
+            "expectancy_ci_low_pct",
+            "expectancy_ci_high_pct",
+            "bootstrap_block_length",
+            "bootstrap_cluster_count",
+            "bootstrap_resamples",
+            "bootstrap_seed",
+            "bootstrap_design_effect",
+            "bootstrap_model_id",
+        ],
+    )
+    def test_dropping_any_single_field_is_refused(self, dropped: str) -> None:
+        base = self._full()
+        base[dropped] = None
+        with pytest.raises(ValueError, match="block-bootstrap fields"):
+            StrategyMetrics(**base)  # type: ignore[arg-type]
+
+    def test_an_inverted_interval_is_refused(self) -> None:
+        base = self._full()
+        base["expectancy_ci_low_pct"] = 2.0
+        base["expectancy_ci_high_pct"] = 1.0
+        with pytest.raises(ValueError, match="inverted"):
+            StrategyMetrics(**base)  # type: ignore[arg-type]

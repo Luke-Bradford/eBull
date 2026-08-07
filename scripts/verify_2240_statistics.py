@@ -21,7 +21,7 @@ of the corpus and moves with every harvest.
 through the real path (``s1_signals`` / ``s3_signals`` →
 ``signal_ledger.resolve_fills`` → ``build_positions`` → ``cost_positions``),
 run the sleeve equity curve over the whole corpus, compute criterion 7's metric
-set, and assert six properties.
+set, and assert seven properties.
 
   P1  **§2.1's EQUALITY, on the whole trade list.** Every leg's entry date
       EQUALS the position's ``entry_fill_bar_date``, every leg's entry price
@@ -41,6 +41,13 @@ set, and assert six properties.
       close of the bar this script independently located as the last usable one.
   P6  **Conservation.** Every costed position becomes exactly one leg or is
       counted in the excluded census; no position is silently dropped.
+  P7  **Criterion 3's correction is present and self-consistent** (stage 5e-2).
+      The block bootstrap ran, and Kish's relation holds on the STORED columns:
+      ``effective_sample_size x design_effect == trade_count``. ⚠ Computed from
+      the row rather than from the bootstrap's own locals, so it also catches a
+      wiring slip that put one sleeve's design effect beside another's sample
+      size. The block length is inside its own cluster axis and the interval is
+      not inverted.
 
   ⚠ WHAT IS NOT COVERED, STATED SO THE GAP IS A DECISION. Only S-1 and S-3 run
   here, for phase 5a's reason: C2 (``level``) needs the resolver over the whole
@@ -53,12 +60,14 @@ set, and assert six properties.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from array import array
 from collections import Counter
 from datetime import date
 from decimal import Decimal
+from typing import Final
 
 import psycopg
 
@@ -87,6 +96,12 @@ from scripts.verify_2240_position_builder import (
     _stamped_versions,
     _to_series,
 )
+
+#: The declared RNG seed for this script's criterion-3 arm. ⚠ A DECLARED input
+#: under criterion 11, written down rather than defaulted: a run that cannot name
+#: its seed cannot reproduce its own interval. Any fixed value is as good as any
+#: other; what matters is that it is stated and does not drift.
+BOOTSTRAP_SEED: Final = 20260807
 
 _AXIS_SQL = """
     SELECT DISTINCT d.bar_date
@@ -131,6 +146,11 @@ class _Sleeve:
         self.label = label
         self.book = LegBook()
         self.returns: array[float] = array("d")
+        # ⚠ Positionally parallel to `self.returns`, and it is criterion 3's
+        # cluster key — the ENTRY fill date, because the criterion's stated
+        # reason for clustering is that signals correlate across instruments on
+        # the same day, which is a statement about the day they FIRED.
+        self.entry_dates: list[date] = []
         self.positions = 0
         self.open_at_end = 0
         self.excluded: Counter[str] = Counter()
@@ -216,6 +236,7 @@ class _Sleeve:
             )
             if realised:
                 self.returns.append(float(row.net_return_pct))
+                self.entry_dates.append(position.entry_fill_bar_date)
 
     def report(self, *, axis: tuple[date, ...], benchmark_curve: EquityCurve) -> StrategyMetrics | None:
         started = time.monotonic()
@@ -252,10 +273,12 @@ class _Sleeve:
                 dates=axis,
                 trades=TradeReturns(
                     net_return_pct=tuple(self.returns),
+                    entry_fill_date=tuple(self.entry_dates),
                     open_count=self.open_at_end,
                     unpriced_count=sum(self.excluded.values()),
                 ),
                 buy_and_hold=benchmark_curve,
+                bootstrap_seed=BOOTSTRAP_SEED,
             )
         except ValueError as exc:
             # P4 — the metric set constructs.
@@ -278,7 +301,40 @@ class _Sleeve:
         pf = "None (no losing trade)" if metrics.profit_factor is None else f"{metrics.profit_factor:.4f}"
         print(f"      profit factor          {pf:>12}")
         print(f"      trades / losers        {metrics.trade_count:>12,} / {metrics.losing_trade_count:,}")
-        print(f"      effective sample size  {str(metrics.effective_sample_size):>12}   (criterion 3 — stage 5e)")
+
+        # --- criterion 3, stage 5e-2 --------------------------------------
+        ess = metrics.effective_sample_size
+        deff = metrics.bootstrap_design_effect
+        if ess is None or deff is None:
+            self.problems.append(f"{self.label}: P7 the bootstrap produced no effective sample size")
+            return metrics
+
+        print(f"      date clusters          {metrics.bootstrap_cluster_count:>12,}   (dates carrying a trade)")
+        print(f"      block length           {metrics.bootstrap_block_length:>12,}   (Politis & White, MEASURED)")
+        print(f"      design effect          {deff:>12.2f}   (Kish — above 1 means overlap COST evidence)")
+        print(f"      effective sample size  {ess:>12,.1f}   of {metrics.trade_count:,} nominal")
+        print(f"      ESS / nominal          {ess / metrics.trade_count * 100.0:>12.3f}%")
+        print(
+            f"      95% CI on expectancy   [{metrics.expectancy_ci_low_pct:.4f}%, "
+            f"{metrics.expectancy_ci_high_pct:.4f}%]"
+        )
+
+        # P7 — Kish's relation holds on the full population. ⚠ Computed from the
+        # STORED columns, so it also proves the three travel together correctly:
+        # ESS = nominal / deff, by definition, and a wiring slip that put a
+        # different sleeve's design effect on this row would break it.
+        if not math.isclose(ess * deff, metrics.trade_count, rel_tol=1e-9):
+            self.problems.append(
+                f"{self.label}: P7 ESS {ess} x design effect {deff} = {ess * deff}, not the {metrics.trade_count} "
+                "nominal trades — Kish's relation does not hold on the stored row"
+            )
+        if not 1 <= (metrics.bootstrap_block_length or 0) <= (metrics.bootstrap_cluster_count or 0):
+            self.problems.append(
+                f"{self.label}: P7 block length {metrics.bootstrap_block_length} is outside its "
+                f"{metrics.bootstrap_cluster_count}-cluster axis"
+            )
+        if (metrics.expectancy_ci_low_pct or 0.0) > (metrics.expectancy_ci_high_pct or 0.0):
+            self.problems.append(f"{self.label}: P7 the reported interval is inverted")
         return metrics
 
 

@@ -34,7 +34,7 @@ from app.services.result_ledger import (
     store_in_sample_result,
 )
 from app.services.strategy_result import PromotionCandidate, check_promotable
-from tests.test_result_ledger import build_result
+from tests.test_result_ledger import BOOTSTRAP_BLOCK, build_metrics, build_result
 
 _ACTOR = "tests/test_strategy_holdout_namespace.py"
 _PURPOSE = "stage 5e-1 acceptance"
@@ -271,6 +271,40 @@ def test_the_round_trip_preserves_the_whole_result(ebull_test_conn: psycopg.Conn
             purpose=_PURPOSE,
         )
         assert read_back == (written,)
+
+
+def test_a_result_carrying_the_criterion_3_block_survives_the_round_trip(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ THE ROUND TRIP ABOVE CANNOT SEE THE BLOCK-BOOTSTRAP COLUMNS.
+
+    ``build_metrics`` leaves the whole criterion-3 set NULL, so every one of
+    `sql/265`'s eight new columns round-trips as ``None`` there — and a writer
+    that omitted them entirely, or read them back in the wrong positional order,
+    would pass. That was a real gap: the stage-5e-1 ledger was NOT updated when
+    `sql/265` landed, and a bootstrap-carrying row was unwritable (one field set,
+    eight null, refused by `strategy_results_bootstrap_all_or_nothing`).
+
+    This is the case that exercises them. ``BOOTSTRAP_BLOCK`` uses the same
+    awkward-float discipline as the metric set, and its two same-typed integer
+    pairs (`bootstrap_cluster_count` / `bootstrap_resamples`,
+    `bootstrap_block_length` / `bootstrap_seed`) are deliberately distinct so a
+    swapped pair cannot coincide.
+    """
+    with ebull_test_conn.transaction():
+        written = build_result(strategy_id="S-C3TRIP", metrics=build_metrics(**BOOTSTRAP_BLOCK))
+        store_holdout_result(ebull_test_conn, written, accessed_by=_ACTOR, purpose=_PURPOSE)
+
+        read_back = read_holdout_results(
+            ebull_test_conn,
+            "S-C3TRIP",
+            written.identity.strategy_version,
+            accessed_by=_ACTOR,
+            purpose=_PURPOSE,
+        )
+        assert read_back == (written,)
+        assert read_back[0].metrics.bootstrap_model_id == "c3-block-bootstrap-v1"
+        assert read_back[0].metrics.bootstrap_cluster_count == 15577
 
 
 def test_the_holdout_read_returns_only_the_withheld_side(

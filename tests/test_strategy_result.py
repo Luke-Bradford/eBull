@@ -82,10 +82,12 @@ def _identity(**overrides: object) -> ResultIdentity:
 
 
 def _metrics(**overrides: object) -> StrategyMetrics:
-    """A complete criterion-7 set. ⚠ ``effective_sample_size`` is SET here even
-    though stage 5d always produces ``None`` — the clean candidate must be able
-    to clear every check, and a helper that could not would make the
-    effective-sample-size refusal untestable in isolation."""
+    """A complete criterion-7 set, including stage 5e-2's block-bootstrap block.
+
+    ⚠ The whole bootstrap set is present, not just ``effective_sample_size``:
+    ``StrategyMetrics`` refuses a partial one (criterion 3 asks for the sample
+    size AND its interval), so setting the ESS alone would raise here rather
+    than produce the clean candidate every promotion-gate test starts from."""
     base: dict[str, object] = {
         "expectancy_per_trade_pct": 0.5,
         "profit_factor": 1.2,
@@ -106,9 +108,43 @@ def _metrics(**overrides: object) -> StrategyMetrics:
         "periods_per_year": 251.7,
         "total_return_pct": 21.0,
         "buy_and_hold_return_pct": 22.5,
+        "expectancy_ci_low_pct": -0.2,
+        "expectancy_ci_high_pct": 1.1,
+        "bootstrap_block_length": 9,
+        "bootstrap_cluster_count": 80,
+        "bootstrap_resamples": 2_000,
+        "bootstrap_seed": 20260807,
+        "bootstrap_design_effect": 2.44,
+        "bootstrap_model_id": "c3-block-bootstrap-v1",
     }
     base.update(overrides)
     return StrategyMetrics(**base)  # type: ignore[arg-type]
+
+
+#: Every block-bootstrap field, so a test can clear the SET rather than the one
+#: field it cares about. ⚠ Clearing ``effective_sample_size`` alone raises — the
+#: all-or-nothing invariant — so a test wanting "no criterion-3 measurement"
+#: must go through here.
+_BOOTSTRAP_FIELDS = (
+    "effective_sample_size",
+    "expectancy_ci_low_pct",
+    "expectancy_ci_high_pct",
+    "bootstrap_block_length",
+    "bootstrap_cluster_count",
+    "bootstrap_resamples",
+    "bootstrap_seed",
+    "bootstrap_design_effect",
+    "bootstrap_model_id",
+)
+
+
+def _metrics_without_bootstrap(**overrides: object) -> StrategyMetrics:
+    """A criterion-7 set with no criterion-3 measurement on it at all.
+
+    This is what ``compute_metrics`` returns when the caller declares no
+    ``bootstrap_seed`` — the fail-closed state the promotion gate refuses on.
+    """
+    return _metrics(**{field: None for field in _BOOTSTRAP_FIELDS}, **overrides)
 
 
 def _result(**overrides: object) -> StrategyResult:
@@ -503,7 +539,7 @@ class TestPromotionGateRefusals:
         the two codes would make that exact state unreportable."""
         candidate = _clean_candidate(
             result=_result(
-                metrics=_metrics(effective_sample_size=None),
+                metrics=_metrics_without_bootstrap(),
                 universe_basis="survivorship_free",
                 carry_unmodelled=False,
                 trial_count=9,
@@ -514,14 +550,19 @@ class TestPromotionGateRefusals:
         assert "effective_sample_size_not_computed" in refusals
         assert "deflated_sharpe_not_computed" not in refusals
 
-    def test_every_result_stage_5d_can_produce_is_refused_on_the_sample_size(self) -> None:
-        """⚠ THE SHIPPED STATE, asserted rather than described. ``compute_metrics``
-        always returns ``effective_sample_size=None`` (the block bootstrap is
-        stage 5e), so no result this stage writes can be promoted — §6's *"the
-        gate's initial state is 'nothing is promotable'. That is correct, not a
-        bug to work around."*"""
+    def test_a_result_computed_with_no_declared_seed_is_refused_on_the_sample_size(self) -> None:
+        """⚠ THE FAIL-CLOSED STATE, asserted rather than described.
+
+        ⚠⚠ This test's PREMISE changed at stage 5e-2 and the change is the point.
+        Before it, ``compute_metrics`` returned ``effective_sample_size=None``
+        unconditionally and this asserted that no result the stage could produce
+        was promotable. The bootstrap now exists, so the null is no longer
+        unconditional — it is what a caller gets when it declares no
+        ``bootstrap_seed``. The refusal must still fire in exactly that case,
+        which is §6's *"the gate's initial state is 'nothing is promotable'"*
+        surviving the arrival of the thing that can clear it."""
         assert "effective_sample_size_not_computed" in check_promotable(
-            _clean_candidate(result=_result(metrics=_metrics(effective_sample_size=None)))
+            _clean_candidate(result=_result(metrics=_metrics_without_bootstrap()))
         )
 
 
