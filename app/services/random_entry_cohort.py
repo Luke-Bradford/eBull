@@ -461,6 +461,12 @@ def evaluate_control(
         sharpe_percentile=percentile,
         cohort_sharpe_threshold=cohort_threshold(sharpes, percentile=percentile),
         strategy_sharpe=strategy_sharpe,
+        # ⚠ THE SAME PERCENTILE, DELIBERATELY, and it is not independently
+        # configurable. §9 names one cut — *"the 95th percentile of the random
+        # cohort's"* — and the return figure exists so a reader can locate the
+        # strategy in the SAME place in a second marginal distribution. Two
+        # different percentiles here would make the pair incomparable while
+        # looking like a generalisation. (Review bot NITPICK, PR #2395.)
         cohort_return_threshold_pct=cohort_threshold(returns, percentile=percentile),
         strategy_return_pct=strategy_return_pct,
     )

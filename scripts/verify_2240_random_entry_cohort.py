@@ -71,6 +71,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import stat as stat_module
 import sys
 import time
 from collections import Counter
@@ -137,10 +139,44 @@ from scripts.verify_2240_position_builder import (
 )
 from scripts.verify_2240_statistics import _AXIS_SQL, _benchmark_leg, _Sleeve
 
-#: Where ``--prepare`` writes and the other two arms read. ⚠ Not a temp file: it
-#: is ~1 GB and takes over an hour to rebuild, and a shard crash must not cost
-#: that. Overridable so a re-run cannot silently mix two corpora.
-DEFAULT_CACHE = Path("/tmp/ebull_2240_cohort_cache")
+#: Where ``--prepare`` writes and the other three arms read.
+#:
+#: ⚠ NOT a ``tempfile.mkdtemp``, and the reason is the sharding: the cache is
+#: ~640 MB, takes over 20 minutes to rebuild, and is read by SEPARATE PROCESSES
+#: that must agree on the path. A per-process temp directory would make
+#: ``--cohort`` unable to find what ``--prepare`` wrote.
+#:
+#: ⚠⚠ AND NOT ``/tmp`` EITHER. A fixed, predictable path under a world-writable
+#: directory, reused with ``exist_ok=True``, is a symlink/TOCTOU target on a
+#: shared box — somebody else's symlink at that name redirects every ``np.save``
+#: below (review bot WARNING, PR #2395). The default now lives under the
+#: invoking user's own cache directory, and ``_ensure_cache_root`` refuses any
+#: path that is a symlink or is not owned by the current uid.
+DEFAULT_CACHE = Path.home() / ".cache" / "ebull" / "2240_cohort"
+
+
+def _ensure_cache_root(root: Path, *, create: bool) -> Path:
+    """The cache directory, refused unless it is ours and is a real directory.
+
+    ⚠ THE CHECK IS ON THE PATH ITSELF, not on its parent: ``O_NOFOLLOW`` on the
+    final component is what a symlink attack needs to defeat, and ``lstat``
+    is what sees it. A directory owned by another uid is refused for the same
+    reason — this arm writes ~640 MB into it and later reads that back as the
+    population every figure is computed on.
+    """
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    if not root.exists():
+        raise SystemExit(f"cache {root} does not exist — run --prepare first")
+    stat = root.lstat()
+    if stat_module.S_ISLNK(stat.st_mode):
+        raise SystemExit(f"cache {root} is a symlink; refusing to read or write through it")
+    if not root.is_dir():
+        raise SystemExit(f"cache {root} is not a directory")
+    if stat.st_uid != os.getuid():
+        raise SystemExit(f"cache {root} is owned by uid {stat.st_uid}, not {os.getuid()}; refusing to use it")
+    return root
+
 
 _LABELS: tuple[str, ...] = ("S-1", "S-3")
 _WARMUP: dict[str, int] = {"S-1": S1_WARMUP_BARS, "S-3": S3_WARMUP_BARS}
@@ -201,8 +237,7 @@ def _metrics_payload(metrics: StrategyMetrics) -> dict[str, float | int]:
 def prepare(*, cache_root: Path, limit: int | None) -> int:
     """One corpus sweep: the real sleeves, and the cohort's inputs."""
     started = time.monotonic()
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache = _Cache(cache_root)
+    cache = _Cache(_ensure_cache_root(cache_root, create=True))
     s1_version, s3_version, builder_version = _stamped_versions()
     print(f"\n[prepare] {S1_STRATEGY_ID} {s1_version}", flush=True)
     print(f"          {S3_STRATEGY_ID} {s3_version}", flush=True)
@@ -566,6 +601,7 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int, zero_cost: bo
     criterion 2 outright.
     """
     started = time.monotonic()
+    cache_root = _ensure_cache_root(cache_root, create=False)
     cache = _Cache(cache_root)
     meta = cache.read_meta()
     key = label.replace("-", "")
@@ -716,7 +752,7 @@ def properties(*, cache_root: Path, label: str, index: int) -> int:
     that does not (the seed).
     """
     started = time.monotonic()
-    cache = _Cache(cache_root)
+    cache = _Cache(_ensure_cache_root(cache_root, create=False))
     key = label.replace("-", "")
     t_panel = cache.load("t_panel")
     t_open = cache.load("t_open")
@@ -802,6 +838,7 @@ def properties(*, cache_root: Path, label: str, index: int) -> int:
 
 def report(*, cache_root: Path) -> int:
     """Every shard, §9's two thresholds, and R5/R6."""
+    cache_root = _ensure_cache_root(cache_root, create=False)
     cache = _Cache(cache_root)
     meta = cache.read_meta()
     real = meta["real"]
