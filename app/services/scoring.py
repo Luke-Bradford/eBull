@@ -2078,7 +2078,7 @@ def compute_score(
     data = _load_instrument_data(conn, instrument_id, now)
     gics_sector, shares_out = _analytics_inputs(data)
     analytics = assemble_instrument_analytics(
-        instrument_id, conn, gics_sector=gics_sector, shares_outstanding=shares_out
+        instrument_id, conn, gics_sector=gics_sector, shares_outstanding=shares_out, today=now.date()
     )
     return _score_from_data(instrument_id, data, weights, model_version, now, analytics)
 
@@ -2202,7 +2202,7 @@ def compute_rankings(
         gics_by_id[iid] = g
         shares_by_id[iid] = s
     analytics_by_id = assemble_instrument_analytics_bulk(
-        conn, instrument_ids, gics_sector_by_id=gics_by_id, shares_outstanding_by_id=shares_by_id
+        conn, instrument_ids, gics_sector_by_id=gics_by_id, shares_outstanding_by_id=shares_by_id, today=now.date()
     )
 
     results: list[ScoreResult] = []
