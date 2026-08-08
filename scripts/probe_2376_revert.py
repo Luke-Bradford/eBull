@@ -2,9 +2,12 @@
 
 A test that passes proves nothing until the defect it guards has been shown to
 make it fail. Each probe edits the parser source in place, runs ONLY the tests
-that should notice, and restores from a byte-for-byte backup.
+that should notice, and restores it in a ``finally``. A byte-for-byte copy is
+also parked at ``_BACKUP`` for the one case ``finally`` cannot cover -- a SIGKILL
+mid-probe, which leaves the injected defect on disk with every later gate
+passing against it.
 
-Two harness rules, both learned the hard way in this repo:
+Three harness rules, all learned the hard way in this repo:
 
 * every replacement asserts ``source.count(old) == 1`` first -- a probe whose
   pattern silently matches nothing reports CAUGHT for a mutation that was never
@@ -12,6 +15,12 @@ Two harness rules, both learned the hard way in this repo:
 * the verdict is taken from pytest's exit code 1 (tests failed) specifically,
   NOT from "non-zero". Exit code 4 is a usage error and means no test was
   evaluated at all, which also reads as non-zero (#2335's false 4/4).
+* the mutation and the run BOTH sit inside the ``try``, so the restore covers a
+  partial write and a Ctrl-C as well as a raising subprocess.
+
+⚠ Do not ``git add`` while this is running -- it stages whichever defect is
+injected at that instant, and the gates all read the working tree, which the
+harness has already restored by the time they run.
 
     PYTHONPATH=. uv run python -m scripts.probe_2376_revert
 """
@@ -150,9 +159,14 @@ def main() -> int:
             print(f"NOT APPLIED  {label}\n             pattern occurs {occurrences}x, expected 1")
             _TARGET.write_text(original)
             continue
-        _TARGET.write_text(source.replace(old, new))
-        exit_code = _run(selector)
-        _TARGET.write_text(original)
+        # The restore is the ONLY thing between a crash here and a permanently
+        # mutated parser, so it goes in `finally` and the mutation goes inside
+        # the `try` with it (review WARNING on PR #2405).
+        try:
+            _TARGET.write_text(source.replace(old, new))
+            exit_code = _run(selector)
+        finally:
+            _TARGET.write_text(original)
         assert _TARGET.read_text() == original, "restore failed"
         # 1 == tests ran and failed. 4 == usage error, nothing evaluated.
         verdict = "CAUGHT" if exit_code == 1 else f"NOT CAUGHT (exit {exit_code})"
