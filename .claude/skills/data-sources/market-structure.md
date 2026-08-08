@@ -48,7 +48,7 @@ Measured on the dev corpus, 2026-08-08. Re-measure before citing — these move.
 
 | Gap | Evidence | Blocks |
 | --- | --- | --- |
-| **No benchmark or sector series** | `SPY QQQ IWM DIA VTI XLK XLF XLE GLD TLT` → **0 rows** in `research_price_series` | **beta · relative strength · sector rotation · pairs · market-regime conditioning · "did it beat the market that day"** — the entire cross-asset half |
+| ~~No benchmark or sector series~~ **CLOSED 2026-08-08 (#2398)** | 16 comparators loaded, **102,027 bars**, SPY `1993-01-29 → 2024-09-27`. `vendor = 'icyDenev/Intrader'`, `scripts/ingest_2398_benchmark_series.py`. ⚠ Stored `instrument_id IS NULL` so the `resolution_evidenced` CHECK keeps them out of the validated universe **by construction** — never resolve them to an instrument | nothing. Beta, relative strength, sector rotation and regime conditioning are all computable. ⚠ Coverage stops **2024-09-27**, so anything after that date has no market leg |
 | ~~Split-adjusted only~~ **CORRECTED — total return IS available** | `adjustment_basis = 'split_adjusted'` describes **OHLC only**. `adj_close` is split **+ dividend** adjusted. Verified full-population: latest factor `= 1.0` on **7,693/7,693**, no factor `> 1`, monotone increasing except 22 material steps in 9 series (0.12%) | nothing. Use `adj_close` for returns and `close` for price levels. Reading `adjustment_basis` as describing `adj_close` understates what is computable — a mistake this file made in its first version |
 | **No intraday bars** | `price_intraday` → **0 rows** | true session VWAP, intraday scalping, any sub-daily entry. `anchored_vwap` over daily bars is a daily approximation, not the intraday benchmark traders mean |
 | **No volume-flow indicators** | no OBV / accumulation-distribution anywhere in `app/services` | volume confirmation as a *signal*. Raw volume IS present on all 25,818,944 rows, so these are buildable — just absent |
@@ -189,3 +189,52 @@ idle" but "how much of the premium am I giving up", and it is the reason
    not only the count it admitted (criterion 9).
 6. **Check it against the gaps table** above. A spec needing beta or intraday is blocked, not
    hard.
+
+---
+
+## The measurement rig that survives — use this, not a fresh one
+
+Built and validated over the 2026-08-08 pass. It killed four candidates and let one
+reach a verdict. Every future pattern test should be cut this way:
+
+1. **Fillable windows only.** Signal from `close(t)`, entry at `open(t+1)`, outcome measured
+   from that entry. Anything measured across `close(t) → open(t+1)` is unreachable.
+2. **Causal trailing beta against SPY.** `regr_slope(ret, mret) OVER (PARTITION BY series
+   ORDER BY bar_date ROWS BETWEEN 120 PRECEDING AND 1 PRECEDING)` — the `1 PRECEDING`
+   excludes the signal bar. Alpha is `fwd − β·market_fwd`, never a raw return.
+3. **Decile WITHIN each day**, then collapse to one observation per day. A cross-sectional
+   sort avoids the level drift that a pooled sort inherits.
+4. **Day-clustered inference**, then **non-overlapping** periods. A 20-day forward return
+   sampled daily shares 19 days with its neighbour; t fell from 50.3 → 17.7 → 5.1 across
+   these three corrections on the same effect. **The first two numbers were fiction.**
+5. **Stratify on price band before believing any pooled result** — and exclude
+   adjustment-inflated series first (#2400).
+
+### The stratification that mattered most
+
+A pooled effect measuring **−22.0 bps (t −1.54)** over 2021-24 was two opposite regimes
+cancelling:
+
+```text
+$20-50     +40.0   t  2.66
+$50-150   -121.8   t -7.12
+>$150     -169.4   t -7.01
+```
+
+> **Rule: a near-zero pooled result is not evidence of no effect.** Stratify on price and
+> liquidity before concluding anything, in either direction.
+
+### Liquidity provision — the one published frame that fitted
+
+**Nagel, "Evaporating Liquidity", *Review of Financial Studies* 25(7), 2012, 2005-2039.**
+Short-term reversal returns proxy the return to **liquidity provision**, and are *"highly
+predictable with the VIX"*. Reproduced here across the full sample — alpha by trailing SPY
+realised-vol quartile, day-clustered, n=4,904: **56.6 / 57.0 / 79.8 / 184.7 bps**, monotone.
+
+⚠ And it still did not save the candidate: the vol conditioning holds across the sample yet
+fails to explain the 2021-24 inversion, which is a **price-segment** effect. A correct
+published mechanism can be reproduced and still be the wrong axis for the decision.
+
+⚠ **Economically dead where it is statistically alive.** The surviving cell pays +40.0 bps
+gross per 20-day hold against a 50.9 bps round trip. A t-statistic is not an edge; the
+spread is the hurdle.

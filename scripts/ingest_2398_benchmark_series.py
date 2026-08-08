@@ -53,16 +53,29 @@ _MIRROR = Path("var/research_corpus/mirrors/icyDenev_Intrader/Data/Day")
 #: cross-asset. Ordered by what each unblocks — SPY alone gives beta and a
 #: regime filter (#2398).
 BENCHMARKS: tuple[str, ...] = (
-    "SPY", "QQQ", "IWM", "DIA", "VTI",
-    "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB",
-    "TLT", "GLD",
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "VTI",
+    "XLK",
+    "XLF",
+    "XLE",
+    "XLV",
+    "XLI",
+    "XLY",
+    "XLP",
+    "XLU",
+    "XLB",
+    "TLT",
+    "GLD",
 )
 
 
 def _dec(value: str) -> Decimal | None:
     try:
         d = Decimal(value)
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     return d if d.is_finite() else None
 
@@ -112,8 +125,7 @@ def load(conn: psycopg.Connection[Any]) -> int:
                    bar_count=EXCLUDED.bar_count, updated_at=NOW()
             RETURNING series_id
             """,
-            (VENDOR, symbol, UPSTREAM_SOURCE, LICENCE, ADJUSTMENT_BASIS,
-             rows[0][0], rows[-1][0], len(rows)),
+            (VENDOR, symbol, UPSTREAM_SOURCE, LICENCE, ADJUSTMENT_BASIS, rows[0][0], rows[-1][0], len(rows)),
         ).fetchone()
         assert series_id is not None
         sid = int(series_id[0])
