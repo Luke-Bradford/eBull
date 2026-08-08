@@ -1648,6 +1648,40 @@ class TestSubjectIdentityGate:
         clause, and they are why it exists."""
         assert _memo_names_subject(memo, {"symbol": "ZZZZ", "company_name": company})
 
+    @pytest.mark.parametrize(
+        ("memo", "subject", "expected", "why"),
+        [
+            (
+                "BP reported strong earnings.",
+                {"symbol": "BP", "company_name": "BP plc"},
+                True,
+                "a 2-char symbol whose name is also short must still work in plain prose",
+            ),
+            ("MMM raised guidance.", {"symbol": "MMM", "company_name": "3M"}, True, "3M"),
+            ("Gap Inc. comped positive.", {"symbol": "GAP", "company_name": "Gap, Inc."}, True, "Gap by name"),
+            (
+                "Apple saw the valuation gap widen.",
+                {"symbol": "GAP", "company_name": "Gap, Inc."},
+                False,
+                "the English word 'gap' is not the company Gap -- this is why the short-name match is case-SENSITIVE",
+            ),
+            (
+                "Tesco grew market share.",
+                {"symbol": "TSCO", "company_name": "Tesco"},
+                True,
+                "'Tesco' must not be mangled to 'tes' by treating 'co' as a suffix",
+            ),
+            ("Citigroup trades below book.", {"symbol": "C", "company_name": "Citigroup"}, True, "not 'citi'"),
+        ],
+    )
+    def test_short_names_and_token_suffixes(self, memo: str, subject: dict[str, str], expected: bool, why: str) -> None:
+        """⚠⚠ Review round on #2434, and both findings were FALSE POSITIVES —
+        the direction that matters for a narrowing gate. Measured on the real
+        universe before fixing: substring suffix-stripping mangles **1,820 of
+        12,696** names, and **97** instruments have both a short symbol and a
+        name too short to carry the check (3M, Gap, NOV, AES, FMC)."""
+        assert _memo_names_subject(memo, subject) is expected, why
+
     def test_the_validator_refuses_the_whole_output(self) -> None:
         """End-to-end through the real validator, not just the predicate."""
         bad = dict(_VALID_WRITER)

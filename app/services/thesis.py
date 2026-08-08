@@ -1697,23 +1697,41 @@ def _memo_names_subject(memo: str, instrument: object) -> bool:
         # in caps, so requiring caps costs a correct memo nothing; a short one
         # additionally has to appear where a ticker appears — "(ON)",
         # "NASDAQ: ON" — rather than anywhere in the prose.
-        if len(symbol) >= 4:
-            if re.search(rf"\b{re.escape(symbol)}\b", memo):
-                return True
-        elif re.search(rf"(?:[(:]\s*{re.escape(symbol)}\b|\b{re.escape(symbol)}\s*\))", memo):
+        if len(symbol) >= 4 and re.search(rf"\b{re.escape(symbol)}\b", memo):
             return True
 
     raw_name = str(instrument.get("company_name") or "").strip()
-    if not raw_name:
-        return False
+    # ⚠⚠ A SUFFIX IS A TOKEN, NOT A TRAILING SUBSTRING (#2434 review). Matching
+    # the substring mangles 1,820 of 12,696 names in the universe — "Tesco"
+    # loses its "co" and becomes "tes", "Citigroup" becomes "citi" — and a name
+    # cut below four characters can never match anything. Splitting on
+    # non-alphanumerics and popping whole trailing tokens keeps "Tesco" intact
+    # while still reducing "Axalta Coating Systems Ltd" and "Avis Budget Group
+    # Inc" to the part a memo actually writes.
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", raw_name) if token]
+    while len(tokens) > 1 and _squash(tokens[-1]) in _CORPORATE_SUFFIXES:
+        tokens.pop()
+    squashed = _squash("".join(tokens))
 
-    squashed = _squash(raw_name)
-    for suffix in _CORPORATE_SUFFIXES:
-        if squashed.endswith(suffix) and len(squashed) > len(suffix) + 2:
-            squashed = squashed[: -len(suffix)]
-            break
     if len(squashed) < 4:
-        return False
+        # ⚠ 97 instruments have BOTH a short symbol and a name too short to
+        # carry the check — 3M (MMM), Gap (GAP), NOV, AES, FMC. For those the
+        # name offers nothing, so the symbol is allowed to match as a standalone
+        # uppercase word rather than only inside ticker punctuation. The
+        # relaxation is scoped to the cases with no alternative: ON
+        # Semiconductor and Gartner (IT) keep the strict rule, because their
+        # names are long enough to do the work.
+        if symbol and re.search(rf"\b{re.escape(symbol)}\b", memo):
+            return True
+        # ⚠ CASE-SENSITIVE for a short name, which is what separates the company
+        # "Gap" from the English word "gap". A memo writing "Gap Inc. comped
+        # positive" names its subject; one writing "the valuation gap widened"
+        # does not, and a case-insensitive match could not tell them apart.
+        short = " ".join(tokens)
+        return bool(short) and re.search(rf"\b{re.escape(short)}\b", memo) is not None
+
+    if symbol and len(symbol) < 4 and re.search(rf"(?:[(:]\s*{re.escape(symbol)}\b|\b{re.escape(symbol)}\s*\))", memo):
+        return True
 
     # ⚠⚠ A PREFIX OF THE NAME, not its leading TOKEN. A correct memo shortens a
     # long name — "Axalta" for ``Axalta Coating Systems Ltd``, "Costco" for
