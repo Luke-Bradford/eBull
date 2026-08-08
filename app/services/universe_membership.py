@@ -110,7 +110,10 @@ def reconcile_universe_membership(
               AND m.last_confirmed_on < CURRENT_DATE
             """,
         )
-        confirmed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        # Bare rowcount: psycopg returns -1 only for a statement that carries
+        # no row count (DDL). After an UPDATE it is always >= 0 — verified on
+        # psycopg 3.3.3, where an UPDATE matching nothing gives 0, not -1.
+        confirmed = cur.rowcount
 
         # Pass 2 — same-day flip-flop undo: reopen the row closed today
         # rather than opening a second one across a gap that never existed.
@@ -131,7 +134,7 @@ def reconcile_universe_membership(
               )
             """,
         )
-        reopened = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        reopened = cur.rowcount
 
         # ``imported`` is a ONE-SHOT event — the run that first populates the
         # table — so the discriminator is the state of the table, not the age
@@ -198,7 +201,7 @@ def reconcile_universe_membership(
               AND m.effective_to IS NULL
             """,
         )
-        closed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        closed = cur.rowcount
 
     return MembershipReconcileStats(
         confirmed=confirmed,
