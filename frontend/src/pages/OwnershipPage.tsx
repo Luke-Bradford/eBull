@@ -47,7 +47,7 @@ import type { WedgeClick } from "@/components/instrument/OwnershipSunburst";
 import {
   formatPct,
   formatShares,
-  ownershipStaleDenominatorCopy,
+  ownershipSuppressedDenominatorCopy,
   parseShareCount,
 } from "@/components/instrument/ownershipMetrics";
 import {
@@ -280,8 +280,9 @@ function OwnershipBody({
         <EmptyState
           title="No ownership data"
           description={
-            ownershipStaleDenominatorCopy(
+            ownershipSuppressedDenominatorCopy(
               rollup.banner.state,
+              rollup.no_data_reason ?? null,
               rollup.shares_outstanding_as_of,
             ) ??
             `Shares outstanding is not on file for ${symbol} yet — the ownership breakdown needs SEC XBRL coverage to compute the denominator. Trigger a fundamentals sync, or wait for the next scheduled run.`
