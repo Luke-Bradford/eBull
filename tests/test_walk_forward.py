@@ -430,7 +430,7 @@ def test_fold_record_refuses_impossible_fields(kwargs: dict[str, object], fragme
         FoldRecord(**base)  # type: ignore[arg-type]
 
 
-def test_a_zero_embargo_is_legal_in_a_storedbuild_split() -> None:
+def test_a_zero_embargo_is_legal_in_a_stored_split() -> None:
     """⚠ 0 means "nothing measurable on this fold's training side", not "skipped".
 
     `role`'s header says refusing it would force a caller to invent a number,
