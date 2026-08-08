@@ -33,18 +33,24 @@ from app.providers.implementations.sec_def14a import (
     _contains_specific_name,
     _detect_role_heading,
     _expand_row_spans,
+    _extract_table_holders,
     _has_item403_value_rows,
     _header_caption_set,
     _is_address_fragment,
     _is_beneficial_owner_identity,
     _is_name_then_address,
     _is_owner_identity,
+    _is_percent_caption,
     _item403_value_signature,
+    _layout_name_key,
+    _layout_percent_by_row,
+    _layout_rows,
     _looks_like_label_row,
     _looks_like_subheader,
     _parse_percent,
     _parse_share_count,
     _parse_table_html,
+    _RawTable,
     _resolve_columns,
     _score_table_headers,
     _shares_cell_percent_signature,
@@ -3010,3 +3016,276 @@ class TestItem403SubsectionSiblings:
         )
         assert table is not None
         assert _header_caption_set(table) == frozenset({"name and address", "shares", "%"})
+
+
+# ---------------------------------------------------------------------------
+# #2376 — layout-attested percent recovery
+# ---------------------------------------------------------------------------
+#
+# Fixture shape is taken from 0001193125-25-103261 (ExlService) — the accession
+# the ticket cites — reduced to the two features that produce the defect:
+# self-closing `<td/>` layout spacers, and `colspan` on the caption cells. The
+# real table's header carries `Shares` and `% (2)` over four layout columns
+# each, and the data rows put their values under the LAST of those columns.
+
+
+_SPACER_OFFSET_TABLE = """
+<table><tr>
+<td>&#160;</td>
+<td/>
+<td>&#8195;&#8202;Name and address<sup>(1)</sup></td>
+<td/>
+<td colspan="4">Shares</td>
+<td/>
+<td colspan="4">%<sup>(2)</sup></td>
+<td/>
+<td colspan="4"> &#160;<p>&#160;</p></td>
+<td/>
+<td colspan="4"> &#160;<p>&#160;</p></td></tr><tr>
+<td/>
+<td/>
+<td> <p>Blackrock Inc.<sup>(11)</sup></p></td>
+<td/>
+<td/>
+<td>&#160;</td>
+<td>23,308,871</td>
+<td/>
+<td/>
+<td/>
+<td>&#160;</td>
+<td>14.33</td>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/></tr><tr>
+<td/>
+<td/>
+<td> <p>The Vanguard Group, Inc.<sup>(12)</sup></p></td>
+<td/>
+<td/>
+<td>&#160;</td>
+<td>17,015,630</td>
+<td/>
+<td/>
+<td/>
+<td>&#160;</td>
+<td>10.46</td>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/>
+<td/></tr></table>
+"""
+
+
+class TestLayoutAttestedPercent:
+    """#2376 — a percent lost because the header and the data rows are not in a
+    common column space, and no rescue may take a BARE number without knowing
+    which caption covers it."""
+
+    def test_self_closing_spacers_and_colspan_offset_the_percent(self) -> None:
+        """The defect, pinned at the grid rather than at the symptom.
+
+        ``_CELL_RE`` reads ``<td style="x"/>`` as an OPENING tag (``[^>]*``
+        accepts the trailing ``/``), so the header emits 6 cells and the data
+        rows 5, and the ``colspan="4"`` is read off the wrong tag. The resolved
+        percent index therefore lands on a spacer."""
+        table = _parse_table_html(_SPACER_OFFSET_TABLE)
+        assert table is not None
+        name_idx, shares_idx, percent_idx = _resolve_columns(table.column_headers)
+        assert table.column_headers == ("", "Name and address (1)", "Shares", "% (2)", "", "")
+        assert (name_idx, shares_idx, percent_idx) == (1, 2, 3)
+        # Six header cells against five data cells, so the resolved percent
+        # index lands on the issuer's blank spacer and the real percent sits one
+        # further right. `_pad_row` only pads SHORT rows; it has nothing to say
+        # about a row whose cells are offset from the header's.
+        assert table.rows[0] == ("Blackrock Inc. (11)", "", "23,308,871", "", "14.33")
+        assert table.rows[0][percent_idx] == ""
+
+    def test_layout_grid_matches_the_html_table_model(self) -> None:
+        """Captions occupy every column they span; values sit under them."""
+        rows = _layout_rows(_SPACER_OFFSET_TABLE)
+        header = rows[0]
+        assert header[2] == "Name and address (1)"
+        assert [header[c] for c in (4, 5, 6, 7)] == ["Shares"] * 4
+        assert [header[c] for c in (9, 10, 11, 12)] == ["% (2)"] * 4
+        # BlackRock's count is under the Shares span, its percent under the %
+        # span — the same placement `pandas.read_html` 3.0.2 returns for this
+        # table, which is what makes the bare 14.33 unambiguous.
+        assert rows[1][6] == "23,308,871"
+        assert rows[1][11] == "14.33"
+
+    def test_bare_percent_is_recovered_end_to_end(self) -> None:
+        """The ticket's reported symptom: 14.33 / 10.46 stored as NULL."""
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=_SPACER_OFFSET_TABLE))
+        by_name = {r.holder_name: r for r in parsed.rows}
+        assert by_name["Blackrock Inc."].shares == Decimal("23308871")
+        assert by_name["Blackrock Inc."].percent_of_class == Decimal("14.33")
+        assert by_name["The Vanguard Group, Inc."].percent_of_class == Decimal("10.46")
+
+    def test_a_share_count_under_a_shares_caption_is_never_attested(self) -> None:
+        """The one failure this must not have. ``_parse_percent`` clamps to
+        [0,100], so a SMALL share count would parse happily as a percent — only
+        the caption above the column keeps it out."""
+        assert _layout_percent_by_row(_SPACER_OFFSET_TABLE) == {
+            _layout_name_key("Blackrock Inc. (11)"): Decimal("14.33"),
+            _layout_name_key("The Vanguard Group, Inc. (12)"): Decimal("10.46"),
+        }
+
+    def test_merged_amount_and_percent_caption_is_not_a_percent_column(self) -> None:
+        """Issuers merge 229.403 columns 3 and 4 into one caption, and that
+        single column holds the SHARE COUNT — ``_resolve_columns`` already
+        records this. Attesting it as a percent would publish a share count as a
+        percent."""
+        assert not _is_percent_caption("Amount and Nature of Beneficial Ownership and Percent of Class")
+        assert not _is_percent_caption("Shares Beneficially Owned (%)")
+        assert _is_percent_caption("Percent of Class")
+        assert _is_percent_caption("% (2)")
+
+    def test_a_threshold_phrase_is_not_a_column_caption(self) -> None:
+        """``5% Beneficial owners`` is Item 403(a)'s section LABEL — the sign
+        binds to the number on its left. Reading it as a caption made
+        ExlService's own table look like it carried two different percent
+        captions, and the ambiguity guard then refused the rows this ticket
+        exists to recover."""
+        assert not _is_percent_caption("5% Beneficial owners")
+        assert not _is_percent_caption("Owners of more than 5%")
+        assert _is_percent_caption("% of Total Voting Power (1)")
+
+    def test_two_distinct_percent_captions_attest_nothing(self) -> None:
+        """Domo (0001505952-25-000062) renders
+        ``Shares | % | Shares | % | % of Total Voting Power``, and its FIRST
+        percent-captioned header row carries only the voting-power caption — one
+        clean contiguous run, so a contiguity test alone passes it and stores
+        voting power as percent of class. Josh James' row reads
+        ``3,263,659 100 1,022,375 2.8 78.5``: 78.5% of the vote, 2.8% of Class A.
+
+        This is why the scan unions across EVERY caption row rather than
+        stopping at the first one that matches."""
+        two_captions = (
+            "<table>"
+            '<tr><td>Name</td><td colspan="2">Shares</td><td colspan="2">Percent of Class</td>'
+            '<td colspan="2">% of Total Voting Power</td></tr>'
+            "<tr><td>Joshua G. James</td><td/><td>1,022,375</td><td/><td>2.8</td>"
+            "<td/><td>78.5</td></tr></table>"
+        )
+        assert _layout_percent_by_row(two_captions) == {}
+
+    def test_an_ambiguous_name_prefix_is_dropped_rather_than_guessed(self) -> None:
+        """The join is a 16-character prefix, so two holders can collide. When
+        the colliding rows disagree the entry is dropped — a null percent is
+        recoverable, a wrong one is not."""
+        collide = (
+            '<table><tr><td>Name</td><td colspan="2">Percent of Class</td></tr>'
+            "<tr><td>Wellington Management Group A</td><td/><td>3.1</td></tr>"
+            "<tr><td>Wellington Management Group B</td><td/><td>4.2</td></tr>"
+            "</table>"
+        )
+        assert _layout_percent_by_row(collide) == {}
+
+    def test_an_existing_percent_is_never_overwritten(self) -> None:
+        """The rescue runs last and only when ``percent is None`` — and that
+        guard is load-bearing, not defensive.
+
+        A caption's ``colspan`` can OVER-cover: here ``Percent of Class`` spans
+        two layout columns and the issuer puts a bare footnote marker in the
+        second, so the layout attests ``3`` where the flat grid reads the
+        correct ``7.7%``. Confining the rescue to rows that have no percent at
+        all is what bounds it to NULL -> value."""
+        over_covering = (
+            "<table>"
+            "<tr><td/><td>Name of Beneficial Owner</td>"
+            '<td colspan="2">Percent of Class</td></tr>'
+            "<tr><td>Acme Holdings LLC</td><td>7.7%</td><td>3</td></tr>"
+            "</table>"
+        )
+        assert _layout_percent_by_row(over_covering) == {_layout_name_key("Acme Holdings LLC"): Decimal("3")}
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=over_covering))
+        assert [r.percent_of_class for r in parsed.rows] == [Decimal("7.7")]
+
+    def test_a_table_with_no_percent_caption_recovers_nothing(self) -> None:
+        """Rule 13d-3 sole/shared-power tables carry no percent column at all.
+        Fabricating one from whichever number sits rightmost is the failure the
+        caption requirement exists to prevent."""
+        no_percent = (
+            "<table><tr><td>Name of Beneficial Owner</td><td>Sole Voting Power</td>"
+            "<td>Shared Voting Power</td></tr>"
+            "<tr><td>Wellington Management</td><td>12,000</td><td>3.5</td></tr></table>"
+        )
+        assert _layout_percent_by_row(no_percent) == {}
+
+    def test_the_rescue_cannot_change_which_tables_are_selected(self) -> None:
+        """A recovered percent must not decide ELIGIBILITY.
+
+        ``_is_item403_eligible`` judges a table by extracting it, so with the
+        rescue live during that probe a table can qualify on a percent the flat
+        grid never had. The full-population A/B measured the consequence on
+        0001140361-25-012231: a junk ``Brian H. Hertzman`` row at 446,200 shares
+        / 89.2% was admitted beside the genuine ``Brian S. Hertzman`` at 0.5%.
+
+        The probe is the ``rows is None`` caller, so this pins that the two
+        callers disagree — eligibility sees no attested percent, extraction
+        does."""
+        table = _parse_table_html(_SPACER_OFFSET_TABLE)
+        assert table is not None
+
+        as_probe = _extract_table_holders(table)
+        assert [h.percent_of_class for h in as_probe] == [None, None]
+
+        collected: list[Def14ABeneficialHolder] = []
+        _extract_table_holders(table, rows=collected, seen=set())
+        assert [h.percent_of_class for h in collected] == [Decimal("14.33"), Decimal("10.46")]
+
+    def test_a_dual_class_table_attests_nothing(self) -> None:
+        """229.403 column 4 appears TWICE on a dual-class table, once per class,
+        and this helper cannot tell which class the extractor's share count came
+        from. Measured consequence of pooling them (0001308179-25-000518,
+        Regeneron): a flat 28 attested to fifteen directors holding between
+        4,472 and 268,499 shares."""
+        dual_class = (
+            "<table><tr><td>Name and Address of Beneficial Owner</td>"
+            '<td colspan="2">Number</td><td colspan="2">Percent of Class</td>'
+            '<td colspan="2">Number</td><td colspan="2">Percent of Class</td></tr>'
+            "<tr><td>Bonnie L. Bassler</td><td/><td>—</td><td/><td>28</td>"
+            "<td/><td>18,058</td><td/><td/></tr></table>"
+        )
+        percent_columns = sorted(
+            column for column, text in _layout_rows(dual_class)[0].items() if _is_percent_caption(text)
+        )
+        # Two runs, 3-4 and 7-8 — not contiguous, so the binding is ambiguous.
+        assert percent_columns == [3, 4, 7, 8]
+        assert _layout_percent_by_row(dual_class) == {}
+
+    def test_a_percent_equal_to_the_share_count_is_the_same_cell_twice(self) -> None:
+        """0001375365-25-000009's group-total row parses ``shares`` as 33.6 —
+        a pre-existing share-column defect. Attesting 33.6 as its percent would
+        manufacture agreement out of one number rather than add a second fact."""
+        html = (
+            "<table><tr><td>Name</td><td>Percent of Class</td></tr>"
+            "<tr><td>Acme Holdings LLC</td><td>33.6</td></tr></table>"
+        )
+        # The layout does attest it — the refusal is at the point of USE, where
+        # the row's own share count is known.
+        assert _layout_percent_by_row(html) == {_layout_name_key("Acme Holdings LLC"): Decimal("33.6")}
+        table = _RawTable(
+            score_headers=("Name", "Shares"),
+            column_headers=("Name", "Shares"),
+            rows=(("Acme Holdings LLC", "33.6"),),
+            line_rows=(("Acme Holdings LLC", "33.6"),),
+            table_html=html,
+        )
+        holders = _extract_table_holders(table, rows=[], seen=set())
+        assert [(h.shares, h.percent_of_class) for h in holders] == [(Decimal("33.6"), None)]
