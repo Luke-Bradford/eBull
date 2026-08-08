@@ -446,6 +446,66 @@ control for the backtester and it is exactly what a pattern test needs: *does
 this pattern beat a random entry held the same length?* Any pattern proposal
 that cannot clear its own random-entry cohort should not reach a backtest.
 
+### The three the operator named, specifically
+
+⚠ **"Untested" and "disproven" are different, and conflating them is how a real
+edge gets discarded.**
+
+**Bull flag / cup-and-handle.** LMW's tested set centres on head-and-shoulders
+(and inverse), broadening, triangle, rectangle and double top/bottom formations.
+**Flags and cup-and-handle are not among the formations the academic literature
+has systematically tested.** ⚠ That is not evidence they work — it is the absence
+of evidence either way, and it means anyone quoting a success rate for them is
+quoting a practitioner source (Bulkowski's *Encyclopedia of Chart Patterns* is
+the usual one), not a controlled study. They are **candidates for the §2.12
+recipe**, not conclusions.
+
+**Wyckoff is not a pattern and should not be tested as one.** It is a framework
+about *who is on the other side*: accumulation / markup / distribution / markdown
+driven by a "composite operator", resting on three laws — supply and demand,
+cause and effect, and **effort versus result**. ⚠ It has **no peer-reviewed
+validation** that this sweep could find. A 1920s practitioner framework, widely
+taught, essentially untested.
+
+> ⚠⚠ **BUT ITS CENTRAL CLAIM IS ALREADY A MEASURED QUANTITY.** Wyckoff's "effort
+> versus result" — *large volume with minimal price progress means someone is
+> absorbing supply* — is **Amihud illiquidity inverted**:
+>
+> ```text
+> Amihud   =  |return| / dollar volume
+> Wyckoff absorption  =  high volume, small |return|   ->  LOW Amihud
+> Wyckoff "ease of movement" =  low volume, big move   ->  HIGH Amihud
+> ```
+>
+> So the one Wyckoff law with a mechanism behind it is expressible in a measure
+> that **does** have empirical support (§2.11), is computable on our 25.9M bars,
+> and needs no new data. **That is the bridge worth building: test the quantity,
+> not the vocabulary.**
+
+⚠ The rest of Wyckoff — the phase labels, the springs and upthrusts — is
+discretionary chart reading and inherits every problem in §2.12: no algorithmic
+definition, so no test, so no way to separate it from hindsight.
+
+### The mathematics actually involved, and which of it is grounded
+
+| what | the maths | grounded? |
+| --- | --- | --- |
+| trend | SMA/EMA — linear and exponentially-weighted moving averages | ⚠ the 50/200 pair is a **convention**, not a result |
+| momentum oscillators | RSI = `100 - 100/(1+RS)`, RS from **Wilder-smoothed** (recursive, causal) average gain/loss | published (Wilder 1978). ⚠ a non-causal smoother inflates results — #2260 |
+| volatility | ATR (Wilder smoothing), realised σ, Bollinger `SMA ± kσ` | published; ⚠ the Squeeze is BandWidth lowest in **126 days**, not a percentile |
+| oscillator | MACD = `EMA12 − EMA26`, signal = `EMA9(MACD)`; Stochastic = position in range | published periods are conventions |
+| levels | single-linkage clustering of extrema, ATR-relative | ⚠ **no published formulation** — by construction, frozen in a hash |
+| retracement | Fibonacci ratios | ⚠ **0.5 is not a Fibonacci ratio** — Dow Theory's halfway |
+| pattern recognition | **nonparametric kernel regression** → local extrema → geometric relations | LMW (2000) — the only rigorous treatment |
+| liquidity / order flow | **Amihud** `mean(|r| / dollar volume)`; Kyle's λ | published, and the closest thing to seeing flow without a tape |
+| significance | correlation `t`, **clustered** standard errors, deflated Sharpe, block bootstrap | ⚠ the part everyone skips — and the part that killed our own momentum finding (§2.8) |
+
+⚠⚠ **The last row is the one that separates analysis from decoration.** Every
+formula above is arithmetic a spreadsheet can do. The inference — clustering,
+multiple-testing correction, out-of-sample discipline — is what decides whether
+the arithmetic means anything, and it is the only row where a mistake is
+invisible in the output.
+
 ### The rule for this repo
 
 > **A chart-pattern proposal ships with: an algorithmic definition that is causal
