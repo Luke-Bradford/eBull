@@ -22,6 +22,7 @@ import psycopg
 import pytest
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
+from app.services.random_entry_cohort import SyntheticControl
 from app.services.result_ledger import (
     HOLDOUT_ACCESS_KINDS,
     HoldoutAccess,
@@ -109,6 +110,35 @@ def build_result_with_dsr(**overrides: object) -> StrategyResult:
         metrics=build_metrics(**BOOTSTRAP_BLOCK),
         **overrides,
     )
+
+
+def build_control(metrics: StrategyMetrics, **overrides: object) -> SyntheticControl:
+    """A COMPLETE §9 control (sql/268), same awkward-float discipline.
+
+    ⚠ The two strategy-side figures are taken FROM the metric set rather than
+    restated — ``StrategyResult.__post_init__`` binds them, and a literal here
+    would be a second copy of a number this row already carries.
+
+    ⚠ The thresholds are chosen so the verdict is FALSE: ``build_metrics``'s
+    Sharpe is -3.73 and its total return -100%, which is the shape today's
+    pipeline actually produces. A fixture whose verdict was true would exercise
+    only the branch that cannot happen yet.
+    """
+    base: dict[str, object] = {
+        "model_id": "permuted-entry-uniform-gap-v1",
+        "cohort_size": 1000,
+        "root_seed": 20260808,
+        "mean_return_pct": -97.5634812,
+        "mean_return_ci_low_pct": -99.2083176,
+        "mean_return_ci_high_pct": -96.3142907,
+        "sharpe_percentile": 95.0,
+        "cohort_sharpe_threshold": -0.16704293,
+        "strategy_sharpe": metrics.sharpe,
+        "cohort_return_threshold_pct": -96.39971148,
+        "strategy_return_pct": metrics.total_return_pct,
+    }
+    base.update(overrides)
+    return SyntheticControl(**base)  # type: ignore[arg-type]
 
 
 def build_metrics(**overrides: object) -> StrategyMetrics:

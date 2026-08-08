@@ -48,6 +48,7 @@ from typing import Final, Literal, get_args
 import psycopg
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
+from app.services.random_entry_cohort import SyntheticControl
 from app.services.strategy_result import (
     ResultIdentity,
     StrategyResult,
@@ -187,7 +188,12 @@ _RESULT_COLUMNS = """
     bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id,
     dsr_trade_sharpe, dsr_skewness, dsr_kurtosis, dsr_expected_max_sharpe, dsr_independent_trials,
     dsr_average_trial_correlation, dsr_trial_sharpe_variance, dsr_measured_trials, dsr_model_id,
-    trial_register_version
+    trial_register_version,
+    synthetic_control_model_id, synthetic_control_size, synthetic_control_root_seed,
+    synthetic_control_mean_return_pct, synthetic_control_mean_return_ci_low_pct,
+    synthetic_control_mean_return_ci_high_pct, synthetic_control_sharpe_percentile,
+    synthetic_control_sharpe_threshold, synthetic_control_return_threshold_pct,
+    synthetic_control_passed
 """
 
 _RESULT_VALUES = """
@@ -206,7 +212,12 @@ _RESULT_VALUES = """
     %(bootstrap_design_effect)s, %(bootstrap_model_id)s,
     %(dsr_trade_sharpe)s, %(dsr_skewness)s, %(dsr_kurtosis)s, %(dsr_expected_max_sharpe)s,
     %(dsr_independent_trials)s, %(dsr_average_trial_correlation)s, %(dsr_trial_sharpe_variance)s,
-    %(dsr_measured_trials)s, %(dsr_model_id)s, %(trial_register_version)s
+    %(dsr_measured_trials)s, %(dsr_model_id)s, %(trial_register_version)s,
+    %(synthetic_control_model_id)s, %(synthetic_control_size)s, %(synthetic_control_root_seed)s,
+    %(synthetic_control_mean_return_pct)s, %(synthetic_control_mean_return_ci_low_pct)s,
+    %(synthetic_control_mean_return_ci_high_pct)s, %(synthetic_control_sharpe_percentile)s,
+    %(synthetic_control_sharpe_threshold)s, %(synthetic_control_return_threshold_pct)s,
+    %(synthetic_control_passed)s
 """
 
 #: ⚠⚠ TARGETS THE VIEW. ``sql/264`` gave ``strategy_results`` a cascaded check
@@ -313,6 +324,10 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         # make every DSR-carrying result UNWRITABLE. `deflated` is None until
         # 5e-3 runs, and the all-absent case is what existing rows satisfy.
         **_dsr_params(result.deflated),
+        # ⚠ sql/268's §9 block, bound by `strategy_results_synthetic_all_or_nothing`
+        # — the same trap as the two blocks above, and the same one-function
+        # answer so the present and absent branches cannot set different keys.
+        **_synthetic_params(result.synthetic_control),
     }
 
 
@@ -347,6 +362,42 @@ def _dsr_params(deflated: DeflatedSharpeResult | None) -> dict[str, object]:
         "dsr_measured_trials": deflated.measured_trials,
         "dsr_model_id": deflated.model_id,
         "trial_register_version": deflated.trial_register_version,
+    }
+
+
+def _synthetic_params(control: SyntheticControl | None) -> dict[str, object]:
+    """``sql/268``'s ten columns, all present or all null.
+
+    ⚠ THE STRATEGY'S OWN SHARPE AND RETURN ARE NOT AMONG THEM. Both are already
+    on the row, and `strategy_results_synthetic_verdict_derived` re-derives
+    `synthetic_control_passed` from the stored `sharpe` and the thresholds here —
+    so a second copy would be a second thing to keep in step. `StrategyResult`
+    binds the object's copy to `metrics` at assembly time.
+    """
+    if control is None:
+        return {
+            "synthetic_control_model_id": None,
+            "synthetic_control_size": None,
+            "synthetic_control_root_seed": None,
+            "synthetic_control_mean_return_pct": None,
+            "synthetic_control_mean_return_ci_low_pct": None,
+            "synthetic_control_mean_return_ci_high_pct": None,
+            "synthetic_control_sharpe_percentile": None,
+            "synthetic_control_sharpe_threshold": None,
+            "synthetic_control_return_threshold_pct": None,
+            "synthetic_control_passed": None,
+        }
+    return {
+        "synthetic_control_model_id": control.model_id,
+        "synthetic_control_size": control.cohort_size,
+        "synthetic_control_root_seed": control.root_seed,
+        "synthetic_control_mean_return_pct": _numeric(control.mean_return_pct),
+        "synthetic_control_mean_return_ci_low_pct": _numeric(control.mean_return_ci_low_pct),
+        "synthetic_control_mean_return_ci_high_pct": _numeric(control.mean_return_ci_high_pct),
+        "synthetic_control_sharpe_percentile": _numeric(control.sharpe_percentile),
+        "synthetic_control_sharpe_threshold": _numeric(control.cohort_sharpe_threshold),
+        "synthetic_control_return_threshold_pct": _numeric(control.cohort_return_threshold_pct),
+        "synthetic_control_passed": control.passed,
     }
 
 
@@ -417,6 +468,16 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         dsr_measured_trials,
         dsr_model_id,
         trial_register_version,
+        synthetic_control_model_id,
+        synthetic_control_size,
+        synthetic_control_root_seed,
+        synthetic_control_mean_return_pct,
+        synthetic_control_mean_return_ci_low_pct,
+        synthetic_control_mean_return_ci_high_pct,
+        synthetic_control_sharpe_percentile,
+        synthetic_control_sharpe_threshold,
+        synthetic_control_return_threshold_pct,
+        synthetic_control_passed,
     ) = row
 
     identity = ResultIdentity(
@@ -506,6 +567,36 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
             model_id=str(dsr_model_id),
         )
     )
+    # ⚠ sql/268, same NULL-preserving rule and same one-probe decision as the
+    # two blocks above — `synthetic_control_model_id`, which is the field a
+    # partial write is least likely to have set. The strategy side is rebuilt
+    # FROM `metrics`, because the table deliberately stores only the cohort side.
+    control = (
+        None
+        if synthetic_control_model_id is None
+        else SyntheticControl(
+            model_id=str(synthetic_control_model_id),
+            cohort_size=int(synthetic_control_size),  # type: ignore[arg-type]
+            root_seed=int(synthetic_control_root_seed),  # type: ignore[arg-type]
+            mean_return_pct=float(synthetic_control_mean_return_pct),  # type: ignore[arg-type]
+            mean_return_ci_low_pct=float(synthetic_control_mean_return_ci_low_pct),  # type: ignore[arg-type]
+            mean_return_ci_high_pct=float(synthetic_control_mean_return_ci_high_pct),  # type: ignore[arg-type]
+            sharpe_percentile=float(synthetic_control_sharpe_percentile),  # type: ignore[arg-type]
+            cohort_sharpe_threshold=float(synthetic_control_sharpe_threshold),  # type: ignore[arg-type]
+            strategy_sharpe=metrics.sharpe,
+            cohort_return_threshold_pct=float(synthetic_control_return_threshold_pct),  # type: ignore[arg-type]
+            strategy_return_pct=metrics.total_return_pct,
+        )
+    )
+    # ⚠ THE STORED VERDICT IS RE-DERIVED AND COMPARED, which is what makes this
+    # a round trip rather than a copy. `sql/268` already CHECKs the same
+    # implication in SQL; a disagreement here means the Python rule and the SQL
+    # rule have drifted apart, which no single-sided test would show.
+    if control is not None and bool(synthetic_control_passed) != control.passed:
+        raise ValueError(
+            f"stored synthetic_control_passed {synthetic_control_passed!r} disagrees with the verdict its own stored "
+            f"inputs produce ({control.passed!r}) — the row's thresholds and its flag have diverged"
+        )
     return StrategyResult(
         identity=identity,
         metrics=metrics,
@@ -515,6 +606,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         trial_count=None if trial_count is None else int(trial_count),  # type: ignore[arg-type]
         deflated_sharpe=deflated_sharpe,  # type: ignore[arg-type]
         deflated=deflated,
+        synthetic_control=control,
     )
 
 

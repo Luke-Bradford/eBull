@@ -36,6 +36,7 @@ from app.services.result_ledger import (
 from app.services.strategy_result import PromotionCandidate, check_promotable
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
+    build_control,
     build_metrics,
     build_result,
     build_result_with_dsr,
@@ -488,6 +489,10 @@ def test_the_counts_move_the_promotion_gate_off_holdout_never_evaluated(
             # records no quarantine sensitivity arm, and criterion 9 requires
             # one before a result is promotable.
             "quarantine_arms_not_compared",
+            # Stage 5e-5b's, and the same reading: `build_result` carries no
+            # synthetic control, so §9's null distribution does not exist for
+            # this row and its Sharpe has no scale to be read against.
+            "synthetic_control_not_run",
         }
 
 
@@ -616,3 +621,47 @@ def test_an_evaluate_record_authorises_only_its_own_result_version(
                 "rver": different_arm.identity.version,
             },
         )
+
+
+def test_a_result_carrying_the_synthetic_control_survives_the_round_trip(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ THE SAME GAP sql/265 AND sql/266 EACH OPENED, ONE STAGE LATER AGAIN.
+
+    ``build_result`` leaves §9's whole block NULL, so every one of ``sql/268``'s
+    ten columns round-trips as ``None`` in every test above — and a ledger that
+    omitted them, or read them back in the wrong positional order, would pass
+    all of them. Twice now that is exactly how the ledger went stale when a
+    migration landed.
+
+    ⚠ The row also exercises the part ``sql/268`` deliberately does NOT store:
+    the strategy's own Sharpe and return are rebuilt FROM ``metrics`` on the way
+    back, and ``_result_from_row`` re-derives the stored verdict and refuses a
+    disagreement. Equality against ``written`` is therefore an assertion about
+    the binding, not only about the columns.
+    """
+    with ebull_test_conn.transaction():
+        metrics = build_metrics()
+        written = build_result(strategy_id="S-C9TRIP", metrics=metrics, synthetic_control=build_control(metrics))
+        store_holdout_result(ebull_test_conn, written, accessed_by=_ACTOR, purpose=_PURPOSE)
+
+        read_back = read_holdout_results(
+            ebull_test_conn,
+            "S-C9TRIP",
+            written.identity.strategy_version,
+            accessed_by=_ACTOR,
+            purpose=_PURPOSE,
+        )
+        assert read_back == (written,)
+        control = read_back[0].synthetic_control
+        assert control is not None
+        assert control.model_id == "permuted-entry-uniform-gap-v1"
+        assert control.cohort_size == 1000
+        assert control.root_seed == 20260808
+        # ⚠ Rebuilt from the metric set, never from a second stored copy.
+        assert control.strategy_sharpe == read_back[0].metrics.sharpe
+        assert control.strategy_return_pct == read_back[0].metrics.total_return_pct
+        # ⚠ A FALSE verdict stored and read back. §10 makes this the expected
+        # state, and a fixture that only ever stored a pass would leave the
+        # derived-verdict CHECK exercised in one direction.
+        assert control.passed is False

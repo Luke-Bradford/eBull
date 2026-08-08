@@ -770,7 +770,19 @@ until the namespace has a mechanism.
 | **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. `app/services/deflated_sharpe.py`, `app/services/trial_register.py`, `sql/266`. | ✅ shipped |
 | **5e-4** | **Purged walk-forward + embargo** (§5.3). `app/services/walk_forward.py`. ⚠ The "blocked on S-1 declaring a `max_hold_bars`" row was **struck**: the block was an unstarted measurement, not a decision, and the measurement adopted the leak-free in-sample p100 with S-1's identity untouched. | ✅ shipped |
 | **5e-5a** | **Quarantine sensitivity arm** (criterion 9) — the two-arm loader, the census, the metric delta, and `quarantine_arm` on the result identity. `app/services/quarantine_sensitivity.py`, `sql/267`. | ✅ shipped |
-| **5e-5b** | The **1,000-strategy random-entry control** (§9, *the harness itself*), and the per-fold walk-forward writer 5e-4 deliberately left unwritten. | last |
+| **5e-5b** | The **1,000-strategy random-entry control** (§9, *the harness itself*) — the permutation, both thresholds, and the three promotion refusals. `app/services/random_entry_cohort.py`, `sql/268`. ⚠ Cohort run at N = 1,000 for **S-3 only**; S-1's is compute-bound, §8.6. | ✅ shipped |
+| **5e-5c** | The **per-fold walk-forward writer** 5e-4 deliberately left unwritten, and the **per-arm result writer** (`quarantine_arm` is expressible; nothing writes it yet). | last |
+
+⚠ **5e-5b was split again at the writers**, and the reason is the same one that
+split 5e at 5e-1 and 5e-5 at 5e-5a: the control CHANGES WHAT A STORED RESULT
+MEANS. It adds three promotion refusals and a derived-verdict CHECK
+(`sql/268`), and a schema change to the result row is cheap only while
+`strategy_results_store` is empty. The two writers add ROWS and no semantics, so
+they are strictly cheaper afterwards. ⚠ The control also unblocks something the
+model already referenced: `PromotionCandidate.ambiguity_material` is defined
+(§3.4) as *"the two ambiguity arms' Sharpe differ by more than the gap between
+the strategy and the random cohort's 95th percentile"* — that gap did not exist
+until this stage, so the §3.4 rule had no measurable right-hand side.
 
 ⚠ **5e-5 was split at 5e-5a**, for the reason 5e was split at 5e-1: the first
 item turned out to change the RESULT IDENTITY (`quarantine_arm`, §8.5), and an
@@ -976,6 +988,76 @@ backtester.
 
 ---
 
+### 8.6 Stage 5e-5b: what the null is, the residual that was not one, and the cohort that did not run
+
+Criterion 9's arm asked what an exclusion cost. §9's control asks a harder
+question — *is any of this distinguishable from chance* — and the answer is only
+worth as much as the null it is measured against.
+
+| choice | fixed by |
+| --- | --- |
+| Cohort size 1,000; Sharpe at the 95th percentile; a 95% interval; a recorded seed | **The parent, verbatim.** All four are `SPEC_` literals with a single bridge test. |
+| The randomisation is a **PERMUTATION** — per series, keep the realised trade count and the multiset of holding periods, redraw only the entry ordinals | **OURS**, and the alternative is named: calibrating a Bernoulli entry rate until exposure and turnover land near the strategy's makes the match an optimisation with a tolerance nobody can source, and the tolerance becomes a free parameter of the null. Under the permutation the trade count matches by construction and is ASSERTED. |
+| Placement space = the strategy's own **eligible fill bars** (usable open, inside the window, past the declared warm-up) | **OURS, from §3.5 and the strategies' own `WARMUP_BARS`.** A member must not be able to trade a bar the real strategy was structurally unable to trade. |
+| The gaps are `m` iid uniform draws, SORTED | **OURS**, frozen in `COHORT_MODEL_ID`. ⚠ Uniform over the sorted DRAW, not over the legal placements — the two differ as a multiset differs from a composition. Neither is fixed by any source; the alternative is named in the code so a later reader sees it was a choice. |
+| Touching permitted — a position may open on the ordinal a previous one closed on | **`position_builder`'s own rule 4.** Forbidding it would make the cohort's placement space strictly SMALLER than the real strategy's. |
+| The percentile is an **ORDER STATISTIC** (`inverted_cdf`, Hyndman & Fan 1996 type 1), not NumPy's interpolation | **OURS**, and it was a real defect: the module declared the 950th order statistic and the code interpolated between the 950th and 951st — a cut at a value no member achieved. Caught at Codex checkpoint 2. ⚠ The bootstrap INTERVAL deliberately keeps NumPy's default, matching stage 5e-2's shipped convention; they are different quantities. |
+| The cohort is **NOT** a trial count for criterion 6 | **OURS, and now written down** rather than left implicit. `trial_register` counts searches of price data for an edge to ship; no cohort member is a promotion candidate or can be selected into one. |
+
+⚠⚠ **THE FINDING: A MATCHING RESIDUAL MEASURED ON A RUINED EQUITY PATH MEASURES
+THE RUIN, NOT THE MATCH.**
+
+Read off the costed run alone, the cohort looks badly mismatched on the two
+things §9 names — exposure **34.65%** against S-3's **85.92%** (−51.3 points) and
+turnover **12.33/yr** against **39.21** (−26.9). That reads as *"the permutation
+destroyed the strategy's concurrency, so the null is mis-specified"*, and it was
+the reading this stage was about to write down. The zero-cost ablation (§9.2)
+falsifies it outright: the **same placements, same seeds** at `h = 0` hold
+**99.87%** exposure and turn over **36.37/yr**, both within a few points of the
+strategy's own. The permutation reproduces exposure and turnover; the costed
+cohort does not, because **an equity path collapsing toward zero carries no
+capital and therefore trades no notional**. The residual is a property of the
+RESULT, not of the matching.
+
+⚠ Generalises past this stage: exposure and turnover are RATIOS whose denominator
+is the equity path. Comparing them between two runs whose paths differ by orders
+of magnitude compares the paths, not the quantity named. The ablation cost ten
+minutes and moved a "the null is wrong by 51 points" conclusion to "the null is
+right and the cohort is ruined".
+
+⚠⚠ **S-1's COHORT DID NOT RUN, AND THE REASON IS COMPUTE, NOT DESIGN.** Every
+piece of machinery is strategy-agnostic and `--prepare` cached S-1's inputs in
+the same sweep (3,133,100 realised holds, 0 series unable to carry them). What
+stops it is scale: S-1's book is **3,133,100 legs**, `build_equity_curve` takes
+**20.7 s** over it and a whole member **31 s** standalone — **8.6 CPU-hours** for
+1,000 members, and measured **122 s/member at 37% CPU** on the shared box (the
+rest is swap wait, against a 10 GB resident model server and an 8.2 GB container
+VM). S-3's 27,782-leg book runs a member in **1.05 s**, which is why its cohort
+and its ablation are both complete at N = 1,000. The command is in §8.7 and needs
+only a machine with the RAM to hold four or five 1.6 GB members at once.
+
+⚠ So the control exists, at full population and full cohort size, for **one** of
+the four catalogued strategies. S-2 and S-4 do not run for phase 5a's standing
+reason (a resident panel; the resolver over the corpus); S-1 is the one that is
+merely expensive.
+
+### 8.7 Stage 5e-5b: the remaining command
+
+```
+PYTHONPATH=. uv run python scripts/verify_2240_random_entry_cohort.py --prepare
+# then, sharded across as many processes as RAM allows (~1.6 GB resident each):
+PYTHONPATH=. uv run python scripts/verify_2240_random_entry_cohort.py --cohort --strategy S-1 --members 0:200
+...                                                                                          --members 800:1000
+PYTHONPATH=. uv run python scripts/verify_2240_random_entry_cohort.py --report
+```
+
+⚠ Member `m`'s stream is a pure function of `(COHORT_ROOT_SEED, m)`, so the shard
+boundaries may be chosen freely and re-drawn between attempts without moving a
+single entry. ⚠ `--report` refuses (R5) unless the member indices are exactly
+`0 … 999`, so a partial cohort cannot be quoted as a §9 figure by accident.
+
+---
+
 ## 9. Acceptance
 
 One block per parent §5 criterion, in the parent's own order, so a missing
@@ -1087,6 +1169,21 @@ thresholds: the cohort's mean net return lies within its own 95% bootstrap CI of
 zero, **and** each real strategy's Sharpe exceeds the cohort's **95th
 percentile** to count as evidence at all. Plus §9.1.
 
+✅ **Shipped at stage 5e-5b, and the cohort is run at N = 1,000 for S-3**
+(`app/services/random_entry_cohort.py`,
+`scripts/verify_2240_random_entry_cohort.py`, `sql/268`). The construction is a
+**permutation**: per series, the realised trade count and the multiset of
+holding periods are kept EXACTLY and only the entry ordinals are redrawn, inside
+the same eligible-fill-bar space the real strategy was under (usable open,
+inside the window, past the declared warm-up). So the trade count matches by
+construction and is asserted rather than tolerated. ⚠ Both thresholds are
+implemented literally, both are stored, and a strategy failing them is a RESULT
+— §10 says so, and the verify script's exit code therefore gates the harness
+properties and never the verdict. ⚠ §9.2 records what the first threshold turned
+out to measure and why it is not satisfiable; §8.6 records the matching residual
+that turned out to be the cohort's ruin rather than a mis-specified null, and
+§8.7 the command for **S-1's cohort, which is compute-bound and did not run**.
+
 ### 9.1 ⚠ The parent's #2260 acceptance needs amending, and this is the amendment
 
 Parent §5 requires: *"reproduce issue #2260's 76.8% figure, then attribute it to
@@ -1105,6 +1202,105 @@ parent should carry:
 > agreeing with a number.
 
 The random-entry synthetic control is unaffected and remains mandatory.
+
+### 9.2 ⚠⚠ Stage 5e-5b measured the FIRST threshold, and it is not satisfiable by a cost-charged long-only null — the amendment, with the numbers
+
+**What the threshold says.** Parent §5: *"the mean net return of the random
+cohort must lie within its own 95% bootstrap CI of zero"*. Its stated purpose is
+one sentence later: *"A harness that finds edge in noise is broken regardless of
+what else it explains."*
+
+**What it measures here.** Full population, 1,000 members, S-3
+(`scripts/verify_2240_random_entry_cohort.py --report`; S-1's cohort did not
+run — see §8.6):
+
+```
+cohort mean net return      -99.5935%     95% CI [-99.8620%, -99.0928%]
+  contains zero                  NO        <- threshold 1 FAILS
+cohort sharpe p95             0.0962      strategy 0.1430
+  exceeds                       YES        <- threshold 2 PASSES
+members >= strategy sharpe   0 of 1,000   empirical p 0.000999  (= the 1/(N+1) FLOOR)
+members >= strategy return   1 of 1,000   empirical p 0.001998
+```
+
+**The cause is MEASURED, not asserted.** The obvious reading — *"a conservative
+cost model doing its job"* — is a causal claim, and this repo does not get to
+make one without checking it (`.claude/CLAUDE.md`; raised at Codex checkpoint 1,
+which was right that the −99.59% could equally have been a placement bug, universe
+drift or a mis-priced exit). The check is a **zero-cost ablation**: the identical
+placements, the same seeds, the same entries and holds, with the half-spread set
+to zero on both fill sides and on the rebalance
+(`--cohort --zero-cost`, all 1,000 members):
+
+| | costed cohort | **ablation `h = 0`** | real S-3 |
+| --- | --- | --- | --- |
+| mean net return | −99.5935% | **+48,048,234.36%** | +32.97% |
+| mean Sharpe | −0.5321 (p50) | **+0.7191** | 0.1430 |
+| mean exposure | 34.65% | **99.87%** | 85.92% |
+| mean turnover /yr | 12.33 | **36.37** | 39.21 |
+
+⚠ The cost model is the whole of it. ⚠⚠ And the same table settles a second
+question the costed run appeared to answer wrongly — see §8.6.
+
+⚠ **What the ablation does NOT establish.** The real sleeve was **not** re-run at
+`h = 0`, so nothing here says anything about whether S-3's own edge survives its
+costs, and the ablation's Sharpe being above the strategy's is not a comparison
+anybody made. A zero-cost backtest violates criterion 2 outright and is never a
+§9 figure; it exists to attribute one number and it is labelled as such in the
+runner's own output.
+
+**Amendment, recommended.**
+
+> **(a) State that the null is NOT centred at zero, by construction.** A member
+> is long-only, holds the strategy's own trade count, and pays a p75 round-trip
+> spread at ~36 turns a year. Its mean net return is the corpus's drift over its
+> exposure MINUS a cost that scales with turnover — a quantity with no reason to
+> equal zero. Threshold 1 fixes the null's centre at a value the construction
+> cannot produce, so it is not a test of the harness; it is a test of a
+> coincidence.
+>
+> **(b) Replace it with a declared permutation p-value on the SHARPE**, at the
+> parent's own 5%: `p = (1 + #{members >= strategy}) / (N + 1)`, refuse above
+> 0.05, and report the same statistic for net return beside it. This keeps the
+> parent's choice of Sharpe as the evidential statistic, uses the whole cohort
+> instead of one order statistic, and is consistent with the Monte-Carlo
+> permutation framing of Aronson (*Evidence-Based Technical Analysis*, 2006,
+> ch. 6) and Masters (*Permutation and Randomization Tests for Trading System
+> Development*, 2018). ⚠ Neither source is cited for this exact rule or for the
+> placement measure — both are OURS and frozen in `COHORT_MODEL_ID`. ⚠ The
+> statistic has a **resolution floor of `1/(N+1)` = 0.000999** at N = 1,000, and
+> S-3 already sits on it; a smaller p is not purchasable without a larger cohort.
+
+⚠ **Two proposals that were considered and REJECTED, with the reason, so they
+are not re-proposed:**
+
+- **A one-sided harness check** ("the cohort's mean must not lie ABOVE its
+  interval of zero"). Rejected at Codex checkpoint 1 and the objection is
+  correct: it would pass every harness that manufactures LOSSES — an
+  over-applied cost model, a mis-priced exit, a forced bad fill, a sizing rule
+  that under-invests — which is the same class of defect in the other direction
+  and is not less likely. A calibration gate that only looks at one tail is not
+  a calibration gate.
+- **Reading the two percentile tests as a joint gate** ("Sharpe AND return each
+  above p95"). It is an intersection rule with an unstated joint null and an
+  effective alpha nobody declared. (b) names ONE gating statistic and reports the
+  other.
+
+**What ships at 5e-5b regardless.** The **literal** thresholds, as the gate.
+`SyntheticControl.passed` is the conjunction the parent states, both halves are
+stored, and the three promotion refusals fire on them. Nothing here is relaxed in
+code — this section records a measurement and a recommendation, and adopting it
+is a change to `passed` and to `sql/268`'s derived-verdict CHECK. ⚠ Adopting it
+changes nothing operationally today: §6's stated initial state is that nothing is
+promotable, and a survivor-only corpus with `carry_unmodelled` refuses every
+result long before §9 is reached.
+
+⚠ **What the cohort's bootstrap interval is.** Randomisation uncertainty
+CONDITIONAL ON THE CORPUS. Every member trades the same price path; resampling
+members measures how much the *placement* moves the mean, and nothing about how
+much a different market would. Reading it as a confidence interval for "the
+return of a random strategy in general" would attribute the corpus's own drift to
+sampling noise.
 
 ---
 
