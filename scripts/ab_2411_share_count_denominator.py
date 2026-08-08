@@ -6,9 +6,9 @@ exactly the three calls ``compute_rankings`` makes — over EVERY instrument, an
 record per instrument. Nothing is simulated and nothing is written to the DB.
 
 The control arm is this same script run in a worktree at ``origin/main``. It labels its
-own arm from the COMPILED code object of ``_analytics_inputs`` — ``main``'s indexes
-``data["fund_rows"]``, the branch's indexes ``data["share_count_row"]`` — and refuses to
-run if it cannot tell them apart. A pair of files that carry the same label makes
+own arm from the loader's data shape — ``share_count_row`` is the key #2411 added to
+``_empty_instrument_data`` — cross-checked against ``_analytics_inputs``'s return arity,
+and refuses to run if the two disagree. A pair of files that carry the same label makes
 ``--compare`` say so rather than print a vacuous diff.
 
 ⚠ The metric is DISTINCT INSTRUMENT, not rows. Both signals under test are one per
@@ -50,7 +50,7 @@ import psycopg
 
 from app.config import settings
 from app.services.instrument_analytics import assemble_instrument_analytics_bulk
-from app.services.scoring import _analytics_inputs, _bulk_load_instrument_data
+from app.services.scoring import _analytics_inputs, _bulk_load_instrument_data, _empty_instrument_data
 
 _POPULATION_SQL = "SELECT instrument_id, symbol FROM instruments ORDER BY instrument_id"
 
@@ -70,14 +70,20 @@ def _signal_of(block: dict[str, Any], name: str) -> tuple[Any, Any]:
 
 
 def _run(out_path: str) -> int:
-    # Label the arm from the CODE OBJECT, not from a flag the caller could set wrong:
-    # `main`'s _analytics_inputs indexes data["fund_rows"], the branch's indexes
-    # data["share_count_row"]. Both are constants in the compiled function.
-    consts = _analytics_inputs.__code__.co_consts
-    settled_arm = "share_count_row" in consts
-    if settled_arm == ("fund_rows" in consts):
-        raise SystemExit(f"cannot label arm — _analytics_inputs consts={consts!r}")
+    # Label the arm from the loader's DATA SHAPE, not from a flag the caller could set
+    # wrong: `share_count_row` is the key #2411 added to `_empty_instrument_data`, and
+    # `_analytics_inputs` reads the denominator from it. A shape probe survives edits to
+    # the function's docstring and log strings, which a code-object probe does not.
+    shape = _empty_instrument_data()
+    settled_arm = "share_count_row" in shape
     arm = "settled" if settled_arm else "snapshot"
+
+    # Belt and braces, because a mislabelled arm makes `--compare` print a confident
+    # diff of the wrong thing: the return arity must agree with the shape. `main`
+    # returns (gics, shares); the branch returns (gics, shares, filed).
+    probe = _analytics_inputs(shape)
+    if (len(probe) == 3) != settled_arm:
+        raise SystemExit(f"cannot label arm — shape has share_count_row={settled_arm} but arity is {len(probe)}")
 
     now = datetime.now(tz=UTC)
     with psycopg.connect(settings.database_url) as conn:
