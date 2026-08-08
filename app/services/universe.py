@@ -14,6 +14,7 @@ import psycopg
 
 from app.providers.market_data import InstrumentRecord, MarketDataProvider
 from app.services.instrument_history import reconcile_symbol_history
+from app.services.universe_membership import reconcile_universe_membership
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,38 @@ def sync_universe(
                 history.renamed,
                 history.corrected_same_day,
                 history.reverted_same_day,
+            )
+
+        # #2290 — append-only universe-membership record.
+        #
+        # ⚠ MUST stay after the deactivation UPDATE above. The reconcile
+        # reads presence from ``instruments.is_tradable``, which only
+        # equals "returned by this sync's feed" once the upsert has set it
+        # TRUE for everything present AND the deactivation has cleared
+        # everything absent. Moving this call earlier would record
+        # membership for instruments the feed no longer returns, and the
+        # rows would be indistinguishable from true ones.
+        #
+        # Inside the same transaction deliberately: the transition and the
+        # membership row must commit atomically or the record is worse
+        # than none.
+        membership = reconcile_universe_membership(conn)
+        if (
+            membership.imported
+            or membership.listed
+            or membership.relisted
+            or membership.closed
+            or membership.reopened_same_day
+        ):
+            logger.info(
+                "Universe sync: membership imported=%d listed=%d relisted=%d "
+                "reopened_same_day=%d closed=%d confirmed=%d",
+                membership.imported,
+                membership.listed,
+                membership.relisted,
+                membership.reopened_same_day,
+                membership.closed,
+                membership.confirmed,
             )
 
     # Re-query to get accurate inserted/updated counts.
