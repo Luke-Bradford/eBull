@@ -6,6 +6,13 @@ split), §6 (#2288 clauses 2-4), §8 (stage 5e), acceptance C5. Parent:
 Row shape: ``sql/262`` + ``sql/263``. Namespace and trigger: ``sql/264``.
 Gate and frozen literals: ``app/services/strategy_result.py``. Refs #2240, #2288.
 
+⚠ STAGE 5e-5c ADDED THE TWO WRITERS THE EARLIER SUB-STAGES LEFT UNWRITTEN, and
+both are pair/whole writers rather than row writers, for one reason: the state
+each of them makes unreachable is a HALF-WRITTEN one that reads as complete.
+``store_*_arm_pair`` cannot leave criterion 9 with a single arm, and
+``store_walk_forward_folds`` (``sql/269``) cannot leave criterion 5's split with
+three folds of four.
+
 ⚠⚠ THE TWO WRITERS TARGET DIFFERENT RELATIONS, AND THAT IS THE MECHANISM.
 
 ``store_in_sample_result`` inserts into the VIEW ``strategy_results``, which
@@ -41,7 +48,7 @@ check somebody has to remember to run.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Final, Literal, get_args
 
@@ -54,6 +61,13 @@ from app.services.strategy_result import (
     StrategyResult,
 )
 from app.services.strategy_statistics import StrategyMetrics
+from app.services.walk_forward import (
+    WALK_FORWARD_MODEL_ID,
+    Fold,
+    FoldCensus,
+    FoldRecord,
+    WalkForwardFolds,
+)
 
 #: ``sql/264``'s ``access_kind`` vocabulary. ⚠ Two kinds because they are
 #: different governance events: an ``evaluate`` is a hold-out number being
@@ -257,6 +271,40 @@ _COUNT_EVALUATE_ACCESSES = """
       AND strategy_version = %(strategy_version)s
       AND access_kind = 'evaluate'
 """
+
+#: ⚠ Counts BOTH sibling versions in one statement rather than probing twice —
+#: two round trips could straddle a concurrent write and report a pair that was
+#: never simultaneously present.
+_COUNT_ARM_PAIR = """
+    SELECT count(*)
+    FROM strategy_results_store
+    WHERE strategy_id = %(strategy_id)s
+      AND strategy_version = %(strategy_version)s
+      AND result_version = ANY(%(result_versions)s)
+"""
+
+#: ``sql/269``. Column order is shared with the read below and with
+#: ``_fold_row``; the round-trip test is what pins the three together.
+_FOLD_COLUMNS = """
+    fold_index, walk_forward_model_id, fold_count, first_index, last_index,
+    first_date, last_date, bar_count, embargo_bars,
+    test_count, train_count, purged_count, embargoed_count
+"""
+
+_INSERT_FOLD = f"""
+    INSERT INTO strategy_result_folds (result_id, {_FOLD_COLUMNS}) VALUES (
+        %(result_id)s, %(fold_index)s, %(walk_forward_model_id)s, %(fold_count)s,
+        %(first_index)s, %(last_index)s, %(first_date)s, %(last_date)s, %(bar_count)s, %(embargo_bars)s,
+        %(test_count)s, %(train_count)s, %(purged_count)s, %(embargoed_count)s
+    )
+"""  # noqa: S608 - `_FOLD_COLUMNS` is a module-level literal, no caller input reaches it
+
+_SELECT_FOLDS = f"""
+    SELECT {_FOLD_COLUMNS}
+    FROM strategy_result_folds
+    WHERE result_id = %(result_id)s
+    ORDER BY fold_index
+"""  # noqa: S608 - as above
 
 
 def _row_params(result: StrategyResult) -> dict[str, object]:
@@ -746,14 +794,321 @@ def holdout_access_counts(
     return HoldoutAccessCounts(holdout_evaluations=int(evaluations[0]), recorded_accesses=int(accesses[0]))
 
 
+# ---------------------------------------------------------------------------
+# Criterion 9's arm PAIR (stage 5e-5c)
+# ---------------------------------------------------------------------------
+
+
+def _check_arm_pair(masked: StrategyResult, admitted: StrategyResult) -> None:
+    """Refuse anything that is not one measurement under both arms.
+
+    ⚠⚠ THE CHECK IS THAT THE TWO IDENTITIES DIFFER IN THE ARM AND IN NOTHING
+    ELSE, and it is written as one comparison rather than as a field-by-field
+    sweep: rebuild the masked identity with the admitted arm and require it to
+    EQUAL the admitted one. A sweep would have to be extended by hand every time
+    ``ResultIdentity`` gains a member — and the member most likely to be
+    forgotten is the newest one, which is the one a pair is most likely to
+    differ in.
+
+    ⚠ WHY A PAIR WRITER EXISTS AT ALL, when ``store_in_sample_result`` can
+    already write either arm: criterion 9 is satisfied by the COMPARISON, not by
+    an arm. A lone ``admitted`` row is a number nobody may quote (``sql/267``)
+    and a lone ``masked`` row is the state the promotion gate refuses as
+    ``quarantine_arms_not_compared``. Storing them through one call makes the
+    half-written state unreachable rather than merely discouraged — a rolled-back
+    transaction leaves neither, and a raise here leaves neither.
+    """
+    if masked.identity.quarantine_arm != "masked" or admitted.identity.quarantine_arm != "admitted":
+        raise ValueError(
+            f"arms are mislabelled: {masked.identity.quarantine_arm!r} / {admitted.identity.quarantine_arm!r} — the "
+            "pair is (masked, admitted) in that order, and the admitted arm is never the number to quote"
+        )
+    expected = replace(masked.identity, quarantine_arm="admitted")
+    if expected != admitted.identity:
+        raise ValueError(
+            "the two arms do not describe one measurement: the admitted identity is not the masked identity with the "
+            f"arm flipped ({expected.version} expected, {admitted.identity.version} given). A delta between results "
+            "that differ in anything else is a comparison of populations, not of handling"
+        )
+
+
+def store_in_sample_arm_pair(
+    conn: psycopg.Connection[tuple],
+    masked: StrategyResult,
+    admitted: StrategyResult,
+) -> tuple[int, int]:
+    """Store criterion 9's two in-sample arms together. Returns both ``result_id``s.
+
+    ⚠ TWO FUNCTIONS AND NOT ONE BRANCHING ON THE NAMESPACE, deliberately — the
+    module header's mechanism is that *the two writers target different
+    relations*, and a single pair writer that decided at runtime would put a
+    hold-out write behind a name that does not say hold-out.
+
+    ⚠⚠ THE PAIR OWNS ITS OWN TRANSACTION, and this is the one place in the
+    module that does. The single-row writers deliberately run in the caller's
+    transaction; a PAIR writer cannot, because its whole claim is that the
+    lone-arm state is unreachable — and on an autocommit connection (this repo
+    opens several, e.g. ``app/main.py``'s lifespan guards) the first insert
+    would COMMIT before the second failed. ``conn.transaction()`` is a savepoint
+    inside an existing transaction and a real one otherwise, so the guarantee
+    does not depend on how the caller connected. Found by Codex at checkpoint 2.
+    """
+    _check_arm_pair(masked, admitted)
+    with conn.transaction():
+        return (store_in_sample_result(conn, masked), store_in_sample_result(conn, admitted))
+
+
+def store_holdout_arm_pair(
+    conn: psycopg.Connection[tuple],
+    masked: StrategyResult,
+    admitted: StrategyResult,
+    *,
+    accessed_by: str,
+    purpose: str,
+) -> tuple[int, int]:
+    """Store criterion 9's two hold-out arms together. Returns both ``result_id``s.
+
+    ⚠ TWO ``evaluate`` ACCESS RECORDS, one per arm, because ``sql/264``'s
+    trigger matches on ``result_version`` and the arms have different ones. That
+    is the correct count and not double-counting: two hold-out numbers were
+    produced, and criterion 5 audits evaluations rather than sessions.
+
+    ⚠⚠ OWNS ITS TRANSACTION, for the reason ``store_in_sample_arm_pair`` gives —
+    and with one more consequence here: four statements have to stand or fall
+    together, since a committed access record for a row that never landed would
+    inflate exactly the count criterion 5 audits.
+    """
+    _check_arm_pair(masked, admitted)
+    with conn.transaction():
+        return (
+            store_holdout_result(conn, masked, accessed_by=accessed_by, purpose=purpose),
+            store_holdout_result(conn, admitted, accessed_by=accessed_by, purpose=purpose),
+        )
+
+
+def quarantine_arms_compared(
+    conn: psycopg.Connection[tuple],
+    identity: ResultIdentity,
+    *,
+    accessed_by: str,
+    purpose: str,
+) -> bool:
+    """``PromotionCandidate.quarantine_arms_compared``, read off the database.
+
+    True when BOTH arms of ``identity`` are stored — the identity's own version
+    and its sibling with the arm flipped. ⚠ A BOOLEAN AND NOT A MAGNITUDE:
+    criterion 9 requires the exclusion visible, not small, and
+    ``PromotionRefusal``'s comment records why no ``quarantine_material`` twin
+    exists.
+
+    ⚠⚠ IT COUNTS ROWS, NEVER METRICS, and for a ``hold_out`` identity it still
+    RECORDS A READ. Presence is a fact about the withheld side, so the access is
+    logged for the reason ``read_holdout_results`` logs an empty read: *looking
+    is the event criterion 5 governs*. An ``in_sample`` identity records
+    nothing — inflating the log with in-sample lookups would make the audit
+    trail a count of automation rather than of governance.
+
+    ⚠ ``accessed_by`` and ``purpose`` are required on BOTH paths even though one
+    discards them. The caller is a gate assembler that does not branch on the
+    namespace, and an optional audit field is one a caller learns it needed at
+    the moment it cannot supply one.
+    """
+    sibling = replace(identity, quarantine_arm=("admitted" if identity.quarantine_arm == "masked" else "masked"))
+    if identity.namespace == "hold_out":
+        record_holdout_access(
+            conn,
+            HoldoutAccess(
+                strategy_id=identity.strategy_id,
+                strategy_version=identity.strategy_version,
+                result_version=None,
+                access_kind="read",
+                accessed_by=accessed_by,
+                purpose=purpose,
+            ),
+        )
+    row = conn.execute(
+        _COUNT_ARM_PAIR,
+        {
+            "strategy_id": identity.strategy_id,
+            "strategy_version": identity.strategy_version,
+            "result_versions": [identity.version, sibling.version],
+        },
+    ).fetchone()
+    if row is None:  # pragma: no cover - count() always returns a row
+        raise RuntimeError("arm-pair count query returned no row")
+    return int(row[0]) == 2
+
+
+# ---------------------------------------------------------------------------
+# The walk-forward split (stage 5e-5c)
+# ---------------------------------------------------------------------------
+
+
+def store_walk_forward_folds(
+    conn: psycopg.Connection[tuple],
+    result_id: int,
+    split: WalkForwardFolds,
+) -> int:
+    """Store one result's whole walk-forward split. Returns the rows written.
+
+    ⚠⚠ THE WHOLE SPLIT OR NOTHING. ``WalkForwardFolds`` refuses a partial or
+    discontiguous set before this function is reached, and every row goes in one
+    ``executemany`` inside a transaction THIS FUNCTION OWNS — so a stored split
+    is always ``FOLD_COUNT`` contiguous folds measured over one population. A
+    per-fold writer would make "three of four folds stored" representable, and
+    it would read as a completed cross-validation.
+
+    ⚠⚠ THE ``conn.transaction()`` HERE IS DEFENCE IN DEPTH AND IS NOT WHAT MAKES
+    THE BATCH ATOMIC — MEASURED, NOT ASSUMED. Codex raised at checkpoint 2 that
+    an autocommit caller would commit each statement and leave the earlier folds
+    standing after a later one was refused. Measured on psycopg **3.3.3**
+    (2026-08-08): an autocommit connection, a temp table with a primary key, and
+    an ``executemany`` whose THIRD statement violates it — the two rows before it
+    do **not** survive. `executemany` runs the batch in its own transaction. So
+    the wrapper is kept for the guarantee to be explicit and independent of a
+    driver implementation detail, and it is stated as belt-and-braces rather
+    than sold as the mechanism. ⚠ Its absence is therefore not observable by any
+    test, which is why ``scripts/probe_2240_result_ledger.py`` carries no probe
+    for it and says so.
+
+    ⚠ The rowcount checks below are inside it regardless, so a short batch
+    unwinds rather than raising over rows that are already committed.
+
+    ⚠ THE MODEL ID MUST BE TODAY'S. A write happens under the construction this
+    module currently implements, so stamping an older one would label rows with
+    a split that did not produce them. The asymmetry with ``read_walk_forward_folds``
+    — which returns whatever was stored — is the correct direction: old rows
+    keep their own construction, and new rows cannot claim one.
+
+    ⚠ THERE IS NO PYTHON NAMESPACE CHECK HERE, unlike the two single-row
+    writers, and the reason is the signature: this function holds a
+    ``result_id`` and not a ``StrategyResult``, so it would have to QUERY to
+    learn the parent's namespace. ``sql/269``'s trigger refuses a fold row on a
+    ``hold_out`` result for every writer including this one, and
+    ``tests/test_strategy_result_folds.py`` exercises it on INSERT and on UPDATE.
+    """
+    if split.model_id != WALK_FORWARD_MODEL_ID:
+        raise ValueError(
+            f"split declares model {split.model_id!r} but this module implements {WALK_FORWARD_MODEL_ID!r} — a stored "
+            "split labelled with a construction that did not produce it is unauditable"
+        )
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            _INSERT_FOLD,
+            [
+                {
+                    "result_id": result_id,
+                    "fold_index": record.fold.index,
+                    "walk_forward_model_id": split.model_id,
+                    "fold_count": len(split.folds),
+                    "first_index": record.fold.first_index,
+                    "last_index": record.fold.last_index,
+                    "first_date": record.first_date,
+                    "last_date": record.last_date,
+                    "bar_count": record.bar_count,
+                    "embargo_bars": record.embargo_bars,
+                    "test_count": record.census.test,
+                    "train_count": record.census.train,
+                    "purged_count": record.census.purged,
+                    "embargoed_count": record.census.embargoed,
+                }
+                for record in split.folds
+            ],
+        )
+        # psycopg3's ``executemany`` rowcount is cumulative across the batch.
+        # ⚠ -1 is psycopg's "the server reported nothing" sentinel and must not
+        # be returned as a count (prevention log: "psycopg v3 rowcount sentinel
+        # (-1) treated as valid count"). ⚠ Read rather than assumed from
+        # ``len(split.folds)``: the two agree only if every statement in the
+        # batch landed, and returning the input's length would report a
+        # complete split for whatever the database actually took.
+        written = cur.rowcount
+        if written < 0:
+            raise RuntimeError(f"strategy_result_folds INSERT reported rowcount {written} for {len(split.folds)} folds")
+        if written != len(split.folds):
+            raise ValueError(
+                f"strategy_result_folds INSERT wrote {written} of {len(split.folds)} folds — a partial split is a "
+                "cross-validation that did not finish"
+            )
+    return written
+
+
+def read_walk_forward_folds(conn: psycopg.Connection[tuple], result_id: int) -> WalkForwardFolds | None:
+    """One result's split, or ``None`` when it has none.
+
+    ⚠ ``None`` and not an empty ``WalkForwardFolds``: the type cannot express an
+    empty split (see its own header), and "this result carries no walk-forward
+    evidence" is a real state that a caller must handle rather than a degenerate
+    collection it can iterate over zero times.
+
+    ⚠ Positional read in ``_FOLD_COLUMNS`` order, matching ``_result_from_row``'s
+    reason: a dict read would tolerate the statement and the unpacking drifting
+    apart, and the round-trip test is what actually pins them.
+    """
+    rows = conn.execute(_SELECT_FOLDS, {"result_id": result_id}).fetchall()
+    if not rows:
+        return None
+    model_ids = {str(row[1]) for row in rows}
+    if len(model_ids) > 1:
+        raise ValueError(
+            f"result {result_id} carries folds from {sorted(model_ids)} — one split is one construction, and a mixed "
+            "set is two runs whose rows landed on one result"
+        )
+    return WalkForwardFolds(
+        model_id=model_ids.pop(),
+        folds=tuple(_fold_from_row(row) for row in rows),
+    )
+
+
+def _fold_from_row(row: Sequence[object]) -> FoldRecord:
+    """One ``sql/269`` row, in ``_FOLD_COLUMNS`` order."""
+    (
+        fold_index,
+        _walk_forward_model_id,
+        _fold_count,
+        first_index,
+        last_index,
+        first_date,
+        last_date,
+        bar_count,
+        embargo_bars,
+        test_count,
+        train_count,
+        purged_count,
+        embargoed_count,
+    ) = row
+    return FoldRecord(
+        fold=Fold(
+            index=int(fold_index),  # type: ignore[arg-type]
+            first_index=int(first_index),  # type: ignore[arg-type]
+            last_index=int(last_index),  # type: ignore[arg-type]
+        ),
+        first_date=first_date,  # type: ignore[arg-type]
+        last_date=last_date,  # type: ignore[arg-type]
+        bar_count=int(bar_count),  # type: ignore[arg-type]
+        embargo_bars=int(embargo_bars),  # type: ignore[arg-type]
+        census=FoldCensus(
+            test=int(test_count),  # type: ignore[arg-type]
+            train=int(train_count),  # type: ignore[arg-type]
+            purged=int(purged_count),  # type: ignore[arg-type]
+            embargoed=int(embargoed_count),  # type: ignore[arg-type]
+        ),
+    )
+
+
 __all__ = [
     "HOLDOUT_ACCESS_KINDS",
     "HoldoutAccess",
     "HoldoutAccessCounts",
     "HoldoutAccessKind",
     "holdout_access_counts",
+    "quarantine_arms_compared",
     "read_holdout_results",
+    "read_walk_forward_folds",
     "record_holdout_access",
+    "store_holdout_arm_pair",
     "store_holdout_result",
+    "store_in_sample_arm_pair",
     "store_in_sample_result",
+    "store_walk_forward_folds",
 ]

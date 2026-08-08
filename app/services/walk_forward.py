@@ -82,6 +82,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Final, Literal, get_args
 
 #: The identity of this construction. Same role as ``BOOTSTRAP_MODEL_ID`` and
@@ -161,6 +162,117 @@ class FoldCensus:
     @property
     def total(self) -> int:
         return self.test + self.train + self.purged + self.embargoed
+
+
+@dataclass(frozen=True)
+class FoldRecord:
+    """One fold, as it is STORED (stage 5e-5c): geometry, embargo and census.
+
+    ⚠ THE DATES ARE CARRIED BESIDE THE INDICES ON PURPOSE. An index is a
+    position on the in-sample panel axis, and that axis is a property of the
+    corpus at the moment the split ran — so a stored index alone is unreadable
+    without re-deriving the axis it indexes. §5.3's own table is written in
+    dates. Both are stored; the writer refuses a pair that disagree in order.
+
+    ⚠ ``bar_count`` is what makes §5.2's realised share re-derivable from the
+    stored rows. ``bar_weighted_folds``' clamp is deliberately silent in the
+    library and loud in the caller, and a stored bar count is how it stays loud
+    after the run that produced it has gone.
+
+    ⚠ NO PER-FOLD METRIC. §5.3: these strategies fit no parameters, so the split
+    is a validity GATE and not a training loop. A per-fold Sharpe would invite
+    exactly the "which fold did best" search criterion 6 exists to bound, and no
+    rule anywhere says what a per-fold number would be compared against.
+    """
+
+    fold: Fold
+    first_date: date
+    last_date: date
+    bar_count: int
+    embargo_bars: int
+    census: FoldCensus
+
+    def __post_init__(self) -> None:
+        if self.last_date < self.first_date:
+            raise ValueError(f"fold {self.fold.index} ends {self.last_date}, before its start {self.first_date}")
+        if self.bar_count < 0:
+            raise ValueError(f"fold {self.fold.index} carries {self.bar_count} bars")
+        if self.embargo_bars < 0:
+            raise ValueError(f"fold {self.fold.index} has embargo_bars {self.embargo_bars}")
+
+
+@dataclass(frozen=True)
+class WalkForwardFolds:
+    """A complete split, and the invariants that make it one.
+
+    ⚠⚠ COMPLETE OR NOTHING, AND THAT IS THE POINT OF THE TYPE. A stored split
+    missing a fold is a cross-validation nobody ran to the end, and it would
+    read as one — the same all-or-nothing argument ``sql/265`` makes for the
+    bootstrap block and ``sql/266`` for the Deflated Sharpe, one grain down. The
+    checks below are here rather than in ``result_ledger`` so they hold with no
+    database, which is what lets them be revert-probed at the fast tier.
+
+    ⚠ ``len(folds) == FOLD_COUNT`` is asserted, not accepted as an argument.
+    ``FOLD_COUNT``'s own comment gives the reason: *a fold count that can be
+    passed in is a fold count that can be swept, and a swept validity gate is a
+    search over validity gates.* ``bar_weighted_folds`` takes the count so a
+    unit test can draw a two-fold axis; a STORED split may not.
+
+    ⚠ ``model_id`` HAS NO DEFAULT. A read reconstructs the id the row was
+    written under, which is not necessarily today's constant, so defaulting it
+    would silently relabel an older split as this one. ``store_walk_forward_folds``
+    refuses anything but ``WALK_FORWARD_MODEL_ID`` on the WRITE side, where the
+    asymmetry is the correct one: a write always happens under today's
+    construction.
+    """
+
+    model_id: str
+    folds: tuple[FoldRecord, ...]
+
+    def __post_init__(self) -> None:
+        if not self.model_id:
+            raise ValueError("model_id is blank — a split with no declared construction records nothing (#2286)")
+        if len(self.folds) != FOLD_COUNT:
+            raise ValueError(
+                f"a stored split carries {FOLD_COUNT} folds, got {len(self.folds)} — a partial split is a "
+                "cross-validation that did not finish, and it would read as one that did"
+            )
+        for position, record in enumerate(self.folds):
+            if record.fold.index != position:
+                raise ValueError(f"fold at position {position} carries index {record.fold.index}")
+        if self.folds[0].fold.first_index != 0:
+            raise ValueError(
+                f"the split starts at axis index {self.folds[0].fold.first_index}, not 0 — folds partition the "
+                "whole in-sample axis, and a gap at the front is training data no fold ever tested"
+            )
+        for earlier, later in zip(self.folds, self.folds[1:], strict=False):
+            if later.fold.first_index != earlier.fold.last_index + 1:
+                raise ValueError(
+                    f"fold {later.fold.index} starts at index {later.fold.first_index}, which does not follow fold "
+                    f"{earlier.fold.index}'s last index {earlier.fold.last_index}"
+                )
+            if later.first_date <= earlier.last_date:
+                raise ValueError(
+                    f"fold {later.fold.index} starts {later.first_date}, on or before fold {earlier.fold.index}'s "
+                    f"last date {earlier.last_date} — contiguous index blocks cannot overlap in time"
+                )
+        # ⚠⚠ EVERY FOLD CLASSIFIES EVERY OBSERVATION, so the four buckets sum to
+        # the SAME total in each fold. A fold whose total differs was measured
+        # over a different population, and every count in the split is then a
+        # count of something else — the identical argument
+        # `QuarantineCensus.__post_init__` makes for its two arms. It is the one
+        # check here that catches a caller assembling folds from two runs.
+        totals = {record.census.total for record in self.folds}
+        if len(totals) > 1:
+            raise ValueError(
+                f"the folds count different observation populations {sorted(totals)} — every fold classifies every "
+                "observation, so a split whose totals differ was assembled from more than one run"
+            )
+
+    @property
+    def observation_count(self) -> int:
+        """The population every fold classified. See the total check above."""
+        return self.folds[0].census.total
 
 
 def bar_weighted_folds(bar_counts: Sequence[int], *, fold_count: int = FOLD_COUNT) -> tuple[Fold, ...]:
@@ -353,7 +465,9 @@ __all__ = [
     "WALK_FORWARD_MODEL_ID",
     "Fold",
     "FoldCensus",
+    "FoldRecord",
     "Role",
+    "WalkForwardFolds",
     "bar_weighted_folds",
     "census",
     "role",

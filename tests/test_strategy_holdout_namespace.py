@@ -28,12 +28,15 @@ import pytest
 from app.services.result_ledger import (
     HoldoutAccess,
     holdout_access_counts,
+    quarantine_arms_compared,
     read_holdout_results,
     record_holdout_access,
+    store_holdout_arm_pair,
     store_holdout_result,
+    store_in_sample_arm_pair,
     store_in_sample_result,
 )
-from app.services.strategy_result import PromotionCandidate, check_promotable
+from app.services.strategy_result import PromotionCandidate, StrategyResult, check_promotable
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
     build_control,
@@ -665,3 +668,175 @@ def test_a_result_carrying_the_synthetic_control_survives_the_round_trip(
         # state, and a fixture that only ever stored a pass would leave the
         # derived-verdict CHECK exercised in one direction.
         assert control.passed is False
+
+
+# ---------------------------------------------------------------------------
+# Criterion 9's arm PAIR (stage 5e-5c)
+# ---------------------------------------------------------------------------
+
+
+def _arms(**overrides: object) -> tuple[StrategyResult, StrategyResult]:
+    """One measurement under both arms — identical but for ``quarantine_arm``.
+
+    ⚠ The metric sets are deliberately DIFFERENT. Two arms with identical
+    numbers would be a pair that no delta could distinguish, and stage 5e-5a
+    measured real movement in every one of criterion 7's twelve.
+    """
+    masked = build_result(quarantine_arm="masked", **overrides)
+    admitted = build_result(
+        quarantine_arm="admitted",
+        metrics=build_metrics(sharpe=-3.2214778, trade_count=3133792),
+        **overrides,
+    )
+    return masked, admitted
+
+
+def test_both_arms_land_and_the_pair_reads_as_compared(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """The state ``quarantine_arms_not_compared`` refuses, cleared by a write."""
+    masked, admitted = _arms(strategy_id="S-PAIR-IN", namespace="in_sample")
+    with ebull_test_conn.transaction():
+        first, second = store_in_sample_arm_pair(ebull_test_conn, masked, admitted)
+        assert first != second
+        assert quarantine_arms_compared(ebull_test_conn, masked.identity, accessed_by=_ACTOR, purpose=_PURPOSE)
+        # ⚠ Read from EITHER arm's identity — the sibling is computed by
+        # flipping the arm, so the answer cannot depend on which one is held.
+        assert quarantine_arms_compared(ebull_test_conn, admitted.identity, accessed_by=_ACTOR, purpose=_PURPOSE)
+
+
+def test_a_lone_arm_does_not_read_as_compared(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """⚠ The refusal must survive the arm that IS stored, not just an empty table."""
+    masked, _ = _arms(strategy_id="S-PAIR-LONE", namespace="in_sample")
+    with ebull_test_conn.transaction():
+        store_in_sample_result(ebull_test_conn, masked)
+        assert not quarantine_arms_compared(ebull_test_conn, masked.identity, accessed_by=_ACTOR, purpose=_PURPOSE)
+
+
+def test_mislabelled_arms_are_refused(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """⚠ The order is (masked, admitted) — the admitted arm is never the quote."""
+    masked, admitted = _arms(strategy_id="S-PAIR-ORDER", namespace="in_sample")
+    with pytest.raises(ValueError, match="mislabelled"), ebull_test_conn.transaction():
+        store_in_sample_arm_pair(ebull_test_conn, admitted, masked)
+
+
+def test_arms_differing_in_anything_but_the_arm_are_refused(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ Two results that differ in a second field are a comparison of POPULATIONS.
+
+    ``quarantine_sensitivity.QuarantineCensus`` refuses the same thing one layer
+    up, on the bar counts. This is the identity-level twin: a delta between a
+    masked ``sleeve`` result and an admitted ``portfolio`` one measures the
+    scope, not the handling.
+    """
+    masked, _ = _arms(strategy_id="S-PAIR-DRIFT", namespace="in_sample")
+    other_scope = build_result(
+        strategy_id="S-PAIR-DRIFT",
+        namespace="in_sample",
+        quarantine_arm="admitted",
+        result_scope="portfolio",
+    )
+    with pytest.raises(ValueError, match="do not describe one measurement"), ebull_test_conn.transaction():
+        store_in_sample_arm_pair(ebull_test_conn, masked, other_scope)
+
+
+def test_a_hold_out_pair_records_one_evaluate_per_arm(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """⚠ TWO records, not one. sql/264's trigger matches on ``result_version``.
+
+    Two hold-out numbers were produced, and criterion 5 audits evaluations
+    rather than sessions — so the gate's ``recorded_accesses`` must keep pace
+    with a pair write or the very next check would refuse it.
+    """
+    masked, admitted = _arms(strategy_id="S-PAIR-HO", namespace="hold_out")
+    with ebull_test_conn.transaction():
+        store_holdout_arm_pair(ebull_test_conn, masked, admitted, accessed_by=_ACTOR, purpose=_PURPOSE)
+        counts = holdout_access_counts(ebull_test_conn, "S-PAIR-HO", masked.identity.strategy_version)
+    assert counts.holdout_evaluations == 2
+    assert counts.recorded_accesses == 2
+
+
+def test_reading_the_pair_state_on_the_hold_out_records_the_look(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ Presence is a fact about the withheld side, so looking is an access.
+
+    The record is a ``read`` and not an ``evaluate``: nothing was produced, so
+    the gate's evaluation arithmetic must not move. An in-sample identity
+    records nothing at all — an audit trail counting automation is not an audit
+    trail.
+    """
+    hold_out, _ = _arms(strategy_id="S-PAIR-LOG", namespace="hold_out")
+    in_sample, _ = _arms(strategy_id="S-PAIR-LOG-IS", namespace="in_sample")
+    with ebull_test_conn.transaction():
+        assert not quarantine_arms_compared(ebull_test_conn, hold_out.identity, accessed_by=_ACTOR, purpose=_PURPOSE)
+        assert not quarantine_arms_compared(ebull_test_conn, in_sample.identity, accessed_by=_ACTOR, purpose=_PURPOSE)
+        logged = ebull_test_conn.execute(
+            "SELECT strategy_id, access_kind, result_version FROM strategy_holdout_accesses ORDER BY access_id"
+        ).fetchall()
+    assert logged == [("S-PAIR-LOG", "read", None)]
+
+
+def test_the_gate_clears_the_arm_refusal_once_both_arms_are_stored(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠ The end-to-end wiring: writer → reader → ``check_promotable``.
+
+    Everything else about this candidate stays unpromotable — that is §6's
+    stated initial state — so the assertion is that this ONE refusal moves,
+    which is what a per-refusal vocabulary buys.
+    """
+    masked, admitted = _arms(strategy_id="S-PAIR-GATE", namespace="in_sample")
+    with ebull_test_conn.transaction():
+        before = quarantine_arms_compared(ebull_test_conn, masked.identity, accessed_by=_ACTOR, purpose=_PURPOSE)
+        store_in_sample_arm_pair(ebull_test_conn, masked, admitted)
+        after = quarantine_arms_compared(ebull_test_conn, masked.identity, accessed_by=_ACTOR, purpose=_PURPOSE)
+    assert "quarantine_arms_not_compared" in check_promotable(
+        PromotionCandidate(
+            result=masked,
+            evaluated_instrument_ids=frozenset({1}),
+            validated_universe_ids=frozenset({1}),
+            quarantine_arms_compared=before,
+        )
+    )
+    assert "quarantine_arms_not_compared" not in check_promotable(
+        PromotionCandidate(
+            result=masked,
+            evaluated_instrument_ids=frozenset({1}),
+            validated_universe_ids=frozenset({1}),
+            quarantine_arms_compared=after,
+        )
+    )
+
+
+def test_the_pair_writer_is_atomic_on_an_autocommit_connection(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ The lone-arm state must be unreachable however the caller CONNECTED.
+
+    Every other test here runs inside an explicit transaction, where a failed
+    second insert aborts the first for free — so none of them can see this. On
+    an autocommit connection (this repo opens several: ``app/main.py``'s
+    lifespan guards, the runbooks) each statement commits on its own, and a pair
+    writer that relied on the caller would leave the masked arm standing after
+    the admitted one was refused. That is exactly the state
+    ``quarantine_arms_not_compared`` exists to catch and exactly the state this
+    API claims to make unreachable.
+
+    The second insert is made to fail by storing the admitted arm FIRST, so the
+    pair writer's own admitted insert violates ``strategy_results_unique``.
+    """
+    masked, admitted = _arms(strategy_id="S-PAIR-ATOMIC", namespace="in_sample")
+    ebull_test_conn.rollback()
+    ebull_test_conn.autocommit = True
+    try:
+        store_in_sample_result(ebull_test_conn, admitted)
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            store_in_sample_arm_pair(ebull_test_conn, masked, admitted)
+        landed = ebull_test_conn.execute(
+            "SELECT count(*) FROM strategy_results_store WHERE strategy_id = 'S-PAIR-ATOMIC'"
+        ).fetchone()
+        assert landed == (1,), "the masked arm survived a failed pair write"
+    finally:
+        # ⚠ Autocommit means nothing unwinds itself. Both the row and the
+        # connection's mode are restored here rather than left for the fixture.
+        ebull_test_conn.execute("DELETE FROM strategy_results_store WHERE strategy_id = 'S-PAIR-ATOMIC'")
+        ebull_test_conn.autocommit = False
