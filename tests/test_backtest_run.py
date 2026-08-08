@@ -228,6 +228,36 @@ class TestExpectedRefusals:
             "holdout_never_evaluated"
         }
 
+    @pytest.mark.parametrize(
+        ("holdout_requested", "prior", "expects_never_evaluated"),
+        [
+            (False, 0, True),  # first run, in-sample only -- the refusal applies
+            (False, 12, False),  # RE-RUN of a version already hold-out evaluated (#2433)
+            (True, 0, False),  # this run evaluates the hold-out
+            (True, 12, False),  # both -- still evaluated
+        ],
+    )
+    def test_holdout_never_evaluated_follows_the_LEDGER_not_the_invocation(
+        self, holdout_requested: bool, prior: int, expects_never_evaluated: bool
+    ) -> None:
+        """#2433 — ``check_promotable`` derives this refusal from stored hold-out
+        rows, so predicting it from ``holdout_requested`` alone is right only on
+        a FIRST run.
+
+        ⚠ Row two is the one that mattered: it was unreachable until #2426 moved
+        every ``result_version``, and the first re-run it allowed rejected after
+        a full corpus pass with the corrected buy-and-hold numbers unwritten.
+        """
+        refusals = _expected_refusals(
+            holdout_requested=holdout_requested, deflated=True, prior_holdout_evaluations=prior
+        )
+        assert ("holdout_never_evaluated" in refusals) is expects_never_evaluated
+
+    def test_a_prior_evaluation_does_not_disturb_the_other_refusals(self) -> None:
+        assert _expected_refusals(
+            holdout_requested=False, deflated=False, prior_holdout_evaluations=12
+        ) == STANDING_REFUSALS | {"deflated_sharpe_not_computed", "trial_count_undeclared"}
+
     def test_no_dsr_adds_both_criterion_6_refusals(self) -> None:
         """⚠ TWO codes, not one. A DSR with no trial count is as refused as no
         DSR at all, and collapsing them would make "which of the two is missing"
