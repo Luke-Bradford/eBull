@@ -22,10 +22,37 @@ branches, no unpushed WIP).
    **merge ONLY via `"$AUTONOMY_ENGINE_HOME/bin/safe_merge.sh" <pr>`** (mechanically
    verifies bot-APPROVE-on-latest-SHA + CI-green; never `gh pr merge` directly).
    If the latest round is **rebuttal-only** (no code change, you think the bot is
-   wrong), do NOT merge unattended — that needs Codex ckpt-3 + human judgment;
-   leave the PR open with your reasoning and move on. If `safe_merge.sh` reports
-   manual-mode (the repo's merge gate is `manual`), leave the PR open and move to
-   the next ticket — do not attempt to merge it yourself.
+   wrong), run **Codex ckpt-3** over the rebuttals — and then finish the ticket:
+
+   - **Codex agrees your rebuttals are sound, and nothing else is outstanding →
+     MERGE.** `.claude/CLAUDE.md`'s decision tree is explicit that this needs
+     **no user rubber-stamp**: *"if Codex and the author both agree the remaining
+     bot findings are unfounded rebuttals and there is nothing else to action,
+     that's sufficient to merge."*
+   - **Codex finds something, or sides with the bot against you → fix it, push,
+     and restart the loop.** The new commit is a NEW round: once the bot APPROVEs
+     that SHA with nothing outstanding, merge it. ⚠ A rebuttal is a property of
+     **the round it appeared in**, not a permanent mark on the PR — reading it as
+     permanent makes a PR that ever drew one nitpick rebuttal unmergeable forever,
+     however much verification follows.
+   - **Escalate ONLY** where Codex cannot settle it: an architecture or scope
+     trade-off, or a settled-decision reversal. Then leave the PR open **and say
+     in the comment exactly what would unblock it** — an open PR with no stated
+     unblock condition is work nobody comes back to.
+
+   ⚠⚠ **Precedent, 2026-08-08 (#2240, PR #2427).** This paragraph used to read
+   *"do NOT merge unattended — that needs Codex ckpt-3 + human judgment; leave the
+   PR open and move on."* The loop did everything right — ran ckpt-3, which found
+   a real silent last-write-wins in `_cut_splits`, fixed it, pushed, and got a
+   clean bot APPROVE on the new SHA — and then **still refused to merge**, because
+   the PR had once contained a rebuttal. It sat merge-ready and abandoned until the
+   operator asked why. It also went `CONFLICTING` in the meantime, which costs a
+   rebase and re-review. The old wording both contradicted `.claude/CLAUDE.md` and
+   had no terminal state; "leave it open and move on" is not an outcome.
+
+   If `safe_merge.sh` reports manual-mode (the repo's merge gate is `manual`),
+   leave the PR open and move to the next ticket — do not attempt to merge it
+   yourself. That one IS a real stop: the gate is the operator's switch.
 
    **Push discipline — run the terminal push/PR step in the FOREGROUND, never
    background it (#1771).** The pre-push gate is slow (full fast tier + smoke +
