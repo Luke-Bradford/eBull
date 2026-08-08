@@ -15,8 +15,8 @@ PYTHONPATH=. uv run python scripts/verify_2394_backtest_run.py --all
 ```
 
 exit 0, on the dev corpus, 2026-08-08 — with **three labelled exceptions**, all
-in §§8-9 and all estimates rather than measurements: the three-run cost
-comparison (three invocations, not one), the six-pass extrapolation, and the
+in §§8-9 and all estimates rather than measurements: the four-run cost
+comparison (four invocations, not one), the six-pass extrapolation, and the
 synthetic-control cost.
 Acceptance criterion 10 names them so the distinction cannot erode. Every other
 figure, including every share and percentage, is computed by the script; none is
@@ -65,11 +65,10 @@ hold-out result over 5,266. `evaluated_instrument_count` and the gate's
 job that computes the count once and stamps it on both rows is wrong on one of
 them. ⚠ 4,022 is a **ceiling, not the count**: warm-up, `not_evaluable` bars and
 S-2's minimum cross-section all remove instruments that have in-sample bars but
-produce no in-sample position. The count on the row is the measured set. On S-1
-masked that set is **3,541**, 12% below the 4,022 ceiling — so a job stamping the ceiling
-would overstate its own population on every in-sample row. `--arm` prints
-"instruments with >=1 in-sample position" for exactly this reason, and its gate
-candidate is built from that set rather than from the corpus's.
+produce no in-sample position. The count on the row is the measured set: on S-1
+masked it is **3,541**, 12% below the 4,022 ceiling, so a job stamping the
+ceiling would overstate its own population on every in-sample row. `--arm`
+prints "instruments with >=1 in-sample position" for exactly this reason.
 
 ⚠ **Zero series end before the boundary**, which is the survivor-only label
 (#2288 clause 1) showing up as a shape rather than as a caveat: a corpus that
@@ -365,26 +364,26 @@ merge two results — the #2286 shape the constraint was written against.
 ## 8. Cost
 
 `--arm`, one arm (S-1, masked, full corpus, whole window), full population, run
-**three times** on the same box and the same code:
+**four times** on the same box and the same code:
 
-| phase | run 1 | run 2 | run 3 |
-| --- | ---: | ---: | ---: |
-| corpus pass | 256.8s | 415.9s | 356.6s |
-| — masked bar loading | 84.7s (33.0%) | 142.9s (34.4%) | 136.8s (38.4%) |
-| — signals → positions | 148.1s (57.7%) | 229.9s (55.3%) | 184.2s (51.7%) |
-| — curve accumulation | 3.8s (1.5%) | 4.5s (1.1%) | 4.1s (1.1%) |
-| curve + metrics | 33.4s | 97.9s | 87.8s |
-| **TOTAL** | **290.3s** | **513.7s** | **444.4s** |
+| phase | run 1 | run 2 | run 3 | run 4 |
+| --- | ---: | ---: | ---: | ---: |
+| corpus pass | 256.8s | 415.9s | 356.6s | 290.8s |
+| — masked bar loading | 84.7s (33.0%) | 142.9s (34.4%) | 136.8s (38.4%) | 84.8s (29.2%) |
+| — signals → positions | 148.1s (57.7%) | 229.9s (55.3%) | 184.2s (51.7%) | 178.1s (61.2%) |
+| — curve accumulation | 3.8s (1.5%) | 4.5s (1.1%) | 4.1s (1.1%) | 4.7s (1.6%) |
+| curve + metrics | 33.4s | 97.9s | 87.8s | 39.7s |
+| **TOTAL** | **290.3s** | **513.7s** | **444.4s** | **330.5s** |
 
-3,135,355 positions over 5,266 series, 0 empties — **identical in all three**.
+3,135,355 positions over 5,266 series, 0 empties — **identical in all four**.
 
 ⚠ **The wall clock is not reproducible to better than ~1.8× on this box, and the
-spread is reported rather than averaged away.** All three runs did the same work
+spread is reported rather than averaged away.** All four runs did the same work
 on the same data and produced the same positions; the box was carrying other
 sessions' load. Plan on the slowest figure. What IS stable is the phase *shape* —
-roughly a third of the time is loading bars, about half is signals→positions, and
-the curve accumulation is ~1% — which is the part an optimisation decision would
-rest on, and it is the reason the spread does not undermine the section.
+29-38% of the time is loading bars, 52-61% is signals→positions, and the curve
+accumulation is ~1% in every run — which is the part an optimisation decision
+would rest on, and it is the reason the spread does not undermine the section.
 
 **Six passes is 29–51 minutes.** ⚠ That multiplication is an estimate and is
 labelled one: only S-1 was measured. S-3 is per-series and comparable; S-2 is
@@ -407,8 +406,8 @@ criterion 3's number and criterion 6 consumes it.
 
 ## 9. What the job can and cannot close on the gate
 
-`--arm` builds the row this job would store and runs `check_promotable` on it.
-Measured, not predicted — **8 refusals**:
+`--arm` runs `check_promotable` on a probe row. Measured, not predicted —
+**8 refusals**:
 
 | refusal | can this job close it? |
 | --- | --- |
@@ -421,12 +420,27 @@ Measured, not predicted — **8 refusals**:
 | `quarantine_arms_not_compared` | yes — both arms stored via the pair writer |
 | `synthetic_control_not_run` | **not in this cut** — see below |
 
-⚠ **The refusal list above is measured on ONE row** — S-1, in-sample, masked,
-with no DSR, no trial count and no arm comparison supplied, which is the *bare*
-row. It is the worst case and every entry in the table's right-hand column is a
-claim about what a fuller run closes, not something `--arm` demonstrated. The
-acceptance criteria (§14) require the implementation to re-measure the list on
-**every** written row.
+⚠ **The row is a WHOLE-WINDOW probe, not a namespace arm, and the substitution is
+demonstrated rather than waved through.** `--arm` deliberately builds no
+namespace-scoped curve — §5 is the reason: choosing that axis is the
+implementation's first decision and nothing in the tree has ever made it. So the
+probe's metric set spans both namespaces while its identity has to name one, and
+that inconsistency would matter if the gate read a metric *value*. It does not:
+blanking criterion 3's block-bootstrap field group and re-gating adds
+**exactly `effective_sample_size_not_computed` and removes nothing** — printed
+by the arm, and a failure if it ever moves. The gate reads one metric, for
+presence.
+
+⚠ Even so, the list is measured on **one** row and is the *bare* worst case: no
+DSR, no trial count, no arm comparison supplied. Every entry in the table's
+right-hand column is a claim about what a fuller run closes, not something
+`--arm` demonstrated. Acceptance criterion 8 requires the implementation to
+re-measure the list on **every** written row.
+
+⚠ A side result worth keeping: the same 8 refusals came back from a 300-series
+`--limit` run and from the full 5,266-series one. The list is a function of what
+the row *carries*, not of how much data went into it — which is why a probe can
+answer this question at all.
 
 ⚠⚠ **`effective_sample_size` is not free, and it nearly read as if it were.**
 `compute_metrics` computes criterion 3's block bootstrap **only when
@@ -643,7 +657,7 @@ maintenance problem.
 10. Every figure in §§0, 3, 4, 5, 6, 9 and the per-arm timings in §8 is printed
     by `scripts/verify_2394_backtest_run.py --all`, exit 0. ⚠ **Three things in
     this document are NOT script output and are labelled where they appear:**
-    §8's three-run comparison (three invocations), §8's six-pass estimate
+    §8's four-run comparison (four invocations), §8's six-pass estimate
     (arithmetic over an S-1 measurement, with S-2 explicitly excluded from the
     extrapolation), and §9's synthetic-control cost. Each is an estimate and
     none is quoted as a measurement.

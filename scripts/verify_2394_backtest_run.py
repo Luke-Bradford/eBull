@@ -47,8 +47,12 @@ thing that defines it.
       run or a filter;
   A3  the close-source census, which is what makes the ambiguity-arm claim
       measurable rather than structural prose;
-  A4  ``check_promotable`` on the row this job would store, so the refusal list
-      the operator would see is measured and not predicted.
+  A4  ``check_promotable`` on a WHOLE-WINDOW probe row, so the refusal list the
+      operator would see is measured and not predicted. ⚠ The probe is not a
+      namespace arm — this script builds no namespace-scoped curve (spec §5) —
+      and A4 DEMONSTRATES that the substitution is sound by blanking
+      ``effective_sample_size`` and showing the gate reads exactly one metric,
+      for presence only.
 """
 
 from __future__ import annotations
@@ -57,6 +61,7 @@ import argparse
 import sys
 import time
 from collections import Counter
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -177,8 +182,8 @@ def population() -> int:
     print(f"  validated universe        {len(universe):>12,} instruments", flush=True)
     print(f"  of which the corpus holds {int(instruments):>12,}", flush=True)
     print(f"  bars in window            {total:>12,}   {first_bar} … {last_bar}", flush=True)
-    print(f"    in-sample               {int(in_sample):>12,}   {100.0 * in_sample / total:.2f}%", flush=True)
-    print(f"    hold-out                {int(hold_out):>12,}   {100.0 * hold_out / total:.2f}%", flush=True)
+    print(f"    in-sample               {int(in_sample):>12,}   {100.0 * in_sample / max(total, 1):.2f}%", flush=True)
+    print(f"    hold-out                {int(hold_out):>12,}   {100.0 * hold_out / max(total, 1):.2f}%", flush=True)
     series_total = int(in_only) + int(out_only) + int(both)
     print(f"  series with in-sample bars only  {int(in_only):>7,}", flush=True)
     print(f"  series with hold-out bars only   {int(out_only):>7,}", flush=True)
@@ -196,7 +201,7 @@ def population() -> int:
     # re-fitted. §5.2: "a recomputed boundary walks forward silently and
     # re-admits hold-out data into training". A drift here is a corpus-version
     # event, so this arm FAILS rather than updating anything.
-    share = 100.0 * in_sample / total
+    share = 100.0 * in_sample / max(total, 1)
     if not 74.0 <= share <= 76.0:
         problems.append(
             f"the frozen boundary now splits the slice {share:.2f}/{100.0 - share:.2f} rather than 75/25 — "
@@ -671,18 +676,19 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
             metrics=metrics,
             universe_basis=UNIVERSE,
             carry_unmodelled=CARRY_UNMODELLED,
-            # ⚠ THE IN-SAMPLE COUNT, not the corpus's. `len(pairs) - empty`
-            # counts every series the pass loaded, including the ones whose
-            # positions are all hold-out — and this row says `in_sample`.
-            evaluated_instrument_count=len(in_sample_instruments),
+            # ⚠⚠ THE WHOLE-CORPUS COUNT, matching the WHOLE-WINDOW curve the
+            # metrics above came off — not the in-sample subset, which would
+            # describe a population these metrics were not computed over. This
+            # probe row is NOT a namespace arm; see the note below the census.
+            evaluated_instrument_count=len(pairs) - empty,
         )
         candidate = PromotionCandidate(
             result=result,
-            evaluated_instrument_ids=frozenset(in_sample_instruments),
+            evaluated_instrument_ids=frozenset(int(row[0]) for row in pairs),
             validated_universe_ids=frozenset(universe),
         )
         refusals = check_promotable(candidate)
-        print("\n  [A4] check_promotable on the row this job would store", flush=True)
+        print("\n  [A4] check_promotable on a WHOLE-WINDOW probe row", flush=True)
         for refusal in refusals:
             print(f"      {refusal}", flush=True)
         print(f"      {len(refusals)} refusals", flush=True)
@@ -690,6 +696,48 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
             problems.append(
                 "the bare row is PROMOTABLE — §3.2's whole argument is that it cannot be, so either the gate or "
                 "this script is wrong"
+            )
+
+        # ⚠⚠ WHY A WHOLE-WINDOW ROW IS A VALID PROBE OF A LIST THE JOB WILL
+        # PRODUCE PER NAMESPACE, and it is DEMONSTRATED rather than asserted.
+        # This arm deliberately builds no namespace-scoped curve (spec §5: none
+        # has ever been built, and choosing its axis is the implementation's
+        # first decision), so the metric set above spans both namespaces while
+        # the identity has to name one. That inconsistency would matter if the
+        # gate read any metric VALUE. It reads exactly one metric, and only for
+        # PRESENCE — so the refusal list cannot move with the metrics, only with
+        # their absence. Blanking `effective_sample_size` must add that one code
+        # and change nothing else; anything more means the gate consumes a
+        # number this probe got from the wrong population.
+        # ⚠ ALL NINE, not just `effective_sample_size`. `StrategyMetrics`
+        # enforces criterion 3's block-bootstrap fields as one set — *"present
+        # or absent as a whole"* — so blanking the single field the gate reads
+        # raises at construction. Found by running this; the group is the unit.
+        no_bootstrap = replace(
+            metrics,
+            effective_sample_size=None,
+            expectancy_ci_low_pct=None,
+            expectancy_ci_high_pct=None,
+            bootstrap_block_length=None,
+            bootstrap_cluster_count=None,
+            bootstrap_resamples=None,
+            bootstrap_seed=None,
+            bootstrap_design_effect=None,
+            bootstrap_model_id=None,
+        )
+        blanked = check_promotable(replace(candidate, result=replace(result, metrics=no_bootstrap)))
+        added = set(blanked) - set(refusals)
+        removed = set(refusals) - set(blanked)
+        print(
+            f"      metric-blanked probe adds {sorted(added)} and removes {sorted(removed)} — "
+            "the gate reads one metric, for presence",
+            flush=True,
+        )
+        if added != {"effective_sample_size_not_computed"} or removed:
+            problems.append(
+                f"blanking effective_sample_size moved the refusal list by {sorted(added)}/{sorted(removed)} rather "
+                "than by exactly that one code — the gate reads a metric VALUE, so a whole-window probe cannot "
+                "stand in for a namespace-scoped row and A4 has to build a real one"
             )
 
     for problem in sleeve.problems:
