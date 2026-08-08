@@ -19,6 +19,91 @@ formulations*. This file owns *whether a strategy family is worth building*.
 
 ---
 
+## 0. ⚠⚠ WHAT SURVIVED — read this first, the rest of the file is mostly what did not
+
+A day of falsification has a shape, and the shape is the finding:
+
+> **Everything that failed was a RETURN PREDICTION. Everything that survived is
+> on the VOLATILITY, COST or STRUCTURE side.**
+
+That is not luck. It is the central asymmetry of the field:
+
+**Returns are not reliably predictable. Volatility is.** *"The conditional
+variance of financial returns is time-varying and predictable"* — one of the
+most robust empirical regularities in finance, first noted by **Mandelbrot
+(1963)**, formalised by **Engle's ARCH (1982, Nobel)** and **Bollerslev's
+GARCH**. Large changes follow large changes; small follow small. It is about as
+settled as anything in this literature, and **nothing today came close to
+challenging it.**
+
+⚠⚠ **This is the positive result, and it is actionable WITHOUT predicting a
+single return.**
+
+### The four things worth building, in order of evidence
+
+**1. Volatility-scaled position sizing (`inverse_vol_v1`).** Improves risk-adjusted
+return using only the quantity we can actually forecast. No return prediction
+required. ⚠ Scoped by §2.4 — the evidence supports it for momentum, not
+universally.
+
+**2. ⚠⚠ ATR-based stops and targets — the highest value per line of code on the
+board.** This is the direct answer to *"what tells us the stop loss and take
+profit"*, and the answer is: **not the signal. The volatility.**
+
+```text
+stop    = entry - m * ATR14
+target  = entry + n * ATR14      with  n/m >= 2  (Wyckoff Buying Test 9 says >= 3)
+```
+
+Why this is well-founded rather than a convention:
+
+- **The distance adapts to the instrument's own scale and regime.** A flat 5%
+  stop means something completely different on a 15%-vol large cap and a 90%-vol
+  microcap. ATR normalises both onto one axis — the same argument
+  `CLUSTER_ATR_K` already makes for level tolerance.
+- **ATR is forecastable** (vol clustering) where the price target is not. You are
+  setting the distance from a quantity that persists, not from a prediction.
+- **It makes reward:risk a stated input** rather than an outcome, which is what
+  turns a signal into a trade.
+
+⚠⚠ **And it is the thing currently blocking S-4.** `ExitLevels` exists in
+`outcome_resolver.py`; **nothing in `app/` constructs one.** One small piece of
+arithmetic unblocks a specced strategy, gives every other strategy a principled
+exit instead of none, and supplies the reward:risk filter. **Build this first.**
+
+**3. Opportunistic insider purchases — the best-evidenced RETURN signal we can
+actually build.** Cohen/Malloy/Pomorski: routine trades **zero**, opportunistic
+**82 bps/month**. ⚠ And the reason it belongs on a positive list while momentum
+does not: **insiders trade rarely, so the strategy is naturally low-turnover** —
+it passes the Novy-Marx/Velikov filter that killed s1 (12× over) and s3 (6.7×
+over) before either was even measured. Evidence, mechanism, our data, and the
+right turnover profile. See §3.1 for what the measurement says about population
+size.
+
+**4. The equity risk premium itself.** Our corrected benchmark compounds at
+**6.3-6.6%/yr** over 58 years. ⚠ Two of our three strategies lose to it. That is
+not only a bar — it is a **fallback that works**, and the honest default until
+something clears it. Related: the one effect that survived all four traps in the
+`market-structure` research pass was the **overnight drift (~4-5 bps/day in
+liquid names, in every decile)** — which is the risk premium accruing while you
+hold, *"captured by holding, not by trading."*
+
+### The reliable negative screen
+
+⚠ **Turnover above ~50%/month.** One stored column, no backtest needed, and it
+disqualifies faster than anything else here. Saving money by not trading is a
+real return and it is the most certain one in this file.
+
+### What this means practically
+
+**We are unlikely to get rich predicting returns, and we can build something
+sound out of predicting risk.** Size by volatility, exit by volatility, refuse
+high turnover, capture the premium, and add the one or two return signals that
+have a mechanism and a low trade count. ⚠ That is a smaller and duller ambition
+than a winning chart pattern, and it is the version supported by evidence.
+
+---
+
 ## 1. ⚠⚠ The four filters, and our own three strategies scored against them
 
 Each filter is a published result. The scores are **our own stored numbers**,
