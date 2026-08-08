@@ -148,6 +148,51 @@ methods are **momentum, liquidity and volatility**.
 
 ---
 
+## 3.1 Insider purchases — the family measured against our own data
+
+**Cohen, Malloy & Pomorski, "Decoding Inside Information", *JF* 67(3) (2012),
+1009-1043.** Routine trades — an insider with a **history of trading the same
+calendar month across years** — are **over half the universe** and carry
+*"essentially zero"* abnormal return. Strip them out and the remainder yields
+**82 bps/month value-weighted**. *"Opportunistic trades predict future news and
+events at a firm level, while routine trades do not."*
+
+⚠ Two conditioning details that invert intuition and are checkable on our
+`filer_role` column: the most informed opportunistic traders are **local,
+NON-EXECUTIVE insiders from geographically concentrated, poorly governed
+firms** — not the CEO.
+
+**Measured on `insider_transactions` (1,052,947 rows), 2026-08-08:**
+
+```text
+distinct insiders                                        55,001
+purchases (txn_code = 'P')                               48,278
+sales     (txn_code = 'S')                              243,068
+insiders with >= 3 distinct PURCHASE years                  997 of 9,936 (10.0%)
+```
+
+⚠⚠ **Two things this measurement changes, and neither was obvious:**
+
+1. **The usable population is 48,278, not 1M.** Jeng/Metrick/Zeckhauser find
+   purchases carry the signal and *"insider sales showed no comparable effect"* —
+   and sales outnumber purchases **5:1** here. Anyone sizing this family off the
+   row count will be out by a factor of 20.
+2. **Only 10% of purchasing insiders have the ≥3 years of history CMP's routine
+   test needs.** ⚠ That is not necessarily fatal — CMP's routine label requires
+   an *established pattern*, so an insider with no pattern is arguably
+   opportunistic by construction rather than unclassifiable. **But that is an
+   inference about their method, not a quote from it — verify against the paper
+   before building on it**, because the alternative reading (exclude the
+   unclassifiable 90%) leaves a very different population.
+
+⚠ Data defect found while measuring this: **20 rows carry two-digit-year
+`txn_date`s** (year 23 in `-24-` accessions) that `txn_date_invalid` does not
+flag. Negligible as a share, material for this family specifically — a
+2,000-year gap wrecks the per-insider history the classification depends on.
+Filed as **#2441**.
+
+---
+
 ## 4. The checklist before speccing any strategy
 
 1. **Turnover first.** Above ~50%/month, the evidence says do not bother unless a
