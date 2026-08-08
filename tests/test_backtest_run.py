@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from array import array
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -39,6 +40,7 @@ from app.services.backtest_run import (
     _NamespaceBook,
     _shifted,
     assert_no_existing_results,
+    build_in_sample_split,
     build_result,
     deflate_group,
     runnable_strategies,
@@ -59,6 +61,7 @@ from app.services.strategy_result import (
 )
 from app.services.strategy_statistics import StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER
+from app.services.walk_forward import FOLD_COUNT, WALK_FORWARD_MODEL_ID
 from app.workers.scheduler import _optional_str  # noqa: PLC2701 - the blank-is-absent rule under test
 
 
@@ -589,6 +592,29 @@ class TestNamespaceAxis:
                 closes_by_instrument={},
             )
 
+    def test_an_in_sample_namespace_holding_an_open_position_raises(self) -> None:
+        """⚠ ``namespace_for_position`` sends EVERY open position to the hold-out,
+        so an open leg on the in-sample book means the partition broke. It matters
+        beyond the axis now: criterion 5's embargo is measured off these label
+        windows, and an open one contributes the span to its MARK bar — a hold the
+        strategy never realised.
+        """
+        axis = tuple(date(2010, 1, day) for day in range(1, 11))
+        book = _NamespaceBook(records_label_windows=True)
+        book.instruments.add(1)
+        book.add_leg(
+            entry_index=3,
+            exit_index=6,
+            entry_price=1.0,
+            exit_price=1.2,
+            half_spread=0.0,
+            realised=False,
+            marks=[1.0, 1.1, 1.15, 1.2],
+        )
+        book.open_at_end = 1
+        with pytest.raises(RuntimeError, match="open at the window end"):
+            _measure_namespace("in_sample", book, corpus=self._corpus(axis), closes_by_instrument={})
+
     def test_a_namespace_with_no_positions_measures_nothing(self) -> None:
         axis = (date(2021, 6, 25), date(2021, 6, 28))
         assert (
@@ -713,6 +739,10 @@ class TestRowCompleteness:
                             result_id=len(rows),
                             evaluated_instrument_count=10,
                             refusals=(),
+                            # ⚠ A COMPLETE in-sample row now carries its whole
+                            # split — the run asserts it, so the helper that
+                            # describes a complete run has to produce it.
+                            folds_written=FOLD_COUNT,
                         )
                     )
         return tuple(rows)
@@ -747,6 +777,240 @@ class TestRowCompleteness:
         report = self._report(self._rows(runnable), runnable)
         assert [entry.strategy_id for entry in report.excluded] == ["s4-volatility-compression-breakout"]
         _assert_every_runnable_produced_rows(report, namespaces=("in_sample",))
+
+    def test_an_in_sample_row_without_its_whole_split_fails(self) -> None:
+        """⚠ ``check_promotable`` adds no walk-forward refusal (sql/269: a code
+        invented there would be a gate semantic with no source rule), so the run
+        is what has to notice a validity gate that did not run."""
+        runnable = ("s1", "s3")
+        rows = list(self._rows(runnable))
+        rows[0] = replace(rows[0], folds_written=FOLD_COUNT - 1)
+        with pytest.raises(RuntimeError, match=r"stored 3 fold\(s\) against 4"):
+            _assert_every_runnable_produced_rows(self._report(tuple(rows), runnable), namespaces=("in_sample",))
+
+    def test_a_hold_out_row_carrying_folds_fails(self) -> None:
+        """⚠ The other direction, and the one sql/269's trigger exists for: a
+        fold row on a hold-out result claims a cross-validation of the withheld
+        side that nobody ran."""
+        runnable = ("s1",)
+        rows = tuple(replace(row, namespace="hold_out", folds_written=FOLD_COUNT) for row in self._rows(runnable))
+        with pytest.raises(RuntimeError, match=r"stored 4 fold\(s\) against 0"):
+            _assert_every_runnable_produced_rows(self._report(rows, runnable), namespaces=("hold_out",))
+
+
+class TestInSampleSplit:
+    """Criterion 5's split, cut over one in-sample population.
+
+    ⚠ The axis is eight equal-bar dates, which ``bar_weighted_folds`` cuts into
+    four blocks of two. Transcribed from the construction rather than imported,
+    so a change to the cut rule shows up here as a failure instead of being
+    followed silently.
+    """
+
+    AXIS = tuple(date(2010, 1, day) for day in range(1, 9))
+    BARS = (1,) * 8
+    EDGES = ((0, 1), (2, 3), (4, 5), (6, 7))
+
+    def test_the_axis_is_cut_into_four_contiguous_blocks_carrying_their_dates(self) -> None:
+        split = build_in_sample_split([0, 2, 4, 6], [0, 2, 4, 6], axis=self.AXIS, bar_counts=self.BARS)
+        assert [(r.fold.first_index, r.fold.last_index) for r in split.folds] == list(self.EDGES)
+        # ⚠ The dates must describe the indices beside them: sql/269 stores both
+        # because an index is unreadable once the corpus axis moves.
+        assert [(r.first_date, r.last_date) for r in split.folds] == [
+            (self.AXIS[lo], self.AXIS[hi]) for lo, hi in self.EDGES
+        ]
+        assert [r.bar_count for r in split.folds] == [2, 2, 2, 2]
+        assert split.model_id == WALK_FORWARD_MODEL_ID
+
+    def test_the_geometry_does_not_move_with_the_population(self) -> None:
+        """⚠⚠ What makes criterion 9's two arms comparable at all.
+
+        ``bar_weighted_folds`` reads only the axis, so the masked and admitted
+        arms are cut at the same four boundaries and only their censuses differ.
+        A geometry that moved with the arm would make every delta between them a
+        comparison of differently-cut folds.
+        """
+        sparse = build_in_sample_split([0], [0], axis=self.AXIS, bar_counts=self.BARS)
+        dense = build_in_sample_split(list(range(8)), list(range(8)), axis=self.AXIS, bar_counts=self.BARS)
+        geometry = [
+            (r.fold.first_index, r.fold.last_index, r.first_date, r.last_date, r.bar_count) for r in sparse.folds
+        ]
+        assert [
+            (r.fold.first_index, r.fold.last_index, r.first_date, r.last_date, r.bar_count) for r in dense.folds
+        ] == geometry
+        assert sparse.observation_count == 1
+        assert dense.observation_count == 8
+
+    def test_every_fold_classifies_every_observation(self) -> None:
+        """F1 — conservation. The only check that catches overlapping branches."""
+        starts, ends = [0, 1, 2, 5, 6], [0, 4, 3, 5, 7]
+        split = build_in_sample_split(starts, ends, axis=self.AXIS, bar_counts=self.BARS)
+        for record in split.folds:
+            assert record.census.total == len(starts)
+
+    def test_an_observation_spanning_a_fold_is_purged_and_not_train(self) -> None:
+        """⚠ Every price the fold owns lies inside that observation's label window."""
+        # One observation, entering before fold 1 (dates 2-3) and closing after it.
+        split = build_in_sample_split([0], [5], axis=self.AXIS, bar_counts=self.BARS)
+        assert split.folds[1].census.purged == 1
+        assert split.folds[1].census.train == 0
+
+    def test_a_population_with_no_closed_observation_refuses(self) -> None:
+        with pytest.raises(ValueError, match="no closed in-sample observation"):
+            build_in_sample_split([], [], axis=self.AXIS, bar_counts=self.BARS)
+
+    def test_mismatched_label_window_arrays_refuse(self) -> None:
+        with pytest.raises(ValueError, match="label-window starts against"):
+            build_in_sample_split([0, 1], [0], axis=self.AXIS, bar_counts=self.BARS)
+
+    def test_fold_zero_can_carry_no_purged_observation(self) -> None:
+        """⚠ STRUCTURAL, not a property of this corpus. Purging needs an
+        observation starting BEFORE the fold, and nothing starts before index 0 —
+        which is why §8's measured table reports ``purged`` 0 for fold 0 on both
+        S-1 and S-3. Pinned so a future reader does not read that 0 as a corpus
+        accident and 'fix' it.
+        """
+        split = build_in_sample_split([0, 2, 4, 6], [7, 7, 7, 7], axis=self.AXIS, bar_counts=self.BARS)
+        assert split.folds[0].census.purged == 0
+        # Only the observation entering at index 0 starts inside fold 0 (dates
+        # 0-1); every later one starts outside it and cannot reach back.
+        assert split.folds[0].census.test == 1
+
+    def test_the_embargo_is_measured_off_the_post_purge_training_side(self) -> None:
+        """⚠⚠ Ordering is the rule: purge, then measure the embargo, then census.
+
+        Fold 1 is dates 2-3. Of the three observations, the spanning one is
+        PURGED and must not set the embargo — measuring over the pre-purge
+        candidates would read the length of a trade the fold's own prices
+        resolved, which is the circularity ``training_embargo_bars`` is written
+        to avoid.
+
+        Measured off the training side the embargo is 1 (observation B's span);
+        measured off everything it would be 5, and at 5 observation B would
+        itself fall inside the embargo window and the fold would have no
+        training data at all. So ``train == 1`` is what discriminates the two.
+        """
+        # A(0->5) spans fold 1 -> purged.   B(6->7) span 1 -> train.
+        # C(4->4) span 0 -> train at measurement time, embargoed once the
+        # measured embargo of 1 covers index 4.
+        split = build_in_sample_split([0, 6, 4], [5, 7, 4], axis=self.AXIS, bar_counts=self.BARS)
+        fold = split.folds[1]
+        assert fold.embargo_bars == 1
+        assert (fold.census.purged, fold.census.train, fold.census.embargoed, fold.census.test) == (1, 1, 1, 0)
+
+
+class TestCutSplits:
+    """One split per ``(strategy, quarantine arm)``, keyed by the arm it measured."""
+
+    AXIS = tuple(date(2010, 1, day) for day in range(1, 9))
+
+    def _corpus(self) -> _Corpus:
+        return _Corpus(
+            universe=(1,),
+            axis=self.AXIS,
+            axis_pos={when: index for index, when in enumerate(self.AXIS)},
+            pairs=((1, 1),),
+            in_sample_axis=self.AXIS,
+            in_sample_bar_counts=(1,) * 8,
+        )
+
+    @staticmethod
+    def _arm(arm: str, starts: list[int], ends: list[int]) -> ArmMeasurement:
+        outcome = NamespaceMeasurement(
+            namespace="in_sample",
+            metrics=_metrics(),
+            moments=TradeMoments(sharpe=0.05, skewness=0.2, kurtosis=4.0, trade_count=len(starts)),
+            daily_returns={},
+            evaluated_instrument_ids=frozenset({1}),
+            position_count=len(starts),
+            axis_first=date(2010, 1, 1),
+            axis_last=date(2010, 1, 8),
+            label_starts=array("i", starts),
+            label_ends=array("i", ends),
+        )
+        return ArmMeasurement(
+            strategy_id="s1",
+            strategy_version="v1",
+            quarantine_arm=arm,  # type: ignore[arg-type]
+            namespaces={"in_sample": outcome},
+            holdout_positions_discarded=0,
+            close_sources={},
+            series_evaluated=1,
+            elapsed_s=0.0,
+        )
+
+    def test_each_arm_keeps_its_own_census(self) -> None:
+        """⚠ The arms differ in POPULATION, so a split handed to the wrong row
+        would report the other arm's leakage — and criterion 9's whole point is
+        that the two are compared."""
+        splits = backtest_run._cut_splits(  # noqa: SLF001 - the assembly under test
+            (self._arm("masked", [0, 2], [1, 3]), self._arm("admitted", [0, 2, 4, 6], [1, 3, 5, 7])),
+            corpus=self._corpus(),
+        )
+        assert sorted(splits) == [("s1", "admitted"), ("s1", "masked")]
+        assert splits[("s1", "masked")].observation_count == 2
+        assert splits[("s1", "admitted")].observation_count == 4
+        # The geometry is shared; only the censuses moved.
+        assert [r.fold.first_index for r in splits[("s1", "masked")].folds] == [
+            r.fold.first_index for r in splits[("s1", "admitted")].folds
+        ]
+
+    def test_a_hold_out_only_measurement_contributes_no_split(self) -> None:
+        arm = self._arm("masked", [0, 2], [1, 3])
+        holdout_only = ArmMeasurement(
+            strategy_id="s1",
+            strategy_version="v1",
+            quarantine_arm="masked",
+            namespaces={},
+            holdout_positions_discarded=0,
+            close_sources={},
+            series_evaluated=1,
+            elapsed_s=0.0,
+        )
+        assert backtest_run._cut_splits((holdout_only,), corpus=self._corpus()) == {}  # noqa: SLF001
+        assert len(backtest_run._cut_splits((arm,), corpus=self._corpus())) == 1  # noqa: SLF001
+
+
+class TestLabelWindowCollection:
+    """The in-sample book accumulates criterion 5's label windows; nothing else does."""
+
+    @staticmethod
+    def _leg(book: _NamespaceBook, *, entry: int, exit_: int, realised: bool) -> None:
+        book.add_leg(
+            entry_index=entry,
+            exit_index=exit_,
+            entry_price=1.0,
+            exit_price=1.1,
+            half_spread=0.0,
+            realised=realised,
+            marks=[1.0] * (exit_ - entry + 1),
+        )
+
+    def test_a_hold_out_book_records_nothing(self) -> None:
+        """⚠ ``walk_forward``: the hold-out is not an input to any function in
+        that module and never becomes one — and sql/269's trigger refuses a fold
+        row on a hold-out result, so the arrays would be memory nothing may read.
+        """
+        book = _NamespaceBook()
+        self._leg(book, entry=0, exit_=3, realised=True)
+        assert len(book.label_starts) == 0
+        assert len(book.label_ends) == 0
+
+    def test_an_in_sample_book_records_the_window_of_each_realised_leg(self) -> None:
+        book = _NamespaceBook(records_label_windows=True)
+        self._leg(book, entry=0, exit_=3, realised=True)
+        self._leg(book, entry=5, exit_=9, realised=True)
+        assert list(book.label_starts) == [0, 5]
+        assert list(book.label_ends) == [3, 9]
+
+    def test_an_unrealised_leg_contributes_no_label_window(self) -> None:
+        """⚠ Its end index is a MARK bar, not a close: the label is unresolved,
+        and feeding it to the embargo would report a span never realised."""
+        book = _NamespaceBook(records_label_windows=True)
+        self._leg(book, entry=0, exit_=3, realised=True)
+        self._leg(book, entry=1, exit_=7, realised=False)
+        assert list(book.label_starts) == [0]
+        assert list(book.label_ends) == [3]
 
 
 class TestFills:

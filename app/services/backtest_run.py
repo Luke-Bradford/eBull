@@ -103,6 +103,7 @@ from app.services.result_ledger import (
     holdout_access_counts,
     store_holdout_arm_pair,
     store_in_sample_arm_pair,
+    store_walk_forward_folds,
 )
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategies.validated_universe import load_validated_universe
@@ -126,6 +127,15 @@ from app.services.strategy_result import (
 from app.services.strategy_statistics import StrategyMetrics, TradeReturns, compute_metrics
 from app.services.technical_analysis import OHLCVRow
 from app.services.trial_register import TRIAL_REGISTER
+from app.services.walk_forward import (
+    FOLD_COUNT,
+    WALK_FORWARD_MODEL_ID,
+    FoldRecord,
+    WalkForwardFolds,
+    bar_weighted_folds,
+    census,
+    training_embargo_bars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +242,29 @@ _SERIES_SQL = """
     ORDER BY instrument_id, series_id
 """
 
+#: The IN-SAMPLE axis and its per-date bar count — criterion 5's fold cut is
+#: bar-weighted, and ``_AXIS_SQL`` carries no counts because nothing else needs
+#: them.
+#:
+#: ⚠ ``< %(boundary)s`` and never ``<=``: ``HOLDOUT_BOUNDARY`` is the FIRST
+#: HOLD-OUT BAR (``namespace_for_bar``), so including it would cut folds over a
+#: withheld date. Deliberately the same predicate as
+#: ``scripts/verify_2240_walk_forward.py``'s own axis query, so the split this
+#: job stores and the split that script asserts are cut over one axis.
+#:
+#: ⚠ The counts are the STORED bars and are therefore arm-invariant, which is
+#: what makes criterion 9's two arms comparable — see ``load_corpus``.
+_INSAMPLE_AXIS_SQL = """
+    SELECT d.bar_date, count(*)
+    FROM research_price_series s
+    JOIN research_price_daily d ON d.series_id = s.series_id
+    WHERE s.instrument_id = ANY(%(ids)s)
+      AND d.bar_date >= %(start)s
+      AND d.bar_date < %(boundary)s
+    GROUP BY d.bar_date
+    ORDER BY 1
+"""
+
 #: ⚠ Reads the STORE, not the ``strategy_results`` view: the view is filtered to
 #: ``namespace = 'in_sample'``, so a collision check through it would be blind to
 #: every hold-out row and the run would discover the duplicate at INSERT — after
@@ -283,6 +316,18 @@ class NamespaceMeasurement:
     position_count: int
     axis_first: date
     axis_last: date
+    #: Criterion 5's label windows, on the panel axis — populated for the
+    #: ``in_sample`` namespace and EMPTY for ``hold_out``, which has no split.
+    #: ⚠ These are the legs that reached the CURVE, so the census describes the
+    #: same observations every metric on the row was computed from. It is
+    #: therefore ``<= position_count``, which also counts the positions §3.4
+    #: excluded as uncosted; ``_cut_splits`` logs both so the gap is visible
+    #: rather than inferred. Measured 2026-08-08 the two are EQUAL on every
+    #: in-sample arm — ``unpriced_trade_count`` and ``open_trade_count`` are 0
+    #: on all 12 stored rows — but that is a property of this corpus, not a
+    #: guarantee, which is why the bound is stated as ``<=``.
+    label_starts: array[int] = field(default_factory=lambda: array("i"))
+    label_ends: array[int] = field(default_factory=lambda: array("i"))
 
 
 @dataclass(frozen=True)
@@ -313,6 +358,10 @@ class WrittenRow:
     result_id: int
     evaluated_instrument_count: int
     refusals: tuple[PromotionRefusal, ...]
+    #: Criterion 5's fold rows attached to this result — ``FOLD_COUNT`` on an
+    #: in-sample row and 0 on a hold-out one, which ``sql/269``'s trigger
+    #: refuses folds for.
+    folds_written: int = 0
 
 
 @dataclass(frozen=True)
@@ -529,6 +578,17 @@ class _NamespaceBook:
     excluded: Counter[str] = field(default_factory=Counter)
     first_index: int | None = None
     last_index: int | None = None
+    #: Whether to accumulate criterion 5's label windows off this book. Set for
+    #: the in-sample namespace ONLY — ``walk_forward``'s header: *"the hold-out
+    #: is not an input to any function in this module and never becomes one"*,
+    #: and ``sql/269``'s trigger refuses a fold row on a hold-out result. On a
+    #: hold-out book the two arrays would be ~20 MB of what nothing may read.
+    records_label_windows: bool = False
+    #: Parallel arrays: the panel-axis index of the entry fill and of the close.
+    #: ⚠ Same construction as ``verify_2240_walk_forward._Observations``, which
+    #: is what the split this job stores has to agree with.
+    label_starts: array[int] = field(default_factory=lambda: array("i"))
+    label_ends: array[int] = field(default_factory=lambda: array("i"))
 
     def add_leg(
         self,
@@ -554,6 +614,18 @@ class _NamespaceBook:
             self.first_index = entry_index
         if self.last_index is None or exit_index > self.last_index:
             self.last_index = exit_index
+        # ⚠⚠ REALISED LEGS ONLY, and on an in-sample book that is every leg —
+        # ``namespace_for_position`` returns ``in_sample`` only for a CLOSED
+        # position, so an unrealised one cannot reach here (asserted by
+        # ``_measure_namespace``). The guard stays because an open position's
+        # label window is UNRESOLVED: its end index is the mark bar, not a
+        # close, and feeding that to ``training_embargo_bars`` would report a
+        # span the strategy never realised — on an early fold, most of the
+        # corpus. ``verify_2240_walk_forward._Observations`` excludes them for
+        # the same reason and counts the exclusion.
+        if self.records_label_windows and realised:
+            self.label_starts.append(entry_index)
+            self.label_ends.append(exit_index)
 
     def daily_trade_returns(self) -> dict[date, float]:
         """Mean realised trade return per ENTRY date — this trial's return series."""
@@ -561,6 +633,62 @@ class _NamespaceBook:
         for value, day in zip(self.returns, self.entry_dates, strict=True):
             totals.setdefault(day, []).append(value)
         return {day: sum(values) / len(values) for day, values in totals.items()}
+
+
+def build_in_sample_split(
+    starts: Sequence[int],
+    ends: Sequence[int],
+    *,
+    axis: Sequence[date],
+    bar_counts: Sequence[int],
+) -> WalkForwardFolds:
+    """Criterion 5's purged split over ONE in-sample population. Pure.
+
+    ``starts`` and ``ends`` are panel-axis indices of the entry fill and the
+    close, both inclusive — the label window ``role`` classifies.
+
+    ⚠⚠ THE GEOMETRY DOES NOT DEPEND ON THE POPULATION, AND THAT IS LOAD-BEARING
+    FOR CRITERION 9. ``bar_weighted_folds`` reads only the axis, so every result
+    row of one run is cut at the same four boundaries; only the measured embargo
+    and the census move between arms. If the geometry moved with the arm, the
+    masked and admitted censuses would be counts over differently-cut folds and
+    no delta between them would be interpretable — the argument
+    ``QuarantineCensus`` makes for its own two arms, one grain down.
+
+    ⚠ THE ORDER IS THE RULE: embargo first, census second. The embargo is
+    measured off the fold's POST-PURGE training side, so it cannot be computed
+    from a census that already needed it. ``training_embargo_bars``' own header
+    records why that ordering is what keeps it non-circular.
+
+    ⚠ NO *CALLER* SELECTS THE FOLD COUNT. This function passes the module
+    constant and takes no ``fold_count`` parameter of its own: ``FOLD_COUNT``'s
+    comment is that *a fold count which can be passed in is a fold count that
+    can be swept, and a swept validity gate is a search over validity gates*.
+    ``bar_weighted_folds`` still accepts one so a unit test can draw a two-fold
+    axis, and ``WalkForwardFolds`` refuses any other count on construction.
+    """
+    if len(starts) != len(ends):
+        raise ValueError(f"{len(starts)} label-window starts against {len(ends)} ends")
+    if not starts:
+        raise ValueError(
+            "no closed in-sample observation to cut folds over — a split counting nothing would record the validity "
+            "gate as having run over a population that does not exist"
+        )
+    folds = bar_weighted_folds(bar_counts, fold_count=FOLD_COUNT)
+    records: list[FoldRecord] = []
+    for fold in folds:
+        embargo = training_embargo_bars(starts, ends, fold=fold)
+        records.append(
+            FoldRecord(
+                fold=fold,
+                first_date=axis[fold.first_index],
+                last_date=axis[fold.last_index],
+                bar_count=sum(bar_counts[fold.first_index : fold.last_index + 1]),
+                embargo_bars=embargo,
+                census=census(starts, ends, fold=fold, embargo_bars=embargo),
+            )
+        )
+    return WalkForwardFolds(model_id=WALK_FORWARD_MODEL_ID, folds=tuple(records))
 
 
 def _shifted(book: LegBook, offset: int) -> LegBook:
@@ -723,12 +851,26 @@ def _absorb(
 
 @dataclass(frozen=True)
 class _Corpus:
-    """The evaluation axis and the series to stream, read once per invocation."""
+    """The evaluation axis and the series to stream, read once per invocation.
+
+    ⚠⚠ ``in_sample_axis`` IS A PREFIX OF ``axis``, NOT A SECOND AXIS, and
+    ``load_corpus`` asserts it rather than trusting the two queries to agree.
+    Every index this module stores on a fold row is a position on ``axis``,
+    while criterion 5's split is defined on the in-sample side — so if the two
+    ever stopped coinciding, every stored ``first_index`` would silently point
+    at a different date than the ``first_date`` beside it. That is the defect
+    class ``walk_forward``'s own header records from 5e-3: *two individually
+    correct numbers joined on an axis neither of them names.*
+    """
 
     universe: tuple[int, ...]
     axis: tuple[date, ...]
     axis_pos: Mapping[date, int]
     pairs: tuple[tuple[int, int], ...]
+    #: The pre-boundary prefix of ``axis``, and how many bars the panel carries
+    #: on each of its dates. Criterion 5's fold cut is weighted by the latter.
+    in_sample_axis: tuple[date, ...] = ()
+    in_sample_bar_counts: tuple[int, ...] = ()
 
     @property
     def window(self) -> Window:
@@ -748,11 +890,34 @@ def load_corpus(conn: psycopg.Connection[Any], *, limit: int | None = None) -> _
     pairs = [(int(row[0]), int(row[1])) for row in conn.execute(_SERIES_SQL, {"ids": list(universe)}).fetchall()]
     if limit is not None:
         pairs = pairs[:limit]
+
+    in_sample = conn.execute(
+        _INSAMPLE_AXIS_SQL,
+        {"ids": list(universe), "start": EVALUATION_WINDOW_START, "boundary": HOLDOUT_BOUNDARY},
+    ).fetchall()
+    in_sample_axis = tuple(row[0] for row in in_sample)
+    # ⚠⚠ THE PREFIX INVARIANT, ASSERTED AND NOT ASSUMED. Both queries run over
+    # the same validated universe and the same two tables, and
+    # ``EVALUATION_WINDOW_END`` is after ``HOLDOUT_BOUNDARY``, so the in-sample
+    # axis SHOULD be exactly the dates of ``axis`` before the boundary — which
+    # is what lets a fold index and a leg index be the same integer with no
+    # re-basing step. Measured true on the dev corpus 2026-08-08 (14,975 of
+    # 16,236 dates), but a universe or window change could break it silently and
+    # every stored fold row would then carry an index/date pair that disagree.
+    expected_prefix = tuple(when for when in axis if when < HOLDOUT_BOUNDARY)
+    if in_sample_axis != expected_prefix:
+        raise RuntimeError(
+            f"the in-sample axis carries {len(in_sample_axis):,} dates against {len(expected_prefix):,} dates of the "
+            "evaluation axis before the frozen boundary — a fold index is a position on the evaluation axis, so a "
+            "split cut over a different axis would store indices and dates that do not describe each other"
+        )
     return _Corpus(
         universe=universe,
         axis=axis,
         axis_pos={when: index for index, when in enumerate(axis)},
         pairs=tuple(pairs),
+        in_sample_axis=in_sample_axis,
+        in_sample_bar_counts=tuple(int(row[1]) for row in in_sample),
     )
 
 
@@ -787,6 +952,18 @@ def _measure_namespace(
             f"an in-sample position closes {corpus.axis[hi]}, on or after the frozen boundary {HOLDOUT_BOUNDARY} — "
             "namespace_for_position must have mis-classified it, and widening the axis would import a withheld bar "
             "into a training number"
+        )
+    # ⚠ ``namespace_for_position`` returns ``in_sample`` only for a position
+    # with a close date, so an in-sample book can hold no unrealised leg and
+    # every one of them carries a RESOLVED label window. Asserted rather than
+    # commented, because criterion 5's embargo is measured off those windows and
+    # a single open leg would contribute the span from its entry to the mark bar
+    # — a hold the strategy never realised.
+    if namespace == "in_sample" and book.open_at_end:
+        raise RuntimeError(
+            f"the in-sample namespace holds {book.open_at_end} position(s) open at the window end — "
+            "namespace_for_position sends every open position to the hold-out, so criterion 5's label windows "
+            "would carry an unresolved span"
         )
 
     dates = corpus.axis[lo : hi + 1]
@@ -843,6 +1020,8 @@ def _measure_namespace(
         position_count=book.positions,
         axis_first=dates[0],
         axis_last=dates[-1],
+        label_starts=book.label_starts,
+        label_ends=book.label_ends,
     )
 
 
@@ -870,7 +1049,9 @@ def evaluate_arm(
     """
     started = time.monotonic()
     regime = _regime_for(entry, corpus.axis)
-    books: dict[ResultNamespace, _NamespaceBook] = {name: _NamespaceBook() for name in namespaces}
+    books: dict[ResultNamespace, _NamespaceBook] = {
+        name: _NamespaceBook(records_label_windows=(name == "in_sample")) for name in namespaces
+    }
     close_sources: Counter[str] = Counter()
     discarded: Counter[str] = Counter()
     closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
@@ -1481,6 +1662,7 @@ def run_backtest(
         holdout_requested=holdout_requested,
         holdout_purpose=holdout_purpose,
         holdout_accessed_by=holdout_accessed_by,
+        corpus=corpus,
     )
     report = BacktestRunReport(
         runnable=runnable,
@@ -1553,6 +1735,7 @@ def _write_rows(
     holdout_requested: bool,
     holdout_purpose: str | None,
     holdout_accessed_by: str | None,
+    corpus: _Corpus,
 ) -> tuple[WrittenRow, ...]:
     """Criterion 9's arm pairs, ``masked`` and ``admitted`` in one transaction each.
 
@@ -1566,6 +1749,20 @@ def _write_rows(
     projected hold-out counts are knowable before the write — so a deviation
     refuses the whole invocation instead of leaving rows behind that nobody
     predicted.
+
+    ⚠⚠ EVERY SPLIT IS CUT BEFORE THE FIRST INSERT, for the same reason. Cutting
+    folds is pure, so a construction that cannot produce one — an empty
+    population, an axis too short to carry ``FOLD_COUNT`` blocks — must fail
+    with ZERO rows written rather than half way through, leaving results whose
+    folds can never be attached: ``assert_no_existing_results`` refuses the
+    re-run that would fix them, and there is no repair path.
+
+    ⚠ THE FOLDS GO IN THE PAIR'S OWN TRANSACTION. A nested ``conn.transaction()``
+    is a SAVEPOINT (measured on psycopg 3.3.3 — an inner failure unwinds the
+    whole outer block), so a stored in-sample result and its split stand or fall
+    together and "a result row whose split silently never landed" is not
+    reachable. ⚠ It does NOT make the invocation atomic: the grain is the pair,
+    exactly as it already was, and a failure at pair 7 still leaves 6 committed.
     """
     by_strategy: dict[str, dict[QuarantineArm, ArmMeasurement]] = {}
     for measurement in arms:
@@ -1598,9 +1795,10 @@ def _write_rows(
                 pending.append((strategy_id, namespace, ambiguity, masked, admitted))
 
     _preflight_gate(pending, validated=validated, holdout_requested=holdout_requested)
+    splits = _cut_splits(arms, corpus=corpus)
 
-    stored: list[tuple[int, StrategyResult]] = []
-    for _strategy_id, namespace, _ambiguity, masked, admitted in pending:
+    stored: list[tuple[int, StrategyResult, int]] = []
+    for strategy_id, namespace, _ambiguity, masked, admitted in pending:
         if namespace == "hold_out":
             assert holdout_purpose is not None and holdout_accessed_by is not None
             ids = store_holdout_arm_pair(
@@ -1610,9 +1808,20 @@ def _write_rows(
                 accessed_by=holdout_accessed_by,
                 purpose=holdout_purpose,
             )
-        else:
+            stored.extend((result_id, result, 0) for result_id, result in zip(ids, (masked, admitted), strict=True))
+            continue
+        # ⚠ ONE SPLIT PER ARM, NOT PER PAIR. The two rows of a pair differ in
+        # exactly the quarantine arm, and the arm is what moves the population —
+        # so each row is cut over its OWN observations. Both ambiguity arms of
+        # one quarantine arm share a split because they share a measurement
+        # (``build_result`` is handed the same ``NamespaceMeasurement`` twice),
+        # which is why the four in-sample rows of a strategy carry two distinct
+        # censuses and not four.
+        with conn.transaction():
             ids = store_in_sample_arm_pair(conn, masked, admitted)
-        stored.extend(zip(ids, (masked, admitted), strict=True))
+            for result_id, result in zip(ids, (masked, admitted), strict=True):
+                folds = store_walk_forward_folds(conn, result_id, splits[(strategy_id, result.identity.quarantine_arm)])
+                stored.append((result_id, result, folds))
 
     # Criterion 8 — RE-MEASURED on every written row, with the hold-out counts
     # read back from the database rather than projected. ⚠ The counts are per
@@ -1620,7 +1829,7 @@ def _write_rows(
     # same pair, so they are cached rather than re-queried 8 times per strategy.
     written: list[WrittenRow] = []
     counts_cache: dict[tuple[str, str], tuple[int, int]] = {}
-    for result_id, result in stored:
+    for result_id, result, folds_written in stored:
         identity = result.identity
         key = (identity.strategy_id, identity.strategy_version)
         if key not in counts_cache:
@@ -1653,9 +1862,48 @@ def _write_rows(
                 result_id=result_id,
                 evaluated_instrument_count=result.evaluated_instrument_count,
                 refusals=outcome,
+                folds_written=folds_written,
             )
         )
     return tuple(written)
+
+
+def _cut_splits(
+    arms: Sequence[ArmMeasurement],
+    *,
+    corpus: _Corpus,
+) -> dict[tuple[str, QuarantineArm], WalkForwardFolds]:
+    """Criterion 5's split for each ``(strategy, quarantine arm)`` in-sample population.
+
+    ⚠ A hold-out measurement contributes nothing and is skipped rather than
+    refused: an invocation that requested both namespaces still cuts folds only
+    on the in-sample side, which is the whole of ``walk_forward``'s scope.
+    """
+    splits: dict[tuple[str, QuarantineArm], WalkForwardFolds] = {}
+    for measurement in arms:
+        outcome = measurement.namespaces.get("in_sample")
+        if outcome is None:
+            continue
+        split = build_in_sample_split(
+            outcome.label_starts,
+            outcome.label_ends,
+            axis=corpus.in_sample_axis,
+            bar_counts=corpus.in_sample_bar_counts,
+        )
+        logger.info(
+            "strategy_backtest_run: %s/%s split %s over %d observation(s) of %d in-sample position(s) — "
+            "embargo %s, purged %s, embargoed %s",
+            measurement.strategy_id,
+            measurement.quarantine_arm,
+            split.model_id,
+            split.observation_count,
+            outcome.position_count,
+            [record.embargo_bars for record in split.folds],
+            [record.census.purged for record in split.folds],
+            [record.census.embargoed for record in split.folds],
+        )
+        splits[(measurement.strategy_id, measurement.quarantine_arm)] = split
+    return splits
 
 
 def _evaluated_ids(arms: Sequence[ArmMeasurement], result: StrategyResult) -> frozenset[int]:
@@ -1745,6 +1993,20 @@ def _assert_every_runnable_produced_rows(
             f"({len(report.runnable)} strategies x {len(namespaces)} namespaces x {len(AMBIGUITY_ARMS)} ambiguity "
             f"x {len(QUARANTINE_ARMS)} quarantine) — a short write is a namespace or an arm silently missing"
         )
+    # ⚠ Criterion 5's split, checked on BOTH sides. An in-sample row without its
+    # ``FOLD_COUNT`` folds is a validity gate that did not run, and a hold-out
+    # row WITH folds is a cross-validation of the withheld side that nobody ran
+    # — the claim ``sql/269``'s trigger exists to make unstorable. Neither is
+    # refused by ``check_promotable`` (§8's "no promotion refusal is added"), so
+    # the run has to be what notices.
+    for row in report.rows:
+        wanted = FOLD_COUNT if row.namespace == "in_sample" else 0
+        if row.folds_written != wanted:
+            raise RuntimeError(
+                f"{row.strategy_id} {row.namespace}/{row.ambiguity_arm}/{row.quarantine_arm} stored "
+                f"{row.folds_written} fold(s) against {wanted} — an in-sample result carries the whole split or the "
+                "gate did not run, and a hold-out result carries none"
+            )
 
 
 def log_report(report: BacktestRunReport) -> None:
@@ -1793,13 +2055,14 @@ def log_report(report: BacktestRunReport) -> None:
         logger.warning("  no Deflated Sharpe for %s: %s", group, reason)
     for row in report.rows:
         logger.info(
-            "    stored %s %s/%s/%s %s instruments=%d refusals=%s",
+            "    stored %s %s/%s/%s %s instruments=%d folds=%d refusals=%s",
             row.strategy_id,
             row.namespace,
             row.ambiguity_arm,
             row.quarantine_arm,
             row.result_version,
             row.evaluated_instrument_count,
+            row.folds_written,
             list(row.refusals),
         )
 
@@ -1815,6 +2078,7 @@ __all__ = [
     "NamespaceMeasurement",
     "WrittenRow",
     "assert_no_existing_results",
+    "build_in_sample_split",
     "build_result",
     "deflate_group",
     "evaluate_arm",
