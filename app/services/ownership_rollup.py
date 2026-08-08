@@ -42,6 +42,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
 import psycopg
@@ -2659,8 +2660,207 @@ def _attested_direct_holders(cluster: Sequence[Holder]) -> list[Holder]:
     ]
 
 
-def _select_control_group_rep(cluster: Sequence[Holder], rows_by_identity: Mapping[str, list[Holder]]) -> Holder:
-    """Choose the holder a control-group fold keeps (#2385).
+# --- Record-holder evidence for a SAME-accession cluster (#2408) ---------------
+# The Table I clause below cannot separate co-filers of ONE accession, because the
+# ownership XML does not attribute a Table I line to a reporting owner and the parser
+# gives every line to ``filers[0]``. The evidence that DOES name a holder of record on
+# a joint filing is the ``natureOfOwnership`` free text on the INDIRECT lines, plus the
+# footnotes those lines reference.
+#
+# ⚠ Two construction decisions, both forced by measurement rather than preference, and
+# both stated here because SEC publishes no formulation for reading this field:
+#
+#   1. **The evidence is per-ROW, not per-accession.** One Form 4 carries a footnote set
+#      covering many holdings, each naming a DIFFERENT record holder — a Battery Ventures
+#      filing on dev names BV IX, BIP IX, BP IX, The Lee Family Trust and "Roger H. Lee
+#      jointly with his spouse" across five footnotes of one accession. Pooling them and
+#      asking "which member is named" is a category error. The link that exists is the
+#      block VALUE, which is what the fold clusters on, so evidence is keyed
+#      ``(accession, shares)`` against the Table I line's own reported amount.
+#   2. **Names are matched VERBATIM, never rotated to First-Last.** EDGAR conformed names
+#      for natural persons are ``LAST FIRST`` while prose writes ``FIRST LAST``, so adding
+#      the rotated form makes individuals matchable — and measured against ground truth it
+#      makes the rule WORSE, not better (see :func:`_named_record_holder`). Verbatim
+#      matching is therefore not a shortcut; the rotated arm was built, priced and rejected.
+_RECORD_HOLDER_NON_ALNUM: Final[re.Pattern[str]] = re.compile(r"[^A-Z0-9]+")
+# Explicit empty default, so a caller that has not read the evidence degrades to the
+# pre-#2408 behaviour rather than to a silent per-call rebuild of a mutable default.
+_NO_RECORD_HOLDER_EVIDENCE: Final[Mapping[tuple[str, Decimal], tuple[str, ...]]] = MappingProxyType({})
+
+
+def _normalise_holder_text(value: str) -> str:
+    """Fold a filer name or a free-text ownership clause onto one comparable alphabet.
+
+    Case, punctuation and ``&`` only. Entity suffixes are deliberately NOT stripped:
+    ``BIOS FUND III LP`` and ``BIOS FUND IV LP`` differ only there, and collapsing them
+    would attribute a block to the wrong fund — the failure this pass exists to avoid,
+    arriving from the other direction."""
+    return _RECORD_HOLDER_NON_ALNUM.sub(" ", value.upper().replace("&", " AND ")).strip()
+
+
+def _read_record_holder_evidence(
+    conn: psycopg.Connection[Any],
+    accessions: Sequence[str],
+) -> dict[tuple[str, Decimal], tuple[str, ...]]:
+    """``{(accession, shares): (text, …)}`` — every indirect-ownership statement a
+    Section 16 Table I line makes about the block it reports, keyed by that line's own
+    amount (#2408; see the construction note above :func:`_named_record_holder`).
+
+    Both row tables carry ``nature_of_ownership``: a Form 4 lands in
+    ``insider_transactions`` and a Form 3 in ``insider_initial_holdings``, so reading one
+    alone silently halves the evidence. Only ``insider_transactions`` carries
+    ``footnote_refs``, so a Form 3's ``See footnote.`` cannot be resolved and contributes
+    only the literal field — the honest asymmetry, not a gap to paper over.
+
+    Value key: Form 4 reports the post-transaction holding in ``post_transaction_shares``
+    (which is what ``ownership_insiders_current.shares`` holds for that source) and Form 3
+    reports it in ``shares``. Every accession list passed here comes from holders already
+    read for ONE instrument, so all three queries hit an ``accession_number``-leading
+    index.
+
+    ⚠ ``NOT is_derivative`` on both row queries (Codex checkpoint 2). Table II derivative
+    rows carry their own ``nature_of_ownership`` and their own post-transaction amount, and
+    the key is only ``(accession, shares)`` — so a derivative holding that happens to match
+    the equity block's count would name a record holder for a DIFFERENT security. The
+    rollup's insider rows are Table I equity, so the evidence must be too. Measured on the
+    fold population: 11 of 1,425 evidence keys drew on a derivative row, every one of them
+    alongside a non-derivative row at the same amount."""
+    if not accessions:
+        return {}
+    acc = list(dict.fromkeys(accessions))
+    texts: dict[tuple[str, Decimal], list[str]] = {}
+    refs: dict[tuple[str, Decimal], set[str]] = {}
+    footnotes: dict[tuple[str, str], str] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT accession_number, post_transaction_shares, nature_of_ownership, footnote_refs
+              FROM insider_transactions
+             WHERE accession_number = ANY(%s) AND direct_indirect = 'I'
+               AND NOT is_derivative
+               AND post_transaction_shares IS NOT NULL
+            """,
+            (acc,),
+        )
+        for accession, shares, nature, footnote_refs in cur.fetchall():
+            key = (str(accession), Decimal(shares))
+            if nature:
+                texts.setdefault(key, []).append(str(nature))
+            for ref in footnote_refs or ():
+                if isinstance(ref, dict) and ref.get("footnote_id"):
+                    refs.setdefault(key, set()).add(str(ref["footnote_id"]))
+        cur.execute(
+            """
+            SELECT accession_number, shares, nature_of_ownership
+              FROM insider_initial_holdings
+             WHERE accession_number = ANY(%s) AND direct_indirect = 'I'
+               AND NOT is_derivative
+               AND shares IS NOT NULL AND nature_of_ownership IS NOT NULL
+            """,
+            (acc,),
+        )
+        for accession, shares, nature in cur.fetchall():
+            texts.setdefault((str(accession), Decimal(shares)), []).append(str(nature))
+        if refs:
+            cur.execute(
+                """
+                SELECT accession_number, footnote_id, footnote_text
+                  FROM insider_transaction_footnotes
+                 WHERE accession_number = ANY(%s) AND footnote_text IS NOT NULL
+                """,
+                (sorted({a for a, _ in refs}),),
+            )
+            for accession, footnote_id, text in cur.fetchall():
+                footnotes[(str(accession), str(footnote_id))] = str(text)
+    for key, ids in refs.items():
+        accession, _shares = key
+        texts.setdefault(key, []).extend(
+            footnotes[(accession, fid)] for fid in sorted(ids) if (accession, fid) in footnotes
+        )
+    return {key: tuple(values) for key, values in texts.items()}
+
+
+def _named_record_holder(
+    cluster: Sequence[Holder],
+    evidence: Mapping[tuple[str, Decimal], tuple[str, ...]],
+) -> Holder | None:
+    """The ONE cluster member the filing's own indirect-ownership text names, or ``None``.
+
+    **Source rule.** Form 3/4 Table I column 5 carries ``natureOfOwnership`` on every
+    ``I`` line (Rule 16a-1(a)(2) deemed ownership), and the SEC's own instruction is that
+    an indirect holder describe the nature of the indirect ownership — which in practice
+    names the record holder ("Securities are held by BV IX", "Berto Acquisition Sponsor,
+    LLC ... is the record holder of the securities reported herein"). No SEC rule
+    prescribes a GRAMMAR for that sentence, so the reading rule below is fixed **by
+    construction** and validated against ground truth rather than cited.
+
+    **Validation — a labelled set from an independent channel.** Ground truth is not
+    available for same-accession clusters by construction (that is the whole ticket), but
+    it IS available for CROSS-accession ones: there each member files separately, so the
+    Table I ``D`` line is attributed correctly and identifies the record holder per
+    :func:`_select_control_group_rep`'s clause 1. Scoring this rule on the 408 such
+    clusters on dev (``scripts/audit_2408_nature_record_holder.py --validate``):
+
+    ==========================================  =====
+    highest-CIK incumbent already correct         220  (53.9% — an arbitrary tie-break)
+    rule fires (names exactly one member)         125
+    ... agrees with the incumbent                  74
+    ... SWAPS                                      51
+    ......... swap moves to the TRUE holder        47
+    ......... swap is wrong                         4  (3 of them break a correct incumbent)
+    ==========================================  =====
+
+    So the rule fires on 30.6% of clusters and its swaps are 92.2% correct against a 53.9%
+    baseline — net **+44** correct representatives on the labelled set. ⚠ The measurement
+    is on cross-accession clusters and the rule is APPLIED to same-accession ones; the
+    evidence channel and the failure mode (a parent named where a subsidiary holds —
+    ``Transocean Ltd.`` for ``TRANSOCEAN INTERNATIONAL Ltd``) are not accession-dependent,
+    but this is an extrapolation and is recorded as one.
+
+    **Fails closed on 0 or ≥2 named members.** A control-chain footnote routinely names
+    every tier ("GEI Capital VI, LLC is the general partner of GEI VI"), and the
+    uniqueness requirement is what keeps a manager from being read as the holder."""
+    insiders = [h for h in cluster if h.winning_source in _INSIDER_GROUP_SOURCES]
+    if not insiders:
+        return None
+    texts: list[str] = []
+    for key in {(h.winning_accession, h.shares) for h in insiders}:
+        texts.extend(evidence.get(key, ()))
+    if not texts:
+        return None
+    # ⚠ Containment is RAW, not anchored on token boundaries, and that is a MEASURED
+    # decision rather than an oversight — word-boundary anchoring was implemented, priced
+    # and reverted. Both rules have a failure case in this corpus and they fail in
+    # opposite directions:
+    #
+    #   * unanchored OVER-matches a sibling — ``LEGION PARTNERS L P I`` is a prefix of
+    #     ``LEGION PARTNERS L P II``, so a footnote naming fund II also "names" fund I.
+    #     6 folds of 1,434 carry a member pair with that shape. Such a cluster then fails
+    #     the uniqueness guard and keeps its incumbent: a LOST promotion, never a wrong one.
+    #   * anchored UNDER-matches an abbreviated conformed name — EDGAR carries
+    #     ``Ayar Third Investment Co`` while that filer's own footnote says "By Ayar Third
+    #     Investment Company", so the subsidiary that actually holds becomes unmatchable
+    #     and its parent ``PUBLIC INVESTMENT FUND`` is left as the only named member. On
+    #     ``LCID`` that promoted the parent over the record holder and moved the pie by
+    #     280,992,324 shares — a WRONG answer, and the largest single mover in the A/B.
+    #
+    # Fail-closed is this pass's posture (#2230), so the over-matching rule wins.
+    # ⚠ Nothing cheap separated these: both spellings scored an IDENTICAL 47 correct / 4
+    # wrong on the 408 labelled clusters, and every unit test passed under both. Only the
+    # paired full-population A/B distinguished them.
+    blobs = [_normalise_holder_text(t) for t in texts]
+    named = [h for h in insiders if (n := _normalise_holder_text(h.filer_name)) and any(n in b for b in blobs)]
+    if len(named) != 1:
+        return None
+    return named[0]
+
+
+def _select_control_group_rep(
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
+) -> Holder:
+    """Choose the holder a control-group fold keeps (#2385, #2408).
 
     ⚠ Every figure quoted below is reproduced by
     ``PYTHONPATH=. uv run python -m scripts.audit_2385_control_group_rep --out /tmp/a.jsonl``
@@ -2695,9 +2895,9 @@ def _select_control_group_rep(cluster: Sequence[Holder], rows_by_identity: Mappi
        assigns every row to ``filers[0]`` (``app/services/insider_transactions.py:449``).
        **Within one accession "Table I-attested" means "listed first in the XML".** 6 of
        931 same-accession folds carry ≥2 attested members, against 378 of 503
-       cross-accession. The discriminant that would settle a same-accession cluster is
-       the ``natureOfOwnership`` free text ("Shares held by X"), stored and unparsed —
-       **#2408**. Until then such a cluster keeps its incumbent.
+       cross-accession. Such a cluster falls through to the ``natureOfOwnership``
+       record-holder evidence (#2408, :func:`_named_record_holder`) and keeps its
+       incumbent when that names nothing or names more than one member.
 
     3. **EXACTLY ONE attested direct holder.** Rule 16a-1(a)(2)'s chain has one holder of
        record, the shape ``_DEEMED_CHAIN_MAX_DIRECT`` already encodes. Two members each
@@ -2715,13 +2915,22 @@ def _select_control_group_rep(cluster: Sequence[Holder], rows_by_identity: Mappi
        Declines 24 of 75 otherwise-eligible swaps. This is #2230's fail-closed posture
        applied to the rep choice, and it deliberately does NOT reverse #1652's
        exact-value-only consumption rule, which claiming the demoted member's rows
-       would require."""
+       would require.
+
+    5. **The record-holder text, only where clause 2 refused** (#2408). Clauses 1-3 are
+       tried first and unchanged: where the Table I attestation is admissible it IS the
+       source rule, and the free text must not override it. The text tier runs only when
+       they yield no candidate — which is exactly the same-accession case clause 2 exists
+       to refuse. Clause 4 then gates whichever candidate survives, so the arithmetic
+       posture is identical for both routes."""
     incumbent = max(cluster, key=_control_group_rep_key)
     attested_direct = _attested_direct_holders(cluster)
-    if len(attested_direct) != 1:
-        return incumbent
-    candidate = attested_direct[0]
-    if candidate.winning_accession == incumbent.winning_accession:
+    candidate: Holder | None = None
+    if len(attested_direct) == 1 and attested_direct[0].winning_accession != incumbent.winning_accession:
+        candidate = attested_direct[0]
+    if candidate is None:
+        candidate = _named_record_holder(cluster, record_holder_evidence)
+    if candidate is None:
         return incumbent
     if _identity_key(candidate.filer_cik, candidate.filer_name) == _identity_key(
         incumbent.filer_cik, incumbent.filer_name
@@ -2735,6 +2944,7 @@ def _select_control_group_rep(cluster: Sequence[Holder], rows_by_identity: Mappi
 def _collapse_insider_control_group(
     cluster: list[Holder],
     rows_by_identity: Mapping[str, list[Holder]],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
 ) -> tuple[Holder, CorrectionApplied]:
     """Collapse a confirmed control-group ``cluster`` (≥2 distinct CIKs, ≥1 insider
     member, all at the same exact non-round block value) to ONE holder at that value
@@ -2749,7 +2959,7 @@ def _collapse_insider_control_group(
     provenance preserved) and folded into one ``insider_control_group_collapse`` correction
     whose ``detail`` carries each folded member's CIK + name + shares (``DroppedSource`` has
     no CIK/name field — same limitation as #1645)."""
-    rep = _select_control_group_rep(cluster, rows_by_identity)
+    rep = _select_control_group_rep(cluster, rows_by_identity, record_holder_evidence)
     losers = [h for h in cluster if h is not rep]
     dropped = list(rep.dropped_sources)
     for loser in losers:
@@ -2824,6 +3034,7 @@ def _collapse_same_accession_channel(
 def _reconcile_same_accession_groups(
     survivors: list[Holder],
     blockholders: list[Holder],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
 ) -> tuple[list[Holder], list[Holder], list[CorrectionApplied]]:
     """Collapse a same-accession control-chain duplicate to ONE holder, counted once (#1764).
 
@@ -2867,14 +3078,14 @@ def _reconcile_same_accession_groups(
     # would strand its other-channel rows (#2385). Built from the INPUTS, before the pass
     # rewrites either list.
     #
-    # ⚠ On THIS pass the rep swap cannot currently fire, and that is by construction rather
-    # than by accident: the bucket key is ``(winning_accession, shares)``, so every insider
-    # member shares one accession, and :func:`_select_control_group_rep` refuses a candidate
-    # on the incumbent's accession (the ownership XML does not attribute a Table I row to a
+    # ⚠ The Table I clause cannot fire on THIS pass, by construction rather than by
+    # accident: the bucket key is ``(winning_accession, shares)``, so every insider member
+    # shares one accession, and :func:`_select_control_group_rep` refuses a candidate on
+    # the incumbent's accession (the ownership XML does not attribute a Table I row to a
     # co-filer). The cross-channel members pulled in below are 13D/G-sourced and can never
-    # be candidates either. The selector is still called here so both passes share ONE
-    # implementation — the drift this file has already taken a review WARNING for — and so
-    # the path is live the moment #2408 supplies a same-accession discriminant.
+    # be candidates either. What DOES fire here is #2408's ``natureOfOwnership`` tier,
+    # which reads the record holder off the filing's own indirect-ownership text — the
+    # same-accession discriminant this comment was written waiting for.
     rows_by_identity = _rows_by_identity(survivors, blockholders)
 
     # --- Insider side: bucket form4/form3 survivors by (accession, shares), pull matching
@@ -2902,7 +3113,9 @@ def _reconcile_same_accession_groups(
                 if id(b) not in consumed_blockholders:
                     cross_channel.append(b)
                     consumed_blockholders.add(id(b))
-        rep, correction = _collapse_insider_control_group(cluster + cross_channel, rows_by_identity)
+        rep, correction = _collapse_insider_control_group(
+            cluster + cross_channel, rows_by_identity, record_holder_evidence
+        )
         survivors_out.append(rep)
         corrections.append(correction)
 
@@ -2925,6 +3138,7 @@ def _reconcile_same_accession_groups(
 def _reconcile_insider_control_groups(
     survivors: list[Holder],
     blockholders: list[Holder],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
 ) -> tuple[list[Holder], list[Holder], list[CorrectionApplied]]:
     """Collapse each inferred cross-channel control group to ONE insiders holder at the
     block value, counted once (#1652). Pure read-path.
@@ -3036,7 +3250,7 @@ def _reconcile_insider_control_groups(
             # re-spelling its key is what keeps the gate and the fold from drifting
             # (review WARNING on PR #2384); the rep is the one member EXEMPT from this
             # check, so a preview that disagreed with the fold would exempt the wrong one.
-            rep_preview = _select_control_group_rep(holders, rows_by_identity)
+            rep_preview = _select_control_group_rep(holders, rows_by_identity, record_holder_evidence)
             rep_identity = _identity_key(rep_preview.filer_cik, rep_preview.filer_name)
             for member in holders:
                 if _identity_key(member.filer_cik, member.filer_name) == rep_identity:
@@ -3045,7 +3259,7 @@ def _reconcile_insider_control_groups(
                     collapsible = False
                     break
         if collapsible:
-            collapsed, correction = _collapse_insider_control_group(holders, rows_by_identity)
+            collapsed, correction = _collapse_insider_control_group(holders, rows_by_identity, record_holder_evidence)
             # The rep is always an insider-source row (≥1 insider member + rep preference),
             # so it routes to the insiders slice via owner-once → goes to survivors.
             survivors_out.append(collapsed)
@@ -4539,8 +4753,20 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     # accession dup leaks. Collapse the PRECISE same-accession signal first (no floor — the
     # shared accession IS the group evidence #1652/#1645 must infer); insiders restricted to
     # {form4,form3}, blockholders to {13d,13g}, never def14a (#1659 FP class).
-    survivors, blockholders, same_accession_corrections = _reconcile_same_accession_groups(survivors, blockholders)
-    survivors, blockholders, insider_group_corrections = _reconcile_insider_control_groups(survivors, blockholders)
+    # #2408: the record-holder text a joint filing states about the block it reports.
+    # Read once, from the accessions the Section 16 survivors actually carry, and shared by
+    # both control-group passes — the same-accession pass is where it decides anything (the
+    # Table I clause cannot separate co-filers of one accession), but the selector is one
+    # implementation and both passes must ask it the same question.
+    record_holder_evidence = _read_record_holder_evidence(
+        conn, [h.winning_accession for h in survivors if h.winning_source in _INSIDER_GROUP_SOURCES]
+    )
+    survivors, blockholders, same_accession_corrections = _reconcile_same_accession_groups(
+        survivors, blockholders, record_holder_evidence
+    )
+    survivors, blockholders, insider_group_corrections = _reconcile_insider_control_groups(
+        survivors, blockholders, record_holder_evidence
+    )
     # 13D/G group collapse (#1645): a Rule 13d-5 group's members each report the
     # identical aggregate stake on separate accessions/CIKs and otherwise sum N× in
     # the blockholders wedge. Collapse a near-equal, same-period, non-round cluster to
