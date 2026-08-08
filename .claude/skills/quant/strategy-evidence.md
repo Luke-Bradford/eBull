@@ -133,6 +133,88 @@ methods are **momentum, liquidity and volatility**.
 
 ---
 
+## 2.8 ⚠⚠ The one structural fact that organises the whole catalogue
+
+**The sign of return autocorrelation flips with horizon.** This is the closest
+thing to a law in the field, and every strategy family is a bet on one segment
+of it:
+
+| horizon | sign | mechanism | source | ours |
+| --- | --- | --- | --- | --- |
+| 1 day – 1 month | **negative** (reversal) | liquidity provision, bid-ask bounce | Jegadeesh (1990) | s3 |
+| 3 – 12 months | **positive** (momentum) | underreaction, slow diffusion | Jegadeesh & Titman (1993) | s1, s2 |
+| 3 – 5 years | **negative** (reversal) | overreaction — this is what *value* is | De Bondt & Thaler (1985) | ⚠ **nothing** |
+
+Two consequences worth acting on:
+
+1. ⚠ **s1 and s3 sit on opposite sides of the curve.** One bets continuation,
+   the other reversal. Running both without conditioning means they take
+   opposing positions in the same name, and the sleeve pays costs on both.
+2. ⚠⚠ **We own nothing at the 3-5 year end** — which is the LOWEST-turnover
+   corner and therefore the one most likely to survive §2.1's filter, and the
+   one where our XBRL fundamentals are the right data rather than a bystander.
+   **The biggest gap in the catalogue is the horizon we have not tried.**
+
+## 2.9 Most measures are redundant — Green, Hand & Zhang (2017)
+
+94 firm characteristics tested **simultaneously** in Fama-MacBeth regressions.
+Only **12** are reliably independent determinants over 1980-2014 — and
+⚠⚠ **since 2003, just TWO.**
+
+> **This is the answer to "combine every metric we have".** The combination adds
+> little because the characteristics are collinear: they are mostly the same
+> few signals wearing different names. And **1/N — equal weighting the signals —
+> is a hard benchmark that optimised weights routinely fail to beat.**
+
+⚠ Read as a *budget*, not a prohibition: aim for a small number of genuinely
+independent signals, equal-weighted, and prove independence rather than assuming
+it. A 40-feature model is 38 features of noise and a multiple-testing problem.
+
+## 2.10 Factor timing is harder than it looks — and our vol result is the exception
+
+**Asness, Chandra, Ilmanen & Israel, "Contrarian Factor Timing is Deceptively
+Difficult", *JPM* (2017).** Timing factor exposures on valuation spreads gives
+*"somewhat disappointing"* results, and — the part that matters —
+**"as the baseline portfolio became more diversified with more factors, it became
+progressively harder for value timing to improve performance."** Trading
+simulations failed to produce economically meaningful gains in gross return or
+Sharpe.
+
+⚠⚠ **This tempers the regime-gating ambition and must not be read as refuting
+it.** Two different things:
+
+- **Volatility conditioning** — a risk/liquidity mechanism at short horizons.
+  Nagel's result reproduces monotonically on our own data (56.6 / 57.0 / 79.8 /
+  **184.7** bps). Evidence FOR.
+- **Contrarian valuation timing of factors** — a slow bet that a cheap factor
+  mean-reverts. Evidence AGAINST.
+
+> **Rule: gate on volatility and liquidity, where the evidence is. Do not
+> generalise to "regime gating works" and start timing factors on spreads.**
+
+## 2.11 You can see part of the order flow without the tape — Amihud (2002)
+
+**Amihud, "Illiquidity and stock returns", *JFM* 5 (2002), 31-56.** The measure
+is `mean(|daily return| / daily dollar volume)` — ⚠ **daily data only, no tick
+data, no order book.** It proxies price impact per unit of order flow (the
+empirical cousin of Kyle's λ) and is *"a relatively strong indicator of informed
+trading when trading is urgent."*
+
+Three uses, all available to us on 25.9M bars with nothing new ingested:
+
+1. **A conditioner** — illiquid names are where limits to arbitrage bind, which
+   is where §2.6's surviving anomalies survive.
+2. **A per-name cost model**, replacing the flat ~50.9 bps round trip with
+   something that varies the way real costs do. ⚠ Our current flat charge
+   under-penalises exactly the microcaps §2.2 says are inflating us.
+3. **A priced factor in its own right** — the illiquidity premium.
+
+⚠ It is a *proxy*, not the tape. It cannot see a specific participant, and
+nothing at daily resolution can. What it measures is how much price moved per
+dollar traded, which is the footprint, not the actor.
+
+---
+
 ## 3. Family viability, with the evidence attached
 
 | family | evidence | our data | verdict |
