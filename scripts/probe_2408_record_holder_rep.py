@@ -14,6 +14,13 @@ left Codex's ``is_derivative`` finding (probe M) unpinned.
 of which look like a pass if the check is ``!= 0`` — that reported a false 4/4 CAUGHT on
 #2214. Runs with ``-n 0`` for the same reason (this repo's ``addopts`` carries ``-n``).
 
+⚠⚠ **This script holds an exclusive lock on the checkout.** It writes a mutated copy of
+``app/services/ownership_rollup.py`` to disk for the duration of each injection, so ANY
+process that reads the tree meanwhile picks up a defect: a ``git commit`` captures it, and
+a full-population A/B or smoke run binds it at import. Nothing else starts until this has
+printed its restored-suite line. Precedent is this ticket — a commit captured probe E's
+clause reordering, and the A/B and panel had to be re-run to prove they had not.
+
     PYTHONPATH=. uv run python scripts/probe_2408_record_holder_rep.py
 """
 
