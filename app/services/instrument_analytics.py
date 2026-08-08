@@ -39,9 +39,15 @@ logger = logging.getLogger(__name__)
 # a second hand-written copy is the #1955 sibling-drift class. FINRA designates
 # two settlement dates a month and publishes each ~12 calendar days after it
 # (finra.org/filing-reporting/short-interest schedule; skill
-# `data-sources/finra.md` §1), so the newest disseminated figure is up to ~27
-# days old in normal operation — 45d is that plus a missed cycle.
-_FINRA_SETTLEMENT_MAX_AGE = FRESHNESS_BOUNDS["short_interest_days_to_cover"]["finra_settlement"]
+# `data-sources/finra.md` §1 and §4.1), so the newest disseminated figure is up
+# to ~27 days old in normal operation — 45d is that plus a missed cycle.
+#
+# Keyed on `short_interest_pct_shares_out` because that is the metric this
+# reader computes (`short_pct` = short interest / shares outstanding); the bound
+# belongs to the `finra_settlement` INPUT, so every metric fed by this table
+# carries the same value and the bridge test in
+# tests/test_instrument_analytics.py pins them equal.
+_FINRA_SETTLEMENT_MAX_AGE = FRESHNESS_BOUNDS["short_interest_pct_shares_out"]["finra_settlement"]
 
 # ---------------------------------------------------------------------------
 # us-gaap concept resolution (financial_facts_raw holds only the non-dimensional
