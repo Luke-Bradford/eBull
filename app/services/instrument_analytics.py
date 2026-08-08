@@ -49,6 +49,18 @@ logger = logging.getLogger(__name__)
 # tests/test_instrument_analytics.py pins them equal.
 _FINRA_SETTLEMENT_MAX_AGE = FRESHNESS_BOUNDS["short_interest_pct_shares_out"]["finra_settlement"]
 
+# The OTHER input to the same ratio, imported for the same reason (#2411). A ratio is
+# only as fresh as its stalest input, and `thesis_break_scan._short_interest_observations`
+# has bounded BOTH since #2010 while this reader bounded neither until #2336 and then only
+# the numerator. dei shares outstanding is stated on the cover of every 10-K/10-Q, so 183d
+# is a quarterly cadence plus one missed filing (`thesis_break.FRESHNESS_BOUNDS` header).
+#
+# ⚠ Scoped to the short-interest ratio deliberately. `insider_signal` divides by the same
+# share count and is NOT bounded here: FRESHNESS_BOUNDS assigns `share_count_filed` to
+# `short_interest_pct_shares_out` and to nothing else, and inventing a bound for a metric
+# the vocabulary does not name is the thing this import exists to avoid.
+_SHARE_COUNT_FILED_MAX_AGE = FRESHNESS_BOUNDS["short_interest_pct_shares_out"]["share_count_filed"]
+
 # ---------------------------------------------------------------------------
 # us-gaap concept resolution (financial_facts_raw holds only the non-dimensional
 # default member — companyfacts strips dimensional facts, prevention-log 1879).
@@ -552,20 +564,34 @@ def _read_13f_delta(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[
 
 
 def _short_interest_from_row(
-    row: tuple[Any, ...] | None, shares_outstanding: float | None, *, today: date
+    row: tuple[Any, ...] | None,
+    shares_outstanding: float | None,
+    *,
+    today: date,
+    shares_outstanding_filed: date | None,
 ) -> dict[str, Any]:
     """Pure row→signal for short interest, shared by the per-instrument reader and
     the bulk reader (#2127 Phase 2). ``row`` = (current_short_interest,
     previous_short_interest, days_to_cover, settlement_date) or None.
 
-    Freshness-gated on ``settlement_date`` (#2336). ``finra_short_interest_current``
+    BOTH inputs are freshness-gated, because a ratio is only as fresh as its stalest
+    input and this one divides two independently-sourced figures.
+
+    Numerator — ``settlement_date`` (#2336). ``finra_short_interest_current``
     is latest-WINS, not current-CYCLE (sql/152) — its INSERT arm is unconditional, so
     an instrument absent from recent FINRA files keeps whatever settlement date last
     named it, and a backfill of old files seeds rows years out of date. Beyond
     ``_FINRA_SETTLEMENT_MAX_AGE`` the signal is suppressed with reason
     ``stale_settlement`` (``asof`` retained so the age stays visible) rather than
     read as live positioning. A NULL settlement date fails closed for the same
-    reason ``thesis_break.observe`` does, though the column is NOT NULL."""
+    reason ``thesis_break.observe`` does, though the column is NOT NULL.
+
+    Denominator — ``shares_outstanding_filed`` (#2411), the filing date of the share
+    count. Beyond ``_SHARE_COUNT_FILED_MAX_AGE`` → ``stale_share_count``. A NULL filed
+    date fails closed, same posture. Checked AFTER the settlement gate so a row stale
+    on both reports the numerator's age, which is the one an operator can act on
+    (FINRA republishes fortnightly; a delinquent filer's share count does not move).
+    """
     if row is None or row[0] is None or shares_outstanding is None or shares_outstanding <= 0:
         return short_interest_signal(None, None)
     settlement = row[3]
@@ -575,6 +601,13 @@ def _short_interest_from_row(
         stale["max_age_days"] = _FINRA_SETTLEMENT_MAX_AGE.days
         if settlement is not None:
             stale["asof"] = settlement.isoformat()
+        return stale
+    if shares_outstanding_filed is None or (today - shares_outstanding_filed) > _SHARE_COUNT_FILED_MAX_AGE:
+        stale = short_interest_signal(None, None)
+        stale["reason"] = "stale_share_count"
+        stale["max_age_days"] = _SHARE_COUNT_FILED_MAX_AGE.days
+        if shares_outstanding_filed is not None:
+            stale["shares_outstanding_asof"] = shares_outstanding_filed.isoformat()
         return stale
     current_si = float(row[0])
     prev_si = float(row[1]) if row[1] is not None else None
@@ -589,7 +622,12 @@ def _short_interest_from_row(
 
 
 def _read_short_interest(
-    conn: psycopg.Connection[Any], instrument_id: int, shares_outstanding: float | None, *, today: date
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    shares_outstanding: float | None,
+    *,
+    today: date,
+    shares_outstanding_filed: date | None,
 ) -> dict[str, Any]:
     """short_pct + falling + days_to_cover from finra_short_interest_current."""
     with conn.cursor() as cur:
@@ -602,7 +640,9 @@ def _read_short_interest(
             {"iid": instrument_id},
         )
         row = cur.fetchone()
-    return _short_interest_from_row(row, shares_outstanding, today=today)
+    return _short_interest_from_row(
+        row, shares_outstanding, today=today, shares_outstanding_filed=shares_outstanding_filed
+    )
 
 
 def _build_analytics_block(
@@ -675,6 +715,7 @@ def assemble_instrument_analytics(
     *,
     gics_sector: str | None,
     shares_outstanding: float | None,
+    shares_outstanding_filed: date | None,
     today: date,
 ) -> dict[str, Any]:
     """Per-instrument IAR evidence block (everything except the cross-sectional
@@ -734,7 +775,13 @@ def assemble_instrument_analytics(
     # short interest
     try:
         with conn.transaction():
-            short_interest = _read_short_interest(conn, instrument_id, shares_outstanding, today=today)
+            short_interest = _read_short_interest(
+                conn,
+                instrument_id,
+                shares_outstanding,
+                today=today,
+                shares_outstanding_filed=shares_outstanding_filed,
+            )
     except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
         short_interest = short_interest_signal(None, None)
 
@@ -936,6 +983,7 @@ def _bulk_read_short_interest(
     shares_outstanding_by_id: Mapping[int, float | None],
     *,
     today: date,
+    shares_outstanding_filed_by_id: Mapping[int, date | None],
 ) -> dict[int, dict[str, Any]]:
     """Bulk form of :func:`_read_short_interest` (one row per instrument;
     ``finra_short_interest_current`` PK is instrument_id). Each id's signal via the
@@ -955,7 +1003,10 @@ def _bulk_read_short_interest(
         for r in cur.fetchall():
             iid = int(r[0])
             out[iid] = _short_interest_from_row(
-                (r[1], r[2], r[3], r[4]), shares_outstanding_by_id.get(iid), today=today
+                (r[1], r[2], r[3], r[4]),
+                shares_outstanding_by_id.get(iid),
+                today=today,
+                shares_outstanding_filed=shares_outstanding_filed_by_id.get(iid),
             )
     for iid in instrument_ids:
         out.setdefault(iid, short_interest_signal(None, None))
@@ -968,6 +1019,7 @@ def assemble_instrument_analytics_bulk(
     *,
     gics_sector_by_id: Mapping[int, str | None],
     shares_outstanding_by_id: Mapping[int, float | None],
+    shares_outstanding_filed_by_id: Mapping[int, date | None],
     today: date,
 ) -> dict[int, dict[str, Any]]:
     """Bulk IAR evidence blocks for a whole scoring batch (#2127 Phase 2). One
@@ -1021,7 +1073,13 @@ def assemble_instrument_analytics_bulk(
 
     try:
         with conn.transaction():
-            si_map = _bulk_read_short_interest(conn, instrument_ids, shares_outstanding_by_id, today=today)
+            si_map = _bulk_read_short_interest(
+                conn,
+                instrument_ids,
+                shares_outstanding_by_id,
+                today=today,
+                shares_outstanding_filed_by_id=shares_outstanding_filed_by_id,
+            )
     except Exception:
         logger.warning("assemble_instrument_analytics_bulk: short-interest bulk read failed; degrading", exc_info=True)
         si_map = {}

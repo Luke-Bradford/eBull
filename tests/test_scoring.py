@@ -21,7 +21,7 @@ Coverage:
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -963,6 +963,7 @@ def _make_fake_conn(
     last_10kq: object = None,
     price_td: int = 0,
     news_90d: int = 0,
+    share_count_row: dict[str, object] | None = None,
 ) -> MagicMock:
     """
     Return a MagicMock psycopg connection that supports the cursor(row_factory=...)
@@ -971,14 +972,19 @@ def _make_fake_conn(
     psycopg cursor semantics: cur.execute(sql) is called, then cur.fetchone() /
     cur.fetchall() is called on the *same* cursor object. We model this by having
     execute() mutate cur.fetchone / cur.fetchall as a side effect, dispatching
-    results in order: fundamentals, price, quote, thesis, news, red_flag,
+    results in order: fundamentals, share count, price, quote, thesis, news, red_flag,
     valuation, risk (#1633 risk_v1 3y). (analyst_estimates retired with FMP under #539.)
+
+    ⚠ This iterator is POSITIONAL — it dispatches on call order, not on SQL. Adding a
+    read to `_load_instrument_data` without adding an entry here fails with a bare
+    `StopIteration` several frames away from the cause (#2411).
     """
     rf_row: dict[str, object] = {"avg_red_flag": avg_red_flag}
 
     # Ordered list of (fetch_method, return_value) per execute() call.
     responses: list[tuple[str, object]] = [
         ("fetchall", fund_rows),
+        ("fetchone", share_count_row),  # #2411 analytics denominator
         ("fetchone", price_row),
         ("fetchone", quote_row),
         ("fetchone", thesis_row),
@@ -1153,6 +1159,13 @@ def _full_data(
         "last_10kq_date": None,
         "price_td_count": 300,
         "news_90d_count": 3,
+        # The analytics denominator is its OWN read (#2411), not fund_rows[0]. The
+        # count here deliberately DIFFERS from the fund_rows one above so a test that
+        # passes by reading the wrong source cannot pass by coincidence.
+        "share_count_row": {
+            "shares_outstanding": 12_500_000.0,
+            "shares_outstanding_filed_date": date(2026, 6, 30),
+        },
     }
 
 
@@ -1178,15 +1191,26 @@ class TestScoreFromData:
             _ = _WEIGHT_MODES["nope"]
 
     def test_analytics_inputs_pure_extraction(self) -> None:
-        gics, shares = _analytics_inputs(_full_data(sic=None))
-        assert shares == pytest.approx(10_000_000.0)
+        gics, shares, filed = _analytics_inputs(_full_data(sic=None))
+        assert shares == pytest.approx(12_500_000.0)
+        assert filed == date(2026, 6, 30)
         assert gics is None  # sic None -> no SPDR sector
 
-    def test_analytics_inputs_empty_fund_rows(self) -> None:
+    def test_analytics_inputs_ignores_fund_rows(self) -> None:
+        """#2411 — the denominator does NOT come from fundamentals_snapshot. Emptying
+        fund_rows must not touch it; that coupling is the defect this ticket removed."""
         data = _full_data()
         data["fund_rows"] = []
-        gics, shares = _analytics_inputs(data)
+        _gics, shares, filed = _analytics_inputs(data)
+        assert shares == pytest.approx(12_500_000.0)
+        assert filed == date(2026, 6, 30)
+
+    def test_analytics_inputs_no_share_count_row(self) -> None:
+        data = _full_data()
+        data["share_count_row"] = None
+        _gics, shares, filed = _analytics_inputs(data)
         assert shares is None
+        assert filed is None
 
 
 # ---------------------------------------------------------------------------
