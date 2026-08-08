@@ -92,6 +92,7 @@ Lane = Literal[
     "risk_metrics",
     "fair_value_band",
     "price_quarantine",
+    "strategy_scan",
     "bootstrap",
     "finra",
     "openfigi",
@@ -336,6 +337,16 @@ when one overruns). Scheduled-only, so NOT added to the
   orchestrator adapter inner-JobLock AND the operator manual-trigger path. NOT
   in SCHEDULED_JOBS (the DAG layer's cadence/freshness gate the run), so NOT
   added to the ``bootstrap_stages.lane`` CHECK.
+* ``strategy_scan`` — ``strategy_signal_scan`` (#2394 §3.1) only. DB-only
+  producer, sole writer of ``strategy_signals`` + ``strategy_scan_watermark``;
+  reads ``price_daily`` / ``price_bar_quarantine`` MVCC-safe. ⚠ The lane is
+  load-bearing for CORRECTNESS here, unlike the two above where it is a
+  starvation fix: ``store_signals`` has no ``ON CONFLICT``, so two overlapping
+  scans do not produce a duplicate row — they produce a ``UniqueViolation`` that
+  aborts a batch after the work is done. Own lane rather than the catch-all
+  ``db`` for the ``risk_metrics`` reason as well: the pass is minutes long over
+  the whole validated universe. Scheduled-only (daily 06:45 UTC) → not in the
+  ``bootstrap_stages.lane`` CHECK.
 
 The final lane is bootstrap-only:
 

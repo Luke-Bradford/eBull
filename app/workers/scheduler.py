@@ -365,6 +365,11 @@ JOB_FAIR_VALUE_BAND_REFRESH = "fair_value_band_refresh"
 # Must follow candles: the verdicts are derived from price_daily and a refresh
 # that rewrote bars leaves them describing a series that no longer exists.
 JOB_PRICE_QUARANTINE_REFRESH = "price_quarantine_refresh"
+# #2394 §3.1 — the daily signal scan. SCHEDULED (not orchestrator-driven): its
+# "after the candle refresh" prerequisite is structural rather than a DAG edge —
+# if candles have not moved, the frontier has not moved, and the watermark makes
+# the run a no-op. See app/services/strategy_signal_scan.py.
+JOB_STRATEGY_SIGNAL_SCAN = "strategy_signal_scan"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 # JOB_WEEKLY_COVERAGE_AUDIT + JOB_WEEKLY_COVERAGE_REVIEW retired in Chunk 2 of
@@ -1943,6 +1948,45 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # where an operator re-runs bootstrap after first-install
         # already finished (status flips from ``complete`` →
         # ``running``).
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_SIGNAL_SCAN,
+        display_name="Strategy signal scan (#2394 §3.1)",
+        source="strategy_scan",
+        description=(
+            "Daily 06:45 UTC — evaluates every strategy in "
+            "STRATEGY_MANIFEST over the validated universe and writes "
+            "strategy_signals. Runs one bar in ARREARS: a signal on "
+            "the last bar of a series has no t+1, so it is "
+            "not_evaluable/no_fill_bar, and store_signals has no ON "
+            "CONFLICT to correct it with — a same-day scan would "
+            "record 6,185 real fired decisions a day as permanently "
+            "unevaluable (measured, full population). The date it "
+            "writes is the bar before the MODAL last bar across the "
+            "loadable universe, not max(price_date), and the day is "
+            "REFUSED if the modal share is below 2/3 — a refresh "
+            "still in flight would otherwise be recorded as terminal "
+            "refusals. Resumes from a per-(strategy_id, "
+            "strategy_version) frontier watermark, so a re-run on the "
+            "same frontier is a no-op and a market holiday neither "
+            "writes nor wedges. Signals only: outcome resolution is a "
+            "separate job (nothing in app/ builds an ExitLevels, and "
+            "an outcome stored for an immature window would drop the "
+            "signal from select_pending_fills permanently). Spec "
+            "docs/proposals/ta/2026-08-08-strategy-signal-scan.md."
+        ),
+        # After the 03:00 orchestrator_full_sync has driven candles →
+        # price_quarantine. The gap is generous on purpose: the scan reads
+        # through the quarantine coverage table, so a run that overtakes the
+        # quarantine recompute would see a stale rule-set version and load
+        # fail-closed zeros for the affected instruments.
+        cadence=Cadence.daily(hour=6, minute=45),
+        # A missed window rolls forward: the next run's watermark is behind the
+        # new frontier, so it writes the whole gap. Catching up on boot would
+        # fire a ~2-minute full-corpus pass on every dev-stack restart for a day
+        # the next scheduled fire covers anyway.
+        catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -4826,6 +4870,40 @@ def price_quarantine_refresh() -> None:
     with _tracked_job(JOB_PRICE_QUARANTINE_REFRESH) as tracker:
         with connect_job() as conn:
             tracker.row_count = refresh_price_quarantine(conn).instruments
+
+
+def strategy_signal_scan() -> None:
+    """Write one day of the shadow track record (#2394 §3.1).
+
+    DB-only (no external I/O): reads ``price_daily`` through the fail-closed
+    masked loader, runs every ``STRATEGY_MANIFEST`` entry over the validated
+    universe, and writes ``strategy_signals`` one bar behind the corpus frontier.
+
+    ⚠⚠ ``autocommit=True`` IS LOAD-BEARING, NOT TIDINESS. ``run_signal_scan``
+    commits per ``(strategy_id, frontier)`` via ``conn.transaction()``, and on a
+    non-autocommit connection the reads it does first open an implicit
+    transaction — which turns every one of those into a SAVEPOINT and collapses
+    the per-strategy boundary into a single batch (prevention log: *"psycopg3
+    savepoint ≠ commit"*). The service refuses a non-autocommit connection
+    rather than trusting this call site.
+
+    ⚠ ``row_count`` is signals WRITTEN, and zero is a legitimate success: a
+    holiday leaves the frontier unmoved and a same-day re-run is a watermark
+    no-op. The status to read is in the logged report, not in the row count.
+    """
+    from app.services.strategy_signal_scan import run_signal_scan
+
+    with _tracked_job(JOB_STRATEGY_SIGNAL_SCAN) as tracker:
+        with connect_job(autocommit=True) as conn:
+            report = run_signal_scan(conn)
+            tracker.row_count = report.rows_written
+            failed = sorted(result.strategy_id for result in report.per_strategy if result.status == "failed")
+        # ⚠ INSIDE the tracker, so a per-strategy failure fails the JOB — while
+        # every healthy strategy's batch stays committed, which is the isolation
+        # §8 asks for made visible rather than swallowed. Raised outside it, the
+        # run would be recorded green with a strategy silently dark.
+        if failed:
+            raise RuntimeError(f"strategy_signal_scan: {len(failed)} strategy(ies) failed: {failed}")
 
 
 def exchanges_metadata_refresh() -> None:

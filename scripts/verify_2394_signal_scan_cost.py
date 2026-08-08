@@ -14,10 +14,14 @@ Every phase-5 figure on this epic was measured on ``research_price_daily``,
 which is a frozen archive keyed on ``series_id``. A daily scan cannot run on it:
 ``--population`` prints both corpora's last bar and the share of research series
 that even carry an ``instrument_id``. The strategy code is corpus-agnostic; the
-LOADER is not, and there is no masked loader for ``price_daily`` in ``app/`` —
-``_load_live_masked`` below is this script's own, mirroring
-``research_price_structure_store._LOAD_SQL`` field for field so the measurement
-is of the corpus and not of a second masking rule.
+LOADER is not.
+
+⚠ IT LOADS THROUGH ``app.services.price_masked_bars``, THE SHIPPED LOADER. This
+script originally carried its own copy — the prototype the spec was measured from
+— and the spec said so: *"``_load_live_masked`` is the measured prototype, not the
+shipping code."* The shipping code now exists (#2394 §3.1), and a second copy of a
+masking rule is a place for the two to drift, which would make every figure below
+a measurement of the script rather than of the scan.
 
 FOUR ARMS, MEASURING DIFFERENT THINGS
 -------------------------------------
@@ -79,12 +83,15 @@ import psycopg
 from app.config import settings
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
-from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
+from app.services.price_masked_bars import (
+    MASKED_REASON,
+    QUARANTINE_RULE_SET_VERSION,
+    load_masked_bars,
+)
 from app.services.signal_ledger import resolve_fills
 from app.services.strategies.s2_cross_sectional_momentum import S2_STRATEGY_ID
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
-from app.services.technical_analysis import OHLCVRow
 
 #: The live corpus is today's tradable list, so every figure here inherits the
 #: survivorship label #2288 put on the research one. ``instrument_universe_
@@ -93,71 +100,10 @@ from app.services.technical_analysis import OHLCVRow
 #: claim is checked rather than repeated.
 UNIVERSE = "survivor_only"
 
-#: What the masked loader means by an absent field, in the strategies' own
-#: closed vocabulary.
-MASKED_REASON = "quarantined_bar"
-
 #: Trailing windows the truncation arm compares against full history. 250 ≈ one
 #: trading year (S-1 needs ``sma_200``, so anything shorter cannot evaluate it at
 #: all and the comparison would be against a refusal); 750 ≈ three.
 TRUNCATION_WINDOWS = (250, 750)
-
-# ⚠ A FIELD-FOR-FIELD MIRROR of `research_price_structure_store._LOAD_SQL`
-# against the live corpus. The JOIN to the coverage table — not a LEFT JOIN — is
-# the fail-closed rule: bars outside an evaluated range are not returned, because
-# an unevaluated bar is unchecked rather than clean. The LEFT JOIN to the verdict
-# table is right for the opposite reason: that table is SPARSE, a row exists only
-# when it says something, so a missing row IS a clean bar inside a covered range.
-_LIVE_LOAD_SQL = """
-    SELECT d.price_date,
-           d.open,
-           d.high,
-           d.low,
-           d.close,
-           d.volume,
-           COALESCE(q.range_usable, TRUE)  AS range_usable,
-           COALESCE(q.return_usable, TRUE) AS return_usable
-    FROM price_daily d
-    JOIN price_quarantine_coverage cov
-      ON cov.instrument_id = d.instrument_id
-     AND cov.rule_set_version = %(quarantine_version)s
-     AND d.price_date BETWEEN cov.first_bar AND cov.last_bar
-    LEFT JOIN price_bar_quarantine q
-      ON q.instrument_id = d.instrument_id
-     AND q.price_date = d.price_date
-     AND q.rule_set_version = %(quarantine_version)s
-    WHERE d.instrument_id = %(instrument_id)s
-    ORDER BY d.price_date
-"""
-
-
-def _load_live_masked(conn: psycopg.Connection[Any], instrument_id: int) -> BarSeries:
-    """One instrument's live bars, quarantined fields masked to ``None``.
-
-    The masking rule is ``_apply_arm``'s, and only the ``masked`` arm: this is a
-    production-shaped read, and criterion 9's ``admitted`` arm is a sensitivity
-    measurement that has no place in a scan. ⚠ The OPEN is masked on its VALUE
-    (#2354) — ``price_quarantine`` has no axis for it, and a stored ``open = 0``
-    reaching ``resolve_fills`` books a fill at price 0.
-    """
-    rows = conn.execute(
-        _LIVE_LOAD_SQL,
-        {"instrument_id": instrument_id, "quarantine_version": QUARANTINE_RULE_SET_VERSION},
-    ).fetchall()
-    dates: list[date] = []
-    bars: list[OHLCVRow] = []
-    for bar_date, open_, high, low, close, volume, range_usable, return_usable in rows:
-        dates.append(bar_date)
-        bars.append(
-            {
-                "open": open_ if (open_ is not None and open_ > 0) else None,  # type: ignore[typeddict-item]
-                "high": high if range_usable else None,  # type: ignore[typeddict-item]
-                "low": low if range_usable else None,  # type: ignore[typeddict-item]
-                "close": close if return_usable else None,  # type: ignore[typeddict-item]
-                "volume": volume,
-            }
-        )
-    return BarSeries(dates=tuple(dates), rows=tuple(bars))
 
 
 def _tail(series: BarSeries, window: int) -> BarSeries:
@@ -320,7 +266,7 @@ def _run_population(conn: psycopg.Connection[Any], instrument_ids: list[int]) ->
     loaded: dict[int, BarSeries] = {}
     started = time.monotonic()
     for n, instrument_id in enumerate(instrument_ids, start=1):
-        series = _load_live_masked(conn, instrument_id)
+        series = load_masked_bars(conn, instrument_id).series
         if len(series):
             loaded[instrument_id] = series
         if n % 1000 == 0:

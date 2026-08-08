@@ -126,6 +126,7 @@ from app.workers.scheduler import (
     JOB_SEC_N_PORT_INGEST,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
+    JOB_STRATEGY_SIGNAL_SCAN,
     JOB_THESIS_BREAK_SCAN,
     JOB_THESIS_DQ_AUDIT,
     JOB_THESIS_OUTCOME_CAPTURE,
@@ -190,6 +191,7 @@ from app.workers.scheduler import (
     sec_n_port_ingest,
     sec_nport_filer_directory_sync,
     seed_cost_models,
+    strategy_signal_scan,
     thesis_break_scan,
     thesis_dq_audit,
     thesis_outcome_capture,
@@ -335,6 +337,11 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # double-fire). Source-lock "fair_value_band" in MANUAL_TRIGGER_JOB_SOURCES;
     # empty params in MANUAL_TRIGGER_JOB_METADATA.
     JOB_FAIR_VALUE_BAND_REFRESH: _adapt_zero_arg(fair_value_band_refresh),
+    # #2394 §3.1 — the daily signal scan. SCHEDULED (daily 06:45 UTC), not
+    # orchestrator-driven: "after the candle refresh" is enforced structurally by
+    # the frontier watermark rather than by a DAG edge. Own "strategy_scan" lane,
+    # resolved from SCHEDULED_JOBS, so no MANUAL_TRIGGER_JOB_SOURCES entry.
+    JOB_STRATEGY_SIGNAL_SCAN: _adapt_zero_arg(strategy_signal_scan),
     JOB_ATTRIBUTION_SUMMARY: _adapt_zero_arg(attribution_summary_job),
     JOB_SEED_COST_MODELS: _adapt_zero_arg(seed_cost_models),
     JOB_WEEKLY_REPORT: _adapt_zero_arg(weekly_report),
