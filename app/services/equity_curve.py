@@ -96,6 +96,41 @@ import numpy.typing as npt
 #:      under-investment that leaves is exactly the cost charged.
 SIZING_RULE_ID: Final = "equal_weight_concurrent_v1"
 
+#: How criterion 7's buy-and-hold BENCHMARK is composed. ⚠ FROZEN AND HASHED —
+#: it is ``ResultIdentity.benchmark_rule``, and it exists as a separate id for
+#: the reason ``SIZING_RULE_ID`` exists: a comparator that can change without the
+#: result identity moving is a comparator that can be tuned invisibly. Until
+#: #2426 the benchmark silently inherited ``SIZING_RULE_ID``.
+#:
+#: ⚠⚠ THE DEFINING PROPERTY IS THAT IT NEVER REBALANCES, and that is a SOURCE
+#: RULE, not a preference. Blume & Stambaugh, *"Biases in computed returns: An
+#: application to the size effect"*, Journal of Financial Economics 12 (1983),
+#: 387-404: rebalancing trades into the bid-ask noise in each closing print, and
+#: *"returns computed for buy-and-hold portfolios largely avoid the bias induced
+#: by closing prices"*. They measure the bias at 0.056%/day on the small-firm
+#: decile against 0.001% on the large-firm decile — fifty times as great — which
+#: is why it matters here specifically: our panel is predominantly small and
+#: delisted US names. Measured on our own full population (#2426), running this
+#: benchmark under ``equal_weight_concurrent_v1`` instead added **23.2 points of
+#: annual return** and turned 137,477,862x the starting pot over on a portfolio
+#: that is supposed never to trade.
+#:
+#: What the panel's shape forces, fixed BY CONSTRUCTION because no published rule
+#: covers an unbalanced panel where names list and delist inside the window
+#: (CRSP's equal-weighted index redistributes to survivors, which is a rebalance;
+#: its delisting-return rule needs a field our corpus does not carry):
+#:
+#:   1. **Each leg is committed exactly ``starting_equity / n``** at its own
+#:      entry, and held to its own exit.
+#:   2. **Proceeds go to cash and stay there; cash earns 0.** §5.4's own rule for
+#:      the strategy — *"define cash return as zero, report return on the full
+#:      allocated pot"* — applied to the benchmark, which is what keeps the two
+#:      denominators comparable.
+#:   3. **No rebalance, ever**, so no rebalance trade and no rebalance cost. The
+#:      entry/exit round trip is charged exactly as the strategy's is, because
+#:      those prices arrive already net from ``_benchmark_book``.
+BENCHMARK_RULE_ID: Final = "equal_weight_buy_and_hold_v1"
+
 #: ⚠ A leg opening on a date whose cash cannot fund ``equity / n`` is admitted
 #: at whatever cash allows and TOPPED UP by that date's close rebalance. It is
 #: never refused, and the count of short-funded entries is reported.
@@ -480,9 +515,181 @@ def build_equity_curve(
     )
 
 
+def build_buy_and_hold_curve(
+    book: LegBook,
+    *,
+    date_count: int,
+    starting_equity: float = 1.0,
+) -> EquityCurve:
+    """Walk the date axis once, applying ``BENCHMARK_RULE_ID``.
+
+    The same axis, the same marks and the same already-netted prices as
+    ``build_equity_curve`` — and no rebalance. That single difference is the
+    whole function; see ``BENCHMARK_RULE_ID`` for the source rule that requires
+    it and for what it measured on our corpus.
+
+    ⚠ ORDER WITHIN A DATE MIRRORS ``build_equity_curve``: exits of positions
+    opened earlier, then entries, then same-bar exits, then the mark. Kept
+    identical deliberately — the benchmark and the strategy must not differ in
+    any respect the comparison is not about.
+
+    ⚠⚠ THE ALLOCATION IS FIXED AT ``starting_equity / n`` AND NEVER RECOMPUTED,
+    which is what makes cash provably sufficient: total commitment is exactly
+    ``n * (starting_equity / n)``, entries only debit and exits only credit, so
+    no leg can be short-funded and no reserved-cash accounting is needed. The
+    strategy curve cannot make that guarantee — its target moves with equity —
+    which is why it carries a cash cap and a short-funded counter and this does
+    not.
+
+    ⚠ COST SHAPE, because the ``leg not in done`` filters look worse than they
+    measure. The dominant term is the per-day mark-and-value loop, which is
+    ``sum(open_count)`` — one iteration per open position per day, and that is
+    simply what marking a portfolio daily IS. The filters run only on a date
+    where something closes, so they are bounded by the open set on closing dates
+    alone. At full-corpus shape they are the minority term by roughly four to
+    one. ⚠ Re-measure rather than trusting that ratio, which is a property of
+    the corpus and moves with it::
+
+        PYTHONPATH=. uv run python scripts/verify_2426_benchmark.py --profile
+
+    ⚠ REFUSES AN UNREALISED LEG. ``_benchmark_book`` closes every leg at its last
+    usable bar and marks all of them ``realised``, so an unrealised one means the
+    caller built the book some other way. The strategy engine handles that case
+    by FREEZING the leg and excluding it from the rebalance; with no rebalance to
+    exclude it from there is no defined treatment here, and inventing one
+    silently would price a position nobody could sell.
+
+    Pure. Reads no database, mutates no argument.
+    """
+    if date_count < 1:
+        raise ValueError(f"date_count must be >= 1, got {date_count}")
+    if starting_equity <= 0.0:
+        raise ValueError(f"starting_equity must be positive, got {starting_equity}")
+
+    n_legs = len(book)
+    equity_path = np.full(date_count, starting_equity, dtype=np.float64)
+    invested_path = np.zeros(date_count, dtype=np.float64)
+    open_path = np.zeros(date_count, dtype=np.int32)
+    traded_path = np.zeros(date_count, dtype=np.float64)
+    if n_legs == 0:
+        return EquityCurve(
+            equity=equity_path,
+            invested=invested_path,
+            open_count=open_path,
+            traded_notional=traded_path,
+            rebalance_costs=0.0,
+            event_dates=0,
+            short_funded_entries=0,
+            stale_marks=0,
+            unrealised_held=0,
+        )
+
+    if not all(book.realised):
+        raise ValueError(
+            f"{sum(1 for value in book.realised if not value)} of {n_legs} benchmark legs are unrealised — a "
+            "buy-and-hold leg is held to its instrument's last usable bar by construction, and there is no "
+            "rebalance here from which an unsellable position could be excluded"
+        )
+
+    entry_index = np.asarray(book.entry_index, dtype=np.int64)
+    exit_index = np.asarray(book.exit_index, dtype=np.int64)
+    entry_price = np.asarray(book.entry_price, dtype=np.float64)
+    exit_price = np.asarray(book.exit_price, dtype=np.float64)
+    mark_offset = np.asarray(book.mark_offset, dtype=np.int64)
+    marks = np.frombuffer(book.marks, dtype=np.float64) if len(book.marks) else np.empty(0, dtype=np.float64)
+
+    if int(exit_index.max()) >= date_count:
+        raise ValueError(
+            f"a leg closes at index {int(exit_index.max())} on a {date_count}-date axis — the axis is short, and "
+            "silently truncating it would drop the tail of the curve"
+        )
+    if int(entry_index.min()) < 0:
+        raise ValueError(f"a leg opens at index {int(entry_index.min())}; indices are positions on the date axis")
+
+    opening: list[list[int]] = [[] for _ in range(date_count)]
+    closing: list[list[int]] = [[] for _ in range(date_count)]
+    for leg in range(n_legs):
+        opening[int(entry_index[leg])].append(leg)
+        closing[int(exit_index[leg])].append(leg)
+
+    #: ⚠ THE constant of this rule. Computed once, never revisited.
+    allocation = starting_equity / n_legs
+    units = np.zeros(n_legs, dtype=np.float64)
+    last_price = np.zeros(n_legs, dtype=np.float64)
+
+    cash = starting_equity
+    open_legs: list[int] = []
+    event_dates = 0
+    stale_marks = 0
+
+    for day in range(date_count):
+        opened_today = opening[day]
+        closing_now = closing[day]
+        closed_today = [leg for leg in closing_now if int(entry_index[leg]) < day]
+        same_bar = [leg for leg in closing_now if int(entry_index[leg]) == day]
+        if closed_today or opened_today:
+            event_dates += 1
+
+        for leg in closed_today:
+            proceeds = units[leg] * exit_price[leg]
+            cash += proceeds
+            traded_path[day] += proceeds
+            units[leg] = 0.0
+        if closed_today:
+            done = set(closed_today)
+            open_legs = [leg for leg in open_legs if leg not in done]
+
+        for leg in opened_today:
+            units[leg] = allocation / entry_price[leg]
+            cash -= allocation
+            traded_path[day] += allocation
+            last_price[leg] = entry_price[leg]
+            open_legs.append(leg)
+
+        # ⚠ Same-bar legs take no part in the mark: they are gone before the
+        # close is read, exactly as in ``build_equity_curve``.
+        if same_bar:
+            for leg in same_bar:
+                proceeds = units[leg] * exit_price[leg]
+                cash += proceeds
+                traded_path[day] += proceeds
+                units[leg] = 0.0
+            done = set(same_bar)
+            open_legs = [leg for leg in open_legs if leg not in done]
+
+        for leg in open_legs:
+            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))
+            mark = marks[offset]
+            if np.isnan(mark):
+                stale_marks += 1
+            else:
+                last_price[leg] = mark
+
+        held = 0.0
+        for leg in open_legs:
+            held += units[leg] * last_price[leg]
+        invested_path[day] = held
+        equity_path[day] = cash + held
+        open_path[day] = len(open_legs)
+
+    return EquityCurve(
+        equity=equity_path,
+        invested=invested_path,
+        open_count=open_path,
+        traded_notional=traded_path,
+        rebalance_costs=0.0,
+        event_dates=event_dates,
+        short_funded_entries=0,
+        stale_marks=stale_marks,
+        unrealised_held=0,
+    )
+
+
 __all__ = [
+    "BENCHMARK_RULE_ID",
     "SIZING_RULE_ID",
     "EquityCurve",
     "LegBook",
+    "build_buy_and_hold_curve",
     "build_equity_curve",
 ]

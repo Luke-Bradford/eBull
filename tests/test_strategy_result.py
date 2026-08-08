@@ -25,6 +25,7 @@ import pytest
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.random_entry_cohort import SyntheticControl
 from app.services.strategy_result import (
+    BENCHMARK_RULE,
     CORPUS_VERSION,
     EVALUATION_WINDOW_END,
     EVALUATION_WINDOW_START,
@@ -72,6 +73,7 @@ def _identity(**overrides: object) -> ResultIdentity:
         "ambiguity_arm": "worst_case",
         "quarantine_arm": "masked",
         "sizing_rule": SIZING_RULE,
+        "benchmark_rule": BENCHMARK_RULE,
         "cost_model_id": "static-p75-insession-v1",
         "corpus_version": CORPUS_VERSION,
         "window_start": EVALUATION_WINDOW_START,
@@ -376,6 +378,7 @@ class TestResultIdentity:
             ("namespace", "in_sample"),
             ("ambiguity_arm", "best_case"),
             ("sizing_rule", "volatility_targeted_v1"),
+            ("benchmark_rule", "cap_weighted_spy_v1"),
             ("cost_model_id", "static-p75-insession-v2"),
             ("corpus_version", "some-vendor@2027-01-01"),
             ("window_start", date(1970, 1, 2)),
@@ -425,6 +428,7 @@ class TestStrategyResultValidation:
             "strategy_id",
             "strategy_version",
             "sizing_rule",
+            "benchmark_rule",
             "cost_model_id",
             "corpus_version",
             "position_rule_set_version",

@@ -75,7 +75,7 @@ from typing import Literal, get_args
 
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DeflatedSharpeResult
-from app.services.equity_curve import SIZING_RULE_ID
+from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.random_entry_cohort import SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
 from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
@@ -171,6 +171,18 @@ HOLDOUT_WEIGHTING = "bar"
 #: the id would let the rule change in ``equity_curve`` while the hash on every
 #: result row kept claiming the old one. The engine owns it.
 SIZING_RULE = SIZING_RULE_ID
+
+#: How criterion 7's buy-and-hold comparator is composed. Re-exported from the
+#: engine for the same reason ``SIZING_RULE`` is.
+#:
+#: ⚠⚠ IT IS A SEPARATE ID BECAUSE THE BENCHMARK USED TO INHERIT ``SIZING_RULE``,
+#: WHICH REBALANCES (#2426). A rebalanced comparator is not buy-and-hold — Blume
+#: & Stambaugh (JFE 12, 1983, 387-404) — and on our own full population that
+#: inheritance added 23.2 points of annual return to the bar every strategy is
+#: measured against. Hashed into ``ResultIdentity.version`` on the same argument
+#: §5.4 makes for the sizing rule: a comparator that can change without the
+#: identity moving is a comparator that can be tuned invisibly.
+BENCHMARK_RULE = BENCHMARK_RULE_ID
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +435,13 @@ class ResultIdentity:
     #: ``input_rule_set_version`` below.
     quarantine_arm: QuarantineArm
     sizing_rule: str
+    #: How the buy-and-hold comparator is composed —
+    #: ``equity_curve.BENCHMARK_RULE_ID``. ⚠ HASHED, and #2426 is why it has to
+    #: be: it did not exist, so the benchmark silently inherited ``sizing_rule``
+    #: and rebalanced. Two runs whose comparator differs are two different
+    #: measurements of "did this beat buying and holding", and without this field
+    #: they hash to the same ``result_version``.
+    benchmark_rule: str
     cost_model_id: str
     corpus_version: str
     window_start: date
@@ -457,6 +476,7 @@ class ResultIdentity:
                 "ambiguity_arm": self.ambiguity_arm,
                 "quarantine_arm": self.quarantine_arm,
                 "sizing_rule": self.sizing_rule,
+                "benchmark_rule": self.benchmark_rule,
                 "cost_model_id": self.cost_model_id,
                 "corpus_version": self.corpus_version,
                 "window_start": self.window_start.isoformat(),
@@ -566,6 +586,7 @@ class StrategyResult:
             "strategy_id",
             "strategy_version",
             "sizing_rule",
+            "benchmark_rule",
             "cost_model_id",
             "corpus_version",
             "position_rule_set_version",
@@ -817,6 +838,7 @@ CURRENT_RESULT_PROVENANCE: Mapping[str, object] = {
     "cost_model_id": COST_MODEL_ID,
     "metric_set_id": METRIC_SET_ID,
     "sizing_rule": SIZING_RULE,
+    "benchmark_rule": BENCHMARK_RULE,
     "window_start": EVALUATION_WINDOW_START,
     "window_end": EVALUATION_WINDOW_END,
 }
@@ -824,6 +846,7 @@ CURRENT_RESULT_PROVENANCE: Mapping[str, object] = {
 
 __all__ = [
     "AMBIGUITY_ARMS",
+    "BENCHMARK_RULE",
     "CORPUS_FROZEN_LAST_BAR",
     "CORPUS_VENDORS",
     "CORPUS_VERSION",

@@ -64,6 +64,7 @@ from app.config import settings
 from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_result import (
+    BENCHMARK_RULE,
     CORPUS_FROZEN_LAST_BAR,
     CORPUS_VENDORS,
     CORPUS_VERSION,
@@ -431,6 +432,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
         ambiguity_arm="worst_case",
         quarantine_arm="masked",
         sizing_rule=SIZING_RULE,
+        benchmark_rule=BENCHMARK_RULE,
         cost_model_id=COST_MODEL_ID,
         corpus_version=CORPUS_VERSION,
         window_start=EVALUATION_WINDOW_START,

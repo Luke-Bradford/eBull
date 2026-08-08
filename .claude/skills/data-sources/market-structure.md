@@ -141,6 +141,10 @@ decile   intraday    overnight (unfillable)   FILLABLE       se
 
 ### 3. Equal-weighted per-bar means are micro-cap means
 
+> ⚠⚠ **This trap has a portfolio-level twin that cost a real number — see "The
+> benchmark is a construction" below.** Same population, same mechanism, but it
+> reaches you through a *rebalance* rather than through a mean.
+
 A series contributes in proportion to its **bar count**, not its size or tradability. The
 same pass concluded "the intraday session has negative expectancy" from a −0.876 bps
 corpus-wide mean. By price band, clean series:
@@ -238,3 +242,73 @@ published mechanism can be reproduced and still be the wrong axis for the decisi
 ⚠ **Economically dead where it is statistically alive.** The surviving cell pays +40.0 bps
 gross per 20-day hold against a 50.9 bps round trip. A t-statistic is not an edge; the
 spread is the hurdle.
+
+---
+
+## ⚠⚠ The benchmark is a CONSTRUCTION, and "buy-and-hold" is not self-defining (#2426)
+
+`return_vs_buy_and_hold_pct` is the catalogue's own bar — criterion 7: *"a
+strategy that fails to beat buy-and-hold after costs is not a strategy"* — so
+the comparator's construction decides every verdict built on it. It shipped
+wrong, read **33,706,844.28%**, and the reason is worth carrying.
+
+**What happened.** The benchmark legs were right (one per evaluated instrument,
+first usable bar to last). They were then run through `build_equity_curve`, the
+strategy engine — on the correct argument that sharing the **cost model** and the
+**fill contract** is what stops the machinery's difference being attributed to
+the strategy. But the engine also carries `SIZING_RULE_ID`, which **re-imposes
+equal weight on every event date**. So the "buy-and-hold" portfolio traded.
+
+**The source rule, which exists.** Blume & Stambaugh, *"Biases in computed
+returns: An application to the size effect"*, **JFE 12 (1983), 387-404**:
+rebalancing trades into the bid-ask noise in each closing print, and *"returns
+computed for buy-and-hold portfolios largely avoid the bias induced by closing
+prices"*. They measure it **fifty times larger on small firms** — 0.056%/day on
+the small-firm decile against 0.001% on the large-firm decile — and the published
+size effect halves when recomputed buy-and-hold. Corroborating: Canina, Michaely,
+Thaler & Womack, *"Caveat Compounder"*, **JF 53(1) (1998), 403-416**, ~0.43%/month
+compounding the daily EW index, *"large enough to reverse the conclusions"*.
+
+**Measured here**, full population, identical legs, identical cost model
+(`scripts/verify_2426_benchmark.py --compositions`):
+
+```text
+                                     total return       CAGR   traded notional
+rebalanced (equal_weight_concurrent) 1,204,631,084%    28.754%  137,477,862x
+buy-and-hold (equal_weight_buy_and_hold)     3,223%     5.581%           34x
+```
+
+**23.2 points of annual return, manufactured by rebalancing** — on our panel
+specifically, because it is 5,266 predominantly small and delisted US names.
+
+### The rules this leaves
+
+1. **A buy-and-hold comparator is committed once and never rebalanced.** Not a
+   preference. If a proposed benchmark "rebalances on the strategy's cadence",
+   that is the biased construction wearing a like-for-like justification.
+2. **Reusing an engine imports its POLICY as well as its plumbing.** Cost model
+   and fill contract are plumbing. A sizing rule is policy — and policy is the
+   thing the comparison exists to isolate. Say which of a shared component's
+   decisions you meant to inherit.
+3. **The comparator belongs on the result identity hash**
+   (`ResultIdentity.benchmark_rule`, `equity_curve.BENCHMARK_RULE_ID`). A bar
+   that can change without the version moving is a bar that can be tuned
+   invisibly — the same argument §5.4 already makes for the sizing rule.
+4. **On an unbalanced panel, no published rule covers listing/delisting**, so it
+   is fixed by construction and frozen: `1/N` of the starting pot at each
+   instrument's first usable bar, held to its last, proceeds to cash, cash earns
+   0. ⚠ CRSP's equal-weighted index does **not** govern — it redistributes to
+   survivors, which is a rebalance — and its delisting-return rule needs a field
+   our corpus does not carry.
+5. ⚠ **SPY cannot be the primary bar.** #2398 loaded it from **1993-01-29**; the
+   in-sample axis starts **1962-01-02**. Secondary comparator on hold-out only.
+6. ⚠ **The engine is price-return, not total-return.** `load_masked_series`
+   selects `close`, never `adj_close`, so the buy-and-hold bar is understated by
+   the dividend yield — on *both* legs. Correcting only the benchmark would be a
+   worse error than the gap; see the gaps table above.
+
+⚠ **And the diagnostic lesson**: #2426 was filed as *"per-instrument returns are
+being summed"*, from `33,706,844 / 3,541 ≈ 9,519`. Numerically plausible,
+mechanically impossible — nothing on the path adds return percentages, and the
+measured sum was **0.0141×** the stored figure. **A plausible ratio is a
+hypothesis about a mechanism. Read the code path before you accept it.**

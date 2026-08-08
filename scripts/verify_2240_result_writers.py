@@ -89,6 +89,7 @@ from app.services.result_ledger import (
     store_walk_forward_folds,
 )
 from app.services.strategy_result import (
+    BENCHMARK_RULE,
     CORPUS_VERSION,
     EVALUATION_WINDOW_END,
     EVALUATION_WINDOW_START,
@@ -166,6 +167,7 @@ def _carrier(strategy_id: str, *, namespace: str, quarantine_arm: str, trade_cou
             ambiguity_arm="worst_case",
             quarantine_arm=quarantine_arm,  # type: ignore[arg-type]
             sizing_rule=SIZING_RULE,
+            benchmark_rule=BENCHMARK_RULE,
             cost_model_id="static-p75-insession-v1",
             corpus_version=CORPUS_VERSION,
             window_start=EVALUATION_WINDOW_START,

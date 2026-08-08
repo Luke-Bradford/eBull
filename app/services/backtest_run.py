@@ -73,7 +73,13 @@ from app.services.deflated_sharpe import (
     implied_independent_trials,
     trade_moments,
 )
-from app.services.equity_curve import SIZING_RULE_ID, LegBook, build_equity_curve
+from app.services.equity_curve import (
+    BENCHMARK_RULE_ID,
+    SIZING_RULE_ID,
+    LegBook,
+    build_buy_and_hold_curve,
+    build_equity_curve,
+)
 from app.services.indicator_series import BarSeries, Universe
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
@@ -786,7 +792,13 @@ def _measure_namespace(
     dates = corpus.axis[lo : hi + 1]
     curve = build_equity_curve(_shifted(book.book, lo), date_count=len(dates))
     instruments = frozenset(book.instruments)
-    benchmark = build_equity_curve(
+    # ⚠⚠ NOT ``build_equity_curve`` — #2426. The benchmark shares this engine's
+    # cost model and fill contract deliberately, but NOT its sizing rule:
+    # ``equal_weight_concurrent_v1`` re-imposes equal weight on every event date,
+    # and a comparator that rebalances is not buy-and-hold. Measured on the full
+    # population, that inheritance added 23.2 points of annual return and turned
+    # over 137,477,862x the pot. See ``BENCHMARK_RULE_ID``.
+    benchmark = build_buy_and_hold_curve(
         _benchmark_book(
             instruments=instruments,
             closes_by_instrument=closes_by_instrument,
@@ -1230,6 +1242,7 @@ def build_result(
             ambiguity_arm=ambiguity_arm,
             quarantine_arm=quarantine_arm,
             sizing_rule=SIZING_RULE_ID,
+            benchmark_rule=BENCHMARK_RULE_ID,
             cost_model_id=COST_MODEL_ID,
             corpus_version=CORPUS_VERSION,
             window_start=EVALUATION_WINDOW_START,
@@ -1391,6 +1404,7 @@ def run_backtest(
             ambiguity_arm=ambiguity,
             quarantine_arm=quarantine,
             sizing_rule=SIZING_RULE_ID,
+            benchmark_rule=BENCHMARK_RULE_ID,
             cost_model_id=COST_MODEL_ID,
             corpus_version=CORPUS_VERSION,
             window_start=EVALUATION_WINDOW_START,

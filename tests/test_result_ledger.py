@@ -31,6 +31,7 @@ from app.services.result_ledger import (
     store_in_sample_result,
 )
 from app.services.strategy_result import (
+    BENCHMARK_RULE,
     CORPUS_VERSION,
     EVALUATION_WINDOW_END,
     EVALUATION_WINDOW_START,
@@ -191,6 +192,7 @@ def build_result(**overrides: object) -> StrategyResult:
         "ambiguity_arm": "worst_case",
         "quarantine_arm": "masked",
         "sizing_rule": SIZING_RULE,
+        "benchmark_rule": BENCHMARK_RULE,
         "cost_model_id": "static-p75-insession-v1",
         "corpus_version": CORPUS_VERSION,
         "window_start": EVALUATION_WINDOW_START,

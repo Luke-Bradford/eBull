@@ -15,11 +15,21 @@ import math
 
 import pytest
 
-from app.services.equity_curve import SIZING_RULE_ID, LegBook, build_equity_curve
+from app.services.equity_curve import (
+    BENCHMARK_RULE_ID,
+    SIZING_RULE_ID,
+    LegBook,
+    build_buy_and_hold_curve,
+    build_equity_curve,
+)
 
 #: §5.4's declared v1 rule, transcribed from
 #: ``docs/proposals/ta/2026-08-07-bounded-backtester.md``.
 SPEC_SIZING_RULE = "equal_weight_concurrent_v1"
+
+#: #2426's benchmark rule, transcribed from
+#: ``docs/proposals/ta/2026-08-08-buy-and-hold-benchmark.md`` §2.4.
+SPEC_BENCHMARK_RULE = "equal_weight_buy_and_hold_v1"
 
 
 def _leg(
@@ -400,3 +410,118 @@ class TestExposureInputs:
         assert list(curve.invested) == [0.0, 0.0, 0.0, 0.0]
         assert list(curve.equity) == [2.0, 2.0, 2.0, 2.0]
         assert curve.event_dates == 0
+
+
+class TestBuyAndHoldComposition:
+    """#2426 — the benchmark's own rule, whose defining property is not trading.
+
+    ⚠ The bug these guard is not a wrong number, it is a wrong COMPOSITION: the
+    benchmark used to be built by ``build_equity_curve`` and so inherited a
+    sizing rule that rebalances. Every assertion below is about the absence of
+    that rebalance, because a rebalanced comparator is not buy-and-hold (Blume &
+    Stambaugh, JFE 12, 1983, 387-404).
+    """
+
+    def test_the_benchmark_rule_matches_the_spec_literal(self) -> None:
+        assert BENCHMARK_RULE_ID == SPEC_BENCHMARK_RULE
+
+    def test_it_is_not_the_sizing_rule(self) -> None:
+        """⚠ The whole of #2426 in one line — they were the same id by omission."""
+        assert BENCHMARK_RULE_ID != SIZING_RULE_ID
+
+    def test_a_divergent_winner_is_never_trimmed_back_to_equal_weight(self) -> None:
+        """⚠⚠ THE DEFECT ITSELF. Two legs, one 10x and one flat, and a third leg
+        opening late so an event date falls between. ``build_equity_curve``
+        re-equalises on that date and books the winner's gain into the loser;
+        ``build_buy_and_hold_curve`` must not.
+        """
+        book = LegBook()
+        _leg(book, entry=0, exit_=4, entry_price=1.0, exit_price=10.0, marks=[1.0, 4.0, 7.0, 10.0, 10.0])
+        _leg(book, entry=0, exit_=4, entry_price=1.0, exit_price=1.0, marks=[1.0, 1.0, 1.0, 1.0, 1.0])
+        _leg(book, entry=2, exit_=4, entry_price=1.0, exit_price=1.0, marks=[1.0, 1.0, 1.0])
+
+        held = build_buy_and_hold_curve(book, date_count=5)
+        rebalanced = build_equity_curve(book, date_count=5)
+
+        # Each leg took exactly 1/3 and kept its own outcome: (10 + 1 + 1) / 3.
+        assert held.equity[-1] == pytest.approx((10.0 + 1.0 + 1.0) / 3.0)
+        assert rebalanced.equity[-1] != pytest.approx(held.equity[-1])
+
+    def test_total_return_is_exactly_the_mean_gross_multiple(self) -> None:
+        """⚠ An ALGEBRAIC identity, not a tolerance: with no rebalancing the pot
+        is n independent 1/n sleeves, so the composition cannot be
+        path-dependent. It is the assertion the full-population arm repeats.
+        """
+        book = LegBook()
+        _leg(book, entry=0, exit_=3, entry_price=2.0, exit_price=5.0)
+        _leg(book, entry=1, exit_=3, entry_price=4.0, exit_price=3.0)
+        _leg(book, entry=2, exit_=3, entry_price=1.0, exit_price=1.5)
+
+        curve = build_buy_and_hold_curve(book, date_count=4)
+        expected = (5.0 / 2.0 + 3.0 / 4.0 + 1.5 / 1.0) / 3.0
+        assert curve.equity[-1] == pytest.approx(expected, rel=1e-12)
+
+    def test_it_charges_no_rebalance_cost_even_at_a_wide_spread(self) -> None:
+        """⚠ The entry/exit round trip is already inside the two prices; a
+        rebalance cost here would be a SECOND charge for a trade never made.
+        """
+        book = LegBook()
+        _leg(book, entry=0, exit_=3, entry_price=1.0, exit_price=2.0, half_spread=0.25)
+        _leg(book, entry=1, exit_=3, entry_price=1.0, exit_price=0.5, half_spread=0.25)
+        curve = build_buy_and_hold_curve(book, date_count=4)
+        assert curve.rebalance_costs == 0.0
+        assert curve.short_funded_entries == 0
+
+    def test_traded_notional_is_entries_plus_exits_and_nothing_else(self) -> None:
+        book = LegBook()
+        _leg(book, entry=0, exit_=2, entry_price=1.0, exit_price=3.0)
+        _leg(book, entry=0, exit_=2, entry_price=1.0, exit_price=1.0)
+        curve = build_buy_and_hold_curve(book, date_count=3)
+        # 0.5 in per leg; out at 0.5 * 3.0 and 0.5 * 1.0.
+        assert float(curve.traded_notional.sum()) == pytest.approx(0.5 + 0.5 + 1.5 + 0.5)
+
+    def test_cash_is_never_negative_however_the_legs_are_priced(self) -> None:
+        """⚠ Stronger than the strategy curve's cap and for a structural reason:
+        total commitment is exactly ``n * (1/n)``, so no leg can be short-funded.
+        """
+        book = LegBook()
+        for entry in range(5):
+            _leg(book, entry=entry, exit_=5, entry_price=0.01, exit_price=100.0)
+        curve = build_buy_and_hold_curve(book, date_count=6)
+        cash = curve.equity - curve.invested
+        assert float(cash.min()) >= -1e-12
+
+    def test_an_unrealised_leg_is_refused_rather_than_guessed_at(self) -> None:
+        """⚠ The strategy engine FREEZES such a leg to exclude it from the
+        rebalance. With no rebalance there is nothing to exclude it from, so
+        inventing a treatment would price a position nobody could sell.
+        """
+        book = LegBook()
+        _leg(book, entry=0, exit_=2, entry_price=1.0, exit_price=2.0, realised=False)
+        with pytest.raises(ValueError, match="unrealised"):
+            build_buy_and_hold_curve(book, date_count=3)
+
+    def test_an_empty_book_holds_the_pot_flat(self) -> None:
+        curve = build_buy_and_hold_curve(LegBook(), date_count=4)
+        assert list(curve.equity) == [1.0, 1.0, 1.0, 1.0]
+        assert curve.event_dates == 0
+
+    def test_a_halt_carries_the_previous_mark_and_is_counted(self) -> None:
+        """§3.3 — a missing bar is not a return, and the carry-forward is
+        reported. Matches ``build_equity_curve``'s treatment deliberately."""
+        book = LegBook()
+        _leg(book, entry=0, exit_=3, entry_price=1.0, exit_price=2.0, marks=[1.0, math.nan, math.nan, 2.0])
+        curve = build_buy_and_hold_curve(book, date_count=4)
+        assert curve.stale_marks == 2
+        assert curve.equity[1] == pytest.approx(curve.equity[0])
+
+    def test_event_dates_stay_truthful_rather_than_being_zeroed(self) -> None:
+        """⚠ It counts concurrency CHANGES (criterion 8), whose meaning does not
+        depend on whether a rebalance followed. Zeroing it to advertise "no
+        rebalancing" would destroy a different measurement."""
+        book = LegBook()
+        _leg(book, entry=0, exit_=3, entry_price=1.0, exit_price=1.0)
+        _leg(book, entry=2, exit_=3, entry_price=1.0, exit_price=1.0)
+        curve = build_buy_and_hold_curve(book, date_count=4)
+        # Opens on 0 and 2, both close on 3.
+        assert curve.event_dates == 3
