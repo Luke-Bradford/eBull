@@ -321,6 +321,54 @@ XML root: `<ownershipDocument>`. **Element-wrapping idiom**: every leaf value li
 
 `directOrIndirectOwnership`: `D` = Direct, `I` = Indirect. **Both surface separately** — Section 16 ownership totals must aggregate D + I separately because the FILER label "owns" both. They are NOT double-counts. This is what made JPM insider rollup go 1.29% → 6.16% post-#905 (`project_905_rollup_cutover_done.md`).
 
+#### ⚠ `ownership_nature` is an OVERLOADED column — four writers, three meanings (#2385/#2386)
+
+`ownership_insiders_current.ownership_nature` is Table I column 5 **only** on rows from the
+three XML ingest paths. `sec_insider_dataset_ingest._map_relationship` writes the DERA bulk
+dataset's RELATIONSHIP flags into the same column (officer/director → `direct`,
+ten-percent-owner → `beneficial`) and never reads the D/I field at all.
+
+Provenance discriminator — a dataset row's `source_document_id` carries an `:NDT:`
+(Form 4 transaction) or `:NDH:` (Form 3 holding) marker:
+
+```sql
+SELECT (source_document_id !~ ':(NDT|NDH):') AS table_i, ownership_nature, count(*)
+  FROM ownership_insiders_current GROUP BY 1,2 ORDER BY 3 DESC;
+-- dev, 2026-08-08: direct/Table-I 69,657 · direct/role-derived 3,404
+--                  indirect/Table-I 16,532 · beneficial/role-derived 3,759
+```
+
+**Any read-path branch on `ownership_nature == 'direct'` must also check
+`Holder.nature_from_table_i`.** Reading the raw string moved 224 control-group folds of
+1,433 and **59 of them promoted a role-derived row** — an officer's name onto a fund's
+block.
+
+#### ⚠⚠ Table I rows are NOT attributed to a reporting owner (#2385/#2408)
+
+`<nonDerivativeTable>` is a **sibling** of `<reportingOwner>`, not a child. A joint Form 3/4
+therefore does not say which co-filer holds the `D` line, and
+`insider_transactions._extract_holdings` assigns every row to `filers[0]`
+(`app/services/insider_transactions.py:449`). **Within one accession, "Table I-attested"
+means "listed first in the XML" and discriminates nothing** — 6 of 931 same-accession
+control-group folds carry ≥2 attested members, against 378 of 503 cross-accession.
+
+The evidence that DOES name the holder of record on a joint filing is `natureOfOwnership`
+on the `I` lines ("Securities are held by BV IX"), plus the footnotes those lines
+reference. Stored at `insider_transactions.nature_of_ownership` (138,380/138,380 non-null
+on `direct_indirect='I'`), `insider_initial_holdings.nature_of_ownership` (30,149/30,149)
+and `insider_transaction_footnotes`, and consumed by
+`ownership_rollup._read_record_holder_evidence`. Three traps:
+
+- **It is per-ROW, not per-accession.** One filing's footnote set covers many holdings and
+  names a different record holder for each (`0001415889-25-017225` names five). Key it on
+  the row's own amount — `post_transaction_shares` for Form 4, `shares` for Form 3.
+- **`insider_initial_holdings` has no `footnote_refs`**, so a Form 3's `See footnote.`
+  cannot be resolved.
+- **Match names verbatim, never rotated to First-Last.** EDGAR conformed names are
+  `LAST FIRST`; adding the rotated form scores WORSE against ground truth because it makes
+  the deemed owner matchable beside the holder. Do not "improve" this without re-running
+  the arm (`scripts/audit_2408_nature_record_holder --validate`).
+
 ### 2.4 Schedule 13D / 13G — beneficial ownership
 
 XML mandate **since 2024-12-18**. Current EDGAR XML technical spec revision is **2.2** (2026-03-16) — verify against `https://www.sec.gov/edgar/filer-information/current-edgar-technical-specifications` before relying on the schema. Pre-mandate filings are HTML/text — no `primary_doc.xml` exists; legacy coverage is lower-fidelity unless you write a parallel HTML extractor.

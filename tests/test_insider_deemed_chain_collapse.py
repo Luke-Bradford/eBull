@@ -466,3 +466,186 @@ def test_institutional_row_carrying_table_i_provenance_cannot_become_the_rep() -
         _h("000000001", "Institution Co", _SUB_FLOOR, nature="direct", source="13f"),
     ]
     assert _rep(cluster).filer_name == "Deemed Owner A"
+
+
+# ---------------------------------------------------------------------------
+# #2408 — the SAME-accession half. Table I cannot separate co-filers of one
+# accession, so the discriminant is the filing's own indirect-ownership text.
+# ---------------------------------------------------------------------------
+
+_ACC = "0001829126-25-003075"  # TACO Form 3, the case the ticket reasons from
+
+
+def _joint(*holders: Holder) -> list[Holder]:
+    """A joint filing: every member on ONE accession, which is what defeats Table I."""
+    return [replace(h, winning_accession=_ACC) for h in holders]
+
+
+def _evidence(*texts: str, shares: str = _SUB_FLOOR, accession: str = _ACC) -> dict:
+    """Record-holder evidence keyed the way the read path keys it: the Table I line's own
+    reported amount, NOT the accession alone. One filing's footnote set covers many
+    holdings naming different record holders, so the value is the link."""
+    return {(accession, Decimal(shares)): texts}
+
+
+def _rep_with(cluster: list[Holder], evidence: dict, blockholders: list[Holder] | None = None) -> Holder:
+    return _select_control_group_rep(cluster, _rows_by_identity(cluster, blockholders or []), evidence)
+
+
+def test_record_holder_text_promotes_the_member_it_names() -> None:
+    """``TACO`` ``0001829126-25-003075`` footnote F3, verbatim from the dev corpus. Two
+    reporting owners, two Table I lines, nothing tying either line to either owner — but
+    the footnote states the record holder outright."""
+    cluster = _joint(
+        _h("000000001", "You Harry L.", _SUB_FLOOR, nature="direct"),
+        _h("000000009", "Berto Acquisition Sponsor LLC", _SUB_FLOOR, nature="indirect", table_i=False),
+    )
+    text = (
+        'Berto Acquisition Sponsor, LLC (the "Sponsor") is the record holder of the securities '
+        "reported herein. Harry L. You is the sole managing member of the Sponsor."
+    )
+    assert _rep(cluster).filer_name == "Berto Acquisition Sponsor LLC"  # incumbent, by CIK order
+    assert _rep_with(cluster, _evidence(text)).filer_name == "Berto Acquisition Sponsor LLC"
+    # …and the same text moves the rep when the incumbent is NOT the named holder.
+    inverted = _joint(
+        _h("000000009", "You Harry L.", _SUB_FLOOR, nature="direct"),
+        _h("000000001", "Berto Acquisition Sponsor LLC", _SUB_FLOOR, nature="indirect", table_i=False),
+    )
+    assert _rep(inverted).filer_name == "You Harry L."
+    assert _rep_with(inverted, _evidence(text)).filer_name == "Berto Acquisition Sponsor LLC"
+
+
+def test_text_naming_two_members_fails_closed() -> None:
+    """A control-chain footnote routinely names every tier — ``GEI Capital VI, LLC is the
+    general partner of GEI VI`` (``0000950170-24-116635`` F8). Uniqueness is what stops a
+    manager being read as the holder, and there is no tie-break to fall back on.
+
+    ⚠ Member order is load-bearing and the first draft of this test got it wrong: the
+    LP is listed first so that "take the first named member" would swap. With the
+    incumbent listed first, dropping the uniqueness check leaves the same answer and the
+    test passes against the defect it exists to catch (revert-probe B, NOT CAUGHT)."""
+    cluster = _joint(
+        _h("000000001", "Green Equity Investors VI, L.P.", _SUB_FLOOR, nature="indirect"),
+        _h("000000009", "GEI Capital VI, LLC", _SUB_FLOOR, nature="indirect"),
+    )
+    text = "GEI Capital VI, LLC is the general partner of Green Equity Investors VI, L.P."
+    assert _rep_with(cluster, _evidence(text)).filer_name == "GEI Capital VI, LLC"  # incumbent kept
+
+
+def test_text_naming_no_member_keeps_the_incumbent() -> None:
+    """Berkshire's Liberty Form 4 names GEICO and National Fire & Marine as the holders —
+    subsidiaries that are not reporting owners at all. "Exactly one member named" is
+    unsatisfiable there, and the pass must not invent an answer."""
+    cluster = _joint(
+        _h("000000009", "BUFFETT WARREN E", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "BERKSHIRE HATHAWAY INC", _SUB_FLOOR, nature="indirect"),
+    )
+    text = "owned by the following subsidiaries: Government Employees Insurance Company"
+    assert _rep_with(cluster, _evidence(text)).filer_name == "BUFFETT WARREN E"
+
+
+def test_evidence_for_a_different_block_value_is_not_consulted() -> None:
+    """The value key is load-bearing, not decoration. One Battery Ventures accession names
+    BV IX, BIP IX, BP IX, The Lee Family Trust and "Roger H. Lee jointly with his spouse"
+    across five footnotes — pooling them per ACCESSION would let another row's record
+    holder decide this row's rep."""
+    cluster = _joint(
+        _h("000000009", "Battery Investment Partners IX, LLC", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "Battery Ventures IX, L.P.", _SUB_FLOOR, nature="indirect"),
+    )
+    other_row = _evidence("Securities are held by Battery Ventures IX, L.P.", shares=_ROUND)
+    assert _rep_with(cluster, other_row).filer_name == "Battery Investment Partners IX, LLC"
+
+
+def test_table_i_attestation_still_outranks_the_text() -> None:
+    """Clause order. Where the Table I ``D`` line IS admissible — a different accession —
+    it is the source rule and the free text must not override it. This is also the
+    configuration the rule was VALIDATED on, so an inversion here would invalidate the
+    measurement it was shipped against."""
+    cluster = [
+        _h("000000009", "Deemed Owner A", _SUB_FLOOR, nature="indirect"),
+        _h("000000008", "Deemed Owner B", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "Sponsor Fund L.P.", _SUB_FLOOR, nature="direct"),
+    ]
+    evidence = {("acc-000000008", Decimal(_SUB_FLOOR)): ("Securities are held by Deemed Owner B",)}
+    assert _rep_with(cluster, evidence).filer_name == "Sponsor Fund L.P."
+
+
+def test_named_blockholder_row_cannot_become_the_rep() -> None:
+    """The cross-channel 13D/G rows a same-accession fold pulls in are named in the very
+    same footnotes. The rep must stay insider-sourced or it does not route to the insiders
+    slice — the same constraint ``_attested_direct_holders`` carries."""
+    cluster = _joint(
+        _h("000000009", "Deemed Owner A", _SUB_FLOOR, nature="indirect"),
+        _h("000000008", "Deemed Owner B", _SUB_FLOOR, nature="indirect"),
+    )
+    cluster.append(_h("000000001", "Blockholder Co", _SUB_FLOOR, nature=None, source="13d"))
+    evidence = _evidence("Securities are held by Blockholder Co")
+    assert _rep_with(cluster, evidence).filer_name == "Deemed Owner A"
+
+
+def test_text_tier_swap_is_declined_when_the_incumbent_holds_other_channel_rows() -> None:
+    """Clause 4 gates BOTH routes. The text tier changes which identity survives into
+    owner-once exactly as the Table I tier does, so it inherits the same fail-closed
+    posture — #2385 measured 108 instruments' pie totals moving on a rep change."""
+    incumbent = _h("000000009", "THRC Management, LLC", _SUB_FLOOR, nature="indirect")
+    cluster = _joint(incumbent, _h("000000001", "THRC Holdings, LP", _SUB_FLOOR, nature="indirect"))
+    evidence = _evidence("Securities are held by THRC Holdings, LP")
+    elsewhere = [_h("000000009", "THRC Management, LLC", "72822917", nature=None, source="13d")]
+    assert _rep_with(cluster, evidence).filer_name == "THRC Holdings, LP"
+    assert _rep_with(cluster, evidence, elsewhere).filer_name == "THRC Management, LLC"
+
+
+def test_person_names_are_matched_verbatim_not_rotated() -> None:
+    """EDGAR conformed names are ``LAST FIRST``; prose writes ``FIRST LAST``. Adding the
+    rotated form was built and PRICED — on the labelled cross-accession set it drops the
+    rule from 47 correct swaps of 51 to 106 correct of 124 overall, because it makes the
+    deemed owner matchable alongside the holder and collapses uniqueness. Verbatim
+    matching is a measured decision, so a future "improvement" must re-run that arm."""
+    cluster = _joint(
+        _h("000000009", "Sponsor Fund L.P.", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "You Harry L.", _SUB_FLOOR, nature="indirect"),
+    )
+    evidence = _evidence("The shares are held of record by Harry L. You.")
+    assert _rep_with(cluster, evidence).filer_name == "Sponsor Fund L.P."  # incumbent kept
+
+
+def test_an_abbreviated_conformed_name_still_matches_its_own_footnote() -> None:
+    """``LCID`` ``0001104659-24-113592``: EDGAR's conformed name is ``Ayar Third Investment
+    Co``; the filing's own footnote says "By Ayar Third Investment Company". Matching on
+    token boundaries makes the subsidiary that HOLDS unmatchable and leaves its parent
+    ``PUBLIC INVESTMENT FUND`` as the only named member — promoting the parent over the
+    record holder, and moving the pie by 280,992,324 shares.
+
+    ⚠ Word-boundary anchoring was implemented and reverted for exactly this. It scored an
+    IDENTICAL 47/4 on the labelled set and passed every test then in this file; only the
+    paired full-population A/B separated the two spellings."""
+    cluster = _joint(
+        _h("000000009", "Ayar Third Investment Co", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "PUBLIC INVESTMENT FUND", _SUB_FLOOR, nature="indirect"),
+    )
+    evidence = _evidence(
+        "By Ayar Third Investment Company",
+        'Ayar is a wholly-owned subsidiary of Public Investment Fund of Saudi Arabia ("PIF").',
+    )
+    # Both are named, so the tier declines and the incumbent stands — which is the
+    # subsidiary here. Anchoring names only the parent and promotes it.
+    assert _rep_with(cluster, evidence).filer_name == "Ayar Third Investment Co"
+
+
+def test_a_sibling_fund_substring_declines_rather_than_guessing() -> None:
+    """``LFCR`` / ``NNBR``: one cluster carries ``Legion Partners, L.P. I`` AND
+    ``Legion Partners, L.P. II``, and the first normalises to a prefix of the second, so a
+    footnote naming fund II also "names" fund I. 6 folds of 1,434 carry a member pair with
+    this shape.
+
+    The cost is a LOST promotion, and that is the direction this pass fails in. Pinned so
+    the loss stays visible: a future boundary-anchored matcher would turn this into a
+    promotion and the ``LCID`` case above into a wrong one, and the trade has to be made
+    knowingly."""
+    cluster = _joint(
+        _h("000000009", "Legion Partners, L.P. I", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "Legion Partners, L.P. II", _SUB_FLOOR, nature="indirect"),
+    )
+    evidence = _evidence("Securities are held of record by Legion Partners, L.P. II.")
+    assert _rep_with(cluster, evidence).filer_name == "Legion Partners, L.P. I"  # incumbent
