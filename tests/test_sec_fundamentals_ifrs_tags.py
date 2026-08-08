@@ -15,6 +15,7 @@ from app.providers.implementations.sec_fundamentals import (
     _ALL_TRACKED_IFRS_TAGS,
     _ALL_TRACKED_TAGS,
     IFRS_TRACKED_CONCEPTS,
+    SecFundamentalsProvider,
 )
 from app.services.sec_companyfacts_ingest import extract_facts_from_companyfacts_payload
 
@@ -132,6 +133,56 @@ class TestIfrsSectionIsRouted:
         assert [f.concept for f in facts] == [concept]
 
 
+class TestProviderEntryPointsRouteIfrs:
+    """The routing branch exists in THREE places — the bulk wrapper
+    ``extract_facts_from_companyfacts_payload`` plus
+    ``SecFundamentalsProvider.extract_facts`` and
+    ``.extract_facts_and_catalog``. The tests above exercise only the wrapper,
+    so deleting the ``ifrs_section`` block from either provider method — the two
+    the steady-state ``fundamentals_sync`` path actually calls — would leave the
+    suite green. Payload is injected, so no HTTP and no DB."""
+
+    @staticmethod
+    def _provider(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> SecFundamentalsProvider:
+        provider = SecFundamentalsProvider(user_agent="eBull-test test@example.com")
+        monkeypatch.setattr(provider, "_fetch_company_facts", lambda cik: payload)
+        return provider
+
+    _PAYLOAD = _payload(
+        **{
+            "dei": {"EntityCommonStockSharesOutstanding": {"units": {"shares": [_entry("2025-12-31", 7)]}}},
+            "ifrs-full": {
+                "NumberOfSharesOutstanding": {"units": {"shares": [_entry("2025-12-31", 23_743_475_754)]}},
+                "NumberOfSharesAuthorised": {"units": {"shares": [_entry("2025-12-31", 120_000_000_000)]}},
+            },
+        }
+    )
+
+    def test_extract_facts_routes_the_ifrs_section(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        facts = self._provider(monkeypatch, self._PAYLOAD).extract_facts("TEST", "0001504764")
+        assert [(f.taxonomy, f.concept) for f in facts if f.taxonomy == "ifrs-full"] == [
+            ("ifrs-full", "NumberOfSharesOutstanding")
+        ]
+
+    def test_extract_facts_and_catalog_routes_the_ifrs_section(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        facts, entries = self._provider(monkeypatch, self._PAYLOAD).extract_facts_and_catalog("TEST", "0001504764")
+        assert [f.concept for f in facts if f.taxonomy == "ifrs-full"] == ["NumberOfSharesOutstanding"]
+        # The catalogue is uncapped BY DESIGN (#1233) and stays that way for
+        # ifrs-full: the untracked concept the fact allowlist dropped is still
+        # catalogued, which is what lets the UI name a concept it holds no fact
+        # for. Safe because sec_facts_concept_catalog is UNIQUE (taxonomy,
+        # concept) — sql/063 — so this cannot overwrite a us-gaap row.
+        ifrs_entries = {e.concept for e in entries if e.taxonomy == "ifrs-full"}
+        assert ifrs_entries == {"NumberOfSharesOutstanding", "NumberOfSharesAuthorised"}
+
+    def test_a_payload_with_only_untracked_ifrs_concepts_yields_no_facts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The bot's NITPICK scenario, pinned. A filer whose ifrs-full section is
+        large but wholly untracked takes the NON-empty path (the early return is
+        skipped), so it returns no facts and logs no "no facts" line."""
+        payload = _payload(**{"ifrs-full": {"Revenue": {"units": {"USD": [_entry("2025-12-31", 1_000_000)]}}}})
+        assert self._provider(monkeypatch, payload).extract_facts("TEST", "0001504764") == []
+
+
 class TestDeclaredConceptsAreCorroborationOnly:
     def test_no_ifrs_concept_is_a_denominator_concept(self) -> None:
         """⚠ Standing guard on the design the gain side falsified. ``AFYA`` tags
@@ -139,15 +190,25 @@ class TestDeclaredConceptsAreCorroborationOnly:
         weighted average — a dimension-stripped remnant, not the entity's count
         — so none of these may feed ``share_count_history.shares_outstanding``.
         That view selects by concept NAME with no taxonomy filter, so adding one
-        of these names to its ``IN`` list is all it would take."""
+        of these names to its ``IN`` list is all it would take.
+
+        ⚠ Scans EVERY file under ``sql/``, not just the migration that happens
+        to define the view today. Pinning one filename makes the guard read a
+        file the code no longer uses the moment a later migration redefines
+        ``share_count_history`` — it would keep passing while the invariant it
+        names had already been broken somewhere else. A deliberate future use
+        of an IFRS tag in SQL is expected to fail this and update it."""
         import pathlib
 
-        view_sql = pathlib.Path("sql/259_share_count_views_positive_only.sql").read_text()
-        for concept in _ALL_TRACKED_IFRS_TAGS:
-            assert concept not in view_sql, (
-                f"{concept} reached the share-count view; IFRS share tags are "
-                "corroboration readings, not denominators (#2232)"
-            )
+        offenders: list[str] = []
+        for path in sorted(pathlib.Path("sql").glob("*.sql")):
+            body = path.read_text()
+            offenders.extend(f"{path}:{concept}" for concept in _ALL_TRACKED_IFRS_TAGS if concept in body)
+        assert offenders == [], (
+            f"IFRS share tags reached SQL: {offenders}. They are corroboration "
+            "readings, not denominators (#2232) — see IFRS_TRACKED_CONCEPTS for "
+            "the gain-side measurement that killed the denominator design."
+        )
 
     def test_concept_dict_keys_are_stable_identifiers(self) -> None:
         assert set(IFRS_TRACKED_CONCEPTS) == {

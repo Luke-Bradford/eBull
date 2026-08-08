@@ -17,6 +17,14 @@ filtered out by an assumption.
 ⚠ The metric is DISTINCT INSTRUMENT, never fact-row count. One issuer tagging a
 concept across twenty periods would otherwise read as twenty wins.
 
+⚠ Counted per ``(concept, unit)``, not per concept. ``_extract_facts_from_section``
+emits a row for EVERY unit in ``_UNIT_PRIORITY`` the tag appears under, so a
+concept present only as ``pure`` or ``USD`` is not a share count and must not be
+counted as one. The first version of this script had no unit filter while the
+comment it fed in ``sec_fundamentals.py`` claimed the census was "in the shares
+unit" — the prose and its own reproduction command disagreed. The per-unit table
+is what makes that claim checkable instead of asserted.
+
 ⚠ THE GAIN SIDE IS THE POINT OF THIS SCRIPT, and on the first run it falsified
 the change's original design. The ingest was going to feed
 ``share_count_history.shares_outstanding``; ``denominator_would_change`` lists
@@ -98,7 +106,10 @@ def main() -> int:
         population = population[: args.limit]
     print(f"population (instruments with zero us-gaap facts): {len(population)}", flush=True)
 
-    per_concept: collections.Counter[str] = collections.Counter()
+    # Keyed ``(concept, unit)`` — see the module docstring. The ``shares``-unit
+    # slice is the only one that could ever corroborate a share count.
+    per_concept_unit: collections.Counter[tuple[str, str]] = collections.Counter()
+    shares_union = 0
     any_concept = 0
     errors = 0
     denominator_would_change: list[str] = []
@@ -122,20 +133,39 @@ def main() -> int:
                 fh.flush()
                 continue
 
-            newest_by_concept: dict[str, dict[str, Any]] = {}
+            # Keyed ``concept/unit``. Ordering breaks ties on
+            # ``(period_end, filed_date, accession_number)``, not ``period_end``
+            # alone: an issuer restating the same period end files a SECOND
+            # accession for it, and picking between them on period_end only is
+            # dict-insertion-order dependent — i.e. non-deterministic across
+            # runs of a script whose whole job is to be re-runnable evidence.
+            newest_by_key: dict[str, dict[str, Any]] = {}
+            newest_rank: dict[str, tuple[str, str, str]] = {}
             for f in facts:
                 if f.taxonomy != "ifrs-full" or f.concept not in _IFRS_TAGS or f.val is None:
                     continue
-                prev = newest_by_concept.get(f.concept)
-                if prev is None or f.period_end.isoformat() > prev["period_end"]:
-                    newest_by_concept[f.concept] = {
-                        "period_end": f.period_end.isoformat(),
+                key = f"{f.concept}/{f.unit}"
+                rank = (
+                    f.period_end.isoformat(),
+                    f.filed_date.isoformat() if f.filed_date is not None else "",
+                    f.accession_number or "",
+                )
+                if key not in newest_rank or rank > newest_rank[key]:
+                    newest_rank[key] = rank
+                    newest_by_key[key] = {
+                        "concept": f.concept,
+                        "unit": f.unit,
+                        "period_end": rank[0],
+                        "filed_date": rank[1] or None,
+                        "accession_number": rank[2] or None,
                         "val": str(f.val),
                     }
-            rec["ifrs"] = newest_by_concept
-            for concept in newest_by_concept:
-                per_concept[concept] += 1
-            if newest_by_concept:
+            rec["ifrs"] = newest_by_key
+            for hit in newest_by_key.values():
+                per_concept_unit[(hit["concept"], hit["unit"])] += 1
+            if any(hit["unit"] == "shares" for hit in newest_by_key.values()):
+                shares_union += 1
+            if newest_by_key:
                 any_concept += 1
                 # An instrument with no positive stored count is one where an
                 # IFRS value could have reached the denominator. Recorded even
@@ -153,8 +183,9 @@ def main() -> int:
     print(f"population                     {len(population)}", flush=True)
     print(f"errors                         {errors}", flush=True)
     print(f"instruments gaining any concept {any_concept}", flush=True)
-    for concept, count in per_concept.most_common():
-        print(f"  {concept:34} {count}", flush=True)
+    print(f"instruments with >=1 concept in the shares unit {shares_union}", flush=True)
+    for (concept, unit), count in per_concept_unit.most_common():
+        print(f"  {concept:34} {unit:12} {count}", flush=True)
     print(
         f"denominator_would_change       {len(denominator_would_change)} {sorted(denominator_would_change)}",
         flush=True,

@@ -389,12 +389,21 @@ DEI_TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
 # disagrees with ITSELF across accessions for the same period end (93,722,831
 # vs 442,669 at 2021-12-31).
 #
-# Concept coverage over those 408, measured the same day, distinct instruments
-# carrying a value in the ``shares`` unit — reproduce with
-# ``python -m scripts.ab_2232_ifrs_share_count``:
+# Concept coverage over those 408 — distinct instruments, counted per
+# ``(concept, unit)`` because ``_extract_facts_from_section`` emits a row for
+# every unit in ``_UNIT_PRIORITY`` and only ``shares`` could ever corroborate a
+# share count. Full population, 0 harness errors, 2026-08-08; reproduce with
+# ``PYTHONPATH=. uv run python -m scripts.ab_2232_ifrs_share_count
+# --out /tmp/ab2232_ifrs_units.jsonl``:
 #
-#     WeightedAverageShares        377     NumberOfSharesIssued        227
-#     NumberOfSharesOutstanding    193     union of the three          313
+#     WeightedAverageShares      shares  377    NumberOfSharesIssued  shares  227
+#     NumberOfSharesOutstanding  shares  193    >=1 of the three      shares  390
+#
+# No concept appeared under ``USD``, ``USD/shares`` or ``pure`` on any of the
+# 408 — the unit column is in the script's output rather than asserted here,
+# because the first version of this block claimed a shares-unit census while
+# naming a command that applied no unit filter. It also recorded the union as
+# 313, which cannot be a union of a 377-member set; the measured figure is 390.
 #
 # Raw-only by construction: ``app.services.fundamentals._TAG_TO_COLUMN`` is
 # built from ``TRACKED_CONCEPTS`` alone, so an IFRS tag lands in
@@ -446,17 +455,23 @@ def _extract_facts_from_section(
 ) -> list[XbrlFact]:
     """Extract XBRL facts from one ``facts.<taxonomy>`` section.
 
-    ``taxonomy`` names the XBRL namespace (``us-gaap`` or ``dei``) and
-    is stamped onto every emitted fact so downstream consumers can
-    partition without string-prefix guessing. ``allowed_tags`` is an
+    ``taxonomy`` names the XBRL namespace (``us-gaap``, ``dei`` or
+    ``ifrs-full``) and is stamped onto every emitted fact so
+    downstream consumers can partition without string-prefix
+    guessing. ``allowed_tags`` is an
     optional allowlist: when ``None`` every concept in the section is
     emitted; when a frozenset is provided only listed tags survive.
     NOTE (#2036): despite the #451 Phase A intent, EVERY production
-    caller passes ``_ALL_TRACKED_TAGS`` / ``_ALL_TRACKED_DEI_TAGS``,
-    so ``financial_facts_raw`` holds only the tracked subset (~78
-    concepts on dev) — raw-store absence of a concept says nothing
+    caller passes ``_ALL_TRACKED_TAGS`` / ``_ALL_TRACKED_DEI_TAGS`` /
+    ``_ALL_TRACKED_IFRS_TAGS``, so ``financial_facts_raw`` holds only
+    the tracked subset — raw-store absence of a concept says nothing
     about issuer tagging. Widening coverage means widening
-    ``TRACKED_CONCEPTS`` / ``RAW_ONLY_CONCEPTS`` + re-fetching.
+    ``TRACKED_CONCEPTS`` / ``RAW_ONLY_CONCEPTS`` + re-fetching. Count
+    what is actually stored rather than trusting a figure written
+    here — ``SELECT taxonomy, count(DISTINCT concept) FROM
+    financial_facts_raw GROUP BY 1`` (77 us-gaap / 3 dei / 0
+    ifrs-full on dev at 2026-08-08, the IFRS row being zero until the
+    #2232 backfill runs).
 
     ``retention_cutoff`` (#1233) — when set, rejects facts whose
     ``period_end`` is strictly before the cutoff with a per-(accession,
@@ -675,15 +690,22 @@ class SecFundamentalsProvider:
     def extract_facts(self, symbol: str, cik: str) -> list[XbrlFact]:
         """Extract XBRL facts from SEC companyfacts.
 
-        Reads both ``facts.us-gaap`` and ``facts.dei`` sections (the
-        latter under #430). DEI facts carry cover-page metadata that
-        us-gaap omits — point-in-time share count, public float,
-        employee count. Stamped with ``taxonomy='dei'`` so downstream
-        normalisation routes them independently.
+        Reads the ``facts.us-gaap``, ``facts.dei`` (#430) and
+        ``facts."ifrs-full"`` (#2232) sections. DEI facts carry
+        cover-page metadata that us-gaap omits — point-in-time share
+        count, public float, employee count. IFRS-full carries the
+        share counts of a foreign private issuer that files
+        IFRS-as-issued-by-the-IASB and therefore has no us-gaap
+        section at all. Each is stamped with its own ``taxonomy`` so
+        downstream normalisation routes them independently — and in
+        the IFRS case, so that it routes them NOWHERE: see
+        ``IFRS_TRACKED_CONCEPTS`` for why those three are
+        corroboration readings and not denominators.
 
         **#1233**: applies the canonical companyfacts caps —
         ``_ALL_TRACKED_TAGS`` (us-gaap whitelist) +
         ``_ALL_TRACKED_DEI_TAGS`` (DEI whitelist) +
+        ``_ALL_TRACKED_IFRS_TAGS`` (IFRS whitelist) +
         ``_default_retention_cutoff()`` (today - 20y). This is the
         steady-state refresh path that runs after the bulk bootstrap;
         without the caps here a subsequent refresh of any CIK would
@@ -757,9 +779,19 @@ class SecFundamentalsProvider:
         fact stream (whitelist + 20y retention cutoff). Catalogue
         entries stay uncapped — the catalogue is a per-concept
         metadata snapshot (label, description, units) keyed on
-        concept name; capping the catalogue would orphan downstream
-        UI rendering for any concept that exists in catalogue but
-        was filtered from facts.
+        ``(taxonomy, concept)``; capping the catalogue would orphan
+        downstream UI rendering for any concept that exists in
+        catalogue but was filtered from facts.
+
+        **#2232**: the ``ifrs-full`` section follows the same split —
+        three tracked tags into ``financial_facts_raw``, every IFRS
+        concept into the catalogue. That is deliberate and it does
+        NOT collide with us-gaap: ``sec_facts_concept_catalog`` is
+        ``UNIQUE (taxonomy, concept)`` (sql/063), so a tag name
+        present in both namespaces is two rows, not an overwrite.
+        Contrast ``uq_facts_raw_identity``, which omits taxonomy —
+        which is why the three FACT allowlists must stay disjoint
+        (see ``_ALL_TRACKED_IFRS_TAGS``).
         """
         raw = self._fetch_company_facts(cik)
         if raw is None:
