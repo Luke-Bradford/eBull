@@ -23,6 +23,7 @@ from decimal import Decimal
 import pytest
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
+from app.services.random_entry_cohort import SyntheticControl
 from app.services.strategy_result import (
     CORPUS_VERSION,
     EVALUATION_WINDOW_END,
@@ -163,6 +164,43 @@ def _result(**overrides: object) -> StrategyResult:
     return StrategyResult(**base)  # type: ignore[arg-type]
 
 
+def _passing_control(**overrides: object) -> SyntheticControl:
+    """§9's control on a cohort this strategy clears BOTH thresholds against.
+
+    ⚠ The two strategy-side figures must equal ``_metrics()``'s ``sharpe`` and
+    ``total_return_pct`` — ``StrategyResult`` binds them, because a control
+    evaluated against one Sharpe and stored beside another describes a
+    comparison nobody made.
+    """
+    base: dict[str, object] = {
+        "model_id": "permuted-entry-uniform-gap-v1",
+        "cohort_size": 1000,
+        "root_seed": 20260808,
+        # Straddles zero → §9's first threshold holds.
+        "mean_return_pct": 0.1,
+        "mean_return_ci_low_pct": -0.4,
+        "mean_return_ci_high_pct": 0.6,
+        "sharpe_percentile": 95.0,
+        # Below the metric set's 0.33 → §9's second threshold holds.
+        "cohort_sharpe_threshold": 0.20,
+        "strategy_sharpe": 0.33,
+        "cohort_return_threshold_pct": 5.0,
+        "strategy_return_pct": 21.0,
+    }
+    base.update(overrides)
+    return SyntheticControl(**base)  # type: ignore[arg-type]
+
+
+#: Everything a clean result needs EXCEPT its synthetic control, so a test can
+#: vary that one field without restating (and drifting from) the other four.
+_CLEAN_RESULT_FIELDS: dict[str, object] = {
+    "universe_basis": "survivorship_free",
+    "carry_unmodelled": False,
+    "trial_count": 17,
+    "deflated_sharpe": Decimal("0.42"),
+}
+
+
 def _clean_candidate(**overrides: object) -> PromotionCandidate:
     """A candidate that passes EVERY check — the only shape ``check_promotable`` clears.
 
@@ -172,12 +210,7 @@ def _clean_candidate(**overrides: object) -> PromotionCandidate:
     exists so each test can break exactly one thing and attribute the refusal.
     """
     base: dict[str, object] = {
-        "result": _result(
-            universe_basis="survivorship_free",
-            carry_unmodelled=False,
-            trial_count=17,
-            deflated_sharpe=Decimal("0.42"),
-        ),
+        "result": _result(**_CLEAN_RESULT_FIELDS, synthetic_control=_passing_control()),
         "evaluated_instrument_ids": frozenset({1, 2, 3}),
         "validated_universe_ids": frozenset({1, 2, 3, 4}),
         "holdout_evaluations": 1,
@@ -622,6 +655,54 @@ class TestPromotionGateRefusals:
         assert "quarantine_arms_not_compared" in PROMOTION_REFUSALS
         assert "quarantine_material" not in PROMOTION_REFUSALS
 
+    def test_a_result_with_no_synthetic_control_is_refused(self) -> None:
+        """§9's control is the null distribution the Sharpe is read against, and
+        a result with none is a number with no scale. ⚠ NULL is the fail-closed
+        default, the same posture as the DSR and the effective sample size."""
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=None))
+        assert "synthetic_control_not_run" in check_promotable(candidate)
+
+    def test_a_cohort_whose_mean_return_excludes_zero_blocks_the_result(self) -> None:
+        """§9's FIRST threshold, and it is a verdict on the HARNESS rather than
+        on the strategy — *"a harness that finds edge in noise is broken
+        regardless of what else it explains"*. ⚠ The strategy here still clears
+        the Sharpe threshold, so exactly one code fires and it is the cohort's."""
+        control = _passing_control(mean_return_ci_low_pct=0.4, mean_return_ci_high_pct=0.9)
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        refusals = set(check_promotable(candidate))
+        assert refusals == {"synthetic_control_cohort_shows_edge"}
+
+    def test_a_sharpe_at_the_cohort_threshold_does_not_exceed_it(self) -> None:
+        """§9 says "must EXCEED", so equality is refused. ⚠ A `>=` reading would
+        admit a strategy indistinguishable from the 950th random member."""
+        control = _passing_control(cohort_sharpe_threshold=0.33)
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert set(check_promotable(candidate)) == {"synthetic_control_sharpe_below_cohort"}
+
+    def test_both_synthetic_failures_are_reported_together(self) -> None:
+        """⚠ NOT the first one. An operator seeing only the strategy-level code
+        would tune the strategy against a cohort that invalidates every result
+        measured under it."""
+        control = _passing_control(
+            mean_return_ci_low_pct=0.4,
+            mean_return_ci_high_pct=0.9,
+            cohort_sharpe_threshold=0.99,
+        )
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert set(check_promotable(candidate)) == {
+            "synthetic_control_cohort_shows_edge",
+            "synthetic_control_sharpe_below_cohort",
+        }
+
+    def test_the_reported_return_percentile_does_not_gate(self) -> None:
+        """⚠ The permutation-test statistic is REPORTED and never blocks. §9's
+        acceptance names two thresholds; adding a third in code would be this
+        module inventing an acceptance criterion."""
+        control = _passing_control(cohort_return_threshold_pct=10_000.0)
+        assert control.return_exceeds_cohort is False
+        candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
+        assert check_promotable(candidate) == ()
+
     def test_a_missing_effective_sample_size_is_refused_independently_of_the_dsr(self) -> None:
         """Criterion 3, and it is SEPARATE from ``deflated_sharpe_not_computed``
         on purpose. ⚠ Criterion 6's deflation CONSUMES the effective sample size,
@@ -720,6 +801,7 @@ class TestPromotionGateReportsEverything:
             "trial_count_undeclared",
             "ambiguity_arms_not_compared",
             "quarantine_arms_not_compared",
+            "synthetic_control_not_run",
         }
 
     def test_todays_real_pipeline_state_is_refused(self) -> None:
@@ -740,6 +822,7 @@ class TestPromotionGateReportsEverything:
             "trial_count_undeclared",
             "ambiguity_arms_not_compared",
             "quarantine_arms_not_compared",
+            "synthetic_control_not_run",
         }
         assert is_promotable(candidate) is False
 

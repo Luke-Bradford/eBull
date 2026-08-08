@@ -770,7 +770,19 @@ until the namespace has a mechanism.
 | **5e-3** | **Deflated Sharpe on a declared trial count** (criterion 6). Consumes 5e-2's output; §5.2 is explicit that a DSR on a nominal *n* is the number criterion 3 forbids. `app/services/deflated_sharpe.py`, `app/services/trial_register.py`, `sql/266`. | ✅ shipped |
 | **5e-4** | **Purged walk-forward + embargo** (§5.3). `app/services/walk_forward.py`. ⚠ The "blocked on S-1 declaring a `max_hold_bars`" row was **struck**: the block was an unstarted measurement, not a decision, and the measurement adopted the leak-free in-sample p100 with S-1's identity untouched. | ✅ shipped |
 | **5e-5a** | **Quarantine sensitivity arm** (criterion 9) — the two-arm loader, the census, the metric delta, and `quarantine_arm` on the result identity. `app/services/quarantine_sensitivity.py`, `sql/267`. | ✅ shipped |
-| **5e-5b** | The **1,000-strategy random-entry control** (§9, *the harness itself*), and the per-fold walk-forward writer 5e-4 deliberately left unwritten. | last |
+| **5e-5b** | The **1,000-strategy random-entry control** (§9, *the harness itself*) — the permutation, both thresholds, and the three promotion refusals. `app/services/random_entry_cohort.py`, `sql/268`. | ✅ shipped |
+| **5e-5c** | The **per-fold walk-forward writer** 5e-4 deliberately left unwritten, and the **per-arm result writer** (`quarantine_arm` is expressible; nothing writes it yet). | last |
+
+⚠ **5e-5b was split again at the writers**, and the reason is the same one that
+split 5e at 5e-1 and 5e-5 at 5e-5a: the control CHANGES WHAT A STORED RESULT
+MEANS. It adds three promotion refusals and a derived-verdict CHECK
+(`sql/268`), and a schema change to the result row is cheap only while
+`strategy_results_store` is empty. The two writers add ROWS and no semantics, so
+they are strictly cheaper afterwards. ⚠ The control also unblocks something the
+model already referenced: `PromotionCandidate.ambiguity_material` is defined
+(§3.4) as *"the two ambiguity arms' Sharpe differ by more than the gap between
+the strategy and the random cohort's 95th percentile"* — that gap did not exist
+until this stage, so the §3.4 rule had no measurable right-hand side.
 
 ⚠ **5e-5 was split at 5e-5a**, for the reason 5e was split at 5e-1: the first
 item turned out to change the RESULT IDENTITY (`quarantine_arm`, §8.5), and an

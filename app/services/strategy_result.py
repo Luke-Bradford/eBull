@@ -76,6 +76,7 @@ from typing import Literal, get_args
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.equity_curve import SIZING_RULE_ID
+from app.services.random_entry_cohort import SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
 from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
 
@@ -250,6 +251,31 @@ PromotionRefusal = Literal[
     #: be the made-up constant the instruction set forbids, so the gate refuses
     #: on the comparison being ABSENT and never on its size.
     "quarantine_arms_not_compared",
+    #: §9's synthetic control (stage 5e-5b). ⚠ THREE CODES, NOT ONE, and the
+    #: split is the same argument that keeps `deflated_sharpe_not_computed`
+    #: apart from `effective_sample_size_not_computed`: each names a different
+    #: broken thing and a different operator action.
+    #:
+    #:   - `synthetic_control_not_run` — no cohort exists for this result. The
+    #:     WRITER has not run §9's control.
+    #:   - `synthetic_control_cohort_shows_edge` — §9's FIRST threshold failed:
+    #:     the random cohort's own mean net return does not lie within its 95%
+    #:     bootstrap interval of zero. ⚠ This is a verdict on the HARNESS (or on
+    #:     the threshold), not on the strategy — *"a harness that finds edge in
+    #:     noise is broken regardless of what else it explains"* — so it blocks
+    #:     EVERY strategy measured under that cohort at once, which is precisely
+    #:     what an operator needs to be able to see as one cause.
+    #:   - `synthetic_control_sharpe_below_cohort` — §9's SECOND threshold
+    #:     failed: this strategy's Sharpe does not exceed the cohort's 95th
+    #:     percentile, so it does *"not count as evidence at all"*.
+    #:
+    #: ⚠ Unlike criterion 9's arm — which has no `quarantine_material` twin
+    #: because no source fixes a blocking magnitude — §9 DOES declare both
+    #: magnitudes, verbatim. So the magnitude refusals here are the spec's, not
+    #: invented, and their absence would be the omission.
+    "synthetic_control_not_run",
+    "synthetic_control_cohort_shows_edge",
+    "synthetic_control_sharpe_below_cohort",
 ]
 PROMOTION_REFUSALS: frozenset[str] = frozenset(get_args(PromotionRefusal))
 
@@ -500,6 +526,18 @@ class StrategyResult:
     #: all-or-nothing ``sql/266`` enforces, checked at assembly time where the
     #: error names the field.
     deflated: DeflatedSharpeResult | None = None
+    #: §9's random-entry synthetic control (stage 5e-5b, ``sql/268``). NULLABLE,
+    #: and NULL is again the fail-closed default: the gate refuses a result with
+    #: no null distribution to read its Sharpe against.
+    #:
+    #: ⚠ It carries the strategy's OWN Sharpe and return as well as the cohort's
+    #: thresholds, because the verdict is a comparison and a comparison with one
+    #: side missing is not checkable. ``__post_init__`` binds those two to
+    #: ``metrics`` — ``sql/268`` stores only the cohort side and expresses the
+    #: verdict as a CHECK over the columns already on the row, which is the
+    #: "one number, one column" rule the DSR's effective-sample-size binding
+    #: exists to enforce.
+    synthetic_control: SyntheticControl | None = None
 
     def __post_init__(self) -> None:
         if self.identity.result_scope not in RESULT_SCOPES:
@@ -578,6 +616,24 @@ class StrategyResult:
                     f"{self.deflated.effective_sample_size} but the metric set carries "
                     f"{self.metrics.effective_sample_size} — criterion 6 consumes criterion 3's number, and there is "
                     "only one column for it"
+                )
+        # ⚠⚠ THE CONTROL'S STRATEGY-SIDE FIGURES ARE THE ROW'S OWN, and this is
+        # the same defect the DSR binding above catches: a control evaluated
+        # against one Sharpe and stored beside another describes a comparison
+        # nobody made. `sql/268` cannot catch it — it stores only the cohort
+        # side, deliberately — so the binding has to hold here.
+        if self.synthetic_control is not None:
+            control = self.synthetic_control
+            if control.strategy_sharpe != self.metrics.sharpe:
+                raise ValueError(
+                    f"the synthetic control was evaluated against a Sharpe of {control.strategy_sharpe} but the "
+                    f"metric set carries {self.metrics.sharpe} — the stored verdict would describe a comparison "
+                    "against a number this row does not report"
+                )
+            if control.strategy_return_pct != self.metrics.total_return_pct:
+                raise ValueError(
+                    f"the synthetic control was evaluated against a total return of {control.strategy_return_pct} "
+                    f"but the metric set carries {self.metrics.total_return_pct}"
                 )
 
 
@@ -721,6 +777,20 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
     # PromotionRefusal for why a `quarantine_material` twin is absent.
     if not candidate.quarantine_arms_compared:
         refusals.append("quarantine_arms_not_compared")
+
+    # §9 — the harness's own acceptance, read per result. ⚠ THE COHORT-LEVEL
+    # AND STRATEGY-LEVEL FAILURES ARE REPORTED SEPARATELY AND BOTH CAN FIRE:
+    # a cohort that shows edge invalidates the scale, and a Sharpe below the
+    # threshold is not evidence on any scale. Returning only the first would
+    # hide from an operator that one broken cohort is blocking every strategy.
+    control = result.synthetic_control
+    if control is None:
+        refusals.append("synthetic_control_not_run")
+    else:
+        if not control.mean_return_ci_contains_zero:
+            refusals.append("synthetic_control_cohort_shows_edge")
+        if not control.sharpe_exceeds_cohort:
+            refusals.append("synthetic_control_sharpe_below_cohort")
 
     return tuple(refusals)
 

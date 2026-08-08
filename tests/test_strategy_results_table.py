@@ -103,6 +103,35 @@ _BASE: dict[str, object] = {
     "dsr_measured_trials": None,
     "dsr_model_id": None,
     "trial_register_version": None,
+    # --- sql/268, §9's random-entry synthetic control ----------------------
+    # ⚠ All NULL together, which is the "§9's control has not been run" state
+    # the promotion gate refuses on (`synthetic_control_not_run`).
+    "synthetic_control_model_id": None,
+    "synthetic_control_size": None,
+    "synthetic_control_root_seed": None,
+    "synthetic_control_mean_return_pct": None,
+    "synthetic_control_mean_return_ci_low_pct": None,
+    "synthetic_control_mean_return_ci_high_pct": None,
+    "synthetic_control_sharpe_percentile": None,
+    "synthetic_control_sharpe_threshold": None,
+    "synthetic_control_return_threshold_pct": None,
+    "synthetic_control_passed": None,
+}
+
+#: A COMPLETE §9 control that this row's own `sharpe` (0.27) CLEARS: the cohort
+#: mean straddles zero and the Sharpe threshold sits below 0.27, so
+#: `synthetic_control_passed` must be true and the derived-verdict CHECK agrees.
+_SYNTH: dict[str, object] = {
+    "synthetic_control_model_id": "permuted-entry-uniform-gap-v1",
+    "synthetic_control_size": 1000,
+    "synthetic_control_root_seed": 20260808,
+    "synthetic_control_mean_return_pct": "0.04",
+    "synthetic_control_mean_return_ci_low_pct": "-0.31",
+    "synthetic_control_mean_return_ci_high_pct": "0.42",
+    "synthetic_control_sharpe_percentile": "95.0",
+    "synthetic_control_sharpe_threshold": "0.11",
+    "synthetic_control_return_threshold_pct": "6.20",
+    "synthetic_control_passed": True,
 }
 
 #: A COMPLETE criterion-6 block, on a declared trial count. ⚠ Includes
@@ -155,7 +184,12 @@ _INSERT = """
         bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id,
         dsr_trade_sharpe, dsr_skewness, dsr_kurtosis, dsr_expected_max_sharpe,
         dsr_independent_trials, dsr_average_trial_correlation, dsr_trial_sharpe_variance,
-        dsr_measured_trials, dsr_model_id, trial_register_version
+        dsr_measured_trials, dsr_model_id, trial_register_version,
+        synthetic_control_model_id, synthetic_control_size, synthetic_control_root_seed,
+        synthetic_control_mean_return_pct, synthetic_control_mean_return_ci_low_pct,
+        synthetic_control_mean_return_ci_high_pct, synthetic_control_sharpe_percentile,
+        synthetic_control_sharpe_threshold, synthetic_control_return_threshold_pct,
+        synthetic_control_passed
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
         %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(universe_basis)s, %(corpus_version)s,
@@ -172,7 +206,12 @@ _INSERT = """
         %(bootstrap_design_effect)s, %(bootstrap_model_id)s,
         %(dsr_trade_sharpe)s, %(dsr_skewness)s, %(dsr_kurtosis)s, %(dsr_expected_max_sharpe)s,
         %(dsr_independent_trials)s, %(dsr_average_trial_correlation)s, %(dsr_trial_sharpe_variance)s,
-        %(dsr_measured_trials)s, %(dsr_model_id)s, %(trial_register_version)s
+        %(dsr_measured_trials)s, %(dsr_model_id)s, %(trial_register_version)s,
+        %(synthetic_control_model_id)s, %(synthetic_control_size)s, %(synthetic_control_root_seed)s,
+        %(synthetic_control_mean_return_pct)s, %(synthetic_control_mean_return_ci_low_pct)s,
+        %(synthetic_control_mean_return_ci_high_pct)s, %(synthetic_control_sharpe_percentile)s,
+        %(synthetic_control_sharpe_threshold)s, %(synthetic_control_return_threshold_pct)s,
+        %(synthetic_control_passed)s
     )
 """
 
@@ -315,6 +354,39 @@ def _insert(conn: psycopg.Connection[tuple], **overrides: object) -> None:
         # correlation to exist at all. ⚠ Stricter than sql/262's `>= 1`, which
         # still governs a trial count standing on its own.
         ("a DSR on a single declared trial", {**_DSR, "trial_count": 1, "dsr_independent_trials": "1.0"}),
+        # --- sql/268, §9's synthetic control -------------------------------
+        # ⚠ Each starts from a COMPLETE control and removes exactly one field,
+        # so the all-or-nothing constraint fires — a control missing its size or
+        # its seed is a null distribution nobody can reproduce.
+        ("a control with no declared size", {**_SYNTH, "synthetic_control_size": None}),
+        ("a control with no recorded seed", {**_SYNTH, "synthetic_control_root_seed": None}),
+        ("a control with no verdict", {**_SYNTH, "synthetic_control_passed": None}),
+        # PRESENT and naming no construction — the #2286 shape again.
+        ("a blank cohort model id", {**_SYNTH, "synthetic_control_model_id": "  "}),
+        ("an empty cohort", {**_SYNTH, "synthetic_control_size": 0}),
+        # §9 reads a PERCENTILE off the cohort; 0 and 100 are its endpoints and
+        # neither is an order statistic the acceptance describes.
+        ("a percentile at one hundred", {**_SYNTH, "synthetic_control_sharpe_percentile": "100"}),
+        ("a percentile at zero", {**_SYNTH, "synthetic_control_sharpe_percentile": "0"}),
+        (
+            "an inverted cohort interval",
+            {
+                **_SYNTH,
+                "synthetic_control_mean_return_ci_low_pct": "0.42",
+                "synthetic_control_mean_return_ci_high_pct": "-0.31",
+            },
+        ),
+        # ⚠⚠ THE VERDICT CONTRADICTING ITS OWN INPUTS, which is the state an
+        # operator reading the row has no way to detect. Both directions.
+        ("a pass whose Sharpe is below the cohort", {**_SYNTH, "synthetic_control_sharpe_threshold": "0.99"}),
+        (
+            "a pass whose cohort interval excludes zero",
+            {
+                **_SYNTH,
+                "synthetic_control_mean_return_ci_low_pct": "0.11",
+            },
+        ),
+        ("a fail whose inputs both hold", {**_SYNTH, "synthetic_control_passed": False}),
     ],
 )
 def test_results_table_rejects(ebull_test_conn: psycopg.Connection[tuple], label: str, overrides: dict) -> None:
@@ -505,3 +577,38 @@ def test_an_effective_sample_size_above_the_trade_count_is_permitted(
             ebull_test_conn,
             **{**_BOOTSTRAP, "effective_sample_size": "4000000.0", "bootstrap_design_effect": "0.78"},
         )
+
+
+def test_a_complete_synthetic_control_is_accepted(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """⚠ The positive branch for sql/268, and it is not optional. Every rejection
+    above could be passing because the whole ``_SYNTH`` shape is unwritable for
+    some other reason — a parametrised reject suite that passes for the wrong
+    reason is indistinguishable from one that works."""
+    with ebull_test_conn.transaction():
+        _insert(ebull_test_conn, **_SYNTH)
+        stored = ebull_test_conn.execute(
+            "SELECT synthetic_control_model_id, synthetic_control_size, synthetic_control_passed "
+            "FROM strategy_results_store WHERE strategy_id = %s",
+            ("S-TEST",),
+        ).fetchone()
+    assert stored == ("permuted-entry-uniform-gap-v1", 1000, True)
+
+
+def test_a_failing_control_is_storable_because_a_failure_is_a_result(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠⚠ §10: *"the most likely outcome of stage 5e … is that some or all of
+    them fail the random-cohort threshold. That is a result, not a failure of
+    the phase."* A table that could only hold passes would make the graveyard
+    §9 open question 4 asks for unrepresentable — and would quietly turn the
+    acceptance into a filter on what gets recorded."""
+    with ebull_test_conn.transaction():
+        _insert(
+            ebull_test_conn,
+            **{**_SYNTH, "synthetic_control_sharpe_threshold": "0.99", "synthetic_control_passed": False},
+        )
+        stored = ebull_test_conn.execute(
+            "SELECT synthetic_control_passed FROM strategy_results_store WHERE strategy_id = %s",
+            ("S-TEST",),
+        ).fetchone()
+    assert stored == (False,)
