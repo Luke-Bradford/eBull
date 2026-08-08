@@ -915,6 +915,17 @@ class TestCutSplits:
         )
 
     @staticmethod
+    def _result(arm: str):  # noqa: ANN205 - StrategyResult, built by the module under test
+        return build_result(
+            _measurement(),
+            strategy_id="s1",
+            strategy_version="v1",
+            ambiguity_arm="best_case",
+            quarantine_arm=arm,  # type: ignore[arg-type]
+            deflated=None,
+        )
+
+    @staticmethod
     def _arm(arm: str, starts: list[int], ends: list[int]) -> ArmMeasurement:
         outcome = NamespaceMeasurement(
             namespace="in_sample",
@@ -954,6 +965,39 @@ class TestCutSplits:
         assert [r.fold.first_index for r in splits[("s1", "masked")].folds] == [
             r.fold.first_index for r in splits[("s1", "admitted")].folds
         ]
+
+    def test_a_pending_in_sample_row_with_no_split_is_refused_before_any_insert(self) -> None:
+        """⚠ The lookup itself sits INSIDE the per-pair transaction, so an
+        uncovered row would surface only after that pair had been inserted —
+        and #2423 records that folds cannot be attached to a row afterwards.
+        Checked up front so the run refuses with zero rows written instead.
+        """
+        masked = self._result("masked")
+        admitted = self._result("admitted")
+        pending = [("s1", "in_sample", "best_case", masked, admitted)]
+        splits = backtest_run._cut_splits(  # noqa: SLF001
+            (self._arm("masked", [0, 2], [1, 3]),), corpus=self._corpus()
+        )
+        # Only the masked arm was cut, so the admitted row of the pair is uncovered.
+        with pytest.raises(RuntimeError, match=r"no walk-forward split was cut for \[\('s1', 'admitted'\)\]"):
+            backtest_run._assert_every_in_sample_row_has_a_split(pending, splits)  # type: ignore[arg-type]  # noqa: SLF001
+
+    def test_a_covered_pair_passes_and_a_hold_out_row_needs_no_split(self) -> None:
+        masked = self._result("masked")
+        admitted = self._result("admitted")
+        splits = backtest_run._cut_splits(  # noqa: SLF001
+            (self._arm("masked", [0, 2], [1, 3]), self._arm("admitted", [0, 4], [1, 5])),
+            corpus=self._corpus(),
+        )
+        backtest_run._assert_every_in_sample_row_has_a_split(  # noqa: SLF001
+            [("s1", "in_sample", "best_case", masked, admitted)],  # type: ignore[arg-type]
+            splits,
+        )
+        # ⚠ A hold-out row is skipped, not refused — sql/269 has no folds for it.
+        backtest_run._assert_every_in_sample_row_has_a_split(  # noqa: SLF001
+            [("s9", "hold_out", "best_case", masked, admitted)],  # type: ignore[arg-type]
+            {},
+        )
 
     def test_a_hold_out_only_measurement_contributes_no_split(self) -> None:
         arm = self._arm("masked", [0, 2], [1, 3])

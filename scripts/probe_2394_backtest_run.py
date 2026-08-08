@@ -234,6 +234,13 @@ PROBES: tuple[Probe, ...] = (
         test=f"{_TESTS}::TestInSampleSplit::test_the_embargo_is_measured_off_the_post_purge_training_side",
     ),
     Probe(
+        name="an in-sample row with no split reaches the write instead of being refused up front",
+        path=SERVICE,
+        old="            if (strategy_id, result.identity.quarantine_arm) not in splits\n",
+        new="            if False\n",
+        test=(f"{_TESTS}::TestCutSplits::test_a_pending_in_sample_row_with_no_split_is_refused_before_any_insert"),
+    ),
+    Probe(
         name="every arm is handed the FIRST arm's split, so the two censuses stop differing",
         path=SERVICE,
         old="        splits[(measurement.strategy_id, measurement.quarantine_arm)] = split\n",

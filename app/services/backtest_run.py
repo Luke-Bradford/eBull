@@ -1796,6 +1796,7 @@ def _write_rows(
 
     _preflight_gate(pending, validated=validated, holdout_requested=holdout_requested)
     splits = _cut_splits(arms, corpus=corpus)
+    _assert_every_in_sample_row_has_a_split(pending, splits)
 
     stored: list[tuple[int, StrategyResult, int]] = []
     for strategy_id, namespace, _ambiguity, masked, admitted in pending:
@@ -1866,6 +1867,44 @@ def _write_rows(
             )
         )
     return tuple(written)
+
+
+def _assert_every_in_sample_row_has_a_split(
+    pending: Sequence[tuple[str, ResultNamespace, AmbiguityArm, StrategyResult, StrategyResult]],
+    splits: Mapping[tuple[str, QuarantineArm], WalkForwardFolds],
+) -> None:
+    """Every in-sample row about to be written has a split waiting for it.
+
+    ⚠⚠ THE COVERAGE IS COMPLETE BY CONSTRUCTION AND CHECKED ANYWAY, BEFORE THE
+    FIRST INSERT. ``pending`` and ``splits`` are both derived from ``arms`` under
+    the same condition — a row exists only where BOTH arms carry an
+    ``in_sample`` namespace, which is exactly when ``_cut_splits`` keys a split
+    for each of them — so a miss is unreachable today.
+
+    It is asserted because the invariant spans two functions that a later change
+    could move apart, and because of WHERE the failure would otherwise land: the
+    lookup sits inside the per-pair transaction, after ``store_in_sample_arm_pair``
+    has already inserted. The savepoint means no half-written pair survives, but
+    the run would still abort with earlier pairs committed and no way to attach
+    their folds afterwards (#2423). Checking here turns that into a refusal with
+    ZERO rows written — the same argument ``_preflight_gate`` above makes for
+    criterion 8's refusal list.
+    """
+    missing = sorted(
+        {
+            (strategy_id, result.identity.quarantine_arm)
+            for strategy_id, namespace, _ambiguity, masked, admitted in pending
+            if namespace == "in_sample"
+            for result in (masked, admitted)
+            if (strategy_id, result.identity.quarantine_arm) not in splits
+        }
+    )
+    if missing:
+        raise RuntimeError(
+            f"no walk-forward split was cut for {missing} — every in-sample row is written with its split in one "
+            "transaction, so a missing one would surface after the pair had already been inserted and could never "
+            "be attached afterwards"
+        )
 
 
 def _cut_splits(
