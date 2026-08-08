@@ -656,14 +656,21 @@ def test_evidence_is_pooled_across_a_clusters_accessions() -> None:
 def test_two_accessions_naming_two_members_fails_closed() -> None:
     """The other half of pooling: co-filers who disagree. Each filing names a different
     member, the union names two, and the uniqueness guard declines — the pooled blob is
-    not a licence to pick whichever was read first."""
+    not a licence to pick whichever was read first.
+
+    ⚠ The low-CIK member is listed FIRST, and that is what makes the assertion mean
+    anything. With the incumbent listed first, "take the first named member" returns the
+    incumbent too, so the test passes against the very defect it names — the third
+    appearance of that shape on this ticket (revert probe B, and the sibling
+    ``test_text_naming_two_members_fails_closed``), and the second time review had to
+    point it out. Probe B now runs this case as well."""
     a = _h("000000001", "Sponsor Fund L.P.", _SUB_FLOOR, nature="indirect")
     b = _h("000000009", "Sponsor GP, L.L.C.", _SUB_FLOOR, nature="indirect")
     evidence = {
         (a.winning_accession, Decimal(_SUB_FLOOR)): ("Securities are held by Sponsor GP, L.L.C.",),
         (b.winning_accession, Decimal(_SUB_FLOOR)): ("Securities are held by Sponsor Fund L.P.",),
     }
-    assert _rep_with([b, a], evidence).filer_name == "Sponsor GP, L.L.C."  # incumbent kept
+    assert _rep_with([a, b], evidence).filer_name == "Sponsor GP, L.L.C."  # incumbent kept
 
 
 def test_a_sibling_fund_substring_declines_rather_than_guessing() -> None:

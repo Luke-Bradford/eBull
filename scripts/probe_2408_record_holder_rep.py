@@ -90,7 +90,10 @@ _PROBES = (
         "B: uniqueness dropped — first named member wins",
         _UNIQUE,
         "    if not named:\n        return None\n",
-        ("test_text_naming_two_members_fails_closed",),
+        (
+            "test_text_naming_two_members_fails_closed",
+            "test_two_accessions_naming_two_members_fails_closed",
+        ),
         _2385 + ("test_record_holder_text_promotes_the_member_it_names",),
     ),
     (
