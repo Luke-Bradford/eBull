@@ -162,13 +162,44 @@ So a **well-formed-looking 9-char uppercase-alphanumeric value is NOT enough** �
 
 So the rule holds exactly where it is meant to: a REAL security's CUSIP on SEC's own list never fails, CINS included (CINS inherits the same check digit, so a failing `G`-prefixed value is corrupt, not merely foreign).
 
-⚠ **But a check-digit failure does NOT imply a corrupt identifier**, and the earlier version of this note said it did. The Official List assigns CALL and PUT rows synthetic CUSIP-shaped identifiers — the issuer's first six characters then `9xx` / `95x` — which are SEC-published and deliberately not valid CUSIPs. Measured against the live bucket on 2026-08-07: of the **14,477** distinct check-digit-invalid `openfigi_unknown` CUSIPs, **9,389 are option rows on the current Official List**, 0 are non-option rows, and 5,088 are absent from 2026q2 entirely. The majority are options, not corruption.
+⚠ **But a check-digit failure does NOT imply a corrupt identifier**, and the earlier version of this note said it did. The Official List gives each issuer's CALL and PUT class its own CUSIP-shaped identifier: the issuer's first six characters, `9` in position 7 (`95` for the PUT), and the UNDERLYING's check digit copied verbatim into position 9 — which is exactly why they fail mod-10. AAPL is `037833100 COM` / `037833900 CALL` / `037833950 PUT`; a multi-class issuer gets one pair per class (Alphabet `02079K107 CAP STK CL C` → `02079K907`/`02079K957`, `02079K305 CAP STK CL A` → `02079K905`/`02079K955`). They are SEC-published and deliberately not valid CUSIPs.
+
+Measured 2026-08-08 by joining `unresolved_13f_cusips` (110,177 rows / 65,938 distinct CUSIPs) against `13flist2026q2-txt.txt`: **9,561 bulk rows** carrying `openfigi_unknown` and **8,657 legacy rows** still pending are Official-List CALL/PUT classes. Those are not a coverage fact about OpenFIGI at all — see §4.5.
 
 ⚠ The prior figure ("12,282 distinct, 0 fail") was arithmetically right and its SUBJECT was narrower than the sentence — it counted the non-option slice while claiming "all lines". That is the defect `.claude/CLAUDE.md` warns about under "state the query and its two numbers, not a percentage whose subject the reader has to infer". Reproduce either half with the query above rather than trusting the table.
 
 ⚠ The obvious regex `^[0-9A-Z]{9}\s` parses only 6,300 of those lines — CINS rows use `*` as the delimiter, so it silently drops the entire foreign half, which is exactly the population the rule most needs testing against. Use `^([0-9A-Z]{9})[\s*]` and assert matched + unmatched == total.
 
 Reproduce the corpus split with `uv run python scripts/audit_cusip_check_digit.py --census`.
+
+### 4.5 An option-class CUSIP must never reach this endpoint (#2353)
+
+**Source rule — Form 13F Special Instruction 10** (`https://www.sec.gov/files/form13f.pdf`, p.6-7, quoted):
+
+> "A Manager must report holdings of options only if the options themselves are Section 13(f) securities. ... The Manager must give the entries in **Columns 1 through 5** and in Columns 7 and 8 of the Information Table, however, **in terms of the securities underlying the options, not the options themselves**. ... coupled with a designation "PUT" or "CALL" following such segregated entries in Column 5"
+
+Special Instruction 11.b.iii makes Column 3 the CUSIP, and Column 3 sits inside "Columns 1 through 5". So the identifier an option row is REQUIRED to carry is the **underlying's** CUSIP, with PUT/CALL in Column 5 (`PUTCALL` in the structured INFOTABLE → `institutional_holdings.is_put_call`). Both conventions are live in our corpus:
+
+- **compliant** — AAPL holds 2,230 `institutional_holdings` rows with `is_put_call` set, all bound through `037833100`;
+- **deviating** — accession `0001313360-26-000003` (`form13fInfoTable20260806.xml`, fetched from EDGAR 2026-08-08) files `<cusip>78462F953</cusip>` (the Official List's SPY PUT class) **together with** `<putCall>Put</putCall>`.
+
+⚠ **That second example is why `PUTCALL` is NOT the discriminator.** It is set correctly on a row whose Column 3 is wrong. `PUTCALL` describes the POSITION; the defect is in the IDENTIFIER, and the two are independent.
+
+The discriminator is the Official List itself, matched **exactly**: description equal to `CALL` or `PUT` after upper-casing, stripping the `*` added-flag and collapsing whitespace (`_is_put_call` in `app/services/sec_13f_securities_list.py`). Three narrower-than-you-expect traps, each measured on `13flist2026q2-txt.txt` rather than reasoned about:
+
+| test | distinct CUSIPs | fail mod-10 | verdict |
+|---|---|---|---|
+| description EXACTLY `CALL`/`PUT` | 10,164 | 11,825 of 12,220 rows | the option classes |
+| `_is_option` (adds WTS/WARRANT/WT/RIGHT/RIGHTS) | +121 | 0 | genuine securities — do NOT tombstone |
+| description CONTAINS `CALL`/`PUT` | +7 | 0 | genuine securities — do NOT tombstone |
+
+Those 7 are 4 BMO structured notes (`CALL NRGU 45`, `CALL NRGD 45`, `CALL BNKU 45`, `CALL LKD 41`) and 3 covered-call ETFs (`ETHE CO CALL ETF`, `KWEB COVERD CALL`, `YIEL S& CALL ETF`). **The containment form was written first and a live probe falsified it**: `063679427` (`CALL NRGU 45`) answers with a populated `data` array where a real option class answers `{"warning": "No identifier found."}`. The check digit could not have caught this — all 7 pass it.
+
+Such a row can never resolve by ANY of our three paths, so it gets its own terminal verdict `option_pseudo_cusip` (`sql/274_unresolved_13f_option_pseudo_cusip.sql`), written by `tombstone_option_pseudo_cusips` inside `cusip_universe_backfill`:
+
+- OpenFIGI **rejects** it on the check digit (§4.3) — 9,561 bulk rows' worth of rate-limited budget;
+- the Official-List backfill maps only `_is_common_share` rows, so it never mints one;
+- ⚠ the legacy fuzzy-name resolver **would match it** — on the issuer name, which is identical to the underlying's — and write an `external_identifiers (provider='sec')` row binding an option-class identifier to the underlying instrument. Simulated over the full legacy pending partition 2026-08-08: **3,876 of 8,663 would promote**, 703 ambiguous, 4,084 below threshold; the top matches score 1.0 (⚠ that 8,663 is the pre-correction CONTAINMENT set — a superset of the 8,657 the shipped exact-match classifier claims, differing by the 6 compound-description rows that happen to sit in this partition) (`13321L908` → CAMECO, `771049903` → ROBLOX, `29355A907` → ENPHASE ENERGY). That false-mapping risk, not the wasted budget, is the reason this verdict exists.
 
 ## 5. eBull integration points (post PR-1b)
 
@@ -231,7 +262,7 @@ A CUSIP can map to several FIGI rows that share `compositeFIGI` (e.g. one row pe
 
 ### 7.5 Pink-sheet / OTC tickers
 
-OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_us_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. When no `US`-row exists the sweep tombstones the `unresolved_13f_cusips` row with `resolution_status='openfigi_unknown'` (sql/192, #740 — terminal in v1; `SET resolution_status=NULL` is the manual retry escape hatch). The sibling `openfigi_no_instrument` status is written when OpenFIGI returns a ticker but it has no unique `is_tradable` `instruments.symbol` match. The third negative, `openfigi_invalid_identifier` (`sql/261_unresolved_13f_openfigi_invalid_identifier.sql`, #2304), is written when OpenFIGI REJECTED the identifier — see §4.3; it is NOT a no-match and must not be read as one.
+OpenFIGI returns OTC tickers under their own `exchCode` (e.g. `'OPRA'`, `'PINX'`). The defensive `_pick_us_primary` filter above intentionally selects `'US'` (the SEC-registered composite exchange code) to avoid binding ownership rows to OTC mirrors that may not exist in `instruments`. When no `US`-row exists the sweep tombstones the `unresolved_13f_cusips` row with `resolution_status='openfigi_unknown'` (sql/192, #740 — terminal in v1; `SET resolution_status=NULL` is the manual retry escape hatch). The sibling `openfigi_no_instrument` status is written when OpenFIGI returns a ticker but it has no unique `is_tradable` `instruments.symbol` match. A fourth verdict, `option_pseudo_cusip` (`sql/274_unresolved_13f_option_pseudo_cusip.sql`, #2353), is NOT written by this sweep at all — `cusip_universe_backfill` writes it off SEC's Official List, and it is deliberately absent from `OPENFIGI_NEGATIVE_STATUSES` so a later mapping cannot un-freeze it (a mapping appearing for an option-class identifier is the defect, not the cure). See §4.5. The third negative, `openfigi_invalid_identifier` (`sql/261_unresolved_13f_openfigi_invalid_identifier.sql`, #2304), is written when OpenFIGI REJECTED the identifier — see §4.3; it is NOT a no-match and must not be read as one.
 
 ### 7.6 Per-instance limiter — single-process only
 

@@ -587,6 +587,8 @@ cannot leave the number stale — which it already did once on this branch, when
 - **Class disambiguation**: GOOGL = `02079K305` (Class A), GOOG = `02079K107` (Class C). Both CIK 1652044 (Alphabet). Aggregating without share-class CUSIP collapses two distinct holdings.
 - Source of authoritative CUSIP→CIK mapping: 13F Official List (per-quarter): `https://www.sec.gov/files/investment/13flist{year}q{quarter}.txt`. Format: fixed-width, columns `CUSIP NO.` (9 char) | `ISSUER NAME` | `ISSUER DESCRIPTION` (`SHS`, `CALL`, `PUT`, `UNIT`, `*W EXP`) | `STATUS`. Each issuer has multiple rows (common, warrant, unit, options-call, options-put). Filter for shares means matching description like `SHS`, `COMMON`, `COM`.
 
+  ⚠ **The `CALL` / `PUT` rows carry their OWN CUSIP-shaped identifier, and a 13F must NOT report it.** Form 13F Special Instruction 10 puts Columns 1 through 5 — Column 3 is the CUSIP, per 11.b.iii — "in terms of the securities underlying the options, not the options themselves", with PUT/CALL designated in Column 5. So the option classes on this list are legitimate SEC-published identifiers that are never a valid Column 3 value; filers that report one anyway strand the holding. `PUTCALL` is NOT the discriminator for finding them (a deviating row sets it correctly while Column 3 is wrong) and neither is the check digit. See `.claude/skills/data-sources/openfigi.md` §4.5 for the exact-match rule, the seven non-option securities a containment test swallows, and the `option_pseudo_cusip` terminal verdict (#2353).
+
 ### 3.3 Accession number
 
 Two interchangeable shapes:
