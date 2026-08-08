@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -46,6 +46,38 @@ from app.services.xbrl_derived_stats import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL_VERSION = "v1.5-balanced"
+
+# The IAR analytics denominator (#2411). Newest POSITIVE point-in-time share count
+# per instrument, with the filing date the freshness bound is measured against.
+#
+# This is the app's settled share-count source, not a new one: `share_count_history`
+# (sql/259) prefers the cover-page `dei:EntityCommonStockSharesOutstanding` and falls
+# back to the balance-sheet `us-gaap:CommonStockSharesOutstanding`, it is what
+# `instrument_share_count_latest` — the ownership rollup's denominator — is built on
+# (data-engineer skill "Views" + I19), and it is what the OTHER consumer of
+# `short_interest_pct_shares_out` already divides by
+# (`thesis_break_scan._short_interest_observations`, whose docstring names it "the
+# settled short_interest_signal denominator"). `fundamentals_snapshot.shares_outstanding`
+# — what this path read until #2411 — carries only the us-gaap balance-sheet concept
+# (`sec_fundamentals.py:237`), has no filed date to bound, and is NULL or zero for
+# 1,427 of 4,529 instruments.
+#
+# `shares_outstanding > 0` is load-bearing twice over: it skips a filer's zero-valued
+# undimensioned tag (#2232), and a NULL/zero in the newest period must not shadow an
+# older usable one — the same contract the price read below carries in its own WHERE.
+#
+# ⚠ `shares_outstanding_filed_date`, NOT `latest_filed_date`. The latter is `MAX(filed_date)`
+# over all FIVE concepts the view groups, so a restated flow fact in the same period makes
+# the count look newer than it is — always forward, i.e. always fail-open for a freshness
+# gate (sql/273: 16 of 4,665 newest-positive rows, up to 1,456 days, 7 of them across the
+# 183-day bound). The column added by sql/273 mirrors the value's own COALESCE.
+_SHARE_COUNT_SQL = """
+    SELECT shares_outstanding, shares_outstanding_filed_date
+    FROM share_count_history
+    WHERE instrument_id = %(id)s AND shares_outstanding > 0
+    ORDER BY period_end DESC
+    LIMIT 1
+"""
 
 # Model-version prefix gates (single source — the next version is a one-line add,
 # not a scattered string edit). TA-enhanced momentum applies from v1.1; the
@@ -1213,6 +1245,11 @@ def _load_instrument_data(
         )
         fund_rows: list[dict[str, Any]] = cur.fetchall()
 
+        # Analytics denominator — the SETTLED share count, not the fundamentals one.
+        # See :func:`_analytics_inputs` for why these are different sources.
+        cur.execute(_SHARE_COUNT_SQL, {"id": instrument_id})
+        share_count_row: dict[str, Any] | None = cur.fetchone()
+
         # Latest price features
         cur.execute(
             """
@@ -1464,6 +1501,7 @@ def _load_instrument_data(
         "last_10kq_date": filing_recency_row["last_10kq"] if filing_recency_row is not None else None,
         "price_td_count": int(price_count_row["price_td"]) if price_count_row is not None else 0,
         "news_90d_count": int(news_count_row["news_90d"]) if news_count_row is not None else 0,
+        "share_count_row": share_count_row,
     }
 
 
@@ -1486,6 +1524,7 @@ def _empty_instrument_data() -> dict[str, Any]:
         "last_10kq_date": None,
         "price_td_count": 0,
         "news_90d_count": 0,
+        "share_count_row": None,
     }
 
 
@@ -1536,6 +1575,29 @@ def _bulk_load_instrument_data(
         )
         for r in cur.fetchall():
             out[int(r.pop("instrument_id"))]["fund_rows"].append(r)
+
+        # Analytics denominator — set-based twin of `_SHARE_COUNT_SQL`.
+        #
+        # ⚠ Measured cost, dev corpus 2026-08-08, 12,696 ids: this ONE query takes ~6s
+        # and takes `_bulk_load_instrument_data` from 20.7s to 42.5s. It is already
+        # index-scanning (`financial_facts_raw_<part>_instrument_id_concept_period_end_idx`
+        # on every partition) — the time is partition fan-out across 126 partitions plus
+        # ~1.7s of planning for the ANY array, so an index does not fix it. Accepted
+        # rather than optimised because the only production caller is `compute_rankings`,
+        # a nightly job; the per-instrument path (`_SHARE_COUNT_SQL`, one id) measures
+        # 0.7-3.7ms. If this ever moves onto a request path, that is the number to re-take.
+        cur.execute(
+            """
+            SELECT DISTINCT ON (instrument_id)
+                   instrument_id, shares_outstanding, shares_outstanding_filed_date
+            FROM share_count_history
+            WHERE instrument_id = ANY(%(ids)s::bigint[]) AND shares_outstanding > 0
+            ORDER BY instrument_id, period_end DESC
+            """,
+            p,
+        )
+        for r in cur.fetchall():
+            out[int(r.pop("instrument_id"))]["share_count_row"] = r
 
         # Latest price row — close IS NOT NULL is load-bearing (a latest NULL close
         # must not shadow an older usable row).
@@ -1763,16 +1825,37 @@ def _bulk_load_instrument_data(
 # ---------------------------------------------------------------------------
 
 
-def _analytics_inputs(data: dict[str, Any]) -> tuple[str | None, float | None]:
-    """Derive ``(gics_sector, shares_outstanding)`` for the analytics block from a
-    loaded ``data`` dict. Pure — hoisted out of the scoring core (#2127) so
-    ``_score_from_data`` stays DB-free and the analytics call can be issued by the
-    caller (per-instrument in Phase 1, bulk in Phase 2)."""
-    fund_rows = data["fund_rows"]
-    shares_out = _to_float(fund_rows[0]["shares_outstanding"]) if fund_rows else None
+def _analytics_inputs(data: dict[str, Any]) -> tuple[str | None, float | None, date | None]:
+    """Derive ``(gics_sector, shares_outstanding, shares_outstanding_filed)`` for the
+    analytics block from a loaded ``data`` dict. Pure — hoisted out of the scoring core
+    (#2127) so ``_score_from_data`` stays DB-free and the analytics call can be issued by
+    the caller (per-instrument in Phase 1, bulk in Phase 2).
+
+    The share count comes from ``share_count_row`` (see ``_SHARE_COUNT_SQL``), NOT from
+    ``fund_rows[0]``. Until #2411 it was ``fund_rows[0]["shares_outstanding"]``, which is
+    wrong three ways at once and only the third was ticketed:
+
+    1. **Wrong source.** ``fundamentals_snapshot.shares_outstanding`` carries only the
+       us-gaap balance-sheet ``CommonStockSharesOutstanding``. The rest of the app —
+       ownership rollup, market cap, and the sibling consumer of this very ratio in
+       ``thesis_break_scan`` — divides by the DEI-cover-page-preferred count.
+    2. **No as-of.** The snapshot's ``as_of_date`` is a period end, so there is no filed
+       date to measure ``FRESHNESS_BOUNDS['…']['share_count_filed']`` against; the bound
+       the other consumer already applies was not expressible here.
+    3. **NULL/zero shadowing.** ``fund_rows`` is ordered by ``as_of_date DESC`` with no
+       ``IS NOT NULL`` filter, so an empty newest snapshot hid a usable older one.
+
+    ``shares_outstanding_filed`` is ``None`` only when the count itself is absent — the
+    column is computed from the same facts under the same ``val > 0`` filter, and 0 of the
+    4,665 newest-positive rows in the dev corpus have it NULL. Consumers must still fail
+    closed on ``None``.
+    """
+    row = data["share_count_row"]
+    shares_out = _to_float(row["shares_outstanding"]) if row is not None else None
+    shares_filed: date | None = row["shares_outstanding_filed_date"] if row is not None else None
     sic_cls = resolve_sector_spdr(data.get("sic"))  # type: ignore[arg-type]
     gics_sector = sic_cls.gics_sector if sic_cls is not None else None
-    return gics_sector, shares_out
+    return gics_sector, shares_out, shares_filed
 
 
 def _score_from_data(
@@ -2076,9 +2159,14 @@ def compute_score(
 
     now = _utcnow()
     data = _load_instrument_data(conn, instrument_id, now)
-    gics_sector, shares_out = _analytics_inputs(data)
+    gics_sector, shares_out, shares_filed = _analytics_inputs(data)
     analytics = assemble_instrument_analytics(
-        instrument_id, conn, gics_sector=gics_sector, shares_outstanding=shares_out, today=now.date()
+        instrument_id,
+        conn,
+        gics_sector=gics_sector,
+        shares_outstanding=shares_out,
+        shares_outstanding_filed=shares_filed,
+        today=now.date(),
     )
     return _score_from_data(instrument_id, data, weights, model_version, now, analytics)
 
@@ -2183,26 +2271,33 @@ def compute_rankings(
     now = _utcnow()
     bulk = _bulk_load_instrument_data(conn, instrument_ids, now)
 
-    # Analytics inputs (gics_sector, shares_outstanding) come from the already-loaded
-    # `bulk` data — no new I/O. _analytics_inputs is pure; the per-id guard preserves
-    # the "one bad id never fails the run" invariant. Then one bulk analytics pass
-    # (#2127 Phase 2) replaces the ~4 per-instrument analytics round-trips × N.
+    # Analytics inputs (gics_sector, shares_outstanding, its filed date) come from the
+    # already-loaded `bulk` data — no new I/O. _analytics_inputs is pure; the per-id guard
+    # preserves the "one bad id never fails the run" invariant. Then one bulk analytics
+    # pass (#2127 Phase 2) replaces the ~4 per-instrument analytics round-trips × N.
     gics_by_id: dict[int, str | None] = {}
     shares_by_id: dict[int, float | None] = {}
+    shares_filed_by_id: dict[int, date | None] = {}
     for iid in instrument_ids:
         try:
-            g, s = _analytics_inputs(bulk[iid])
+            g, s, f = _analytics_inputs(bulk[iid])
         except Exception:
             logger.warning(
                 "compute_rankings: analytics-input derivation failed for instrument_id=%d; degrading to (None, None)",
                 iid,
                 exc_info=True,
             )
-            g, s = None, None
+            g, s, f = None, None, None
         gics_by_id[iid] = g
         shares_by_id[iid] = s
+        shares_filed_by_id[iid] = f
     analytics_by_id = assemble_instrument_analytics_bulk(
-        conn, instrument_ids, gics_sector_by_id=gics_by_id, shares_outstanding_by_id=shares_by_id, today=now.date()
+        conn,
+        instrument_ids,
+        gics_sector_by_id=gics_by_id,
+        shares_outstanding_by_id=shares_by_id,
+        shares_outstanding_filed_by_id=shares_filed_by_id,
+        today=now.date(),
     )
 
     results: list[ScoreResult] = []

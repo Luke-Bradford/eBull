@@ -152,10 +152,14 @@ def _short_interest_observations(
             """
             SELECT si.instrument_id, si.settlement_date, si.current_short_interest,
                    si.days_to_cover, si.change_percent,
-                   sc.shares_outstanding, sc.latest_filed_date
+                   sc.shares_outstanding, sc.shares_outstanding_filed_date
             FROM finra_short_interest_current si
             LEFT JOIN LATERAL (
-                SELECT h.shares_outstanding, h.latest_filed_date
+                -- #2411: `shares_outstanding_filed_date`, not `latest_filed_date`. The
+                -- latter is MAX over all five concepts the view groups, so a restated
+                -- flow fact in the same period reports the count as fresher than it is —
+                -- fail-open for the `share_count_filed` bound below (sql/273).
+                SELECT h.shares_outstanding, h.shares_outstanding_filed_date
                 FROM share_count_history h
                 WHERE h.instrument_id = si.instrument_id AND h.shares_outstanding IS NOT NULL
                 ORDER BY h.period_end DESC

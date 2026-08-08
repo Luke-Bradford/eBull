@@ -61,6 +61,22 @@ _SHARES_SQL = """
      ORDER BY instrument_id, as_of_date DESC
 """
 
+# ⚠ #2411 changed this reader underneath the script in two ways: the scoring denominator
+# moved off `fundamentals_snapshot` onto `share_count_history`, and the reader gained a
+# SECOND gate on the denominator's filed date. So re-running this script today no longer
+# reproduces the `SUPPRESSED 19 / GAINED 0` recorded for #2336 — its gated arm now
+# measures both gates. Kept runnable, and kept reading the snapshot above, because that
+# is the input #2336's numbers were taken on; the query below exists to satisfy the new
+# required argument with a filed date that belongs to the count rather than to whatever
+# else was filed in the period. For the current denominator's own A/B see
+# `scripts/ab_2411_share_count_denominator.py`.
+_SHARE_COUNT_FILED_SQL = """
+    SELECT DISTINCT ON (instrument_id) instrument_id, shares_outstanding_filed_date
+      FROM share_count_history
+     WHERE instrument_id = ANY(%(ids)s::bigint[]) AND shares_outstanding > 0
+     ORDER BY instrument_id, period_end DESC
+"""
+
 # Instruments whose most recent `scores` row is the one an operator sees today.
 _SCORED_SQL = """
     SELECT DISTINCT ON (instrument_id) instrument_id, model_version
@@ -86,6 +102,14 @@ def _run(out_path: str) -> int:
             scored = {int(r[0]): r[1] for r in cur.fetchall()}
 
         kwargs: dict[str, Any] = {"today": today} if gated else {}
+        # #2411 made the denominator's filed date a REQUIRED keyword on this reader, so
+        # the call has to supply it or the script raises before producing an arm. Probed
+        # the same way `gated` is, for the same reason: this script must keep running on
+        # `origin/main` as well as here, and its own A/B is about `settlement_date` only.
+        if "shares_outstanding_filed_by_id" in inspect.signature(_bulk_read_short_interest).parameters:
+            with conn.cursor() as cur:
+                cur.execute(_SHARE_COUNT_FILED_SQL, {"ids": ids})
+                kwargs["shares_outstanding_filed_by_id"] = {int(r[0]): r[1] for r in cur.fetchall()}
         signals = _bulk_read_short_interest(conn, ids, shares, **kwargs)
 
     reasons: collections.Counter[str] = collections.Counter()

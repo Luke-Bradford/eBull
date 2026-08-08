@@ -39,6 +39,7 @@ def _seed_outstanding(
     concept: str = "EntityCommonStockSharesOutstanding",
     taxonomy: str = "dei",
     accession_number: str | None = None,
+    filed_date: date | None = None,
 ) -> None:
     conn.execute(
         """
@@ -53,8 +54,8 @@ def _seed_outstanding(
             concept,
             period_end,
             shares,
-            accession_number or f"acc-{taxonomy}-{period_end.isoformat()}",
-            period_end,
+            accession_number or f"acc-{taxonomy}-{period_end.isoformat()}-{concept}",
+            filed_date or period_end,
         ),
     )
     conn.commit()
@@ -332,3 +333,127 @@ class TestPositiveOnlyShareCount:
         assert int(row[0]) == 5_000_000
         assert row[1] is not None
         assert int(row[1]) == 0
+
+
+class TestShareCountFiledDate:
+    """#2411 / sql/273 — ``shares_outstanding_filed_date`` is the filed date OF THE
+    COUNT, not of whatever else was filed in the same period.
+
+    ``latest_filed_date`` is ``MAX(filed_date)`` across all five grouped concepts, so
+    it can only overstate the count's freshness. Two consumers now bound the
+    ``share_count_filed`` input on this value, and a bound built on the MAX fails open —
+    it was reading 16 of 4,665 dev rows too fresh, 7 of them across the 183-day line.
+    """
+
+    def test_a_later_flow_fact_does_not_freshen_the_count(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """The HUIZ shape: the count is filed once, then a flow fact for the same
+        period is re-tagged years later. ``latest_filed_date`` follows the flow;
+        the count's own date must not."""
+        iid = 30021
+        _seed_instrument(ebull_test_conn, instrument_id=iid)
+        _seed_outstanding(
+            ebull_test_conn,
+            instrument_id=iid,
+            period_end=date(2019, 12, 31),
+            shares=483_310_373,
+            filed_date=date(2020, 4, 24),
+        )
+        _seed_outstanding(
+            ebull_test_conn,
+            instrument_id=iid,
+            period_end=date(2019, 12, 31),
+            shares=1_000,
+            concept="StockIssuedDuringPeriodSharesNewIssues",
+            filed_date=date(2024, 4, 19),
+        )
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT shares_outstanding, latest_filed_date, shares_outstanding_filed_date"
+                "  FROM share_count_history WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert int(row[0]) == 483_310_373
+        # latest_filed_date is KEPT as MAX-over-everything — it answers a different
+        # question and has other readers.
+        assert row[1] == date(2024, 4, 19)
+        assert row[2] == date(2020, 4, 24)
+
+    def test_filed_date_follows_the_arm_the_value_came_from(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """The VIPS shape again, asked of the date: when a zero DEI makes the
+        COALESCE fall through to us-gaap, the reported filing must be the us-gaap
+        one. A date taken from the DEI arm would describe a value nobody used."""
+        iid = 30022
+        _seed_instrument(ebull_test_conn, instrument_id=iid)
+        _seed_outstanding(
+            ebull_test_conn,
+            instrument_id=iid,
+            period_end=date(2025, 12, 31),
+            shares=0,
+            filed_date=date(2026, 6, 1),
+        )
+        _seed_outstanding(
+            ebull_test_conn,
+            instrument_id=iid,
+            period_end=date(2025, 12, 31),
+            shares=111_665_972,
+            concept="CommonStockSharesOutstanding",
+            taxonomy="us-gaap",
+            filed_date=date(2026, 2, 13),
+        )
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT shares_outstanding, shares_outstanding_filed_date"
+                "  FROM share_count_history WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert int(row[0]) == 111_665_972
+        assert row[1] == date(2026, 2, 13)
+
+    def test_dei_preference_holds_for_the_date_too(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """Both arms positive: the value takes DEI, so the date must take DEI —
+        even when the us-gaap fact was filed later. Value and date have to name
+        the same fact or the pair is incoherent."""
+        iid = 30023
+        _seed_instrument(ebull_test_conn, instrument_id=iid)
+        _seed_outstanding(
+            ebull_test_conn,
+            instrument_id=iid,
+            period_end=date(2026, 3, 31),
+            shares=500_000,
+            filed_date=date(2026, 5, 1),
+        )
+        _seed_outstanding(
+            ebull_test_conn,
+            instrument_id=iid,
+            period_end=date(2026, 3, 31),
+            shares=499_000,
+            concept="CommonStockSharesOutstanding",
+            taxonomy="us-gaap",
+            filed_date=date(2026, 7, 30),
+        )
+
+        with ebull_test_conn.cursor() as cur:
+            cur.execute(
+                "SELECT shares_outstanding, shares_outstanding_filed_date"
+                "  FROM share_count_history WHERE instrument_id = %s",
+                (iid,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert int(row[0]) == 500_000
+        assert row[1] == date(2026, 5, 1)
