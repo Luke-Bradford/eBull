@@ -391,6 +391,114 @@ dollar traded, which is the footprint, not the actor.
 
 ---
 
+## 2.11a ⚠⚠ Is our one surviving finding just the bid-ask bounce? — INCONCLUSIVE
+
+After clustering, short-horizon reversal is the **only** part of the term
+structure our own data supports (§2.8). **Roll (1984)** —
+*"A Simple Implicit Measure of the Effective Bid-Ask Spread in an Efficient
+Market"*, **JF 39(4)** — says that may be an artefact with no economic content:
+with a spread, trades alternate between bid and ask, so observed price changes
+carry **spurious negative serial covariance**, which is literally what a
+short-term reversal pattern looks like. And the spread is recoverable from it:
+
+```text
+effective spread = 2 * sqrt( -cov(dP_t, dP_t-1) )
+```
+
+**The test** (`scripts/verify_2437_roll_bounce.py`): compare the spread IMPLIED
+by our measured autocovariance against the spread `cost_model.BANDS`
+independently believes those names have. Close ⇒ bounce. Much larger ⇒ economic
+reversal on top of the bounce.
+
+```text
+band        implied RT   our RT   ratio
+<$5             4.437%   1.450%   3.06x
+$5-20           2.162%   0.571%   3.79x
+$20-100         1.537%   0.509%   3.02x
+>=$100          3.908%   0.322%  12.14x
+```
+
+⚠⚠ **DO NOT READ THIS AS "THE REVERSAL IS REAL." The test has two confounds and
+both push in the flattering direction.**
+
+**Confound 1 — my own selection bias, and it is the worse one.** Roll is
+undefined for a positive covariance, and **26-30% of series had `cov >= 0`**
+(229/870, 720/2494, 599/2169, 126/427). The script averaged `sqrt(-cov)` over the
+**negative subset only**. ⚠ If the true covariance were zero with noise around
+it, keeping only the negative draws and averaging their square roots produces a
+**positive implied spread out of pure noise**. The discard rate is the tell, and
+the fix is to average the covariance across ALL series first and take the root
+once — not to root each and average.
+
+**Confound 2 — era mismatch.** `cost_model.BANDS` is calibrated on **modern**
+eToro spreads (p75, samples of 76-244). The research corpus runs 1962-2026, and
+**5,266,053 of 25,920,971 bars — 20.3% — predate decimalisation** (2001-04-09),
+when US equities traded in eighths and sixteenths. A 1/8 tick on a \$10 stock is
+**1.25%**, an order of magnitude above a modern spread. ⚠ So a large part of the
+"excess" may simply be that historical spreads were genuinely far wider than the
+band table says. **A 3x ratio is entirely consistent with comparing a
+1962-2026 autocovariance against a 2020s spread.**
+
+⚠ The `>=$100` band at **12.14x** is the row that should provoke most suspicion,
+not most excitement: expensive names have the *tightest* relative spreads, so
+that is the cell where the ratio should be smallest. It being the largest
+suggests the estimator is measuring something other than the spread there.
+
+> **Verdict: NOT SETTLED.** The honest statement is that short-horizon reversal
+> is *not obviously* pure bounce, and that our test cannot currently distinguish
+> "real reversal" from "wider historical spreads plus a biased estimator".
+>
+> **Two fixes, both cheap, before this claim is used for anything:** average the
+> covariance across all series before rooting (removes confound 1), and split the
+> corpus at **2001-04-09** (removes confound 2). If the post-decimalisation ratio
+> is still comfortably above 1, the finding stands.
+
+⚠ Recorded as inconclusive deliberately. The result came back in the direction
+that would justify the one strategy family our data still supports, and that is
+precisely when a test deserves the hardest look.
+
+## 2.11b Our cost model is right for a small account and silent about capacity
+
+`cost_model.BANDS` charges a **flat per-price-band half-spread** — `<$5` at
+1.450% round trip, `$5-20` at 0.571%, and so on. It is size-independent.
+
+⚠⚠ **Real market impact is not.** The empirical regularity is the **square-root
+law**: impact on a metaorder of size `Q` grows roughly as `sqrt(Q)` — strongly
+**concave**, so the marginal cost of the next share falls as the order grows.
+Almgren & Chriss decompose it into a **temporary** component (the cost of
+demanding liquidity, which reverts once you stop) and a **permanent** one (the
+lasting shift reflecting your trade's information). Later work argues the
+dependence is closer to logarithmic than square-root; the direction is not in
+dispute.
+
+**What that means for us, honestly, in both directions:**
+
+- ✅ **At small size a flat spread is a defensible approximation.** When you are
+  trading a few thousand pounds, you cross the spread and move nothing. Impact is
+  negligible and the spread genuinely is the cost. The model is fit for the
+  account it currently describes.
+- ⚠⚠ **It has NOTHING to say about capacity, and capacity is the question that
+  matters the moment a strategy works.** A flat cost model reports the same cost
+  at £1,000 and £10,000,000. It therefore **cannot tell us the size at which a
+  strategy stops working** — and it will never warn us, because the number does
+  not move.
+
+> **So the model can answer "does this edge exist at our current size" and cannot
+> answer "how much money can it hold". Those are different questions and only the
+> first is currently askable.**
+
+⚠ This is exactly the axis Frazzini/Israel/Moskowitz measure (*"capacity more
+than an order of magnitude larger than previous studies suggest"*, value and
+momentum most scalable) and Novy-Marx & Velikov measure (*"strategies based on
+size, value and profitability have the greatest capacity to support new
+capital"*). **Both papers rank strategies on a dimension our cost model cannot
+represent at all.**
+
+⚠ And note the interaction with §2.2: a flat percentage under-penalises exactly
+the illiquid microcaps where real impact is worst — the same names Hou/Xue/Zhang
+say are inflating our results. **Two independent reasons the sub-\$5 band is
+flattered, and a size-aware or Amihud-scaled cost model corrects both at once.**
+
 ## 2.12 Chart patterns — how to TEST one, which is the only interesting question
 
 Bull flags, cup-and-handle, Wyckoff accumulation, head-and-shoulders. The useful
