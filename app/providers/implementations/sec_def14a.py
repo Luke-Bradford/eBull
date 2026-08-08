@@ -163,9 +163,17 @@ _CELL_RE: Final[re.Pattern[str]] = re.compile(r"<(?:t[hd])\b([^>]*)>(.*?)</t[hd]
 _ANY_CELL_RE: Final[re.Pattern[str]] = re.compile(
     r"<t[hd]\b([^>]*?)/>|<t[hd]\b([^>]*)>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL
 )
-# A digit immediately left of the sign, as in ``5% Beneficial owners`` — the
-# shape that separates a threshold PHRASE from a percent CAPTION.
-_NUMBER_THEN_PERCENT_RE: Final[re.Pattern[str]] = re.compile(r"\d\s*%")
+# A QUANTITY immediately left of the sign, as in ``5% Beneficial owners`` — the
+# shape that separates a threshold PHRASE from a percent CAPTION. A caption names
+# a column and states no quantity ("Percent of Class", "% (2)"); a section label
+# binds the sign to the number on its left.
+#
+# Both the sign and the word, because the label is written both ways and only the
+# ``%`` half was covered at first: ``5 Percent Beneficial Owners`` and ``Ten
+# Percent Holders`` are the same label. The number words are the two the reg
+# actually produces — 17 CFR 229.403(a) is the 5% threshold and Section 16 is the
+# 10% one — so this is the source's vocabulary, not an open-ended list.
+_THRESHOLD_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"(?:\d|\bfive\b|\bten\b)\s*(?:%|percent\b)")
 _ROWSPAN_RE: Final[re.Pattern[str]] = re.compile(r"\browspan\s*=\s*[\"']?\s*(\d+)", re.IGNORECASE)
 _COLSPAN_RE: Final[re.Pattern[str]] = re.compile(r"\bcolspan\s*=\s*[\"']?\s*(\d+)", re.IGNORECASE)
 _HTML_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<[^>]+>")
@@ -1364,15 +1372,20 @@ def _is_percent_caption(text: str) -> bool:
         return False
     if any(keyword in lowered for keyword in _STRONG_SHARES_KEYWORDS):
         return False
-    if "percent" in lowered:
-        return True
-    if "%" not in lowered:
-        return False
     # ``5% Beneficial owners`` is Item 403(a)'s SECTION LABEL, not column 4's
-    # caption: there the sign binds to a number on its left. Admitting it made
+    # caption: there the sign binds to a QUANTITY on its left. Admitting it made
     # ExlService's own table look like it carried two different percent captions
     # and refused the very rows this ticket exists to recover.
-    return not _NUMBER_THEN_PERCENT_RE.search(lowered)
+    #
+    # The test runs FIRST, ahead of the plain ``percent`` match, and that order
+    # is the whole fix for the spelled-out spellings — ``5 Percent Beneficial
+    # Owners`` and ``Ten Percent Holders`` are the same section label with the
+    # sign written as a word, and a ``"percent" in lowered`` early return admits
+    # them. Codex caught it at checkpoint 2, after the ``%`` half was already
+    # fixed: the guard was written against the character, not the phenomenon.
+    if _THRESHOLD_LABEL_RE.search(lowered):
+        return False
+    return "percent" in lowered or "%" in lowered
 
 
 def _layout_name_key(text: str) -> str:
@@ -1400,7 +1413,9 @@ def _layout_percent_by_row(table_html: str) -> dict[str, Decimal]:
 
     * no caption row carrying a percent caption -> empty result;
     * a name key appearing on rows with DIFFERENT percent values -> that key is
-      dropped, since the prefix join cannot say which row is the holder's;
+      dropped, since the prefix join cannot say which row is the holder's. This
+      is also what makes keying the row's first TWO text cells safe: a repeated
+      ``Title of class`` label collides with itself and drops out;
     * a cell that ``_parse_percent`` rejects -> no entry.
     """
     rows = _layout_rows(table_html)
@@ -1452,17 +1467,30 @@ def _layout_percent_by_row(table_html: str) -> dict[str, Decimal]:
     found: dict[str, Decimal] = {}
     ambiguous: set[str] = set()
     for row in rows[header_index + 1 :]:
-        name_key = ""
+        # The FIRST TWO text cells, not the first — 17 CFR 229.403(a) prescribes
+        # column 1 "Title of class" ahead of column 2 "Name and address of
+        # beneficial owner", so on a table that renders column 1 the holder's
+        # name is the SECOND text cell and keying only the first files the
+        # percent under ``commonstock``. Caught by Codex at checkpoint 2 and
+        # reproduced: ``Common Stock | Acme Capital LLC | 1,000 | 7.7`` recovered
+        # nothing, because the lookup is by ``_layout_name_key(holder_name)``.
+        #
+        # Two is the reg's own bound, not a tuned constant, and registering the
+        # class label costs nothing: it is either never looked up, or it repeats
+        # across rows with different percents and the ambiguity guard below drops
+        # it — which is the same mechanism, not a second one.
+        name_keys: list[str] = []
         for column in sorted(row):
             text = row[column].strip()
             if not text or column in percent_columns:
                 continue
             if _NUMERIC_VALUE_CELL_RE.match(_FOOTNOTE_RE.sub("", text).strip()):
                 continue
-            name_key = _layout_name_key(text)
-            if name_key:
+            if (key := _layout_name_key(text)) and key not in name_keys:
+                name_keys.append(key)
+            if len(name_keys) == 2:
                 break
-        if not name_key:
+        if not name_keys:
             continue
         percent: Decimal | None = None
         for column in sorted(percent_columns):
@@ -1474,9 +1502,10 @@ def _layout_percent_by_row(table_html: str) -> dict[str, Decimal]:
                 break
         if percent is None:
             continue
-        if name_key in found and found[name_key] != percent:
-            ambiguous.add(name_key)
-        found[name_key] = percent
+        for name_key in name_keys:
+            if name_key in found and found[name_key] != percent:
+                ambiguous.add(name_key)
+            found[name_key] = percent
     for key in ambiguous:
         found.pop(key, None)
     return found

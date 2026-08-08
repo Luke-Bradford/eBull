@@ -3165,6 +3165,25 @@ class TestLayoutAttestedPercent:
         assert not _is_percent_caption("Owners of more than 5%")
         assert _is_percent_caption("% of Total Voting Power (1)")
 
+    def test_a_threshold_phrase_spelled_as_a_word_is_not_a_caption_either(self) -> None:
+        """Same label, sign written out. The first cut tested the CHARACTER, so a
+        ``"percent" in lowered`` early return admitted ``5 Percent Beneficial
+        Owners`` — and a table carrying that section label beside a real
+        ``Percent of Class`` header then reads as two distinct captions and
+        fails closed, losing the recovery it was meant to have. Codex caught it
+        at checkpoint 2.
+
+        The two number words are the reg's own: 229.403(a) is the 5% threshold,
+        Section 16 the 10% one."""
+        assert not _is_percent_caption("5 Percent Beneficial Owners")
+        assert not _is_percent_caption("Five Percent Holders")
+        assert not _is_percent_caption("Ten Percent Owners")
+        assert not _is_percent_caption("Beneficial owners of more than five percent")
+        # Still captions — no quantity binds to the sign.
+        assert _is_percent_caption("Percent of Class")
+        assert _is_percent_caption("Approximate Percent of Class")
+        assert _is_percent_caption("Percent of Class (5)")
+
     def test_two_distinct_percent_captions_attest_nothing(self) -> None:
         """Domo (0001505952-25-000062) renders
         ``Shares | % | Shares | % | % of Total Voting Power``, and its FIRST
@@ -3248,6 +3267,49 @@ class TestLayoutAttestedPercent:
         collected: list[Def14ABeneficialHolder] = []
         _extract_table_holders(table, rows=collected, seen=set())
         assert [h.percent_of_class for h in collected] == [Decimal("14.33"), Decimal("10.46")]
+
+    def test_a_leading_title_of_class_column_does_not_shadow_the_holder(self) -> None:
+        """17 CFR 229.403(a) prescribes column 1 ``Title of class`` AHEAD of
+        column 2 ``Name and address of beneficial owner``.
+
+        Keying the row on its FIRST text cell therefore files the percent under
+        ``commonstock`` on every table that renders column 1, and the lookup —
+        which is by ``_layout_name_key(holder_name)`` — never finds it. The
+        recovery is silently disabled for the reg's own table shape. Caught by
+        Codex at checkpoint 2, on this exact markup."""
+        titled = (
+            "<table>"
+            "<tr><td>Title of Class</td><td>Name of Beneficial Owner</td><td/>"
+            '<td colspan="2">Shares</td><td/><td colspan="2">Percent of Class</td></tr>'
+            "<tr><td>Common Stock</td><td>Acme Capital LLC</td><td/><td/><td>1,000</td>"
+            "<td/><td/><td>7.7</td></tr></table>"
+        )
+        attested = _layout_percent_by_row(titled)
+        assert attested[_layout_name_key("Acme Capital LLC")] == Decimal("7.7")
+        # The class label is registered too, and that is harmless by
+        # construction: nothing ever looks a holder up under it.
+        assert attested[_layout_name_key("Common Stock")] == Decimal("7.7")
+        parsed = parse_beneficial_ownership_table(_proxy_html(body=titled))
+        assert [(r.holder_name, r.percent_of_class) for r in parsed.rows] == [("Acme Capital LLC", Decimal("7.7"))]
+
+    def test_a_repeated_class_label_collides_with_itself_and_drops_out(self) -> None:
+        """The second key is safe because the ambiguity guard already covers it.
+
+        A multi-row table repeats ``Common Stock`` against different percents,
+        so the label is dropped exactly as a colliding holder name would be —
+        one mechanism, not a new one. The holders keep their own values."""
+        repeated = (
+            "<table>"
+            "<tr><td>Title of Class</td><td>Name of Beneficial Owner</td>"
+            '<td colspan="2">Percent of Class</td></tr>'
+            "<tr><td>Common Stock</td><td>Acme Capital LLC</td><td/><td>7.7</td></tr>"
+            "<tr><td>Common Stock</td><td>Beta Partners LP</td><td/><td>5.1</td></tr>"
+            "</table>"
+        )
+        assert _layout_percent_by_row(repeated) == {
+            _layout_name_key("Acme Capital LLC"): Decimal("7.7"),
+            _layout_name_key("Beta Partners LP"): Decimal("5.1"),
+        }
 
     def test_a_dual_class_table_attests_nothing(self) -> None:
         """229.403 column 4 appears TWICE on a dual-class table, once per class,

@@ -57,7 +57,14 @@ _PROBES: tuple[tuple[str, str, str, str], ...] = (
         "ambiguous name-prefix collisions are guessed instead of dropped",
         "    for key in ambiguous:\n        found.pop(key, None)",
         "    ambiguous.clear()",
-        "test_an_ambiguous_name_prefix_is_dropped_rather_than_guessed",
+        "test_an_ambiguous_name_prefix_is_dropped_rather_than_guessed"
+        " or test_a_repeated_class_label_collides_with_itself_and_drops_out",
+    ),
+    (
+        "the row is keyed on its FIRST text cell, so 229.403 column 1 shadows the holder",
+        "            if len(name_keys) == 2:\n                break",
+        "            if len(name_keys) == 1:\n                break",
+        "test_a_leading_title_of_class_column_does_not_shadow_the_holder",
     ),
     (
         "the rescue overwrites a percent another rescue already found",
@@ -89,9 +96,15 @@ _PROBES: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "a threshold phrase like '5% Beneficial owners' counts as a caption",
-        "    return not _NUMBER_THEN_PERCENT_RE.search(lowered)",
-        "    return True",
+        "    if _THRESHOLD_LABEL_RE.search(lowered):\n        return False",
+        "    pass",
         "test_a_threshold_phrase_is_not_a_column_caption or test_bare_percent_is_recovered_end_to_end",
+    ),
+    (
+        "the threshold guard tests only the SIGN, so '5 Percent Beneficial Owners' is a caption",
+        r"(?:\d|\bfive\b|\bten\b)\s*(?:%|percent\b)",
+        r"\d\s*%",
+        "test_a_threshold_phrase_spelled_as_a_word_is_not_a_caption_either",
     ),
     (
         "a percent equal to the row's own share count is accepted",
