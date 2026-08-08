@@ -133,27 +133,120 @@ methods are **momentum, liquidity and volatility**.
 
 ---
 
-## 2.8 ⚠⚠ The one structural fact that organises the whole catalogue
+## 2.8 ⚠⚠ The horizon term structure — MEASURED HERE, and it is NOT universal
 
-**The sign of return autocorrelation flips with horizon.** This is the closest
-thing to a law in the field, and every strategy family is a bet on one segment
-of it:
+The literature's organising fact: autocorrelation is negative at days, positive
+at 3-12 months, negative again at 3-5 years (Jegadeesh 1990; Jegadeesh & Titman
+1993; De Bondt & Thaler 1985).
 
-| horizon | sign | mechanism | source | ours |
-| --- | --- | --- | --- | --- |
-| 1 day – 1 month | **negative** (reversal) | liquidity provision, bid-ask bounce | Jegadeesh (1990) | s3 |
-| 3 – 12 months | **positive** (momentum) | underreaction, slow diffusion | Jegadeesh & Titman (1993) | s1, s2 |
-| 3 – 5 years | **negative** (reversal) | overreaction — this is what *value* is | De Bondt & Thaler (1985) | ⚠ **nothing** |
+⚠⚠ **This file asserted that curve from the literature. It was then measured on
+our own corpus and it is only PARTLY true — the sign at long horizons depends on
+price band.** Full population, 7,709 series, non-overlapping windows,
+`adj_close`, adjustment-distorted series excluded
+(`scripts/verify_2437_autocorrelation_term_structure.py`, 2026-08-08):
 
-Two consequences worth acting on:
+```text
+horizon        <$5        $5-20      $20-100      >=$100
+   1d       -0.1181     -0.1464     -0.0578     -0.0876     reversal everywhere
+   5d       -0.1023     -0.0723     -0.0537     -0.0583     reversal everywhere
+   1mo      -0.0420     -0.0327     -0.0274     -0.0024     reversal everywhere
+   3mo      -0.0171     -0.0033     -0.0094     +0.0703     flips
+   6mo      +0.0207     +0.0214     +0.0375     +0.1262     MOMENTUM everywhere
+   1y       -0.0546     -0.0364     +0.0177     +0.2479     SPLITS BY PRICE
+   3y       -0.1598     -0.1063     -0.0074     +0.1838     SPLITS BY PRICE
+```
 
-1. ⚠ **s1 and s3 sit on opposite sides of the curve.** One bets continuation,
-   the other reversal. Running both without conditioning means they take
-   opposing positions in the same name, and the sleeve pays costs on both.
-2. ⚠⚠ **We own nothing at the 3-5 year end** — which is the LOWEST-turnover
-   corner and therefore the one most likely to survive §2.1's filter, and the
-   one where our XBRL fundamentals are the right data rather than a bystander.
-   **The biggest gap in the catalogue is the horizon we have not tried.**
+**What survived:** short-horizon reversal (1d-1mo) in **every** band, and
+6-month momentum in **every** band. Those two are solid.
+
+**What did not:**
+
+1. ⚠⚠ **Momentum at 1 year exists ONLY in the higher price bands.** `+0.2479` at
+   `>=$100` against **−0.0546** at `<$5` — not weaker, *opposite sign*. In cheap
+   stocks there is **no momentum regime at any horizon**; they are reversal
+   throughout.
+2. ⚠ **Long-horizon reversal is not universal either.** At 3 years `>=$100`
+   shows **+0.1838 continuation**, the opposite of De Bondt & Thaler.
+
+> **This is an INDEPENDENT route to the same conclusion as §2.2**, and that is
+> what makes it load-bearing. Hou/Xue/Zhang say microcap results are artefacts of
+> construction. This says the *underlying return process itself differs by price
+> band*. Two unrelated arguments, one instruction: **momentum strategies must not
+> be run across the whole universe.** s1 and s2 currently are, and 24% of that
+> universe sits in the band where momentum has the wrong sign.
+
+### ⚠ What NOT to take from this table
+
+- **The t-statistics are not trustworthy and are omitted above deliberately.**
+  The raw run reports values up to `t −491`, which is an artefact: returns of
+  different series in the same period are cross-sectionally correlated, and this
+  pools them as if independent. The repo has been here before — `t` fell
+  **50.3 → 17.7 → 5.1** on one effect under exactly this correction. **The signs
+  and the relative magnitudes are the finding; the significance is not
+  established.** Day-clustered inference is the follow-up.
+- **The 1-day row is biased negative by construction.** Consecutive
+  non-overlapping blocks share a boundary print, so one bad close enters block A
+  positively and block B negatively. Treat 1d as the least trustworthy row.
+- **The band cut uses median adjusted close, which is a LEVEL** — and #2400 says
+  adjusted levels are distorted. Series with an implausible adjusted span are
+  excluded and counted, but the assignment is still imperfect. A market-cap cut
+  would be better and is what §7's redesigned test uses.
+- **3-year n is small** (1,256-10,846 pairs per band) relative to the shorter
+  horizons.
+
+### What it changes
+
+1. **s1 and s2 need a price or cap floor**, and the floor now has a measured
+   basis rather than a borrowed one.
+2. ⚠ **s1 and s3 sit on opposite sides of the curve** — one bets continuation,
+   the other reversal, and in the `<$20` bands s3 is on the right side of the
+   measurement while s1 is on the wrong one.
+3. ⚠⚠ **We own nothing at the 3-5 year end**, which is the lowest-turnover corner
+   and the one most likely to survive §2.1. But note the measurement: long-horizon
+   reversal is present in cheap names and *absent* in expensive ones, so a value
+   strategy here would be a small-cap strategy — colliding directly with §2.2.
+   **That tension is unresolved and should be resolved by measurement, not by
+   picking whichever paper agrees with us.**
+
+## 2.8b ⚠⚠ Momentum crashes — forecastable, and the state is COMPUTABLE HERE
+
+**Daniel & Moskowitz, "Momentum Crashes", *JFE* (2016).** Momentum carries huge
+tail risk: *"short but persistent periods of highly negative returns"*. The
+crashes are **partly forecastable** — they occur in **"panic" states, following
+market declines and when volatility is high, contemporaneous with market
+rebounds**.
+
+⚠⚠ **14 of the 15 worst momentum returns occurred when the past two-year market
+return was NEGATIVE and the contemporaneous market return was POSITIVE.** A
+dynamic strategy scaling exposure on forecasts of momentum's mean and variance
+*"approximately doubles the alpha and Sharpe ratio"* of static momentum.
+
+**VERIFIED ON OUR OWN DATA, 2026-08-08** — the state is computable from SPY
+(series 7694) with nothing new ingested:
+
+```text
+SPY monthly observations with a 2-year lookback   357   (1995-01 .. 2024-09)
+PANIC states (2y return < 0 AND 1m return > 0)     28   (7.8% of months)
+clustered in                                       2001, 2002, 2003, 2008, 2009, 2010
+```
+
+⚠ **That clustering is the validation.** The state is rare, and it lands exactly
+on the dot-com bust, the GFC and their rebounds — the periods when momentum
+historically crashed (March 2009 being the canonical case). A condition invented
+by data-mining would not concentrate itself on precisely the episodes the theory
+names. Reproduce with `scripts/` or the CTE in this section's git history.
+
+> **This is a better-targeted gate than generic volatility conditioning**, and it
+> applies to the two strategies we most want to keep. It is a *two-condition
+> state*, not a threshold, and it fires in under 8% of months — so it costs
+> almost nothing in normal times.
+
+⚠ Three papers now converge on the same instruction for momentum specifically:
+Moreira-Muir (scale by inverse variance), Cederburg et al. (vol management works
+*for momentum*), Daniel-Moskowitz (dynamic scaling doubles Sharpe). ⚠ Coverage
+caveat: SPY stops **2024-09-27** while the corpus runs to 2026-07-08, so the
+state is unavailable for the last ~21 months and must be **fail-closed**, not
+carried forward.
 
 ## 2.9 Most measures are redundant — Green, Hand & Zhang (2017)
 
