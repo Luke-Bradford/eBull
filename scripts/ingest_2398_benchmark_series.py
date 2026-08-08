@@ -99,7 +99,7 @@ def _read(symbol: str) -> list[tuple[date, Decimal, Decimal, Decimal, Decimal, i
             if c <= 0 or adj <= 0:
                 continue
             try:
-                volume = int(float(row[5]))
+                volume = int(row[5])
             except ValueError:
                 continue
             out.append((bar_date, o, h, low, c, volume, adj))
@@ -127,7 +127,8 @@ def load(conn: psycopg.Connection[Any]) -> int:
             """,
             (VENDOR, symbol, UPSTREAM_SOURCE, LICENCE, ADJUSTMENT_BASIS, rows[0][0], rows[-1][0], len(rows)),
         ).fetchone()
-        assert series_id is not None
+        if series_id is None:
+            raise RuntimeError(f"{symbol}: series upsert returned no series_id")
         sid = int(series_id[0])
         with conn.cursor() as cur:
             cur.executemany(
@@ -182,7 +183,8 @@ def verify(conn: psycopg.Connection[Any]) -> int:
         """,
         (VENDOR,),
     ).fetchone()
-    assert bad is not None
+    if bad is None:
+        raise RuntimeError("adjustment check returned no row")
     if bad[0] or bad[1]:
         print(f"FAIL: latest_factor!=1 on {bad[0]} series; factor>1 on {bad[1]} bars")
         failures += 1
