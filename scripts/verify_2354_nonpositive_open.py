@@ -82,7 +82,13 @@ _IDENTITY = StrategyIdentity(
 #: The predicate the loader and the writer both apply, as SQL. ⚠ ``<= 0`` and
 #: ``IS NULL``, matching ``rule_b1``'s clause — not ``= 0``, which is what the
 #: corpus happens to hold today.
-_UNUSABLE = "(open IS NULL OR open <= 0)"
+#:
+#: ⚠ [review NITPICK] Written out qualified, not derived by string-replacing
+#: ``open`` into ``d.open``. That trick reads as a way to keep one source for the
+#: predicate and is not one — it rewrites every occurrence of the substring,
+#: so adding ``open_interest`` or a comment containing the word to this constant
+#: would silently corrupt the WHERE clause of both queries at once.
+_UNUSABLE = "(d.open IS NULL OR d.open <= 0)"
 
 _RESEARCH_CENSUS = f"""
     SELECT d.series_id,
@@ -95,7 +101,7 @@ _RESEARCH_CENSUS = f"""
       LEFT JOIN research_bar_quarantine q
              ON q.series_id = d.series_id
             AND q.bar_date  = d.bar_date
-     WHERE {_UNUSABLE.replace("open", "d.open")}
+     WHERE {_UNUSABLE}
      ORDER BY d.series_id, d.bar_date
 """
 
@@ -110,7 +116,7 @@ _VENUE_CENSUS = f"""
       LEFT JOIN price_bar_quarantine q
              ON q.instrument_id = d.instrument_id
             AND q.price_date    = d.price_date
-     WHERE {_UNUSABLE.replace("open", "d.open")}
+     WHERE {_UNUSABLE}
      ORDER BY d.instrument_id, d.price_date
 """
 
