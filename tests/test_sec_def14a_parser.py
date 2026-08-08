@@ -3311,6 +3311,30 @@ class TestLayoutAttestedPercent:
             _layout_name_key("Beta Partners LP"): Decimal("5.1"),
         }
 
+    def test_a_digit_beside_an_asterisk_states_a_threshold_not_a_holding(self) -> None:
+        """``1*`` against a ``* Less than 1.0%`` legend is the ISSUER writing
+        "under one percent" — the digit is the threshold.
+
+        ``_parse_percent`` strips a trailing footnote marker, so ``1*`` reads as
+        a flat ``1``: a figure the filing does not state, and one the parser's
+        own convention for that meaning writes as ``0.5``. Found by the
+        gain-side arm on 0001437749-25-025111, where seven holders would have
+        stored it.
+
+        A BARE ``*`` is unambiguous and stays accepted — that is the settled
+        convention, and declining it would drop percents the parser gets right
+        today (Campbell Soup 0001308179-25-000618 recovers thirteen)."""
+        threshold = (
+            '<table><tr><td>Name of Beneficial Owner</td><td colspan="2">Percentage of Shares</td></tr>'
+            "<tr><td>David Wheadon, M.D.</td><td/><td>1*</td></tr>"
+            "<tr><td>Andrei Floroiu</td><td/><td>1.4</td></tr>"
+            "<tr><td>Fabiola R. Arredondo</td><td/><td>*</td></tr></table>"
+        )
+        assert _layout_percent_by_row(threshold) == {
+            _layout_name_key("Andrei Floroiu"): Decimal("1.4"),
+            _layout_name_key("Fabiola R. Arredondo"): Decimal("0.5"),
+        }
+
     def test_a_dual_class_table_attests_nothing(self) -> None:
         """229.403 column 4 appears TWICE on a dual-class table, once per class,
         and this helper cannot tell which class the extractor's share count came

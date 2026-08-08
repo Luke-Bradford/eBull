@@ -1416,6 +1416,8 @@ def _layout_percent_by_row(table_html: str) -> dict[str, Decimal]:
       dropped, since the prefix join cannot say which row is the holder's. This
       is also what makes keying the row's first TWO text cells safe: a repeated
       ``Title of class`` label collides with itself and drops out;
+    * a cell mixing a DIGIT with an asterisk -> declined, because ``1*`` against
+      a ``* Less than 1.0%`` legend states a THRESHOLD, not a holding;
     * a cell that ``_parse_percent`` rejects -> no entry.
     """
     rows = _layout_rows(table_html)
@@ -1497,6 +1499,26 @@ def _layout_percent_by_row(table_html: str) -> dict[str, Decimal]:
             text = row.get(column, "").strip()
             if not text:
                 continue
+            # A DIGIT beside an ASTERISK is the issuer writing "less than N%",
+            # where the digit is the THRESHOLD and not the holding. Declined
+            # outright, because ``_parse_percent`` strips a trailing footnote
+            # marker and would read the threshold as the value.
+            #
+            # Found by the gain-side arm, not by reasoning: on
+            # 0001437749-25-025111 the percent column renders ``1*`` against a
+            # ``* Less than 1.0%`` legend, and seven holders would have stored a
+            # flat 1 — a figure the filing does not state, and one the parser's
+            # own settled convention for that meaning writes as 0.5 (a BARE
+            # ``*``, which is unambiguous and is still accepted; Campbell Soup
+            # 0001308179-25-000618 recovers thirteen of them correctly).
+            #
+            # ``5.2*`` — a real value carrying a footnote marker — is declined
+            # by the same rule, and that is the intended trade: the two readings
+            # are indistinguishable from the cell alone, and a null is
+            # recoverable from the filing where a wrong percent is not.
+            if "*" in text and any(character.isdigit() for character in text):
+                percent = None
+                break
             percent = _parse_percent(text)
             if percent is not None:
                 break

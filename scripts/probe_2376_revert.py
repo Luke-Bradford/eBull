@@ -107,6 +107,14 @@ _PROBES: tuple[tuple[str, str, str, str], ...] = (
         "test_a_threshold_phrase_spelled_as_a_word_is_not_a_caption_either",
     ),
     (
+        "a '1*' threshold cell is read as a flat 1 instead of being declined",
+        '            if "*" in text and any(character.isdigit() for character in text):\n'
+        "                percent = None\n"
+        "                break",
+        "            pass",
+        "test_a_digit_beside_an_asterisk_states_a_threshold_not_a_holding",
+    ),
+    (
         "a percent equal to the row's own share count is accepted",
         "            if percent is not None and shares is not None and percent == shares:\n"
         "                percent = None",
