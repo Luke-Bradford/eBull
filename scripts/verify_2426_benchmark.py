@@ -283,18 +283,83 @@ def emit_version_map() -> int:
     return 0
 
 
+def profile() -> int:
+    """Which term dominates ``build_buy_and_hold_curve``? Counted, not argued.
+
+    ⚠ Answers the #2428 review NITPICK, which read the two
+    ``[leg for leg in open_legs if leg not in done]`` filters as the hot loop.
+    They are not: the mark-and-value loop is ``sum(open_count)`` — one iteration
+    per open position per day — while the filters run ONLY on a date where
+    something closes. This arm reports the split so the claim is re-measurable
+    rather than a number rotting in a docstring.
+
+    ⚠ Synthetic book at full-corpus SHAPE (5,266 legs over a 16,236-date axis),
+    not the corpus itself: the question is about the algorithm, and this arm must
+    not need a 300-second database read to answer it. Seeded, so it repeats.
+    """
+    import random
+
+    dates, legs = 16236, 5266
+    random.seed(20260808)
+    book = LegBook()
+    for _ in range(legs):
+        entry = random.randint(0, dates - 2)
+        exit_ = random.randint(entry + 1, dates - 1)
+        span = exit_ - entry + 1
+        book.add(
+            entry_index=entry,
+            exit_index=exit_,
+            entry_price=10.0,
+            exit_price=12.0,
+            half_spread=0.001,
+            realised=True,
+            marks=[10.0 + i * 0.0001 for i in range(span)],
+        )
+
+    started = time.monotonic()
+    curve = build_buy_and_hold_curve(book, date_count=dates)
+    elapsed = time.monotonic() - started
+
+    opens = [0] * dates
+    closes = [0] * dates
+    for leg in range(len(book)):
+        opens[book.entry_index[leg]] += 1
+        closes[book.exit_index[leg]] += 1
+    filter_iterations = 0
+    open_now = 0
+    for day in range(dates):
+        open_now += opens[day]
+        if closes[day]:
+            filter_iterations += open_now
+        open_now -= closes[day]
+    mark_iterations = int(curve.open_count.sum())
+    total = mark_iterations + filter_iterations
+
+    print(f"legs {legs:,}  dates {dates:,}  build {elapsed:.2f}s")
+    print(f"  mark/valuation loop iterations : {mark_iterations:>12,}")
+    print(f"  open_legs filter iterations    : {filter_iterations:>12,}")
+    print(f"  filter share of the two        : {filter_iterations / total * 100:>11.1f}%")
+    if filter_iterations >= mark_iterations:
+        print("  !! the filter is now the dominant term — the docstring's cost note is stale")
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compositions", action="store_true", help="A/B/C over the full population")
     parser.add_argument("--emit-version-map", action="store_true", help="re-derive the stored result versions")
+    parser.add_argument("--profile", action="store_true", help="which loop dominates the buy-and-hold curve")
     args = parser.parse_args()
-    if not (args.compositions or args.emit_version_map):
-        parser.error("pick an arm: --compositions or --emit-version-map")
+    if not (args.compositions or args.emit_version_map or args.profile):
+        parser.error("pick an arm: --compositions, --emit-version-map or --profile")
     status = 0
     if args.compositions:
         status |= compositions()
     if args.emit_version_map:
         status |= emit_version_map()
+    if args.profile:
+        status |= profile()
     return status
 
 

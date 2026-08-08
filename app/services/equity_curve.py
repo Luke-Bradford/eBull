@@ -541,6 +541,17 @@ def build_buy_and_hold_curve(
     which is why it carries a cash cap and a short-funded counter and this does
     not.
 
+    ⚠ COST SHAPE, because the ``leg not in done`` filters look worse than they
+    measure. The dominant term is the per-day mark-and-value loop, which is
+    ``sum(open_count)`` — one iteration per open position per day, and that is
+    simply what marking a portfolio daily IS. The filters run only on a date
+    where something closes, so they are bounded by the open set on closing dates
+    alone. At full-corpus shape they are the minority term by roughly four to
+    one. ⚠ Re-measure rather than trusting that ratio, which is a property of
+    the corpus and moves with it::
+
+        PYTHONPATH=. uv run python scripts/verify_2426_benchmark.py --profile
+
     ⚠ REFUSES AN UNREALISED LEG. ``_benchmark_book`` closes every leg at its last
     usable bar and marks all of them ``realised``, so an unrealised one means the
     caller built the book some other way. The strategy engine handles that case
