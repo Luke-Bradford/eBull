@@ -30,6 +30,7 @@ from app.services.random_entry_cohort import (
     SPEC_SHARPE_PERCENTILE,
     MemberOutcome,
     SyntheticControl,
+    cohort_threshold,
     evaluate_control,
     match_residual,
     member_seed,
@@ -356,6 +357,31 @@ class TestEvaluateControl:
         assert control.cohort_size == 101
         assert math.isclose(control.cohort_sharpe_threshold, 0.95, abs_tol=1e-9)
         assert control.sharpe_exceeds_cohort is True
+
+    def test_the_threshold_is_an_order_statistic_and_not_an_interpolation(self) -> None:
+        """⚠⚠ NumPy's DEFAULT would fail this. Linear interpolation on the
+        ``(n-1)`` grid puts the 95th percentile of a 1,000-member cohort at
+        950.05 — between the 950th and 951st members, a value no member
+        achieved — and §9 asks a strategy to exceed the cohort's percentile,
+        not a number sitting in the gap between two of its draws.
+
+        Caught at Codex checkpoint 2: this module's header declared the 950th
+        order statistic and the code interpolated."""
+        values = np.arange(1.0, 1001.0)
+        assert cohort_threshold(values, percentile=95.0) == 950.0
+        assert float(np.percentile(values, 95.0)) != 950.0
+
+    def test_the_threshold_is_always_a_value_some_member_produced(self) -> None:
+        """The property that makes the choice above checkable without restating
+        the estimator: a null distribution's cut is one of its own draws."""
+        rng = np.random.default_rng(9)
+        for size in (7, 50, 101, 1000):
+            values = rng.normal(size=size)
+            assert cohort_threshold(values, percentile=95.0) in set(values.tolist())
+
+    def test_an_empty_cohort_has_no_threshold(self) -> None:
+        with pytest.raises(ValueError, match="empty null distribution"):
+            cohort_threshold(np.empty(0, dtype=np.float64), percentile=95.0)
 
     def test_a_duplicated_member_is_refused(self) -> None:
         """⚠ One draw counted twice NARROWS the null distribution it is supposed

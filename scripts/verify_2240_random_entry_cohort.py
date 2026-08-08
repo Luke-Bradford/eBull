@@ -548,8 +548,23 @@ def _absorb_series(
 # ---------------------------------------------------------------------------
 
 
-def cohort(*, cache_root: Path, label: str, first: int, last: int) -> int:
-    """Members ``[first, last)`` of ``label``'s cohort, off the cache."""
+def cohort(*, cache_root: Path, label: str, first: int, last: int, zero_cost: bool = False) -> int:
+    """Members ``[first, last)`` of ``label``'s cohort, off the cache.
+
+    ⚠⚠ ``zero_cost`` IS A DIAGNOSTIC ABLATION AND IS NOT AN ARM OF §9. It reruns
+    the identical placement — same seeds, same entries, same holds — with the
+    half-spread set to zero on both fill sides and on the rebalance, and writes
+    to an ``ablation_`` shard that ``--report``'s ``members_`` glob cannot pick
+    up. It exists to answer ONE question that §9.2 must not assert without
+    measuring: is the cohort's catastrophic mean net return the COST MODEL, or
+    something else (universe drift, a placement bug, the sizing rule, a mispriced
+    exit)? A cost-free rerun that lands near zero says the first; one that is
+    still catastrophic says the diagnosis was wrong. (Codex checkpoint 1 on §9.2:
+    *"the measured −99.59% is not proven to be the cost model doing its job"*.)
+
+    ⚠ Its output MUST NOT be quoted as a §9 figure. A zero-cost backtest violates
+    criterion 2 outright.
+    """
     started = time.monotonic()
     cache = _Cache(cache_root)
     meta = cache.read_meta()
@@ -582,7 +597,8 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int) -> int:
     series_count = int(t_offset.size) - 1
     expected_trades = int(holds_offset[-1])
 
-    print(f"\n[cohort] {label}   members {first}…{last - 1}   {COHORT_MODEL_ID}", flush=True)
+    arm = "  ⚠ ZERO-COST ABLATION — a diagnostic, NOT a §9 figure" if zero_cost else ""
+    print(f"\n[cohort] {label}   members {first}…{last - 1}   {COHORT_MODEL_ID}{arm}", flush=True)
     print(f"         series {series_count:,}   axis {len(axis):,}   holds {expected_trades:,}", flush=True)
     print(f"         root seed {meta['cohort_root_seed']}   cost model {meta['cost_model_id']}", flush=True)
 
@@ -604,6 +620,10 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int) -> int:
             entry_slot = base + entries
             exit_slot = entry_slot + permuted
             spreads = np.asarray(t_half[entry_slot], dtype=np.float64)
+            if zero_cost:
+                # ⚠ Zeroed AFTER the lookup, not by skipping it, so the ablation
+                # walks the identical code path and differs in the value alone.
+                spreads = np.zeros_like(spreads)
             entry_net = net_entry_prices(np.asarray(t_open[entry_slot], dtype=np.float64), spreads)
             exit_net = net_exit_prices(np.asarray(t_open[exit_slot], dtype=np.float64), spreads)
             entry_panel = np.asarray(t_panel[entry_slot], dtype=np.int64)
@@ -660,7 +680,8 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int) -> int:
             flush=True,
         )
 
-    shard = cache_root / f"members_{key}_{first:04d}_{last:04d}.npz"
+    prefix = "ablation" if zero_cost else "members"
+    shard = cache_root / f"{prefix}_{key}_{first:04d}_{last:04d}.npz"
     np.savez(
         shard,
         index=np.asarray([member.index for member in results], dtype=np.int64),
@@ -866,6 +887,54 @@ def report(*, cache_root: Path) -> int:
         print(f"      strategy return        {control.strategy_return_pct:>16,.4f}%")
         print(f"        exceeds cohort       {str(control.return_exceeds_cohort):>16}   ⚠ reported, does NOT gate")
         print(f"      §9 VERDICT             {str(control.passed):>16}")
+        # ⚠⚠ THE EMPIRICAL p-VALUE, and it is reported because a p95 PASS/FAIL
+        # throws away the resolution the 1,000 members bought. The conventional
+        # Monte-Carlo form counts the observed value in its own null —
+        # `(1 + #{null >= observed}) / (N + 1)` — so it can never be zero, and
+        # its floor at N = 1,000 is 1/1001 = 0.000999. A run printing "0 of
+        # 1,000 members reach it" without that floor invites "p = 0", which no
+        # finite cohort can support. (Codex checkpoint 1 on §9.2.)
+        sharpes = np.asarray([member.sharpe for member in members], dtype=np.float64)
+        returns = np.asarray([member.total_return_pct for member in members], dtype=np.float64)
+        at_or_above_sharpe = int((sharpes >= control.strategy_sharpe).sum())
+        at_or_above_return = int((returns >= control.strategy_return_pct).sum())
+        n = len(members)
+        print(
+            f"      members >= sharpe      {at_or_above_sharpe:>16,}   of {n:,}   "
+            f"empirical p {(1 + at_or_above_sharpe) / (n + 1):.6f}   (floor {1 / (n + 1):.6f})"
+        )
+        print(
+            f"      members >= return      {at_or_above_return:>16,}   of {n:,}   "
+            f"empirical p {(1 + at_or_above_return) / (n + 1):.6f}"
+        )
+        # ⚠ The zero-cost ABLATION, if one was run. Diagnostic only: it answers
+        # "is the cohort's mean the cost model or something else", and it is
+        # never a §9 figure — a zero-cost backtest violates criterion 2 outright.
+        ablation_returns: list[float] = []
+        ablation_exposure: list[float] = []
+        ablation_sharpe: list[float] = []
+        for shard in sorted(cache_root.glob(f"ablation_{key}_*.npz")):
+            with np.load(shard) as data:
+                ablation_returns.extend(float(value) for value in data["total_return_pct"])
+                ablation_exposure.extend(float(value) for value in data["exposure_time_pct"])
+                ablation_sharpe.extend(float(value) for value in data["sharpe"])
+        if ablation_returns:
+            print(
+                f"      [ablation h=0]  mean return {float(np.mean(ablation_returns)):>16,.4f}%   "
+                f"mean sharpe {float(np.mean(ablation_sharpe)):.4f}   "
+                f"mean exposure {float(np.mean(ablation_exposure)):.2f}%   over {len(ablation_returns):,} members"
+            )
+            # ⚠⚠ THE EXPOSURE LINE IS WHY THE ABLATION CARRIES MORE THAN THE
+            # RETURN. The costed cohort's exposure sits far below the strategy's,
+            # and the obvious reading — "the permutation failed to reproduce the
+            # strategy's concurrency" — is testable: the SAME placements with the
+            # half-spread zeroed hold their capital at work. If the ablation's
+            # exposure is at or above the strategy's, the gap is the cohort's
+            # RUIN (an equity path collapsing toward zero carries no capital),
+            # not a mis-specified null.
+            print(
+                "      ⚠ DIAGNOSTIC ONLY — a zero-cost backtest violates criterion 2 outright and is never a §9 figure"
+            )
         # R6 — the verdict is a RESULT. §10: "the most likely outcome of stage 5e
         # … is that some or all of them fail the random-cohort threshold. That is
         # a result, not a failure of the phase." So it prints and does not gate.
@@ -880,6 +949,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare", action="store_true", help="one corpus sweep; writes the cohort cache")
     parser.add_argument("--cohort", action="store_true", help="run a slice of members off the cache")
+    parser.add_argument(
+        "--zero-cost",
+        action="store_true",
+        help="DIAGNOSTIC: rerun the same placement with the half-spread zeroed. Never a §9 figure.",
+    )
     parser.add_argument("--properties", action="store_true", help="R2/R3/R4/R7 on one member, over every series")
     parser.add_argument("--report", action="store_true", help="aggregate the shards and evaluate §9")
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
@@ -896,7 +970,13 @@ def main() -> int:
         status |= prepare(cache_root=args.cache, limit=args.limit)
     if args.cohort:
         first, _, last = args.members.partition(":")
-        status |= cohort(cache_root=args.cache, label=args.strategy, first=int(first), last=int(last))
+        status |= cohort(
+            cache_root=args.cache,
+            label=args.strategy,
+            first=int(first),
+            last=int(last),
+            zero_cost=args.zero_cost,
+        )
     if args.properties:
         status |= properties(cache_root=args.cache, label=args.strategy, index=args.member)
     if args.report:

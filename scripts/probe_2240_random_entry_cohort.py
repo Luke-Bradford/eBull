@@ -252,6 +252,24 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_two_members_draw_different_placements",
     ),
     (
+        # ⚠⚠ THE COHORT CUT INTERPOLATED. NumPy's default puts the 95th
+        # percentile of a 1,000-member cohort BETWEEN the 950th and 951st sorted
+        # members — a value no member achieved — so a strategy that beat every
+        # draw at or below the declared rank is refused against a number the null
+        # never produced. This is the defect Codex found at checkpoint 2: the
+        # module's own header declared the order statistic and the code did not.
+        "the cohort percentile interpolated between two members",
+        COHORT,
+        TESTS,
+        [
+            (
+                '    return float(np.percentile(values, percentile, method="inverted_cdf"))',
+                "    return float(np.percentile(values, percentile))",
+            )
+        ],
+        "test_the_threshold_is_an_order_statistic_and_not_an_interpolation",
+    ),
+    (
         # ⚠ THE INTERVAL COLLAPSED TO ONE TAIL. Both ends read the LOW
         # percentile, so the reported interval sits entirely below the mean —
         # and "contains zero" then answers a question about the lower tail

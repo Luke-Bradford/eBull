@@ -332,6 +332,38 @@ def percentile_bootstrap_mean(
     return float(values.mean()), float(low), float(high)
 
 
+def cohort_threshold(values: npt.NDArray[np.float64], *, percentile: float) -> float:
+    """The cohort's ``percentile`` as an ORDER STATISTIC, never an interpolation.
+
+    ⚠⚠ ``method="inverted_cdf"`` AND NOT NUMPY'S DEFAULT, and the difference is
+    a decision, not a rounding. NumPy's default is linear interpolation on the
+    ``(n-1)`` grid, which for a 1,000-member cohort puts the 95th percentile
+    between the **950th and 951st** sorted members — a value **no member
+    achieved**. §9 asks a real strategy to exceed *"the 95th percentile of the
+    random cohort's"* Sharpe, and a cut that sits between two draws refuses a
+    strategy that beat every draw at or below the declared rank, for a value the
+    null never produced.
+
+    ``inverted_cdf`` is the empirical-CDF inverse — Hyndman & Fan (1996) type 1,
+    the nearest-rank definition — so at ``n = 1000`` and 95% the threshold is
+    exactly the 950th order statistic, which is what this module's header claims
+    and what a permutation test's *"at most 5% of the null lies strictly
+    above"* means. (Caught at Codex checkpoint 2; the code and its own docstring
+    disagreed.)
+
+    ⚠ THE BOOTSTRAP INTERVAL DELIBERATELY DOES **NOT** MOVE WITH THIS.
+    ``percentile_bootstrap_mean`` keeps NumPy's default, matching stage 5e-2's
+    shipped ``BOOTSTRAP_MODEL_ID`` convention: the two are different quantities —
+    an interval estimator over bootstrap replications (Efron & Tibshirani ch. 13,
+    where interpolation is standard) against a decision cut over a finite cohort
+    of strategies — and silently re-estimating 5e-2's intervals from here would
+    change a shipped number for a reason that has nothing to do with it.
+    """
+    if values.size == 0:
+        raise ValueError("no cohort members: an empty null distribution has no percentile")
+    return float(np.percentile(values, percentile, method="inverted_cdf"))
+
+
 @dataclass(frozen=True)
 class SyntheticControl:
     """§9's synthetic control for ONE strategy, as it is stored and gated on.
@@ -427,9 +459,9 @@ def evaluate_control(
         mean_return_ci_low_pct=low,
         mean_return_ci_high_pct=high,
         sharpe_percentile=percentile,
-        cohort_sharpe_threshold=float(np.percentile(sharpes, percentile)),
+        cohort_sharpe_threshold=cohort_threshold(sharpes, percentile=percentile),
         strategy_sharpe=strategy_sharpe,
-        cohort_return_threshold_pct=float(np.percentile(returns, percentile)),
+        cohort_return_threshold_pct=cohort_threshold(returns, percentile=percentile),
         strategy_return_pct=strategy_return_pct,
     )
 
@@ -464,6 +496,7 @@ __all__ = [
     "MatchResidual",
     "MemberOutcome",
     "SyntheticControl",
+    "cohort_threshold",
     "decimal_net_prices",
     "evaluate_control",
     "match_residual",
