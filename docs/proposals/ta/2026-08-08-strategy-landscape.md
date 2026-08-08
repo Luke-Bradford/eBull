@@ -256,3 +256,135 @@ alone cannot tell us.
 ⚠ One measurement, three strategies, four arms, no new data — and it decides
 whether the next months go on new signals or on re-basing the measurement of the
 ones we have. **That is the next thing to run.**
+
+---
+
+## 8. The evidence review — six papers that change what we should build
+
+Added after the operator asked for a real study rather than three searches. Each
+entry is here because it **changes a decision**, not because it is famous.
+
+### 8.1 Volatility scaling works — but only on some families, and the field is split
+
+**Moreira & Muir, "Volatility-Managed Portfolios", *Journal of Finance* 72(4)
+(2017), 1611-1644.** Scale portfolio weight by the **inverse of last month's
+realised daily return variance**. Result: *"large alphas, increase Sharpe ratios,
+and produce large utility gains"* across market, value, momentum, profitability,
+ROE, investment, betting-against-beta and currency carry. Mechanism: **changes
+in volatility are not offset by proportional changes in expected return.**
+
+⚠⚠ **And the direct rebuttal, which matters more than the original for us.**
+**Cederburg, O'Doherty, Wang & Yan, "On the performance of volatility-managed
+portfolios", *JFE* 138(1) (2020), 95-117** — 103 equity strategies:
+volatility-managed portfolios *"do not systematically outperform their
+corresponding unmanaged portfolios in direct comparisons."* The spanning-
+regression alphas are **not implementable in real time**, and real out-of-sample
+versions *"generally earn lower certainty equivalent returns and Sharpe ratios"*.
+Cause: structural instability in the spanning regressions.
+
+**But the exception is precisely our case:** volatility management **does** add
+value for **momentum (in particular), profitability and BAB**, and not for the
+other six factors tested.
+
+> **Decision:** build `inverse_vol_v1` and expect it to help **S-1 and S-2**
+> (momentum) and **not S-3**. ⚠ That is a *pre-registered directional
+> prediction*, which makes the four-arm test of §7 sharper — if inverse-vol
+> helps S-3 most, the literature says be suspicious of the result rather than
+> pleased with it.
+
+### 8.2 The honest significance bar is t > 3.0, and almost nothing clears it
+
+**Harvey, Liu & Zhu, "…and the Cross-Section of Expected Returns", *RFS* (2016).**
+Catalogues **316 factors across 313 articles** and, allowing for multiple
+testing, correlation among tests and publication bias, concludes a new factor
+needs **t > 3.0**. At that hurdle **only nine of 313 survive.**
+
+⚠ The debate is **not settled** — Chen, *"Most claimed statistical findings in
+cross-sectional return predictability are likely true"* argues the opposite from
+the same literature. Both are worth reading; the asymmetry of consequences is
+what decides our posture, and the cost of believing a false edge with real money
+is higher than the cost of missing a true one.
+
+> **Decision:** our deflated-Sharpe machinery is the right shape, but the bar
+> should be calibrated to a **t > 3.0 equivalent**, not 1.96. Combined with the
+> trial table (1,000 trials → 0.1738), this is the arithmetic that says *build
+> fewer, better-motivated strategies*.
+
+### 8.3 Real trading costs are far lower than academia claims — except for reversal
+
+**Frazzini, Israel & Moskowitz, "Trading Costs of Asset Pricing Anomalies"** —
+nearly **\$1 trillion of live trading data**, 19 developed markets, 1998-2011.
+Actual costs are *"less than a tenth as large as previous studies suggest"*, so
+capacity is *"more than an order of magnitude larger"*. Value and momentum are
+**more scalable** than size. ⚠⚠ **"Short-term reversals are the most constrained
+by trading costs."**
+
+> **Decision, and it is the second independent indictment of S-3.** §1 said our
+> microcap equal-weight construction inflates it; this says its *family* is the
+> one costs kill first. S-3 runs `turnover_annualised ≈ 40/yr` with a −99.6%
+> drawdown. ⚠ Note the direction of the caveat: their costs are low because they
+> are an institution with excellent execution — **ours are worse, not better**,
+> so the constraint binds harder on us than on them.
+
+### 8.4 Machine learning genuinely helps, and it points at conditioning
+
+**Gu, Kelly & Xiu, "Empirical Asset Pricing via Machine Learning", *RFS* 33(5)
+(2020), 2223-2273.** Trees and neural networks are the best performers, *"in
+some cases doubling the performance of leading regression-based strategies"*. A
+neural-network portfolio reaches an out-of-sample Sharpe of **0.77 against 0.51
+for buy-and-hold**; a long-short decile spread on NN predictions reaches **1.35
+value-weighted / 1.45 equal-weighted**.
+
+Two details matter more than the headline:
+
+1. *"Their predictive gains come from allowing **nonlinear predictor
+   interactions** missed by other methods."* ⚠ That is precisely the
+   conditioning study — an interaction between signal and regime is exactly what
+   a cell in §3 is.
+2. *"All methods agree on the same set of dominant predictive signals… variations
+   on **momentum, liquidity, and volatility**."* We hold all three.
+
+> **Decision:** do **not** reach for ML yet — it multiplies the trial count and
+> we have not fixed the measurement. But the finding validates §3's direction:
+> the edge is in the *interactions*, not in a better single signal. Build the
+> conditioning study first; it is the interpretable version of the same thing.
+
+### 8.5 The open-source landscape — what is worth borrowing
+
+- **Qlib** (Microsoft) — an AI-oriented quantitative investment platform with a
+  full ML pipeline and a DataServer benchmarked ~10× faster than pandas for
+  time series. ⚠ **The closest thing to what we are building**, and explicitly
+  aimed at cross-sectional stock selection. Worth an evaluation pass before we
+  hand-roll more infrastructure.
+- **vectorbt** — already measured and **rejected** with reasons recorded in
+  `equity_curve.py`: its Sharpe/Sortino/vol/return metrics raise
+  `ValueError: Index frequency is None` on a real trading calendar, and forcing
+  `freq="1D"` imposes an annualisation factor of exactly 365 against our ~196
+  observations/year, inflating Sharpe by **1.37×**. Do not revisit without new
+  evidence.
+- **zipline-reloaded** — community fork; the original is effectively dead since
+  Quantopian closed.
+- **backtrader** — event-driven, simple, no cross-sectional strength.
+- **TradeMaster**, **FinRL** — reinforcement-learning platforms. ⚠ RL multiplies
+  the trial-count problem rather than solving it.
+- **Quantpedia** — 900-1,200+ quantified strategies, a subset implemented in
+  QuantConnect with out-of-sample replications. ⚠ Useful as a **hypothesis
+  source with mechanisms attached**, not as a strategy shopping list; every one
+  taken from it is a declared trial.
+
+### 8.6 What the six papers change, in one place
+
+| finding | what it changes |
+| --- | --- |
+| HXZ: 65-82% of anomalies fail under value weighting | the four-arm test of §7 is the top priority |
+| Moreira-Muir vs Cederburg et al. | `inverse_vol_v1` predicted to help S-1/S-2, **not** S-3 — a pre-registered direction |
+| Harvey-Liu-Zhu: t > 3.0, 9 of 313 survive | calibrate the promotion bar to t > 3.0, build fewer strategies |
+| Frazzini-Israel-Moskowitz | S-3's family is the most cost-constrained; momentum is the most scalable |
+| Gu-Kelly-Xiu | conditioning (interactions) beats better single signals; ML later, not now |
+| Qlib | evaluate before hand-rolling more infrastructure |
+
+⚠ **The convergent finding across four of the six: our two momentum strategies
+sit in the families that survive costs, scale, and respond to volatility
+management — and our reversal strategy sits in the one that does not.** That is a
+stronger prior than anything our own backtest currently supports, and it is
+testable with the measurement already specced.

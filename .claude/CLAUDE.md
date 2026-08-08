@@ -605,6 +605,10 @@ nothing more:
 - `.claude/skills/frontend/design-system.md` — standing surface/card/badge/chart/density decisions (visual v2). Assembling the system is engineering, NOT a taste-gate.
 - `.claude/skills/frontend/information-architecture.md` — standing nav/page-consolidation decisions (lens hub + view presets). Consolidating existing pages is engineering, NOT a taste-gate.
 
+### Quant / strategy skills (read before proposing or defending any strategy)
+
+- `.claude/skills/quant/strategy-evidence.md` — **MANDATORY before proposing, speccing or defending any trading strategy.** The replication literature has already tested most of what we would think of and says most of it fails: Hou/Xue/Zhang (65-82% of 452 anomalies fail under value weighting), Harvey/Liu/Zhu (t > 3.0; 9 of 313 survive), Novy-Marx/Velikov (**turnover above ~50%/month rarely survives costs** — check this FIRST, it is one stored column and disqualifies faster than any backtest), Frazzini/Israel/Moskowitz (short-term reversal is the most cost-constrained family), Cederburg et al. (vol scaling works on momentum, not elsewhere), Cohen/Malloy/Pomorski (**routine insider trades have zero predictive power; opportunistic ones pay ~82 bps/month**). ⚠ Four of those independently predicted, ex ante, the ranking our own backtest produced — s2 inside the turnover bar and the only one beating buy-and-hold, s1 12× over it, s3 6.7× over. Carries the family-viability table and the pre-spec checklist.
+
 ### Data foundation skills (read before SEC ingest / schema / parser / metric work)
 
 - `.claude/skills/data-sources/sec-edgar.md` — source-of-truth: endpoints, formats, identifiers, gotchas (DD-MMM-YYYY dates, 13F PRN/SH, VALUE-cutover 2023-01-03, 13D/G XML mandate, etc.), rate-limit discipline, reference impls.
