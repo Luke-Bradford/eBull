@@ -1941,7 +1941,23 @@ def _cut_splits(
             [record.census.purged for record in split.folds],
             [record.census.embargoed for record in split.folds],
         )
-        splits[(measurement.strategy_id, measurement.quarantine_arm)] = split
+        # ⚠⚠ A DUPLICATE KEY IS REFUSED, NOT OVERWRITTEN. ``run_backtest`` builds
+        # ``arms`` one per ``(strategy, quarantine arm)`` so this cannot fire
+        # today, but a plain assignment makes "two measurements of one arm" a
+        # SILENT last-write-wins: the surviving split would be cut over one
+        # population while the rows it lands on were measured over the other,
+        # and nothing downstream could tell — the census would simply describe
+        # observations the metrics beside it never saw. Same argument
+        # ``WalkForwardFolds`` makes for a split assembled from more than one
+        # run, one level up. Found by a Codex pass on the rebuttal, not by the
+        # diff review.
+        key = (measurement.strategy_id, measurement.quarantine_arm)
+        if key in splits:
+            raise RuntimeError(
+                f"{key} produced a second in-sample measurement — one arm is one population, and silently keeping "
+                "the later split would attach a census to rows whose metrics were computed over the earlier one"
+            )
+        splits[key] = split
     return splits
 
 

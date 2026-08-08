@@ -999,6 +999,17 @@ class TestCutSplits:
             {},
         )
 
+    def test_two_measurements_of_one_arm_are_refused_rather_than_overwritten(self) -> None:
+        """⚠ A plain assignment would be a SILENT last-write-wins, and the
+        surviving split would describe a different population than the metrics
+        on the rows it lands on. Unreachable from `run_backtest` today; refused
+        because the failure would be invisible, not because it is likely."""
+        with pytest.raises(RuntimeError, match="produced a second in-sample measurement"):
+            backtest_run._cut_splits(  # noqa: SLF001
+                (self._arm("masked", [0, 2], [1, 3]), self._arm("masked", [0, 4], [1, 5])),
+                corpus=self._corpus(),
+            )
+
     def test_a_hold_out_only_measurement_contributes_no_split(self) -> None:
         arm = self._arm("masked", [0, 2], [1, 3])
         holdout_only = ArmMeasurement(
