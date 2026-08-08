@@ -62,7 +62,7 @@ MAX_ADJ_SPAN = 1e6
 
 _SERIES_SQL = "SELECT series_id FROM research_price_series ORDER BY series_id"
 _BARS_SQL = """
-    SELECT adj_close
+    SELECT adj_close, bar_date
     FROM research_price_daily
     WHERE series_id = %(series_id)s AND adj_close IS NOT NULL AND adj_close > 0
     ORDER BY bar_date
@@ -101,7 +101,7 @@ def main() -> int:
         print(f"{len(series_ids)} series in the research corpus", flush=True)
 
         # (band, horizon) -> [x_values, y_values] accumulated across series
-        pairs: dict[tuple[str, int], tuple[list[float], list[float]]] = defaultdict(lambda: ([], []))
+        pairs: dict[tuple[str, int], tuple[list[float], list[float], list[int]]] = defaultdict(lambda: ([], [], []))
         excluded_distorted = 0
         excluded_short = 0
         used = 0
@@ -112,6 +112,7 @@ def main() -> int:
                 excluded_short += 1
                 continue
             prices = np.asarray([float(r[0]) for r in rows], dtype=np.float64)
+            dates = [r[1] for r in rows]
             if float(prices.max()) / float(prices.min()) > MAX_ADJ_SPAN:
                 excluded_distorted += 1
                 continue
@@ -127,6 +128,12 @@ def main() -> int:
                     bucket = pairs[(band, k)]
                     bucket[0].extend(x.tolist())
                     bucket[1].extend(y.tolist())
+                    # ⚠ The block's ordinal position in THIS series' history is a
+                    # proxy for calendar period — series start at different dates,
+                    # so it is imperfect, but it is what clusters observations that
+                    # move together. See the clustered arm below.
+                    starts = dates[: len(x) * k : k][: len(x)]
+                    bucket[2].extend([d.year for d in starts])
             if n % 500 == 0:
                 print(f"  {n}/{len(series_ids)} series", flush=True)
 
@@ -143,7 +150,7 @@ def main() -> int:
     for k in HORIZONS:
         cells = []
         for band in bands:
-            xs, ys = pairs.get((band, k), ([], []))
+            xs, ys, _yr = pairs.get((band, k), ([], [], []))
             if len(xs) < 30:
                 cells.append(f"{'insufficient':^22}")
                 continue
@@ -157,6 +164,58 @@ def main() -> int:
             cells.append(f"{r:+.4f} t{t:+7.1f} n{n:>7,}".rjust(22))
         label = f"{k}d" if k < 21 else (f"{k // 21}mo" if k < 252 else f"{k // 252}y")
         print(f"{label:>9} | " + " | ".join(cells))
+
+    # ------------------------------------------------------------------
+    # ⚠⚠ THE ARM THAT DECIDES WHETHER ANY OF THE ABOVE IS SIGNIFICANT.
+    # The pooled t values printed above are ARTEFACTS: they treat every
+    # (series, block) pair as an independent observation, when series in the
+    # same calendar year move together. This repo has already paid for that
+    # error once -- t fell 50.3 -> 17.7 -> 5.1 on one effect under exactly this
+    # correction. Here the statistic is computed WITHIN each calendar year and
+    # the sample is then the YEARS, so the degrees of freedom collapse to
+    # something honest.
+    # ------------------------------------------------------------------
+    print("\n\nYEAR-CLUSTERED: correlation computed WITHIN each year, then averaged ACROSS years")
+    print("⚠ n is now the number of YEARS, not the number of pairs. This is the honest inference.\n")
+    header2 = f"{'horizon':>9} | " + " | ".join(f"{b:^24}" for b in bands)
+    print(header2)
+    print("-" * len(header2))
+    clustered_t: dict[tuple[str, int], float] = {}
+    for k in HORIZONS:
+        cells = []
+        for band in bands:
+            xs, ys, yrs = pairs.get((band, k), ([], [], []))
+            if len(xs) < 30:
+                cells.append(f"{'insufficient':^24}")
+                continue
+            x, y, yr = np.asarray(xs), np.asarray(ys), np.asarray(yrs)
+            per_year = []
+            for year in np.unique(yr):
+                m = yr == year
+                if m.sum() < 20:
+                    continue
+                xa, ya = x[m], y[m]
+                if xa.std() == 0 or ya.std() == 0:
+                    continue
+                per_year.append(float(np.corrcoef(xa, ya)[0, 1]))
+            if len(per_year) < 5:
+                cells.append(f"{'too few years':^24}")
+                continue
+            arr = np.asarray(per_year)
+            mean = float(arr.mean())
+            se = float(arr.std(ddof=1) / np.sqrt(len(arr)))
+            t = mean / se if se > 0 else 0.0
+            clustered_t[(band, k)] = t
+            cells.append(f"{mean:+.4f} t{t:+6.1f} yrs{len(arr):>4}".rjust(24))
+        label = f"{k}d" if k < 21 else (f"{k // 21}mo" if k < 252 else f"{k // 252}y")
+        print(f"{label:>9} | " + " | ".join(cells))
+
+    survivors = {kk: v for kk, v in clustered_t.items() if abs(v) >= 3.0}
+    print(f"\n⚠ cells surviving |t| >= 3.0 after clustering: {len(survivors)} of {len(clustered_t)}")
+    print("   (Harvey/Liu/Zhu's hurdle, applied to our own measurement)")
+    for (band, k), t in sorted(survivors.items(), key=lambda kv: -abs(kv[1]))[:10]:
+        label = f"{k}d" if k < 21 else (f"{k // 21}mo" if k < 252 else f"{k // 252}y")
+        print(f"     {band:<12} {label:>5}  t {t:+.1f}")
 
     print("\n--- VERDICT against the skill's §2.8 claim ---")
     print("claim: NEGATIVE at 1d-1mo, POSITIVE at 3-12mo, NEGATIVE at 3y\n")

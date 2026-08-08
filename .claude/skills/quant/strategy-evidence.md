@@ -33,6 +33,14 @@ recomputed — never quoted from here without re-running.
 
 **Our measured result: s2 is the only one of the three that beats buy-and-hold.**
 
+⚠⚠ **BUT SEE §2.8 BEFORE LEANING ON THIS TABLE.** Under year-clustered inference
+on our own corpus, **momentum is not statistically established at any horizon**,
+while short-horizon reversal is robust in every price band. The literature ranks
+momentum above reversal; our data does not reproduce that. The two are
+reconcilable — a real effect you cannot trade is precisely what §2.5 says
+reversal is — but **the filters below are the LITERATURE's ranking, not ours**,
+and the four-arm test of §7 is what adjudicates.
+
 ⚠⚠ **The literature predicted that, ex ante, on four independent axes.** That is
 the strongest evidence in this file — not that any single paper is right, but
 that four unrelated results converge on the same ranking our own backtest
@@ -175,38 +183,113 @@ horizon        <$5        $5-20      $20-100      >=$100
 > be run across the whole universe.** s1 and s2 currently are, and 24% of that
 > universe sits in the band where momentum has the wrong sign.
 
-### ⚠ What NOT to take from this table
+### ⚠⚠ AND THEN THE CLUSTERED RUN KILLED HALF OF IT
 
-- **The t-statistics are not trustworthy and are omitted above deliberately.**
-  The raw run reports values up to `t −491`, which is an artefact: returns of
-  different series in the same period are cross-sectionally correlated, and this
-  pools them as if independent. The repo has been here before — `t` fell
-  **50.3 → 17.7 → 5.1** on one effect under exactly this correction. **The signs
-  and the relative magnitudes are the finding; the significance is not
-  established.** Day-clustered inference is the follow-up.
+The table above pools every (series, block) pair as independent. Series in the
+same year move together, so those `t` values are fiction. Re-run computing the
+correlation **within each calendar year** and treating the **years** as the
+sample — `n` becomes 22-65 years instead of millions of pairs:
+
+```text
+horizon        <$5           $5-20         $20-100        >=$100
+   1d      -0.0812 t -7.3  -0.0689 t -5.3  -0.0252 t -3.0  -0.1018 t -7.9
+   5d      -0.0747 t -7.9  -0.0664 t-11.0  -0.0534 t -8.9  -0.0893 t -8.0
+   1mo     -0.0330 t -2.3  -0.0362 t -4.8  -0.0334 t -4.6  -0.0345 t -2.9
+   3mo     -0.0764 t -4.8  -0.0302 t -2.1  -0.0262 t -1.6  -0.0218 t -1.2
+   6mo     -0.0403 t -2.1  +0.0025 t +0.1  -0.0196 t -0.9  +0.0039 t +0.1
+   1y      -0.0636 t -2.8  -0.0184 t -0.9  +0.0183 t +0.8  +0.0511 t +1.6
+   3y      -0.1283 t -4.2  -0.0642 t -2.3  +0.0030 t +0.1  +0.1070 t +1.9
+```
+
+**11 of 28 cells clear |t| >= 3.0** (Harvey/Liu/Zhu's hurdle applied to our own
+measurement), and they are almost all the **short** horizons.
+
+⚠⚠ **WHAT DIED:**
+
+1. **6-month momentum, which the pooled run showed in EVERY band, is gone.**
+   `+0.1262` at `>=$100` became **`+0.0039`, t `+0.1`**. Not weakened —
+   **erased**. It was an artefact of counting correlated series as independent.
+2. **The 1-year momentum split — the headline finding — does not survive.**
+   `+0.2479 (t +18.4)` became **`+0.0511`, t `+1.6`**. It does not clear 3.0,
+   or even 2.0. ⚠ **This file previously claimed that result gave the size
+   screen "a measured basis rather than a borrowed one". IT DOES NOT.** The
+   direction persists (`+0.0511` vs `-0.0636` at `<$5`) but neither end is
+   significant, and the size-screen argument falls back to §2.2's literature.
+3. **3-year continuation in expensive names** (`+0.1070`, t `+1.9`) also fails.
+
+**WHAT SURVIVED, robustly and in every band: short-horizon reversal.** 1-day and
+5-day at `t -5` to `-11`, 1-month in three of four bands. That is the one part of
+the term structure our own data establishes.
+
+⚠⚠ **This inverts the ranking the literature gave us.** §2.1/§2.5 say momentum is
+the scalable survivor and short-term reversal is the most cost-constrained.
+**Our data says reversal is the robust signal and momentum is not established
+here at all.** Both can be true at once — a real effect you cannot trade
+profitably is exactly Frazzini/Israel/Moskowitz's point about reversal — and
+momentum's absence may be a property of a microcap-heavy universe where the
+`>=$100` band has the fewest series. ⚠ **But it means s1 and s2 are momentum
+strategies running on a corpus where momentum is not statistically present, and
+that is a finding about our universe, not about momentum.**
+
+### The rest of what NOT to take from this
+
 - **The 1-day row is biased negative by construction.** Consecutive
   non-overlapping blocks share a boundary print, so one bad close enters block A
-  positively and block B negatively. Treat 1d as the least trustworthy row.
-- **The band cut uses median adjusted close, which is a LEVEL** — and #2400 says
-  adjusted levels are distorted. Series with an implausible adjusted span are
-  excluded and counted, but the assignment is still imperfect. A market-cap cut
-  would be better and is what §7's redesigned test uses.
-- **3-year n is small** (1,256-10,846 pairs per band) relative to the shorter
-  horizons.
+  positively and block B negatively. It is the least trustworthy row even
+  clustered.
+- **The band cut uses median adjusted close, a LEVEL** — #2400 says adjusted
+  levels are distorted. Extreme-span series are excluded and counted, but the
+  assignment is imperfect. A market-cap cut is better and is what §7's test uses.
+- **3-year n is 22-44 years**, which is thin for the horizon.
+- ⚠ **Year-clustering is itself an approximation.** It handles cross-sectional
+  dependence within a year; it does not handle dependence *across* adjacent
+  years, and for a 3-year horizon the blocks straddle year boundaries anyway.
 
-### What it changes
+## 2.8a ⚠⚠ The size/horizon collision — a real effect we probably cannot harvest
 
-1. **s1 and s2 need a price or cap floor**, and the floor now has a measured
-   basis rather than a borrowed one.
-2. ⚠ **s1 and s3 sit on opposite sides of the curve** — one bets continuation,
-   the other reversal, and in the `<$20` bands s3 is on the right side of the
-   measurement while s1 is on the wrong one.
-3. ⚠⚠ **We own nothing at the 3-5 year end**, which is the lowest-turnover corner
-   and the one most likely to survive §2.1. But note the measurement: long-horizon
-   reversal is present in cheap names and *absent* in expensive ones, so a value
-   strategy here would be a small-cap strategy — colliding directly with §2.2.
-   **That tension is unresolved and should be resolved by measurement, not by
-   picking whichever paper agrees with us.**
+§2.8 named the 3-5 year end as our biggest gap: lowest turnover, most likely to
+survive the cost filter, and the horizon where XBRL fundamentals are the right
+data. Then the measurement complicated it, and the complication is worth
+recording rather than resolving by choosing a convenient paper.
+
+**Three independent sources agree on the same fact:**
+
+1. **Our own measurement** — 3-year autocorrelation is `-0.1598` at `<$5`,
+   `-0.1063` at `$5-20`, `-0.0074` at `$20-100` and `+0.1838` at `>=$100`. The
+   reversal **fades monotonically with price and reverses sign at the top.**
+2. **Fama-French and the size-value literature** — value effects are
+   concentrated in smaller companies and weaker among large caps.
+3. The two arrived at it by completely different routes.
+
+**So long-horizon reversal is real and it lives in small, cheap names.**
+
+⚠⚠ **And that is exactly the population everything else in this file says to
+avoid:**
+
+| the same population is where… | source |
+| --- | --- |
+| anomalies are *"more apparent than real"* | Hou/Xue/Zhang §2.2 |
+| trading costs bite hardest and capacity is smallest | Novy-Marx/Velikov §2.1 |
+| **size is the LEAST scalable** of the surviving anomalies | Frazzini/Israel/Moskowitz §2.5 |
+| our own execution is worst (retail, ~50.9 bps flat) | §2.5's caveat |
+
+> **Working conclusion: the long-horizon reversal premium is probably REAL and
+> probably UNHARVESTABLE BY US.** Not because the effect is fake — three sources
+> say it is not — but because it is concentrated precisely where our costs,
+> our construction bias and our capacity all fail at once.
+
+⚠ **The obvious escape does not appear to exist.** One would hope for a middle
+band where the effect survives and costs are tolerable. The measurement says
+otherwise: by `$20-100` the 3-year autocorrelation is `-0.0074`, i.e. gone. The
+effect does not fade gently into a tradable zone — it is concentrated in the
+band we cannot trade.
+
+**This is recorded so a future session does not spend months rediscovering it.**
+⚠ It is a *working* conclusion on one measurement with small n at the 3-year
+horizon (1,256-10,846 pairs per band) and unclustered inference. **Overturning it
+requires a measurement, not an argument** — specifically, a cost-aware backtest
+of a long-horizon reversal strategy restricted to the `$5-20` band, where the
+effect is still `-0.1063` and the costs are merely bad rather than prohibitive.
 
 ## 2.8b ⚠⚠ Momentum crashes — forecastable, and the state is COMPUTABLE HERE
 
@@ -305,6 +388,74 @@ Three uses, all available to us on 25.9M bars with nothing new ingested:
 ⚠ It is a *proxy*, not the tape. It cannot see a specific participant, and
 nothing at daily resolution can. What it measures is how much price moved per
 dollar traded, which is the footprint, not the actor.
+
+---
+
+## 2.12 Chart patterns — how to TEST one, which is the only interesting question
+
+Bull flags, cup-and-handle, Wyckoff accumulation, head-and-shoulders. The useful
+question is not *"do they work"* — it is **"what would make one demonstrably
+valid?"**, because without an answer every discussion is anecdote.
+
+**Lo, Mamaysky & Wang, "Foundations of Technical Analysis: Computational
+Algorithms, Statistical Inference, and Empirical Implementation", *JF* (2000)**
+is the paper that answered it. US stocks, **1962-1996** — almost exactly our
+corpus window. Their method is the template:
+
+1. ⚠⚠ **Make the pattern ALGORITHMIC first.** They smooth the price with
+   **nonparametric kernel regression**, take local extrema off the smoothed
+   series, and define each pattern as a *geometric relation among those extrema*.
+   **A pattern you cannot express as code cannot be tested, and a pattern
+   recognised by eye is recognised with hindsight.** This step is most of the
+   work and it is the step practitioners skip.
+2. **Compare the CONDITIONAL return distribution to the UNCONDITIONAL one.** The
+   pattern carries information if and only if the distribution of returns given
+   the pattern differs from the distribution without it. ⚠ Note what this
+   avoids: you do not have to guess the right trade, stop or target to find out
+   whether there is information there. It is a goodness-of-fit test, not a
+   backtest.
+3. **Test against a null.** A pattern that appears as often, and pays as much, in
+   a randomised series with the same drift and volatility is noise.
+
+**Their finding:** several indicators *"do provide incremental information and
+may have some practical value"* — ⚠⚠ **"especially for low-liquidity stocks"** —
+and traditional forms such as head-and-shoulders *"may not be optimal"*.
+
+> ⚠⚠ **THAT IS THE THIRD TIME TODAY THE SAME COLLISION HAS APPEARED.** Chart
+> patterns carry information *in illiquid names*. Long-horizon reversal lives *in
+> cheap names* (§2.8a). Both sit in the population where §2.1, §2.2 and §2.5 say
+> costs and construction destroy the edge. **Meanwhile momentum — the one effect
+> our own measurement finds strongest in EXPENSIVE names (`+0.2479` at
+> `>=$100`) — is the one the cost literature calls most scalable.**
+>
+> The convergence is the finding: **almost everything that looks exploitable
+> lives where we cannot trade it, and the exception is momentum in liquid
+> names.**
+
+### What we already have, and the one piece we do not
+
+| step | ours | ⚠ gap |
+| --- | --- | --- |
+| local extrema | `detect_swings(bars, n)` — n-bar fractal | ⚠ LMW smooth with kernel regression *first*. A raw fractal on noisy prices finds different extrema than a smoothed one, and they argue the smoothing is what makes detection robust |
+| geometric relations | `cluster_levels`, `fib_levels`, `find_break_and_retest` | fine |
+| causality | `detect_swings` needs `2n` neighbours | ⚠⚠ **a pivot is only knowable `n` bars later** — the look-ahead that caught S-6 |
+| **the null model** | ✅ **`random_entry_cohort.py`** (stage 5e-5b) | ⚠ **already built and not being used for this.** A random-entry cohort with matched holding periods IS step 3's null |
+
+⚠ **The null model is the part worth noticing.** We built a synthetic random-entry
+control for the backtester and it is exactly what a pattern test needs: *does
+this pattern beat a random entry held the same length?* Any pattern proposal
+that cannot clear its own random-entry cohort should not reach a backtest.
+
+### The rule for this repo
+
+> **A chart-pattern proposal ships with: an algorithmic definition that is causal
+> at the decision bar, a conditional-vs-unconditional distribution test, and a
+> random-entry cohort it beats. Absent any of the three, it is a picture.**
+
+⚠ And note the honest ceiling even when all three pass: LMW's own conclusion is
+*"incremental information"*, not a profitable strategy — the gap between the two
+being costs, which §2.1 says is decided by turnover. Pattern strategies are
+high-turnover by construction.
 
 ---
 
