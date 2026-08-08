@@ -361,6 +361,52 @@ DEI_TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
     "dei_employees": ("EntityNumberOfEmployees",),
 }
 
+# IFRS-IASB (``facts."ifrs-full"``) share counts — foreign private issuers (#2232).
+#
+# Source rule: Reg S-X 4-01(a)(2) lets a foreign private issuer file
+# IFRS-as-issued-by-the-IASB statements with no US-GAAP reconciliation, and
+# SEC's XBRL then carries them under the ``ifrs-full`` namespace instead of
+# ``us-gaap``. The ingest read ``us-gaap`` + ``dei`` only, so for those filers
+# the cover-page ``dei:EntityCommonStockSharesOutstanding`` was the SINGLE
+# share count on file and a mis-tagged cover value had nothing to contradict
+# it. Measured on the dev corpus 2026-08-08 — 408 of the 5,228 instruments
+# holding any fact carry ZERO ``us-gaap`` rows (NVS, GSK, RIO, UBS, TTE, DB,
+# BCS, BNTX among them), and ``AVAL`` stores ``7`` at 2025-12-31 against
+# 7,542,263,255 the year before. SEC's own companyconcept endpoint returns the
+# same ``7``: the parse is faithful, the ISSUER's tag is wrong.
+#
+# ⚠⚠ THESE ARE CORROBORATION READINGS, NOT DENOMINATORS. Do not add any of
+# them to ``share_count_history``'s ``shares_outstanding`` COALESCE. That was
+# this change's first design and the full-population gain side falsified it:
+# both instruments that would have gained a denominator would have gained a
+# WRONG one. ``AFYA`` (CIK 0001771007) tags ``NumberOfSharesOutstanding`` at
+# 3,455,538 / 3,773,478 / 3,855,150 for FY2023-25 while its own
+# ``WeightedAverageShares`` for the same periods reads 89,830,351 / 90,122,429
+# / 90,475,878 — a ~23x gap that is stable across three years, so it is not a
+# split; it is the sec-edgar §7.17 dimension-stripping failure arriving in the
+# IFRS namespace. ``SLSR`` (0002019103) tags ``NumberOfSharesIssued`` 150,589
+# against a 165,125,705 weighted average, and ``AFYA``'s ``NumberOfSharesIssued``
+# disagrees with ITSELF across accessions for the same period end (93,722,831
+# vs 442,669 at 2021-12-31).
+#
+# Concept coverage over those 408, measured the same day, distinct instruments
+# carrying a value in the ``shares`` unit — reproduce with
+# ``python -m scripts.ab_2232_ifrs_share_count``:
+#
+#     WeightedAverageShares        377     NumberOfSharesIssued        227
+#     NumberOfSharesOutstanding    193     union of the three          313
+#
+# Raw-only by construction: ``app.services.fundamentals._TAG_TO_COLUMN`` is
+# built from ``TRACKED_CONCEPTS`` alone, so an IFRS tag lands in
+# ``financial_facts_raw`` and no derived metric or canonical column changes
+# shape. All three are ingested together because the backfill that populates
+# them is an operator-run corpus job — leaving a concept out costs a second one.
+IFRS_TRACKED_CONCEPTS: dict[str, tuple[str, ...]] = {
+    "ifrs_shares_outstanding": ("NumberOfSharesOutstanding",),
+    "ifrs_shares_issued": ("NumberOfSharesIssued",),
+    "ifrs_weighted_average_shares": ("WeightedAverageShares",),
+}
+
 # #2036: concepts captured into ``financial_facts_raw`` WITHOUT a canonical
 # column. ``_TAG_TO_COLUMN`` (app/services/fundamentals) is mechanically built
 # from ``TRACKED_CONCEPTS``, so a component concept listed there would enter
@@ -375,6 +421,13 @@ _ALL_TRACKED_TAGS: frozenset[str] = (
     frozenset(tag for tags in TRACKED_CONCEPTS.values() for tag in tags) | RAW_ONLY_CONCEPTS
 )
 _ALL_TRACKED_DEI_TAGS: frozenset[str] = frozenset(tag for tags in DEI_TRACKED_CONCEPTS.values() for tag in tags)
+# ⚠ These three sets MUST stay pairwise disjoint. ``uq_facts_raw_identity`` is
+# ``(instrument_id, concept, unit, period_start, period_end, accession_number)``
+# — taxonomy is NOT in the key — so the same concept name tracked under two
+# namespaces would UPSERT over itself rather than raise, and the loser would
+# vanish silently. Pinned by
+# tests/test_sec_fundamentals_ifrs_tags.py::TestTrackedTagNamespaces.
+_ALL_TRACKED_IFRS_TAGS: frozenset[str] = frozenset(tag for tags in IFRS_TRACKED_CONCEPTS.values() for tag in tags)
 
 
 def _zero_pad_cik(cik: str | int) -> str:
@@ -644,8 +697,9 @@ class SecFundamentalsProvider:
         all_facts: dict[str, Any] = raw.get("facts", {})
         gaap_section = all_facts.get("us-gaap", {})
         dei_section = all_facts.get("dei", {})
-        if not gaap_section and not dei_section:
-            logger.info("No us-gaap or dei facts for %s (CIK %s)", symbol, cik)
+        ifrs_section = all_facts.get("ifrs-full", {})
+        if not gaap_section and not dei_section and not ifrs_section:
+            logger.info("No us-gaap, dei or ifrs-full facts for %s (CIK %s)", symbol, cik)
             return []
         retention_cutoff = _default_retention_cutoff()
         facts: list[XbrlFact] = []
@@ -664,6 +718,15 @@ class SecFundamentalsProvider:
                     dei_section,
                     taxonomy="dei",
                     allowed_tags=_ALL_TRACKED_DEI_TAGS,
+                    retention_cutoff=retention_cutoff,
+                )
+            )
+        if ifrs_section:
+            facts.extend(
+                _extract_facts_from_section(
+                    ifrs_section,
+                    taxonomy="ifrs-full",
+                    allowed_tags=_ALL_TRACKED_IFRS_TAGS,
                     retention_cutoff=retention_cutoff,
                 )
             )
@@ -704,8 +767,9 @@ class SecFundamentalsProvider:
         all_facts: dict[str, Any] = raw.get("facts", {})
         gaap_section = all_facts.get("us-gaap", {})
         dei_section = all_facts.get("dei", {})
-        if not gaap_section and not dei_section:
-            logger.info("No us-gaap or dei facts for %s (CIK %s)", symbol, cik)
+        ifrs_section = all_facts.get("ifrs-full", {})
+        if not gaap_section and not dei_section and not ifrs_section:
+            logger.info("No us-gaap, dei or ifrs-full facts for %s (CIK %s)", symbol, cik)
             return [], []
         retention_cutoff = _default_retention_cutoff()
         facts: list[XbrlFact] = []
@@ -730,6 +794,16 @@ class SecFundamentalsProvider:
                 )
             )
             entries.extend(_extract_catalog_from_section(dei_section, taxonomy="dei"))
+        if ifrs_section:
+            facts.extend(
+                _extract_facts_from_section(
+                    ifrs_section,
+                    taxonomy="ifrs-full",
+                    allowed_tags=_ALL_TRACKED_IFRS_TAGS,
+                    retention_cutoff=retention_cutoff,
+                )
+            )
+            entries.extend(_extract_catalog_from_section(ifrs_section, taxonomy="ifrs-full"))
         return facts, entries
 
     # ------------------------------------------------------------------
