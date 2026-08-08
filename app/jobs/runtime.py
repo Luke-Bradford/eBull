@@ -126,6 +126,7 @@ from app.workers.scheduler import (
     JOB_SEC_N_PORT_INGEST,
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
+    JOB_STRATEGY_BACKTEST_RUN,
     JOB_STRATEGY_SIGNAL_SCAN,
     JOB_THESIS_BREAK_SCAN,
     JOB_THESIS_DQ_AUDIT,
@@ -191,6 +192,7 @@ from app.workers.scheduler import (
     sec_n_port_ingest,
     sec_nport_filer_directory_sync,
     seed_cost_models,
+    strategy_backtest_run,
     strategy_signal_scan,
     thesis_break_scan,
     thesis_dq_audit,
@@ -342,6 +344,14 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # the frontier watermark rather than by a DAG edge. Own "strategy_scan" lane,
     # resolved from SCHEDULED_JOBS, so no MANUAL_TRIGGER_JOB_SOURCES entry.
     JOB_STRATEGY_SIGNAL_SCAN: _adapt_zero_arg(strategy_signal_scan),
+    # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
+    # SCHEDULED_JOBS: criterion 5 requires a hold-out purpose no cron fire can
+    # supply. ⚠ Registered NATIVELY, not through ``_adapt_zero_arg`` — the body
+    # takes params, and the zero-arg adapter would silently discard the
+    # ``holdout_*`` pair that decides whether the withheld side is measured at
+    # all. Source-lock "strategy_backtest" in MANUAL_TRIGGER_JOB_SOURCES; params
+    # in MANUAL_TRIGGER_JOB_METADATA.
+    JOB_STRATEGY_BACKTEST_RUN: strategy_backtest_run,
     JOB_ATTRIBUTION_SUMMARY: _adapt_zero_arg(attribution_summary_job),
     JOB_SEED_COST_MODELS: _adapt_zero_arg(seed_cost_models),
     JOB_WEEKLY_REPORT: _adapt_zero_arg(weekly_report),

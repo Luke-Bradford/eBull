@@ -563,6 +563,17 @@ class TestProductionInvokerRegistry:
             # cadence/freshness gate the DAG walk). Source-lock
             # "price_quarantine" + empty param metadata complete the triangle.
             "price_quarantine_refresh",
+            # #2394 §3.2 — strategy_backtest_run. MANUAL-TRIGGER-ONLY, and the
+            # absence from SCHEDULED_JOBS is the deliberate visible choice this
+            # test exists to force: criterion 5 requires a hold-out purpose and
+            # an accessor that a cron fire cannot supply, so a scheduled fire
+            # could only ever produce in-sample rows. Source-lock
+            # "strategy_backtest" + four params in MANUAL_TRIGGER_JOB_METADATA
+            # complete the triangle. ⚠ It does NOT share strategy_signal_scan's
+            # lane — that one IS scheduled, and blocking the daily shadow track
+            # record behind a ~30-50 minute backtest is the coupling §3 of the
+            # runner spec split the two jobs to avoid.
+            "strategy_backtest_run",
         }
         assert on_demand == expected_on_demand, (
             f"Unexpected on-demand invokers (update this test if intentional): "

@@ -238,6 +238,67 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # price_quarantine_refresh — #2261 full-corpus quarantine recompute. No
     # operator params: scope is the whole priced universe.
     "price_quarantine_refresh": (),
+    # strategy_backtest_run — #2394 §3.2. Four params, and the two hold-out ones
+    # are the only operator-facing degree of freedom the job HAS: §7 pins
+    # thirteen of the fourteen result-identity members to module constants, so
+    # exposing a sizing rule or a window would let an operator mint result
+    # identities no code path can reproduce.
+    #
+    # ⚠⚠ ``holdout_purpose`` AND ``holdout_accessed_by`` ARE REQUIRED TOGETHER,
+    # AND THAT IS NOT EXPRESSIBLE HERE. ParamMetadata declares per-key type and
+    # requiredness and has no conditional model, so the pairing is checked in
+    # the job body before any corpus work (backtest_run._check_holdout_pairing).
+    # Declaring either "required" would make an in-sample run impossible;
+    # declaring neither and leaving it at that would let a hold-out run start
+    # with a blank purpose, which is the #2286 present-but-empty shape.
+    #
+    # ⚠ ``strategy_id`` is ``string`` and not ``enum``: enum_values would have
+    # to come from STRATEGY_MANIFEST, and importing it here would drag
+    # position_builder + every strategy module into a leaf the API imports on
+    # every request. The service validates it against the RUNNABLE set and names
+    # the members in the error, which is the check that actually matters —
+    # a manifest entry can be present and still be unrunnable (S-4).
+    "strategy_backtest_run": (
+        ParamMetadata(
+            name="strategy_id",
+            label="Strategy id",
+            help_text=(
+                "Narrow the run to one runnable strategy, for debugging. ⚠ The Deflated Sharpe "
+                "needs at least 2 measured trials, so a single-strategy run stores rows with no "
+                "DSR and the report says why. Leave blank for the full set."
+            ),
+            field_type="string",
+        ),
+        ParamMetadata(
+            name="holdout_purpose",
+            label="Hold-out purpose",
+            help_text=(
+                "Why the withheld side is being evaluated. REQUIRED together with 'Accessed by' "
+                "and stored as the criterion-5 audit record's only content. Leave BOTH blank and "
+                "the hold-out partition is counted and discarded, never measured."
+            ),
+            field_type="string",
+        ),
+        ParamMetadata(
+            name="holdout_accessed_by",
+            label="Hold-out accessed by",
+            help_text=(
+                "Who is evaluating the withheld side. REQUIRED together with 'Purpose'. It cannot "
+                "be derived from the request: the queue listener dispatches invoker(params) and "
+                "pending_job_requests.requested_by never reaches the job body."
+            ),
+            field_type="string",
+        ),
+        ParamMetadata(
+            name="trial_register_version",
+            label="Trial register version",
+            help_text=(
+                "Optional assertion. The run refuses if this is not the live trial register's "
+                "version, so it cannot silently deflate against a register that has moved."
+            ),
+            field_type="string",
+        ),
+    ),
     "risk_metrics_refresh": (),
     # fair_value_band_refresh — #2009 deterministic fair-value band recompute.
     # No operator-tunable params (multiples set + calibration constants are
