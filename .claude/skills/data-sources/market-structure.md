@@ -49,7 +49,7 @@ Measured on the dev corpus, 2026-08-08. Re-measure before citing — these move.
 | Gap | Evidence | Blocks |
 | --- | --- | --- |
 | **No benchmark or sector series** | `SPY QQQ IWM DIA VTI XLK XLF XLE GLD TLT` → **0 rows** in `research_price_series` | **beta · relative strength · sector rotation · pairs · market-regime conditioning · "did it beat the market that day"** — the entire cross-asset half |
-| **Split-adjusted only** | `adjustment_basis = 'split_adjusted'` on **7,693 of 7,693** series | total return; dividend-sensitive momentum. A 12-month lookback systematically understates high-yield names |
+| ~~Split-adjusted only~~ **CORRECTED — total return IS available** | `adjustment_basis = 'split_adjusted'` describes **OHLC only**. `adj_close` is split **+ dividend** adjusted. Verified full-population: latest factor `= 1.0` on **7,693/7,693**, no factor `> 1`, monotone increasing except 22 material steps in 9 series (0.12%) | nothing. Use `adj_close` for returns and `close` for price levels. Reading `adjustment_basis` as describing `adj_close` understates what is computable — a mistake this file made in its first version |
 | **No intraday bars** | `price_intraday` → **0 rows** | true session VWAP, intraday scalping, any sub-daily entry. `anchored_vwap` over daily bars is a daily approximation, not the intraday benchmark traders mean |
 | **No volume-flow indicators** | no OBV / accumulation-distribution anywhere in `app/services` | volume confirmation as a *signal*. Raw volume IS present on all 25,818,944 rows, so these are buildable — just absent |
 | Delisting linkage thin | 2 series carry a `delisting_date` | survivorship correction inside the research corpus specifically (the Form 25 register is separate) |
@@ -102,6 +102,80 @@ its trials afterwards is indistinguishable from one that reports only its winner
 stored value is an upper bound on the honest one.
 
 ---
+
+## ⚠⚠ Four traps that killed a real finding on 2026-08-08 — check every one
+
+A research pass measured a near-monotonic overnight mean-reversion across 18.8M bars:
+decile 1 (fell 6% intraday) → **+43.9 bps** overnight, decile 10 → −17.5 bps, spread 61.4 bps
+against a ~50.9 bps round trip. It looked tradable. **All of it was wrong**, in four separate
+ways, and each is a reusable trap.
+
+### 1. The shared-print trap — the one that generated the whole effect
+
+The sort variable **ended** at `close(t)`. The outcome **started** at `close(t)`. Any error
+in that single print — a bid-side fill, a stale quote, one tick on a cheap stock — enters
+the sort negatively and the outcome positively. **Monotonicity across deciles is the
+signature of the artefact, not evidence against it.**
+
+> **Rule: never sort on a variable that terminates at price P and measure an outcome that
+> originates at price P.** Put a tradable gap between them.
+
+### 2. The unfillable-window trap
+
+Signals complete at `close(t)`; §3.5 fills at `open(t+1)`. The measured +43.9 bps lived
+**entirely inside `close(t) → open(t+1)`** — consumed before a fill can exist. Not a cost
+problem, a **timing impossibility**.
+
+Re-measured on what a next-open fill actually earns (`open(t+1) → close(t+1)`), same sort,
+1.79M obs per decile, inflated series excluded:
+
+```text
+decile   intraday    overnight (unfillable)   FILLABLE       se
+     1     -5.63%            +39.19 bps       -7.16 bps    0.39
+    10     +5.92%            -13.96 bps       +2.72 bps    0.38
+```
+
+**The tradable signal is the opposite sign to the apparent one.** Buying the fallers loses.
+
+> **Rule: measure every outcome from the first price you could actually transact at.**
+
+### 3. Equal-weighted per-bar means are micro-cap means
+
+A series contributes in proportion to its **bar count**, not its size or tradability. The
+same pass concluded "the intraday session has negative expectancy" from a −0.876 bps
+corpus-wide mean. By price band, clean series:
+
+```text
+band        overnight   intraday    total    ~annual
+<$5             2.082     -5.060   -8.689    -21.90%
+$5-20           4.414     +0.465   +3.690     +9.30%
+$20-100         4.843     +3.044   +7.367    +18.56%
+>=$100          7.323     +1.972   +7.887    +19.88%
+```
+
+Intraday is negative **only below $5**. The corpus-wide claim was penny-stock print noise
+outvoting every tradable name.
+
+> **Rule: stratify by price band and dollar volume before believing any corpus-wide mean.
+> And prefer a per-day cross-sectional mean then a time-series mean of those** — same-day
+> returns are heavily correlated, so an N of 18.8M bars is really an N of ~5,400 days.
+
+### 4. Stratifying on a back-adjusted price level
+
+The band cut above was itself keyed on back-adjusted `close`, which #2400 shows is
+meaningless as a *level* — serial reverse-splitters inflate to `3e17`, forward-splitters
+deflate a 1990s large cap under $5. Two findings from one pass silently contradicted each
+other.
+
+> **Rule: any analysis that buckets by price level must first exclude or reconstruct
+> adjustment-distorted levels.** Returns are safe; levels are not.
+
+**What survived all four:** the overnight drift itself (~4–5 bps/day in liquid names, in
+every decile) — which is just the equity risk premium accruing while you hold, and is
+captured by holding, not by trading. Its corollary is worth carrying into strategy design:
+**every hour out of the market forfeits drift**, so `exposure_time_pct` is not "is my cash
+idle" but "how much of the premium am I giving up", and it is the reason
+`return_vs_buy_and_hold_pct` is the catalogue's bar.
 
 ## Before speccing a new pattern — the checklist
 
