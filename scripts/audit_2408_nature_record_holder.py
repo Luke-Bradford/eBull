@@ -97,6 +97,16 @@ def _validate(conn: psycopg.Connection[Any]) -> int:
         # Incumbent = the module's key past the source preference. Shares are equal inside
         # a cluster by construction and every member is an insider row here, so this
         # reduces to (filer_cik, accession) DESC — the arbitrary highest-CIK tie-break.
+        #
+        # ⚠ String comparison, matching ``_control_group_rep_key``, which also compares
+        # ``filer_cik`` as text. That reproduces numeric CIK order only while every CIK is
+        # fixed-width zero-padded, and the whole baseline column of this report hangs on
+        # it, so it is asserted rather than assumed (review NITPICK on PR #2422). Measured:
+        # ``select length(holder_cik), count(*) from ownership_insiders_current`` returns a
+        # single row, ``10 | 93352``, and zero rows fail ``^[0-9]{10}$``.
+        for cik, _accession in order[cluster].values():
+            if len(cik) != 10 or not cik.isdigit():
+                raise AssertionError(f"CIK {cik!r} is not 10-digit zero-padded; the incumbent tie-break is invalid")
         incumbent = max(names, key=lambda k: order[cluster][k])
         stats["clusters"] += 1
         if incumbent == truth[cluster]:
