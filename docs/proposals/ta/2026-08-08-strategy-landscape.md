@@ -1,0 +1,258 @@
+# The strategy landscape — what actually survives, where OUR edge plausibly is, and how to look for one
+
+Refs #2437. Companion to `2026-08-08-edge-construction.md` (how to bet) and
+`strategy-catalogue-and-backtest-validity.md` (whether a strategy works). This
+one asks the prior question: **which strategies are worth building at all, given
+the data we hold and the capital we run.**
+
+Operator challenge (2026-08-08): *"3 strategies, with 2 of them sounding like
+garbage… what strategies are there, have we researched this… at your core, think
+you need to make money in a market."* Fair, and the literature sweep had not been
+done. It has now.
+
+---
+
+## 1. ⚠⚠ The finding that indicts our current construction
+
+**Hou, Xue & Zhang, "Replicating Anomalies", *Review of Financial Studies* (2020)**
+— the largest replication study in finance, 452 anomalies:
+
+> With microcaps mitigated via **NYSE breakpoints and value-weighted returns**,
+> **65%** of the 452 anomalies cannot clear the single-test hurdle of |t| > 1.96.
+> At the multiple-test hurdle of 2.78, the failure rate rises to **82%**.
+> …Microcaps have the highest equal-weighted returns but the largest
+> cross-sectional dispersion. **"Anomalies in microcaps are more apparent than
+> real."**
+
+Now measure our own setup:
+
+```text
+sizing rule ever used in strategy_results_store   equal_weight_concurrent_v1
+instruments in the universe trading below $5      2,943 of 12,185  (24%)
+size screen                                       S-2 only: MIN_CLOSE = 1.0
+value weighting                                   none
+NYSE-breakpoint equivalent                        none
+```
+
+⚠ **Scope this claim precisely — the first draft overstated it.** HXZ is about
+**cross-sectional anomaly sorts**, so it maps *directly* onto **S-2**:
+cross-sectional ranking, equal-weighted eligible names, no NYSE breakpoints, and
+a \$1 close floor that is far below the microcap boundary the paper is about.
+
+For **S-1 and S-3** it maps only *indirectly*: they are time-series strategies
+whose positions are then pooled by `equal_weight_concurrent_v1`. The failure
+mode there is not literally anomaly-replication — it is **small-stock
+microstructure and rebalancing bias**, which is the same underlying disease
+(bid-ask bounce in illiquid names, amplified by equal weighting) reached by a
+different route.
+
+Either way the corrective is identical, and that is why the distinction does not
+change the plan: **screen on size, and weight by something other than equal.**
+
+⚠ And it is the **second independent line of evidence** for the same conclusion.
+Our own research pass (`market-structure.md`) found intraday expectancy negative
+**only below \$5** — `<$5` at −21.90%/yr against `>=$100` at +19.88%/yr — and
+concluded the corpus-wide result was *"penny-stock print noise outvoting every
+tradable name."* Two different routes, same answer.
+
+**Consequence, and it is a design change, not a caveat:** every strategy result
+we hold is provisional until re-measured with a size screen and value or
+inverse-vol weighting. This is cheap, it needs no new data, and it should
+precede building any new strategy.
+
+---
+
+## 2. What actually survives
+
+Two things are true at once and both matter:
+
+- **Most published anomalies do not replicate** (§1), and of those that do,
+  *"economic magnitudes are much smaller than originally reported."*
+- **A short list does survive, including after trading costs.** Size, value,
+  momentum and short-term reversal survive transaction costs; fundamentals,
+  earnings revisions and momentum retained significance 2003-2018 including
+  post-publication.
+
+And the decay is measured: **McLean & Pontiff (JF 2016)** — 26% lower
+out-of-sample, **58% lower post-publication**, ~32 points attributable to
+publication-informed trading.
+
+⚠ **PEAD is the cautionary case.** It is the textbook "safe" anomaly and the
+evidence says it *"has largely disappeared in many segments of the market"*,
+persisting only where limits to arbitrage bind. So it is not a free win — it is a
+conditioning problem, which is exactly §3's shape.
+
+**Reading for us:** do not expect a plain published anomaly to pay. Expect the
+survivors to pay *in the segments where arbitrage is constrained*, which is a
+statement about conditioning and about which names, not about the pattern.
+
+---
+
+## 3. Where OUR edge plausibly is — and it is not chart patterns
+
+This is the part I have been under-weighting, and it is the direct answer to
+*"what strategies could we have"*.
+
+**Look at what we actually hold:**
+
+```text
+filing_documents                   9,243,776
+ownership_institutions_*           ~7,000,000   (13F, quarterly, 2024q3+)
+filing_events                      2,764,591
+sec_filing_manifest                2,613,520
+financial_facts_raw_*              ~2,000,000   (XBRL)
+finra_regsho_daily_observations      539,388    (daily short volume)
+ownership_insiders_*                 ~300,000
+def14a_beneficial_holdings           110,832
+research_price_daily              25,927,473
+```
+
+versus what we do **not** hold: **no intraday bars** (`price_intraday` = 0 rows),
+no order book, no options/implied vol, no borrow cost, no analyst estimates.
+
+**Hypothesis, stated so it can be attacked — and it is currently unproven:**
+our highest-expectancy strategies are event-driven and cross-sectional, keyed on
+filings, ownership flow and positioning, rather than on price geometry.
+
+The argument for it: at daily resolution with no tape and no book, classical TA
+is the axis where we are *weakest* relative to the rest of the market — every
+participant has daily OHLC and the ones who matter have far more — while a
+7-million-row institutional-ownership panel joined to XBRL fundamentals is
+unusual at retail scale.
+
+⚠⚠ **But data possession is not edge, and this is a just-so story until
+measured** (Codex, checkpoint 1). Nothing here shows a filings-derived signal
+beats a dumb price or fundamental baseline *after* reporting lag, costs,
+coverage and survivorship — and the 13F lag alone (45 days) is enough to kill
+the naive version. **Treat §3 as the reason to run the experiment, not as its
+result.** The falsification is the same in both directions: build one
+filings-keyed signal and one price baseline, measure both under identical
+conditions.
+
+⚠ This does **not** mean abandon TA. Price structure is the right *conditioner
+and execution layer* — where to enter, where the stop goes, whether the regime
+supports the trade. It is a poor *primary signal* for us.
+
+---
+
+## 4. The families worth building, with mechanism
+
+⚠ A strategy without a stated mechanism — **who is forced to trade, and why** —
+is a pattern, and patterns are what §1 says do not replicate. Mechanism first,
+every time.
+
+| # | family | mechanism (who is forced, why) | our data | feasible now |
+| --- | --- | --- | --- | --- |
+| A | **cross-sectional momentum** (S-2) | slow information diffusion; institutional herding | bars | ✅ shipped |
+| B | **time-series momentum** (S-1) | trend-following flows, risk management | bars | ✅ shipped |
+| C | **short-term reversal** (S-3) | **liquidity provision** — paid for absorbing forced flow. Nagel: predictable with vol, reproduced here 56.6/57.0/79.8/**184.7** bps by vol quartile | bars | ✅ shipped, but see §1 |
+| D | **volatility-compression breakout** (S-4) | vol clustering; option-hedging feedback | bars + ATR | ⚠ blocked — nothing computes `ExitLevels` |
+| E | **support/resistance retest** (S-5) | order clustering at round/prior levels | `price_structure.py` | ✅ **unblocked** (#2279) |
+| F | **Fibonacci retracement** (S-6) | ⚠ weakest mechanism of the set — largely self-fulfilling | `price_structure.py` | ✅ unblocked; ⚠ inherits swing look-ahead |
+| G | **post-earnings-announcement drift** | under-reaction to earnings news; limited arbitrage in small/illiquid names | `filing_events` + XBRL | ⚠ **partial** — we hold the event and the reported figure but NOT analyst estimates, so there is no consensus to surprise against. Buildable as a *realised*-surprise proxy against own history; the standard construction needs §6 item 4 |
+| H | **13F flow / crowding** | quarterly institutional accumulation is slow and visible; crowded names unwind together | 7M ownership rows | ✅ held; ⚠ the **45-day reporting lag** is the whole design problem — anything a filing reveals is 45+ days stale |
+| I | **insider transactions** | genuine information asymmetry; the one legal edge that is *definitionally* informed | Form 4/3 tables | ✅ data held |
+| J | **short-VOLUME pressure** | forced covering; borrow constraint | RegSHO daily | ⚠ **proxy only.** The table holds `short_volume`, `short_exempt_volume`, `total_volume` — daily FLOW. It is **not short interest**, not borrow cost, not days-to-cover. A real squeeze strategy needs §6 item 3 |
+| K | **index / ETF rebalance** | forced, calendar-known, price-insensitive buying | membership history (#2290) | ⚠ needs index membership |
+| L | **accruals / earnings quality** | investors over-weight accruals vs cash flow | XBRL facts | ✅ data held |
+| M | **filing-text change** | 10-K/10-Q language shifts predict returns; under-read because it is laborious | ⚠ **NOT held** | ⚠⚠ **The biggest error in this doc's first draft.** `filing_documents` is a **manifest** — `document_name`, `document_type`, `document_url`, `size_bytes`. **No text bodies.** Those 9.2M rows are pointers, not a corpus. Needs a fetch-and-store pipeline before it is a strategy at all |
+
+**Honest count: ~13 families, not 900.** Quantpedia catalogues **900-1,200+**
+quantified strategies (many with open-source QuantConnect implementations), but
+that number is mostly parameterisations and asset-class variants of a much
+smaller set of mechanisms. ⚠ And the trial arithmetic is unforgiving — testing
+1,000 raises the deflated-Sharpe bar to **0.1738**, testing 100,000 to **0.2344**.
+Breadth of *hypotheses tested* is a liability. Breadth of *bets held* is the asset.
+
+---
+
+## 5. How to look for an entry, programmatically
+
+The method, stated concretely because it was asked for directly.
+
+**Not** "scan for repeating patterns and keep the ones that paid" — that is a
+trial-generating machine whose output is indistinguishable from noise at our
+sample sizes.
+
+**Instead, five steps, in order:**
+
+1. **Name the forced participant.** Who *has* to trade, against their own
+   interest, and why? Index funds at a rebalance. A fund meeting redemptions. A
+   market maker absorbing a block. An investor under-reacting to an 8-K. If no
+   one is forced, there is no reason for a price to be wrong.
+2. **Find the observable that proxies the force**, and check it is *causal* —
+   knowable at the decision bar. ⚠ Our own trap #1: never sort on a variable
+   that terminates at price P and measure an outcome starting at P.
+3. **Measure the response function, not a threshold.** Bucket the observable and
+   look at the *shape*. Monotone → mechanism. A single paying bucket → noise.
+   This is why Nagel's `56.6/57.0/79.8/184.7` is believable.
+4. **Check the fill is reachable.** ⚠ Our own trap #2: a measured +43.9 bps lived
+   entirely inside `close(t) → open(t+1)` and was consumed before any fill could
+   exist. Measure from the first price you could actually transact at.
+5. **Check it survives costs at size**, using the ~50.9 bps round trip — and
+   under §1's rules, value-weighted with a size screen.
+
+Only then does the chart matter, and it matters for *execution*: where the stop
+goes, whether the level held, whether the regime supports it.
+
+---
+
+## 6. What data I would bring in, ranked by expected value
+
+1. **Survivorship-free universe** — #2437 Tier 1. Not new data so much as the
+   missing quarter of it. Everything else is measured wrong without it.
+2. **Options / implied volatility** — the single biggest missing conditioner.
+   IV rank, skew and term structure are the highest-information regime variables
+   available, and Nagel's result says our best-understood edge is *vol-conditioned*.
+3. **Borrow cost / short availability** — decides whether family J is a real
+   edge or just an expensive one. RegSHO gives volume, not cost.
+4. **Analyst estimates + revisions** — the standard PEAD companion; without it
+   family G is running on half its inputs.
+5. **Index membership history** — unlocks family K, which is the cleanest forced
+   flow in the market. (#2290 shipped the membership table; it is empty by design.)
+6. **Intraday bars** — expensive, and it unlocks a family where we are least
+   differentiated. ⚠ Ranked last deliberately, against instinct.
+
+---
+
+## 7. What I would do first, and the thesis I am putting up to be falsified
+
+**Thesis:** *the largest available improvement is not a new strategy — it is
+re-measuring the three we have under a size screen with value or inverse-vol
+weighting, because §1 says our current construction inflates exactly the segment
+we most heavily weight.*
+
+**Falsifiable, and specified before running** — ⚠ the first draft said "re-run
+with (a) sub-$5 excluded and (b) inverse-vol weighting" and judged it on whether
+results "barely move". That confounds two variables and has no rejection rule.
+Codex was right to refuse it. **Four arms, one variable each:**
+
+| arm | universe | weighting |
+| --- | --- | --- |
+| 0 baseline | as today | `equal_weight_concurrent_v1` |
+| 1 size screen only | exclude close < $5 at the decision bar | equal weight |
+| 2 weighting only | as today | `inverse_vol_v1` |
+| 3 both | exclude close < $5 | `inverse_vol_v1` |
+
+Run for all three strategies, in-sample only, holding corpus, cost model,
+benchmark rule, namespace and both arms identical. Declared to
+`trial_register.py` before the first measurement.
+
+**Pre-registered rejection rule**, so the answer cannot be argued after the fact:
+
+- **Thesis SUPPORTED** if arm 3 moves `return_vs_buy_and_hold_pct` by **more than
+  50% of arm 0's absolute value** on at least two of the three strategies. That
+  says the microcap/equal-weight construction, not the signal, is driving the
+  result — and every stored number needs re-basing before anything new is built.
+- **Thesis REJECTED** if every arm lands within **±20%** of arm 0. The strategies
+  are simply weak, the construction is not what is hiding an edge, and effort
+  belongs on new families instead.
+- **Anything between is INCONCLUSIVE** and is reported as such — ⚠ not
+  reinterpreted into whichever story is more convenient.
+
+Arms 1 and 2 separate *which* correction did the work, which is the thing arm 3
+alone cannot tell us.
+
+⚠ One measurement, three strategies, four arms, no new data — and it decides
+whether the next months go on new signals or on re-basing the measurement of the
+ones we have. **That is the next thing to run.**
