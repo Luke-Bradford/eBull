@@ -30,6 +30,7 @@ from app.services.thesis import (
     _call_critic,
     _call_writer,
     _evaluable_prices,
+    _memo_names_subject,
     _news_spike_fired,
     _price_move_fired,
     _shape_analytics_evidence,
@@ -1554,3 +1555,142 @@ class TestPriceMovePctGuard:
 
         assert _price_move_pct(65.0, 100.0) == pytest.approx(-0.35)
         assert _price_move_pct(105.0, 100.0) is None  # +5% under threshold
+
+
+class TestSubjectIdentityGate:
+    """#2431 — the memo must name the company it is about.
+
+    ⚠ The bug this closes is not cosmetic. The writer produced memos titled
+    "Microsoft Corporation (MSFT)" and "Apple Inc. (AAPL)" on an OTEX row while
+    rendering OTEX's own figures, and the stored valuation band was anchored to
+    the confabulated company's price — `portfolio.py` reads `base_value` as an
+    exit trigger, so the row is not inert.
+
+    ⚠⚠ The system prompt ALREADY forbids this in capitals and the writer prompt
+    names the subject on its first line. Compliance on prompt v6 was 0 of 127.
+    These tests exist because an instruction the model ignores is not a control.
+    """
+
+    SUBJECT = {"symbol": "OTEX", "company_name": "Open Text Corp"}
+
+    @pytest.mark.parametrize(
+        ("memo", "why"),
+        [
+            ("OTEX trades at 9x trailing earnings.", "the symbol, on a word boundary"),
+            ("Open Text Corp is a compounder.", "the full name as stored"),
+            ("OpenText Corporation delivers strong FCF.", "the company's own one-word spelling"),
+            ("open text corp — cash generative", "case-insensitive"),
+            ("A long memo. Later on, OTEX looks cheap.", "not required to be in the first sentence"),
+        ],
+    )
+    def test_a_memo_naming_its_subject_passes(self, memo: str, why: str) -> None:
+        assert _memo_names_subject(memo, self.SUBJECT), why
+
+    @pytest.mark.parametrize(
+        ("memo", "why"),
+        [
+            ("### **Apple Inc. (AAPL)** Apple demonstrates strong fundamentals.", "a different real company"),
+            ("Investment Memo: Microsoft Corporation (MSFT)", "the observed OTEX failure verbatim"),
+            ("### **Company Analysis: XYZ Corp (NYSE: XYZ)**", "a template placeholder as the subject"),
+            ("The subject is a turnaround candidate trading below book.", "never names anyone at all"),
+        ],
+    )
+    def test_a_memo_that_never_names_its_subject_is_refused(self, memo: str, why: str) -> None:
+        assert not _memo_names_subject(memo, self.SUBJECT), why
+
+    def test_a_common_word_symbol_does_not_match_ordinary_prose(self) -> None:
+        """⚠⚠ Codex checkpoint 2. 2,186 of 12,696 symbols are <= 3 characters
+        and many are ordinary words. A bare case-insensitive match would let an
+        Apple memo satisfy an ON Semiconductor row on the word "on"."""
+        subject = {"symbol": "ON", "company_name": "ON Semiconductor Corp"}
+        assert not _memo_names_subject("Apple is executing on AI across the estate.", subject)
+
+    def test_a_short_symbol_still_matches_where_a_TICKER_appears(self) -> None:
+        subject = {"symbol": "ON", "company_name": "ON Semiconductor Corp"}
+        assert _memo_names_subject("The subject (ON) trades at 12x.", subject)
+        assert _memo_names_subject("NASDAQ: ON is cyclical.", subject)
+
+    def test_a_shared_leading_token_does_not_carry_the_match(self) -> None:
+        """⚠⚠ Codex checkpoint 2, and the reason the fallback is a PREFIX of the
+        name rather than its leading token: 3,360 companies (26.5%) share a
+        >= 5-character lead with a different issuer. "Apple Hospitality REIT"
+        must not accept a memo about Apple Inc."""
+        subject = {"symbol": "APLE", "company_name": "Apple Hospitality REIT Inc"}
+        assert not _memo_names_subject("### **Apple Inc. (AAPL)** Apple demonstrates strong fundamentals.", subject)
+        assert _memo_names_subject("Apple Hospitality REIT owns select-service hotels.", subject)
+
+    def test_naming_a_peer_alongside_the_subject_is_fine(self) -> None:
+        """⚠ PRESENCE, not exclusivity — the system prompt explicitly allows
+        "versus <peer>" comparisons, so a gate demanding the subject be the only
+        company named would reject correct memos."""
+        assert _memo_names_subject("OTEX trades at a discount versus Microsoft and Adobe.", self.SUBJECT)
+
+    def test_a_generic_leading_token_does_not_carry_the_match_alone(self) -> None:
+        """⚠ The >= 5 bound on the leading token, which is measured and not
+        chosen: "Open" is the lead of "Open Text Corp" and is far too generic —
+        a memo about anything can say "open". The six-character prefix
+        ("opente") is what identifies this subject."""
+        assert not _memo_names_subject("The company has an open architecture and open standards.", self.SUBJECT)
+
+    def test_a_short_leading_token_still_matches_via_the_full_name(self) -> None:
+        assert _memo_names_subject("Open Text's renewals are sticky.", self.SUBJECT)
+
+    @pytest.mark.parametrize(
+        ("company", "memo"),
+        [
+            ("Axalta Coating Systems Ltd", "Axalta exhibits robust fundamentals."),
+            ("Costco Wholesale Corp", "Costco maintains strong fundamentals."),
+        ],
+    )
+    def test_the_short_form_of_a_long_name_passes(self, company: str, memo: str) -> None:
+        """⚠ These two are not hypotheticals — they were the ONLY false
+        positives across 487 known-good v1-v4 memos before the leading-token
+        clause, and they are why it exists."""
+        assert _memo_names_subject(memo, {"symbol": "ZZZZ", "company_name": company})
+
+    @pytest.mark.parametrize(
+        ("memo", "subject", "expected", "why"),
+        [
+            (
+                "BP reported strong earnings.",
+                {"symbol": "BP", "company_name": "BP plc"},
+                True,
+                "a 2-char symbol whose name is also short must still work in plain prose",
+            ),
+            ("MMM raised guidance.", {"symbol": "MMM", "company_name": "3M"}, True, "3M"),
+            ("Gap Inc. comped positive.", {"symbol": "GAP", "company_name": "Gap, Inc."}, True, "Gap by name"),
+            (
+                "Apple saw the valuation gap widen.",
+                {"symbol": "GAP", "company_name": "Gap, Inc."},
+                False,
+                "the English word 'gap' is not the company Gap -- this is why the short-name match is case-SENSITIVE",
+            ),
+            (
+                "Tesco grew market share.",
+                {"symbol": "TSCO", "company_name": "Tesco"},
+                True,
+                "'Tesco' must not be mangled to 'tes' by treating 'co' as a suffix",
+            ),
+            ("Citigroup trades below book.", {"symbol": "C", "company_name": "Citigroup"}, True, "not 'citi'"),
+        ],
+    )
+    def test_short_names_and_token_suffixes(self, memo: str, subject: dict[str, str], expected: bool, why: str) -> None:
+        """⚠⚠ Review round on #2434, and both findings were FALSE POSITIVES —
+        the direction that matters for a narrowing gate. Measured on the real
+        universe before fixing: substring suffix-stripping mangles **1,820 of
+        12,696** names, and **97** instruments have both a short symbol and a
+        name too short to carry the check (3M, Gap, NOV, AES, FMC)."""
+        assert _memo_names_subject(memo, subject) is expected, why
+
+    def test_the_validator_refuses_the_whole_output(self) -> None:
+        """End-to-end through the real validator, not just the predicate."""
+        bad = dict(_VALID_WRITER)
+        bad["memo_markdown"] = "### Investment Memo: Microsoft Corporation (MSFT)"
+        with pytest.raises(ValueError, match="never names its subject"):
+            _validate_writer_output(bad, subject=self.SUBJECT)
+
+    def test_no_subject_supplied_does_not_gate(self) -> None:
+        """⚠ Fails OPEN on a missing subject deliberately: the check is about a
+        memo against ITS context, and with no context there is nothing to
+        contradict. The schema gates still apply."""
+        _validate_writer_output(dict(_VALID_WRITER), subject=None)

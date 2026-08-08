@@ -51,7 +51,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import psycopg
 import psycopg.rows
@@ -1616,6 +1616,138 @@ def _call_with_one_retry(
 # uses them, which is how they leaked into memo prose in the first place.
 _PLACEHOLDER_RE = re.compile(r"\[[A-Za-z][A-Za-z ]{0,24}\](?!\()|<[a-z][a-z ]{0,24}>")
 
+#: Trailing legal forms stripped before matching a company name in a memo. A
+#: correct memo says "Open Text" or "OpenText", never "Open Text Corp".
+_CORPORATE_SUFFIXES: Final = (
+    "corporation",
+    "incorporated",
+    "holdings",
+    "holding",
+    "company",
+    "limited",
+    "group",
+    "corp",
+    "inc",
+    "ltd",
+    "plc",
+    "nv",
+    "sa",
+    "ag",
+    "co",
+)
+
+
+def _squash(text: str) -> str:
+    """Lowercase, alphanumerics only — so "OpenText" matches "Open Text Corp"."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _memo_names_subject(memo: str, instrument: object) -> bool:
+    """Does the memo name the company it is supposed to be about? (#2431)
+
+    ⚠⚠ THE GATE THAT #2235 WANTED AND COULD NOT FIND. That ticket closed the
+    PLACEHOLDER half deterministically and left misattribution to prose,
+    recording that it lacked "a clean discriminator". This is one, and it is
+    verified on the FULL stored corpus rather than argued:
+
+    ```text
+    ver      n   REJECTS   reject-rate
+     v1     25         0       0.0%
+     v2     36         0       0.0%
+     v3     71         0       0.0%
+     v4    355         0       0.0%      <- 487 known-good memos, ZERO rejected
+     v5   2038      1378      67.6%
+     v6    127       127     100.0%
+    ```
+
+    Reproduce with ``scripts/verify_2431_subject_identity.py``. The load-bearing
+    number is the FIRST FOUR ROWS, not the last two: a narrowing gate is only
+    safe if it rejects nothing correct, and v1-v4 are the populations where the
+    writer was demonstrably naming the right company.
+
+    ⚠ Three spellings are accepted, because a correct memo uses whichever reads
+    best and all three are the subject:
+
+      1. the SYMBOL on a word boundary — "OTEX";
+      2. the full company name minus its legal suffix, squashed — so
+         "OpenText Corporation" matches ``Open Text Corp``;
+      3. the LEADING TOKEN when it is >= 5 characters — "Axalta" for
+         ``Axalta Coating Systems Ltd``, "Costco" for ``Costco Wholesale
+         Corp``. ⚠ Five, not four, and the bound is measured: those two were
+         the ONLY false positives across 487 known-good memos before this
+         clause, and a 4-character bound would admit generic leads like "Open"
+         (``Open Text Corp``), where spelling 2 is the discriminator instead.
+
+    ⚠ Presence, NOT exclusivity. A memo may name peers and the benchmark — the
+    system prompt allows exactly that ("versus <peer>"). This asks only whether
+    the subject appears at all, which is the failure actually observed: memos
+    about Microsoft, Tesla and Apple that never mention their own instrument.
+    """
+    if not isinstance(instrument, dict):
+        return True  # nothing to check against; the schema gates elsewhere
+
+    symbol = str(instrument.get("symbol") or "").strip()
+    if symbol:
+        # ⚠⚠ CASE-SENSITIVE, and for a SHORT symbol also position-sensitive.
+        # 2,186 of 12,696 symbols in the universe are three characters or fewer
+        # (17.2%) and many are ordinary words — ON, IT, ALL, KEY, CAR. A
+        # case-insensitive bare match would let "Apple is executing on AI" pass
+        # as an ON Semiconductor memo, which is precisely the misattribution
+        # this gate exists to catch (Codex checkpoint 2). Tickers are written
+        # in caps, so requiring caps costs a correct memo nothing; a short one
+        # additionally has to appear where a ticker appears — "(ON)",
+        # "NASDAQ: ON" — rather than anywhere in the prose.
+        if len(symbol) >= 4 and re.search(rf"\b{re.escape(symbol)}\b", memo):
+            return True
+
+    raw_name = str(instrument.get("company_name") or "").strip()
+    # ⚠⚠ A SUFFIX IS A TOKEN, NOT A TRAILING SUBSTRING (#2434 review). Matching
+    # the substring mangles 1,820 of 12,696 names in the universe — "Tesco"
+    # loses its "co" and becomes "tes", "Citigroup" becomes "citi" — and a name
+    # cut below four characters can never match anything. Splitting on
+    # non-alphanumerics and popping whole trailing tokens keeps "Tesco" intact
+    # while still reducing "Axalta Coating Systems Ltd" and "Avis Budget Group
+    # Inc" to the part a memo actually writes.
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", raw_name) if token]
+    while len(tokens) > 1 and _squash(tokens[-1]) in _CORPORATE_SUFFIXES:
+        tokens.pop()
+    squashed = _squash("".join(tokens))
+
+    if len(squashed) < 4:
+        # ⚠ 97 instruments have BOTH a short symbol and a name too short to
+        # carry the check — 3M (MMM), Gap (GAP), NOV, AES, FMC. For those the
+        # name offers nothing, so the symbol is allowed to match as a standalone
+        # uppercase word rather than only inside ticker punctuation. The
+        # relaxation is scoped to the cases with no alternative: ON
+        # Semiconductor and Gartner (IT) keep the strict rule, because their
+        # names are long enough to do the work.
+        # ⚠ ONLY the short symbols reach the regex here: a symbol of 4+ characters
+        # already ran this exact search above and failed it, so repeating it is
+        # dead work (review round 2).
+        if symbol and len(symbol) < 4 and re.search(rf"\b{re.escape(symbol)}\b", memo):
+            return True
+        # ⚠ CASE-SENSITIVE for a short name, which is what separates the company
+        # "Gap" from the English word "gap". A memo writing "Gap Inc. comped
+        # positive" names its subject; one writing "the valuation gap widened"
+        # does not, and a case-insensitive match could not tell them apart.
+        short = " ".join(tokens)
+        return bool(short) and re.search(rf"\b{re.escape(short)}\b", memo) is not None
+
+    if symbol and len(symbol) < 4 and re.search(rf"(?:[(:]\s*{re.escape(symbol)}\b|\b{re.escape(symbol)}\s*\))", memo):
+        return True
+
+    # ⚠⚠ A PREFIX OF THE NAME, not its leading TOKEN. A correct memo shortens a
+    # long name — "Axalta" for ``Axalta Coating Systems Ltd``, "Costco" for
+    # ``Costco Wholesale Corp`` — and those two were the only false positives
+    # across 487 known-good memos when the full name was required. But matching
+    # the leading token alone is far too loose: 3,360 companies (26.5%) share a
+    # >= 5-character leading token with a DIFFERENT issuer, so ``Apple
+    # Hospitality REIT Inc`` would accept a memo titled "Apple Inc. (AAPL)"
+    # (Codex checkpoint 2). A six-character prefix of the squashed name splits
+    # them exactly: "axalta" and "costco" still match, while Apple Hospitality
+    # needs "appleh", which an Apple Inc memo does not contain.
+    return squashed[:6] in _squash(memo)
+
 
 def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[str, object], LLMCompletion]:
     """
@@ -1626,9 +1758,13 @@ def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[st
     # Buy-zone enforcement is anchor-gated (#2010): the validator stays
     # output-only; the context decides whether the rule applies.
     require_buy_zone = context.get("price_anchor") is not None
+    # #2431 — the subject travels into the validator the same way, because the
+    # check is about the memo AGAINST its context and neither half means
+    # anything alone.
+    subject = context.get("instrument")
 
     def _validate(data: dict[str, object]) -> None:
-        _validate_writer_output(data, require_buy_zone=require_buy_zone)
+        _validate_writer_output(data, require_buy_zone=require_buy_zone, subject=subject)
 
     return _call_with_one_retry(
         client,
@@ -1640,7 +1776,7 @@ def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[st
     )
 
 
-def _validate_writer_output(data: dict[str, object], *, require_buy_zone: bool = False) -> None:
+def _validate_writer_output(data: dict[str, object], *, require_buy_zone: bool = False, subject: object = None) -> None:
     required = {
         "thesis_type",
         "confidence_score",
@@ -1687,6 +1823,26 @@ def _validate_writer_output(data: dict[str, object], *, require_buy_zone: bool =
     placeholder = _PLACEHOLDER_RE.search(memo)
     if placeholder is not None:
         raise ValueError(f"Writer output contains an unfilled placeholder: {placeholder.group(0)!r}")
+
+    # #2431 — SUBJECT IDENTITY, enforced rather than requested. The system
+    # prompt already forbids this in capitals ("Never write the memo about a
+    # different company") and the writer prompt names the subject on its FIRST
+    # line; on prompt v6 the compliance rate with both is 0 of 127. An
+    # instruction the model ignores is not a control.
+    #
+    # ⚠⚠ REFUSED, NOT REPAIRED. The memo misattributes real financial data — the
+    # figures in it are the SUBJECT's, rendered under another company's name —
+    # and the row's valuation band is anchored to whatever price the confabulated
+    # company had. `portfolio.py` reads `base_value` as an EXIT trigger, so a
+    # stored row is not inert. Storing nothing is the honest outcome; this rides
+    # the retry-once machinery first, so a one-off lapse still gets a second
+    # attempt.
+    if not _memo_names_subject(memo, subject):
+        named = subject.get("symbol") if isinstance(subject, dict) else None
+        raise ValueError(
+            f"Writer output never names its subject ({named or 'unknown'}) — the memo is about a different "
+            "company, and every figure in it belongs to the subject"
+        )
 
     # Valuation-band coherence (#2007): the stored band must satisfy
     # bear <= base <= bull, and the buy zone low <= high. Local writers
