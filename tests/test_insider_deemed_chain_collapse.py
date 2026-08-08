@@ -15,6 +15,7 @@ regression names something an operator can look up. No DB — hand-built ``Holde
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -27,6 +28,8 @@ from app.services.ownership_rollup import (
     _dedup_by_priority,
     _is_deemed_chain,
     _reconcile_insider_control_groups,
+    _rows_by_identity,
+    _select_control_group_rep,
 )
 
 _P = date(2026, 3, 31)
@@ -206,11 +209,12 @@ def test_fold_is_allowed_when_the_other_row_belongs_to_the_REP() -> None:
     and refusing every cluster whose rep has a 13F footprint."""
     holders = _chain(_SUB_FLOOR, n=3)
     # ⚠ Ask the module for the rep. This line used to re-spell the key inline as
-    # ``(True, shares, cik, accession)``. #2385 prototyped an extra component and the
-    # inline copy would have attached the 13F row to a holder that is no longer the rep
-    # — i.e. set up the OPPOSITE scenario from the one this test's name describes, while
-    # still asserting on the same output.
-    rep = max(holders, key=_control_group_rep_key)
+    # ``(True, shares, cik, accession)``. #2385 then ADDED a selector on top of that key,
+    # and both the inline copy and a bare ``max(..., key=_control_group_rep_key)`` now
+    # name the INCUMBENT — i.e. they would attach the 13F row to a holder that is no
+    # longer the rep, setting up the OPPOSITE scenario from the one this test's name
+    # describes while still asserting on the same output.
+    rep = _select_control_group_rep(holders, _rows_by_identity(holders, []))
     holders.append(_h(rep.filer_cik or "", rep.filer_name, "999999999", nature=None, source="13f"))
     _out_s, _b, corrs = _reconcile_insider_control_groups(holders, [])
     assert _kinds(corrs) == ["insider_control_group_collapse"]
@@ -366,15 +370,99 @@ def test_duplicate_cik_does_not_inflate_the_cluster_size() -> None:
 def test_rep_preview_and_fold_pick_the_same_holder() -> None:
     """The release-hazard preview and the fold must agree on WHO the rep is, or the
     check protects one identity and strands another. They now share
-    ``_control_group_rep_key``; this pins that they still agree, including on the
-    ``sorted(reverse=True)[0]`` vs ``max`` equivalence (review WARNING, PR #2384)."""
+    :func:`_select_control_group_rep`; this pins that they still agree."""
     cluster = [
         _h("000000003", "Tie B", _SUB_FLOOR, nature="indirect"),
         _h("000000001", "Sponsor Fund L.P.", _SUB_FLOOR, nature="direct"),
         _h("000000002", "Tie A", _SUB_FLOOR, nature="indirect"),
         _h("000000009", "Blockholder Co", _SUB_FLOOR, nature=None, source="13d"),
     ]
-    folded, _corr = _collapse_insider_control_group(cluster)
-    preview = max(cluster, key=_control_group_rep_key)
+    index = _rows_by_identity(cluster, [])
+    folded, _corr = _collapse_insider_control_group(cluster, index)
+    preview = _select_control_group_rep(cluster, index)
     assert (folded.filer_cik, folded.filer_name) == (preview.filer_cik, preview.filer_name)
-    assert sorted(cluster, key=_control_group_rep_key, reverse=True)[0] is preview
+
+
+# ---------------------------------------------------------------------------
+# #2385 — WHICH member the fold keeps. Rule 16a-1(a)(2): the chain's one DIRECT
+# holder is the record holder, and it is what the block should be labelled with.
+# ---------------------------------------------------------------------------
+
+
+def _rep(cluster: list[Holder], blockholders: list[Holder] | None = None) -> Holder:
+    return _select_control_group_rep(cluster, _rows_by_identity(cluster, blockholders or []))
+
+
+def test_rep_is_the_table_i_direct_holder_not_the_highest_cik() -> None:
+    """XFOR/TRVI shape: six deemed owners restating one NEA fund's block. The incumbent
+    key has no nature component, so past the insider-source preference it selects by CIK
+    order and labels the block with whichever deemed owner happens to sort highest."""
+    cluster = _chain(_SUB_FLOOR, n=4)
+    assert max(cluster, key=_control_group_rep_key).filer_name == "Sponsor GP 2 L.L.C."
+    assert _rep(cluster).filer_name == "Sponsor Fund L.P."
+
+
+def test_role_derived_direct_is_not_a_record_holder() -> None:
+    """``sec_insider_dataset_ingest._map_relationship`` maps officer/director → ``direct``
+    without ever reading Table I column 5, so a DERA row's ``direct`` means "is an
+    officer". Promoting one puts an individual's name on a fund's block — measured at 59
+    of the 224 folds the ungated key moved (#2385)."""
+    cluster = [
+        _h("000000009", "Deemed Owner A", _SUB_FLOOR, nature="indirect"),
+        _h("000000008", "Deemed Owner B", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "Officer Person", _SUB_FLOOR, nature="direct", table_i=False),
+    ]
+    assert _rep(cluster).filer_name == "Deemed Owner A"
+
+
+def test_direct_holder_co_filing_the_incumbents_accession_is_not_promoted() -> None:
+    """``TACO`` (Form 3 ``0001829126-25-003075``): the ownership XML puts
+    ``<nonDerivativeHolding>`` beside ``<reportingOwner>``, not inside it, so a joint
+    filing does not say which co-filer holds the D line — and
+    ``insider_transactions._extract_holdings`` attributes every row to ``filers[0]``.
+    Within one accession the attestation therefore ranks by XML listing order. Measured:
+    6 of 931 same-accession folds carry >=2 attested members, against 378 of 503
+    cross-accession."""
+    acc = "0001829126-25-003075"
+    first_listed = _h("000000001", "You Harry L.", _SUB_FLOOR, nature="direct")
+    co_filer = _h("000000009", "Sponsor LLC", _SUB_FLOOR, nature="direct", table_i=False)
+    cluster = [replace(first_listed, winning_accession=acc), replace(co_filer, winning_accession=acc)]
+    assert _rep(cluster).filer_name == "Sponsor LLC"  # incumbent kept — no discriminant
+
+
+def test_two_attested_direct_holders_is_not_a_chain() -> None:
+    """A Rule 16a-1(a)(2) chain has ONE holder of record — the same shape
+    ``_DEEMED_CHAIN_MAX_DIRECT`` already encodes. Two members each attesting D on their
+    OWN filings is the #1659 equal-value coincidence instead, and choosing between them
+    falls through to arbitrary CIK order (``ABTC`` swapped one person's revocable trust
+    for another's; ``HYMC`` promoted the advisor over the fund)."""
+    cluster = [
+        _h("000000005", "Deemed Owner", _SUB_FLOOR, nature="indirect"),
+        _h("000000002", "Trust A", _SUB_FLOOR, nature="direct"),
+        _h("000000001", "Trust B", _SUB_FLOOR, nature="direct"),
+    ]
+    assert _rep(cluster).filer_name == "Deemed Owner"
+
+
+def test_swap_is_declined_when_the_incumbent_holds_other_channel_rows() -> None:
+    """``ACDC``: demoting ``THRC Management, LLC`` releases its 13D rows into the
+    blockholders wedge and the insiders wedge ROSE 225,951,558 → 298,774,575. The rep is
+    the identity that survives into owner-once, so the swap is arithmetic; it is taken
+    only when it cannot add shares back."""
+    incumbent = _h("000000009", "THRC Management, LLC", _SUB_FLOOR, nature="indirect")
+    cluster = [incumbent, _h("000000001", "THRC Holdings, LP", _SUB_FLOOR, nature="direct")]
+    elsewhere = [_h("000000009", "THRC Management, LLC", "72822917", nature=None, source="13d")]
+    assert _rep(cluster).filer_name == "THRC Holdings, LP"  # release-free: swap taken
+    assert _rep(cluster, elsewhere).filer_name == "THRC Management, LLC"  # exposed: declined
+
+
+def test_institutional_row_carrying_table_i_provenance_cannot_become_the_rep() -> None:
+    """``nature_from_table_i`` survives the cross-source merge via
+    ``any(c.nature_from_table_i for c in cands)``, so a 13F-winning holder can carry it.
+    The rep must stay insider-sourced or it does not route to the insiders slice."""
+    cluster = [
+        _h("000000009", "Deemed Owner A", _SUB_FLOOR, nature="indirect"),
+        _h("000000008", "Deemed Owner B", _SUB_FLOOR, nature="indirect"),
+        _h("000000001", "Institution Co", _SUB_FLOOR, nature="direct", source="13f"),
+    ]
+    assert _rep(cluster).filer_name == "Deemed Owner A"

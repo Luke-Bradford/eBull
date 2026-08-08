@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -2599,23 +2599,190 @@ def _control_group_rep_key(h: Holder) -> tuple[bool, Decimal, str, str]:
     Shared by :func:`_collapse_insider_control_group`, which performs the fold, and the
     release-hazard preview in :func:`_reconcile_insider_control_groups`, which must
     identify the SAME holder to know whose other-channel rows would be stranded. Kept in
-    one place so the two cannot drift (review WARNING on PR #2384)."""
+    one place so the two cannot drift (review WARNING on PR #2384).
+
+    ⚠ This is the INCUMBENT key only — every component after the source preference is an
+    arbitrary tie-break, so on a real control chain it selects by highest CIK.
+    :func:`_select_control_group_rep` is what the two callers actually use; this stays the
+    fallback and the deterministic order within each preference tier."""
     return (h.winning_source in _INSIDER_GROUP_SOURCES, h.shares, h.filer_cik or "", h.winning_accession)
 
 
-def _collapse_insider_control_group(cluster: list[Holder]) -> tuple[Holder, CorrectionApplied]:
+def _rows_by_identity(*holder_lists: Iterable[Holder]) -> dict[str, list[Holder]]:
+    """Index every row entering a collapse pass by :func:`_identity_key`.
+
+    A collapse pass needs to know, for a holder it is about to DEMOTE, whether that
+    identity holds any row outside the cluster — because demotion removes the identity
+    from ``survivors`` and releases those rows into their own wedges (see the release
+    hazard in :func:`_reconcile_insider_control_groups`). That question is not answerable
+    from the cluster, so both passes build this index over their own inputs and pass it
+    down. Built per pass, not once at the call site: :func:`_reconcile_same_accession_groups`
+    runs first and rewrites both lists, so the second pass must index what it actually
+    receives."""
+    index: dict[str, list[Holder]] = {}
+    for holders in holder_lists:
+        for h in holders:
+            index.setdefault(_identity_key(h.filer_cik, h.filer_name), []).append(h)
+    return index
+
+
+def _releases_other_rows(
+    holder: Holder,
+    cluster: Sequence[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> bool:
+    """True when demoting ``holder`` out of ``cluster`` would strand rows it holds in
+    OTHER channels — its 13F institutional row, most consequentially.
+
+    Identity, not object: ``rows_by_identity`` is keyed on :func:`_identity_key`, and
+    cluster membership is tested by object id, so a row of the same identity that is not
+    one of the cluster's own objects counts as stranded."""
+    in_cluster = {id(h) for h in cluster}
+    key = _identity_key(holder.filer_cik, holder.filer_name)
+    return any(id(row) not in in_cluster for row in rows_by_identity.get(key, ()))
+
+
+def _attested_direct_holders(cluster: Sequence[Holder]) -> list[Holder]:
+    """The cluster members that state Rule 16a-1(a)(2) DIRECT ownership on their own
+    Form 3/4 Table I column 5.
+
+    Three conditions, each removing a different way the raw ``ownership_nature == "direct"``
+    string lies. Section 16 source, because ``nature_from_table_i`` survives the
+    cross-source merge and a 13F-winning row must never become the rep. Table I provenance,
+    because ``sec_insider_dataset_ingest._map_relationship`` writes DERA RELATIONSHIP flags
+    into the same column and maps officer/director → ``direct`` (#2385/#2386). And the
+    ``direct`` value itself."""
+    return [
+        h
+        for h in cluster
+        if h.winning_source in _INSIDER_GROUP_SOURCES and h.nature_from_table_i and h.ownership_nature == "direct"
+    ]
+
+
+def _select_control_group_rep(cluster: Sequence[Holder], rows_by_identity: Mapping[str, list[Holder]]) -> Holder:
+    """Choose the holder a control-group fold keeps (#2385).
+
+    ⚠ Every figure quoted below is reproduced by
+    ``PYTHONPATH=. uv run python -m scripts.audit_2385_control_group_rep --out /tmp/a.jsonl``
+    (full population, ~4 min sharded 3 ways), which computes one arm per clause so each is
+    priced separately rather than reported as a total. Re-run it rather than trusting these
+    numbers if the corpus has moved.
+
+    **Source rule.** Form 4/3 Table I column 5 ``directOrIndirectOwnership`` — ``D`` =
+    Direct, ``I`` = Indirect (sec-edgar skill §2.3). In a Rule 16a-1(a)(2) control chain
+    exactly one member holds the block DIRECTLY — the fund or trust that actually holds
+    it — and the deemed owners restate the same block INDIRECTLY, naming the direct holder
+    in ``natureOfOwnership``. So the block's holder of record is the member reporting
+    ``D``, and that is the identity the fold should keep. :func:`_control_group_rep_key`
+    has no such component: past the insider-source preference every term is an arbitrary
+    tie-break, so it labels the block with the highest-CIK member.
+
+    ⚠ **Provenance is required, not optional** (#2385/#2386). ``ownership_nature`` has four
+    writers and three meanings: three XML ingest paths write Table I column 5, while
+    ``sec_insider_dataset_ingest._map_relationship`` writes the DERA RELATIONSHIP flags
+    into the same column (officer/director → ``direct``). Preferring ``direct`` without
+    checking ``Holder.nature_from_table_i`` promotes an officer over the fund on 59 of the
+    224 folds it moves — the exact defect this exists to remove.
+
+    ⚠ **Restricted to insider sources explicitly.** ``nature_from_table_i`` survives the
+    cross-source merge (``any(c.nature_from_table_i for c in cands)``), so a holder whose
+    ``winning_source`` is ``13f`` can carry it. Selecting one would break the invariant
+    that the rep routes to the insiders slice via :func:`_reconcile_owner_once`.
+
+    ⚠⚠ **The candidate must be on a DIFFERENT accession from the incumbent**, and that is
+    the load-bearing clause, not a nicety. The SEC ownership XML schema carries no
+    per-owner attribution for Table I: ``<nonDerivativeHolding>`` is a SIBLING of
+    ``<reportingOwner>``, not a child, so a joint filing's D and I lines are not tied to a
+    co-filer by the format. ``insider_transactions._extract_holdings`` consequently
+    attributes every row to ``filers[0]`` (``default_filer_cik``,
+    ``app/services/insider_transactions.py:449``), and the DERA dataset supplies the other
+    co-filers' rows with a role-derived nature. **Within one accession, therefore,
+    "Table I-attested" means "listed first in the XML" and discriminates nothing.**
+    Measured on the full population: only **6 of 931** same-accession folds carry ≥2
+    attested members, against **378 of 503** cross-accession ones. ``TACO``'s Form 3
+    (``0001829126-25-003075``, fetched from EDGAR) is the worked case — two reporting
+    owners, two Table I lines (2,401,200 ``D`` and 2,688,300 ``I`` / "See footnote."),
+    and nothing in the document saying which owner holds which; we attributed both to the
+    first-listed ``You Harry L.`` and the sponsor LLC's row came from DERA. Promoting on
+    that basis would relabel a SPAC sponsor's block with an individual — the same defect
+    the provenance gate exists to prevent, arriving by a different route.
+
+    The evidence that WOULD settle a same-accession cluster is the ``natureOfOwnership``
+    free text on the indirect lines ("Shares held by X"), which names the record holder.
+    It is stored (``insider_transactions.nature_of_ownership``,
+    ``insider_initial_holdings.nature_of_ownership``; 138,380/138,380 and 30,149/30,149
+    non-null on ``direct_indirect = 'I'``) and is not parsed. Until it is, a same-accession
+    cluster has no discriminant and keeps its incumbent.
+
+    ⚠⚠ **EXACTLY ONE attested direct holder, or no swap.** Rule 16a-1(a)(2)'s chain has one
+    member holding of record; :func:`_is_deemed_chain` already encodes that as
+    ``_DEEMED_CHAIN_MAX_DIRECT``. A cluster where TWO members each attest ``D`` on their own
+    filings is not a chain — it is the #1659 equal-value coincidence class, two holders who
+    happen to report the same figure — and picking between them falls through to the
+    incumbent key's arbitrary CIK order. Measured on the full population before this clause
+    existed: of 70 swaps, **19** had ≥2 attested directs and every one was churn or an
+    inversion — ``ABTC`` swapped one person's revocable trust for another's, ``COGT`` and
+    ``RNAZ`` swapped one executive for another, and ``HYMC`` promoted ``WHITEBOX ADVISORS
+    LLC`` over the ``Wbox 2015-5 Ltd.`` fund, which is a control chain read backwards.
+    ⚠ The clause blocks **0** further swaps on today's corpus, and that is expected rather
+    than a sign it is dead: all 33 folds with ≥2 attested directs have the incumbent as one
+    of them, and since ``attested_direct ⊆ cluster`` the incumbent is then the maximal
+    element by :func:`_control_group_rep_key`, so the identity check already refuses. The
+    class it uniquely catches — ≥2 directs with the incumbent NOT among them — is currently
+    empty. It stays because it states the rule, not because it is load-bearing today.
+
+    **Decline-on-release-exposure.** The rep is not a label — it is the identity that
+    survives into :func:`_reconcile_owner_once`, so every demoted member's other-channel
+    rows are RELEASED into their own wedges as standalone owners. Swapping in the direct
+    holder is therefore arithmetic. It is arithmetic-neutral-or-better only when the
+    incumbent holds nothing else: the promoted member's rows stop being released (the pie
+    can only shrink), while the demoted incumbent's rows start being released (the pie
+    grows). So the swap is declined whenever the incumbent has rows outside the cluster —
+    **24 of 75** otherwise-eligible swaps, e.g. ``MIRM``, where ``New Enterprise Associates
+    16, L.P.`` is the correct label by the source rule and ``NEA Partners 16, L.P.`` is
+    kept anyway because it is the member carrying the other-channel rows. The regression
+    class it exists for was measured on 2026-08-07, before any of these clauses: an
+    ungoverned rep swap moved 108 instruments and 19 of them REGRESSED, ``ACDC`` rising
+    225,951,558 → 298,774,575 when ``THRC Management, LLC`` was demoted. ⚠ ``ACDC`` itself
+    is now refused one clause earlier — it is a same-accession cluster — so do not read it
+    as an example of THIS guard firing; the guard's own 24 declines are all value-proxy.
+    This is #2230's fail-closed posture applied to the rep choice instead of to the fold,
+    and it deliberately does NOT reverse #1652's exact-value-only consumption rule, which
+    is what claiming the demoted member's rows would require."""
+    incumbent = max(cluster, key=_control_group_rep_key)
+    attested_direct = _attested_direct_holders(cluster)
+    if len(attested_direct) != 1:
+        return incumbent
+    candidate = attested_direct[0]
+    if candidate.winning_accession == incumbent.winning_accession:
+        return incumbent
+    if _identity_key(candidate.filer_cik, candidate.filer_name) == _identity_key(
+        incumbent.filer_cik, incumbent.filer_name
+    ):
+        return incumbent
+    if _releases_other_rows(incumbent, cluster, rows_by_identity):
+        return incumbent
+    return candidate
+
+
+def _collapse_insider_control_group(
+    cluster: list[Holder],
+    rows_by_identity: Mapping[str, list[Holder]],
+) -> tuple[Holder, CorrectionApplied]:
     """Collapse a confirmed control-group ``cluster`` (≥2 distinct CIKs, ≥1 insider
     member, all at the same exact non-round block value) to ONE holder at that value
     (Rule 13d-3 total beneficial ownership, counted once).
 
-    Representative = a member, preferring an insider source (``form4``/``form3``) so the
-    rep routes to the insiders slice via owner-once, then deterministic tie-break
-    ``(insider-source, shares, filer_cik, winning_accession)`` descending. Non-rep members
+    Representative = :func:`_select_control_group_rep` — the Rule 16a-1(a)(2) Table I
+    ``direct`` holder where the cluster names one and the swap is release-safe, otherwise
+    the insider-source-preferring ``(shares, filer_cik, winning_accession)`` tie-break.
+    ``rows_by_identity`` is the pass's index of every row it received, which is what makes
+    the release-safety half answerable (see :func:`_rows_by_identity`). Non-rep members
     (from BOTH channels) are appended to the rep's existing ``dropped_sources`` (amendment
     provenance preserved) and folded into one ``insider_control_group_collapse`` correction
     whose ``detail`` carries each folded member's CIK + name + shares (``DroppedSource`` has
     no CIK/name field — same limitation as #1645)."""
-    rep = sorted(cluster, key=_control_group_rep_key, reverse=True)[0]
+    rep = _select_control_group_rep(cluster, rows_by_identity)
     losers = [h for h in cluster if h is not rep]
     dropped = list(rep.dropped_sources)
     for loser in losers:
@@ -2729,6 +2896,19 @@ def _reconcile_same_accession_groups(
     representative, never the N dups). The rep keeps its original ``_identity_key`` so the
     downstream survivor-key exclusion + owner-once see it correctly."""
     corrections: list[CorrectionApplied] = []
+    # Every row this pass received, so the rep choice can tell whether demoting a member
+    # would strand its other-channel rows (#2385). Built from the INPUTS, before the pass
+    # rewrites either list.
+    #
+    # ⚠ On THIS pass the rep swap cannot currently fire, and that is by construction rather
+    # than by accident: the bucket key is ``(winning_accession, shares)``, so every insider
+    # member shares one accession, and :func:`_select_control_group_rep` refuses a candidate
+    # on the incumbent's accession (the ownership XML does not attribute a Table I row to a
+    # co-filer). The cross-channel members pulled in below are 13D/G-sourced and can never
+    # be candidates either. The selector is still called here so both passes share ONE
+    # implementation — the drift this file has already taken a review WARNING for — and so
+    # the path is live the moment #2408 supplies a same-accession discriminant.
+    rows_by_identity = _rows_by_identity(survivors, blockholders)
 
     # --- Insider side: bucket form4/form3 survivors by (accession, shares), pull matching
     #     cross-channel 13D/G restatements into the cluster so they fold into the rep. ---
@@ -2755,7 +2935,7 @@ def _reconcile_same_accession_groups(
                 if id(b) not in consumed_blockholders:
                     cross_channel.append(b)
                     consumed_blockholders.add(id(b))
-        rep, correction = _collapse_insider_control_group(cluster + cross_channel)
+        rep, correction = _collapse_insider_control_group(cluster + cross_channel, rows_by_identity)
         survivors_out.append(rep)
         corrections.append(correction)
 
@@ -2831,15 +3011,14 @@ def _reconcile_insider_control_groups(
         that can actually explode a float."""
         return shares >= _INSIDER_GROUP_MIN_SHARES and _is_group_block(shares)
 
-    # Every row, indexed by holder identity, so a fold can also claim a folded member's
-    # rows in OTHER channels. See the release hazard below.
-    by_identity: dict[str, list[tuple[str, Holder]]] = {}
+    # Every row this pass received, indexed by holder identity, so both the release hazard
+    # below and the rep choice (#2385) can see a member's rows in OTHER channels.
+    rows_by_identity = _rows_by_identity(survivors, blockholders)
     for origin, source_list, out_list in (
         ("s", survivors, survivors_out),
         ("b", blockholders, blockholders_out),
     ):
         for h in source_list:
-            by_identity.setdefault(_identity_key(h.filer_cik, h.filer_name), []).append((origin, h))
             if _is_eligible(h):
                 eligible_by_value.setdefault(h.shares, []).append((origin, h))
             else:
@@ -2885,22 +3064,21 @@ def _reconcile_insider_control_groups(
         # this pass takes. The original value-proxy route is deliberately NOT gated on
         # this — its behaviour is unchanged from #1652.
         if collapsible and not (len(distinct_ciks) >= 2 and has_insider and _passes_value_proxies(shares)):
-            # Same key, same tie-break, same winner as the fold itself — see
-            # :func:`_control_group_rep_key`. ``sorted(..., reverse=True)[0]`` there and
-            # ``max`` here agree: Python's sort is stable, so both return the FIRST
-            # maximal element.
-            rep_preview = max(holders, key=_control_group_rep_key)
+            # Same selector, same inputs, same winner as the fold itself — see
+            # :func:`_select_control_group_rep`. Asking the selector rather than
+            # re-spelling its key is what keeps the gate and the fold from drifting
+            # (review WARNING on PR #2384); the rep is the one member EXEMPT from this
+            # check, so a preview that disagreed with the fold would exempt the wrong one.
+            rep_preview = _select_control_group_rep(holders, rows_by_identity)
             rep_identity = _identity_key(rep_preview.filer_cik, rep_preview.filer_name)
-            in_cluster = {id(h) for h in holders}
             for member in holders:
-                member_identity = _identity_key(member.filer_cik, member.filer_name)
-                if member_identity == rep_identity:
+                if _identity_key(member.filer_cik, member.filer_name) == rep_identity:
                     continue
-                if any(id(sib) not in in_cluster for _o, sib in by_identity.get(member_identity, [])):
+                if _releases_other_rows(member, holders, rows_by_identity):
                     collapsible = False
                     break
         if collapsible:
-            collapsed, correction = _collapse_insider_control_group(holders)
+            collapsed, correction = _collapse_insider_control_group(holders, rows_by_identity)
             # The rep is always an insider-source row (≥1 insider member + rep preference),
             # so it routes to the insiders slice via owner-once → goes to survivors.
             survivors_out.append(collapsed)
