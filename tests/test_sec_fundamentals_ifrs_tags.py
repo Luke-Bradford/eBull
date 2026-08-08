@@ -192,16 +192,24 @@ class TestDeclaredConceptsAreCorroborationOnly:
         That view selects by concept NAME with no taxonomy filter, so adding one
         of these names to its ``IN`` list is all it would take.
 
-        ⚠ Scans EVERY file under ``sql/``, not just the migration that happens
-        to define the view today. Pinning one filename makes the guard read a
+        ⚠ Scans EVERY file under ``sql/`` — ``rglob``, so a migration moved into
+        a subdirectory stays covered — not just the migration that happens to
+        define the view today. Pinning one filename makes the guard read a
         file the code no longer uses the moment a later migration redefines
         ``share_count_history`` — it would keep passing while the invariant it
         names had already been broken somewhere else. A deliberate future use
-        of an IFRS tag in SQL is expected to fail this and update it."""
+        of an IFRS tag in SQL is expected to fail this and update it.
+
+        The root is resolved from ``__file__`` and the file count asserted
+        non-empty, so the guard cannot pass vacuously by scanning nothing."""
         import pathlib
 
+        sql_root = pathlib.Path(__file__).resolve().parent.parent / "sql"
+        paths = sorted(sql_root.rglob("*.sql"))
+        assert paths, f"no .sql files found under {sql_root} — guard would pass vacuously"
+
         offenders: list[str] = []
-        for path in sorted(pathlib.Path("sql").glob("*.sql")):
+        for path in paths:
             body = path.read_text()
             offenders.extend(f"{path}:{concept}" for concept in _ALL_TRACKED_IFRS_TAGS if concept in body)
         assert offenders == [], (
