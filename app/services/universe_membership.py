@@ -76,9 +76,13 @@ def reconcile_universe_membership(
     3. **Open** — tradable instruments with no open row and nothing closed
        today. ``source_event`` records how the row landed: ``relisting``
        when any prior row exists for the instrument, ``listing`` when the
-       instrument itself first appeared today, else ``imported`` (already
-       tradable when this table was created, so its true membership start
-       predates the record and is truncated here).
+       instrument itself first appeared today, ``imported`` when this is
+       the run that first populates the table (already tradable at that
+       moment, so its true membership start predates the record and is
+       truncated here), and otherwise ``relisting`` again — an instrument
+       that was dormant when the table was seeded and has now come back.
+       That last branch has no predecessor row to point at, because the
+       absence it ends predates the record.
     4. **Close** — untradable instruments with an open row are closed at
        ``effective_to = last_confirmed_on``: the last date the provider
        actually returned them, never the date we noticed they were gone.
@@ -129,6 +133,21 @@ def reconcile_universe_membership(
         )
         reopened = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
+        # ``imported`` is a ONE-SHOT event — the run that first populates the
+        # table — so the discriminator is the state of the table, not the age
+        # of the instrument. Read it BEFORE the insert and pass it in, rather
+        # than testing emptiness in a subquery of the INSERT's own SELECT,
+        # which would make the label depend on statement-snapshot semantics.
+        #
+        # ⚠ Without this, an instrument that was already ``is_tradable =
+        # FALSE`` when the table was created and later reappears would be
+        # labelled ``imported``: it has no prior membership row (it was never
+        # tradable while the table existed) and its first_seen_at is old, so
+        # both other branches miss. It is a relisting, and mislabelling it
+        # loses the very transition this table was built to record.
+        row = cur.execute("SELECT NOT EXISTS (SELECT 1 FROM instrument_universe_membership)").fetchone()
+        is_seed_run = bool(row[0]) if row is not None else False
+
         # Pass 3 — open a membership row for anything tradable without one.
         #
         # NOT EXISTS(open row) is re-evaluated here rather than reused from
@@ -151,7 +170,8 @@ def reconcile_universe_membership(
                            WHERE p.instrument_id = i.instrument_id
                        ) THEN 'relisting'
                        WHEN i.first_seen_at::date = CURRENT_DATE THEN 'listing'
-                       ELSE 'imported'
+                       WHEN %(is_seed_run)s THEN 'imported'
+                       ELSE 'relisting'
                    END
             FROM instruments i
             WHERE i.is_tradable
@@ -163,6 +183,7 @@ def reconcile_universe_membership(
               )
             RETURNING source_event
             """,
+            {"is_seed_run": is_seed_run},
         )
         opened = [str(r[0]) for r in cur.fetchall()]
 

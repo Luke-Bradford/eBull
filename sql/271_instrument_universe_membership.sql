@@ -173,10 +173,15 @@ COMMENT ON COLUMN instrument_universe_membership.effective_to IS
     'a detection date cannot be stamped here by a later regression.';
 
 COMMENT ON COLUMN instrument_universe_membership.source_event IS
-    'How this row OPENED: imported (already tradable when the table '
-    'was created — true start unknown and truncated here), listing '
-    '(first observed in the feed on effective_from), relisting (a '
-    'prior closed row exists for this instrument). CHECK-constrained '
-    'so a parser regression cannot smuggle a fourth value. There is '
-    'deliberately no close-reason value: a close has exactly one '
-    'cause, the provider omitting the instrument.';
+    'How this row OPENED: imported (tradable on the ONE run that first '
+    'populated this table — true start unknown and truncated here), '
+    'listing (the instrument itself first appeared in the feed on '
+    'effective_from), relisting (it came back after an absence). '
+    '⚠ A relisting row does NOT always have a closed predecessor row: '
+    'an instrument that was already is_tradable = FALSE when the table '
+    'was seeded got no row at all, so its return is a relisting whose '
+    'absence predates the record. Labelling that case imported would '
+    'claim it was tradable at seed time, which is exactly false. '
+    'CHECK-constrained so a regression cannot smuggle a fourth value. '
+    'There is deliberately no close-reason value: a close has exactly '
+    'one cause, the provider omitting the instrument.';

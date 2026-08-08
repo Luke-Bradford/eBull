@@ -305,6 +305,29 @@ class TestReconcile:
             (today, None, today, "relisting"),
         ]
 
+    def test_dormant_at_seed_time_returns_as_a_relisting(self, conn: psycopg.Connection[tuple[Any, ...]]) -> None:
+        """⚠ An instrument already ``is_tradable = FALSE`` when the table was
+        seeded has NO membership row, and its ``first_seen_at`` is old. When it
+        comes back it must still be a ``relisting`` — labelling it ``imported``
+        would claim it was tradable at seed time, which is exactly false, and
+        would lose the return transition.
+
+        Caught by Codex checkpoint 2; the earlier CASE fell through to
+        ``imported`` for this shape."""
+        # Another instrument seeded the table first, so this is not the seed run.
+        _seed_instrument(conn, iid=2_290_021, symbol="INCUMB", first_seen_days_ago=300)
+        _seed_membership(conn, iid=2_290_021, from_days_ago=100, confirmed_days_ago=0)
+        # The dormant one: old, no membership row, now back in the feed.
+        _seed_instrument(conn, iid=2_290_022, symbol="DORMANT", first_seen_days_ago=300)
+        conn.commit()
+
+        stats = reconcile_universe_membership(conn)
+        conn.commit()
+
+        assert stats.imported == 0
+        assert stats.relisted == 1
+        assert _rows(conn, 2_290_022) == [(_today(conn), None, _today(conn), "relisting")]
+
     def test_same_day_flip_flop_reopens_rather_than_splitting(self, conn: psycopg.Connection[tuple[Any, ...]]) -> None:
         """Present, absent, present within one day is a provider flip-flop, not
         a relisting: there is no day on which the instrument was absent, so the
