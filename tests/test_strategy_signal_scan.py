@@ -113,7 +113,10 @@ class TestWriteWindow:
     def test_same_frontier_rerun_writes_nothing(self) -> None:
         """Acceptance 2 — the no-op is the watermark's, not an ``ON CONFLICT``."""
         dates = tuple(date(2026, 1, day) for day in range(1, 6))
-        assert list(write_window_indices(dates, watermark=date(2026, 1, 4), frontier=date(2026, 1, 5))) == []
+        # ⚠ The re-run no-op is `run_signal_scan`'s `watermark == frontier`
+        # short-circuit, which never reaches this function. Here the frontier has
+        # ALREADY moved past the watermark, which is the case that must write.
+        assert list(write_window_indices(dates, watermark=date(2026, 1, 5), frontier=date(2026, 1, 5))) == []
 
     def test_a_gap_is_caught_up_whole(self) -> None:
         """Acceptance 3 — the next run with a moved frontier writes the gap.
@@ -124,7 +127,7 @@ class TestWriteWindow:
         """
         dates = tuple(date(2026, 1, day) for day in range(1, 11))
         window = write_window_indices(dates, watermark=date(2026, 1, 5), frontier=date(2026, 1, 10))
-        assert list(window) == [5, 6, 7, 8]
+        assert list(window) == [4, 5, 6, 7, 8]
 
     def test_watermark_ahead_of_the_series_writes_nothing(self) -> None:
         dates = tuple(date(2026, 1, day) for day in range(1, 6))
@@ -143,14 +146,44 @@ class TestWriteWindow:
         that was never written, and no later run could reach back for it.
         """
         dates = tuple(date(2026, 1, day) for day in range(1, 12))  # gained 2026-01-11
-        window = write_window_indices(dates, watermark=date(2026, 1, 8), frontier=date(2026, 1, 10))
+        window = write_window_indices(dates, watermark=date(2026, 1, 9), frontier=date(2026, 1, 10))
         assert [dates[index] for index in window] == [date(2026, 1, 9)]
+
+    def test_the_day_after_a_completed_run_writes_the_watermark_bar_itself(self) -> None:
+        """⚠⚠ ``>=``, not ``>`` — the bound spec §3.1 states as "strictly after".
+
+        The watermark names the FRONTIER the last run completed, and that run
+        wrote bars strictly BEFORE it. So the frontier bar is the first one still
+        owed. Under ``>`` this window is empty and every run after the first
+        writes nothing at all.
+        """
+        dates = tuple(date(2026, 1, day) for day in range(1, 6))
+        window = write_window_indices(dates, watermark=date(2026, 1, 4), frontier=date(2026, 1, 5))
+        assert [dates[index] for index in window] == [date(2026, 1, 4)]
+
+    def test_consecutive_runs_write_each_bar_exactly_once(self) -> None:
+        """The abutting-window property the ``>=`` bound rests on.
+
+        Run N covers ``[lower, frontier_N)`` and run N+1 covers
+        ``[frontier_N, frontier_N+1)``. Under a ledger with no ``ON CONFLICT`` a
+        one-bar overlap is an aborted batch, and a one-bar gap is unrecoverable.
+        """
+        dates = tuple(date(2026, 1, day) for day in range(1, 8))
+        written: list[date] = []
+        watermark: date | None = None
+        for frontier_index in range(4, len(dates)):
+            frontier = dates[frontier_index]
+            window = write_window_indices(dates, watermark=watermark, frontier=frontier)
+            written.extend(dates[index] for index in window)
+            watermark = frontier
+        assert written == [date(2026, 1, 4), date(2026, 1, 5), date(2026, 1, 6)]
+        assert len(set(written)) == len(written)
 
     def test_a_series_that_fell_behind_still_stops_short_of_its_own_last_bar(self) -> None:
         """The opposite movement: the frontier bound must not override the arrears one."""
         dates = tuple(date(2026, 1, day) for day in range(1, 8))  # last bar 2026-01-07
         window = write_window_indices(dates, watermark=date(2026, 1, 5), frontier=date(2026, 1, 10))
-        assert [dates[index] for index in window] == [date(2026, 1, 6)]
+        assert [dates[index] for index in window] == [date(2026, 1, 5), date(2026, 1, 6)]
 
 
 class TestCensusGate:
@@ -162,7 +195,7 @@ class TestCensusGate:
     def test_complete_census_passes(self) -> None:
         entry = STRATEGY_MANIFEST["s1-time-series-momentum"]
         assert_census_complete(
-            entry, self._census(("entry", "exit"), 7), 7, instruments_covered=7, eligible_instruments=7
+            entry, self._census(("entry", "exit"), 7), 7, instruments_evaluated=7, eligible_instruments=7
         )
 
     def test_short_leg_raises(self) -> None:
@@ -175,29 +208,42 @@ class TestCensusGate:
         census = self._census(("entry", "exit"), 7)
         census["exit"] = {("exit", "not_fired", ""): 6}
         with pytest.raises(RuntimeError, match="exit censused 6 rows against 7"):
-            assert_census_complete(entry, census, 7, instruments_covered=7, eligible_instruments=7)
+            assert_census_complete(entry, census, 7, instruments_evaluated=7, eligible_instruments=7)
 
     def test_undeclared_leg_raises(self) -> None:
         """The mirror of a short leg: rows nothing filtering on the manifest reads."""
         entry = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
         with pytest.raises(RuntimeError, match="emitted \\['exit'\\]"):
             assert_census_complete(
-                entry, self._census(("entry", "exit"), 3), 3, instruments_covered=3, eligible_instruments=3
+                entry, self._census(("entry", "exit"), 3), 3, instruments_evaluated=3, eligible_instruments=3
             )
 
-    def test_an_uncovered_eligible_instrument_raises(self) -> None:
+    def test_an_unevaluated_eligible_instrument_raises(self) -> None:
         """⚠⚠ The check ``expected_per_leg`` CANNOT make.
 
         ``expected_per_leg`` is summed over the windows the scan computed, so an
-        instrument that contributed no window lowers the expectation and the row
+        instrument the loader could not return lowers the expectation and the row
         count together and the census agrees with itself. Only the eligible
         population — counted before any bar was loaded — sees the hole.
         """
         entry = STRATEGY_MANIFEST["s1-time-series-momentum"]
-        with pytest.raises(RuntimeError, match="wrote for 6 instruments against 7 eligible"):
+        with pytest.raises(RuntimeError, match="evaluated 6 instruments against 7 eligible"):
             assert_census_complete(
-                entry, self._census(("entry", "exit"), 6), 6, instruments_covered=6, eligible_instruments=7
+                entry, self._census(("entry", "exit"), 6), 6, instruments_evaluated=6, eligible_instruments=7
             )
+
+    def test_an_empty_window_is_not_a_hole(self) -> None:
+        """⚠ The review's WARNING on the first version, pinned.
+
+        An instrument rejoining the frontier after a stale spell has no bar at or
+        after the watermark to write, and a series that shrank mid-scan may be
+        fully caught up. Both evaluate fine and produce nothing, and gating on
+        "produced a row" would abort a healthy batch for either.
+        """
+        entry = STRATEGY_MANIFEST["s1-time-series-momentum"]
+        assert_census_complete(
+            entry, self._census(("entry", "exit"), 5), 5, instruments_evaluated=7, eligible_instruments=7
+        )
 
 
 class TestCrossSectionalResolution:

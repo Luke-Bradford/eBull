@@ -152,10 +152,11 @@ class StrategyScanResult:
     #: Expected rows per leg — the sum of the per-instrument windows the census
     #: is checked against. Spec §9: *"a mismatch is a failure, not a log line"*.
     expected_per_leg: int = 0
-    #: Eligible instruments that contributed at least one window bar. ⚠ Checked
+    #: Eligible instruments the loader returned a usable series for. ⚠ Checked
     #: against the eligible count, not against ``expected_per_leg``, which is
-    #: derived from the same windows and so cannot detect a missing one.
-    instruments_covered: int = 0
+    #: derived from the same windows and so cannot detect a missing one. NOT the
+    #: number that produced a row — an empty window is legitimate.
+    instruments_evaluated: int = 0
     census: Mapping[CensusKey, int] = field(default_factory=dict)
     error: str | None = None
 
@@ -227,10 +228,25 @@ def write_window_indices(dates: Sequence[date], *, watermark: date | None, front
 
     - **strictly before the last bar** is §2's arrears rule. The last bar has no
       ``t+1``, so a decision there is ``no_fill_bar`` and unrewritable.
-    - **strictly after the watermark** is what makes a re-run a no-op without an
+    - **at or after the watermark** is what makes a re-run a no-op without an
       ``ON CONFLICT``, and what lets a straggler that missed sessions catch up:
       it gets every unwritten bar in the window, not just the newest, so a gap
       does not silently drop a day of its record.
+
+    ⚠⚠ ``>=``, NOT ``>``, AND SPEC §3.1 SAYS *"strictly after the watermark"* —
+    WHICH IS AN OFF-BY-ONE IN THE SPEC. The two bounds are measured against
+    different things: the watermark names the **frontier** of the last completed
+    run, and that run wrote bars strictly *before* its frontier. So the frontier
+    bar itself is the first one still owed, and ``>`` skips it. Concretely, with
+    a frontier moving F1 → F2 on a series ``…, F0, F1, F2``: ``>`` gives bars in
+    ``(F1, F2)``, which is EMPTY, so every run after the first would write
+    nothing at all. ``>=`` gives ``{F1}``, the bar before the new frontier, which
+    is what §2's arrears rule asks for.
+
+    ⚠ It cannot double-write. The previous run covered ``[its lower bound, F1)``
+    and this one covers ``[F1, F2)`` — abutting, disjoint, and the same-frontier
+    case never reaches here because ``run_signal_scan`` short-circuits on
+    ``watermark == frontier``.
 
     ⚠⚠ THE UPPER BOUND IS THE **FRONTIER**, NOT THE SERIES END, AND THE
     DIFFERENCE IS A PERMANENT DATA LOSS (Codex, checkpoint 2). The two agree for
@@ -270,7 +286,7 @@ def write_window_indices(dates: Sequence[date], *, watermark: date | None, front
     if watermark is None:
         return range(end - 1, end)
     start = end
-    while start > 0 and dates[start - 1] > watermark:
+    while start > 0 and dates[start - 1] >= watermark:
         start -= 1
     return range(start, end)
 
@@ -515,10 +531,10 @@ def run_signal_scan(
 
     rows: dict[str, list[LedgerRow]] = {plan.entry.strategy_id: [] for plan in plans}
     expected: dict[str, int] = {plan.entry.strategy_id: 0 for plan in plans}
-    covered: dict[str, int] = {plan.entry.strategy_id: 0 for plan in plans}
     pending: dict[str, dict[int, _PendingMember]] = {plan.entry.strategy_id: {} for plan in cross_sectional}
     scores: dict[str, dict[date, dict[int, float]]] = {plan.entry.strategy_id: {} for plan in cross_sectional}
     moved_mid_scan = 0
+    evaluated = 0
 
     for instrument_id in eligible:
         series = load_masked_bars(conn, instrument_id).series
@@ -534,13 +550,13 @@ def run_signal_scan(
         if len(series) < 2:
             moved_mid_scan += 1
             continue
+        evaluated += 1
 
         for plan in plans:
             window = write_window_indices(series.dates, watermark=plan.watermark, frontier=frontier.bar_date)
             if not window:
                 continue
             expected[plan.entry.strategy_id] += len(window)
-            covered[plan.entry.strategy_id] += 1
             if plan.entry.strategy_class == "per_series":
                 _scan_per_series(plan, series, instrument_id, window, rows[plan.entry.strategy_id])
             else:
@@ -571,7 +587,7 @@ def run_signal_scan(
                 plan,
                 rows[strategy_id],
                 expected_per_leg=expected[strategy_id],
-                instruments_covered=covered[strategy_id],
+                instruments_evaluated=evaluated,
                 eligible_instruments=len(eligible),
                 frontier=frontier,
             )
@@ -653,8 +669,14 @@ def _stage_cross_sectional(
     participating: set[date] = set()
     for offset, index in enumerate(window):
         when = series.dates[index]
-        # The re-basing the slice depends on, checked rather than trusted.
-        assert trimmed.dates[offset] == when
+        # ⚠ The re-basing the slice depends on, checked rather than trusted — and
+        # NOT an `assert`, which `python -O` deletes. This is the one guard on the
+        # off-by-one the slice exists to risk, so it must survive optimisation.
+        if trimmed.dates[offset] != when:
+            raise RuntimeError(
+                f"cross-sectional slice re-based wrongly for instrument {instrument_id}: "
+                f"offset {offset} is {trimmed.dates[offset]}, expected {when}"
+            )
         verdict = staged.verdicts[index]
         if verdict is None:
             participating.add(when)
@@ -749,7 +771,7 @@ def assert_census_complete(
     census: Mapping[SignalKind, Mapping[CensusKey, int]],
     expected_per_leg: int,
     *,
-    instruments_covered: int,
+    instruments_evaluated: int,
     eligible_instruments: int,
 ) -> None:
     """Every declared leg carries exactly one row per eligible instrument-bar.
@@ -763,22 +785,31 @@ def assert_census_complete(
     ⚠⚠ TWO CHECKS, AND THE POPULATION ONE IS NOT REDUNDANT. ``expected_per_leg``
     is a sum over the windows the scan actually computed, so a window that came
     out empty lowers the expectation and the row count together — the census
-    agrees with itself and reports nothing. ``instruments_covered`` is checked
-    against the ELIGIBLE population instead, which is the count computed before
-    any bar was loaded, so an instrument that contributed no window at all fails
-    here. That is the shape the mid-scan corpus move takes, and its cost is a
-    permanent hole: the watermark would advance past a bar that was never
-    written, and nothing after it can reach back.
+    agrees with itself and reports nothing. ``instruments_evaluated`` is checked
+    against the ELIGIBLE population instead, a count taken before any bar was
+    loaded, so an instrument the scan could not evaluate at all fails here. Its
+    cost is a permanent hole: the watermark would advance past a bar that was
+    never written, and nothing after it can reach back.
+
+    ⚠ IT COUNTS INSTRUMENTS **EVALUATED**, NOT INSTRUMENTS THAT PRODUCED A ROW,
+    and the distinction is the review's WARNING on the first version. An empty
+    window is a legitimate outcome — an instrument rejoining the frontier after a
+    stale spell has no bar at or after the watermark to write, and a series that
+    shrank mid-scan may be fully caught up already. Gating on "produced a row"
+    aborts a healthy batch for both. What is NOT legitimate is an eligible
+    instrument the loader could not return two bars for, because that one was
+    owed a bar and did not get it; the counter is incremented at load time, so it
+    is independent of the window computation rather than derived from it.
 
     ⚠ It checks the leg set BOTH ways. A short leg is the failure the spec names;
     an *undeclared* leg is the same defect mirrored — a manifest that says S-4 is
     entry-only while the strategy emits exits means a reader filtering on the
     manifest silently drops rows that exist.
     """
-    if instruments_covered != eligible_instruments:
+    if instruments_evaluated != eligible_instruments:
         raise RuntimeError(
-            f"{entry.strategy_id} wrote for {instruments_covered} instruments against {eligible_instruments} "
-            "eligible — an eligible instrument that produced no window is a bar this frontier owes and "
+            f"{entry.strategy_id} evaluated {instruments_evaluated} instruments against {eligible_instruments} "
+            "eligible — an eligible instrument the loader could not return is a bar this frontier owes and "
             "no later run can reach, because the watermark would advance past it"
         )
     for kind in sorted(entry.signal_kinds):
@@ -800,7 +831,7 @@ def _commit_strategy(
     rows: Sequence[LedgerRow],
     *,
     expected_per_leg: int,
-    instruments_covered: int,
+    instruments_evaluated: int,
     eligible_instruments: int,
     frontier: Frontier,
 ) -> StrategyScanResult:
@@ -817,7 +848,7 @@ def _commit_strategy(
             plan.entry,
             census,
             expected_per_leg,
-            instruments_covered=instruments_covered,
+            instruments_evaluated=instruments_evaluated,
             eligible_instruments=eligible_instruments,
         )
         with conn.transaction():
@@ -836,7 +867,7 @@ def _commit_strategy(
             status="failed",
             resumed_from=plan.watermark,
             expected_per_leg=expected_per_leg,
-            instruments_covered=instruments_covered,
+            instruments_evaluated=instruments_evaluated,
             census={key: count for bucket in census.values() for key, count in bucket.items()},
             error=f"{type(exc).__name__}: {exc}",
         )
@@ -848,7 +879,7 @@ def _commit_strategy(
         resumed_from=plan.watermark,
         rows_written=written,
         expected_per_leg=expected_per_leg,
-        instruments_covered=instruments_covered,
+        instruments_evaluated=instruments_evaluated,
         census={key: count for bucket in census.values() for key, count in bucket.items()},
     )
 
@@ -880,7 +911,7 @@ def log_report(report: ScanReport) -> None:
             result.resumed_from,
             result.rows_written,
             result.expected_per_leg,
-            result.instruments_covered,
+            result.instruments_evaluated,
             f" error={result.error}" if result.error else "",
         )
         for (kind, verdict, reason), count in sorted(result.census.items()):

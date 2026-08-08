@@ -27,8 +27,10 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.services.cost_model import COST_MODEL_ID
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
-from app.services.strategy_signal_scan import ScanReport, run_signal_scan
+from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_signal_scan import SCAN_UNIVERSE, ScanReport, run_signal_scan
 
 _LAST_BAR_OF_WRITTEN = """
     SELECT count(*)
@@ -248,7 +250,96 @@ def scan() -> bool:
     return ok
 
 
-ARMS = {"scan": scan}
+def resume() -> bool:
+    """The DAY-AFTER case: a watermark already at the last bar the scan wrote.
+
+    ⚠⚠ THIS ARM EXISTS BECAUSE ITS ABSENCE HID A BUG THAT BROKE EVERY RUN AFTER
+    THE FIRST. ``--scan`` exercises only a cold start (no watermark) and a
+    same-frontier re-run (short-circuited before the window is computed), so the
+    one bound that matters daily — "which bars does a MOVED frontier owe?" — was
+    never executed against the corpus. The watermark names a FRONTIER and the run
+    that set it wrote bars strictly BEFORE that frontier, so the lower bound has
+    to be ``>=``; with ``>`` the window is empty and the scan writes nothing,
+    every day, silently.
+
+    The arm seeds each strategy's watermark at the modal WRITE date — one bar
+    behind today's frontier, which is exactly the state the previous day's run
+    would have left — runs the scan, and requires the same row count a cold start
+    produces. Under ``>`` it is zero.
+    """
+    print("RESUME — a moved frontier against yesterday's watermark, then cleaned up")
+    ok = True
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        floor_id = _scalar(conn, "SELECT coalesce(max(signal_id), 0) FROM strategy_signals")
+        before = _scalar(conn, "SELECT count(*) FROM strategy_scan_watermark")
+        if before:
+            print(f"  ⚠⚠ {before} watermark row(s) already present — this arm seeds its own and will not run")
+            return False
+
+        # The modal write date, computed the way the scan computes the frontier
+        # rather than assumed: one bar back on the majority calendar.
+        seeded = conn.execute(
+            """
+            SELECT last_bar FROM (
+                SELECT max(d.price_date) AS last_bar
+                FROM price_daily d
+                JOIN price_quarantine_coverage cov
+                  ON cov.instrument_id = d.instrument_id
+                 AND cov.rule_set_version = %(v)s
+                 AND d.price_date BETWEEN cov.first_bar AND cov.last_bar
+                GROUP BY d.instrument_id
+            ) t GROUP BY last_bar ORDER BY count(*) DESC, last_bar DESC LIMIT 1
+            """,
+            {"v": QUARANTINE_RULE_SET_VERSION},
+        ).fetchone()
+        assert seeded is not None
+        frontier_today = seeded[0]
+        print(f"  today's frontier is {frontier_today}; seeding each strategy's watermark one session behind it")
+
+        identities = [
+            (strategy_id, entry.identity(universe=SCAN_UNIVERSE, cost_model_id=COST_MODEL_ID).version)
+            for strategy_id, entry in sorted(STRATEGY_MANIFEST.items())
+        ]
+        previous = conn.execute(
+            "SELECT max(price_date) FROM price_daily WHERE price_date < %(f)s",
+            {"f": frontier_today},
+        ).fetchone()
+        assert previous is not None and previous[0] is not None
+        yesterday = previous[0]
+        print(f"  seeded watermark {yesterday} for {len(identities)} strategies")
+        try:
+            for strategy_id, version in identities:
+                conn.execute(
+                    "INSERT INTO strategy_scan_watermark (strategy_id, strategy_version, frontier_date) "
+                    "VALUES (%(s)s, %(v)s, %(d)s)",
+                    {"s": strategy_id, "v": version, "d": yesterday},
+                )
+            report = run_signal_scan(conn)
+            _print_report(report)
+            written = _scalar(conn, "SELECT count(*) FROM strategy_signals WHERE signal_id > %(f)s", {"f": floor_id})
+            dates = conn.execute(
+                "SELECT DISTINCT signal_bar_date FROM strategy_signals WHERE signal_id > %(f)s ORDER BY 1 DESC LIMIT 5",
+                {"f": floor_id},
+            ).fetchall()
+            print(f"  rows written from a MOVED frontier: {written} (must be > 0)")
+            print(f"  newest signal_bar_dates written: {[str(row[0]) for row in dates]}")
+            ok = written > 0
+            if not ok:
+                print("  ⚠⚠ a moved frontier wrote NOTHING — the watermark lower bound is off by one bar")
+        finally:
+            removed = _scalar(
+                conn,
+                "WITH d AS (DELETE FROM strategy_signals WHERE signal_id > %(f)s RETURNING 1) SELECT count(*) FROM d",
+                {"f": floor_id},
+            )
+            conn.execute("DELETE FROM strategy_scan_watermark")
+            left = _scalar(conn, "SELECT count(*) FROM strategy_scan_watermark")
+            print(f"  cleanup: removed {removed} signal row(s); {left} watermark row(s) remain")
+            ok = ok and left == 0
+    return ok
+
+
+ARMS = {"scan": scan, "resume": resume}
 
 
 def main() -> int:
