@@ -449,7 +449,13 @@ def tombstone_option_pseudo_cusips(
             """,
             {"status": STATUS_OPTION_PSEUDO_CUSIP, "cusips": cusips},
         )
-        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        # Plain rowcount: psycopg only reports -1 when no statement has run,
+        # and an UPDATE has just run. Verified against psycopg 3.3.3 — a
+        # zero-row UPDATE returns 0, not -1. The defensive
+        # ``if rowcount and rowcount > 0`` form in cusip_resolver.py's
+        # sibling sweeps is redundant here and implies a negative is
+        # reachable, which it is not.
+        return cur.rowcount
 
 
 def _best_match(
