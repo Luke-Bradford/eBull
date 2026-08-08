@@ -460,31 +460,68 @@ quoting a practitioner source (Bulkowski's *Encyclopedia of Chart Patterns* is
 the usual one), not a controlled study. They are **candidates for the §2.12
 recipe**, not conclusions.
 
-**Wyckoff is not a pattern and should not be tested as one.** It is a framework
-about *who is on the other side*: accumulation / markup / distribution / markdown
-driven by a "composite operator", resting on three laws — supply and demand,
-cause and effect, and **effort versus result**. ⚠ It has **no peer-reviewed
-validation** that this sweep could find. A 1920s practitioner framework, widely
-taught, essentially untested.
+**Wyckoff — ⚠⚠ I called this "not a pattern, should not be tested as one" and
+that was WRONG.** Corrected after the operator pushed back and the primary source
+was actually read (`wyckoffanalytics.com/wyckoff-method/`). It is far more
+structured than a discretionary framework, and much of it is computable.
 
-> ⚠⚠ **BUT ITS CENTRAL CLAIM IS ALREADY A MEASURED QUANTITY.** Wyckoff's "effort
-> versus result" — *large volume with minimal price progress means someone is
-> absorbing supply* — is **Amihud illiquidity inverted**:
->
-> ```text
-> Amihud   =  |return| / dollar volume
-> Wyckoff absorption  =  high volume, small |return|   ->  LOW Amihud
-> Wyckoff "ease of movement" =  low volume, big move   ->  HIGH Amihud
-> ```
->
-> So the one Wyckoff law with a mechanism behind it is expressible in a measure
-> that **does** have empirical support (§2.11), is computable on our 25.9M bars,
-> and needs no new data. **That is the bridge worth building: test the quantity,
-> not the vocabulary.**
+**It defines named, chartable events with stated criteria** — accumulation: PS
+(preliminary support), SC (selling climax), AR (automatic rally), ST (secondary
+test), **Spring**, SOS (sign of strength), LPS (last point of support), BU
+(back-up); distribution: PSY, BC (buying climax), AR, SOW, LPSY, UT (upthrust),
+UTAD. Each with a definition — a Spring is *"a price move below the support level
+of the TR that quickly reverses and moves back into the TR"*, an SOS is *"a price
+advance on increasing spread and relatively higher volume"*.
 
-⚠ The rest of Wyckoff — the phase labels, the springs and upthrusts — is
-discretionary chart reading and inherits every problem in §2.12: no algorithmic
-definition, so no test, so no way to separate it from hindsight.
+⚠⚠ **And it carries an explicit numbered checklist — the Nine Buying Tests —
+most of which we can compute today:**
+
+| # | test | computable with |
+| --- | --- | --- |
+| 1 | downside price objective accomplished (P&F count) | ⚠ needs point-and-figure; we have none |
+| 2 | PS, SC, ST present | ⚠ needs the event definitions coded |
+| 3 | activity bullish — volume rises on rallies, falls on reactions | ✅ bars + volume |
+| 4 | downtrend line penetrated | ✅ `detect_swings` + a fitted line |
+| 5 | higher lows | ✅ `detect_swings` |
+| 6 | higher highs | ✅ `detect_swings` |
+| 7 | **stock stronger than the market** | ✅ relative strength vs SPY (#2398) |
+| 8 | base forming (horizontal price line) | ✅ `cluster_levels` |
+| 9 | profit potential >= 3x risk | ✅ a reward:risk filter on the level distance |
+
+**Seven of nine are expressible with primitives we already ship.**
+
+> **So the honest status is not "untestable" — it is "never systematically
+> tested", which is a completely different and much more interesting
+> statement.** This sweep found no peer-reviewed validation, and the source
+> itself says proficiency *"requires considerable practice"* and that a trader
+> must *"interpret the motives behind the action"* — i.e. **as practised it is
+> discretionary, but as specified it is largely mechanical.**
+
+⚠ The structure is also unusually well-suited to being tested properly, because
+the Nine Tests are a **conjunctive filter**: you can measure the marginal
+contribution of each condition, and find out whether the edge (if any) lives in
+the whole gestalt or in two of the nine. **That is a far better experiment than
+"does Wyckoff work".**
+
+⚠ And the third law — **effort versus result**, *"high-volume bars with narrow
+ranges indicating institutional unloading"* — is **Amihud illiquidity inverted**:
+
+```text
+Amihud                      =  |return| / dollar volume
+Wyckoff absorption           =  high volume, small |return|  ->  LOW Amihud
+Wyckoff "ease of movement"   =  low volume, big move         ->  HIGH Amihud
+```
+
+So the law Wyckoff rests on is a quantity that **does** have empirical support
+(§2.11) and is computable on our 25.9M bars with no new data. ⚠ Note what this
+does NOT establish: that the *interpretation* (a composite operator accumulating)
+is correct. It establishes that the **observable** is real and measurable. Test
+the quantity, not the story attached to it.
+
+⚠⚠ **Lesson recorded against myself: I dismissed Wyckoff from priors without
+reading the source, and the source contradicted me. The repo rule is "grep before
+cite"; the same applies to dismissing something. A framework being old and
+practitioner-taught is not evidence about its testability.**
 
 ### The mathematics actually involved, and which of it is grounded
 
