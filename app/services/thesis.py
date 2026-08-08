@@ -1721,7 +1721,10 @@ def _memo_names_subject(memo: str, instrument: object) -> bool:
         # relaxation is scoped to the cases with no alternative: ON
         # Semiconductor and Gartner (IT) keep the strict rule, because their
         # names are long enough to do the work.
-        if symbol and re.search(rf"\b{re.escape(symbol)}\b", memo):
+        # ⚠ ONLY the short symbols reach the regex here: a symbol of 4+ characters
+        # already ran this exact search above and failed it, so repeating it is
+        # dead work (review round 2).
+        if symbol and len(symbol) < 4 and re.search(rf"\b{re.escape(symbol)}\b", memo):
             return True
         # ⚠ CASE-SENSITIVE for a short name, which is what separates the company
         # "Gap" from the English word "gap". A memo writing "Gap Inc. comped
