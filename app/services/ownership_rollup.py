@@ -2677,78 +2677,45 @@ def _select_control_group_rep(cluster: Sequence[Holder], rows_by_identity: Mappi
     has no such component: past the insider-source preference every term is an arbitrary
     tie-break, so it labels the block with the highest-CIK member.
 
-    ⚠ **Provenance is required, not optional** (#2385/#2386). ``ownership_nature`` has four
-    writers and three meanings: three XML ingest paths write Table I column 5, while
-    ``sec_insider_dataset_ingest._map_relationship`` writes the DERA RELATIONSHIP flags
-    into the same column (officer/director → ``direct``). Preferring ``direct`` without
-    checking ``Holder.nature_from_table_i`` promotes an officer over the fund on 59 of the
-    224 folds it moves — the exact defect this exists to remove.
+    Four clauses, each refusing a way the raw ``direct`` string misleads. Evidence for
+    every one is in ``docs/review-prevention-log.md`` (2026-08-08 #2385 entry) and on the
+    PR; the audit script above reprices them on demand.
 
-    ⚠ **Restricted to insider sources explicitly.** ``nature_from_table_i`` survives the
-    cross-source merge (``any(c.nature_from_table_i for c in cands)``), so a holder whose
-    ``winning_source`` is ``13f`` can carry it. Selecting one would break the invariant
-    that the rep routes to the insiders slice via :func:`_reconcile_owner_once`.
+    1. **Provenance** — ``ownership_nature`` has four writers and three meanings;
+       ``sec_insider_dataset_ingest._map_relationship`` maps DERA officer/director →
+       ``direct`` without reading Table I. See :func:`_attested_direct_holders`, which
+       also restricts to insider sources: ``nature_from_table_i`` survives the cross-source
+       merge, so a 13F-winning holder can carry it and would not route to the insiders
+       slice.
 
-    ⚠⚠ **The candidate must be on a DIFFERENT accession from the incumbent**, and that is
-    the load-bearing clause, not a nicety. The SEC ownership XML schema carries no
-    per-owner attribution for Table I: ``<nonDerivativeHolding>`` is a SIBLING of
-    ``<reportingOwner>``, not a child, so a joint filing's D and I lines are not tied to a
-    co-filer by the format. ``insider_transactions._extract_holdings`` consequently
-    attributes every row to ``filers[0]`` (``default_filer_cik``,
-    ``app/services/insider_transactions.py:449``), and the DERA dataset supplies the other
-    co-filers' rows with a role-derived nature. **Within one accession, therefore,
-    "Table I-attested" means "listed first in the XML" and discriminates nothing.**
-    Measured on the full population: only **6 of 931** same-accession folds carry ≥2
-    attested members, against **378 of 503** cross-accession ones. ``TACO``'s Form 3
-    (``0001829126-25-003075``, fetched from EDGAR) is the worked case — two reporting
-    owners, two Table I lines (2,401,200 ``D`` and 2,688,300 ``I`` / "See footnote."),
-    and nothing in the document saying which owner holds which; we attributed both to the
-    first-listed ``You Harry L.`` and the sponsor LLC's row came from DERA. Promoting on
-    that basis would relabel a SPAC sponsor's block with an individual — the same defect
-    the provenance gate exists to prevent, arriving by a different route.
+    2. ⚠⚠ **A DIFFERENT accession from the incumbent**, and this is the load-bearing one.
+       The ownership XML has no per-owner Table I attribution — ``<nonDerivativeHolding>``
+       is a SIBLING of ``<reportingOwner>`` — so a joint filing does not say which
+       co-filer holds the ``D`` line, and ``insider_transactions._extract_holdings``
+       assigns every row to ``filers[0]`` (``app/services/insider_transactions.py:449``).
+       **Within one accession "Table I-attested" means "listed first in the XML".** 6 of
+       931 same-accession folds carry ≥2 attested members, against 378 of 503
+       cross-accession. The discriminant that would settle a same-accession cluster is
+       the ``natureOfOwnership`` free text ("Shares held by X"), stored and unparsed —
+       **#2408**. Until then such a cluster keeps its incumbent.
 
-    The evidence that WOULD settle a same-accession cluster is the ``natureOfOwnership``
-    free text on the indirect lines ("Shares held by X"), which names the record holder.
-    It is stored (``insider_transactions.nature_of_ownership``,
-    ``insider_initial_holdings.nature_of_ownership``; 138,380/138,380 and 30,149/30,149
-    non-null on ``direct_indirect = 'I'``) and is not parsed. Until it is, a same-accession
-    cluster has no discriminant and keeps its incumbent.
+    3. **EXACTLY ONE attested direct holder.** Rule 16a-1(a)(2)'s chain has one holder of
+       record, the shape ``_DEEMED_CHAIN_MAX_DIRECT`` already encodes. Two members each
+       attesting ``D`` on their own filings is the #1659 equal-value coincidence class,
+       where the choice falls through to arbitrary CIK order. ⚠ Blocks 0 further swaps
+       today — all 33 such folds have the incumbent among the directs, and since
+       ``attested_direct ⊆ cluster`` the incumbent is then maximal by the key, so the
+       identity check already refuses. It states the rule; it is not load-bearing today.
 
-    ⚠⚠ **EXACTLY ONE attested direct holder, or no swap.** Rule 16a-1(a)(2)'s chain has one
-    member holding of record; :func:`_is_deemed_chain` already encodes that as
-    ``_DEEMED_CHAIN_MAX_DIRECT``. A cluster where TWO members each attest ``D`` on their own
-    filings is not a chain — it is the #1659 equal-value coincidence class, two holders who
-    happen to report the same figure — and picking between them falls through to the
-    incumbent key's arbitrary CIK order. Measured on the full population before this clause
-    existed: of 70 swaps, **19** had ≥2 attested directs and every one was churn or an
-    inversion — ``ABTC`` swapped one person's revocable trust for another's, ``COGT`` and
-    ``RNAZ`` swapped one executive for another, and ``HYMC`` promoted ``WHITEBOX ADVISORS
-    LLC`` over the ``Wbox 2015-5 Ltd.`` fund, which is a control chain read backwards.
-    ⚠ The clause blocks **0** further swaps on today's corpus, and that is expected rather
-    than a sign it is dead: all 33 folds with ≥2 attested directs have the incumbent as one
-    of them, and since ``attested_direct ⊆ cluster`` the incumbent is then the maximal
-    element by :func:`_control_group_rep_key`, so the identity check already refuses. The
-    class it uniquely catches — ≥2 directs with the incumbent NOT among them — is currently
-    empty. It stays because it states the rule, not because it is load-bearing today.
-
-    **Decline-on-release-exposure.** The rep is not a label — it is the identity that
-    survives into :func:`_reconcile_owner_once`, so every demoted member's other-channel
-    rows are RELEASED into their own wedges as standalone owners. Swapping in the direct
-    holder is therefore arithmetic. It is arithmetic-neutral-or-better only when the
-    incumbent holds nothing else: the promoted member's rows stop being released (the pie
-    can only shrink), while the demoted incumbent's rows start being released (the pie
-    grows). So the swap is declined whenever the incumbent has rows outside the cluster —
-    **24 of 75** otherwise-eligible swaps, e.g. ``MIRM``, where ``New Enterprise Associates
-    16, L.P.`` is the correct label by the source rule and ``NEA Partners 16, L.P.`` is
-    kept anyway because it is the member carrying the other-channel rows. The regression
-    class it exists for was measured on 2026-08-07, before any of these clauses: an
-    ungoverned rep swap moved 108 instruments and 19 of them REGRESSED, ``ACDC`` rising
-    225,951,558 → 298,774,575 when ``THRC Management, LLC`` was demoted. ⚠ ``ACDC`` itself
-    is now refused one clause earlier — it is a same-accession cluster — so do not read it
-    as an example of THIS guard firing; the guard's own 24 declines are all value-proxy.
-    This is #2230's fail-closed posture applied to the rep choice instead of to the fold,
-    and it deliberately does NOT reverse #1652's exact-value-only consumption rule, which
-    is what claiming the demoted member's rows would require."""
+    4. **Decline on release exposure.** The rep is not a label — it is the identity that
+       survives into :func:`_reconcile_owner_once`, so demoting a member RELEASES its
+       other-channel rows into their own wedges. The swap is therefore arithmetic, and is
+       neutral-or-better only when the incumbent holds nothing outside the cluster:
+       the promoted member's rows stop being released, the demoted one's would start.
+       Declines 24 of 75 otherwise-eligible swaps. This is #2230's fail-closed posture
+       applied to the rep choice, and it deliberately does NOT reverse #1652's
+       exact-value-only consumption rule, which claiming the demoted member's rows
+       would require."""
     incumbent = max(cluster, key=_control_group_rep_key)
     attested_direct = _attested_direct_holders(cluster)
     if len(attested_direct) != 1:
