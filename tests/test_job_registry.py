@@ -139,6 +139,12 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # #2002 — thesis_outcome_capture single-job lane (same #2052/#1526
         # rationale); sole writer of thesis_outcomes.
         "db_thesis_outcomes",
+        # #2394 §3.1 — strategy_signal_scan single-job lane. Unlike the
+        # starvation-driven lanes above, this one is load-bearing for
+        # CORRECTNESS: strategy_signals has no ON CONFLICT, so two overlapping
+        # scans raise a UniqueViolation and abort a batch rather than
+        # de-duplicating. See app/jobs/sources.py::Lane.
+        "strategy_scan",
     }
 )
 
