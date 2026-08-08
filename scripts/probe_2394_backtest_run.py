@@ -244,8 +244,16 @@ PROBES: tuple[Probe, ...] = (
     Probe(
         name="a measurement with no in-sample namespace still gets a split cut for it",
         path=SERVICE,
-        old='        outcome = measurement.namespaces.get("in_sample")\n        if outcome is None:\n            continue\n',
-        new='        outcome = measurement.namespaces.get("in_sample")\n        if outcome is None:\n            outcome = next(iter(measurement.namespaces.values()), None)\n        if outcome is None:\n            raise RuntimeError("no namespace")\n',
+        old=(
+            '        outcome = measurement.namespaces.get("in_sample")\n'
+            "        if outcome is None:\n            continue\n"
+        ),
+        new=(
+            '        outcome = measurement.namespaces.get("in_sample")\n'
+            "        if outcome is None:\n"
+            "            outcome = next(iter(measurement.namespaces.values()), None)\n"
+            "        if outcome is None:\n            raise RuntimeError('no namespace')\n"
+        ),
         test=f"{_TESTS}::TestCutSplits::test_a_hold_out_only_measurement_contributes_no_split",
     ),
     Probe(
