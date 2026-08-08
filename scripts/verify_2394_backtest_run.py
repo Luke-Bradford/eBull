@@ -72,7 +72,7 @@ import psycopg
 from app.config import settings
 from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID
 from app.services.deflated_sharpe import MIN_MEASURED_TRIALS
-from app.services.equity_curve import SIZING_RULE_ID, LegBook
+from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import (
@@ -665,6 +665,7 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
                 ambiguity_arm="worst_case",
                 quarantine_arm="masked",
                 sizing_rule=SIZING_RULE_ID,
+                benchmark_rule=BENCHMARK_RULE_ID,
                 cost_model_id=COST_MODEL_ID,
                 corpus_version=CORPUS_VERSION,
                 window_start=EVALUATION_WINDOW_START,

@@ -282,16 +282,26 @@ def compute_metrics(
 ) -> StrategyMetrics:
     """Criterion 7's metric set for one curve. Pure; reads no database.
 
-    ⚠⚠ ``buy_and_hold`` IS AN EQUITY CURVE FROM THE SAME ENGINE, not a second
+    ⚠⚠ ``buy_and_hold`` IS AN EQUITY CURVE FROM THE SAME MODULE, not a second
     implementation. Criterion 7's twelfth metric is *"return relative to
     buy-and-hold"*, and no published rule says what "buy-and-hold" means on an
     unbalanced panel where instruments list and delist inside the window. Fixed
     by construction: one leg per evaluated instrument, opened at its first
     usable bar in the window and closed at its last, run through
-    ``build_equity_curve`` under the SAME sizing rule and the SAME cost model.
-    Re-using the engine is what makes the comparison an apples-to-apples one —
-    a benchmark computed by different machinery would attribute the machinery's
-    difference to the strategy.
+    ``equity_curve`` under the SAME cost model and the SAME fill contract.
+    Sharing those is what makes the comparison apples-to-apples — a benchmark
+    computed by different machinery would attribute the machinery's difference
+    to the strategy.
+
+    ⚠⚠ IT DOES **NOT** SHARE THE SIZING RULE, AND THAT WAS A REAL DEFECT (#2426).
+    This docstring used to say "the SAME sizing rule", and the benchmark was
+    built by ``build_equity_curve`` accordingly — so it re-imposed equal weight
+    on every event date. A rebalanced comparator is not buy-and-hold (Blume &
+    Stambaugh, JFE 12, 1983): on the full population it added **23.2 points of
+    annual return** to the bar and turned over 137,477,862x the pot. The
+    benchmark now comes from ``build_buy_and_hold_curve`` under its own frozen
+    ``BENCHMARK_RULE_ID``, which is hashed into the result identity so it cannot
+    change again without the version moving.
 
     ⚠ ``None`` is permitted and means *no benchmark was supplied*, in which case
     the relative return is reported against zero and the absolute one is

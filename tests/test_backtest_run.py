@@ -45,7 +45,7 @@ from app.services.backtest_run import (
 )
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
-from app.services.equity_curve import SIZING_RULE_ID, LegBook
+from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QUARANTINE_RULE_SET_VERSION
 from app.services.signal_ledger import LedgerRow
@@ -448,6 +448,7 @@ class TestPlannedIdentities:
             ambiguity_arm="worst_case",
             quarantine_arm="masked",
             sizing_rule=SIZING_RULE_ID,
+            benchmark_rule=BENCHMARK_RULE_ID,
             cost_model_id=COST_MODEL_ID,
             corpus_version=CORPUS_VERSION,
             window_start=EVALUATION_WINDOW_START,
