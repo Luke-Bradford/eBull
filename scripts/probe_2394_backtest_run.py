@@ -33,6 +33,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SERVICE = REPO / "app" / "services" / "backtest_run.py"
 SCHEDULER = REPO / "app" / "workers" / "scheduler.py"
+WALK_FORWARD = REPO / "app" / "services" / "walk_forward.py"
 
 _TESTS = "tests/test_backtest_run.py"
 
@@ -193,6 +194,118 @@ PROBES: tuple[Probe, ...] = (
         old="    text = str(value).strip()\n    return text or None\n",
         new="    return str(value)\n",
         test=f"{_TESTS}::TestOptionalStr::test_blank_is_none",
+    ),
+    # -----------------------------------------------------------------------
+    # Criterion 5's split, wired into the run (#2240 follow-on to §3.2)
+    # -----------------------------------------------------------------------
+    Probe(
+        name="a split is cut over an empty in-sample population",
+        path=SERVICE,
+        old="    if not starts:\n        raise ValueError(",
+        new="    if False:\n        raise ValueError(",
+        test=f"{_TESTS}::TestInSampleSplit::test_a_population_with_no_closed_observation_refuses",
+    ),
+    Probe(
+        name="mismatched label-window arrays are cut instead of refused",
+        path=SERVICE,
+        old='    if len(starts) != len(ends):\n        raise ValueError(f"{len(starts)} label-window starts',
+        new='    if False:\n        raise ValueError(f"{len(starts)} label-window starts',
+        test=f"{_TESTS}::TestInSampleSplit::test_mismatched_label_window_arrays_refuse",
+    ),
+    Probe(
+        name="the fold's bar count is taken from the population rather than the axis",
+        path=SERVICE,
+        old="                bar_count=sum(bar_counts[fold.first_index : fold.last_index + 1]),\n",
+        new="                bar_count=len(starts),\n",
+        test=f"{_TESTS}::TestInSampleSplit::test_the_geometry_does_not_move_with_the_population",
+    ),
+    Probe(
+        name="a fold's stored first_date does not describe its stored first_index",
+        path=SERVICE,
+        old="                first_date=axis[fold.first_index],\n",
+        new="                first_date=axis[fold.last_index],\n",
+        test=f"{_TESTS}::TestInSampleSplit::test_the_axis_is_cut_into_four_contiguous_blocks_carrying_their_dates",
+    ),
+    Probe(
+        name="the embargo is measured over the PRE-purge candidates (the circularity AFML ch. 7 forbids)",
+        path=WALK_FORWARD,
+        old='        if role(start, end, fold=fold, embargo_bars=0) != "train":\n            continue\n',
+        new="        if False:\n            continue\n",
+        test=f"{_TESTS}::TestInSampleSplit::test_the_embargo_is_measured_off_the_post_purge_training_side",
+    ),
+    Probe(
+        name="a second measurement of one arm silently overwrites the first arm's split",
+        path=SERVICE,
+        old="        if key in splits:\n",
+        new="        if False:\n",
+        test=(f"{_TESTS}::TestCutSplits::test_two_measurements_of_one_arm_are_refused_rather_than_overwritten"),
+    ),
+    Probe(
+        name="an in-sample row with no split reaches the write instead of being refused up front",
+        path=SERVICE,
+        old="            if (strategy_id, result.identity.quarantine_arm) not in splits\n",
+        new="            if False\n",
+        test=(f"{_TESTS}::TestCutSplits::test_a_pending_in_sample_row_with_no_split_is_refused_before_any_insert"),
+    ),
+    Probe(
+        name="every arm is handed the FIRST arm's split, so the two censuses stop differing",
+        path=SERVICE,
+        old="        splits[key] = split\n",
+        new="        splits[key] = next(iter(splits.values()), split)\n",
+        test=f"{_TESTS}::TestCutSplits::test_each_arm_keeps_its_own_census",
+    ),
+    Probe(
+        name="a measurement with no in-sample namespace still gets a split cut for it",
+        path=SERVICE,
+        old=(
+            '        outcome = measurement.namespaces.get("in_sample")\n'
+            "        if outcome is None:\n            continue\n"
+        ),
+        new=(
+            '        outcome = measurement.namespaces.get("in_sample")\n'
+            "        if outcome is None:\n"
+            "            outcome = next(iter(measurement.namespaces.values()), None)\n"
+            "        if outcome is None:\n            raise RuntimeError('no namespace')\n"
+        ),
+        test=f"{_TESTS}::TestCutSplits::test_a_hold_out_only_measurement_contributes_no_split",
+    ),
+    Probe(
+        name="the hold-out book accumulates criterion 5's label windows too",
+        path=SERVICE,
+        old="        if self.records_label_windows and realised:\n",
+        new="        if realised:\n",
+        test=f"{_TESTS}::TestLabelWindowCollection::test_a_hold_out_book_records_nothing",
+    ),
+    Probe(
+        name="an unrealised leg's unresolved label window reaches the embargo measurement",
+        path=SERVICE,
+        old="        if self.records_label_windows and realised:\n",
+        new="        if self.records_label_windows:\n",
+        test=f"{_TESTS}::TestLabelWindowCollection::test_an_unrealised_leg_contributes_no_label_window",
+    ),
+    Probe(
+        name="an in-sample book holding an open position is measured rather than refused",
+        path=SERVICE,
+        old='    if namespace == "in_sample" and book.open_at_end:\n',
+        new="    if False:\n",
+        test=f"{_TESTS}::TestNamespaceAxis::test_an_in_sample_namespace_holding_an_open_position_raises",
+    ),
+    # ⚠ TWO-SIDED PREDICATE, ONE PROBE PER SIDE. ``wanted`` decides both "an
+    # in-sample row carries the whole split" and "a hold-out row carries none";
+    # a single probe would leave whichever side it did not move unproven.
+    Probe(
+        name="an in-sample row's fold shortfall is not noticed",
+        path=SERVICE,
+        old='        wanted = FOLD_COUNT if row.namespace == "in_sample" else 0\n',
+        new='        wanted = row.folds_written if row.namespace == "in_sample" else 0\n',
+        test=f"{_TESTS}::TestRowCompleteness::test_an_in_sample_row_without_its_whole_split_fails",
+    ),
+    Probe(
+        name="a hold-out row carrying folds is not noticed",
+        path=SERVICE,
+        old='        wanted = FOLD_COUNT if row.namespace == "in_sample" else 0\n',
+        new='        wanted = FOLD_COUNT if row.namespace == "in_sample" else row.folds_written\n',
+        test=f"{_TESTS}::TestRowCompleteness::test_a_hold_out_row_carrying_folds_fails",
     ),
 )
 
