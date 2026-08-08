@@ -446,6 +446,72 @@ control for the backtester and it is exactly what a pattern test needs: *does
 this pattern beat a random entry held the same length?* Any pattern proposal
 that cannot clear its own random-entry cohort should not reach a backtest.
 
+### The four papers that ARE the evidence base for technical analysis
+
+⚠ Asked for well-written research rather than assertion. This is the arc, and it
+matters that it is read in order — the third paper overturns the second.
+
+**1. Osler (2003) — the MECHANISM for support and resistance, from order data.**
+*"Currency Orders and Exchange Rate Dynamics: An Explanation for the Predictive
+Success of Technical Analysis"*, **JF 58(5), 1791-1819.** The first study with
+data on **individual stop-loss and take-profit orders**. Two findings that
+explain two separate TA claims:
+
+- **Take-profit orders cluster at round numbers** → why trends *reverse* at
+  support and resistance.
+- **Stop-loss orders cluster just BEYOND round numbers** → why moves are
+  *unusually rapid* once a level breaks.
+
+⚠⚠ **This is the strongest pro-TA evidence in the literature, and its strength is
+that it is mechanistic rather than statistical.** It does not say "the pattern
+backtests well" — it shows the order book actually contains the clustering that
+would produce the effect. That is precisely what `find_break_and_retest` and
+`classify_interaction` model, and they now have a documented reason to exist.
+
+⚠ Caveat that must travel with it: **the order data is FX, not equities.**
+Round-number clustering is documented in equities too, but the order-book
+evidence is currency markets.
+
+**2. Brock, Lakonishok & LeBaron (1992) — the best statistical case FOR.**
+*"Simple Technical Trading Rules and the Stochastic Properties of Stock
+Returns"*, **JF.** DJIA **1897-1986**, moving-average and trading-range-break
+rules, bootstrapped against four nulls — random walk, AR(1), GARCH-M, EGARCH.
+**Strong support**; the returns were not consistent with any of the four.
+
+**3. ⚠⚠ Sullivan, Timmermann & White (1999) — which overturns it.**
+*"Data-Snooping, Technical Trading Rule Performance, and the Bootstrap"*, **JF
+54(5), 1647-1691.** They apply **White's Reality Check** to quantify
+data-snooping bias, expand BLL's 26 rules to *"the full universe from which the
+trading rules were drawn"*, and re-run on 100 years of DJIA. Result: **no
+profitable simple trading rule** for the DJIA, S&P 500, or S&P 500 futures.
+
+> ⚠⚠ **This is the single most important paper in this file for how we work.**
+> BLL's rules looked significant because the test ignored how many rules were
+> considered before those 26 were selected. **STW is the direct ancestor of the
+> deflated Sharpe and of `trial_register.py`** — the same correction, applied to
+> the same mistake, 27 years earlier. Anyone proposing a rule here is repeating
+> BLL unless the trial count is declared first.
+
+**4. Lo, Mamaysky & Wang (2000) — the method for patterns.** §2.12. Kernel
+regression → extrema → geometric definition → conditional vs unconditional
+distribution. *"Incremental information … especially for low-liquidity stocks."*
+
+### What the arc adds up to
+
+| | verdict |
+| --- | --- |
+| Is there a mechanism behind support/resistance? | ✅ **Yes** — order clustering, Osler, with order-book data |
+| Do simple rules beat the market on the index? | ❌ **No**, once data-snooping is corrected (STW) |
+| Do chart patterns carry information? | ⚠ **Some**, incrementally, mostly in illiquid names (LMW) |
+| Does that make them profitable? | ⚠ **Unestablished** — the gap is costs, and §2.1 says turnover decides |
+
+⚠ **The honest reading: TA's foundations are better than its reputation and
+weaker than its marketing.** There is a real, documented micro-mechanism. There
+is no evidence that simple rules survive honest multiple-testing correction on
+an index. Both are true, and the resolution is that the mechanism lives at a
+scale and in a population where costs are hardest — the same collision as
+§2.8a and §2.12.
+
 ### The three the operator named, specifically
 
 ⚠ **"Untested" and "disproven" are different, and conflating them is how a real
