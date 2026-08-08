@@ -1,27 +1,35 @@
 """Read-only census of the control-group representative choice (#2385).
 
-Step 1 of #2385: the ticket proposes preferring the Rule 16a-1(a)(2) ``direct`` holder
-as a folded cluster's representative, but states its own premise as UNMEASURED —
-``_DEEMED_CHAIN_MAX_DIRECT`` is ``<= 1``, not ``== 1``, so an all-``indirect`` chain is
-admissible and has no direct member to prefer. This script measures, over the full
-population rather than the single ``XFOR`` case the ticket reasons from:
+#2385 proposes preferring the Rule 16a-1(a)(2) ``direct`` holder as a folded cluster's
+representative instead of the incumbent key's highest-CIK member. This script prices that
+proposal and each guard the measurement forced onto it, over the full population rather
+than the single ``XFOR`` case the ticket reasons from.
 
-* how many clusters :func:`_reconcile_insider_control_groups` actually folds;
-* the ``n_direct`` distribution over them (0 vs 1 vs >1 — the value-proxy tier does not
-  gate on nature at all, so >1 is possible there);
-* in how many the CURRENT representative differs from the direct member;
-* whether the `direct` string can be trusted at all — see :func:`_ungated_rep_key`.
+One arm per clause, so the summary says which guard does the work instead of reporting a
+combined total:
+
+* ``rep_now`` — the pre-#2385 rule, spelled from :func:`orl._control_group_rep_key`.
+* ``rep_ungated`` — what the ticket proposed LITERALLY (see :func:`_ungated_rep_key`).
+* ``rep_rung1`` — the SHIPPED rule: all three clauses.
+* ``rep_rung1_ungoverned`` / ``_any_accession`` / ``_multi_direct`` — the shipped rule
+  minus the release guard / the accession clause / the one-direct-holder clause.
+* ``rep_rung2`` — attested-any, MEASURED BUT NOT SHIPPED (see :func:`_attested_any`).
+* ``rep_loaded`` — what this checkout actually does, reconciled in the summary.
+
+⚠ That last line is the point of the layout. A census that reads its control arm off the
+loaded function reports a clean result whether or not the fix landed (#2386 prevention
+entry), so every arm is computed in-harness from the module's constants and the loaded
+function's verdict is printed as a separate agreement count.
 
 Method: wrap the module's own :func:`_collapse_insider_control_group` and run the REAL
 :func:`get_ownership_rollup` over the same population the #2230 A/B uses. Nothing is
 re-derived — the folds recorded are the folds the read path performs, and the tier is
-recomputed from the module's own constants (:data:`_INSIDER_GROUP_MIN_SHARES`,
-:func:`_is_group_block`) rather than a copy of the thresholds.
+captured from the CALLER (:func:`_tier`) rather than re-derived from the thresholds.
 
-Usage:
+Usage (~4 min sharded 3 ways over 2,179 instruments):
 
     PYTHONPATH=. uv run python -m scripts.audit_2385_control_group_rep \
-        --out /tmp/audit2385.jsonl
+        --out /tmp/audit2385.jsonl --shard 0 --shards 3
 """
 
 from __future__ import annotations
@@ -102,7 +110,52 @@ def _describe(h: orl.Holder) -> dict[str, Any]:
         "name": h.filer_name,
         "nature": h.ownership_nature,
         "source": h.winning_source,
+        "table_i": h.nature_from_table_i,
     }
+
+
+def _attested_any(cluster: list[orl.Holder]) -> list[orl.Holder]:
+    """RUNG 2, measured but NOT shipped unless the numbers justify it: any Section 16
+    member whose ``ownership_nature`` came off a Table I line at all.
+
+    The case for it is #2386's ``ACTU`` — a 24-CIK Bios chain where every Table I line in
+    the filing reads ``I``, so `orl._attested_direct_holders` is empty and the incumbent key
+    keeps a DERA role-derived ``:NDT:`` row that carries no Table I evidence whatsoever.
+    The case against is that the source rule names no member here: an ``I`` filer is not
+    the holder of record either, so this rung is a tie-break preference, not a source
+    rule, and it must earn its place on measured impact."""
+    return [h for h in cluster if h.winning_source in orl._INSIDER_GROUP_SOURCES and h.nature_from_table_i]
+
+
+def _rung(
+    cluster: list[orl.Holder],
+    pool: list[orl.Holder],
+    incumbent: orl.Holder,
+    *,
+    governed: bool,
+    index: Any,
+    unique: bool = False,
+    same_accession_ok: bool = True,
+) -> orl.Holder:
+    """One arm, computed IN-HARNESS from the module's own key and predicates rather than
+    read off the loaded function — otherwise the control arm silently becomes the
+    treatment arm the moment the fix lands (#2386 prevention entry).
+
+    ``unique`` requires exactly one candidate (Rule 16a-1(a)(2)'s one-direct-holder shape);
+    ``same_accession_ok=False`` adds the accession clause. Each guard is a separate flag so
+    the summary can price it rather than report only the combined rule."""
+    if not pool or (unique and len(pool) != 1):
+        return incumbent
+    candidate = max(pool, key=orl._control_group_rep_key)
+    if not same_accession_ok and candidate.winning_accession == incumbent.winning_accession:
+        return incumbent
+    if orl._identity_key(candidate.filer_cik, candidate.filer_name) == orl._identity_key(
+        incumbent.filer_cik, incumbent.filer_name
+    ):
+        return incumbent
+    if governed and orl._releases_other_rows(incumbent, cluster, index):
+        return incumbent
+    return candidate
 
 
 def main() -> int:
@@ -130,12 +183,34 @@ def main() -> int:
 
         return wrapper
 
-    def recording_collapse(cluster: list[orl.Holder]) -> tuple[orl.Holder, orl.CorrectionApplied]:
-        collapsed, correction = real_collapse(cluster)
+    def recording_collapse(
+        cluster: list[orl.Holder], rows_by_identity: Any
+    ) -> tuple[orl.Holder, orl.CorrectionApplied]:
+        collapsed, correction = real_collapse(cluster, rows_by_identity)
         insiders = [h for h in cluster if h.winning_source in orl._INSIDER_GROUP_SOURCES]
+        # ARM 0 — the pre-#2385 rule, spelled from the module's key rather than read off
+        # the loaded collapse, so this stays the CONTROL at every commit.
         rep_now = max(cluster, key=orl._control_group_rep_key)
         rep_ungated = max(cluster, key=_ungated_rep_key)
         directs = [h for h in cluster if h.ownership_nature == "direct"]
+        attested_direct = orl._attested_direct_holders(cluster)
+        attested_any = _attested_any(cluster)
+        exposed = orl._releases_other_rows(rep_now, cluster, rows_by_identity)
+        # ARM 1 = the SHIPPED rule (all three guards). ARMs 1u / 1a / 1m each drop exactly
+        # one guard, so the summary prices each rather than reporting only the total.
+        arm = dict(index=rows_by_identity)
+        rep_r1 = _rung(cluster, attested_direct, rep_now, governed=True, unique=True, same_accession_ok=False, **arm)
+        rep_r1u = _rung(cluster, attested_direct, rep_now, governed=False, unique=True, same_accession_ok=False, **arm)
+        rep_r1a = _rung(cluster, attested_direct, rep_now, governed=True, unique=True, same_accession_ok=True, **arm)
+        rep_r1m = _rung(cluster, attested_direct, rep_now, governed=True, unique=False, same_accession_ok=False, **arm)
+        rep_r2 = _rung(cluster, attested_any, rep_now, governed=True, unique=True, same_accession_ok=False, **arm)
+        # ARM 3 — what the LOADED module actually does. Reconciled in the summary so a
+        # reader can tell which arm this checkout implements instead of assuming (#2386).
+        rep_loaded = orl._select_control_group_rep(cluster, rows_by_identity)
+
+        def _same(a: orl.Holder, b: orl.Holder) -> bool:
+            return orl._identity_key(a.filer_cik, a.filer_name) == orl._identity_key(b.filer_cik, b.filer_name)
+
         folds.append(
             {
                 **current,
@@ -147,10 +222,31 @@ def main() -> int:
                 "n_indirect": sum(1 for h in cluster if h.ownership_nature == "indirect"),
                 "n_other_nature": sum(1 for h in cluster if h.ownership_nature not in ("direct", "indirect")),
                 "n_direct_insider_only": sum(1 for h in insiders if h.ownership_nature == "direct"),
+                "n_attested_direct": len(attested_direct),
+                "n_attested_any": len(attested_any),
+                "n_distinct_accessions": len({h.winning_accession for h in cluster}),
+                "n_role_derived": sum(1 for h in insiders if not h.nature_from_table_i),
+                "incumbent_release_exposed": exposed,
                 "rep_now": _describe(rep_now),
                 "rep_ungated": _describe(rep_ungated),
-                "rep_changes": orl._identity_key(rep_now.filer_cik, rep_now.filer_name)
-                != orl._identity_key(rep_ungated.filer_cik, rep_ungated.filer_name),
+                "rep_rung1": _describe(rep_r1),
+                "rep_rung1_ungoverned": _describe(rep_r1u),
+                "rep_rung1_any_accession": _describe(rep_r1a),
+                "rep_rung1_multi_direct": _describe(rep_r1m),
+                "rep_rung2": _describe(rep_r2),
+                "rep_loaded": _describe(rep_loaded),
+                "rep_changes": not _same(rep_now, rep_ungated),
+                "rung1_changes": not _same(rep_now, rep_r1),
+                "rung1_ungoverned_changes": not _same(rep_now, rep_r1u),
+                "rung1_declined": (not _same(rep_now, rep_r1u)) and _same(rep_now, rep_r1),
+                "rung1_any_accession_changes": not _same(rep_now, rep_r1a),
+                "accession_clause_blocks": (not _same(rep_now, rep_r1a)) and _same(rep_now, rep_r1),
+                "rung1_multi_direct_changes": not _same(rep_now, rep_r1m),
+                "unique_clause_blocks": (not _same(rep_now, rep_r1m)) and _same(rep_now, rep_r1),
+                "rung2_changes": not _same(rep_now, rep_r2),
+                "rung2_beyond_rung1": (not _same(rep_now, rep_r2)) and _same(rep_now, rep_r1),
+                "loaded_is_rung1": _same(rep_loaded, rep_r1),
+                "loaded_is_now": _same(rep_loaded, rep_now),
                 "directs": [_describe(h) for h in directs],
             }
         )
@@ -209,6 +305,59 @@ def main() -> int:
     already = sum(1 for f in have_direct if f["rep_now"]["nature"] == "direct")
     print(f"   of those, rep already direct       : {already}")
     print(f"folds with ZERO direct insider member: {len(good) - len(have_direct)}   (rep unchanged by construction)")
+
+    print("\n--- rung structure (#2385 decline-on-release-exposure design) ---")
+    print(f"folds with >=1 ATTESTED direct member : {sum(1 for f in good if f['n_attested_direct'] >= 1)}")
+    print(f"folds with >=1 attested member at all : {sum(1 for f in good if f['n_attested_any'] >= 1)}")
+    print(f"folds with a role-derived member      : {sum(1 for f in good if f['n_role_derived'] >= 1)}")
+    print(f"folds whose incumbent is release-EXPOSED : {sum(1 for f in good if f['incumbent_release_exposed'])}")
+    # The accession clause exists because Table I attestation is assigned to ``filers[0]``
+    # (`insider_transactions.py:449`), so within one accession it ranks by XML listing
+    # order. This is the number that shows the clause is not decorative.
+    print(f"\nfolds spanning >1 accession : {sum(1 for f in good if f['n_distinct_accessions'] > 1)}")
+    for t in tiers:
+        sub = [f for f in good if f["tier"] == t]
+        print(
+            f"   ... {t:16s}: {len(sub):4d} folds, "
+            f"{sum(1 for f in sub if f['n_attested_any'] >= 2):4d} with >=2 attested members"
+        )
+    r1u = [f for f in good if f["rung1_ungoverned_changes"]]
+    r1 = [f for f in good if f["rung1_changes"]]
+    r1a = [f for f in good if f["rung1_any_accession_changes"]]
+    dec = [f for f in good if f["rung1_declined"]]
+    blocked = [f for f in good if f["accession_clause_blocks"]]
+    print(f"\nRUNG 1 without the ACCESSION clause moves                  : {len(r1a)}")
+    print("   by tier:", dict(Counter(f["tier"] for f in r1a)))
+    print(f"   swaps the accession clause BLOCKS                      : {len(blocked)}")
+    print("   by tier:", dict(Counter(f["tier"] for f in blocked)))
+    r1m = [f for f in good if f["rung1_multi_direct_changes"]]
+    ublocked = [f for f in good if f["unique_clause_blocks"]]
+    print(f"RUNG 1 without the ONE-DIRECT-HOLDER clause moves          : {len(r1m)}")
+    print(f"   swaps the one-direct-holder clause BLOCKS              : {len(ublocked)}")
+    print("   by tier:", dict(Counter(f["tier"] for f in ublocked)))
+    print(f"RUNG 1 without the RELEASE guard moves                     : {len(r1u)}")
+    print(f"RUNG 1 SHIPPED (accession clause + release guard)          : {len(r1)}")
+    print("   by tier:", dict(Counter(f["tier"] for f in r1)))
+    print(f"   swaps the release guard DECLINES                       : {len(dec)}")
+    print("   instruments moved by the shipped rule:", len({f["instrument_id"] for f in r1}))
+    r2 = [f for f in good if f["rung2_beyond_rung1"]]
+    print(f"\nRUNG 2 adds beyond rung 1 (attested-any over role-derived) : {len(r2)}")
+    print("   by tier:", dict(Counter(f["tier"] for f in r2)))
+    print("   instruments:", len({f["instrument_id"] for f in r2}))
+    print(
+        "   rep_now nature/provenance:",
+        dict(Counter(f"{f['rep_now']['nature']}/{f['rep_now']['table_i']}" for f in r2)),
+    )
+    # Which arm does THIS checkout implement? Printed, not assumed — a census that reads
+    # its control off the loaded function reports a clean result either way (#2386).
+    print(
+        f"\nloaded _select_control_group_rep agrees with RUNG 1 GOVERNED : "
+        f"{sum(1 for f in good if f['loaded_is_rung1'])}/{len(good)}"
+    )
+    print(
+        f"loaded _select_control_group_rep agrees with the OLD key      : "
+        f"{sum(1 for f in good if f['loaded_is_now'])}/{len(good)}"
+    )
     return 0
 
 

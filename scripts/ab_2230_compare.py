@@ -95,14 +95,44 @@ def main() -> int:
     print(f"\ntotal shares removed from the PIE: {tot_pie}")
 
     print()
+    # ⚠ "gained" alone stopped being the safety metric once #2385 made the fold's
+    # REPRESENTATIVE selectable. A rep change is a swap by construction — the demoted
+    # incumbent leaves the wedge and the promoted holder enters it — so it lands in BOTH
+    # `lost` and `gained` on the same instrument and reads as a violation of a line that
+    # says "must be 0".
+    #
+    # ⚠⚠ The obvious repair is NOT sufficient, and Codex caught it: subtracting the
+    # LOST symbols from the GAINED symbols is an instrument-level set difference, so an
+    # instrument carrying a legitimate rep swap AND a genuinely new holder drops out of
+    # the "gained-only" bucket entirely — the invariant then prints 0 while a holder was
+    # added. Symbol-level accounting cannot answer an identity-level question.
+    #
+    # A gain is EXPLAINED only if that identity is one a fold in the treatment arm kept as
+    # its representative (`kept_cik`). Anything else is a holder this pass added to the
+    # wedge, which is the defect signal, whatever else happened on the same instrument.
+    unexplained: list[tuple[str, list[str]]] = []
+    for i in common:
+        c, t = ctrl[i], treat[i]
+        if "error" in c or "error" in t:
+            continue
+        fresh = set(t["insider_identities"]) - set(c["insider_identities"])
+        if not fresh:
+            continue
+        kept = {str(x["kept_cik"]) for x in t["collapses"] if x.get("kept_cik")}
+        rest = sorted(g for g in fresh if g not in kept)
+        if rest:
+            unexplained.append((c["symbol"], rest))
+    swaps = sorted({s for s, _ in gained} & {row[0] for row in lost})
     print(f"instruments whose collapse COUNT changed : {len(collapse_delta)}")
     print(f"instruments that LOST insider identities : {len(lost)}   <-- the intended effect")
-    print(f"instruments that GAINED an identity      : {len(gained)}   <-- must be 0")
+    print(f"instruments that GAINED an identity      : {len(gained)}")
+    print(f"   ... also lost one (rep swap shape)    : {len(swaps)}   <-- expected for a rep change (#2385)")
+    print(f"   ... UNEXPLAINED gains (not a fold rep): {len(unexplained)}   <-- must be 0")
     print(f"same identity set but different total    : {len(reattributed)}   <-- must be 0")
 
-    if gained:
-        print("\nGAINED (unexpected):")
-        for s, ids in gained[:20]:
+    if unexplained:
+        print("\nUNEXPLAINED GAINS (identity added, not kept by any collapse):")
+        for s, ids in unexplained[:20]:
             print("   ", s, ids)
     if reattributed:
         print("\nRE-ATTRIBUTED (unexpected):")
