@@ -146,6 +146,34 @@ _TR_RE: Final[re.Pattern[str]] = re.compile(r"<tr\b[^>]*>(.*?)</tr\s*>", re.IGNO
 # Group 1 is the tag's ATTRIBUTES, group 2 the cell contents. The attributes
 # are needed for ``rowspan`` — see :func:`_expand_row_spans`.
 _CELL_RE: Final[re.Pattern[str]] = re.compile(r"<(?:t[hd])\b([^>]*)>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL)
+# Every cell tag, SELF-CLOSING included, each paired with its OWN attributes.
+#
+# ``_CELL_RE`` above cannot do this and is left alone deliberately — its cell
+# tuples are the index space that header scoring, two-row-header promotion and
+# ``_resolve_columns`` are all tuned against, and moving it re-selects which
+# table wins corpus-wide (#2175's prevention entry). This pattern feeds the
+# read-only layout grid in :func:`_layout_percent_by_row` instead.
+#
+# The defect it exists to route around: ``<td style="x"/>`` matches
+# ``<t[hd]\b([^>]*)>`` because ``[^>]*`` accepts the trailing ``/``, so
+# ``_CELL_RE`` reads a self-closing spacer as an OPENING tag and runs ``(.*?)``
+# on to the next real ``</td>``. The emitted cell then carries the SPACER's
+# attributes with the FOLLOWING cell's text, which is why a ``colspan="4"``
+# caption reads as ``colspan=1``.
+_ANY_CELL_RE: Final[re.Pattern[str]] = re.compile(
+    r"<t[hd]\b([^>]*?)/>|<t[hd]\b([^>]*)>(.*?)</t[hd]\s*>", re.IGNORECASE | re.DOTALL
+)
+# A QUANTITY immediately left of the sign, as in ``5% Beneficial owners`` — the
+# shape that separates a threshold PHRASE from a percent CAPTION. A caption names
+# a column and states no quantity ("Percent of Class", "% (2)"); a section label
+# binds the sign to the number on its left.
+#
+# Both the sign and the word, because the label is written both ways and only the
+# ``%`` half was covered at first: ``5 Percent Beneficial Owners`` and ``Ten
+# Percent Holders`` are the same label. The number words are the two the reg
+# actually produces — 17 CFR 229.403(a) is the 5% threshold and Section 16 is the
+# 10% one — so this is the source's vocabulary, not an open-ended list.
+_THRESHOLD_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"(?:\d|\bfive\b|\bten\b)\s*(?:%|percent\b)")
 _ROWSPAN_RE: Final[re.Pattern[str]] = re.compile(r"\browspan\s*=\s*[\"']?\s*(\d+)", re.IGNORECASE)
 _COLSPAN_RE: Final[re.Pattern[str]] = re.compile(r"\bcolspan\s*=\s*[\"']?\s*(\d+)", re.IGNORECASE)
 _HTML_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<[^>]+>")
@@ -778,6 +806,12 @@ class _RawTable:
     column_headers: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
     line_rows: tuple[tuple[str, ...], ...]
+    # The table's own markup, kept so :func:`_layout_percent_by_row` can rebuild
+    # a true table-model grid on demand (#2376). Defaulted because it is read
+    # ONLY by that rescue: an empty string disables it and changes nothing else,
+    # which is what keeps ``scripts/ab_2140_def14a_parser.py``'s reconstruction
+    # of this dataclass valid.
+    table_html: str = ""
 
 
 _NUMERIC_LIKE_RE: Final[re.Pattern[str]] = re.compile(r"\d{2,}")
@@ -1075,6 +1109,32 @@ def _is_value_cell(cell: str) -> bool:
     return _parse_share_count(cell) is not None or _parse_percent(cell) is not None
 
 
+def _table_inner_html(table_html: str) -> str | None:
+    """TABLE_HTML's own body, with every NESTED table blanked out.
+
+    Extracted verbatim from :func:`_parse_table_html` so the layout grid below
+    reads exactly the same bytes the main parse does -- the two must agree on
+    which ``<tr>``s belong to this table, or a nested table's rows would appear
+    in one grid and not the other.
+    """
+    open_match = _TABLE_OPEN_RE.search(table_html)
+    close_idx = table_html.rfind("</table")
+    if open_match is None or close_idx == -1:
+        return None
+    inner = table_html[open_match.end() : close_idx]
+    nested = _scan_outer_tables(inner)
+    if not nested:
+        return inner
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in nested:
+        pieces.append(inner[cursor:start])
+        pieces.append(" ")
+        cursor = end
+    pieces.append(inner[cursor:])
+    return "".join(pieces)
+
+
 def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTable | None:
     """Extract one ``<table>`` block. Mirrors the helper in
     business_summary but kept inlined so this module is provider-
@@ -1090,23 +1150,9 @@ def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTabl
     headers so the column resolver can find ``Total``. Codex
     pre-push review caught this on PR review.
     """
-    open_match = _TABLE_OPEN_RE.search(table_html)
-    close_idx = table_html.rfind("</table")
-    if open_match is None or close_idx == -1:
+    scrubbed = _table_inner_html(table_html)
+    if scrubbed is None:
         return None
-    inner = table_html[open_match.end() : close_idx]
-    nested = _scan_outer_tables(inner)
-    if nested:
-        pieces: list[str] = []
-        cursor = 0
-        for start, end in nested:
-            pieces.append(inner[cursor:start])
-            pieces.append(" ")
-            cursor = end
-        pieces.append(inner[cursor:])
-        scrubbed = "".join(pieces)
-    else:
-        scrubbed = inner
     # Two passes, and the ORDER is load-bearing: the row-span expansion below
     # counts rows, so every ``<tr>`` must reach it — including the all-empty
     # spacer rows the old single pass dropped here. Dropping a row first would
@@ -1232,7 +1278,259 @@ def _parse_table_html(table_html: str, *, expand_spans: bool = True) -> _RawTabl
         column_headers=column_headers,
         rows=tuple(body),
         line_rows=tuple(line_body),
+        table_html=table_html,
     )
+
+
+def _layout_rows(table_html: str) -> list[dict[int, str]]:
+    """TABLE_HTML as a proper table-model grid: one ``{layout column: text}`` per row.
+
+    Source rule -- the HTML Living Standard's table model (SS4.9.12 "Forming a
+    table"). DEF 14A carries no structured-data mandate (sec-edgar skill SS2.2's
+    form table: "narrative HTML; no structured-XBRL mandate"), so the markup's own
+    model IS the source rule for which caption governs which cell; there is no
+    XBRL tagging to consult and nothing here is inferred from first principles.
+
+    Differs from :func:`_expand_row_spans` in exactly two ways, both required to
+    answer "which caption is above this cell":
+
+    1. ``colspan`` is EXPANDED -- a cell spanning N columns occupies N slots.
+       ``_expand_row_spans`` deliberately emits it once, because its output feeds
+       ``score_headers`` and :func:`_score_table_headers` SUMS keyword weights, so
+       a ``colspan=6`` caption would score six times. That constraint does not
+       apply here: this grid is never scored and never selects a table.
+    2. Self-closing ``<td/>`` cells are read (see :data:`_ANY_CELL_RE`), so
+       ``colspan`` is taken off the tag that carries it.
+
+    Verified against ``pandas.read_html`` 3.0.2 (the reuse oracle the #2175
+    prevention entry names) on ``0001193125-25-103261``'s Item 403(a) table: both
+    return 10 rows x 23 columns with ``Name and address(1)`` at column 2,
+    ``Shares`` spanning 4-7, ``%(2)`` spanning 9-12, and the BlackRock row's
+    ``23,308,871`` at column 6 and ``14.33`` at column 11. pandas is not adopted
+    wholesale for the same reason #2175 gave -- it re-does cell-text extraction,
+    which every header-scoring constant in this module is tuned against.
+    """
+    scrubbed = _table_inner_html(table_html)
+    if scrubbed is None:
+        return []
+    out: list[dict[int, str]] = []
+    # (layout_column, columns_spanned, text, rows_left), ascending by column.
+    remainder: list[tuple[int, int, str, int]] = []
+    for tr_match in _TR_RE.finditer(scrubbed):
+        cells: list[tuple[str, int, int]] = []
+        for match in _ANY_CELL_RE.finditer(tr_match.group(1)):
+            if match.group(1) is not None:  # self-closing: an empty cell
+                attrs, text = match.group(1), ""
+            else:
+                attrs, text = match.group(2), _strip_inline_html(match.group(3))
+            rowspan = int(rs.group(1)) if (rs := _ROWSPAN_RE.search(attrs)) else 1
+            colspan = max(1, int(cs.group(1))) if (cs := _COLSPAN_RE.search(attrs)) else 1
+            cells.append((text, max(1, rowspan), colspan))
+        row: dict[int, str] = {}
+        next_remainder: list[tuple[int, int, str, int]] = []
+        column = 0
+        pending = iter(remainder)
+        carried = next(pending, None)
+        for text, rowspan, colspan in cells:
+            while carried is not None and carried[0] <= column:
+                col, width, prev_text, left = carried
+                for slot in range(col, col + width):
+                    row.setdefault(slot, prev_text)
+                column = max(column, col) + width
+                if left > 1:
+                    next_remainder.append((col, width, prev_text, left - 1))
+                carried = next(pending, None)
+            for slot in range(column, column + colspan):
+                row[slot] = text
+            if rowspan > 1:
+                next_remainder.append((column, colspan, text, rowspan - 1))
+            column += colspan
+        while carried is not None:
+            col, width, prev_text, left = carried
+            for slot in range(col, col + width):
+                row.setdefault(slot, prev_text)
+            if left > 1:
+                next_remainder.append((col, width, prev_text, left - 1))
+            carried = next(pending, None)
+        next_remainder.sort(key=lambda entry: entry[0])
+        remainder = next_remainder
+        out.append(row)
+    return out
+
+
+def _is_percent_caption(text: str) -> bool:
+    """True when TEXT is a caption naming Item 403's column 4, ``Percent of class``.
+
+    Excludes the strong AMOUNT captions for the reason :func:`_resolve_columns`
+    already records: issuers merge columns 3 and 4 into one ("Amount and Nature
+    of Beneficial Ownership and Percent of Class"), and that single column holds
+    the SHARE COUNT. Treating it as a percent column here would attest a share
+    count as a percent, which is the one failure this helper must not have.
+    """
+    lowered = _FOOTNOTE_RE.sub("", text).strip().lower()
+    if not lowered:
+        return False
+    if any(keyword in lowered for keyword in _STRONG_SHARES_KEYWORDS):
+        return False
+    # ``5% Beneficial owners`` is Item 403(a)'s SECTION LABEL, not column 4's
+    # caption: there the sign binds to a QUANTITY on its left. Admitting it made
+    # ExlService's own table look like it carried two different percent captions
+    # and refused the very rows this ticket exists to recover.
+    #
+    # The test runs FIRST, ahead of the plain ``percent`` match, and that order
+    # is the whole fix for the spelled-out spellings — ``5 Percent Beneficial
+    # Owners`` and ``Ten Percent Holders`` are the same section label with the
+    # sign written as a word, and a ``"percent" in lowered`` early return admits
+    # them. Codex caught it at checkpoint 2, after the ``%`` half was already
+    # fixed: the guard was written against the character, not the phenomenon.
+    if _THRESHOLD_LABEL_RE.search(lowered):
+        return False
+    return "percent" in lowered or "%" in lowered
+
+
+def _layout_name_key(text: str) -> str:
+    """Normalised join key between an extracted holder and its raw grid row.
+
+    Prefix-based, and it has to be: the extractor's ``holder_name`` has already
+    had footnote markers and any trailing address removed, so ``"BlackRock, Inc.
+    50 Hudson Yards New York, NY 10001"`` in the cell becomes ``"BlackRock,
+    Inc."`` in the holder. An equality join on the full string matches neither.
+    """
+    collapsed = re.sub(r"[^a-z0-9]+", "", _clean_beneficial_holder_name(text).lower())
+    return collapsed[:16]
+
+
+def _layout_percent_by_row(table_html: str) -> dict[str, Decimal]:
+    """Percent values attested by the TABLE MODEL, keyed by :func:`_layout_name_key`.
+
+    For each data row, the value returned is the one sitting in a layout column
+    covered by a percent CAPTION -- which is what makes a bare ``14.33`` (no
+    ``%`` sign, no ``*``) unambiguous. The positional rescue in
+    :func:`_extract_holder_rows` cannot accept such a cell, and is right not to:
+    without the layout it cannot tell ``14.33`` from a 14-share holding.
+
+    Fails closed in three places, because a wrong percent is worse than a null:
+
+    * no caption row carrying a percent caption -> empty result;
+    * a name key appearing on rows with DIFFERENT percent values -> that key is
+      dropped, since the prefix join cannot say which row is the holder's. This
+      is also what makes keying the row's first TWO text cells safe: a repeated
+      ``Title of class`` label collides with itself and drops out;
+    * a cell mixing a DIGIT with an asterisk -> declined, because ``1*`` against
+      a ``* Less than 1.0%`` legend states a THRESHOLD, not a holding;
+    * a cell that ``_parse_percent`` rejects -> no entry.
+    """
+    rows = _layout_rows(table_html)
+    percent_columns: set[int] = set()
+    captions: set[str] = set()
+    header_index = -1
+    for index, row in enumerate(rows):
+        populated = [text for text in row.values() if text.strip()]
+        if not populated:
+            continue
+        # A caption row states what the columns hold; a data row holds values.
+        # Requiring no value cell keeps a holder called "Percentage Partners LP"
+        # from being read as the header.
+        if any(_NUMERIC_VALUE_CELL_RE.match(_FOOTNOTE_RE.sub("", text).strip()) for text in populated):
+            continue
+        columns = {column for column, text in row.items() if _is_percent_caption(text)}
+        if columns:
+            percent_columns |= columns
+            captions |= {_FOOTNOTE_RE.sub("", row[column]).strip().lower() for column in columns}
+            header_index = max(header_index, index)
+    if not percent_columns:
+        return {}
+    # Everything below fails CLOSED, because a null percent is recoverable from
+    # the filing and a wrong one is not. Two ways a header offers more than one
+    # percent column, both measured on the full population:
+    #
+    # * TWO RUNS of the same caption — a dual-class table carries 229.403 column
+    #   4 once per class. Regeneron (0001308179-25-000518) heads ``Number |
+    #   Percent of Class`` over Class A Stock at layout columns 2-7 and again
+    #   over Common Stock at 10-16; pooling them bound a Class A percent to a
+    #   Common Stock share count and attested a flat 28 to fifteen directors
+    #   holding between 4,472 and 268,499 shares.
+    # * TWO DISTINCT CAPTIONS, which is why the scan above unions across EVERY
+    #   caption row instead of stopping at the first. Domo (0001505952-25-000062)
+    #   renders ``Shares | % | Shares | % | % of Total Voting Power``, and its
+    #   first percent-captioned row carries only the voting-power caption — one
+    #   clean contiguous run, so a contiguity test alone passes it and stores
+    #   VOTING POWER as percent of class. Josh James' row reads
+    #   ``3,263,659 100 1,022,375 2.8 78.5``: 78.5% of the vote, 2.8% of Class A.
+    #
+    # Binding a percent to the share count the extractor actually used needs the
+    # whole grid re-columned, which is the wider ticket; per-class binding is
+    # tracked on #2351.
+    if len(captions) > 1:
+        return {}
+    if max(percent_columns) - min(percent_columns) + 1 != len(percent_columns):
+        return {}
+
+    found: dict[str, Decimal] = {}
+    ambiguous: set[str] = set()
+    for row in rows[header_index + 1 :]:
+        # The FIRST TWO text cells, not the first — 17 CFR 229.403(a) prescribes
+        # column 1 "Title of class" ahead of column 2 "Name and address of
+        # beneficial owner", so on a table that renders column 1 the holder's
+        # name is the SECOND text cell and keying only the first files the
+        # percent under ``commonstock``. Caught by Codex at checkpoint 2 and
+        # reproduced: ``Common Stock | Acme Capital LLC | 1,000 | 7.7`` recovered
+        # nothing, because the lookup is by ``_layout_name_key(holder_name)``.
+        #
+        # Two is the reg's own bound, not a tuned constant, and registering the
+        # class label costs nothing: it is either never looked up, or it repeats
+        # across rows with different percents and the ambiguity guard below drops
+        # it — which is the same mechanism, not a second one.
+        name_keys: list[str] = []
+        for column in sorted(row):
+            text = row[column].strip()
+            if not text or column in percent_columns:
+                continue
+            if _NUMERIC_VALUE_CELL_RE.match(_FOOTNOTE_RE.sub("", text).strip()):
+                continue
+            if (key := _layout_name_key(text)) and key not in name_keys:
+                name_keys.append(key)
+            if len(name_keys) == 2:
+                break
+        if not name_keys:
+            continue
+        percent: Decimal | None = None
+        for column in sorted(percent_columns):
+            text = row.get(column, "").strip()
+            if not text:
+                continue
+            # A DIGIT beside an ASTERISK is the issuer writing "less than N%",
+            # where the digit is the THRESHOLD and not the holding. Declined
+            # outright, because ``_parse_percent`` strips a trailing footnote
+            # marker and would read the threshold as the value.
+            #
+            # Found by the gain-side arm, not by reasoning: on
+            # 0001437749-25-025111 the percent column renders ``1*`` against a
+            # ``* Less than 1.0%`` legend, and seven holders would have stored a
+            # flat 1 — a figure the filing does not state, and one the parser's
+            # own settled convention for that meaning writes as 0.5 (a BARE
+            # ``*``, which is unambiguous and is still accepted; Campbell Soup
+            # 0001308179-25-000618 recovers thirteen of them correctly).
+            #
+            # ``5.2*`` — a real value carrying a footnote marker — is declined
+            # by the same rule, and that is the intended trade: the two readings
+            # are indistinguishable from the cell alone, and a null is
+            # recoverable from the filing where a wrong percent is not.
+            if "*" in text and any(character.isdigit() for character in text):
+                percent = None
+                break
+            percent = _parse_percent(text)
+            if percent is not None:
+                break
+        if percent is None:
+            continue
+        for name_key in name_keys:
+            if name_key in found and found[name_key] != percent:
+                ambiguous.add(name_key)
+            found[name_key] = percent
+    for key in ambiguous:
+        found.pop(key, None)
+    return found
 
 
 # Footnote / asterisk markers stripped from holder-name cells. The
@@ -2611,6 +2909,21 @@ def _extract_table_holders(
         rows=out,
         seen=set() if seen is None else seen,
         drop_non_owner_rows=drop_non_owner_rows,
+        # The layout-attested percent (#2376) is an EXTRACTION rescue, never a
+        # SELECTION input — so it is off for the eligibility probe, which is the
+        # ``rows is None`` caller. ``_is_item403_eligible`` judges a table by
+        # extracting it and asking ``_has_item403_value_rows``, so a percent
+        # recovered here decides which tables ARE Item 403 tables, and that gate
+        # is calibrated against the flat grid.
+        #
+        # Measured, not defensive: with the rescue live during the probe, the
+        # full-population A/B admitted a junk row on 0001140361-25-012231 and
+        # -26-013118 — ``Brian H. Hertzman`` at 446,200 shares / 89.2%, beside
+        # the real ``Brian S. Hertzman`` at 18,832 / 0.5%. An 89.2% holding
+        # implies 500,224 shares outstanding against the ~83m the same table's
+        # other rows imply. Table selection belongs to #2160 / #2176 and moves
+        # only under its own A/B.
+        attest_percent=rows is not None,
     )
     return out
 
@@ -2866,6 +3179,7 @@ def _extract_holder_rows(
     rows: list[Def14ABeneficialHolder],
     seen: set[str],
     drop_non_owner_rows: bool = True,
+    attest_percent: bool = True,
 ) -> None:
     """Append one :class:`Def14ABeneficialHolder` per data row of ONE Item 403
     table, skipping rows already collected from a sibling table.
@@ -2888,6 +3202,10 @@ def _extract_holder_rows(
     # Carrying the name forward is purely ADDITIVE at the row level: it fires
     # only on a pair where BOTH rows are already being dropped.
     pending_owner_name: str | None = None
+    # Built at most once per table, and only when a row actually reaches the
+    # layout-attested rescue below — rebuilding the grid costs a second cell
+    # parse, and the rewash path is the surface #2171 was about.
+    layout_percents: dict[str, Decimal] | None = None
     # One-<tr>-N-holders expansion (#2169), BEFORE the loop rather than inside
     # it: the stacked-name/address recovery above looks at ``raw_rows[idx + 1]``,
     # so the sequence it walks must already be the expanded one or a split row's
@@ -3121,6 +3439,46 @@ def _extract_holder_rows(
             pending_owner_name = holder_name if (_is_owner_identity(holder_name) and stacked_next()) else None
             continue
         pending_owner_name = None
+
+        # LAYOUT-ATTESTED percent (#2376), deliberately the LAST rescue and
+        # deliberately AFTER the drop guard above.
+        #
+        # Every rescue before this one works inside the flat cell grid, where a
+        # data row and its header need not share a column space at all — issuers
+        # interleave footnote-only cells, and ``_CELL_RE`` silently drops
+        # self-closing ``<td/>`` spacers and mis-pairs the ``colspan`` of the
+        # cell after one. So the positional percent cell can land on a spacer
+        # while the real percent sits further right, and the ragged-row scan is
+        # RIGHT to decline it: a bare ``14.33`` with no ``%`` and no ``*`` is
+        # indistinguishable from a 14-share holding without the layout.
+        #
+        # Rebuilding the table under the HTML table model supplies exactly the
+        # missing fact — which caption covers this cell — so a bare number under
+        # a percent caption becomes unambiguous. ExlService
+        # (0001193125-25-103261) is the worked case: header ``Shares`` spans
+        # layout columns 4-7 and ``% (2)`` spans 9-12, BlackRock's 23,308,871 is
+        # at column 6 and its 14.33 at column 11, and all three 5% holders stored
+        # a NULL percent against a filing that plainly shows 14.33 / 10.46 / 5.76.
+        #
+        # Placement after the drop guard is what keeps this purely ADDITIVE: it
+        # can only fill a percent on a row that already survives, never admit a
+        # row, never change a share count, and never overwrite a percent another
+        # rescue found.
+        if percent is None and attest_percent and table.table_html:
+            if layout_percents is None:
+                layout_percents = _layout_percent_by_row(table.table_html)
+            percent = layout_percents.get(_layout_name_key(holder_name))
+            # A percent equal to the row's own share count is the SAME CELL read
+            # twice, not a second fact. It happens on the group-total row of a
+            # table whose "shares" column already holds a percentage —
+            # 0001375365-25-000009's "Total executive officers, directors & 5%
+            # holders" parses shares as 33.6 on main, and attesting 33.6 against
+            # it manufactures agreement out of one number. The share-count
+            # defect there is pre-existing and out of scope; echoing it is not.
+            if percent is not None and shares is not None and percent == shares:
+                percent = None
+            if percent is not None:
+                percent_src_idx = -1
 
         role = current_role or _detect_inline_role(holder_name)
 

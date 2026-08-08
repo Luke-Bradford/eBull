@@ -153,7 +153,22 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # tables' rows are people, so row identity alone scores them 1.00.
 # `_SIBLING_SCORE_FLOOR` is deleted; header score is retained for window RANKING
 # only.
-_PARSER_VERSION_DEF14A = "def14a-v13"
+# v14 (#2376): Item 403 column 4 is recovered from the HTML TABLE MODEL when the
+# flat cell grid loses it. `_CELL_RE` reads a self-closing `<td/>` as an opening
+# tag, so a spacer contributes no cell and the `colspan` of the cell after it is
+# read off the wrong tag; header and data rows then sit in different index spaces
+# and the resolved percent index lands on a blank. Every prior rescue works
+# inside that grid and cannot accept a bare `14.33` — without knowing which
+# caption covers the cell it is indistinguishable from a 14-share holding.
+# `_layout_percent_by_row` rebuilds the table under the HTML Living Standard's
+# model (§4.9.12, the only source rule available — DEF 14A has no structured-data
+# mandate) and supplies exactly that missing fact. Strictly additive: it runs
+# after the row-drop guard, only when the percent is still None, and never during
+# the eligibility probe, so it cannot admit a row, move a share count, or change
+# which table wins. Fails closed on more than one distinct percent caption, on
+# two non-contiguous percent runs (dual-class), on an ambiguous name prefix, and
+# on a percent equal to the row's own share count.
+_PARSER_VERSION_DEF14A = "def14a-v14"
 
 logger = logging.getLogger(__name__)
 
