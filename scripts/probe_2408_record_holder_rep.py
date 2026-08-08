@@ -66,6 +66,8 @@ _ALL_2408 = (
     "test_person_names_are_matched_verbatim_not_rotated",
     "test_an_abbreviated_conformed_name_still_matches_its_own_footnote",
     "test_a_sibling_fund_substring_declines_rather_than_guessing",
+    "test_evidence_is_pooled_across_a_clusters_accessions",
+    "test_two_accessions_naming_two_members_fails_closed",
 )
 # The #2385 cases, which must survive every probe that is not about them. The tier is an
 # ADDITION to that rule, so a probe that also breaks the Table I route has changed
@@ -105,6 +107,18 @@ _PROBES = (
         "        if acc in {h.winning_accession for h in insiders}:\n"
         "            texts.extend(vals)\n",
         ("test_evidence_for_a_different_block_value_is_not_consulted",),
+        _2385 + ("test_record_holder_text_promotes_the_member_it_names",),
+    ),
+    (
+        "D2: a member must be named by its OWN filing (pooling removed)",
+        _VALUE_KEY,
+        "    texts.extend(t for h in insiders for t in evidence.get((h.winning_accession, h.shares), ()))\n"
+        "    _own = {\n"
+        "        id(h): _normalise_holder_text(' '.join(evidence.get((h.winning_accession, h.shares), ())))\n"
+        "        for h in insiders\n"
+        "    }\n"
+        "    insiders = [h for h in insiders if (n := _normalise_holder_text(h.filer_name)) and n in _own[id(h)]]\n",
+        ("test_evidence_is_pooled_across_a_clusters_accessions",),
         _2385 + ("test_record_holder_text_promotes_the_member_it_names",),
     ),
     (

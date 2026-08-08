@@ -633,6 +633,39 @@ def test_an_abbreviated_conformed_name_still_matches_its_own_footnote() -> None:
     assert _rep_with(cluster, evidence).filer_name == "Ayar Third Investment Co"
 
 
+def test_evidence_is_pooled_across_a_clusters_accessions() -> None:
+    """Cross-accession clusters reach this tier too, whenever clause 1 yields no candidate
+    — 17 of the 76 folds the A/B moves. There the members file SEPARATELY, so the union of
+    their own filings is the evidence about the one block they all restate, and a deemed
+    owner's filing naming the holder is exactly the statement the rule wants.
+
+    Pooling is therefore deliberate, and it is also the configuration the labelled-set
+    score was measured on (that set is entirely cross-accession), so restricting it would
+    ship an unvalidated rule. Pinned because no other test exercises it — every other case
+    uses ``_joint`` (review WARNING on PR #2422)."""
+    holder = _h("000000001", "Sponsor Fund L.P.", _SUB_FLOOR, nature="indirect")
+    deemed = _h("000000009", "Sponsor GP, L.L.C.", _SUB_FLOOR, nature="indirect")
+    cluster = [deemed, holder]
+    assert deemed.winning_accession != holder.winning_accession
+    # The DEEMED owner's own filing names the holder; the holder's filing says nothing.
+    evidence = {(deemed.winning_accession, Decimal(_SUB_FLOOR)): ("Securities are held by Sponsor Fund L.P.",)}
+    assert _rep(cluster).filer_name == "Sponsor GP, L.L.C."  # incumbent, by CIK order
+    assert _rep_with(cluster, evidence).filer_name == "Sponsor Fund L.P."
+
+
+def test_two_accessions_naming_two_members_fails_closed() -> None:
+    """The other half of pooling: co-filers who disagree. Each filing names a different
+    member, the union names two, and the uniqueness guard declines — the pooled blob is
+    not a licence to pick whichever was read first."""
+    a = _h("000000001", "Sponsor Fund L.P.", _SUB_FLOOR, nature="indirect")
+    b = _h("000000009", "Sponsor GP, L.L.C.", _SUB_FLOOR, nature="indirect")
+    evidence = {
+        (a.winning_accession, Decimal(_SUB_FLOOR)): ("Securities are held by Sponsor GP, L.L.C.",),
+        (b.winning_accession, Decimal(_SUB_FLOOR)): ("Securities are held by Sponsor Fund L.P.",),
+    }
+    assert _rep_with([b, a], evidence).filer_name == "Sponsor GP, L.L.C."  # incumbent kept
+
+
 def test_a_sibling_fund_substring_declines_rather_than_guessing() -> None:
     """``LFCR`` / ``NNBR``: one cluster carries ``Legion Partners, L.P. I`` AND
     ``Legion Partners, L.P. II``, and the first normalises to a prefix of the second, so a
