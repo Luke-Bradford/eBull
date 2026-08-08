@@ -15,8 +15,8 @@ rather than overwrite it — the same argument phase 3b made for the ledger.
 
 The third is this module's. **The resolver is not the only thing that decides an
 outcome; its INPUTS do too.** ``load_masked_series`` masks high/low/close per
-``price_quarantine``'s rule set, and 4a's masking contract is that an absent
-field REFUSES. Re-run the quarantine under a changed rule set and the same
+``price_quarantine``'s rule set — and, since #2354, a non-positive open — and
+4a's masking contract is that an absent field REFUSES. Re-run the quarantine under a changed rule set and the same
 signal can resolve differently with ``outcome_resolver.py`` byte-identical.
 Without the column that is not merely unrecorded, it is UNSTORABLE: the
 corrected outcome collides on a two-part key, and with no ``ON CONFLICT`` the

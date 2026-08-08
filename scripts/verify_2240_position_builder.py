@@ -138,29 +138,31 @@ def _stamped_versions() -> tuple[str, str, str]:
 def _to_series(bars: Sequence[StructureBar]) -> tuple[BarSeries, int]:
     """The masked bars, with any NON-POSITIVE open masked too. Returns the count.
 
-    ⚠⚠ THIS IS A CALLER OBLIGATION BEING DISCHARGED, NOT A WORKAROUND.
-    ``outcome_resolver``'s own docstring already states it: *"``load_masked_series``
-    masks high/low/close and CARRIES THE OPEN THROUGH UNMASKED … a caller
-    reading `B4` bars must mask the open itself."* This run is the first to hit
-    that gap on real data.
+    ⚠⚠ SINCE #2354 THIS IS A CROSS-CHECK, NOT THE FIX. ``load_masked_series``
+    now masks a non-positive open itself, so through that loader the count this
+    returns is **0** and the print below is what says so. It is kept rather than
+    deleted for the reason the fix has two layers at all: this function takes
+    ``Sequence[StructureBar]`` and does not know which loader produced them, and
+    a raw read of ``research_price_daily`` still carries the zero.
 
-    Measured on the dev corpus 2026-08-07, reproduced by::
+    Measured on the dev corpus 2026-08-08, reproduced by::
 
-        select count(*), count(distinct series_id) from research_price_daily where open = 0;
-        select count(*) from research_price_daily d
-          join research_bar_quarantine q on q.series_id = d.series_id and q.bar_date = d.bar_date
-         where d.open = 0;
+        select count(*), count(distinct series_id) from research_price_daily where open <= 0;
+        select q.rules, q.range_usable, q.return_usable, count(*)
+          from research_price_daily d
+          left join research_bar_quarantine q
+                 on q.series_id = d.series_id and q.bar_date = d.bar_date
+         where d.open <= 0 group by 1, 2, 3;
 
-    **16 bars across 9 series carry ``open = 0``, and all 16 already carry a
-    quarantine row with `range_usable = false` AND `return_usable = false`** —
-    so the quarantine knows the bar is unusable on both axes and the loader
-    hands its open to the fill path anyway. None is negative.
+    **16 bars across 9 series carry ``open = 0``**, none negative, and all 16
+    are ``rules = ['B1']`` with `range_usable = false` AND `return_usable =
+    false` — the quarantine had condemned every one of them on both axes while
+    the loader handed its open to the fill path.
 
-    Masking it here turns the bar into ``no_fill_bar`` inside
-    ``signal_ledger.resolve_fills`` — the branch whose docstring records *"zero
-    NULL opens in either table … If the measured count ever leaves zero, split
-    it."* The upstream fix belongs to the loader and to 3c, not to phase 5a; it
-    is filed rather than folded in.
+    A bar reaching here still masked turns into ``unusable_fill_price`` inside
+    ``signal_ledger.resolve_fills`` — the tenth reason code, which is the split
+    that branch's docstring pre-registered as *"if the measured count ever
+    leaves zero, split it"*.
     """
     masked_opens = 0
     rows: list[OHLCVRow] = []

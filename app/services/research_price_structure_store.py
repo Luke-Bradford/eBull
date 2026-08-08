@@ -173,6 +173,18 @@ def load_masked_series(
     ``return_usable = False`` is a bad close (masks close). Masking the whole bar
     on either verdict would discard good data and shift every N-bar window.
 
+    ⚠⚠ THE OPEN IS MASKED ON ITS VALUE, NOT ON A VERDICT (#2354). It is the one
+    OHLC field the quarantine has no axis for, and this loader used to carry it
+    through untouched — so a stored ``open = 0`` reached the fill path and
+    ``signal_ledger.resolve_fills`` booked a fill at price 0. The rule applied
+    here is not invented: it is ``price_quarantine.rule_b1``'s own clause,
+    *"any of open/high/low/close NULL or <= 0"*, applied to the field the
+    two-axis masking cannot reach. Measured on the full corpus 2026-08-08, every
+    non-positive open in ``research_price_daily`` (16 bars / 9 series) and in
+    ``price_daily`` (154 bars / 14 instruments) carries ``rules = ['B1']`` with
+    BOTH axes false — so this masks no bar the quarantine had not already
+    condemned, and adds nothing to criterion 9's census.
+
     ``arm="admitted"`` is criterion 9's sensitivity arm: the same rows, the same
     verdicts counted, and every flagged field passed through at its **stored**
     value. It is a measurement of what masking cost, never a production read.
@@ -214,7 +226,13 @@ def _apply_arm(
         bars.append(
             StructureBar(
                 bar_date=bar_date,
-                open=open_,
+                # ⚠ Value-keyed, and it follows the ARM like every other field:
+                # `admitted` is criterion 9's "stored values rather than masked"
+                # and an exception for the open would make the arm no longer the
+                # thing C9 names. The admitted arm is safe to run because
+                # `resolve_fills` refuses a non-positive open independently and
+                # reports `unusable_fill_price` rather than crashing.
+                open=open_ if (admit or (open_ is not None and open_ > 0)) else None,
                 high=high if (range_usable or admit) else None,
                 low=low if (range_usable or admit) else None,
                 close=close if (return_usable or admit) else None,

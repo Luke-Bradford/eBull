@@ -165,31 +165,50 @@ def resolve_fills(
        because the writer must not depend on which producer fed it, and a
        hand-built signal would otherwise slip a final-bar decision into the
        ledger.
-    2. ⚠ **A** ``t+1`` **with no OPEN price is also** ``no_fill_bar``. Measured
-       2026-08-06 on the full population: **zero NULL opens in either**
-       ``price_daily`` or ``research_price_daily`` — so this branch is
-       currently unreachable in practice. Reproduce with::
+    2. ⚠ **A** ``t+1`` **that EXISTS but cannot be priced is**
+       ``unusable_fill_price`` — its open is NULL, or is present and
+       non-positive. Reproduce the population with::
 
-           select count(*) - count(open) from price_daily;
-           select count(*) - count(open) from research_price_daily;
+           select count(*) - count(open), count(*) filter (where open <= 0) from price_daily;
+           select count(*) - count(open), count(*) filter (where open <= 0) from research_price_daily;
 
        ⚠ The row COUNTS are deliberately not written down here: the corpus is
        live (``daily_candle_refresh`` moved ``price_daily`` by 7 rows during
-       this ticket alone), so a figure in a docstring goes stale in the place a
-       reader trusts most. The zero is the claim; the query reproduces it.
+       one ticket alone), so a figure in a docstring goes stale in the place a
+       reader trusts most. ``sql/270`` records the run that motivated the split,
+       beside the queries that reproduce it.
 
-       It is not unreachable structurally: both ``open`` columns are nullable, and
-       ``price_structure`` builds ``OHLCVRow`` by passing ``bar.open`` through
-       with no None check. Failing closed is what the rest of this codebase
-       does with a masked bar.
+       ⚠⚠ **This used to be** ``no_fill_bar`` **and the split is #2354.** The
+       old branch tested ``fill_open is None`` alone, so a stored ``open = 0``
+       — which is not NULL and is not a price — became ``fill_price = 0`` on a
+       ``fired`` row. Every reader refuses that (``outcome_resolver``:
+       *"entry_price must be > 0 … gross_return_pct divides by it"*;
+       ``position_builder.EntryFill``/``ExitFill`` the same), so the writer and
+       the readers disagreed, and only a ledger with 0 rows kept it academic.
 
-       ⚠ Reusing ``no_fill_bar`` for it is a deliberate widening of a code
-       whose stated meaning is "the series ended", and it is flagged rather
-       than smuggled: criterion 8 exists precisely to stop a data gap and a
-       real absence being collapsed. It is accepted here because the
-       alternative — a ninth reason code — needs the parent vocabulary
-       reopened and ``sql/255``'s CHECK widened for a case that has never
-       occurred. **If the measured count ever leaves zero, split it.**
+       The reason code is a SPLIT, not a widening. This docstring previously
+       accepted the widening on the stated condition *"if the measured count
+       ever leaves zero, split it"*, and it has: both corpora carry
+       non-positive opens today. ``no_fill_bar`` now means only what it says —
+       the series ended — and criterion 8's distinction between a real absence
+       and a data gap is countable again through
+       ``idx_strategy_signals_reason``.
+
+       ⚠ It stamps ``unusable_fill_price`` rather than ``quarantined_bar``,
+       even though every such bar in both corpora is `B1`-quarantined on both
+       axes today (measured; see ``sql/270``). This function receives a
+       ``BarSeries`` and no verdicts — the quarantine is the CALLER's gate,
+       which is why every strategy module takes its ``close_reason`` as an
+       argument — so a ``quarantined_bar`` stamp here would assert a cause the
+       writer has no input for, and would keep asserting it against a raw
+       loader that never ran the quarantine.
+
+       Neither branch is unreachable structurally: both ``open`` columns are
+       nullable, ``price_structure`` builds ``OHLCVRow`` by passing
+       ``bar.open`` through with no None check, and
+       ``research_price_structure_store.load_masked_series`` masks the
+       non-positive case only for callers that go through it — a raw
+       ``price_daily`` read does not.
 
     A duplicate ``(signal_bar_date, signal_kind)`` inside one batch raises
     rather than reaching the database: the uniqueness key would reject it
@@ -238,12 +257,22 @@ def resolve_fills(
         fill_price: Decimal | None = None
 
         fill_index = signal.signal_index + 1
-        fill_open = series.rows[fill_index].get("open") if fill_index < n_bars else None
-        if fill_open is None:
+        # ⚠ TWO refusals, not one, and the order is the order of the questions:
+        # does the bar exist, and can it be priced. Collapsing them was #2354 —
+        # `fill_open is None` alone let a stored `open = 0` through as a fill.
+        if fill_index >= n_bars:
             verdict, reason = "not_evaluable", "no_fill_bar"
-        elif verdict == "fired":
-            fill_bar_date = series.dates[fill_index]
-            fill_price = fill_open
+        else:
+            fill_open = series.rows[fill_index].get("open")
+            # ⚠ `<= 0`, not `== 0`. Measured on both corpora today there are no
+            # NEGATIVE opens, only zeros — but "no negatives were stored" is a
+            # fact about an ingest run, and a bound that holds by measurement
+            # rather than by construction is one re-harvest from being wrong.
+            if fill_open is None or fill_open <= 0:
+                verdict, reason = "not_evaluable", "unusable_fill_price"
+            elif verdict == "fired":
+                fill_bar_date = series.dates[fill_index]
+                fill_price = fill_open
 
         rows.append(
             LedgerRow(

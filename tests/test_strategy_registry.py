@@ -107,6 +107,14 @@ class TestReasonCodeContract:
         PARENT_REASON_CODES a reader would attribute it to criterion 8."""
         assert "no_fill_bar" not in PARENT_REASON_CODES
 
+    def test_unusable_fill_price_is_ours_too(self) -> None:
+        """#2354's split of ``no_fill_bar``. The parent set is pinned to seven
+        above, so a tenth code landing on the wrong side of the line fails
+        twice — here, and on the count in ``test_parent_codes_are_the_derived
+        _set_minus_ours``."""
+        assert "unusable_fill_price" in NOT_EVALUABLE_REASONS
+        assert "unusable_fill_price" not in PARENT_REASON_CODES
+
 
 class TestEvaluabilityBeatsShortCircuit:
     """⚠⚠ The hole Codex found at checkpoint 1.
@@ -378,10 +386,10 @@ class TestVocabularyIsDefinedOnce:
     def _defining_migration(table: str, column: str) -> tuple[str, set[str]]:
         """The LATEST migration that defines ``column``'s IN-list, and the list.
 
-        ⚠ Not sql/255 by name any more. sql/260 widens the reason vocabulary, so
-        pinning the Python Literal against 255 alone would compare it to a
-        superseded list — and the test would pass while the applied schema
-        rejected the ninth code.
+        ⚠ Not sql/255 by name any more, and not sql/260 either — sql/270 is the
+        third file to redefine this list. Pinning the Python Literal against a
+        superseded migration would pass while the applied schema rejected the
+        newest code, which is the failure this helper exists to prevent.
 
         ⚠ Comments are stripped BEFORE matching. sql/256's prose quotes
         ``WHERE signal_kind = 'entry' AND verdict = 'fired'``, and the regex
@@ -414,7 +422,7 @@ class TestVocabularyIsDefinedOnce:
         """Pins the resolution itself: a helper that silently fell back to 255
         would agree with a stale Python Literal and prove nothing."""
         name, _ = self._defining_migration("strategy_signals", "not_evaluable_reason")
-        assert name == "260_strategy_signals_thin_cross_section.sql"
+        assert name == "270_strategy_signals_unusable_fill_price.sql"
 
     def test_sql_reason_codes_match_the_python_vocabulary(self) -> None:
         assert self._check_values("strategy_signals", "not_evaluable_reason") == NOT_EVALUABLE_REASONS

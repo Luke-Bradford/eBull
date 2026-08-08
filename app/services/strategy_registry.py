@@ -111,6 +111,15 @@ SignalKind = Literal["entry", "exit"]
 #: rounding the decile up silently becomes "best of six", and reporting
 #: ``not_fired`` is criterion 8's exact prohibition, a data-availability fact
 #: wearing a rule verdict's clothes. See ``evaluate_cross_sectional``.
+#:
+#: ⚠ ``unusable_fill_price`` is a TENTH (#2354, sql/270 widens the CHECK), and
+#: it is a SPLIT of ``no_fill_bar`` rather than a new situation: bar ``t+1``
+#: exists and its OPEN is not a usable price. ``resolve_fills`` used to report
+#: that as ``no_fill_bar`` and said so, conditionally — *"if the measured count
+#: ever leaves zero, split it"*. It has (170 bars across the two corpora,
+#: measured in sql/270), so this is the split it pre-registered. The pair is
+#: exactly criterion 8's distinction: the edge of the series is a real absence,
+#: an unpriceable bar is a data gap.
 NotEvaluableReason = Literal[
     "missing_volume",
     "missing_spread",
@@ -121,6 +130,7 @@ NotEvaluableReason = Literal[
     "ambiguous_intrabar",
     "no_fill_bar",
     "thin_cross_section",
+    "unusable_fill_price",
 ]
 
 # ⚠ DERIVED from the Literals above, never restated. Review flagged the
@@ -133,11 +143,11 @@ VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
 SIGNAL_KINDS: frozenset[str] = frozenset(get_args(SignalKind))
 NOT_EVALUABLE_REASONS: frozenset[str] = frozenset(get_args(NotEvaluableReason))
 
-#: The seven from parent criterion 8. `no_fill_bar` and `thin_cross_section` are
-#: OURS and are excluded deliberately — see NotEvaluableReason. Kept as an
-#: explicit subtraction so adding a parent code later cannot silently land on
-#: our side of the line.
-OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset({"no_fill_bar", "thin_cross_section"})
+#: The seven from parent criterion 8. `no_fill_bar`, `thin_cross_section` and
+#: `unusable_fill_price` are OURS and are excluded deliberately — see
+#: NotEvaluableReason. Kept as an explicit subtraction so adding a parent code
+#: later cannot silently land on our side of the line.
+OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset({"no_fill_bar", "thin_cross_section", "unusable_fill_price"})
 PARENT_REASON_CODES: frozenset[str] = NOT_EVALUABLE_REASONS - OUR_ADDITIONAL_REASON_CODES
 
 

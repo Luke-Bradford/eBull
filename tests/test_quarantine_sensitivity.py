@@ -57,11 +57,12 @@ def _row(
     range_usable: bool = True,
     return_usable: bool = True,
     close: Decimal | None = Decimal("10"),
+    open_: Decimal | None = Decimal("9"),
 ) -> tuple[object, ...]:
     """One ``_LOAD_SQL`` row, in the order the loader unpacks it."""
     return (
         date(2024, 1, day),
-        Decimal("9"),
+        open_,
         Decimal("11"),
         Decimal("8"),
         close,
@@ -136,13 +137,61 @@ class TestTheTwoArms:
         loaded = _apply_arm(1, [_row(2, range_usable=False, return_usable=False)], arm="masked")
         bar = loaded.bars[0]
         assert (bar.high, bar.low, bar.close) == (None, None, None)
-        assert bar.open == Decimal("9")  # ⚠ never masked — no verdict covers it
+        # ⚠ A POSITIVE open survives both verdicts — no axis covers it, and #2354
+        # masks it on its VALUE, not on the bar being flagged. A both-false bar
+        # is exactly where the two rules are easiest to conflate.
+        assert bar.open == Decimal("9")
 
     def test_the_admitted_arm_keeps_them_at_their_stored_values(self) -> None:
         """C9's own definition: *"admitted at their stored values"*."""
         loaded = _apply_arm(1, [_row(2, range_usable=False, return_usable=False)], arm="admitted")
         bar = loaded.bars[0]
         assert (bar.high, bar.low, bar.close) == (Decimal("11"), Decimal("8"), Decimal("10"))
+
+
+class TestTheOpenIsMaskedOnItsValue:
+    """#2354. The open is the one OHLC field the two axes do not cover, and the
+    loader carried it through untouched — so a stored ``open = 0`` reached
+    ``signal_ledger.resolve_fills`` and became ``fill_price = 0`` on a fired
+    row. The rule applied is ``price_quarantine.rule_b1``'s own clause, *"any of
+    open/high/low/close NULL or <= 0"*.
+    """
+
+    def test_a_zero_open_is_masked_even_though_no_verdict_names_it(self) -> None:
+        loaded = _apply_arm(1, [_row(2, open_=Decimal("0"))], arm="masked")
+        assert loaded.bars[0].open is None
+
+    def test_a_null_open_stays_none_and_is_not_compared_against_zero(self) -> None:
+        """⚠ The None half of ``open_ is not None and open_ > 0``. Both columns
+        are nullable, and dropping the None guard does not fail a comparison
+        quietly — it raises ``TypeError`` deep inside a corpus sweep. Neither
+        corpus stores a NULL open today, which is exactly why the guard needs a
+        test rather than a measurement."""
+        loaded = _apply_arm(1, [_row(2, open_=None)], arm="masked")
+        assert loaded.bars[0].open is None
+
+    def test_a_negative_open_is_masked(self) -> None:
+        """⚠ No negative open is stored in either corpus today. That is a fact
+        about an ingest run, not a property of the column, so the bound is
+        ``<= 0`` and this pins the half the corpus cannot currently exercise."""
+        loaded = _apply_arm(1, [_row(2, open_=Decimal("-1"))], arm="masked")
+        assert loaded.bars[0].open is None
+
+    def test_the_admitted_arm_still_admits_the_stored_open(self) -> None:
+        """⚠ The arm is C9's *"stored values rather than masked"* and an
+        exception for the open would make it a different arm from the one the
+        criterion names. Safe because ``resolve_fills`` refuses a non-positive
+        open independently, so the admitted arm reports rather than crashes."""
+        loaded = _apply_arm(1, [_row(2, open_=Decimal("0"))], arm="admitted")
+        assert loaded.bars[0].open == Decimal("0")
+
+    def test_masking_the_open_does_not_touch_the_criterion_9_counts(self) -> None:
+        """⚠ Every non-positive open in both corpora is `B1`, i.e. already
+        flagged on BOTH axes (measured, full population). The census counts bars
+        the QUARANTINE flagged; inventing a third axis here would double-count
+        the same bars in a figure criterion 9 reads as a share."""
+        loaded = _apply_arm(1, [_row(2, open_=Decimal("0"), range_usable=False, return_usable=False)], arm="masked")
+        assert (loaded.range_flagged, loaded.return_flagged, loaded.bars_flagged) == (1, 1, 1)
 
     def test_the_arms_agree_on_what_was_flagged_and_differ_on_what_was_masked(self) -> None:
         """⚠⚠ The distinction the census depends on. If ``*_flagged`` moved with
