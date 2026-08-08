@@ -1482,10 +1482,27 @@ def _candidate(
     )
 
 
-def _expected_refusals(*, holdout_requested: bool, deflated: bool) -> frozenset[PromotionRefusal]:
-    """What §9's table says a row from THIS invocation must still refuse on."""
+def _expected_refusals(
+    *, holdout_requested: bool, deflated: bool, prior_holdout_evaluations: int = 0
+) -> frozenset[PromotionRefusal]:
+    """What §9's table says a row from this run must still refuse on.
+
+    ⚠⚠ ``holdout_never_evaluated`` IS A PROPERTY OF THE STRATEGY VERSION, NOT OF
+    THIS INVOCATION (#2433). ``check_promotable`` derives it from the LEDGER —
+    stored hold-out rows and recorded ``evaluate`` accesses for the
+    ``(strategy_id, strategy_version)`` pair — so predicting it from
+    ``holdout_requested`` alone is only right on a FIRST run. Once a version has
+    been hold-out evaluated, an in-sample-only re-run legitimately does not carry
+    the refusal, and this function used to insist it did.
+
+    It was unreachable until #2426: ``assert_no_existing_results`` refused any
+    re-run whose ``result_version`` already existed, so a second invocation never
+    reached the check. Adding ``benchmark_rule`` to the identity hash moved every
+    version, made a re-run possible for the first time, and the corrected
+    buy-and-hold run rejected here after a full corpus pass.
+    """
     expected = set(STANDING_REFUSALS)
-    if not holdout_requested:
+    if not holdout_requested and prior_holdout_evaluations <= 0:
         expected.add("holdout_never_evaluated")
     if not deflated:
         expected.update({"deflated_sharpe_not_computed", "trial_count_undeclared"})
@@ -1794,7 +1811,14 @@ def _write_rows(
                 )
                 pending.append((strategy_id, namespace, ambiguity, masked, admitted))
 
-    _preflight_gate(pending, validated=validated, holdout_requested=holdout_requested)
+    # ⚠ Read ONCE, before anything is written, so the preflight prediction and
+    # the post-write re-measure share a source (#2433).
+    prior_holdout: dict[tuple[str, str], int] = {}
+    for _strategy_id, _namespace, _ambiguity, masked, _admitted in pending:
+        key = (masked.identity.strategy_id, masked.identity.strategy_version)
+        if key not in prior_holdout:
+            prior_holdout[key] = holdout_access_counts(conn, *key).holdout_evaluations
+    _preflight_gate(pending, validated=validated, holdout_requested=holdout_requested, prior_holdout=prior_holdout)
     splits = _cut_splits(arms, corpus=corpus)
     _assert_every_in_sample_row_has_a_split(pending, splits)
 
@@ -1846,7 +1870,14 @@ def _write_rows(
                 recorded_accesses=accesses,
             )
         )
-        expected = _expected_refusals(holdout_requested=holdout_requested, deflated=result.deflated is not None)
+        # ⚠ The SAME ``evaluations`` the outcome was derived from. Predicting the
+        # expectation from a different source than the actual is exactly the
+        # mismatch #2433 was.
+        expected = _expected_refusals(
+            holdout_requested=holdout_requested,
+            deflated=result.deflated is not None,
+            prior_holdout_evaluations=evaluations,
+        )
         if set(outcome) != expected:
             raise RuntimeError(
                 f"{identity.strategy_id} {identity.namespace}/{identity.quarantine_arm} stored with refusals "
@@ -1980,6 +2011,7 @@ def _preflight_gate(
     *,
     validated: frozenset[int],
     holdout_requested: bool,
+    prior_holdout: Mapping[tuple[str, str], int],
 ) -> None:
     """The refusal list every row WILL carry, checked before anything is stored.
 
@@ -1988,8 +2020,15 @@ def _preflight_gate(
     refuses a row without one), so the two counts are equal by construction and
     the gate's ``recorded_accesses < holdout_evaluations`` clause cannot fire on
     a row this job wrote.
+
+    ⚠⚠ THE PROJECTION STARTS FROM WHAT THE LEDGER ALREADY HOLDS (#2433), not
+    from zero. A strategy version hold-out evaluated by an EARLIER run carries
+    those rows into ``check_promotable`` at write time, so a projection counting
+    only this run's pending rows predicts a refusal set the stored rows will not
+    have — and a gate whose prediction is wrong cannot catch the mismatch it
+    exists for.
     """
-    projected: Counter[tuple[str, str]] = Counter()
+    projected: Counter[tuple[str, str]] = Counter(prior_holdout)
     for _strategy_id, namespace, _ambiguity, masked, admitted in pending:
         if namespace == "hold_out":
             for result in (masked, admitted):
@@ -2011,7 +2050,13 @@ def _preflight_gate(
                     recorded_accesses=count,
                 )
             )
-            expected = _expected_refusals(holdout_requested=holdout_requested, deflated=result.deflated is not None)
+            expected = _expected_refusals(
+                holdout_requested=holdout_requested,
+                deflated=result.deflated is not None,
+                prior_holdout_evaluations=prior_holdout.get(
+                    (result.identity.strategy_id, result.identity.strategy_version), 0
+                ),
+            )
             if set(outcome) != expected:
                 raise RuntimeError(
                     f"{result.identity.strategy_id} {result.identity.namespace}/"
