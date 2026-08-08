@@ -6170,7 +6170,7 @@ def cusip_universe_backfill() -> None:
         logger.info(
             "cusip_universe_backfill: list_rows=%d instruments_seen=%d "
             "inserted=%d already_mapped=%d unresolvable=%d ambiguous=%d "
-            "conflict=%d sweep_promoted=%d sweep_rewashed=%d",
+            "conflict=%d option_pseudo_cusip=%d sweep_promoted=%d sweep_rewashed=%d",
             result.list_rows,
             result.instruments_seen,
             result.inserted,
@@ -6178,6 +6178,7 @@ def cusip_universe_backfill() -> None:
             result.tombstoned_unresolvable,
             result.tombstoned_ambiguous,
             result.tombstoned_conflict,
+            result.tombstoned_option_pseudo_cusip,
             result.sweep.promoted,
             result.sweep.rewashed,
         )

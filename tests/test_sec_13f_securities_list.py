@@ -665,3 +665,198 @@ class TestFetchUrlFallback:
         assert exc_info.value.code == 503
         # Non-404 aborts immediately — no legacy-name fallback attempt.
         assert attempted == ["https://www.sec.gov/files/investment/13flist2026q2-txt.txt"]
+
+
+# ---------------------------------------------------------------------------
+# #2353 — Official-List option classes get their own terminal verdict
+# ---------------------------------------------------------------------------
+
+
+class TestIsPutCall:
+    """The discriminator, pinned against the two ways it can go wrong.
+
+    Source rule: Form 13F Special Instruction 10 puts Columns 1 through 5
+    — Column 3 is the CUSIP, per 11.b.iii — "in terms of the securities
+    underlying the options, not the options themselves". So an
+    Official-List CALL/PUT identifier is never a valid Column 3 value,
+    and a stored CUSIP matching one can never resolve.
+    """
+
+    @staticmethod
+    def _sec(cusip: str, desc: str, status: str = "E"):
+        from app.services.sec_13f_securities_list import ThirteenFSecurity
+
+        return ThirteenFSecurity(
+            cusip=cusip, issuer_name="APPLE INC", description=desc, is_added_since_last=False, status=status
+        )
+
+    @pytest.mark.parametrize("desc", ["CALL", "PUT", "call", "CALL                       *"])
+    def test_call_and_put_match(self, desc: str) -> None:
+        from app.services.sec_13f_securities_list import _is_put_call
+
+        assert _is_put_call(self._sec("037833900", desc)) is True
+
+    @pytest.mark.parametrize(
+        "desc",
+        ["WTS", "WARRANT", "WT", "RIGHT 05/15/2030", "RIGHTS", "COM", "SHS", "UNIT 99/99/9999", "*W EXP 05/21/203", ""],
+    )
+    def test_warrants_rights_and_equity_do_not_match(self, desc: str) -> None:
+        """⚠ The regression this guards is REAL, not hypothetical.
+
+        ``_is_option`` folds WTS / WARRANT / WT / RIGHT / RIGHTS in with
+        CALL / PUT. Measured on ``13flist2026q2-txt.txt``: 0 of the 121
+        distinct warrant/right CUSIPs fail the mod-10 check digit,
+        against 9,977 of 10,171 CALL/PUT ones — warrants and rights are
+        genuine securities and must keep their shot at resolution.
+        Tombstoning off ``_is_option`` would strand them permanently.
+        """
+        from app.services.sec_13f_securities_list import _is_option, _is_put_call
+
+        assert _is_put_call(self._sec("00000000X", desc)) is False
+        if desc in {"WTS", "WARRANT", "WT", "RIGHTS"} or desc.startswith("RIGHT "):
+            # The wider helper DOES match these — that divergence is the point.
+            assert _is_option(self._sec("00000000X", desc)) is True
+
+    @pytest.mark.parametrize(
+        ("cusip", "desc"),
+        [
+            ("063679427", "CALL NRGU 45"),  # BMO structured note
+            ("063679435", "CALL BNKU 45"),
+            ("06368L882", "CALL LKD 41"),
+            ("00000000X", "CALL NRGD 45"),
+            ("00000000X", "ETHE CO CALL ETF"),  # covered-call ETFs
+            ("00000000X", "KWEB COVERD CALL"),
+            ("00000000X", "YIEL S& CALL ETF"),
+        ],
+    )
+    def test_compound_descriptions_containing_call_are_not_option_classes(self, cusip: str, desc: str) -> None:
+        """⚠ Falsified by the SOURCE, not by reasoning.
+
+        The first version of this discriminator asked whether the
+        description CONTAINED the token ``CALL``. On
+        ``13flist2026q2-txt.txt`` that swallows exactly 7 further rows —
+        4 BMO structured notes and 3 covered-call ETFs — every one a
+        genuine security. All 7 pass the mod-10 check digit, so the
+        check-digit sanity check could not catch it; a live OpenFIGI
+        probe on 2026-08-08 did, answering ``063679427`` with a
+        populated ``data`` array where a real option class answers
+        ``{"warning": "No identifier found."}``.
+        """
+        from app.services.sec_13f_securities_list import _is_put_call
+
+        assert _is_put_call(self._sec(cusip, desc)) is False
+
+
+class TestTombstoneOptionPseudoCusips:
+    def test_claims_both_partitions_and_spares_everything_else(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """One UPDATE covers the legacy (``source IS NULL``) and bulk
+        (``source IS NOT NULL``) partitions, leaves a warrant and a
+        common share pending, and never overwrites an existing verdict."""
+        from app.services.sec_13f_securities_list import (
+            STATUS_OPTION_PSEUDO_CUSIP,
+            parse_13f_list,
+            tombstone_option_pseudo_cusips,
+        )
+
+        conn = ebull_test_conn
+        conn.execute("DELETE FROM unresolved_13f_cusips WHERE cusip LIKE '2353%%'")
+        # legacy partition: pending CALL, pending common, pending warrant
+        for cusip in ("2353A0900", "2353A0100", "2353A0112"):
+            conn.execute(
+                "INSERT INTO unresolved_13f_cusips (cusip, name_of_issuer, last_accession_number) VALUES (%s, %s, %s)",
+                (cusip, "ACME CORP", "0000000000-00-000000"),
+            )
+        # bulk partition: pending PUT, plus a PUT already carrying an OpenFIGI verdict
+        conn.execute(
+            "INSERT INTO unresolved_13f_cusips (cusip, source, first_period_end, last_period_end)"
+            " VALUES (%s, 'bulk_13f_dataset', %s, %s)",
+            ("2353A0950", date(2026, 3, 31), date(2026, 3, 31)),
+        )
+        conn.execute(
+            "INSERT INTO unresolved_13f_cusips (cusip, source, resolution_status, first_period_end, last_period_end)"
+            " VALUES (%s, 'bulk_nport_dataset', 'openfigi_unknown', %s, %s)",
+            ("2353B0950", date(2026, 3, 31), date(2026, 3, 31)),
+        )
+        conn.commit()
+
+        payload = (
+            _line("2353A0100", "ACME CORP", "COM")
+            + _line("2353A0900", "ACME CORP", "CALL")
+            + _line("2353A0950", "ACME CORP", "PUT")
+            + _line("2353A0112", "ACME CORP", "WTS")
+            + _line("2353B0950", "BETA CORP", "PUT", status="D")
+        )
+        claimed = tombstone_option_pseudo_cusips(conn, list(parse_13f_list(payload)))
+        conn.commit()
+
+        # The pending CALL (legacy) + the pending PUT (bulk) = 2. The
+        # already-tombstoned PUT is NOT overwritten even though it is a
+        # ``D`` row the helper does otherwise consider.
+        assert claimed == 2
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT cusip, resolution_status FROM unresolved_13f_cusips WHERE cusip LIKE '2353%%' ORDER BY cusip"
+            )
+            rows = {r["cusip"]: r["resolution_status"] for r in cur.fetchall()}
+        assert rows == {
+            "2353A0100": None,  # common share — still resolvable
+            "2353A0112": None,  # warrant — still resolvable
+            "2353A0900": STATUS_OPTION_PSEUDO_CUSIP,
+            "2353A0950": STATUS_OPTION_PSEUDO_CUSIP,
+            "2353B0950": "openfigi_unknown",  # pre-existing verdict preserved
+        }
+
+    def test_backfill_reports_the_count_and_claims_delisted_option_rows(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """The backfill claims option rows before the matcher runs, and
+        surfaces the count on its rollup so the operator log carries it.
+
+        ⚠ The ``status='D'`` row is the load-bearing half. The backfill
+        drops ``D`` rows from ``securities`` before matching (a CUSIP SEC
+        just delisted must not anchor a NEW mapping), but a CALL class
+        SEC removed from 13(f) eligibility is still a CALL class and its
+        identifier is still not what Column 3 asks for. Feeding the
+        tombstoner ``securities`` instead of ``raw_securities`` would
+        leave such a row pending forever — a revert-probe on that exact
+        substitution went UNCAUGHT until this row was added.
+        """
+        from app.services.sec_13f_securities_list import STATUS_OPTION_PSEUDO_CUSIP
+
+        conn = ebull_test_conn
+        conn.execute("DELETE FROM unresolved_13f_cusips WHERE cusip LIKE '2354%%'")
+        for cusip in ("2354A0900", "2354A0950"):
+            conn.execute(
+                "INSERT INTO unresolved_13f_cusips (cusip, name_of_issuer, last_accession_number) VALUES (%s, %s, %s)",
+                (cusip, "ACME CORP", "0000000000-00-000000"),
+            )
+        conn.commit()
+
+        payload = (
+            _line("2354A0100", "ACME CORP", "COM")
+            + _line("2354A0900", "ACME CORP", "CALL")
+            + _line("2354A0950", "ACME CORP", "PUT", status="D")
+        )
+        result = backfill_cusip_coverage(
+            conn,
+            year=2025,
+            quarter=4,
+            today=date(2026, 5, 5),
+            fetch=lambda *_: (payload, "test://13flist"),
+        )
+        assert result.tombstoned_option_pseudo_cusip == 2
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT cusip, resolution_status FROM unresolved_13f_cusips WHERE cusip LIKE '2354%%' ORDER BY cusip"
+            )
+            rows = {r["cusip"]: r["resolution_status"] for r in cur.fetchall()}
+        assert rows == {
+            "2354A0900": STATUS_OPTION_PSEUDO_CUSIP,
+            "2354A0950": STATUS_OPTION_PSEUDO_CUSIP,  # delisted, still claimed
+        }
