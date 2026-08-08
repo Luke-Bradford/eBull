@@ -370,6 +370,13 @@ JOB_PRICE_QUARANTINE_REFRESH = "price_quarantine_refresh"
 # if candles have not moved, the frontier has not moved, and the watermark makes
 # the run a no-op. See app/services/strategy_signal_scan.py.
 JOB_STRATEGY_SIGNAL_SCAN = "strategy_signal_scan"
+# #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
+# expensive: half an hour is a scheduled job's workload. The reasons are
+# governance — criterion 5 requires a hold-out purpose a cron fire cannot
+# supply, and a stored row is meaningless if its identity moved between runs.
+# Source-lock "strategy_backtest" in MANUAL_TRIGGER_JOB_SOURCES; params in
+# MANUAL_TRIGGER_JOB_METADATA. See app/services/backtest_run.py.
+JOB_STRATEGY_BACKTEST_RUN = "strategy_backtest_run"
 JOB_ATTRIBUTION_SUMMARY = "attribution_summary"
 JOB_WEEKLY_REPORT = "weekly_report"
 # JOB_WEEKLY_COVERAGE_AUDIT + JOB_WEEKLY_COVERAGE_REVIEW retired in Chunk 2 of
@@ -4904,6 +4911,71 @@ def strategy_signal_scan() -> None:
         # run would be recorded green with a strategy silently dark.
         if failed:
             raise RuntimeError(f"strategy_signal_scan: {len(failed)} strategy(ies) failed: {failed}")
+
+
+def strategy_backtest_run(params: Mapping[str, Any]) -> None:
+    """Persist criterion 9's arm pairs for every runnable strategy (#2394 §3.2).
+
+    DB-only (no external I/O): reads the FROZEN research corpus through
+    ``research_price_structure_store.load_masked_series`` at ``CORPUS_VERSION``
+    and writes ``strategy_results`` / ``strategy_results_store`` +
+    ``strategy_holdout_accesses`` through ``result_ledger``. It touches no
+    broker path and no live-data path.
+
+    ⚠⚠ ONE INVOCATION IS THE WHOLE STRATEGY SET. Criterion 6's Deflated Sharpe
+    deflates by the variance of Sharpes ACROSS the measured trials, and
+    ``deflated_sharpe.MIN_MEASURED_TRIALS`` is 2 — so a per-strategy run writes
+    rows the gate refuses with ``deflated_sharpe_not_computed``, a refusal no
+    re-run of that one strategy can clear. ``strategy_id`` narrows the set for a
+    debugging run and the report then DECLARES the deflation absent with its
+    reason.
+
+    Honoured params (declared in ``MANUAL_TRIGGER_JOB_METADATA``):
+
+    * ``strategy_id`` (enum) — narrow to one runnable strategy. See above.
+    * ``holdout_purpose`` / ``holdout_accessed_by`` (string) — REQUIRED TOGETHER
+      and non-empty, or the withheld side is neither computed nor written (§4).
+      ``ParamMetadata`` has no conditional model, so the pairing is checked in
+      the service body before any corpus work.
+    * ``trial_register_version`` (string) — optional assertion. A run cannot
+      silently deflate against a register that has moved.
+
+    ⚠ ``row_count`` is RESULT ROWS written. Zero is never a success here: the
+    service raises if a runnable strategy produced no row, because an absent row
+    indexes to nothing and a short write would otherwise read as a clean run.
+
+    ⚠ NOT autocommit, unlike ``strategy_signal_scan``. ``result_ledger``'s pair
+    writers own their own ``conn.transaction()`` and their whole claim is that
+    the lone-arm state is unreachable; on an autocommit connection the first
+    insert of a pair would commit before the second failed.
+    """
+    from app.services.backtest_run import run_backtest
+
+    with _tracked_job(JOB_STRATEGY_BACKTEST_RUN) as tracker:
+        with connect_job() as conn:
+            report = run_backtest(
+                conn,
+                strategy_id=_optional_str(params.get("strategy_id")),
+                holdout_purpose=_optional_str(params.get("holdout_purpose")),
+                holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
+                trial_register_version=_optional_str(params.get("trial_register_version")),
+            )
+            tracker.row_count = report.rows_written
+
+
+def _optional_str(value: object) -> str | None:
+    """A params value as a non-empty string, or ``None``.
+
+    ⚠ A BLANK IS ``None`` AND NOT ``""``. The #2286 shape: a present-but-empty
+    field passes a presence check, and here that would let a hold-out run start
+    with an audit record whose purpose is the empty string. The service refuses
+    a half-supplied pair, so this collapses "absent" and "blank" into the one
+    state it can judge.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def exchanges_metadata_refresh() -> None:

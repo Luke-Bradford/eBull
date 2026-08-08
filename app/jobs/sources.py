@@ -93,6 +93,7 @@ Lane = Literal[
     "fair_value_band",
     "price_quarantine",
     "strategy_scan",
+    "strategy_backtest",
     "bootstrap",
     "finra",
     "openfigi",
@@ -347,6 +348,16 @@ when one overruns). Scheduled-only, so NOT added to the
   ``db`` for the ``risk_metrics`` reason as well: the pass is minutes long over
   the whole validated universe. Scheduled-only (daily 06:45 UTC) → not in the
   ``bootstrap_stages.lane`` CHECK.
+* ``strategy_backtest`` — ``strategy_backtest_run`` (#2394 §3.2) only. DB-only
+  producer, sole writer of ``strategy_results`` / ``strategy_results_store`` /
+  ``strategy_holdout_accesses``; reads the FROZEN research corpus
+  (``research_price_daily`` + ``research_bar_quarantine``) MVCC-safe. ⚠ It must
+  NOT share ``strategy_scan``'s lane, and that is the reason §3 of the runner
+  spec split the two jobs at all: the scan reads live ``price_daily`` and is
+  cheap and daily, this reads the research corpus and takes ~30-50 minutes, and
+  blocking the daily shadow track record behind a backtest is the exact
+  coupling the split avoided. Manual-trigger-only → registered in
+  MANUAL_TRIGGER_JOB_SOURCES, not in the ``bootstrap_stages.lane`` CHECK.
 
 The final lane is bootstrap-only:
 
@@ -534,6 +545,14 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # sec_rebuild — operator manual triage (#1155). Per-CIK
     # check_freshness probes against SEC submissions.json; shares the
     # 10 req/s SEC fair-use budget with every other sec_rate consumer.
+    # strategy_backtest_run — #2394 §3.2 backtest persistence. Own lane, NOT
+    # the catch-all ``db`` and NOT ``strategy_scan``: a 30-50 minute
+    # full-corpus pass would starve the db-lane orchestrator sync (#1526/#1527
+    # class) and would block the daily signal scan behind it. Manual-trigger
+    # only — criterion 5 requires a hold-out purpose no cron fire can supply,
+    # so it is deliberately absent from SCHEDULED_JOBS. Params in
+    # MANUAL_TRIGGER_JOB_METADATA; invoker in app/jobs/runtime.py::_INVOKERS.
+    "strategy_backtest_run": "strategy_backtest",
     "sec_rebuild": "sec_rate",
     # institutional_13f_notice_backfill — one-shot 13F-NT backfill (#1639).
     # Per-day daily-index reads + per-Notice primary_doc fetches against SEC;
