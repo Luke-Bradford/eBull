@@ -28,13 +28,19 @@ A day of falsification has a shape, and the shape is the finding:
 
 That is not luck. It is the central asymmetry of the field:
 
-**Returns are not reliably predictable. Volatility is.** *"The conditional
-variance of financial returns is time-varying and predictable"* — one of the
-most robust empirical regularities in finance, first noted by **Mandelbrot
-(1963)**, formalised by **Engle's ARCH (1982, Nobel)** and **Bollerslev's
-GARCH**. Large changes follow large changes; small follow small. It is about as
-settled as anything in this literature, and **nothing today came close to
-challenging it.**
+**Volatility is predictable.** *"The conditional variance of financial returns
+is time-varying and predictable"* — one of the most robust regularities in
+finance: **Mandelbrot (1963)**, **Engle's ARCH (1982, Nobel)**, **Bollerslev's
+GARCH**. Large changes follow large changes. Nothing here challenged it.
+
+⚠⚠ **But "returns are not predictable" — which this file previously asserted —
+is FALSE as stated** (Codex audit). **Order-flow imbalance predicts short-horizon
+returns** with a linear, stable relation (§2.10b, Cont/Kukanov/Stoikov). The
+accurate claim is narrower and worth stating precisely:
+
+> **Returns are not predictable FROM DAILY PRICE HISTORY ALONE, which is the
+> data most of this file tests.** They are predictable from order flow, which we
+> do not receive. That is a statement about our feed, not about markets.
 
 ⚠⚠ **This is the positive result, and it is actionable WITHOUT predicting a
 single return.**
@@ -46,9 +52,16 @@ return using only the quantity we can actually forecast. No return prediction
 required. ⚠ Scoped by §2.4 — the evidence supports it for momentum, not
 universally.
 
-**2. ⚠⚠ ATR-based stops and targets — the highest value per line of code on the
-board.** This is the direct answer to *"what tells us the stop loss and take
-profit"*, and the answer is: **not the signal. The volatility.**
+**2. ATR-based stops and targets — useful, and ⚠ NOT an edge.** The direct
+answer to *"what tells us the stop and the take profit"* is **the volatility, not
+the signal.**
+
+⚠⚠ **But this file previously called it "the highest value per line of code on
+the board", and that was wrong** (Codex audit). **ATR gives SCALE, not
+EXPECTANCY.** A stop changes the shape of the return distribution and **can
+convert positive drift into negative** by cutting winners' paths short and
+locking in the noise. It is infrastructure that makes risk statable — it does
+not create return, and a strategy with no edge is not rescued by a good stop.
 
 ```text
 stop    = entry - m * ATR14
@@ -159,8 +172,14 @@ them."** Named by the paper as *the most effective* cost-mitigation technique. I
 is a small change to any strategy's exit rule and it directly attacks the filter
 we fail worst on.
 
-> **Check turnover BEFORE anything else.** It is one column, it is already
-> stored, and it disqualifies faster than any backtest.
+> **Check turnover BEFORE anything else.** It is one column, already stored, and
+> it screens faster than any backtest.
+
+⚠ **Do not read it as an absolute** (Codex audit). Novy-Marx & Velikov say *most*
+anomalies below 50%/month generate net spreads and *few* above do — **not that
+every high-turnover strategy is dead.** It is a strong prior for a daily-bar,
+retail-cost operation, and it would be the wrong filter for a genuine intraday
+book where the whole point is high turnover at tiny per-trade cost.
 
 ### 2.2 Most anomalies do not replicate — Hou, Xue & Zhang, *RFS* (2020)
 
@@ -305,6 +324,13 @@ measurement), and they are almost all the **short** horizons.
 **WHAT SURVIVED, robustly and in every band: short-horizon reversal.** 1-day and
 5-day at `t -5` to `-11`, 1-month in three of four bands. That is the one part of
 the term structure our own data establishes.
+
+⚠⚠ **AND AN AUTOCORRELATION SIGN IS NOT A TRADABLE SIGNAL** (Codex audit). A
+negative coefficient says the series mean-reverts on average; it does not say the
+reversion is larger than the spread, reachable at a fill you could get, or
+present when you need it. §2.11a is the immediate proof — the same negative
+autocovariance is exactly what a bid-ask bounce produces. **Treat every cell in
+this table as a hypothesis about a mechanism, never as a strategy.**
 
 ⚠⚠ **This inverts the ranking the literature gave us.** §2.1/§2.5 say momentum is
 the scalable survivor and short-term reversal is the most cost-constrained.
@@ -475,6 +501,104 @@ nothing at daily resolution can. What it measures is how much price moved per
 dollar traded, which is the footprint, not the actor.
 
 ---
+
+## 2.10b ⚠⚠ What skilled day traders actually read — and exactly why we cannot
+
+⚠⚠ **CORRECTION AGAINST MYSELF — I READ HALF OF ONE PAPER.** I researched day
+trading by searching for *failure rates*, found Barber/Odean and Chague et al.,
+and treated that as the answer. It was a loaded query and I took the answer it
+was shaped to give.
+
+**The same Barber, Lee, Liu & Odean Taiwan paper cuts BOTH ways, and I quoted
+only one side:**
+
+| what I quoted | what I missed, from the SAME study |
+| --- | --- |
+| fewer than **1%** are predictably profitable net of fees | **the top 500 traders ranked by PRIOR-YEAR performance earned 37.9 bps/day after fees the following year** |
+
+⚠⚠ **That is persistence.** Past performance and trade concentration predict
+future performance. **Day-trading skill is real, it is rare, and it is
+identifiable ex ante** — which is the opposite of the conclusion I drew, from
+the same source.
+
+Corroborating, and also missed:
+
+- **Locke & Mann** — discipline measures predict subsequent trader success **out
+  of sample**; successful floor futures traders are *"rational and disciplined"*.
+- **Boyd & Kurov** — trader profits, experience, sophistication and dual trading
+  predict **survival** in energy futures.
+- **Hasbrouck** — trades carry information and price impact arrives with a lag.
+
+> **The honest summary is not "97% lose."** It is: **the distribution is brutal,
+> and the right tail is real, persistent and predictable from past performance.**
+> Those are compatible, and only the second one is useful.
+
+**They are reading order flow, and it is one of the best-established results in
+market microstructure.**
+
+**Cont, Kukanov & Stoikov, "The Price Impact of Order Book Events", *Journal of
+Financial Econometrics* 12(1) (2014), 47-88.** NYSE TAQ, fifty US stocks:
+
+> Over short time intervals, **price changes are mainly driven by the order flow
+> imbalance (OFI)** — the imbalance between supply and demand at the best bid
+> and ask. The relation is **LINEAR**, with a slope **inversely proportional to
+> market depth**, and is **robust to intraday seasonality and stable across time
+> scales and across stocks.**
+
+⚠ Read that again against the folklore. What a tape reader describes as *"heavy
+buying hitting the ask"* is a measured, linear, stable relationship. **The
+intuition is real and it has a formula.** It also implies the square-root impact
+law (§2.11b), so it is the same physics from the other end.
+
+### ⚠⚠ And the precise reason we cannot compute it
+
+**OFI needs the SIZES at the best bid and ask, and how they change.** Not the
+prices — the quantities resting there.
+
+Measured on our own feed (`app/services/etoro_websocket.py`, 2026-08-09):
+
+```text
+Trading.Instrument.Rate pushes:   bid, ask, last          (prices only)
+bid size / ask size:              ABSENT
+depth beyond L1:                  ABSENT
+volume at price / trade side:     ABSENT
+```
+
+⚠ Every occurrence of "size" in that module refers to **WebSocket frame bytes**,
+not order size. Verified by grep, not assumed.
+
+> **So the honest gap is NOT "we have no intraday data" — a claim I made
+> repeatedly and which is wrong. We have a live authenticated tick feed to every
+> instrument. What we lack is DEPTH.** That is a far sharper statement and it
+> changes what a data purchase would have to buy.
+
+| we CAN build from the live feed | we CANNOT, at any effort |
+| --- | --- |
+| tick history, true intraday candles | **OFI** — needs L1 sizes |
+| observed bid-ask spread over time ⚠ | footprint charts / volume-at-price |
+| quote-update frequency (activity proxy) | cumulative delta, absorption, exhaustion |
+| realised intraday volatility | trade-side classification |
+
+⚠ **The spread row is worth noticing on its own.** `quotes` carries `bid`, `ask`
+and `spread_pct` — **observed** spreads. Our cost model uses *calibrated bands*
+from samples of 76-244 series, and the era mismatch between those bands and a
+1962-2026 corpus is what made the Roll test inconclusive (§2.11a). **Recording
+observed spreads over time replaces a calibration with a measurement.**
+
+### What this means for strategy selection
+
+1. **The intraday order-flow game is closed to us on this feed**, and not for
+   want of skill or speed — for want of a field in the payload. ⚠ Stop treating
+   it as an aspiration; treat it as a data-purchase decision with a known
+   requirement (L1 depth minimum, ideally full book).
+2. **The tick feed is still worth persisting.** `price_intraday` exists and holds
+   **0 rows**. Subscribing a chosen universe and aggregating into candles builds
+   an intraday corpus from today forward at zero data cost — and in months it
+   supports the intraday work we currently cannot even backtest.
+3. ⚠ **Do not conclude "day trading is impossible".** Conclude that **the
+   specific mechanism the profitable minority uses requires data we do not
+   receive**, and that our own asset — SEC filings at depth — is a different
+   game with a different mechanism (§3.1).
 
 ## 2.11a ⚠⚠ Is our one surviving finding just the bid-ask bounce? — INCONCLUSIVE
 
