@@ -60,6 +60,42 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry]   # strategy_id -> identity fn, s
                                                  # class, emitted legs, resolver shape
 ```
 
+⚠⚠ **CORRECTION, made while implementing it: the manifest landed in
+`app/services/strategy_manifest.py`, NOT in `strategy_registry.py`.** The shape above is
+unchanged; the placement was wrong for a reason this section could not see, and the first
+of the four is measurable:
+
+1. `StrategyIdentity.version` hashes `_module_hash()` — **the bytes of
+   `strategy_registry.py`**. A manifest living there would move *every stored strategy
+   version every time a strategy is added*, so registering S-5 would invalidate S-1's
+   entire track record for no reason of S-1's. `verify_2394_strategy_manifest.py
+   --identity` asserts all five identity-bearing files are byte-identical to `origin/main`
+   and prints the four versions, so the claim is checked rather than asserted.
+2. The registry is imported **by** every strategy module, so it cannot import them back.
+3. `ExitRegime` lives in `position_builder`; putting the manifest in the registry would
+   couple the pure signal contract to the position layer.
+4. ⚠ **It is not inside `app/services/strategies/` either**, which is where it was first
+   written. `TestInputRuleSetsAreComplete` walks every module in that package and requires
+   any imported `app.services` module carrying a `RULE_SET_VERSION` to be in
+   `INPUT_RULE_SETS` — and the manifest imports `position_builder`, which has one. The
+   guard failed on the first fast-tier run, correctly. Adding `position_builder` to
+   `INPUT_RULE_SETS` would be reason 1 by another route; excluding the file would weaken a
+   working guard. The manifest computes no verdict, so it belongs outside the package the
+   guard scopes to.
+
+⚠ **A second correction, to §1's last bullet** — *"Adding or removing a strategy changes
+the set, so the manifest is versioned by it."* It does not, and must not.
+`STRATEGY_SET_ID` is a literal in the registry and no field of `StrategyIdentity` is a
+function of manifest membership. S-1's signals are unchanged by S-5 existing, so S-1's
+version must not move when S-5 lands. The set id names the **contract** version, not the
+membership.
+
+⚠ **A third, to the field list** — the entry carries an `ExitRegimeFactory` rather than a
+free-text "resolver shape". `position_builder.ExitRegime` already *is* the per-strategy
+close-source contract, and §3's table already lives in its docstring as prose that every
+caller hand-builds from. The manifest makes that table executable instead of adding a
+second vocabulary for it.
+
 **The completeness check is a test, not a convention**, mirroring the pattern already proven
 by `tests/test_strategy_registry.py::TestInputRuleSetsAreComplete`: walk every module under
 `app.services.strategies` (excluding known non-strategy modules), and fail if a module
