@@ -196,6 +196,79 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         [("        widest = max(widest, end - start)", "        widest = min(widest, end - start)")],
         "test_the_embargo_is_the_widest_span_wholly_outside_the_fold",
     ),
+    # --- stage 5e-5c: the STORED split's shape -----------------------------
+    (
+        # ⚠⚠ A THREE-FOLD SPLIT STORED AS A COMPLETE ONE. The rows are each
+        # individually correct and the set is a cross-validation that stopped
+        # early — which is exactly what it would not look like on a read.
+        "the stored split no longer required to be complete",
+        WALK,
+        TESTS,
+        [("        if len(self.folds) != FOLD_COUNT:", "        if False:")],
+        "test_a_split_that_is_not_four_folds_is_refused",
+    ),
+    (
+        "a fold's index no longer required to be its position in the split",
+        WALK,
+        TESTS,
+        [("            if record.fold.index != position:", "            if False:")],
+        "test_a_fold_whose_index_is_not_its_position_is_refused",
+    ),
+    (
+        # ⚠ A gap at the front is training data that no fold ever tested — it
+        # never enters the purge, the embargo or any census, and every count
+        # below it still adds up.
+        "the split no longer required to start at the axis front",
+        WALK,
+        TESTS,
+        [("        if self.folds[0].fold.first_index != 0:", "        if False:")],
+        "test_a_split_that_does_not_start_at_the_axis_front_is_refused",
+    ),
+    (
+        "the folds no longer required to be contiguous",
+        WALK,
+        TESTS,
+        [("            if later.fold.first_index != earlier.fold.last_index + 1:", "            if False:")],
+        "test_a_gap_between_two_folds_is_refused",
+    ),
+    (
+        # ⚠⚠ THE SECOND AXIS. Indices and dates are stored side by side and only
+        # one of them is derived from the other's axis; dropping the date check
+        # lets a split whose dates came from a different corpus pass as one
+        # whose indices are contiguous.
+        "the fold DATES no longer required to agree with the fold indices",
+        WALK,
+        TESTS,
+        [("            if later.first_date <= earlier.last_date:", "            if False:")],
+        "test_index_contiguous_folds_that_overlap_in_TIME_are_refused",
+    ),
+    (
+        # ⚠⚠ THE CHECK THAT CATCHES TWO RUNS. Every fold classifies every
+        # observation, so their totals are equal by construction; without this
+        # a split assembled from two sweeps stores four internally-consistent
+        # censuses of different populations.
+        "the folds no longer required to count one population",
+        WALK,
+        TESTS,
+        [("        if len(totals) > 1:", "        if False:")],
+        "test_folds_counting_different_populations_are_refused",
+    ),
+    (
+        "a fold record accepting a last date before its first",
+        WALK,
+        TESTS,
+        [("        if self.last_date < self.first_date:", "        if False:")],
+        "test_fold_record_refuses_impossible_fields",
+    ),
+    (
+        # ⚠ The #2286 shape: a PRESENT-but-empty construction id. NOT NULL does
+        # not catch it and neither does anything downstream.
+        "a blank construction id accepted on a stored split",
+        WALK,
+        TESTS,
+        [("        if not self.model_id:", "        if False:")],
+        "test_a_blank_model_id_is_refused",
+    ),
 ]
 
 

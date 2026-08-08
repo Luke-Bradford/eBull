@@ -614,6 +614,15 @@ columns nobody populates is precisely the defect `sql/266`'s own header records
 (*"sql/262 shipped two of criterion 6's columns and none of its inputs"*). The
 columns land with the writer, in 5e-5.
 
+✅ **They landed at stage 5e-5c, as `sql/269`'s CHILD TABLE rather than as
+columns** — the grain is (result, fold), and four columns per field would encode
+`FOLD_COUNT` in the schema, making a future construction with a different count
+a migration instead of a model-id bump. **No per-fold METRIC ships and that is
+the same decision one level down**: the sentence above is why. Four per-fold
+Sharpes have no use the spec names, and the obvious one — picking the best fold —
+is the search criterion 6's trial count exists to bound. §8.8 records what a
+fold row does carry and the two findings the writer produced.
+
 ### 5.4 Exposure, cash and the return denominator
 
 **Source rule: §7**, quoted rather than re-derived — *"define cash return as
@@ -771,7 +780,7 @@ until the namespace has a mechanism.
 | **5e-4** | **Purged walk-forward + embargo** (§5.3). `app/services/walk_forward.py`. ⚠ The "blocked on S-1 declaring a `max_hold_bars`" row was **struck**: the block was an unstarted measurement, not a decision, and the measurement adopted the leak-free in-sample p100 with S-1's identity untouched. | ✅ shipped |
 | **5e-5a** | **Quarantine sensitivity arm** (criterion 9) — the two-arm loader, the census, the metric delta, and `quarantine_arm` on the result identity. `app/services/quarantine_sensitivity.py`, `sql/267`. | ✅ shipped |
 | **5e-5b** | The **1,000-strategy random-entry control** (§9, *the harness itself*) — the permutation, both thresholds, and the three promotion refusals. `app/services/random_entry_cohort.py`, `sql/268`. ⚠ Cohort run at N = 1,000 for **S-3 only**; S-1's is compute-bound, §8.6. | ✅ shipped |
-| **5e-5c** | The **per-fold walk-forward writer** 5e-4 deliberately left unwritten, and the **per-arm result writer** (`quarantine_arm` is expressible; nothing writes it yet). | last |
+| **5e-5c** | The **per-fold walk-forward writer** 5e-4 deliberately left unwritten (`sql/269`, `walk_forward.WalkForwardFolds`), and the **per-arm result writer** — `store_in_sample_arm_pair` / `store_holdout_arm_pair` plus `quarantine_arms_compared`, which is the first thing to produce that gate input from the database. | ✅ shipped |
 
 ⚠ **5e-5b was split again at the writers**, and the reason is the same one that
 split 5e at 5e-1 and 5e-5 at 5e-5a: the control CHANGES WHAT A STORED RESULT
@@ -1056,6 +1065,110 @@ boundaries may be chosen freely and re-drawn between attempts without moving a
 single entry. ⚠ `--report` refuses (R5) unless the member indices are exactly
 `0 … 999`, so a partial cohort cannot be quoted as a §9 figure by accident.
 
+### 8.8 Stage 5e-5c: what a stored split carries, and the shape both writers exist to make unreachable
+
+Two writers, and the same argument produced both: **the state each one makes
+unrepresentable is a HALF-WRITTEN one that reads as complete.**
+
+- `store_in_sample_arm_pair` / `store_holdout_arm_pair` take criterion 9's two
+  arms together. A lone `admitted` row is a number `sql/267` says may never be
+  quoted; a lone `masked` row is the state the gate refuses as
+  `quarantine_arms_not_compared`. Neither is reachable through one call, and a
+  raise or a rollback leaves neither behind.
+- `store_walk_forward_folds` takes a whole `WalkForwardFolds` — four contiguous
+  folds counting one population — and writes them in one `executemany`. There is
+  no per-fold writer, because a three-of-four split is a cross-validation that
+  stopped early and nothing about the stored rows would say so.
+
+**The pair check is one comparison, not a field sweep.** `_check_arm_pair`
+rebuilds the masked identity with the admitted arm and requires it to EQUAL the
+admitted one. A field-by-field sweep has to be extended by hand whenever
+`ResultIdentity` gains a member, and the newest member is exactly the one a pair
+is most likely to differ in — `quarantine_arm` itself was added one sub-stage
+ago for that reason. This is `QuarantineCensus`' controlled-experiment check
+(*"a difference means the populations differ and no delta between them is
+interpretable"*) moved up from the bar counts to the identity.
+
+**`quarantine_arms_compared` is the first thing to produce that gate input from
+the database**, and its hold-out branch records a `read`. Presence is a fact
+about the withheld side, so looking at it is an access — the same rule
+`read_holdout_results` applies to a read that returns nothing. ⚠ A `read` and
+never an `evaluate`: nothing was produced, so criterion 5's evaluation
+arithmetic must not move. An in-sample identity records nothing, because an
+audit trail that counts automation is not an audit trail.
+
+**What the fold table stores and what it deliberately does not** — `sql/269`'s
+header carries both in full. The short form: geometry on both axes (indices AND
+dates, because an index is unreadable once the corpus axis moves), the realised
+bar count, the MEASURED panel embargo, and the four-way census as four columns
+rather than one `dropped` total. No per-fold metric (§5.3), and no new promotion
+refusal — `check_promotable`'s vocabulary is sourced clause by clause from §6 and
+§3.4, neither of which declares a walk-forward bullet, so a `walk_forward_not_run`
+code invented here would be a gate semantic with no source rule behind it.
+
+#### What was measured (full population, `verify_2240_result_writers.py --all`)
+
+5,266 series, 0 fail-closed empties, 501.8 s, **0 property violations**, exit 0.
+The split written is the one 5e-4 measured, re-derived from the corpus in this
+run rather than quoted:
+
+| | S-1 | S-3 |
+| --- | ---: | ---: |
+| in-sample observations (each fold classifies all of them) | 2,456,097 | 22,811 |
+| embargo, folds 0-3 (panel bars) | 615 / 931 / 931 / 931 | 10 / 10 / 10 / 10 |
+| purged, folds 0-3 | 0 / 597 / 111 / 606 | 0 / 20 / 1 / 3 |
+| embargoed, folds 0-3 | 122,530 / 332,214 / 399,280 / 0 | 14 / 2 / 3 / 0 |
+
+Realised bar shares 25.00% / 24.99% / 25.00% / 25.01%. ⚠ The four numbers on the
+S-1 embargo row and the four in its embargoed row are §5.3's own table, arrived
+at from a fresh sweep — which is the cross-check that matters here, since a
+stored split is only worth as much as the measurement it froze.
+
+⚠⚠ **The round trip is the assertion, and the magnitudes are why it needs the
+full population.** W2 writes the split and reads it back as a whole object:
+counts near 2.5M and an embargo of 931 exercise the `BIGINT` columns and the
+13-position column mapping that a 30-observation fixture cannot. W3 then takes
+the identical object and the identical statement to a **hold-out** parent and
+requires `sql/269`'s trigger to refuse it — so a pass is about the parent's
+namespace, not about anything in the payload. ⚠ Every write in the arm is rolled
+back and the occupancy of both tables is re-counted afterwards (W4/P4): "it
+rolled back" is asserted, not assumed.
+
+⚠ **The `--pair` arm is a MECHANISM arm and says so.** The two arms' metric delta
+is stage 5e-5a's measurement and is not re-derived here — that is an 83-minute
+corpus sweep to re-measure a number nothing in this stage changes. What it
+asserts is the storage behaviour 5e-5a could not have: both arms land under
+different `result_version`s, the pair reads back as compared from EITHER arm's
+identity, a lone arm does not, and storing the pair clears
+`quarantine_arms_not_compared` **and nothing else** — 8 refusals still stand,
+which is §6's stated initial state.
+
+#### ⚠⚠ The atomicity finding: one of the two writers needed its own transaction and the other did not, and the difference is `executemany`
+
+Codex raised at checkpoint 2 that both writers took their atomicity from the
+CALLER's connection — and this repo opens autocommit connections (`app/main.py`'s
+lifespan guards, the runbooks), where each statement commits on its own. For the
+**arm pair** that is exactly right: two separate `execute` calls, so the masked
+arm would commit before the admitted one was refused, leaving the lone-arm state
+the API exists to make unreachable. It now owns a `conn.transaction()`, and the
+revert probe removing it is **CAUGHT** by a test written for the purpose.
+
+For the **split** the same objection does not survive measurement. On psycopg
+**3.3.3** (measured 2026-08-08 — autocommit connection, temp table with a
+primary key, an `executemany` whose third statement violates it) the two rows
+before the failure do **not** survive: `executemany` runs its batch in a
+transaction of its own. The wrapper is kept as defence in depth and is described
+as that rather than as the mechanism, and no probe ships for it, because the
+probe would be reporting on the driver. ⚠ The NOT CAUGHT that established this
+is the evidence, not a failure: triaged selector → fixture → code, the answer was
+a fourth one the prevention log now carries — *the injected defect is not a
+defect, because a lower layer already provides the property.*
+
+⚠ **Stated gap, unchanged from 5e-4:** only S-1 and S-3 sweep. S-2 needs its
+whole panel resident and S-4 the resolver over the corpus (phase 5a's reason).
+Neither changes a rule these writers apply — a split is a function of dates and a
+pair is a function of two identities — but no S-2 or S-4 split has been stored.
+
 ---
 
 ## 9. Acceptance
@@ -1109,6 +1222,16 @@ fold window counts panel dates (§5.3, §8.4). F4 asserts the measured bound
 covers the declared one. Per-strategy in-sample and hold-out **trade** counts
 are reported, gated on effective sample size (§5.2).
 
+✅ **The split is now STORED, at stage 5e-5c** (`sql/269`,
+`walk_forward.WalkForwardFolds`, `result_ledger.store_walk_forward_folds`,
+`scripts/verify_2240_result_writers.py --split`). Four contiguous folds counting
+one population, each carrying its block on both axes, its realised bar count,
+its measured panel embargo and the four-way census — written whole or not at
+all, and refused by trigger against a `hold_out` result, since every fold is cut
+inside the in-sample side. ⚠ The evidence a criterion-5 auditor needs is the
+census and the embargo, not a per-fold return; §8.8 records why no per-fold
+metric ships and why no new promotion refusal was invented for it.
+
 **C6 — multiple-testing control.** Deflated Sharpe computed with **all four**
 parent inputs: the trial count, the trials' **correlation**, and the returns'
 **skew and kurtosis**. The trial count is explicitly declared and includes
@@ -1149,6 +1272,13 @@ on `quarantine_arms_not_compared` and — deliberately — on nothing else: crit
 blocking magnitude (§8.5). ⚠ Measured against S-1 and S-3 only; the RANGE
 verdict's exposure belongs to S-4, which does not run here, and the census
 reports it so the gap is visible.
+
+✅ **Stage 5e-5c stores the pair and reads the gate's input off it**
+(`result_ledger.store_in_sample_arm_pair` / `store_holdout_arm_pair`,
+`quarantine_arms_compared`). Both arms go in through one call, so a single-arm
+result — the state this refusal exists for — is not reachable by writing one and
+forgetting the other. ⚠ The refusal is unchanged and still fires on ABSENCE
+only; nothing here introduces a magnitude.
 
 **C10 — corporate actions declared.** `price_series_break` segments are **never
 spanned** by a position — asserted, since C3's block bootstrap would otherwise

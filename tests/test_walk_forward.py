@@ -15,6 +15,7 @@ construction (a test fold is criterion 5's 25%).
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from itertools import pairwise
 
 import pytest
@@ -25,6 +26,8 @@ from app.services.walk_forward import (
     WALK_FORWARD_MODEL_ID,
     Fold,
     FoldCensus,
+    FoldRecord,
+    WalkForwardFolds,
     bar_weighted_folds,
     census,
     role,
@@ -259,3 +262,184 @@ def test_no_training_observation_survives_the_purge_or_the_embargo() -> None:
                 continue
             assert not (start <= fold.last_index and end >= fold.first_index), "purge incomplete"
             assert not (fold.last_index < start <= fold.last_index + embargo), "embargo incomplete"
+
+
+# ---------------------------------------------------------------------------
+# WalkForwardFolds — the stored split's shape (stage 5e-5c)
+# ---------------------------------------------------------------------------
+
+#: Transcribed from `walk_forward`'s own construction, not imported.
+SPEC_WALK_FORWARD_MODEL_ID = "c5-purged-walk-forward-v1"
+
+
+def build_fold_record(
+    index: int,
+    first_index: int,
+    last_index: int,
+    *,
+    test: int = 5,
+    train: int = 20,
+    purged: int = 3,
+    embargoed: int = 2,
+    embargo_bars: int = 7,
+) -> FoldRecord:
+    """One fold record whose dates track its indices, day for day.
+
+    ⚠ The default census sums to 30 in EVERY fold, which is the state the type
+    requires — each fold classifies the same observation set. A test that wants
+    the totals to disagree says so by overriding one bucket.
+    """
+    return FoldRecord(
+        fold=Fold(index=index, first_index=first_index, last_index=last_index),
+        first_date=date(2000, 1, 1) + timedelta(days=first_index),
+        last_date=date(2000, 1, 1) + timedelta(days=last_index),
+        bar_count=(last_index - first_index + 1) * 100,
+        embargo_bars=embargo_bars,
+        census=FoldCensus(test=test, train=train, purged=purged, embargoed=embargoed),
+    )
+
+
+def build_split(**overrides: object) -> WalkForwardFolds:
+    base: dict[str, object] = {
+        "model_id": SPEC_WALK_FORWARD_MODEL_ID,
+        "folds": (
+            build_fold_record(0, 0, 9),
+            build_fold_record(1, 10, 19),
+            build_fold_record(2, 20, 29),
+            build_fold_record(3, 30, 39),
+        ),
+    }
+    base.update(overrides)
+    return WalkForwardFolds(**base)  # type: ignore[arg-type]
+
+
+def test_a_complete_split_constructs_and_reports_one_population() -> None:
+    split = build_split()
+    assert len(split.folds) == SPEC_FOLD_COUNT
+    assert split.observation_count == 30
+    assert split.model_id == SPEC_WALK_FORWARD_MODEL_ID
+
+
+@pytest.mark.parametrize("fold_count", [1, 2, 3, 5])
+def test_a_split_that_is_not_four_folds_is_refused(fold_count: int) -> None:
+    """⚠ The stored split's count is FROZEN — see FOLD_COUNT's own comment.
+
+    A three-fold set is a cross-validation that stopped early and would read as
+    one that finished; a five-fold set is a swept validity gate.
+    """
+    folds = tuple(build_fold_record(k, k * 10, k * 10 + 9) for k in range(fold_count))
+    with pytest.raises(ValueError, match="carries 4 folds"):
+        build_split(folds=folds)
+
+
+def test_a_fold_whose_index_is_not_its_position_is_refused() -> None:
+    folds = (
+        build_fold_record(0, 0, 9),
+        build_fold_record(2, 10, 19),
+        build_fold_record(2, 20, 29),
+        build_fold_record(3, 30, 39),
+    )
+    with pytest.raises(ValueError, match="position 1 carries index 2"):
+        build_split(folds=folds)
+
+
+def test_a_split_that_does_not_start_at_the_axis_front_is_refused() -> None:
+    """A gap at index 0 is training data no fold ever tested."""
+    folds = (
+        build_fold_record(0, 1, 9),
+        build_fold_record(1, 10, 19),
+        build_fold_record(2, 20, 29),
+        build_fold_record(3, 30, 39),
+    )
+    with pytest.raises(ValueError, match="starts at axis index 1"):
+        build_split(folds=folds)
+
+
+def test_a_gap_between_two_folds_is_refused() -> None:
+    folds = (
+        build_fold_record(0, 0, 9),
+        build_fold_record(1, 11, 19),
+        build_fold_record(2, 20, 29),
+        build_fold_record(3, 30, 39),
+    )
+    with pytest.raises(ValueError, match="does not follow"):
+        build_split(folds=folds)
+
+
+def test_index_contiguous_folds_that_overlap_in_TIME_are_refused() -> None:
+    """⚠ Both axes are checked, because only one of them is derived.
+
+    The indices below are perfectly contiguous; the DATES are not, and a stored
+    pair that disagrees means the axis the indices refer to is not the axis the
+    dates came from.
+    """
+    later = build_fold_record(1, 10, 19)
+    folds = (
+        build_fold_record(0, 0, 9),
+        FoldRecord(
+            fold=later.fold,
+            first_date=date(2000, 1, 5),
+            last_date=later.last_date,
+            bar_count=later.bar_count,
+            embargo_bars=later.embargo_bars,
+            census=later.census,
+        ),
+        build_fold_record(2, 20, 29),
+        build_fold_record(3, 30, 39),
+    )
+    with pytest.raises(ValueError, match="on or before fold 0's last date"):
+        build_split(folds=folds)
+
+
+def test_folds_counting_different_populations_are_refused() -> None:
+    """⚠ The check that catches a split assembled from two runs."""
+    folds = (
+        build_fold_record(0, 0, 9),
+        build_fold_record(1, 10, 19, train=21),
+        build_fold_record(2, 20, 29),
+        build_fold_record(3, 30, 39),
+    )
+    with pytest.raises(ValueError, match="count different observation populations"):
+        build_split(folds=folds)
+
+
+def test_a_blank_model_id_is_refused() -> None:
+    with pytest.raises(ValueError, match="model_id is blank"):
+        build_split(model_id="")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "fragment"),
+    [
+        ({"first_date": date(2000, 2, 1), "last_date": date(2000, 1, 1)}, "before its start"),
+        ({"bar_count": -1}, "carries -1 bars"),
+        ({"embargo_bars": -1}, "embargo_bars -1"),
+    ],
+)
+def test_fold_record_refuses_impossible_fields(kwargs: dict[str, object], fragment: str) -> None:
+    base: dict[str, object] = {
+        "fold": Fold(index=0, first_index=0, last_index=9),
+        "first_date": date(2000, 1, 1),
+        "last_date": date(2000, 1, 10),
+        "bar_count": 1000,
+        "embargo_bars": 7,
+        "census": FoldCensus(test=5, train=20, purged=3, embargoed=2),
+    }
+    base.update(kwargs)
+    with pytest.raises(ValueError, match=fragment):
+        FoldRecord(**base)  # type: ignore[arg-type]
+
+
+def test_a_zero_embargo_is_legal_in_a_stored_split() -> None:
+    """⚠ 0 means "nothing measurable on this fold's training side", not "skipped".
+
+    `role`'s header says refusing it would force a caller to invent a number,
+    and the last fold — with nothing following it — measures exactly this.
+    """
+    folds = (
+        build_fold_record(0, 0, 9),
+        build_fold_record(1, 10, 19),
+        build_fold_record(2, 20, 29),
+        build_fold_record(3, 30, 39, embargo_bars=0),
+    )
+    assert build_split(folds=folds).folds[3].embargo_bars == 0

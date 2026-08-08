@@ -45,6 +45,19 @@ injects a schema-level defect and observes the consequence.
 that would otherwise fail silently: a lossy conversion stores a number that is
 not the number that was computed, and every downstream reader agrees with the
 stored one.
+
+⚠⚠ **`store_walk_forward_folds`' own `conn.transaction()` is NOT probed, and the
+NOT CAUGHT that established it is the evidence.** The probe removing it ran and
+`test_the_split_writer_is_atomic_on_an_autocommit_connection` still passed —
+triaged per the rule above (selector → fixture → code) and the answer was the
+third one: there is no observable defect to inject. Measured on psycopg
+**3.3.3** (2026-08-08) — autocommit connection, temp table with a primary key,
+an `executemany` whose THIRD statement violates it — the two rows before it do
+**not** survive, because `executemany` runs the batch in its own transaction.
+The wrapper stays as defence in depth (see the writer's docstring); a probe for
+it would report CAUGHT or NOT CAUGHT about the DRIVER, not about our code. ⚠ The
+sibling probe on `store_in_sample_arm_pair` is a different case and IS here: two
+separate `execute` calls have no such batching, and it is CAUGHT.
 """
 
 from __future__ import annotations
@@ -59,6 +72,7 @@ SOURCES = (LEDGER,)
 
 PURE_TESTS = "tests/test_result_ledger.py"
 DB_TESTS = "tests/test_strategy_holdout_namespace.py"
+FOLD_TESTS = "tests/test_strategy_result_folds.py"
 
 #: (what the injected defect IS, source file, test file, [(anchor, replacement), ...], -k selector)
 PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
@@ -233,6 +247,141 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         [("    if identity.version != result_version:", "    if False:")],
         "test_a_stored_row_whose_hash_does_not_describe_it_is_refused",
     ),
+    # --- stage 5e-5c: the arm pair and the walk-forward split --------------
+    (
+        # ⚠ The order matters because the ADMITTED arm is never the number to
+        # quote (sql/267). Dropping the label check lets a caller store the pair
+        # backwards, and every stored figure then reads as the other arm's.
+        "the arm labels no longer checked (the pair may be stored backwards)",
+        LEDGER,
+        DB_TESTS,
+        [
+            (
+                '    if masked.identity.quarantine_arm != "masked" or admitted.identity.quarantine_arm != "admitted":',
+                "    if False:",
+            )
+        ],
+        "test_mislabelled_arms_are_refused",
+    ),
+    (
+        # ⚠⚠ THE PAIR'S WHOLE POINT. Without this, two results differing in the
+        # SCOPE (or the window, or the cost model) can be stored as criterion
+        # 9's pair, and the delta between them measures that difference instead
+        # of the quarantine handling.
+        "the arm pair no longer required to be one measurement",
+        LEDGER,
+        DB_TESTS,
+        [("    if expected != admitted.identity:", "    if False:")],
+        "test_arms_differing_in_anything_but_the_arm_are_refused",
+    ),
+    (
+        # ⚠ The sibling is the identity with the ARM FLIPPED. Reading the same
+        # identity twice counts one row and the pair can never read as
+        # compared — the gate's criterion-9 refusal then never clears.
+        "the sibling identity computed without flipping the arm",
+        LEDGER,
+        DB_TESTS,
+        [
+            (
+                '    sibling = replace(identity, quarantine_arm=("admitted" if identity.quarantine_arm == "masked" '
+                'else "masked"))',
+                "    sibling = identity",
+            )
+        ],
+        "test_both_arms_land_and_the_pair_reads_as_compared",
+    ),
+    (
+        # ⚠ ONE arm is not a comparison. `>= 1` makes a lone masked result read
+        # as compared, which clears criterion 9's refusal on evidence that does
+        # not exist.
+        "a single stored arm accepted as a comparison",
+        LEDGER,
+        DB_TESTS,
+        [("    return int(row[0]) == 2", "    return int(row[0]) >= 1")],
+        "test_a_lone_arm_does_not_read_as_compared",
+    ),
+    (
+        # ⚠ Presence is a fact about the withheld side, so looking at it is an
+        # access. Dropping the record makes a hold-out look invisible to
+        # criterion 5's log.
+        "the hold-out pair check stopped recording its look",
+        LEDGER,
+        DB_TESTS,
+        [('    if identity.namespace == "hold_out":', "    if False:")],
+        "test_reading_the_pair_state_on_the_hold_out_records_the_look",
+    ),
+    (
+        # ⚠⚠ THE PAIR'S ATOMICITY. Without its own transaction the guarantee is
+        # the CALLER's connection mode, and on an autocommit connection the
+        # masked arm commits before the admitted one is refused — the lone-arm
+        # state this API exists to make unreachable. Found by Codex at
+        # checkpoint 2, and the test below exists because of it.
+        "the arm pair writing outside its own transaction",
+        LEDGER,
+        DB_TESTS,
+        [
+            (
+                "    with conn.transaction():\n"
+                "        return (store_in_sample_result(conn, masked), store_in_sample_result(conn, admitted))",
+                "    return (store_in_sample_result(conn, masked), store_in_sample_result(conn, admitted))",
+            )
+        ],
+        "test_the_pair_writer_is_atomic_on_an_autocommit_connection",
+    ),
+    (
+        # ⚠ A write happens under TODAY's construction. Without the guard a
+        # split can be stored under any label, including one whose fold count
+        # or embargo rule differs from the rows beside it.
+        "the walk-forward writer accepting a construction it did not implement",
+        LEDGER,
+        FOLD_TESTS,
+        [("    if split.model_id != WALK_FORWARD_MODEL_ID:", "    if False:")],
+        "test_the_writer_refuses_a_construction_it_did_not_implement",
+    ),
+    (
+        # ⚠ One split is one construction. Without the check a mixed row set is
+        # returned as a single split under whichever id the set happened to pop.
+        "a split assembled from two constructions returned as one",
+        LEDGER,
+        FOLD_TESTS,
+        [("    if len(model_ids) > 1:", "    if False:")],
+        "test_a_split_whose_rows_declare_two_constructions_is_refused_on_read",
+    ),
+    (
+        # ⚠⚠ THE 13-COLUMN MAPPING, one position out. The purge and the embargo
+        # are different leaks of very different sizes (§5.3), and a stored pair
+        # that swapped them would report the finding backwards while every
+        # CHECK on the table still passes.
+        "purged and embargoed counts swapped when writing the split",
+        LEDGER,
+        FOLD_TESTS,
+        [
+            (
+                '                    "purged_count": record.census.purged,\n'
+                '                    "embargoed_count": record.census.embargoed,\n',
+                '                    "purged_count": record.census.embargoed,\n'
+                '                    "embargoed_count": record.census.purged,\n',
+            )
+        ],
+        "test_a_split_round_trips_through_the_table",
+    ),
+    (
+        # The same defect on the READ side, which the write-side probe cannot
+        # reach — the statement and the unpacking are independent, and only the
+        # round trip pins both.
+        "the two fold DATE bounds swapped when reading the split",
+        LEDGER,
+        FOLD_TESTS,
+        [
+            (
+                "        first_date=first_date,  # type: ignore[arg-type]\n"
+                "        last_date=last_date,  # type: ignore[arg-type]\n",
+                "        first_date=last_date,  # type: ignore[arg-type]\n"
+                "        last_date=first_date,  # type: ignore[arg-type]\n",
+            )
+        ],
+        "test_a_split_round_trips_through_the_table",
+    ),
 ]
 
 
@@ -284,7 +433,7 @@ def main() -> int:
         for source, text in originals.items():
             source.write_text(text)
 
-    rc_suite = run([PURE_TESTS, DB_TESTS], "test_")
+    rc_suite = run([PURE_TESTS, DB_TESTS, FOLD_TESTS], "test_")
     suite = "PASS" if rc_suite == PYTEST_PASSED else f"*** FAIL (exit {rc_suite}) ***"
     print(f"\n  restored suite: {suite}", flush=True)
     if rc_suite != PYTEST_PASSED:
