@@ -29,7 +29,25 @@ from typing import Any
 
 import psycopg
 
+from app.services.thesis_break import FRESHNESS_BOUNDS
+
 logger = logging.getLogger(__name__)
+
+# Freshness bound for the FINRA bimonthly snapshot, imported rather than
+# restated: `thesis_break.FRESHNESS_BOUNDS` already carries this table's bound
+# for its other consumer (`thesis_break_scan._short_interest_observations`), and
+# a second hand-written copy is the #1955 sibling-drift class. FINRA designates
+# two settlement dates a month and publishes each ~12 calendar days after it
+# (finra.org/filing-reporting/short-interest schedule; skill
+# `data-sources/finra.md` §1 and §4.1), so the newest disseminated figure is up
+# to ~27 days old in normal operation — 45d is that plus a missed cycle.
+#
+# Keyed on `short_interest_pct_shares_out` because that is the metric this
+# reader computes (`short_pct` = short interest / shares outstanding); the bound
+# belongs to the `finra_settlement` INPUT, so every metric fed by this table
+# carries the same value and the bridge test in
+# tests/test_instrument_analytics.py pins them equal.
+_FINRA_SETTLEMENT_MAX_AGE = FRESHNESS_BOUNDS["short_interest_pct_shares_out"]["finra_settlement"]
 
 # ---------------------------------------------------------------------------
 # us-gaap concept resolution (financial_facts_raw holds only the non-dimensional
@@ -533,12 +551,31 @@ def _read_13f_delta(conn: psycopg.Connection[Any], instrument_id: int) -> tuple[
     return (latest_sh - prior_sh) / prior_sh, latest.period_end
 
 
-def _short_interest_from_row(row: tuple[Any, ...] | None, shares_outstanding: float | None) -> dict[str, Any]:
+def _short_interest_from_row(
+    row: tuple[Any, ...] | None, shares_outstanding: float | None, *, today: date
+) -> dict[str, Any]:
     """Pure row→signal for short interest, shared by the per-instrument reader and
     the bulk reader (#2127 Phase 2). ``row`` = (current_short_interest,
-    previous_short_interest, days_to_cover, settlement_date) or None."""
+    previous_short_interest, days_to_cover, settlement_date) or None.
+
+    Freshness-gated on ``settlement_date`` (#2336). ``finra_short_interest_current``
+    is latest-WINS, not current-CYCLE (sql/152) — its INSERT arm is unconditional, so
+    an instrument absent from recent FINRA files keeps whatever settlement date last
+    named it, and a backfill of old files seeds rows years out of date. Beyond
+    ``_FINRA_SETTLEMENT_MAX_AGE`` the signal is suppressed with reason
+    ``stale_settlement`` (``asof`` retained so the age stays visible) rather than
+    read as live positioning. A NULL settlement date fails closed for the same
+    reason ``thesis_break.observe`` does, though the column is NOT NULL."""
     if row is None or row[0] is None or shares_outstanding is None or shares_outstanding <= 0:
         return short_interest_signal(None, None)
+    settlement = row[3]
+    if settlement is None or (today - settlement) > _FINRA_SETTLEMENT_MAX_AGE:
+        stale = short_interest_signal(None, None)
+        stale["reason"] = "stale_settlement"
+        stale["max_age_days"] = _FINRA_SETTLEMENT_MAX_AGE.days
+        if settlement is not None:
+            stale["asof"] = settlement.isoformat()
+        return stale
     current_si = float(row[0])
     prev_si = float(row[1]) if row[1] is not None else None
     short_pct = current_si / shares_outstanding
@@ -552,7 +589,7 @@ def _short_interest_from_row(row: tuple[Any, ...] | None, shares_outstanding: fl
 
 
 def _read_short_interest(
-    conn: psycopg.Connection[Any], instrument_id: int, shares_outstanding: float | None
+    conn: psycopg.Connection[Any], instrument_id: int, shares_outstanding: float | None, *, today: date
 ) -> dict[str, Any]:
     """short_pct + falling + days_to_cover from finra_short_interest_current."""
     with conn.cursor() as cur:
@@ -565,7 +602,7 @@ def _read_short_interest(
             {"iid": instrument_id},
         )
         row = cur.fetchone()
-    return _short_interest_from_row(row, shares_outstanding)
+    return _short_interest_from_row(row, shares_outstanding, today=today)
 
 
 def _build_analytics_block(
@@ -638,6 +675,7 @@ def assemble_instrument_analytics(
     *,
     gics_sector: str | None,
     shares_outstanding: float | None,
+    today: date,
 ) -> dict[str, Any]:
     """Per-instrument IAR evidence block (everything except the cross-sectional
     ``peer_grade``, which ``compute_rankings`` injects from the run population).
@@ -696,7 +734,7 @@ def assemble_instrument_analytics(
     # short interest
     try:
         with conn.transaction():
-            short_interest = _read_short_interest(conn, instrument_id, shares_outstanding)
+            short_interest = _read_short_interest(conn, instrument_id, shares_outstanding, today=today)
     except psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn:
         short_interest = short_interest_signal(None, None)
 
@@ -896,6 +934,8 @@ def _bulk_read_short_interest(
     conn: psycopg.Connection[Any],
     instrument_ids: list[int],
     shares_outstanding_by_id: Mapping[int, float | None],
+    *,
+    today: date,
 ) -> dict[int, dict[str, Any]]:
     """Bulk form of :func:`_read_short_interest` (one row per instrument;
     ``finra_short_interest_current`` PK is instrument_id). Each id's signal via the
@@ -914,7 +954,9 @@ def _bulk_read_short_interest(
         )
         for r in cur.fetchall():
             iid = int(r[0])
-            out[iid] = _short_interest_from_row((r[1], r[2], r[3], r[4]), shares_outstanding_by_id.get(iid))
+            out[iid] = _short_interest_from_row(
+                (r[1], r[2], r[3], r[4]), shares_outstanding_by_id.get(iid), today=today
+            )
     for iid in instrument_ids:
         out.setdefault(iid, short_interest_signal(None, None))
     return out
@@ -926,6 +968,7 @@ def assemble_instrument_analytics_bulk(
     *,
     gics_sector_by_id: Mapping[int, str | None],
     shares_outstanding_by_id: Mapping[int, float | None],
+    today: date,
 ) -> dict[int, dict[str, Any]]:
     """Bulk IAR evidence blocks for a whole scoring batch (#2127 Phase 2). One
     set-based read per source (each savepoint-wrapped and fail-open on ANY exception
@@ -978,7 +1021,7 @@ def assemble_instrument_analytics_bulk(
 
     try:
         with conn.transaction():
-            si_map = _bulk_read_short_interest(conn, instrument_ids, shares_outstanding_by_id)
+            si_map = _bulk_read_short_interest(conn, instrument_ids, shares_outstanding_by_id, today=today)
     except Exception:
         logger.warning("assemble_instrument_analytics_bulk: short-interest bulk read failed; degrading", exc_info=True)
         si_map = {}

@@ -52,11 +52,13 @@ Every RegSHO daily file (CNMS + 5 per-facility prefixes) ends with a single line
 
 For every body row, the parser asserts `row.Date == trade_date.strftime('%Y%m%d')`. A CDN path mistake or fixture seeded under the wrong date would silently write facts under the caller's `trade_date` while ignoring the body's date column. Mismatch raises `HeaderCorruptionError` mid-body — caller's txn rolls back atomically.
 
-### 2.7 RegSHO daily — CDN returns 403 (not 404) for not-yet-published files (#916)
+### 2.7 BOTH CDNs return 403 (not 404) for not-yet-published files (#916, corrected #2234)
 
-Empirically verified 2026-05-18 in live-smoke against `cdn.finra.org/equity/regsho/daily/`: requesting a file for a trade date BEFORE the EOD ~6 PM ET publication window returns **HTTP 403 Forbidden**, not 404. This is **different from the bimonthly CDN** (`/equity/otcmarket/biweekly/`) which returns 404 for missing files.
+Empirically verified 2026-05-18 in live-smoke against `cdn.finra.org/equity/regsho/daily/`: requesting a file for a trade date BEFORE the EOD ~6 PM ET publication window returns **HTTP 403 Forbidden**, not 404.
 
-Provider `FinraRegShoProvider.fetch_regsho_daily_file` maps **both 403 + 404 → `FinraNotFound`** so the cron can safely run before EOD publication. The bimonthly provider only maps 404 (no observed 403 behaviour). Future FINRA endpoints should default to 403+404 = not-found UNLESS empirically verified otherwise — FINRA appears to use 403 as a "missing object" idiom on the RegSHO sub-host.
+⚠ **Corrected 2026-08-06 (#2234), applied 2026-08-08 (#2336).** This section used to say the bimonthly CDN (`/equity/otcmarket/biweekly/`) returns 404, and that its provider "only maps 404". Both false: the bimonthly CDN answers an undesignated or unpublished settlement date with **403 and a 111-byte body**, and `app/providers/implementations/finra_short_interest.py:122` has mapped 403 + 404 since #916. The skill had drifted away from the code in the direction that HIDES a bug — #2234's derived-calendar defect was invisible precisely because a permanently-undesignated date and a not-yet-published one produce the same 403.
+
+Both providers (`FinraRegShoProvider.fetch_regsho_daily_file`, `FinraShortInterestProvider.fetch_settlement_file`) map **403 + 404 → `FinraNotFound`** so the cron can safely run before publication. Future FINRA endpoints should default to 403+404 = not-found UNLESS empirically verified otherwise — FINRA uses 403 as a "missing object" idiom on both hosts.
 
 **Cross-source 403 idiom:** SEC's `efts.sec.gov` exhibits a similar "403 ≠ permanent" pattern on weekends — see `.claude/skills/data-sources/sec-edgar.md` §4 "Multi-host shared clock" for the SEC analogue. **Rule for new sources:** never default-treat 403 as "permanently unavailable" without an empirical probe against a known-good vs known-not-yet-published case for that specific CDN/host. The cost of mis-classifying transient 403 as permanent is silent gap; the cost of treating permanent 403 as transient is wasted budget. Probe both directions.
 
@@ -110,6 +112,50 @@ FINRA RegSHO daily short volume (#916):
 - **Backfill** — REPL runbook against `run_finra_regsho_daily_refresh(conn, backfill_window_days=N)`. v1 manual-trigger surface is zero-param (default 30-day window). Extended backfill via REPL (~6 min per 90 days at 1 req/s × 6 prefixes × ~63 trading days).
 
 Per spec §4 + plan §5: the ScheduledJob owns commit/rollback ownership. The service emits SQL only and is wrapped in the JOB's `with conn.transaction():`. Raw-payload-before-parse contract (#1168): `raw_filings.store_raw` + explicit `conn.commit()` happens BEFORE the per-file txn.
+
+## 4.1 `finra_short_interest_current` is latest-WINS, not current-CYCLE (#2336)
+
+`sql/152` defines the `_current` table as a materialised snapshot, one row per instrument,
+settled "settlement-date-wins". Read the UPSERT in
+`app/services/finra_short_interest_ingest.py` carefully: the `DO UPDATE` arm is guarded
+(`EXCLUDED.settlement_date > …`, plus a same-date revision clause), but the **INSERT arm is
+unconditional**. So the table means *the latest settlement date we hold for this instrument*,
+which is NOT *the current cycle*:
+
+- an instrument that stops appearing in FINRA's file keeps whatever row last named it, forever;
+- ingesting an OLD file (a backfill, per §6.1) SEEDS rows for instruments that have no row yet,
+  however stale that file is.
+
+Both are correct under the table's own contract. The consequence lands on the READER: a
+`_current` row is not evidence that the figure is current.
+
+**Every consumer must bound freshness on `settlement_date`. The bound is exported once —
+`app/services/thesis_break.py::FRESHNESS_BOUNDS[…]["finra_settlement"]` — import it, never
+restate it.** Consumers today: `thesis_break_scan._short_interest_observations` (via `observe`,
+since #2010) and `instrument_analytics._short_interest_from_row` (since #2336; suppressed
+signals carry reason `stale_settlement`).
+
+Construction of the 45-day bound, from FINRA's own published schedule
+(finra.org/filing-reporting/short-interest): firms report by the second business day after each
+designated settlement date, and FINRA publishes roughly a week after that — 2026-01-15 settles,
+2026-01-27 publishes, 12 calendar days. With two settlement dates a month, the newest
+disseminated figure is therefore up to ~27 calendar days old in normal operation; 45 days is
+that plus one missed cycle.
+
+Measured on the dev corpus 2026-08-08 — state the query, never the bare figure, because it drifts:
+
+```sql
+SELECT count(*) FILTER (WHERE current_date - settlement_date <= 45) AS fresh,
+       count(*) FILTER (WHERE current_date - settlement_date  > 45) AS stale,
+       count(*) AS total
+  FROM finra_short_interest_current;
+--  fresh 5740 | stale 441 | total 6181
+```
+
+Of those 441, **19** also carried a `fundamentals_snapshot.shares_outstanding`, i.e. were the
+only ones a `short_pct` could be computed from at all; **0 of the 19 appear in the newest
+settlement file** (`shrt20260715.csv`, fetched from the CDN this session), so the staleness is
+genuine absence from FINRA's file rather than a `_current` row that failed to refresh.
 
 ## 5. Revision-window discipline
 

@@ -3,9 +3,10 @@ is a pure function over fact dicts / populations."""
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from app.services.instrument_analytics import (
+    _FINRA_SETTLEMENT_MAX_AGE,
     _build_analytics_block,
     _short_interest_from_row,
     altman_z2,
@@ -17,6 +18,7 @@ from app.services.instrument_analytics import (
     piotroski_f,
     short_interest_signal,
 )
+from app.services.thesis_break import FRESHNESS_BOUNDS
 
 # A clean two-FY pair that earns all 9 Piotroski points.
 _CURR = {
@@ -203,36 +205,92 @@ class TestPeerGrade:
         assert q["hybrid"] == q["absolute"]  # absolute-only when thin
 
 
+#: SPEC literal, deliberately NOT imported from the code under test — the max
+#: age of a FINRA bimonthly settlement date that may still be read as live
+#: positioning (#2336). One bridge test below ties it to the shared constant.
+_SPEC_FINRA_MAX_AGE_DAYS = 45
+_TODAY = date(2026, 8, 8)
+
+
 class TestShortInterestFromRow:
     """Shared pure row→signal helper (#2127 Phase 2) — must match the early-return
     contract of the per-instrument reader exactly."""
 
     def test_none_row(self) -> None:
-        assert _short_interest_from_row(None, 1000.0) == short_interest_signal(None, None)
+        assert _short_interest_from_row(None, 1000.0, today=_TODAY) == short_interest_signal(None, None)
 
     def test_current_none(self) -> None:
-        assert _short_interest_from_row((None, 5.0, 3.0, date(2026, 1, 1)), 1000.0) == short_interest_signal(None, None)
+        assert _short_interest_from_row(
+            (None, 5.0, 3.0, date(2026, 8, 1)), 1000.0, today=_TODAY
+        ) == short_interest_signal(None, None)
 
     def test_shares_missing_or_nonpositive(self) -> None:
-        row = (100.0, 90.0, 2.0, date(2026, 1, 1))
-        assert _short_interest_from_row(row, None) == short_interest_signal(None, None)
-        assert _short_interest_from_row(row, 0.0) == short_interest_signal(None, None)
+        row = (100.0, 90.0, 2.0, date(2026, 8, 1))
+        assert _short_interest_from_row(row, None, today=_TODAY) == short_interest_signal(None, None)
+        assert _short_interest_from_row(row, 0.0, today=_TODAY) == short_interest_signal(None, None)
 
     def test_valid_row_falling_with_days_and_asof(self) -> None:
         # current < previous → falling; short_pct = 100/1000 = 0.10.
-        out = _short_interest_from_row((100.0, 120.0, 2.5, date(2026, 3, 31)), 1000.0)
+        out = _short_interest_from_row((100.0, 120.0, 2.5, date(2026, 7, 15)), 1000.0, today=_TODAY)
         expected = short_interest_signal(0.10, True)
         assert out["signal"] == expected["signal"]
         assert out["falling"] is True
         assert out["days_to_cover"] == 2.5
-        assert out["asof"] == "2026-03-31"
+        assert out["asof"] == "2026-07-15"
 
-    def test_valid_row_rising_no_optional_fields(self) -> None:
-        # current > previous → not falling; days_to_cover/settlement absent → no keys.
-        out = _short_interest_from_row((200.0, 100.0, None, None), 1000.0)
+    def test_valid_row_rising_no_days_to_cover(self) -> None:
+        # current > previous → not falling; days_to_cover absent → no key.
+        out = _short_interest_from_row((200.0, 100.0, None, date(2026, 7, 15)), 1000.0, today=_TODAY)
         assert out["falling"] is False
         assert "days_to_cover" not in out
+        assert out["asof"] == "2026-07-15"
+
+
+class TestShortInterestStaleness:
+    """#2336 — ``finra_short_interest_current`` is latest-WINS, not current-CYCLE,
+    so a row can be arbitrarily old (backfilled file, or an instrument that stopped
+    appearing in FINRA's file). Beyond the bound the signal is suppressed, not read."""
+
+    _ROW = (100.0, 120.0, 2.5)
+
+    def _at_age(self, days: int) -> dict:
+        settlement = _TODAY - timedelta(days=days)
+        return _short_interest_from_row((*self._ROW, settlement), 1000.0, today=_TODAY)
+
+    def test_boundary_age_is_still_live(self) -> None:
+        out = self._at_age(_SPEC_FINRA_MAX_AGE_DAYS)
+        assert out["signal"] is not None
+        assert "reason" not in out
+
+    def test_one_day_past_boundary_is_suppressed(self) -> None:
+        out = self._at_age(_SPEC_FINRA_MAX_AGE_DAYS + 1)
+        assert out["signal"] is None
+        assert out["reason"] == "stale_settlement"
+        assert out["max_age_days"] == _SPEC_FINRA_MAX_AGE_DAYS
+        # asof retained: the operator sees WHICH settlement date was rejected.
+        assert out["asof"] == (_TODAY - timedelta(days=_SPEC_FINRA_MAX_AGE_DAYS + 1)).isoformat()
+        # No positioning numbers leak out of a suppressed signal.
+        assert "short_pct" not in out
+        assert "days_to_cover" not in out
+
+    def test_backfilled_two_year_old_row_is_suppressed(self) -> None:
+        # The #2234 backfill shape: a 2024 settlement date seeded into _current.
+        out = _short_interest_from_row((*self._ROW, date(2024, 2, 15)), 1000.0, today=_TODAY)
+        assert out["signal"] is None
+        assert out["reason"] == "stale_settlement"
+
+    def test_null_settlement_fails_closed(self) -> None:
+        # Column is NOT NULL (sql/152); fail closed anyway, as thesis_break.observe does.
+        out = _short_interest_from_row((*self._ROW, None), 1000.0, today=_TODAY)
+        assert out["signal"] is None
+        assert out["reason"] == "stale_settlement"
         assert "asof" not in out
+
+    def test_bound_is_the_shared_finra_freshness_bound(self) -> None:
+        """Bridge: the IAR reader and thesis_break must not drift apart (#1955 class)."""
+        assert _FINRA_SETTLEMENT_MAX_AGE == timedelta(days=_SPEC_FINRA_MAX_AGE_DAYS)
+        assert _FINRA_SETTLEMENT_MAX_AGE == FRESHNESS_BOUNDS["short_interest_days_to_cover"]["finra_settlement"]
+        assert _FINRA_SETTLEMENT_MAX_AGE == FRESHNESS_BOUNDS["short_interest_pct_shares_out"]["finra_settlement"]
 
 
 class TestBuildAnalyticsBlock:
