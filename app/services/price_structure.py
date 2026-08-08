@@ -139,11 +139,19 @@ class StructureBar:
 
     ``open`` has no verdict and no primitive here reads it for a decision; it is
     carried only so ``technical_analysis.atr`` can be reused unchanged rather
-    than re-implemented.
+    than re-implemented (``atr`` reads high/low/close only, so masking the open
+    cannot move a tolerance).
+
+    ⚠ ``open`` IS ``Decimal | None`` since #2354, and the annotation was the
+    defect. Both source columns are nullable, and the loader now masks a
+    non-positive open per ``price_quarantine.rule_b1`` — but this field was
+    declared non-optional, so every consumer type-checked as though a usable
+    price were guaranteed while the runtime value could be ``None`` or ``0``.
+    ``signal_ledger.resolve_fills`` was one of those consumers.
     """
 
     bar_date: date
-    open: Decimal
+    open: Decimal | None
     high: Decimal | None
     low: Decimal | None
     close: Decimal | None
@@ -281,7 +289,11 @@ def _atr_at(bars: Sequence[StructureBar], index: int, period: int = ATR_PERIOD) 
             return None
         window.append(
             {
-                "open": bar.open,
+                # ⚠ `atr` reads high/low/close only, and the three are checked
+                # non-None above. The open is carried for shape alone, so a
+                # masked one cannot reach an arithmetic — the ignore is the same
+                # one the four sibling call sites already carry.
+                "open": bar.open,  # type: ignore[typeddict-item]
                 "high": bar.high,
                 "low": bar.low,
                 "close": bar.close,

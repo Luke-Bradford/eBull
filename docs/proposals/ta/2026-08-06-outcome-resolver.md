@@ -222,10 +222,15 @@ quarantine verdict and a data gap never collapse into one another.
 ⚠ Consequence, stated because it is otherwise a footgun: **annotating a bar
 whose fields are all present is a no-op.** To refuse such a bar the caller masks
 the field it does not trust. ⚠ `load_masked_series` masks `high`/`low`/`close`
-and **carries the open through unmasked** — right for a bad wick, and a gap for
-a `B1`/`B4` sentinel bar stored flat at `0.0001`, whose open is untrustworthy
-too. That is the loader's gap to close; a caller reading `B4` bars must mask the
-open itself. Recorded here rather than papered over.
+on the two quarantine axes and used to **carry the open through unmasked** —
+right for a bad wick, and a gap for a `B1`/`B4` sentinel bar, whose open is
+untrustworthy too. **CLOSED 2026-08-08 by #2354**: the loader masks a NULL or
+non-positive open by `rule_b1`'s own clause (*"any of open/high/low/close NULL
+or `<= 0`"*), and `signal_ledger.resolve_fills` refuses one independently under
+the `unusable_fill_price` code for callers that load bars by some other route.
+⚠ The sentence this paragraph used to end on — *"a caller reading `B4` bars must
+mask the open itself"* — was read by every caller since and discharged by none,
+which is now its own prevention-log entry.
 
 ⚠ **The map and `segment_end_index` are REQUIRED arguments with no defaults.**
 #2288's lesson applies unchanged: a field with a default is a field a writer can

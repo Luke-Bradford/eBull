@@ -320,9 +320,14 @@ def resolve_outcome(
     whose fields are all present is a no-op.** To refuse such a bar — a `B1`/`B4`
     sentinel whose OPEN is untrustworthy too, a `provisional` part-session bar —
     the caller masks the field it does not trust. ⚠ ``load_masked_series`` masks
-    ``high``/``low``/``close`` and **carries the open through unmasked**, which
-    is right for a bad wick and is a gap for a `B4` sentinel; that is the
-    loader's to close, and a caller reading `B4` bars must mask the open itself.
+    ``high``/``low``/``close`` on the two quarantine axes, and **since #2354 it
+    also masks a non-positive open** — ``rule_b1``'s own clause applied to the
+    field neither axis covers. This paragraph used to hand that job to the
+    caller (*"a caller reading `B4` bars must mask the open itself"*) and no
+    caller ever did it, which is the prevention log's *"an obligation written in
+    the docstring of the module that CANNOT discharge it is the weakest form of
+    a rule there is"*. A caller loading bars by some OTHER route still owes the
+    mask; ``signal_ledger.resolve_fills`` refuses one independently.
 
     ⚠ ``masked_bar_reasons`` and ``segment_end_index`` are REQUIRED and have no
     defaults. #2288's lesson: a field with a default is a field a writer can

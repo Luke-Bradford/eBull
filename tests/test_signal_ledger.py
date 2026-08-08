@@ -106,16 +106,50 @@ class TestFillResolution:
         assert rows[0].verdict == "not_evaluable"
         assert rows[0].not_evaluable_reason == "no_fill_bar"
 
-    def test_a_fill_bar_with_no_open_price_is_no_fill_bar(self) -> None:
-        """Both ``open`` columns are nullable. Measured 2026-08-06: zero NULL
-        opens in either ``price_daily`` or ``research_price_daily`` (the query
-        is in ``signal_ledger.resolve_fills``), so this is unreachable today —
-        but nullable is not impossible, and the alternative to failing closed
-        is storing a fill price of None on a fired row."""
+    def test_a_fill_bar_with_no_open_price_is_unusable_fill_price(self) -> None:
+        """Both ``open`` columns are nullable, and the alternative to failing
+        closed is storing a fill price of None on a fired row.
+
+        ⚠ This asserted ``no_fill_bar`` until #2354. The code is now the tenth,
+        because the bar EXISTS — see ``test_the_two_refusals_are_different_facts``
+        for why the distinction is not cosmetic."""
         series = _series(_CONSECUTIVE, opens=[Decimal("100"), None, Decimal("102"), Decimal("103")])
         rows = resolve_fills([_fired_at(0)], series=series, identity=_IDENTITY, instrument_id=1)
         assert rows[0].verdict == "not_evaluable"
-        assert rows[0].not_evaluable_reason == "no_fill_bar"
+        assert rows[0].not_evaluable_reason == "unusable_fill_price"
+
+    def test_a_zero_open_is_refused_and_never_becomes_a_fill_price(self) -> None:
+        """⚠⚠ #2354, and the reason the ticket exists. ``open = 0`` is not NULL,
+        so the old ``fill_open is None`` branch passed it straight through and
+        stored ``fill_price = 0`` on a ``fired`` row — which every reader then
+        refuses (``outcome_resolver``: *"entry_price must be > 0 …
+        gross_return_pct divides by it"*). Measured on the dev corpus
+        2026-08-08: 16 such bars in ``research_price_daily``, 154 in
+        ``price_daily``, all `B1`-quarantined on both axes."""
+        series = _series(_CONSECUTIVE, opens=[Decimal("100"), Decimal("0"), Decimal("102"), Decimal("103")])
+        rows = resolve_fills([_fired_at(0)], series=series, identity=_IDENTITY, instrument_id=1)
+        assert rows[0].verdict == "not_evaluable"
+        assert rows[0].not_evaluable_reason == "unusable_fill_price"
+        assert rows[0].fill_price is None
+        assert rows[0].fill_bar_date is None
+
+    def test_a_negative_open_is_refused(self) -> None:
+        """⚠ Neither corpus stores a negative open today. That is a fact about
+        an ingest run rather than a property of the column, so the bound is
+        ``<= 0`` and this pins the half no corpus row currently reaches."""
+        series = _series(_CONSECUTIVE, opens=[Decimal("100"), Decimal("-5"), Decimal("102"), Decimal("103")])
+        rows = resolve_fills([_fired_at(0)], series=series, identity=_IDENTITY, instrument_id=1)
+        assert rows[0].not_evaluable_reason == "unusable_fill_price"
+
+    def test_the_two_refusals_are_different_facts(self) -> None:
+        """⚠⚠ Criterion 8: *"collapsing them loses the ability to tell a data
+        gap from a real absence."* The SAME series produces both codes — the
+        last bar has no ``t+1`` at all, while bar 0's fill bar exists and is
+        unpriceable. One `not_evaluable` count covering both would report a
+        corpus growing zero-open bars as a corpus of series endings."""
+        series = _series(_CONSECUTIVE, opens=[Decimal("100"), Decimal("0"), Decimal("102"), Decimal("103")])
+        rows = resolve_fills([_fired_at(0), _fired_at(3)], series=series, identity=_IDENTITY, instrument_id=1)
+        assert [r.not_evaluable_reason for r in rows] == ["unusable_fill_price", "no_fill_bar"]
 
     def test_non_fired_verdicts_carry_no_fill(self) -> None:
         rows = resolve_fills(
