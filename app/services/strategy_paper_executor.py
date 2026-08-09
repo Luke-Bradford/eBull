@@ -550,8 +550,6 @@ def _resume_uncertain_submission(
             existing.strategy_trade_id,
             existing.order_id,
         )
-    except Exception:
-        return existing
     with conn.transaction():
         conn.execute(
             "UPDATE orders SET broker_order_ref=%s WHERE order_id=%s",
@@ -798,14 +796,15 @@ def _execute_fired_paper_signal_locked(
             order_id,
         )
     except Exception:
+        # The broker contract translates transport/response uncertainty into
+        # BrokerOrderSubmissionUncertain. Preserve exact reconciliation
+        # authority here, but let programming/contract bugs fail loudly.
         with conn.transaction():
             conn.execute(
                 "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() WHERE strategy_trade_id=%s",
                 (trade_id,),
             )
-        return PaperExecutionResult(
-            signal_id, "submission_uncertain", "submission_uncertain", amount, trade_id, order_id
-        )
+        raise
     with conn.transaction():
         conn.execute(
             "UPDATE orders SET broker_order_ref=%s WHERE order_id=%s",

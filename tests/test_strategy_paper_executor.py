@@ -440,6 +440,51 @@ def test_transport_uncertainty_retries_only_the_committed_uuid(
     ).fetchall() == [(_REQUEST_ID,)]
 
 
+def test_unexpected_initial_submission_bug_propagates_with_reconciliation_authority(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_id = _seed(ebull_test_conn)
+    broker = _broker()
+    broker.place_demo_strategy_order.side_effect = RuntimeError("provider programming bug")
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+
+    with pytest.raises(RuntimeError, match="provider programming bug"):
+        execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert ebull_test_conn.execute(
+        """
+        SELECT t.status, o.strategy_request_id, r.state
+        FROM strategy_trades t
+        JOIN strategy_trade_orders sto ON sto.strategy_trade_id=t.strategy_trade_id
+        JOIN orders o ON o.order_id=sto.order_id
+        JOIN strategy_order_reconciliation_state r ON r.order_id=o.order_id
+        """
+    ).fetchone() == ("reconcile_required", _REQUEST_ID, "unresolved")
+
+
+def test_unexpected_uncertain_retry_bug_propagates_instead_of_looping_silently(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_id = _seed(ebull_test_conn)
+    broker = _broker()
+    broker.place_demo_strategy_order.side_effect = [
+        BrokerOrderSubmissionUncertain("timeout"),
+        RuntimeError("retry programming bug"),
+    ]
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+    assert (
+        execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW).verdict
+        == "submission_uncertain"
+    )
+
+    with pytest.raises(RuntimeError, match="retry programming bug"):
+        execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert broker.place_demo_strategy_order.call_count == 2
+
+
 def test_concurrent_same_signal_callers_submit_exactly_once(
     ebull_test_conn: psycopg.Connection[Any],
     monkeypatch: pytest.MonkeyPatch,
