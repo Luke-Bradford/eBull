@@ -2563,6 +2563,44 @@ export interface StrategyPnlHistoryResponse {
   points: StrategyPnlHistoryPoint[];
 }
 
+export interface StrategyOwnedPosition {
+  strategy_trade_id: number;
+  broker_position_id: number;
+  strategy_id: string;
+  strategy_version: string;
+  strategy_title: string;
+  instrument_id: number;
+  symbol: string;
+  company_name: string | null;
+  direction: "long" | "short" | null;
+  units: string | null;
+  assigned_value: string | null;
+  current_value: string | null;
+  unrealised_pnl: string | null;
+  unrealised_return_pct: string | null;
+  open_rate: string | null;
+  current_price: string | null;
+  stop_loss_rate: string | null;
+  take_profit_rate: string | null;
+  opened_at: string | null;
+  currency: string;
+  trade_status: "open" | "closing" | "reconcile_required";
+  valuation_available: boolean;
+}
+
+export interface StrategyOwnedPositionsResponse {
+  positions: StrategyOwnedPosition[];
+  live_quote_instrument_ids: number[];
+}
+
+export interface StrategyPositionCloseResponse {
+  strategy_trade_id: number;
+  broker_position_id: number;
+  state: "submitted" | "pending" | "applied";
+  reason_code: string;
+  operation_id: number | null;
+}
+
 export interface FiredSignal {
   signal_id: number;
   strategy_id: string;

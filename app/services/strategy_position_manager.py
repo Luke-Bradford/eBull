@@ -661,7 +661,7 @@ def _submit_close(
     *,
     broker: BrokerProvider,
     owned: _OwnedPosition,
-    trigger_code: Literal["timeout", "strategy_exit", "emergency_risk"],
+    trigger_code: Literal["timeout", "strategy_exit", "emergency_risk", "operator_close"],
 ) -> PositionManagerResult:
     request_id = uuid4()
     with conn.transaction():
@@ -749,7 +749,7 @@ def manage_owned_position(
     strategy_trade_id: int,
     broker_position_id: int,
     ratchet_bar: RatchetBar | None = None,
-    close_reason: Literal["strategy_exit", "emergency_risk"] | None = None,
+    close_reason: Literal["strategy_exit", "emergency_risk", "operator_close"] | None = None,
     now: datetime | None = None,
 ) -> PositionManagerResult:
     """Verify or de-risk one exact owned position.

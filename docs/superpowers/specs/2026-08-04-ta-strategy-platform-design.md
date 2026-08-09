@@ -379,7 +379,7 @@ presets" (#1917, `frontend/information-architecture` skill).
 | market heat map | `/research?view=heatmap` | same universe rendered as a treemap; first consumer of the spine |
 | per-instrument TA workings + signal history | `/instrument/:symbol/chart` (**exists**) | overlays belong on the chart, not a new page |
 | strategy performance (win rate, frequency, sample size, CI) | **new route** | keyed on *strategy*, not instrument — a different noun, so not a hub preset |
-| paper portfolio + capital allocation | **route distinct from `/portfolio`** | demo and live money must never share a surface |
+| automated portfolio subset + capital allocation | **strategy route, with the same positions also present in `/portfolio`** | the strategy route is an ownership-filtered control lens, not a second broker portfolio |
 | collector health, strategy enable/disable, kill switch | `/admin`, `/admin/ingest-health` | `ProcessesTable` / `JobsTable` exist; the collector becomes a monitored process |
 
 ### 4.1 Product semantics correction (#2464, 2026-08-10)
@@ -418,6 +418,30 @@ current daily-close rules, because that changes the rule and its evidence.
 The three result levels from the validity proposal remain separate everywhere:
 per-signal outcome, per-strategy sleeve performance, and total automated-pot
 performance. Only the latter belongs in the workspace hero.
+
+### 4.2 Exact-owned position contract (#2467, 2026-08-10)
+
+The workspace includes a compact open-position table only when an automated
+trade owns an active broker position. Each row shows the instrument, strategy,
+assigned and current value, unrealised P&L and return, actual broker stop loss,
+take profit and lifecycle state. Valuation must be the same contract used by
+`/portfolio`; the strategy route must not create a competing valuation formula
+or persist periodic valuation snapshots.
+
+Ownership is resolved only by the exact
+`(strategy_trade_id, broker_position_id)` row in
+`strategy_position_ownership`. Instrument, FIFO and “only position in this
+ticker” inference are forbidden because a manual and automated position may
+coexist in the same instrument. The main Portfolio therefore continues to show
+both positions while the strategy workspace shows only the automated subset.
+
+An operator close from this table is a full, demo-only, risk-reducing action.
+It remains available while new entries or the automated pot are paused, routes
+through the existing exact-owned position manager, and writes the bounded
+material-operation reason `operator_close`. The row remains `closing` until the
+exact broker close order reconciles; only reconciliation releases ownership,
+closes the strategy trade and feeds realised strategy P&L. No position history
+or quote history table is introduced by this surface.
 
 ## 5. Phases
 

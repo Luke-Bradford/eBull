@@ -4,19 +4,23 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import psycopg
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from app.api.strategies import (
     AllocationUpdateRequest,
     StrategyPaperPoolUpdateRequest,
     _current_versions,
+    close_strategy_owned_position,
     get_fired_signals,
     get_strategy_overview,
+    get_strategy_owned_positions,
     update_strategy_allocation,
     update_strategy_paper_pool,
 )
@@ -29,6 +33,7 @@ from app.services.strategy_monitoring import (
     load_entry_block_state,
     load_owned_pnl,
 )
+from app.services.strategy_position_manager import PositionManagerResult
 
 
 def _instrument(conn: psycopg.Connection[Any], instrument_id: int) -> None:
@@ -174,6 +179,171 @@ def test_owned_pnl_excludes_manual_same_instrument_lifecycle(
     assert pnl.invested_capital == Decimal("100")
     assert pnl.owned_position_count == 1
     assert pnl.complete
+
+
+def test_strategy_positions_show_only_exact_owned_trade_with_portfolio_valuation(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "monitoring-owned"
+    strategy_version = "monitoring-owned-v1"
+    instrument_id = 2453011
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO broker_positions (
+            position_id, instrument_id, is_buy, units, initial_units, amount,
+            initial_amount_in_dollars, open_rate, open_conversion_rate,
+            open_date_time, stop_loss_rate, take_profit_rate, raw_payload
+        ) VALUES
+          (7011, %s, true, 5, 5, 100, 100, 10, 1, now(), 9, 14, '{}'::jsonb),
+          (7012, %s, true, 8, 8, 80, 80, 10, 1, now(), NULL, NULL, '{}'::jsonb)
+        """,
+        (instrument_id, instrument_id),
+    )
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id) VALUES (%s, 7011)",
+        (trade_id,),
+    )
+    ebull_test_conn.execute(
+        "INSERT INTO quotes (instrument_id, quoted_at, bid, ask, last) VALUES (%s, now(), 11.9, 12.1, 12)",
+        (instrument_id,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO positions (
+            instrument_id, open_date, avg_cost, current_units, cost_basis, source
+        ) VALUES (%s, DATE '2026-08-01', 10, 13, 180, 'broker_sync')
+        """,
+        (instrument_id,),
+    )
+
+    response = get_strategy_owned_positions(ebull_test_conn)
+
+    assert len(response.positions) == 1
+    position = response.positions[0]
+    assert position.strategy_trade_id == trade_id
+    assert position.broker_position_id == 7011
+    assert position.assigned_value == Decimal("100.0")
+    assert position.current_value == Decimal("110.0")
+    assert position.unrealised_pnl == Decimal("10.0")
+    assert position.unrealised_return_pct == Decimal("10.0")
+    assert position.stop_loss_rate == Decimal("9.0")
+    assert position.take_profit_rate == Decimal("14.0")
+    assert response.live_quote_instrument_ids == [instrument_id]
+
+
+def test_strategy_position_close_passes_both_exact_ids_to_owned_manager(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instrument_id = 2453012
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id="operator-close",
+        strategy_version="operator-close-v1",
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, "operator-close", "operator-close-v1")
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id) VALUES (%s, 7021)",
+        (trade_id,),
+    )
+    ebull_test_conn.commit()
+    request = Request({"type": "http", "app": SimpleNamespace(state=SimpleNamespace())})
+    monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+    monkeypatch.setattr(
+        "app.api.strategies._load_strategy_broker_credentials",
+        lambda *_args, **_kwargs: ("api", "user"),
+    )
+    provider = MagicMock()
+    provider.__enter__.return_value = MagicMock()
+    monkeypatch.setattr("app.api.strategies.EtoroBrokerProvider", lambda **_kwargs: provider)
+    managed: dict[str, object] = {}
+
+    def _manage(_conn: object, **kwargs: object) -> PositionManagerResult:
+        managed.update(kwargs)
+        return PositionManagerResult(trade_id, 7021, "submitted", "broker_close_accepted", 81)
+
+    monkeypatch.setattr("app.api.strategies.manage_owned_position", _manage)
+
+    response = close_strategy_owned_position(
+        trade_id,
+        7021,
+        request,
+        _session(),
+        ebull_test_conn,
+    )
+
+    assert response.state == "submitted"
+    assert managed["strategy_trade_id"] == trade_id
+    assert managed["broker_position_id"] == 7021
+    assert managed["close_reason"] == "operator_close"
+
+
+def test_strategy_position_close_rejects_unowned_same_instrument_id_before_broker_io(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instrument_id = 2453013
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id="operator-close",
+        strategy_version="operator-close-v1",
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, "operator-close", "operator-close-v1")
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id) VALUES (%s, 7031)",
+        (trade_id,),
+    )
+    ebull_test_conn.commit()
+    request = Request({"type": "http", "app": SimpleNamespace(state=SimpleNamespace())})
+    credentials = MagicMock()
+    monkeypatch.setattr("app.api.strategies.settings.etoro_env", "demo")
+    monkeypatch.setattr("app.api.strategies._load_strategy_broker_credentials", credentials)
+
+    with pytest.raises(HTTPException) as exc:
+        close_strategy_owned_position(
+            trade_id,
+            7032,
+            request,
+            _session(),
+            ebull_test_conn,
+        )
+
+    assert exc.value.status_code == 404
+    credentials.assert_not_called()
 
 
 def test_missing_owned_mark_is_unknown_not_zero(

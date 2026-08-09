@@ -4,8 +4,10 @@ import type {
   AllocationUpdateResponse,
   FiredSignalsResponse,
   StrategyOverviewResponse,
+  StrategyOwnedPositionsResponse,
   StrategyPaperPool,
   StrategyPnlHistoryResponse,
+  StrategyPositionCloseResponse,
 } from "@/api/types";
 
 export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
@@ -23,6 +25,20 @@ export function fetchFiredSignals(cursor: number | null, strategyId?: string): P
 
 export function fetchStrategyPnlHistory(): Promise<StrategyPnlHistoryResponse> {
   return apiFetch("/strategies/pnl-history");
+}
+
+export function fetchStrategyOwnedPositions(): Promise<StrategyOwnedPositionsResponse> {
+  return apiFetch("/strategies/positions");
+}
+
+export function closeStrategyOwnedPosition(
+  strategyTradeId: number,
+  brokerPositionId: number,
+): Promise<StrategyPositionCloseResponse> {
+  return apiFetch(
+    `/strategies/positions/${strategyTradeId}/${brokerPositionId}/close`,
+    { method: "POST" },
+  );
 }
 
 export function updateStrategyPaperPool(body: {

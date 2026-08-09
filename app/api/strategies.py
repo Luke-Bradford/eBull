@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -9,15 +10,24 @@ from typing import Literal, cast
 
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from psycopg.pq import TransactionStatus
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.auth import require_session, require_session_or_service_token
+from app.api.portfolio import get_portfolio
 from app.config import settings
 from app.db import get_conn
+from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+from app.security.master_key import MasterKeyError, ensure_broker_key_loaded
+from app.security.secrets_crypto import CredentialCryptoConfigError
 from app.security.sessions import SessionRow
 from app.services.backtest_run import BACKTEST_UNIVERSE, runnable_strategies
+from app.services.broker_credentials import (
+    CredentialDecryptError,
+    CredentialNotFound,
+    load_credential_for_provider_use,
+)
 from app.services.cost_model import COST_MODEL_ID
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
@@ -32,6 +42,7 @@ from app.services.runtime_config import (
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
+    StrategyOwnershipError,
     configure_deployment,
     configure_paper_pool,
     current_stage,
@@ -58,6 +69,10 @@ from app.services.strategy_monitoring import (
     load_entry_block_state,
     load_owned_pnl,
 )
+from app.services.strategy_position_manager import (
+    StrategyPositionManagerError,
+    manage_owned_position,
+)
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import CORPUS_VERSION
 
@@ -66,6 +81,8 @@ router = APIRouter(
     tags=["strategies"],
     dependencies=[Depends(require_session_or_service_token)],
 )
+
+logger = logging.getLogger(__name__)
 
 _TITLES = {
     "s1-time-series-momentum": "Time-series momentum",
@@ -272,6 +289,44 @@ class StrategyPnlHistoryPoint(BaseModel):
 
 class StrategyPnlHistoryResponse(BaseModel):
     points: list[StrategyPnlHistoryPoint]
+
+
+class StrategyOwnedPosition(BaseModel):
+    strategy_trade_id: int
+    broker_position_id: int
+    strategy_id: str
+    strategy_version: str
+    strategy_title: str
+    instrument_id: int
+    symbol: str
+    company_name: str | None
+    direction: Literal["long", "short"] | None
+    units: Decimal | None
+    assigned_value: Decimal | None
+    current_value: Decimal | None
+    unrealised_pnl: Decimal | None
+    unrealised_return_pct: Decimal | None
+    open_rate: Decimal | None
+    current_price: Decimal | None
+    stop_loss_rate: Decimal | None
+    take_profit_rate: Decimal | None
+    opened_at: datetime | None
+    currency: str
+    trade_status: Literal["open", "closing", "reconcile_required"]
+    valuation_available: bool
+
+
+class StrategyOwnedPositionsResponse(BaseModel):
+    positions: list[StrategyOwnedPosition]
+    live_quote_instrument_ids: list[int]
+
+
+class StrategyPositionCloseResponse(BaseModel):
+    strategy_trade_id: int
+    broker_position_id: int
+    state: Literal["submitted", "pending", "applied"]
+    reason_code: str
+    operation_id: int | None
 
 
 class FiredSignal(BaseModel):
@@ -898,6 +953,200 @@ def get_fired_signals(
         rows = list(cur.fetchall())
     items = [FiredSignal(**row) for row in rows]
     return FiredSignalsResponse(items=items, next_cursor=items[-1].signal_id if len(items) == limit else None)
+
+
+@router.get("/positions", response_model=StrategyOwnedPositionsResponse)
+def get_strategy_owned_positions(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyOwnedPositionsResponse:
+    """Return only exact, active automated positions.
+
+    Valuation is deliberately sourced through the Portfolio contract so the
+    same broker position cannot show a different assigned value or P&L on the
+    two pages.  Ownership metadata remains visible if the local broker snapshot
+    is temporarily missing; that is a reconciliation state, not a reason to
+    infer ownership from another position in the same instrument.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT ownership.strategy_trade_id,ownership.broker_position_id,
+                   trade.status AS trade_status,
+                   signal.strategy_id,signal.strategy_version,
+                   instrument.instrument_id,instrument.symbol,instrument.company_name
+            FROM strategy_position_ownership ownership
+            JOIN strategy_trades trade
+              ON trade.strategy_trade_id=ownership.strategy_trade_id
+            JOIN strategy_funding_decisions funding
+              ON funding.funding_decision_id=trade.funding_decision_id
+            JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
+            JOIN instruments instrument ON instrument.instrument_id=trade.instrument_id
+            WHERE ownership.status='active'
+              AND trade.status IN ('open','closing','reconcile_required')
+            ORDER BY ownership.claimed_at DESC,ownership.ownership_id DESC
+            """
+        )
+        rows = list(cur.fetchall())
+
+    portfolio = get_portfolio(conn)
+    broker_positions = {trade.position_id: trade for position in portfolio.positions for trade in position.trades}
+    positions: list[StrategyOwnedPosition] = []
+    for row in rows:
+        broker_position_id = int(row["broker_position_id"])
+        broker_position = broker_positions.get(broker_position_id)
+        assigned = Decimal(str(broker_position.amount)) if broker_position is not None else None
+        unrealised = Decimal(str(broker_position.unrealized_pnl)) if broker_position is not None else None
+        return_pct = (
+            unrealised / assigned * Decimal("100")
+            if unrealised is not None and assigned is not None and assigned != 0
+            else None
+        )
+        strategy_id = str(row["strategy_id"])
+        positions.append(
+            StrategyOwnedPosition(
+                strategy_trade_id=int(row["strategy_trade_id"]),
+                broker_position_id=broker_position_id,
+                strategy_id=strategy_id,
+                strategy_version=str(row["strategy_version"]),
+                strategy_title=_TITLES.get(strategy_id, strategy_id),
+                instrument_id=int(row["instrument_id"]),
+                symbol=str(row["symbol"]),
+                company_name=(str(row["company_name"]) if row["company_name"] is not None else None),
+                direction=("long" if broker_position.is_buy else "short") if broker_position is not None else None,
+                units=Decimal(str(broker_position.units)) if broker_position is not None else None,
+                assigned_value=assigned,
+                current_value=(Decimal(str(broker_position.market_value)) if broker_position is not None else None),
+                unrealised_pnl=unrealised,
+                unrealised_return_pct=return_pct,
+                open_rate=Decimal(str(broker_position.open_rate)) if broker_position is not None else None,
+                current_price=(
+                    Decimal(str(broker_position.current_price))
+                    if broker_position is not None and broker_position.current_price is not None
+                    else None
+                ),
+                stop_loss_rate=(
+                    Decimal(str(broker_position.stop_loss_rate))
+                    if broker_position is not None and broker_position.stop_loss_rate is not None
+                    else None
+                ),
+                take_profit_rate=(
+                    Decimal(str(broker_position.take_profit_rate))
+                    if broker_position is not None and broker_position.take_profit_rate is not None
+                    else None
+                ),
+                opened_at=broker_position.open_date_time if broker_position is not None else None,
+                currency=broker_position.currency if broker_position is not None else "USD",
+                trade_status=cast(Literal["open", "closing", "reconcile_required"], row["trade_status"]),
+                valuation_available=broker_position is not None,
+            )
+        )
+    return StrategyOwnedPositionsResponse(
+        positions=positions,
+        live_quote_instrument_ids=sorted({position.instrument_id for position in positions}),
+    )
+
+
+def _load_strategy_broker_credentials(
+    conn: psycopg.Connection[object],
+    *,
+    request: Request,
+    session: SessionRow,
+) -> tuple[str, str]:
+    audit_pool = getattr(request.app.state, "audit_pool", None)
+    try:
+        if not ensure_broker_key_loaded(conn):
+            raise CredentialCryptoConfigError("broker credential key is unavailable")
+        api_key = load_credential_for_provider_use(
+            conn,
+            operator_id=session.operator_id,
+            provider="etoro",
+            label="api_key",
+            environment="demo",
+            caller="strategy_operator_close",
+            audit_pool=audit_pool,
+        )
+        conn.commit()
+        user_key = load_credential_for_provider_use(
+            conn,
+            operator_id=session.operator_id,
+            provider="etoro",
+            label="user_key",
+            environment="demo",
+            caller="strategy_operator_close",
+            audit_pool=audit_pool,
+        )
+        conn.commit()
+    except CredentialNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Demo broker credentials are not configured.",
+        ) from exc
+    except (CredentialDecryptError, CredentialCryptoConfigError, MasterKeyError) as exc:
+        logger.error("strategy operator close: credential loading failed", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Demo broker credentials could not be loaded.",
+        ) from exc
+    return api_key, user_key
+
+
+@router.post(
+    "/positions/{strategy_trade_id}/{broker_position_id}/close",
+    response_model=StrategyPositionCloseResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def close_strategy_owned_position(
+    strategy_trade_id: int,
+    broker_position_id: int,
+    request: Request,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyPositionCloseResponse:
+    """Submit a full close for one exact demo strategy-owned position."""
+    if settings.etoro_env != "demo":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Strategy position close is available only for the demo account.",
+        )
+    owned = conn.execute(
+        """
+        SELECT 1
+        FROM strategy_position_ownership ownership
+        JOIN strategy_trades trade
+          ON trade.strategy_trade_id=ownership.strategy_trade_id
+        WHERE ownership.strategy_trade_id=%s
+          AND ownership.broker_position_id=%s
+          AND ownership.status='active'
+          AND trade.status IN ('open','closing','reconcile_required')
+        """,
+        (strategy_trade_id, broker_position_id),
+    ).fetchone()
+    if owned is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy-owned position not found.")
+
+    api_key, user_key = _load_strategy_broker_credentials(conn, request=request, session=session)
+    conn.commit()
+    try:
+        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
+            result = manage_owned_position(
+                conn,
+                broker=broker,
+                strategy_trade_id=strategy_trade_id,
+                broker_position_id=broker_position_id,
+                close_reason="operator_close",
+            )
+    except (StrategyOwnershipError, StrategyPositionManagerError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    if result.state not in ("submitted", "pending", "applied"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result.reason_code)
+    return StrategyPositionCloseResponse(
+        strategy_trade_id=result.strategy_trade_id,
+        broker_position_id=result.broker_position_id,
+        state=result.state,
+        reason_code=result.reason_code,
+        operation_id=result.position_operation_id,
+    )
 
 
 @router.get("/pnl-history", response_model=StrategyPnlHistoryResponse)
