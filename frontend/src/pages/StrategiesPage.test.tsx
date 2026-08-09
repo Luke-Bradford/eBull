@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -170,8 +170,7 @@ describe("StrategiesPage", () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     const input = await screen.findByLabelText("Trading capital (USD)");
     expect(input.parentElement).toHaveClass("w-48");
-    await userEvent.clear(input);
-    await userEvent.type(input, "1500");
+    fireEvent.change(input, { target: { value: "1500" } });
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", reason: "Automated strategy workspace update" }));
   });
