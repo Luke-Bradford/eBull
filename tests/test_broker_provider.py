@@ -400,6 +400,7 @@ class TestDemoStrategyPositionMutations:
             "positionId": 9001,
             "referenceId": str(request_id),
         }
+        persisted: list[dict[str, object]] = []
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._http_write = MagicMock()
             broker._http_write.patch.return_value = response
@@ -408,6 +409,7 @@ class TestDemoStrategyPositionMutations:
                 stop_loss_rate=Decimal("101.25"),
                 take_profit_rate=Decimal("120"),
                 request_id=request_id,
+                persist_response=persisted.append,
             )
             call = broker._http_write.patch.call_args
         assert call.args[0] == "/api/v2/trading/demo/positions/9001"
@@ -418,6 +420,8 @@ class TestDemoStrategyPositionMutations:
             "takeProfitRate": 120.0,
         }
         assert result.operation_id == operation_id
+        assert result.raw_payload == response.json.return_value
+        assert persisted == [response.json.return_value]
 
     def test_close_uses_exact_demo_route_and_close_lookup_proves_affected_position(self) -> None:
         request_id = UUID("f95eab17-c3ac-4948-a281-d94fd1e2764b")
@@ -431,6 +435,7 @@ class TestDemoStrategyPositionMutations:
             "errorCode": None,
             "positions": [{"positionID": 9001}],
         }
+        persisted: list[dict[str, object]] = []
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._http_write = MagicMock()
             broker._http_read = MagicMock()
@@ -440,13 +445,20 @@ class TestDemoStrategyPositionMutations:
                 position_id=9001,
                 instrument_id=1001,
                 request_id=request_id,
+                persist_response=persisted.append,
             )
-            resolved = broker.get_demo_close_order(order_id=submission.broker_order_ref)
+            resolved = broker.get_demo_close_order(
+                order_id=submission.broker_order_ref,
+                persist_response=persisted.append,
+            )
             close_call = broker._http_write.post.call_args
         assert close_call.args[0] == "/api/v1/trading/execution/demo/market-close-orders/positions/9001"
         assert close_call.kwargs["json"] == {"InstrumentID": 1001, "UnitsToDeduct": None}
         assert resolved.status == "filled"
         assert resolved.position_ids == (9001,)
+        assert submission.raw_payload == accepted.json.return_value
+        assert resolved.raw_payload == detail.json.return_value
+        assert persisted == [accepted.json.return_value, detail.json.return_value]
 
     def test_real_credentials_cannot_patch_or_close_strategy_positions(self) -> None:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:

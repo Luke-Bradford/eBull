@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS strategy_position_operations (
         REFERENCES strategy_ratchet_variants(ratchet_variant_id) ON DELETE RESTRICT,
     broker_operation_id    UUID,
     broker_order_ref       BIGINT CHECK (broker_order_ref IS NULL OR broker_order_ref > 0),
+    broker_response_json   JSONB,
     last_error_code        TEXT CHECK (last_error_code IS NULL OR (last_error_code <> '' AND length(last_error_code) <= 100)),
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     submitted_at           TIMESTAMPTZ,
@@ -126,5 +127,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_position_operation_material_ident
     WHERE operation_type IN ('fixed_exit_repair', 'stop_ratchet');
 
 COMMENT ON TABLE strategy_position_operations IS
-    'Material exact-position PATCH/close intents only. Raw broker payloads and '
-    'poll heartbeats are intentionally excluded; unchanged checks grow no rows.';
+    'Material exact-position PATCH/close intents only. One latest bounded-shape '
+    'broker response may be retained; polls and unchanged checks grow no rows.';

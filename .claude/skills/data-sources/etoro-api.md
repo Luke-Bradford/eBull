@@ -415,6 +415,10 @@ Primary pages: `trading--demo/create-an-order`,
 - Keep only policy revisions and material mutation facts. Unchanged completed
   bars and polling heartbeats write no rows; repeat rejection of the same
   material edit reuses its terminal audit result.
+- Return the untouched response object with every typed mutation result/error.
+  Persist it before advancing the material operation: PATCH/latest close detail
+  on the operation row and close submission on its linked order. Overwrite the
+  latest close-detail response rather than appending a row for every poll.
 
 Primary pages: `trading--demo/modify-stop-loss-and-take-profit-settings-on-an-open-position`,
 `trading--demo/close-demo-position-by-units`, and

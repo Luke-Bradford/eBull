@@ -276,8 +276,10 @@ empty** on PostgreSQL 17. It adds four narrow relations: registered variants,
 one current policy, policy revisions, and material operations. A protected
 position/bar poll writes zero rows; an actual stop change or close writes one
 compact operation and repeated rejection of the same material edit is unique.
-There is no tick, bar, eligibility, portfolio or raw broker payload copy in
-these relations.
+There is no tick, bar, eligibility or portfolio payload copy in these
+relations. Each material operation retains at most the latest small broker
+response object (and the linked close order retains its submission response),
+so auditability does not create an append-only polling heap.
 
 P&L is derived from owned trade order/fill links and broker close history; it is
 not copied into the general `positions` aggregate and not duplicated on every

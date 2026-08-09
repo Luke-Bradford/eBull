@@ -78,6 +78,13 @@ blocks new entries. They are still audited: one durable
 I/O, an unowned position id fails before I/O, and broker acceptance is not
 treated as application until exact-position re-sync/close-order reconciliation.
 This is demo-only and must not be routed through the legacy manual close helper.
+The broker adapter must return the untouched JSON object alongside every typed
+position-mutation result (including error responses where a body exists). The
+manager persists that object before applying the typed transition: PATCH/latest
+close-detail responses live on the single material operation row, and close
+submission responses live on the linked `orders` row. Keep this bounded to the
+latest response for that material operation; never append portfolio polls,
+heartbeats, or unchanged-bar payloads.
 
 ## Invariants (do not break)
 
@@ -101,6 +108,11 @@ This is demo-only and must not be routed through the legacy manual close helper.
   all three are independent gates (settled: "Kill switch" / "Config controls").
 - Deterministic: identical DB state ⇒ identical verdict. No ML, no randomness, no
   external I/O inside any DB transaction.
+- **Raw mutation response before state transition:** grep any new automated
+  broker method for `response.json()`. Its typed result/error must retain the
+  untouched dict, and the service must write it to the material operation/order
+  before using the typed fields to advance broker state. Do not satisfy this by
+  creating an append-only poll or market-data payload heap.
 
 ## Failure conditions
 

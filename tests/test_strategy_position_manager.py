@@ -112,9 +112,20 @@ def _opened_trade(
         raw_payload={},
     )
     broker.edit_demo_strategy_position.return_value = BrokerPositionEditSubmission(
-        _EDIT_OPERATION_ID, _POSITION_ID, _REQUEST_ID
+        _EDIT_OPERATION_ID,
+        _POSITION_ID,
+        _REQUEST_ID,
+        {
+            "operationId": str(_EDIT_OPERATION_ID),
+            "positionId": _POSITION_ID,
+            "referenceId": str(_REQUEST_ID),
+        },
     )
-    broker.close_demo_strategy_position.return_value = BrokerPositionCloseSubmission("24521234", _POSITION_ID)
+    broker.close_demo_strategy_position.return_value = BrokerPositionCloseSubmission(
+        "24521234",
+        _POSITION_ID,
+        {"orderForClose": {"orderID": 24521234, "positionID": _POSITION_ID}},
+    )
     return execution.strategy_trade_id, deployment_id, broker, manual
 
 
@@ -207,6 +218,9 @@ def test_fixed_exit_gap_is_repaired_once_and_manual_position_is_untouched(
     broker.edit_demo_strategy_position.assert_called_once()
     assert conn.execute("SELECT count(*) FROM strategy_position_operations").fetchone() == (1,)
     assert conn.execute("SELECT status FROM strategy_position_operations").fetchone() == ("applied",)
+    assert conn.execute("SELECT broker_response_json->>'operationId' FROM strategy_position_operations").fetchone() == (
+        str(_EDIT_OPERATION_ID),
+    )
 
 
 def test_rejected_patch_is_a_single_material_event_not_a_retry_heap(
@@ -391,6 +405,7 @@ def test_exact_close_remains_available_under_kill_switch_and_reconciles(
         broker_status="1",
         position_ids=(_POSITION_ID,),
         reference_id=None,
+        raw_payload={"orderID": 24521234, "statusID": 1, "positions": [{"positionID": _POSITION_ID}]},
     )
     broker.get_portfolio.return_value = BrokerPortfolio(
         positions=(manual,), available_cash=Decimal("600"), raw_payload={}
@@ -410,6 +425,13 @@ def test_exact_close_remains_available_under_kill_switch_and_reconciles(
     ).fetchone() == ("released", "emergency_risk")
     assert conn.execute("SELECT status FROM strategy_trades WHERE strategy_trade_id=%s", (trade_id,)).fetchone() == (
         "closed",
+    )
+    assert conn.execute(
+        "SELECT raw_payload_json->'orderForClose'->>'positionID' FROM orders "
+        "WHERE execution_origin='strategy' AND action='EXIT'"
+    ).fetchone() == (str(_POSITION_ID),)
+    assert conn.execute("SELECT broker_response_json->>'orderID' FROM strategy_position_operations").fetchone() == (
+        "24521234",
     )
 
 
@@ -451,7 +473,11 @@ def test_terminal_close_failure_can_be_retried_as_a_new_audited_intent(
     trade_id, _, broker, _ = _opened_trade(conn, monkeypatch)
     broker.close_demo_strategy_position.side_effect = [
         BrokerPositionMutationError("temporary rejection"),
-        BrokerPositionCloseSubmission("24521235", _POSITION_ID),
+        BrokerPositionCloseSubmission(
+            "24521235",
+            _POSITION_ID,
+            {"orderForClose": {"orderID": 24521235, "positionID": _POSITION_ID}},
+        ),
     ]
 
     rejected = manage_owned_position(

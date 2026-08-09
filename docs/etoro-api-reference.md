@@ -110,7 +110,7 @@ GET+POST requests cannot exceed the API limit.
 - Cache static data locally (instrument IDs are immutable)
 - Batch rate requests (max 100 IDs per call; eBull uses 50 for safety)
 - Sequence per-instrument calls with throttle delay
-- Land every structured field in SQL — raw disk dumps for eToro were retired in #471 (`instruments` / `price_daily` / `quotes` / `exchanges` tables ARE the audit trail)
+- Land every structured field in SQL — raw disk dumps for eToro were retired in #471 (`instruments` / `price_daily` / `quotes` / `exchanges` tables ARE the market-data audit trail). Automated broker mutations additionally retain one small latest response object on their material operation/order row; they do not append polling payloads.
 
 ---
 
