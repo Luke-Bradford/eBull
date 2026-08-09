@@ -23,6 +23,62 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
 - Trading (verified live): open by-amount/by-units; close per position with optional `UnitsToDeduct` (partial); **`PATCH /api/v2/trading[/demo]/positions/{positionId}`** for TP/SL edit (`stopLossRate`, `takeProfitRate`, `stopLossType` fixed|trailing, `clearStopLoss`, `clearTakeProfit`; ≥1 field; **202 async** `{operationId, positionId, referenceId}`).
 - Write ops are asynchronous (202) — re-sync portfolio before treating them as landed.
 
+## ⚠⚠ WE HAVE INTRADAY HISTORY. Read this before saying otherwise — MEASURED 2026-08-09
+
+**Never claim "we have no intraday data" or "we only have daily candles".** It is
+false, it has been corrected by the operator four separate times, and it has
+repeatedly steered strategy research away from viable ground. If you are about to
+write a sentence about our intraday capability, this section is the source.
+
+`GET /api/v1/market-data/instruments/{id}/history/candles/asc/{interval}/{count}`
+serves intraday OHLCV **on demand, per instrument, with no recorder required**.
+Wired as `EtoroMarketDataProvider.get_intraday_candles`
+(`app/providers/implementations/etoro.py`).
+
+⚠ **`count` caps at 1000 bars and there is NO date anchor in the URL** — you get the
+*last* N bars, never an arbitrary window. So reach back is purely a function of
+interval, and the only way to go deeper than the table below is to poll forward and
+accumulate.
+
+Measured on AAPL (`instrument_id=1001`) at `count=1000`, 2026-08-09:
+
+| interval | earliest bar returned | reach back |
+| --- | --- | --- |
+| `OneMinute` | 2026-08-07T02:23Z | ~2 days |
+| `FiveMinutes` | 2026-08-04T07:20Z | ~5 days |
+| `ThirtyMinutes` | 2026-07-09T07:00Z | ~1 month |
+| `OneHour` | 2026-06-08T02:00Z | ~2 months |
+| `FourHours` | 2025-12-02T12:00Z | **~8 months** |
+
+`TenMinutes` and `FifteenMinutes` are also valid tokens (`IntradayInterval` in
+`app/providers/market_data.py`) and were not probed.
+
+Reproduce: `curl -s "http://localhost:8000/_debug/etoro-candles-probe?instrument_id=1001&count=1000&interval=FourHours"`
+(`app/api/_debug_ws.py:47`, dev-like envs only).
+
+- ⚠ **Volume IS populated** on these bars (observed 273 / 7,090 / 951) — unlike the
+  WS stream, where volume is equity-only (see the WS section below).
+- ⚠ **Extended hours are included.** The `02:23Z` and `07:20Z` stamps are outside US
+  RTH, so any RTH-only study must filter by session explicitly; the bars will not do
+  it for you.
+- ⚠ `price_intraday` (created in `sql/023_live_pricing_currency.sql`) **exists and has
+  0 rows.** Nothing writes it. The absence of stored intraday is a *build gap*, not a
+  data-availability gap — do not confuse the two.
+
+**The three capabilities are distinct. Do not collapse them:**
+
+| capability | what it gives | limit |
+| --- | --- | --- |
+| REST intraday candles | OHLCV history, any instrument, on demand | 1000 bars, no date anchor; **60 GET/min shared** |
+| WS rate stream | live bid/ask/last ticks, all instruments | no depth, no sizes; forward-only |
+| `research_price_daily` | 25.9M daily bars 1962-2026, survivorship-controlled | daily granularity only |
+
+⚠ **Corpus arithmetic, because the rate limit binds hard.** 60 GET/min shared means a
+full 6,700-instrument intraday pull is **~112 minutes per interval per pass**, and it
+competes with every other eToro call. A cross-sectional intraday study is therefore a
+*scheduled harvest*, not an ad-hoc query — budget for it in the design, and prefer
+`FourHours` (deepest history per request) when bootstrapping.
+
 ## Scope boundary — what this file is NOT
 
 This file documents **eToro's** behaviour: endpoints, limits, payload shapes,
