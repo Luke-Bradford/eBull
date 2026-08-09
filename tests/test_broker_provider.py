@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 
 from app.providers.broker import (
     BrokerMirror,
@@ -22,6 +23,7 @@ from app.providers.broker import (
     BrokerOrderNotFound,
     BrokerOrderSubmissionError,
     BrokerPortfolio,
+    BrokerPositionMutationError,
     BrokerStrategyOrder,
     BrokerWhatIfOrder,
     OrderParams,
@@ -386,6 +388,83 @@ class TestDemoStrategyOrder:
                 pass
             else:  # pragma: no cover
                 raise AssertionError("real credentials must not reach the paper writer")
+
+
+class TestDemoStrategyPositionMutations:
+    def test_edit_uses_exact_v2_demo_route_and_validates_acceptance_identity(self) -> None:
+        request_id = UUID("f95eab17-c3ac-4948-a281-d94fd1e2764b")
+        operation_id = UUID("2165467c-73b8-4d2c-ac3c-b00968f0cfe3")
+        response = MagicMock()
+        response.json.return_value = {
+            "operationId": str(operation_id),
+            "positionId": 9001,
+            "referenceId": str(request_id),
+        }
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.patch.return_value = response
+            result = broker.edit_demo_strategy_position(
+                position_id=9001,
+                stop_loss_rate=Decimal("101.25"),
+                take_profit_rate=Decimal("120"),
+                request_id=request_id,
+            )
+            call = broker._http_write.patch.call_args
+        assert call.args[0] == "/api/v2/trading/demo/positions/9001"
+        assert call.kwargs["headers"] == {"x-request-id": str(request_id)}
+        assert call.kwargs["json"] == {
+            "stopLossRate": 101.25,
+            "stopLossType": "fixed",
+            "takeProfitRate": 120.0,
+        }
+        assert result.operation_id == operation_id
+
+    def test_close_uses_exact_demo_route_and_close_lookup_proves_affected_position(self) -> None:
+        request_id = UUID("f95eab17-c3ac-4948-a281-d94fd1e2764b")
+        accepted = MagicMock()
+        accepted.json.return_value = {"orderForClose": {"orderID": 12346, "positionID": 9001, "statusID": 1}}
+        detail = MagicMock()
+        detail.json.return_value = {
+            "orderID": 12346,
+            "statusID": 1,
+            "referenceID": str(request_id),
+            "errorCode": None,
+            "positions": [{"positionID": 9001}],
+        }
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_read = MagicMock()
+            broker._http_write.post.return_value = accepted
+            broker._http_read.get.return_value = detail
+            submission = broker.close_demo_strategy_position(
+                position_id=9001,
+                instrument_id=1001,
+                request_id=request_id,
+            )
+            resolved = broker.get_demo_close_order(order_id=submission.broker_order_ref)
+            close_call = broker._http_write.post.call_args
+        assert close_call.args[0] == "/api/v1/trading/execution/demo/market-close-orders/positions/9001"
+        assert close_call.kwargs["json"] == {"InstrumentID": 1001, "UnitsToDeduct": None}
+        assert resolved.status == "filled"
+        assert resolved.position_ids == (9001,)
+
+    def test_real_credentials_cannot_patch_or_close_strategy_positions(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:
+            broker._http_write = MagicMock()
+            with pytest.raises(BrokerPositionMutationError, match="demo credentials"):
+                broker.edit_demo_strategy_position(
+                    position_id=9001,
+                    stop_loss_rate=Decimal("100"),
+                    take_profit_rate=None,
+                    request_id=uuid4(),
+                )
+            with pytest.raises(BrokerPositionMutationError, match="demo credentials"):
+                broker.close_demo_strategy_position(
+                    position_id=9001,
+                    instrument_id=1001,
+                    request_id=uuid4(),
+                )
+            broker._http_write.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

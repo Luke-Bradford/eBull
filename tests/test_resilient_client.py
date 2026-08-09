@@ -294,6 +294,19 @@ def test_post_is_throttled_and_retried(_patch_time: MagicMock) -> None:
     assert mock_httpx.build_request.call_args_list[0][0][0] == "POST"
 
 
+def test_patch_is_throttled_and_retried(_patch_time: MagicMock) -> None:
+    """PATCH requests use the shared retry path needed by position edits."""
+    r429 = _make_response(429)
+    r202 = _make_response(202)
+    client, mock_httpx = _make_client([r429, r202])
+
+    result = client.patch("/positions/1", json={"stopLossRate": 100})
+
+    assert result.status_code == 202
+    assert mock_httpx.send.call_count == 2
+    assert mock_httpx.build_request.call_args_list[0][0][0] == "PATCH"
+
+
 # ---------------------------------------------------------------------------
 # Shared throttle state
 # ---------------------------------------------------------------------------

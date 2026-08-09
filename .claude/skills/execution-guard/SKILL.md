@@ -70,6 +70,15 @@ currently returns 501 and demo fills are synthetic.
 Operator surfaces: `GET /audit` + `GET /audit/{decision_id}` (evidence_json
 detail), `GET /alerts/guard-rejections` (stage `execution_guard` FAILs).
 
+Strategy-owned paper exits (#2452) are a separate risk-reduction path in
+`strategy_position_manager.manage_owned_position`. They do not call
+`evaluate_recommendation` and intentionally remain usable while the kill switch
+blocks new entries. They are still audited: one durable
+`strategy_position_operations` intent exists before exact-position PATCH/close
+I/O, an unowned position id fails before I/O, and broker acceptance is not
+treated as application until exact-position re-sync/close-order reconciliation.
+This is demo-only and must not be routed through the legacy manual close helper.
+
 ## Invariants (do not break)
 
 - **Fail closed, no silent bypass** (CLAUDE.md non-negotiables; settled-decisions
