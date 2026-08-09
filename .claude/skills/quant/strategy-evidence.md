@@ -1078,6 +1078,59 @@ $100 stock        0.0010%       0.509%    509x
 
 ---
 
+## 3.0 ⚠⚠ MEASURED ON OUR DATA: insider purchases, and the one thing blocking them
+
+`scripts/verify_2437_insider_forward_returns.py`, 47,369 purchases joined to
+prices, entry at the **next** bar after the transaction, against a **matched
+same-series control**, year-clustered:
+
+```text
+ horizon    events   event ret    control     EXCESS       t  years
+     1mo    18,998       3.72%      1.60%      2.12%    0.98      6
+     3mo    18,998      12.60%      4.19%      8.41%    1.22      6
+     6mo    18,998      18.40%      6.34%     12.05%    1.06      6
+    12mo    18,984      28.37%     21.98%      6.39%    0.50      6
+```
+
+**Every horizon is the right sign, and the magnitudes are large** — +12.05%
+excess over a matched control at six months. ⚠ **And not one reaches |t| = 2.**
+
+### ⚠⚠ The reason is the corpus, not the signal
+
+```text
+insider PURCHASES by year, joinable to a price series
+  2004-2022      < 250 per year, most years in single digits
+  2023         8,456
+  2024        15,275
+  2025        16,163
+  2026         6,997
+```
+
+**99% of our insider history is 2023 onward.** The year-clustered test therefore
+has **~4 real years**. At n=4 a t-statistic of 1.0 means nothing in either
+direction — **we cannot establish the effect and we cannot reject it.**
+
+### The fix is a backfill, not research
+
+`data-sources/sec-edgar.md` §Form 3/4/5: **"XML mandate since 2003-06-30"**,
+*"decades of XML coverage"*, and the `<ownershipDocument>` schema *"has been
+stable"*.
+
+> ⚠⚠ **~20 years of Form 4 data is available, in a stable schema, with a parser we
+> already own — and we are ingesting the last three.** Extending the corpus to
+> 2003 takes the sample from ~4 usable years to ~22, which shrinks the standard
+> error by roughly `sqrt(22/4) = 2.3x`. **A t of 1.06 becomes ~2.5 if the effect
+> is real** — the difference between "cannot tell" and "established".
+
+**This is the highest-value bounded task identified in the entire research pass.**
+It is not a bet on a hypothesis; it is removing the reason the best-evidenced
+signal we have is currently unmeasurable.
+
+⚠ Read the table as an **upper bound** regardless. It keys on the transaction
+date rather than the filing date we could actually have seen; it applies no
+routine/opportunistic split, so the informative subset is diluted; it charges **no
+costs**; and the corpus is survivor-heavy, which flatters any long signal.
+
 ## 3.1 Insider purchases — the family measured against our own data
 
 **Cohen, Malloy & Pomorski, "Decoding Inside Information", *JF* 67(3) (2012),
