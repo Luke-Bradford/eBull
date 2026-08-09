@@ -382,6 +382,43 @@ presets" (#1917, `frontend/information-architecture` skill).
 | paper portfolio + capital allocation | **route distinct from `/portfolio`** | demo and live money must never share a surface |
 | collector health, strategy enable/disable, kill switch | `/admin`, `/admin/ingest-health` | `ProcessesTable` / `JobsTable` exist; the collector becomes a monitored process |
 
+### 4.1 Product semantics correction (#2464, 2026-08-10)
+
+The automated-strategy workspace is a portfolio control surface, not a signal
+scanner and not a research-results table. Its hierarchy is fixed:
+
+1. **Automated pot** — observed P&L, capital working, completed automated trades
+   and open automated positions. Backtests never substitute for an empty live
+   record and never contribute to a portfolio headline.
+2. **Approved strategies** — only strategy versions that pass every promotion,
+   evidence, risk, cost and execution-policy gate expose an allocation switch.
+   A disabled switch beside a refused strategy is misleading; refused versions
+   belong in the research pipeline and cannot be selected.
+3. **Research pipeline** — one stable summary of the primary evidence window,
+   its confidence interval, drawdown and blockers. Missing evidence windows are
+   completeness state, not pages for the operator to browse. Detailed audit
+   rows may sit behind a disclosure, but must not replace the stable summary.
+4. **Forward validation** — aggregate fired, unresolved, successful and
+   unsuccessful observations. The main workspace does not enumerate every
+   instrument. A per-instrument ledger is an audit surface reached deliberately,
+   not general activity.
+
+There is no `pending strategy` state. A rule evaluation is `fired`,
+`not_fired`, or `not_evaluable`; only `fired` becomes a durable signal. A fired
+entry whose exit has not resolved is an **open observation**, not a strategy
+that is about to fire.
+
+The current `strategy_signal_scan` evaluates completed daily bars in arrears.
+It therefore makes no real-time or near-trigger claim. A future pre-trigger
+surface requires an explicit, versioned distance-to-threshold definition per
+approved strategy and must be validated at the same sampling cadence it will
+trade. Forming intraday bars must not be presented as an approximation of the
+current daily-close rules, because that changes the rule and its evidence.
+
+The three result levels from the validity proposal remain separate everywhere:
+per-signal outcome, per-strategy sleeve performance, and total automated-pot
+performance. Only the latter belongs in the workspace hero.
+
 ## 5. Phases
 
 Phase tickets are deliberately NOT all minted up front — several are shaped by

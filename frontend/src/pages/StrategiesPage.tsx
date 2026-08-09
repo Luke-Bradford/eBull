@@ -2,11 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-import { fetchFiredSignals, fetchStrategyOverview, fetchStrategyPnlHistory, updateStrategyAllocation, updateStrategyPaperPool } from "@/api/strategies";
-import type { FiredSignal, StrategyEvidenceWindow, StrategyOverview, StrategyOverviewResponse, StrategyResultArm } from "@/api/types";
+import {
+  fetchStrategyOverview,
+  fetchStrategyPnlHistory,
+  updateStrategyAllocation,
+  updateStrategyPaperPool,
+} from "@/api/strategies";
+import type {
+  StrategyEvidenceWindow,
+  StrategyOverview,
+  StrategyOverviewResponse,
+  StrategyResultArm,
+} from "@/api/types";
 import { ChartTooltip } from "@/components/charts/ChartTooltip";
 import { SectionError, SectionSkeleton } from "@/components/dashboard/Section";
-import { STAT_ROW_GRID, StatTile } from "@/components/dashboard/StatTile";
 import { EmptyState } from "@/components/states/EmptyState";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, formatMoney, formatNumber, formatPct } from "@/lib/format";
@@ -23,355 +32,474 @@ function money(value: string | null): string {
   return formatMoney(number(value), "USD");
 }
 
-function pctFraction(value: number | null): string {
-  return formatPct(value);
-}
-
 function pctPoints(value: string | null): string {
   const parsed = number(value);
   return formatPct(parsed === null ? null : parsed / 100);
 }
 
-function representativeArm(strategy: StrategyOverview): StrategyResultArm | null {
-  const windows = [
-    ...strategy.evidence_windows.filter((window) => window.status === "complete"),
-    ...strategy.evidence_windows.filter((window) => window.status !== "complete"),
-  ];
-  for (const window of windows) {
-    const arm = window.arms.find(
-      (candidate) => candidate.ambiguity_arm === "worst_case" && candidate.quarantine_arm === "masked",
-    );
-    if (arm) return arm;
-  }
-  return null;
+function primaryEvidence(strategy: StrategyOverview): StrategyEvidenceWindow | null {
+  return strategy.evidence_windows.find((window) => window.window_id === "primary")
+    ?? strategy.evidence_windows.find((window) => window.status === "complete")
+    ?? null;
 }
 
-function strategyDisplayStats(strategy: StrategyOverview) {
-  if (strategy.attribution.resolved_entries > 0) {
-    return {
-      basis: "Observed",
-      successRate: number(strategy.attribution.win_rate),
-      averageReturn: strategy.attribution.shadow_average_return_pct,
-    };
+function representativeArm(strategy: StrategyOverview): StrategyResultArm | null {
+  return primaryEvidence(strategy)?.arms.find(
+    (arm) => arm.ambiguity_arm === "worst_case" && arm.quarantine_arm === "masked",
+  ) ?? null;
+}
+
+function completedEvidenceCount(strategy: StrategyOverview): number {
+  return strategy.evidence_windows.filter((window) => window.status === "complete").length;
+}
+
+function validationState(strategy: StrategyOverview): {
+  label: string;
+  tone: "ok" | "warn" | "risk" | "neutral";
+  explanation: string;
+} {
+  if (strategy.allocation_ready) {
+    return { label: "Approved", tone: "ok", explanation: "All automation gates have passed." };
   }
   const arm = representativeArm(strategy);
-  if (!arm) return { basis: "Awaiting backtest", successRate: null, averageReturn: null };
-  const resolved = Math.max(0, arm.trade_count - arm.open_trade_count - arm.unpriced_trade_count);
+  if (!strategy.runnable || !arm) {
+    return {
+      label: "Not tested",
+      tone: "neutral",
+      explanation: !strategy.runnable
+        ? "The rule cannot yet run end to end."
+        : "No completed valid backtest is available.",
+    };
+  }
+  const expectancy = number(arm.expectancy_per_trade_pct);
+  const ciHigh = number(arm.expectancy_ci_high_pct);
+  if ((expectancy !== null && expectancy <= 0) || (ciHigh !== null && ciHigh <= 0)) {
+    return {
+      label: "Rejected",
+      tone: "risk",
+      explanation: "The current rule does not show positive expectancy after costs.",
+    };
+  }
+  const ciLow = number(arm.expectancy_ci_low_pct);
+  if (ciLow === null || ciLow <= 0) {
+    return {
+      label: "Not proven",
+      tone: "warn",
+      explanation: "The estimate is positive, but its confidence range still includes a loss.",
+    };
+  }
   return {
-    basis: "Backtest",
-    successRate: resolved > 0 ? Math.max(0, resolved - arm.losing_trade_count) / resolved : null,
-    averageReturn: arm.expectancy_per_trade_pct,
+    label: "Checks incomplete",
+    tone: "warn",
+    explanation: "The return evidence is positive, but required validation checks remain.",
   };
 }
 
+const REFUSAL_LABELS: Record<string, string> = {
+  strategy_not_runnable: "Rule is not runnable end to end",
+  recent_evidence_incomplete: "Recent evidence windows are incomplete",
+  recent_evidence_gate_refused: "Recent evidence failed its promotion gate",
+  recent_net_expectancy_not_positive: "Net expectancy is not positive",
+  paper_promotion_missing: "No approved deployment exists",
+  pinned_promotion_evidence_invalid: "Pinned evidence is no longer valid",
+  execution_policy_missing: "Execution and risk policy is missing",
+  universe_basis_not_survivorship_free: "Point-in-time universe is not complete",
+  carry_unmodelled: "Holding and financing costs are not modelled",
+  synthetic_control_not_run: "Random-entry control has not passed",
+};
+
+function refusalLabel(refusal: string): string {
+  return REFUSAL_LABELS[refusal] ?? refusal.replaceAll("_", " ");
+}
+
 function aggregate(overview: StrategyOverviewResponse) {
-  const pnl = overview.strategies.map((strategy) => number(strategy.pnl.total_pnl));
-  const observedCount = overview.strategies.reduce(
+  const pnlValues = overview.strategies.map((strategy) => number(strategy.pnl.total_pnl));
+  const resolved = overview.strategies.reduce(
     (sum, strategy) => sum + strategy.attribution.resolved_entries,
     0,
   );
-  let resolved = observedCount;
-  let winners = overview.strategies.reduce(
+  const winners = overview.strategies.reduce(
     (sum, strategy) => sum + strategy.attribution.winning_entries,
     0,
   );
-  let weightedReturn: number | null = 0;
+  let weightedReturn = 0;
+  let averageReturnKnown = resolved > 0;
   for (const strategy of overview.strategies) {
     if (strategy.attribution.resolved_entries === 0) continue;
     const average = number(strategy.attribution.shadow_average_return_pct);
     if (average === null) {
-      weightedReturn = null;
+      averageReturnKnown = false;
       break;
     }
     weightedReturn += average * strategy.attribution.resolved_entries;
   }
-  if (observedCount === 0) {
-    weightedReturn = 0;
-    for (const strategy of overview.strategies) {
-      const arm = representativeArm(strategy);
-      if (!arm) continue;
-      const count = Math.max(0, arm.trade_count - arm.open_trade_count - arm.unpriced_trade_count);
-      resolved += count;
-      winners += Math.max(0, count - arm.losing_trade_count);
-      weightedReturn += Number(arm.expectancy_per_trade_pct) * count;
-    }
-  }
+  const fired = overview.strategies.reduce(
+    (sum, strategy) => sum + strategy.attribution.fired_entries,
+    0,
+  );
   return {
-    totalPnl: pnl.every((value) => value !== null) ? pnl.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null,
-    successRate: resolved ? winners / resolved : null,
-    averageReturn: resolved && weightedReturn !== null ? weightedReturn / resolved / 100 : null,
-    activePositions: overview.strategies.reduce((sum, strategy) => sum + strategy.pnl.active_position_count, 0),
-    performanceBasis: observedCount > 0 ? "Observed results" : resolved > 0 ? "Backtest evidence" : "No results yet",
+    totalPnl: pnlValues.every((value) => value !== null)
+      ? pnlValues.reduce<number>((sum, value) => sum + (value ?? 0), 0)
+      : null,
+    resolved,
+    winners,
+    unsuccessful: Math.max(0, resolved - winners),
+    awaitingOutcome: Math.max(0, fired - resolved),
+    successRate: resolved > 0 ? winners / resolved : null,
+    averageReturn: averageReturnKnown ? weightedReturn / resolved / 100 : null,
+    activePositions: overview.strategies.reduce(
+      (sum, strategy) => sum + strategy.pnl.active_position_count,
+      0,
+    ),
+    approved: overview.strategies.filter((strategy) => strategy.allocation_ready).length,
   };
 }
 
-function PnlTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ value?: number }>; label?: string }) {
+function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div>
+      <span className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+        {label}
+      </span>
+      <strong className="mt-1 block text-xl tabular-nums text-slate-900 dark:text-slate-100">
+        {value}
+      </strong>
+      {hint ? <span className="mt-0.5 block text-xs text-slate-500">{hint}</span> : null}
+    </div>
+  );
+}
+
+function PnlTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: Array<{ value?: number }>;
+  label?: string;
+}) {
   if (!active || !payload?.length) return null;
-  return <ChartTooltip><div className="text-slate-500">{formatDate(label ?? null)}</div><div className="font-semibold">{formatMoney(payload[0]?.value ?? null, "USD")}</div></ChartTooltip>;
+  return (
+    <ChartTooltip>
+      <div className="text-slate-500">{formatDate(label ?? null)}</div>
+      <div className="font-semibold">{formatMoney(payload[0]?.value ?? null, "USD")}</div>
+    </ChartTooltip>
+  );
 }
 
 function PnlChart({ history }: { history: Array<{ date: string; total_pnl: string }> }) {
   const theme = useChartTheme();
   const data = history.map((point) => ({ date: point.date, pnl: number(point.total_pnl) }));
-  return <div className="mt-5 h-44 border-t border-slate-200 pt-3 dark:border-slate-800"><ResponsiveContainer width="100%" height="100%"><LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}><XAxis dataKey="date" tickFormatter={(value: string) => formatDate(value)} tick={{ fontSize: 10, fill: theme.textMuted }} stroke={theme.gridLine} /><YAxis tickFormatter={(value: number) => `$${formatNumber(value, 0)}`} tick={{ fontSize: 10, fill: theme.textMuted }} stroke={theme.gridLine} width={52} /><Tooltip content={<PnlTooltip />} /><Line type="stepAfter" dataKey="pnl" stroke={theme.primaryLine} strokeWidth={2} dot={{ r: 2 }} isAnimationActive={false} /></LineChart></ResponsiveContainer></div>;
-}
-
-function AutomationControl({ overview, onUpdated }: { overview: StrategyOverviewResponse; onUpdated: () => void }) {
-  const pool = overview.paper_pool;
-  const [enabled, setEnabled] = useState(pool.enabled && overview.execution_enabled);
-  const [limit, setLimit] = useState(pool.capital_limit);
-  const [saving, setSaving] = useState(false);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => { setEnabled(pool.enabled && overview.execution_enabled); setLimit(pool.capital_limit); }, [pool.enabled, pool.capital_limit, overview.execution_enabled]);
-  const parsed = Number(limit);
-  const valid = Number.isFinite(parsed) && parsed >= 0 && (!enabled || parsed > 0);
-  const dirty = enabled !== (pool.enabled && overview.execution_enabled) || parsed !== Number(pool.capital_limit);
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (!valid || !dirty || saving) return;
-    setSaving(true); setFailed(false);
-    try {
-      await updateStrategyPaperPool({ enabled, capital_limit: parsed.toFixed(6), reason: "Automated strategy workspace update" });
-      onUpdated();
-    } catch (error) { console.error("Automation update failed:", error); setFailed(true); }
-    finally { setSaving(false); }
-  }
-  return <form onSubmit={(event) => void save(event)} className="flex flex-wrap items-end gap-3 border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-    <label className="flex min-h-11 cursor-pointer items-center gap-2 pr-4 text-sm font-semibold"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="h-5 w-5" />Automation {enabled ? "on" : "off"}</label>
-    <label className="min-w-52 flex-1 text-xs font-medium text-slate-600 dark:text-slate-300">Trading capital (USD)<input type="number" min="0" step="0.01" value={limit} onChange={(event) => setLimit(event.target.value)} className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-sm tabular-nums dark:border-slate-700 dark:bg-slate-950" /></label>
-    <button type="submit" disabled={!valid || !dirty || saving} className="min-h-11 border border-blue-700 bg-blue-700 px-4 text-sm font-medium text-white disabled:opacity-40">{saving ? "Saving…" : "Apply"}</button>
-    <div className="ml-auto grid grid-cols-3 gap-5 text-xs"><div><span className="block text-slate-500">Working</span><strong>{money(pool.invested_capital)}</strong></div><div><span className="block text-slate-500">Reserved</span><strong>{money(pool.reserved_capital)}</strong></div><div><span className="block text-slate-500">Available</span><strong>{money(pool.remaining_capital)}</strong></div></div>
-    {overview.entry_block.new_entries_blocked ? <p className="w-full text-xs text-amber-700 dark:text-amber-300"><strong>New entries are waiting on a safety check.</strong> Existing automated positions remain managed. {overview.entry_block.execution_block_reasons[0] ?? overview.entry_block.global_kill_reason}</p> : null}
-    {failed ? <p className="w-full text-xs text-red-700 dark:text-red-300">The automation settings were not changed.</p> : null}
-  </form>;
-}
-
-function StrategyRow({ strategy, poolLimit, onUpdated, expanded, onExpand }: { strategy: StrategyOverview; poolLimit: string; onUpdated: () => void; expanded: boolean; onExpand: () => void }) {
-  const [saving, setSaving] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const stats = strategyDisplayStats(strategy);
-  const availableCapital = Math.max(Number(strategy.allocation.capital_limit), Number(poolLimit));
-  const canToggle = strategy.allocation.enabled || (
-    (strategy.allocation.deployment_id !== null || strategy.allocation_ready) && availableCapital > 0
-  );
-  const timeToOutcome = strategy.attribution.median_days_to_outcome === null
-    ? strategy.exit_timing
-    : `${formatNumber(number(strategy.attribution.median_days_to_outcome), 1)} market days`;
-  const timeBasis = strategy.attribution.median_days_to_outcome === null ? "Rule" : "Observed";
-  async function toggle() {
-    if (!canToggle || saving) return;
-    setSaving(true); setFailed(false);
-    const enabled = !strategy.allocation.enabled;
-    const current = Number(strategy.allocation.capital_limit);
-    const capital = enabled && current <= 0 ? Number(poolLimit) : current;
-    try {
-      await updateStrategyAllocation(strategy.strategy_id, { strategy_version: strategy.strategy_version, capital_limit: Math.max(0, capital).toFixed(6), enabled, reason: `${enabled ? "Enabled" : "Paused"} from automated strategy workspace` });
-      onUpdated();
-    } catch (error) { console.error("Strategy toggle failed:", error); setFailed(true); }
-    finally { setSaving(false); }
-  }
-  return <div className="border-t border-slate-200 dark:border-slate-800"><article className="grid gap-4 py-4 lg:grid-cols-[minmax(16rem,1.5fr)_repeat(5,minmax(6rem,0.7fr))_auto] lg:items-center">
-    <div><div className="flex items-center gap-2"><h3 className="text-sm font-semibold">{strategy.title}</h3><Badge tone={strategy.allocation_ready ? "ok" : "neutral"}>{strategy.allocation_ready ? "Ready" : "Learning"}</Badge></div><p className="mt-1 max-w-sm text-xs text-slate-500">{strategy.description}</p></div>
-    <div><span className="text-xs text-slate-500">P&amp;L</span><strong className="block">{money(strategy.pnl.total_pnl)}</strong></div>
-    <div><span className="text-xs text-slate-500">Success</span><strong className="block">{pctFraction(stats.successRate)}</strong><span className="text-[10px] text-slate-500">{stats.basis}</span></div>
-    <div><span className="text-xs text-slate-500">Avg / trade</span><strong className="block">{pctPoints(stats.averageReturn)}</strong><span className="text-[10px] text-slate-500">{stats.basis}</span></div>
-    <div><span className="text-xs text-slate-500">Time to outcome</span><strong className="block text-xs">{timeToOutcome}</strong><span className="text-[10px] text-slate-500">{timeBasis}</span></div>
-    <div><span className="text-xs text-slate-500">Matches / 30d</span><strong className="block">{formatNumber(strategy.attribution.signals_last_30_days, 0)}</strong></div>
-    <div className="flex items-center justify-end gap-2"><label title={!canToggle ? "Assign trading capital and complete the strategy checks before enabling." : undefined} className={`flex min-h-11 items-center gap-2 text-xs ${canToggle ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}><input type="checkbox" checked={strategy.allocation.enabled} disabled={!canToggle || saving} onChange={() => void toggle()} className="h-5 w-5" />{strategy.allocation.enabled ? "On" : "Off"}</label><button type="button" aria-expanded={expanded} onClick={onExpand} className="min-h-11 border border-slate-300 px-3 text-xs dark:border-slate-700">{expanded ? "Close" : "Breakdown"}</button></div>
-    {failed ? <p className="text-xs text-red-700 dark:text-red-300 lg:col-span-7">This strategy was not changed.</p> : null}
-  </article></div>;
-}
-
-function EvidenceCard({ window }: { window: StrategyEvidenceWindow }) {
-  const arm = window.arms.find((candidate) => candidate.ambiguity_arm === "worst_case" && candidate.quarantine_arm === "masked");
-  if (!arm) return <p className="text-sm text-slate-500">This evidence window has not completed.</p>;
-  const resolved = Math.max(0, arm.trade_count - arm.open_trade_count - arm.unpriced_trade_count);
-  const success = resolved ? (resolved - arm.losing_trade_count) / resolved : null;
   return (
-    <div className={STAT_ROW_GRID}>
-      <StatTile
-        label="Period"
-        value={window.label}
-        hint={`${formatDate(window.window_start)}–${formatDate(window.window_end)}`}
-        size="md"
-      />
-      <StatTile label="Trades" value={formatNumber(resolved, 0)} size="md" />
-      <StatTile label="Success" value={pctFraction(success)} size="md" />
-      <StatTile
-        label="Average / trade"
-        value={pctPoints(arm.expectancy_per_trade_pct)}
-        size="md"
-      />
-      <StatTile label="Worst dip" value={pctPoints(arm.max_drawdown_pct)} size="md" />
+    <div className="mt-6 h-52 border-t border-slate-200 pt-4 dark:border-slate-800">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+          <XAxis dataKey="date" tickFormatter={(value: string) => formatDate(value)} tick={{ fontSize: 10, fill: theme.textMuted }} stroke={theme.gridLine} />
+          <YAxis tickFormatter={(value: number) => `$${formatNumber(value, 0)}`} tick={{ fontSize: 10, fill: theme.textMuted }} stroke={theme.gridLine} width={52} />
+          <Tooltip content={<PnlTooltip />} />
+          <Line type="stepAfter" dataKey="pnl" stroke={theme.primaryLine} strokeWidth={2} dot={{ r: 2 }} isAnimationActive={false} />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }
 
-function StrategyBreakdown({ strategy }: { strategy: StrategyOverview }) {
-  const [page, setPage] = useState(0);
-  const window = strategy.evidence_windows[page];
+function EmptyPnlChart() {
   return (
-    <section className="mb-4 border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950/40">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h4 className="text-sm font-semibold">Historical breakdown</h4>
-          <p className="text-xs text-slate-500">
-            Evidence only; instruments and signal events live in Activity.
-          </p>
-        </div>
-        <span className="text-xs text-slate-500">
-          {strategy.evidence_windows.length
-            ? `${page + 1} of ${strategy.evidence_windows.length}`
-            : "No windows"}
-        </span>
-      </div>
-      {window ? <EvidenceCard window={window} /> : null}
-      <div className="mt-4 flex gap-2">
-        <button
-          type="button"
-          disabled={page === 0}
-          onClick={() => setPage((value) => value - 1)}
-          className="min-h-11 border border-slate-300 px-3 text-xs hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:hover:bg-slate-800"
-        >
-          Previous
-        </button>
-        <button
-          type="button"
-          disabled={page >= strategy.evidence_windows.length - 1}
-          onClick={() => setPage((value) => value + 1)}
-          className="min-h-11 border border-slate-300 px-3 text-xs hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:hover:bg-slate-800"
-        >
-          Next
-        </button>
-      </div>
-      <details className="mt-4 text-xs text-slate-500">
-        <summary className="cursor-pointer">Audit detail</summary>
-        <p className="mt-2">
-          Stage: {strategy.stage ?? "not promoted"} · version: {strategy.strategy_version}
+    <div className="mt-6 flex h-52 items-center justify-center border-t border-slate-200 bg-[linear-gradient(to_bottom,transparent_31px,rgb(226_232_240/0.55)_32px)] bg-[size:100%_32px] pt-4 text-center dark:border-slate-800 dark:bg-[linear-gradient(to_bottom,transparent_31px,rgb(30_41_59/0.45)_32px)]">
+      <div className="bg-white/90 px-5 py-3 dark:bg-slate-900/90">
+        <p className="text-sm font-medium text-slate-700 dark:text-slate-200">No automated P&amp;L yet</p>
+        <p className="mt-1 max-w-sm text-xs text-slate-500">
+          The performance line begins when an automated position records a result.
         </p>
-        <p>Blockers: {strategy.allocation_refusals.join(", ") || "none"}</p>
-      </details>
+      </div>
+    </div>
+  );
+}
+
+function AutomationControl({
+  overview,
+  approvedCount,
+  onUpdated,
+}: {
+  overview: StrategyOverviewResponse;
+  approvedCount: number;
+  onUpdated: () => void;
+}) {
+  const pool = overview.paper_pool;
+  const [enabled, setEnabled] = useState(pool.enabled);
+  const [limit, setLimit] = useState(pool.capital_limit);
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setEnabled(pool.enabled);
+    setLimit(pool.capital_limit);
+  }, [pool.enabled, pool.capital_limit]);
+  const parsed = Number(limit);
+  const valid = Number.isFinite(parsed) && parsed >= 0 && (!enabled || parsed > 0);
+  const dirty = enabled !== pool.enabled || parsed !== Number(pool.capital_limit);
+  const canEnable = approvedCount > 0;
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (!valid || !dirty || saving || (enabled && !canEnable)) return;
+    setSaving(true);
+    setFailed(false);
+    try {
+      await updateStrategyPaperPool({
+        enabled,
+        capital_limit: parsed.toFixed(6),
+        reason: "Automated strategy workspace update",
+      });
+      onUpdated();
+    } catch (error) {
+      console.error("Automation update failed:", error);
+      setFailed(true);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold">Automation</h2>
+          <p className="mt-1 text-xs text-slate-500">One capital limit shared by approved strategies.</p>
+        </div>
+        <Badge tone={enabled ? "ok" : "neutral"}>{enabled ? "On" : "Off"}</Badge>
+      </div>
+      <form onSubmit={(event) => void save(event)} className="mt-5 space-y-4">
+        <label className={`flex min-h-11 items-center gap-2 text-sm font-semibold ${canEnable || enabled ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}>
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={(!canEnable && !enabled) || saving}
+            onChange={(event) => setEnabled(event.target.checked)}
+            className="h-5 w-5"
+          />
+          Allow new automated entries
+        </label>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="w-48 text-xs font-medium text-slate-600 dark:text-slate-300">
+            Trading capital (USD)
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={limit}
+              onChange={(event) => setLimit(event.target.value)}
+              className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-sm tabular-nums dark:border-slate-700 dark:bg-slate-950"
+            />
+          </label>
+          <button type="submit" disabled={!valid || !dirty || saving || (enabled && !canEnable)} className="min-h-11 cursor-pointer border border-blue-700 bg-blue-700 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+      <dl className="mt-5 grid grid-cols-3 gap-3 border-t border-slate-200 pt-4 text-xs dark:border-slate-800">
+        <div><dt className="text-slate-500">Working</dt><dd className="font-semibold tabular-nums">{money(pool.invested_capital)}</dd></div>
+        <div><dt className="text-slate-500">Reserved</dt><dd className="font-semibold tabular-nums">{money(pool.reserved_capital)}</dd></div>
+        <div><dt className="text-slate-500">Available</dt><dd className="font-semibold tabular-nums">{money(pool.remaining_capital)}</dd></div>
+      </dl>
+      {!canEnable ? (
+        <p className="mt-4 text-xs text-amber-700 dark:text-amber-300">
+          Automation stays off until at least one strategy passes validation.
+        </p>
+      ) : null}
+      {overview.entry_block.new_entries_blocked ? (
+        <p className="mt-4 text-xs text-amber-700 dark:text-amber-300">
+          <strong>New entries are paused by a safety control.</strong> Existing automated positions remain managed.
+        </p>
+      ) : null}
+      {failed ? <p className="mt-4 text-xs text-red-700 dark:text-red-300">The automation settings were not changed.</p> : null}
     </section>
   );
 }
 
-function ActivityView({ strategies }: { strategies: StrategyOverview[] }) {
-  const [strategyId, setStrategyId] = useState(strategies[0]?.strategy_id ?? "");
-  const [cursor, setCursor] = useState<number | null>(null);
-  const [history, setHistory] = useState<Array<number | null>>([]);
-  const signals = useAsync(() => fetchFiredSignals(cursor, strategyId), [cursor, strategyId]);
-  function select(value: string) {
-    setStrategyId(value);
-    setCursor(null);
-    setHistory([]);
-  }
-  function newer() {
-    const previous = history.at(-1) ?? null;
-    setHistory((items) => items.slice(0, -1));
-    setCursor(previous);
-  }
-  function older() {
-    setHistory((items) => [...items, cursor]);
-    setCursor(signals.data?.next_cursor ?? null);
+function SignalValidation({ overview }: { overview: StrategyOverviewResponse }) {
+  const summary = aggregate(overview);
+  return (
+    <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold">Forward signal validation</h2>
+          <p className="mt-1 max-w-2xl text-xs text-slate-500">
+            A signal is recorded only after every rule aligns. It then remains an open observation until its exit rule resolves.
+          </p>
+        </div>
+        <Badge tone="info">Completed daily bars</Badge>
+      </div>
+      <dl className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div><dt className="text-xs text-slate-500">Open observations</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{formatNumber(summary.awaitingOutcome, 0)}</dd></div>
+        <div><dt className="text-xs text-slate-500">Completed</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{formatNumber(summary.resolved, 0)}</dd></div>
+        <div><dt className="text-xs text-slate-500">Successful</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{formatNumber(summary.winners, 0)}</dd></div>
+        <div><dt className="text-xs text-slate-500">Unsuccessful</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{formatNumber(summary.unsuccessful, 0)}</dd></div>
+      </dl>
+      <p className="mt-4 border-t border-slate-200 pt-4 text-xs text-slate-500 dark:border-slate-800">
+        There is no “pending strategy” state and no near-trigger forecast in the current daily evaluator.
+      </p>
+    </section>
+  );
+}
+
+function StrategyToggle({
+  strategy,
+  poolLimit,
+  onUpdated,
+}: {
+  strategy: StrategyOverview;
+  poolLimit: string;
+  onUpdated: () => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
+  async function toggle() {
+    if (saving || (!strategy.allocation.enabled && !strategy.allocation_ready)) return;
+    setSaving(true);
+    setFailed(false);
+    const enabled = !strategy.allocation.enabled;
+    const current = Number(strategy.allocation.capital_limit);
+    const capital = enabled && current <= 0 ? Number(poolLimit) : current;
+    try {
+      await updateStrategyAllocation(strategy.strategy_id, {
+        strategy_version: strategy.strategy_version,
+        capital_limit: Math.max(0, capital).toFixed(6),
+        enabled,
+        reason: `${enabled ? "Enabled" : "Paused"} from automated strategy workspace`,
+      });
+      onUpdated();
+    } catch (error) {
+      console.error("Strategy toggle failed:", error);
+      setFailed(true);
+    } finally {
+      setSaving(false);
+    }
   }
   return (
-    <section className="border-t border-slate-200 py-4 dark:border-slate-800">
-      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-        <label className="text-xs font-medium text-slate-600 dark:text-slate-300">
-          Strategy
-          <select
-            value={strategyId}
-            onChange={(event) => select(event.target.value)}
-            className="mt-1 block min-h-11 min-w-64 border border-slate-300 bg-white px-3 dark:border-slate-700 dark:bg-slate-950"
-          >
-            {strategies.map((strategy) => (
-              <option key={strategy.strategy_id} value={strategy.strategy_id}>
-                {strategy.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <p className="text-xs text-slate-500">15 events per page · newest first</p>
+    <div>
+      <label className="flex min-h-11 cursor-pointer items-center justify-end gap-2 text-xs font-medium">
+        <input type="checkbox" checked={strategy.allocation.enabled} disabled={saving} onChange={() => void toggle()} className="h-5 w-5" />
+        {strategy.allocation.enabled ? "Enabled" : "Paused"}
+      </label>
+      {failed ? <p className="text-xs text-red-700 dark:text-red-300">Not changed</p> : null}
+    </div>
+  );
+}
+
+function ApprovedStrategy({
+  strategy,
+  poolLimit,
+  onUpdated,
+}: {
+  strategy: StrategyOverview;
+  poolLimit: string;
+  onUpdated: () => void;
+}) {
+  return (
+    <article className="grid gap-4 border-t border-slate-200 py-4 dark:border-slate-800 lg:grid-cols-[minmax(16rem,1.4fr)_repeat(4,minmax(6rem,0.65fr))_auto] lg:items-center">
+      <div>
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold">{strategy.title}</h3>
+          <Badge tone={strategy.allocation_ready ? "ok" : "warn"}>
+            {strategy.allocation_ready ? "Approved" : "Managing existing position"}
+          </Badge>
+        </div>
+        <p className="mt-1 max-w-md text-xs text-slate-500">{strategy.description}</p>
       </div>
-      {signals.loading ? (
-        <SectionSkeleton rows={6} />
-      ) : signals.error ? (
-        <SectionError onRetry={signals.refetch} />
-      ) : !signals.data?.items.length ? (
-        <EmptyState
-          title="No signal activity"
-          description="This strategy has not produced a matching event yet."
-        />
-      ) : (
-        <>
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead className="text-xs text-slate-500">
-                <tr>
-                  <th className="px-2 py-2">Instrument</th>
-                  <th className="px-2 py-2">Date</th>
-                  <th className="px-2 py-2">Outcome</th>
-                  <th className="px-2 py-2 text-right">Return</th>
-                  <th className="px-2 py-2 text-right">Capital decision</th>
-                </tr>
-              </thead>
-              <tbody>
-                {signals.data.items.map((signal: FiredSignal) => (
-                  <tr key={signal.signal_id} className="border-t border-slate-200 dark:border-slate-800">
-                    <td className="px-2 py-2">
-                      <strong>{signal.symbol}</strong>
-                      <div className="text-xs text-slate-500">{signal.company_name}</div>
-                    </td>
-                    <td className="px-2 py-2">{formatDate(signal.signal_bar_date)}</td>
-                    <td className="px-2 py-2">{signal.outcome ?? "In progress"}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">
-                      {pctPoints(signal.gross_return_pct)}
-                    </td>
-                    <td className="px-2 py-2 text-right">
-                      {signal.funding_status === "funded" ? "Used capital" : "Observed only"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="mt-3 flex gap-2">
-            <button
-              type="button"
-              disabled={!history.length}
-              onClick={newer}
-              className="min-h-11 border border-slate-300 px-3 text-xs hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:hover:bg-slate-800"
-            >
-              Newer
-            </button>
-            <button
-              type="button"
-              disabled={signals.data.next_cursor === null}
-              onClick={older}
-              className="min-h-11 border border-slate-300 px-3 text-xs hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:hover:bg-slate-800"
-            >
-              Older
-            </button>
-          </div>
-        </>
-      )}
-    </section>
+      <div><span className="text-xs text-slate-500">P&amp;L</span><strong className="block tabular-nums">{money(strategy.pnl.total_pnl)}</strong></div>
+      <div><span className="text-xs text-slate-500">Completed</span><strong className="block tabular-nums">{formatNumber(strategy.attribution.resolved_entries, 0)}</strong></div>
+      <div><span className="text-xs text-slate-500">Success</span><strong className="block tabular-nums">{formatPct(number(strategy.attribution.win_rate))}</strong></div>
+      <div><span className="text-xs text-slate-500">Average / trade</span><strong className="block tabular-nums">{pctPoints(strategy.attribution.shadow_average_return_pct)}</strong></div>
+      <StrategyToggle strategy={strategy} poolLimit={poolLimit} onUpdated={onUpdated} />
+    </article>
+  );
+}
+
+function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
+  const window = primaryEvidence(strategy);
+  const arm = representativeArm(strategy);
+  const completed = completedEvidenceCount(strategy);
+  const failures = strategy.allocation_refusals.map(refusalLabel);
+  const failedOutcomes = Math.max(0, strategy.attribution.resolved_entries - strategy.attribution.winning_entries);
+  if (!window || !arm) {
+    return (
+      <div className="border-t border-slate-200 px-4 py-4 text-sm text-slate-500 dark:border-slate-800">
+        No completed valid evidence is available. {failures[0] ?? "The research run has not finished."}
+      </div>
+    );
+  }
+  const resolved = Math.max(0, arm.trade_count - arm.open_trade_count - arm.unpriced_trade_count);
+  return (
+    <div className="border-t border-slate-200 px-4 py-4 dark:border-slate-800">
+      <div className="grid gap-5 lg:grid-cols-[1.3fr_1fr]">
+        <div>
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Primary evidence</h4>
+          <p className="mt-1 text-xs text-slate-500">{window.label} · {formatDate(window.window_start)}–{formatDate(window.window_end)} · pessimistic execution arm</p>
+          <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div><dt className="text-xs text-slate-500">Trades</dt><dd className="font-semibold tabular-nums">{formatNumber(resolved, 0)}</dd></div>
+            <div><dt className="text-xs text-slate-500">Profit factor</dt><dd className="font-semibold tabular-nums">{formatNumber(number(arm.profit_factor), 2)}</dd></div>
+            <div><dt className="text-xs text-slate-500">Vs buy &amp; hold</dt><dd className="font-semibold tabular-nums">{pctPoints(arm.return_vs_buy_and_hold_pct)}</dd></div>
+            <div><dt className="text-xs text-slate-500">Deflated Sharpe</dt><dd className="font-semibold tabular-nums">{formatNumber(number(arm.deflated_sharpe), 2)}</dd></div>
+          </dl>
+        </div>
+        <div>
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Why it cannot use capital</h4>
+          <ul className="mt-2 space-y-1 text-xs text-slate-600 dark:text-slate-300">
+            {(failures.length ? failures : ["No remaining blockers"]).slice(0, 4).map((failure) => <li key={failure}>• {failure}</li>)}
+          </ul>
+          {failures.length > 4 ? <p className="mt-1 text-xs text-slate-500">+ {failures.length - 4} more checks</p> : null}
+        </div>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
+        <span>Evidence windows complete: <strong className="text-slate-700 dark:text-slate-200">{completed}/{strategy.evidence_windows.length}</strong></span>
+        <span>Forward observations: <strong className="text-slate-700 dark:text-slate-200">{strategy.attribution.fired_entries}</strong></span>
+        <span>Completed outcomes: <strong className="text-slate-700 dark:text-slate-200">{strategy.attribution.resolved_entries}</strong></span>
+        <span>Successful / unsuccessful: <strong className="text-slate-700 dark:text-slate-200">{strategy.attribution.winning_entries} / {failedOutcomes}</strong></span>
+      </div>
+    </div>
+  );
+}
+
+function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
+  const [expanded, setExpanded] = useState(false);
+  const arm = representativeArm(strategy);
+  const validation = validationState(strategy);
+  const ci = arm && arm.expectancy_ci_low_pct !== null && arm.expectancy_ci_high_pct !== null
+    ? `${pctPoints(arm.expectancy_ci_low_pct)} to ${pctPoints(arm.expectancy_ci_high_pct)}`
+    : "—";
+  return (
+    <article className="border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+      <div className="grid gap-4 p-4 lg:grid-cols-[minmax(16rem,1.5fr)_repeat(3,minmax(7rem,0.7fr))_auto] lg:items-center">
+        <div>
+          <div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold">{strategy.title}</h3><Badge tone={validation.tone}>{validation.label}</Badge></div>
+          <p className="mt-1 max-w-lg text-xs text-slate-500">{validation.explanation}</p>
+        </div>
+        <div><span className="text-xs text-slate-500">Expected / trade</span><strong className="block tabular-nums">{pctPoints(arm?.expectancy_per_trade_pct ?? null)}</strong><span className="text-[10px] text-slate-500">After modelled costs</span></div>
+        <div><span className="text-xs text-slate-500">95% range</span><strong className="block text-xs tabular-nums">{ci}</strong><span className="text-[10px] text-slate-500">Must clear 0%</span></div>
+        <div><span className="text-xs text-slate-500">Worst drawdown</span><strong className="block tabular-nums">{pctPoints(arm?.max_drawdown_pct ?? null)}</strong><span className="text-[10px] text-slate-500">Backtest</span></div>
+        <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} className="min-h-11 cursor-pointer border border-slate-300 px-3 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">
+          {expanded ? "Hide evidence" : "View evidence"}
+        </button>
+      </div>
+      {expanded ? <EvidenceDetail strategy={strategy} /> : null}
+    </article>
   );
 }
 
 export function StrategiesPage() {
   const overview = useAsync(fetchStrategyOverview, []);
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
-  const [tab, setTab] = useState<"overview" | "activity">("overview");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const summary = useMemo(() => overview.data ? aggregate(overview.data) : null, [overview.data]);
+  const approvedStrategies = overview.data?.strategies.filter((strategy) => strategy.allocation_ready || strategy.allocation.enabled) ?? [];
+  const researchCandidates = overview.data?.strategies.filter((strategy) => !strategy.allocation_ready && !strategy.allocation.enabled) ?? [];
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       <header>
         <h1 className="text-xl font-semibold">Automated strategies</h1>
         <p className="mt-1 max-w-3xl text-sm text-slate-600 dark:text-slate-400">
-          Allocate capital once, choose the strategies allowed to act, and monitor how the
-          automated portfolio performs.
+          Monitor the automated pot and control only strategies that have passed validation.
         </p>
       </header>
       {overview.loading ? (
@@ -380,110 +508,81 @@ export function StrategiesPage() {
         <SectionError onRetry={overview.refetch} />
       ) : overview.data && summary ? (
         <>
+          {summary.approved === 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+              <span><strong>No strategies are approved for automation.</strong> Research candidates cannot use capital.</span>
+              <span className="text-xs">0 of {overview.data.strategies.length} ready</span>
+            </div>
+          ) : null}
           {!overview.data.demo_connection && !overview.data.live_strategy_activation_available ? (
             <div className="border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
               <strong>Real-money strategy activation is unavailable.</strong>
             </div>
           ) : null}
-          <nav className="flex border-b border-slate-200 dark:border-slate-800">
-            <button
-              type="button"
-              onClick={() => setTab("overview")}
-              className={`min-h-11 border-b-2 px-4 text-sm ${tab === "overview" ? "border-blue-600 font-semibold" : "border-transparent text-slate-500"}`}
-            >
-              Overview
-            </button>
-            <button
-              type="button"
-              onClick={() => setTab("activity")}
-              className={`min-h-11 border-b-2 px-4 text-sm ${tab === "activity" ? "border-blue-600 font-semibold" : "border-transparent text-slate-500"}`}
-            >
-              Activity
-            </button>
-          </nav>
-          {tab === "overview" ? (
-            <>
-              <section className="py-1">
-                <div className={STAT_ROW_GRID}>
-                  <StatTile
-                    label="Automated P&L"
-                    value={formatMoney(summary.totalPnl, "USD")}
-                    hint="Closed + current positions"
-                  />
-                  <StatTile
-                    label="Capital assigned"
-                    value={money(overview.data.paper_pool.capital_limit)}
-                  />
-                  <StatTile
-                    label="Capital working"
-                    value={money(overview.data.paper_pool.invested_capital)}
-                  />
-                  <StatTile label="Open positions" value={formatNumber(summary.activePositions, 0)} />
-                  <StatTile
-                    label="Success rate"
-                    value={pctFraction(summary.successRate)}
-                    hint={summary.performanceBasis}
-                    size="md"
-                  />
-                  <StatTile
-                    label="Average / trade"
-                    value={pctFraction(summary.averageReturn)}
-                    hint={summary.performanceBasis}
-                    size="md"
-                  />
+
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(19rem,1fr)]">
+            <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-sm font-semibold">Portfolio performance</h2>
+                  <p className="mt-1 text-xs text-slate-500">Automated positions only; research backtests are excluded.</p>
                 </div>
-                {pnlHistory.loading ? (
-                  <p className="mt-4 text-xs text-slate-500">Loading P&amp;L history…</p>
-                ) : pnlHistory.error ? (
-                  <SectionError onRetry={pnlHistory.refetch} />
-                ) : pnlHistory.data?.points.length ? (
-                  <PnlChart history={pnlHistory.data.points} />
-                ) : null}
-              </section>
-              <AutomationControl overview={overview.data} onUpdated={overview.refetch} />
-              <section className="border-t border-slate-200 dark:border-slate-800">
-                <div className="py-4">
-                  <h2 className="text-sm font-semibold">Strategies</h2>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Backtest figures fill the early record; observed results replace them as
-                    automated outcomes resolve.
-                  </p>
-                </div>
-                {overview.data.strategies.length ? (
-                  overview.data.strategies.map((strategy) => (
-                    <div key={strategy.strategy_id}>
-                      <StrategyRow
-                        strategy={strategy}
-                        poolLimit={overview.data?.paper_pool.capital_limit ?? "0"}
-                        onUpdated={overview.refetch}
-                        expanded={expandedId === strategy.strategy_id}
-                        onExpand={() =>
-                          setExpandedId((current) =>
-                            current === strategy.strategy_id ? null : strategy.strategy_id,
-                          )
-                        }
-                      />
-                      {expandedId === strategy.strategy_id ? (
-                        <StrategyBreakdown strategy={strategy} />
-                      ) : null}
-                    </div>
-                  ))
-                ) : (
-                  <EmptyState
-                    title="No registered strategies"
-                    description="Strategies appear here after they are registered."
-                  />
-                )}
-              </section>
-            </>
-          ) : overview.data.strategies.length ? (
-            <ActivityView strategies={overview.data.strategies} />
-          ) : (
-            <EmptyState
-              title="No strategy activity"
-              description="Register a strategy before viewing its signal activity."
-            />
-          )}
+                <Badge tone="neutral">{overview.data.demo_connection ? "Demo account" : "Connected account"}</Badge>
+              </div>
+              <div className="mt-5 grid grid-cols-2 gap-5 sm:grid-cols-4">
+                <Metric label="Total P&L" value={formatMoney(summary.totalPnl, "USD")} hint="Realised + open" />
+                <Metric label="Average / trade" value={formatPct(summary.averageReturn)} hint="Completed outcomes" />
+                <Metric label="Success rate" value={formatPct(summary.successRate)} hint={`${formatNumber(summary.resolved, 0)} completed`} />
+                <Metric label="Open positions" value={formatNumber(summary.activePositions, 0)} />
+              </div>
+              {pnlHistory.loading ? (
+                <div className="mt-6 flex h-52 items-center justify-center border-t border-slate-200 text-xs text-slate-500 dark:border-slate-800">Loading P&amp;L history…</div>
+              ) : pnlHistory.error ? (
+                <div className="mt-6 border-t border-slate-200 pt-4 dark:border-slate-800"><SectionError onRetry={pnlHistory.refetch} /></div>
+              ) : pnlHistory.data?.points.length ? (
+                <PnlChart history={pnlHistory.data.points} />
+              ) : (
+                <EmptyPnlChart />
+              )}
+            </section>
+            <AutomationControl overview={overview.data} approvedCount={summary.approved} onUpdated={overview.refetch} />
+          </div>
+
+          <SignalValidation overview={overview.data} />
+
+          <section>
+            <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold">Approved &amp; managed strategies</h2>
+                <p className="mt-1 text-xs text-slate-500">Approved strategies may use the shared pot; an invalidated strategy remains visible only while it manages an existing position.</p>
+              </div>
+              <span className="text-xs text-slate-500">{summary.approved} approved</span>
+            </div>
+            {approvedStrategies.length ? (
+              <div>
+                {approvedStrategies.map((strategy) => (
+                  <ApprovedStrategy key={strategy.strategy_id} strategy={strategy} poolLimit={overview.data?.paper_pool.capital_limit ?? "0"} onUpdated={overview.refetch} />
+                ))}
+              </div>
+            ) : (
+              <EmptyState title="Nothing can trade yet" description="Candidates move here only after recent evidence, risk, cost and execution checks all pass." />
+            )}
+          </section>
+
+          <section>
+            <div className="mb-3 flex flex-wrap items-end justify-between gap-2 border-t border-slate-200 pt-5 dark:border-slate-800">
+              <div>
+                <h2 className="text-sm font-semibold">Research pipeline</h2>
+                <p className="mt-1 max-w-3xl text-xs text-slate-500">
+                  These rules are measured, not selectable. Current evaluation uses completed daily bars; it does not predict which rule is about to fire.
+                </p>
+              </div>
+              <span className="text-xs text-slate-500">{researchCandidates.length} candidates</span>
+            </div>
+            <div className="space-y-2">
+              {researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} />)}
+            </div>
+          </section>
         </>
       ) : null}
     </div>
