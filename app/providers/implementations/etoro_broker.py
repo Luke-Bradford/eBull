@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import decimal
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
@@ -26,6 +26,7 @@ from app.config import settings
 from app.providers.broker import (
     BrokerAccountRiskSnapshot,
     BrokerClosedTrade,
+    BrokerCloseOrderDetail,
     BrokerCostComponent,
     BrokerEligibilityResponse,
     BrokerInstrumentEligibility,
@@ -42,7 +43,11 @@ from app.providers.broker import (
     BrokerOrderSubmissionUncertain,
     BrokerPortfolio,
     BrokerPosition,
+    BrokerPositionCloseSubmission,
+    BrokerPositionEditSubmission,
     BrokerPositionExecution,
+    BrokerPositionMutationError,
+    BrokerPositionMutationUncertain,
     BrokerProvider,
     BrokerStrategyOrder,
     BrokerWhatIfCostResponse,
@@ -441,6 +446,170 @@ class EtoroBrokerProvider(BrokerProvider):
             )
 
         return _normalise_close_order_response(raw)
+
+    def edit_demo_strategy_position(
+        self,
+        *,
+        position_id: int,
+        stop_loss_rate: Decimal,
+        take_profit_rate: Decimal | None,
+        request_id: UUID,
+        persist_response: Callable[[dict[str, Any]], None] | None = None,
+    ) -> BrokerPositionEditSubmission:
+        """Strict v2 adapter for automated demo-only position edits."""
+        if self._env != "demo":
+            raise BrokerPositionMutationError("strategy position edits require demo credentials")
+        if position_id <= 0 or stop_loss_rate <= 0:
+            raise BrokerPositionMutationError("position id and stop rate must be positive")
+        body: dict[str, Any] = {
+            "stopLossRate": float(stop_loss_rate),
+            "stopLossType": "fixed",
+        }
+        if take_profit_rate is not None:
+            if take_profit_rate <= 0:
+                raise BrokerPositionMutationError("take-profit rate must be positive")
+            body["takeProfitRate"] = float(take_profit_rate)
+        raw: dict[str, Any] | None = None
+        try:
+            response = self._http_write.patch(
+                f"/api/v2/trading/demo/positions/{position_id}",
+                json=body,
+                headers=self._request_headers(request_id),
+            )
+            raw = _safe_json(response)
+            if persist_response is not None:
+                persist_response(raw)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            error_raw = raw or _safe_json(exc.response)
+            if 400 <= exc.response.status_code < 500:
+                raise BrokerPositionMutationError(
+                    f"demo position edit rejected with HTTP {exc.response.status_code}",
+                    raw_payload=error_raw,
+                ) from exc
+            raise BrokerPositionMutationUncertain(
+                "demo position edit returned a server error", raw_payload=error_raw
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BrokerPositionMutationUncertain("demo position edit transport failed") from exc
+        assert raw is not None
+        try:
+            operation_id = UUID(str(raw["operationId"]))
+            returned_position_id = int(raw["positionId"])
+            reference_id = UUID(str(raw["referenceId"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BrokerPositionMutationUncertain(
+                "demo position edit response identity is malformed", raw_payload=raw
+            ) from exc
+        if returned_position_id != position_id or reference_id != request_id:
+            raise BrokerPositionMutationUncertain(
+                "demo position edit response identity does not match intent", raw_payload=raw
+            )
+        return BrokerPositionEditSubmission(operation_id, returned_position_id, reference_id, raw)
+
+    def close_demo_strategy_position(
+        self,
+        *,
+        position_id: int,
+        instrument_id: int,
+        request_id: UUID,
+        persist_response: Callable[[dict[str, Any]], None] | None = None,
+    ) -> BrokerPositionCloseSubmission:
+        """Strict v1 adapter for an exact, whole demo-position close."""
+        if self._env != "demo":
+            raise BrokerPositionMutationError("strategy position closes require demo credentials")
+        if position_id <= 0 or instrument_id <= 0:
+            raise BrokerPositionMutationError("position and instrument ids must be positive")
+        raw: dict[str, Any] | None = None
+        try:
+            response = self._http_write.post(
+                f"/api/v1/trading/execution/demo/market-close-orders/positions/{position_id}",
+                json={"InstrumentID": instrument_id, "UnitsToDeduct": None},
+                headers=self._request_headers(request_id),
+            )
+            raw = _safe_json(response)
+            if persist_response is not None:
+                persist_response(raw)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            error_raw = raw or _safe_json(exc.response)
+            if 400 <= exc.response.status_code < 500:
+                raise BrokerPositionMutationError(
+                    f"demo position close rejected with HTTP {exc.response.status_code}",
+                    raw_payload=error_raw,
+                ) from exc
+            raise BrokerPositionMutationUncertain(
+                "demo position close returned a server error", raw_payload=error_raw
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BrokerPositionMutationUncertain("demo position close transport failed") from exc
+        assert raw is not None
+        try:
+            order = raw["orderForClose"]
+            broker_order_ref = int(order["orderID"])
+            returned_position_id = int(order["positionID"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BrokerPositionMutationUncertain(
+                "demo position close response identity is malformed", raw_payload=raw
+            ) from exc
+        if broker_order_ref <= 0 or returned_position_id != position_id:
+            raise BrokerPositionMutationUncertain(
+                "demo position close response identity does not match intent", raw_payload=raw
+            )
+        return BrokerPositionCloseSubmission(str(broker_order_ref), returned_position_id, raw)
+
+    def get_demo_close_order(
+        self,
+        *,
+        order_id: str,
+        persist_response: Callable[[dict[str, Any]], None] | None = None,
+    ) -> BrokerCloseOrderDetail:
+        """Resolve a close order without inferring success from disappearance."""
+        if self._env != "demo" or not order_id.isdigit() or int(order_id) <= 0:
+            raise BrokerPositionMutationError("valid demo close-order identity is required")
+        raw: dict[str, Any] | None = None
+        try:
+            response = self._http_read.get(
+                f"/api/v1/trading/info/demo/close-orders/{order_id}",
+                headers=self._request_headers(),
+            )
+            raw = _safe_json(response)
+            if persist_response is not None:
+                persist_response(raw)
+            response.raise_for_status()
+            returned_order_id = int(raw["orderID"])
+            raw_positions = raw.get("positions") or []
+            if not isinstance(raw_positions, list):
+                raise TypeError("positions must be a list")
+            if any(not isinstance(row, dict) for row in raw_positions):
+                raise TypeError("every affected position must be an object")
+            position_ids = tuple(int(row["positionID"]) for row in raw_positions)
+            error_code = raw.get("errorCode")
+            raw_status = str(raw.get("statusID", "unknown"))
+            reference = raw.get("referenceID")
+            reference_id = UUID(str(reference)) if reference else None
+        except httpx.HTTPStatusError as exc:
+            raise BrokerPositionMutationError(
+                f"demo close-order lookup failed with HTTP {exc.response.status_code}",
+                raw_payload=raw or _safe_json(exc.response),
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BrokerPositionMutationUncertain("demo close-order lookup transport failed") from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BrokerPositionMutationUncertain(
+                "demo close-order lookup response is malformed", raw_payload=raw
+            ) from exc
+        assert raw is not None
+        if returned_order_id != int(order_id):
+            raise BrokerPositionMutationUncertain("demo close-order lookup identity does not match", raw_payload=raw)
+        status: OrderStatus
+        if error_code not in (None, 0, "0"):
+            status = "rejected"
+        elif position_ids:
+            status = "filled"
+        else:
+            status = "pending"
+        return BrokerCloseOrderDetail(order_id, status, raw_status, position_ids, reference_id, raw)
 
     def get_order_status(self, broker_order_ref: str) -> BrokerOrderResult:
         try:
@@ -1380,6 +1549,7 @@ def _build_result(
 def _safe_json(response: httpx.Response) -> dict[str, Any]:
     """Extract JSON from an error response, falling back to text."""
     try:
-        return response.json()  # type: ignore[no-any-return]
+        value = response.json()
+        return dict(value) if isinstance(value, dict) else {"raw_json": value}
     except Exception:
         return {"raw_text": response.text}

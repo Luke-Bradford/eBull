@@ -393,3 +393,33 @@ When you verify a NEW capability or find drift: update `docs/etoro-api-reference
 Primary pages: `trading--demo/create-an-order`,
 `trading--demo/get-what-if-trading-cost-breakdown`, and guides
 `calculate-available-cash`, `calculate-total-invested`, `calculate-equity`.
+
+## Automated paper-position boundary — VERIFIED 2026-08-09 (#2452)
+
+- Strategy edits use only `PATCH /api/v2/trading/demo/positions/{positionId}`;
+  strategy closes use only
+  `POST /api/v1/trading/execution/demo/market-close-orders/positions/{positionId}`.
+  Both adapters refuse real credentials and require the exact actively owned
+  broker position id before domain code reaches broker I/O.
+- PATCH returns asynchronous acceptance only. Persist the UUID first, require
+  response `positionId` and `referenceId` to match, then re-fetch the portfolio;
+  never mark the edit applied from HTTP 202.
+- A close is complete only when
+  `GET /api/v1/trading/info/demo/close-orders/{orderId}` returns the exact owned
+  id in `positions[]`. Portfolio disappearance alone cannot distinguish broker
+  SL/TP, manual intervention, missing data and the requested close.
+- Neither endpoint documents lookup by request UUID. If the process loses the
+  accepted operation/order identity, re-sync once: exact requested SL/TP already
+  landed may be accepted; every other outcome is `reconcile_required`, never a
+  newly keyed replay.
+- Keep only policy revisions and material mutation facts. Unchanged completed
+  bars and polling heartbeats write no rows; repeat rejection of the same
+  material edit reuses its terminal audit result.
+- Return the untouched response object with every typed mutation result/error.
+  Persist it before advancing the material operation: PATCH/latest close detail
+  on the operation row and close submission on its linked order. Overwrite the
+  latest close-detail response rather than appending a row for every poll.
+
+Primary pages: `trading--demo/modify-stop-loss-and-take-profit-settings-on-an-open-position`,
+`trading--demo/close-demo-position-by-units`, and
+`trading--demo/get-close-order-information-and-closed-position-details`.

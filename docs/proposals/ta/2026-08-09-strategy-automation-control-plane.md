@@ -271,6 +271,16 @@ the smallest control-plane schema is:
 | preflight observations | candidate request or changed eligibility state | 24 months; no unchanged polling rows |
 | strategy daily metrics | strategy/version/day/stage arm | durable compact aggregate |
 
+The #2452 position-manager schema measured **128 KiB including indexes when
+empty** on PostgreSQL 17. It adds four narrow relations: registered variants,
+one current policy, policy revisions, and material operations. A protected
+position/bar poll writes zero rows; an actual stop change or close writes one
+compact operation and repeated rejection of the same material edit is unique.
+There is no tick, bar, eligibility or portfolio payload copy in these
+relations. Each material operation retains at most the latest small broker
+response object (and the linked close order retains its submission response),
+so auditability does not create an append-only polling heap.
+
 P&L is derived from owned trade order/fill links and broker close history; it is
 not copied into the general `positions` aggregate and not duplicated on every
 signal. The strategy page uses strategy-owned rows only. The main portfolio page
@@ -380,10 +390,17 @@ are actually created.
    the full body remains process-local and one SHA-256 fingerprint is retained
    per order. Repeated polls append no JSON. No broker writer or paper allocator
    is enabled.
-7. **Paper allocator/executor:** exact strategy version, sleeve cash, current
-   preflight, SL/TP and portfolio guard; no live key path.
-8. **Owned-position manager:** exact-position exits, timeout and separately
-   registered ratchet variants; asynchronous PATCH re-sync.
+7. **Paper allocator/executor — implemented:** exact strategy version, sleeve
+   cash, current eligibility/cost/account-risk preflight, fixed SL/TP and
+   portfolio guard. The writer has one hard-coded demo path and no live-key
+   selection.
+8. **Owned-position manager — implemented:** exact-position fixed-exit repair,
+   timeout/strategy/emergency closes, and separately promoted ratchet variants.
+   Every material PATCH/close intent is durable before broker I/O; PATCH is
+   re-synced and close detail must name the owned position before application.
+   An unowned id fails before I/O, same-instrument manual positions are never
+   mutated, kill switches leave risk reduction available, and unchanged bars or
+   polling heartbeats add no database rows. Live credentials are refused.
 9. **Paper P&L and picker allocation controls:** strategy-only P&L, shadow versus
    funded capture, manual allocation changes with audit.
 10. **Live promotion:** requires minimum forward/paper evidence, reconciliation

@@ -12,7 +12,7 @@ balance).  It does not own DB access or domain logic.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -79,6 +79,49 @@ class BrokerOrderSubmissionError(RuntimeError):
 
 class BrokerOrderSubmissionUncertain(BrokerOrderSubmissionError):
     """Transport/response failure requires lookup by the same request UUID."""
+
+
+class BrokerPositionMutationError(RuntimeError):
+    """A demo strategy position mutation was explicitly rejected."""
+
+    def __init__(self, message: str, *, raw_payload: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.raw_payload = raw_payload
+
+
+class BrokerPositionMutationUncertain(BrokerPositionMutationError):
+    """A position mutation may have reached the broker and must be re-synced."""
+
+
+@dataclass(frozen=True)
+class BrokerPositionEditSubmission:
+    """Asynchronous acceptance identity for an exact-position SL/TP edit."""
+
+    operation_id: UUID
+    position_id: int
+    reference_id: UUID
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerPositionCloseSubmission:
+    """Acceptance identity for an exact-position close order."""
+
+    broker_order_ref: str
+    position_id: int
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerCloseOrderDetail:
+    """Current exact close-order result and the positions it affected."""
+
+    broker_order_ref: str
+    status: OrderStatus
+    broker_status: str
+    position_ids: tuple[int, ...]
+    reference_id: UUID | None
+    raw_payload: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -449,6 +492,38 @@ class BrokerProvider(ABC):
         submitted.  It is therefore usable even when a process crashed before
         persisting the broker-assigned order id.
         """
+        raise NotImplementedError
+
+    def edit_demo_strategy_position(
+        self,
+        *,
+        position_id: int,
+        stop_loss_rate: Decimal,
+        take_profit_rate: Decimal | None,
+        request_id: UUID,
+        persist_response: Callable[[dict[str, Any]], None] | None = None,
+    ) -> BrokerPositionEditSubmission:
+        """Edit one demo position; automated strategy code has no real path."""
+        raise NotImplementedError
+
+    def close_demo_strategy_position(
+        self,
+        *,
+        position_id: int,
+        instrument_id: int,
+        request_id: UUID,
+        persist_response: Callable[[dict[str, Any]], None] | None = None,
+    ) -> BrokerPositionCloseSubmission:
+        """Close one whole demo position by its exact broker id."""
+        raise NotImplementedError
+
+    def get_demo_close_order(
+        self,
+        *,
+        order_id: str,
+        persist_response: Callable[[dict[str, Any]], None] | None = None,
+    ) -> BrokerCloseOrderDetail:
+        """Resolve one exact demo close order and its affected position ids."""
         raise NotImplementedError
 
     def check_instrument_eligibility(

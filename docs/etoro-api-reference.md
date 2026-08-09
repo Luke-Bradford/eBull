@@ -110,7 +110,7 @@ GET+POST requests cannot exceed the API limit.
 - Cache static data locally (instrument IDs are immutable)
 - Batch rate requests (max 100 IDs per call; eBull uses 50 for safety)
 - Sequence per-instrument calls with throttle delay
-- Land every structured field in SQL — raw disk dumps for eToro were retired in #471 (`instruments` / `price_daily` / `quotes` / `exchanges` tables ARE the audit trail)
+- Land every structured field in SQL — raw disk dumps for eToro were retired in #471 (`instruments` / `price_daily` / `quotes` / `exchanges` tables ARE the market-data audit trail). Automated broker mutations additionally retain one small latest response object on their material operation/order row; they do not append polling payloads.
 
 ---
 
@@ -144,7 +144,7 @@ GET+POST requests cannot exceed the API limit.
 | DELETE | `/api/v1/trading/execution/market-open-orders/{orderId}` | Cancel pending open order | Not used (v1) |
 | POST | `/api/v1/trading/execution/market-close-orders/positions/{positionId}` | Close position — body `UnitsToDeduct` nullable → partial close (omit = full). Live doc also lists `InstrumentID` required; our impl omits it — verify on demo before relying | **Active** (full close; partial plumbed in provider, unexposed) |
 | DELETE | `/api/v1/trading/execution/market-close-orders/{orderId}` | Cancel pending close order | Not used (v1) |
-| PATCH | `/api/v2/trading/{real\|demo}/positions/{positionId}` | Edit TP/SL on one exact open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). Async acceptance `{operationId, positionId, referenceId}` — re-sync before treating as landed | Planned — required for strategy-owned ratchets |
+| PATCH | `/api/v2/trading/{real\|demo}/positions/{positionId}` | Edit TP/SL on one exact open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). Async acceptance `{operationId, positionId, referenceId}` — re-sync before treating as landed | **Demo active for exact strategy-owned fixed-exit repair and registered ratchets**; real path refused |
 | POST | `/api/v2/trading/info/{real\|demo}/eligibility` | Up to 100 ids/symbols; account-specific open/close/partial-close permission, min exposure, max units, order/fill types, and leverage + SL/TP constraints by settlement/direction | **Active as a just-in-time paper gate**; response is process-local |
 | POST | `/api/v2/trading/info/{real\|demo}/costs` | What-if open cost rows for `buy` / `sellShort`: open vocabulary including spread, markup, transaction, overnight/weekend and tax; returns `lastUpdated`. Demo returned `value` while omitting documented `amount`; controlled scaling did not establish one unit equation | **Active fail-closed paper gate**: documented fresh USD `amount` only; `value`/unknown horizon refuses |
 | GET | `/api/v2/trading/info/{real\|demo}/orders:lookup` | Exactly one of numeric `orderId` or submission `referenceId`; returns status and every `positionExecutions[].positionId` with opening units/average price. Shared 60 GET/min quota | **Active for strategy reconciliation** — strict adapter, exact execution persistence and restart backlog |
@@ -153,6 +153,7 @@ GET+POST requests cannot exceed the API limit.
 | GET | `/api/v1/trading/info/portfolio` | Full portfolio: positions, orders, mirrors, credit | **Active** — portfolio sync |
 | GET | `/api/v1/trading/info/{real\|demo}/pnl` | Positions, mirrors, pending orders, credit and P&L inputs for the published cash/invested/equity formula | **Demo active as a just-in-time paper risk gate**; raw response is process-local |
 | GET | `/api/v1/trading/info/real/orders/{orderId}` | Single order status | **Active** — order polling |
+| GET | `/api/v1/trading/info/{real\|demo}/close-orders/{orderId}` | Close-order status plus exact affected `positions[].positionID` | **Demo active for exact strategy close reconciliation**; disappearance alone is not success |
 | GET | `/api/v1/trading/info/trade/history` | Trade history (`minDate` required) | Not used (v1) |
 
 ⚠ **Live portal drift, detail pages verified 2026-08-09:** both preflights are
@@ -174,6 +175,16 @@ writer. Its adapter refuses non-demo credentials and its accepted shape is
 long `buy`, `real`, market, x1, USD amount with fixed SL/TP. It validates a
 positive `orderId` and exact `referenceId == X-Request-Id`; the generic legacy
 writer remains manual and is not an automated fallback.
+
+The automated position manager is equally demo-bound. It commits one compact
+material intent before calling either exact-position endpoint, sends the stored
+request UUID, and treats PATCH acceptance as pending until a portfolio re-sync
+shows the requested fixed rates. A close is applied only when the close-order
+detail names the one owned `positionID`. There is no request-id lookup for a
+PATCH or legacy close, so a crash before the broker identity is stored becomes
+`reconcile_required`; the writer is not blindly replayed. Verified against the
+live demo endpoint pages on 2026-08-09 (the downloadable base snapshot remains
+v1.279.0 as recorded above).
 
 ### Authenticated demo census (2026-08-09)
 
@@ -690,6 +701,7 @@ persistence" for the scope-narrowed rule.
 | Universe sync service | `app/services/universe.py` |
 | Market data service | `app/services/market_data.py` |
 | Portfolio sync service | `app/services/portfolio_sync.py` |
+| Strategy position manager | `app/services/strategy_position_manager.py` |
 | Credentials service | `app/services/broker_credentials.py` |
 | Scheduled jobs | `app/workers/scheduler.py` |
 | Configuration | `app/config.py` |

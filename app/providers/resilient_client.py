@@ -126,6 +126,16 @@ class ResilientClient:
         """Throttled, retried POST request."""
         return self._request("POST", url, json=json, headers=headers)
 
+    def patch(
+        self,
+        url: str,
+        *,
+        json: object | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """Throttled, retried PATCH request."""
+        return self._request("PATCH", url, json=json, headers=headers)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
