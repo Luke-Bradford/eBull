@@ -145,6 +145,9 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # scans raise a UniqueViolation and abort a batch rather than
         # de-duplicating. See app/jobs/sources.py::Lane.
         "strategy_scan",
+        # #2450 — demo strategy order reconciliation, owned-position
+        # protection and paper entry share one bounded lifecycle lane.
+        "strategy_execution",
     }
 )
 

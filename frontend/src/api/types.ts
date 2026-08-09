@@ -2413,6 +2413,9 @@ export interface StrategyResultArm {
   input_rule_set_version: string;
   evaluated_instrument_count: number;
   trade_count: number;
+  losing_trade_count: number;
+  open_trade_count: number;
+  unpriced_trade_count: number;
   expectancy_per_trade_pct: string;
   expectancy_ci_low_pct: string | null;
   expectancy_ci_high_pct: string | null;
@@ -2442,6 +2445,8 @@ export interface StrategyOverview {
   strategy_id: string;
   strategy_version: string;
   title: string;
+  description: string;
+  exit_timing: string;
   runnable: boolean;
   exclusion_reason: string | null;
   scan: {
@@ -2470,6 +2475,10 @@ export interface StrategyAttribution {
   funded_entries: number;
   rejected_entries: number;
   resolved_entries: number;
+  winning_entries: number;
+  win_rate: string | null;
+  median_days_to_outcome: string | null;
+  signals_last_30_days: number;
   shadow_average_return_pct: string | null;
   funded_shadow_average_return_pct: string | null;
   rejected_shadow_average_return_pct: string | null;
@@ -2523,11 +2532,35 @@ export interface StrategyEntryBlock {
 
 export interface StrategyOverviewResponse {
   as_of: string;
+  demo_connection: boolean;
   execution_enabled: boolean;
   live_execution_enabled: boolean;
+  live_strategy_activation_available: false;
+  live_strategy_activation_blocker: "live_strategy_broker_contract_not_validated";
   storage_policy: "fired_signals_and_material_mutations_only";
   entry_block: StrategyEntryBlock;
+  paper_pool: StrategyPaperPool;
   strategies: StrategyOverview[];
+}
+
+export interface StrategyPaperPool {
+  configured: boolean;
+  enabled: boolean;
+  capital_limit: string;
+  currency: "USD";
+  reserved_capital: string;
+  invested_capital: string | null;
+  remaining_capital: string;
+}
+
+export interface StrategyPnlHistoryPoint {
+  date: string;
+  total_pnl: string;
+  strategy_pnl: Record<string, string>;
+}
+
+export interface StrategyPnlHistoryResponse {
+  points: StrategyPnlHistoryPoint[];
 }
 
 export interface FiredSignal {

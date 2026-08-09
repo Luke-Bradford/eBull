@@ -418,6 +418,16 @@ Primary contracts verified 2026-08-09: [eToro create order](https://api-portal.e
 
 ## Features to add before paper trading
 
+Implementation update (2026-08-09): the #2437 child series now implements the
+bounded observation store, causal feature/signal evidence, recent validation,
+promotion/ownership, reconciliation, demo paper execution, exact-owned position
+management, strategy P&L/monitoring and the fail-closed live gate. The numbered
+list below is the original dependency analysis, retained for provenance; it is
+not a current backlog. Live activation remains blocked by the measured eToro
+cost contract and by zero promotable current strategy versions. See
+`2026-08-09-strategy-automation-control-plane.md` and
+`2026-08-09-strategy-live-promotion-runbook.md` for current operation.
+
 1. **Eligibility/cost endpoint spike — measured:** endpoint schemas and thin
    calls retain raw payloads in memory. The deterministic bounded demo census
    records field presence, direction/settlement arms, cost vocabulary, canonical

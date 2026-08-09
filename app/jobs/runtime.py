@@ -128,6 +128,7 @@ from app.workers.scheduler import (
     JOB_SEED_COST_MODELS,
     JOB_STRATEGY_BACKTEST_RUN,
     JOB_STRATEGY_OBSERVATION_RETENTION,
+    JOB_STRATEGY_PAPER_CYCLE,
     JOB_STRATEGY_SIGNAL_SCAN,
     JOB_THESIS_BREAK_SCAN,
     JOB_THESIS_DQ_AUDIT,
@@ -195,6 +196,7 @@ from app.workers.scheduler import (
     seed_cost_models,
     strategy_backtest_run,
     strategy_observation_retention,
+    strategy_paper_cycle,
     strategy_signal_scan,
     thesis_break_scan,
     thesis_dq_audit,
@@ -347,6 +349,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # resolved from SCHEDULED_JOBS, so no MANUAL_TRIGGER_JOB_SOURCES entry.
     JOB_STRATEGY_SIGNAL_SCAN: _adapt_zero_arg(strategy_signal_scan),
     JOB_STRATEGY_OBSERVATION_RETENTION: _adapt_zero_arg(strategy_observation_retention),
+    JOB_STRATEGY_PAPER_CYCLE: _adapt_zero_arg(strategy_paper_cycle),
     # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
     # SCHEDULED_JOBS: criterion 5 requires a hold-out purpose no cron fire can
     # supply. ⚠ Registered NATIVELY, not through ``_adapt_zero_arg`` — the body

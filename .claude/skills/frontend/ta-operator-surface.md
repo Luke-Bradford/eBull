@@ -139,3 +139,26 @@ Walk the rendered page top to bottom. For **each section**, then **each figure i
 Record the pass as a table in the PR description: figure · gate result · action. A pass
 with no demotions is a pass that was not run — this surface accretes engineering detail by
 default, because the people building it can read it.
+
+## Live-activation state
+
+Never infer strategy authority from the account-wide live flag. Read
+`live_strategy_activation_available` and its named blocker from the strategy
+overview. On a demonstrably demo-only connection, do not spend landing-page
+space repeatedly explaining that activity is paper trading; keep the real-money
+blocker in the API, audit detail and runbook. If the configured connection can
+place real-money orders, show one page-level outcome banner and never render a
+disabled live control as though it awaits only a click.
+
+The Strategies landing view is a money workspace: total automated P&L, trading
+capital working/reserved/available, then one summary row per strategy. Do not
+render an empty P&L chart before the first close. A row pairs success rate with
+average return, then gives time to outcome, recent signal frequency and enabled
+state. Observed results take precedence; until they exist, representative
+backtest figures must be visibly labelled and must not be mixed with observed
+figures in one aggregate. Expand at most one strategy's evidence windows inline.
+Instrument-level events belong in a separate Activity view, filtered to one
+selected strategy and bounded to 15 rows per page; evidence expansion never
+loads the instrument ledger.
+The overview freshness check must use the ingest-maintained series census, not
+aggregate the full research bar heap or justify a large page-only index.

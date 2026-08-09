@@ -86,6 +86,23 @@ submission responses live on the linked `orders` row. Keep this bounded to the
 latest response for that material operation; never append portfolio polls,
 heartbeats, or unchanged-bar payloads.
 
+Strategy promotion (#2450) is a separate authority layer. Route
+`paper_enabled -> live_enabled` only through `strategy_live_gate`; the generic
+control-plane promotion must refuse it. Treat global auto/live flags as
+additional gates, never promotion evidence. Keep the live broker-contract
+refusal unconditional until a measured live writer lands. Run recurring
+strategy execution only with demo credentials and bounded batches (20
+reconciliation lookups, five owned positions, five new signals).
+
+Use `strategy_execution_blocks` as keyed current state. Refresh only the five
+health sources (`order_reconciliation`, `scan_freshness`, `quote_freshness`,
+`broker_availability`, `drawdown`) in place. Block new strategy entries on any
+active source while preserving exact-owned risk reduction. Store one event per
+material drill or mutation; never append health heartbeats.
+Persist every fresh account-risk probe into the singleton account high-water and
+the update-in-place per-deployment high-water/maximum-drawdown row; never derive
+promotion drawdown only from entry preflights.
+
 ## Invariants (do not break)
 
 - **Fail closed, no silent bypass** (CLAUDE.md non-negotiables; settled-decisions

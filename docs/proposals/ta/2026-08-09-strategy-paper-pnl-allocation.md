@@ -81,10 +81,42 @@ Global kill and reconciliation block state is visible in the picker and blocks
 new order entry in the executor. It does not erase the allocation audit and it
 does not remove exact-position risk reduction.
 
+The default operator view is a money workspace, not an evidence dump. It leads
+with total exact-owned strategy P&L, capital state, open positions, success rate
+and average return. The read-time cumulative close-event line is rendered only
+after a close exists; an empty chart does not consume the page. Until automated
+outcomes resolve, success and average-return fields are explicitly labelled as
+representative backtest evidence. Observed and backtest populations are never
+silently pooled in one aggregate.
+
+Each strategy occupies one summary row with P&L, paired success/average return,
+time to outcome, trailing 30-day signal count and an individual next-run switch.
+One strategy's bounded evidence windows can expand inline. Instrument-level
+events are a separate Activity view, explicitly filtered to one selected
+strategy and paginated at 15 rows. Opening evidence never loads or displays the
+instrument ledger.
+
+The overview response carries the configured broker connection mode. A demo
+connection does not repeat paper/live caveats across the workspace. If a
+real-money-capable connection is configured while live strategy activation is
+refused, the page shows one concise activation-unavailable warning.
+
+The shared strategy pot is an additional hard ceiling across every enabled
+paper strategy deployment; future live reservations are explicitly excluded.
+Under the existing allocator advisory lock, sizing takes
+the minimum of the shared remaining pot, per-strategy remaining ceiling,
+available cash and the existing portfolio/instrument risk limits. The master
+workspace switch updates that ceiling and the account-wide automatic-trading
+flag under the allocator lock so the displayed state is effective, not cosmetic.
+It does not override the account kill switch, per-strategy evidence gate or the
+unconditional live-activation refusal.
+
 ## Database and performance impact
 
-This slice adds **no table, column, payload or periodic writer**. It is a read
-model over bounded/existing ledgers:
+The read model adds no snapshot or periodic writer. Shared-pot authority uses
+one narrow `strategy_paper_pool_events` row per human revision; the latest row
+is current state and there is no heartbeat/current-state duplicate. Everything
+else reads bounded/existing ledgers:
 
 - fired signals and outcomes already retained by the observation policy;
 - one funding/preflight row per fired entry;
@@ -97,7 +129,10 @@ Repeated page refreshes and P&L changes write zero rows. There is therefore no
 new retention job or database-growth allowance. Existing keys/indexes cover the
 joins: unique funding decision per signal, trade-order indexes, unique broker
 position ownership, the partial trade-event open/close indexes, current quote
-PK and daily-price PK. A future material scale change must be demonstrated with
+PK and daily-price PK. Scan freshness reads the ingest-maintained
+`research_price_series.last_bar` census rather than aggregating the full
+`research_price_daily` bar heap; this avoids adding a large date-only index just
+for the page. A future material scale change must be demonstrated with
 `EXPLAIN (ANALYZE, BUFFERS)` before adding an aggregate snapshot table.
 
 Dev-DB measurement on 2026-08-09 (warm cache, exact current versions) was

@@ -119,6 +119,9 @@ def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:
         input_rule_set_version="input-v1",
         evaluated_instrument_count=1,
         trade_count=1,
+        losing_trade_count=0,
+        open_trade_count=0,
+        unpriced_trade_count=0,
         expectancy_per_trade_pct=Decimal("1"),
         expectancy_ci_low_pct=None,
         expectancy_ci_high_pct=None,
@@ -175,6 +178,36 @@ def test_completed_zero_signal_scan_uses_its_watermark(
     assert strategy.scan.fired_exits == 0
     assert strategy.scan.not_fired == 0
     assert strategy.scan.not_evaluable == 0
+
+
+def test_scan_freshness_reads_the_ingest_census_without_scanning_daily_bars(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s2-cross-sectional-momentum"
+    version = _current_versions()[strategy_id]
+    frontier = date(2026, 7, 8)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO research_price_series (
+            vendor,vendor_symbol,upstream_source,licence,adjustment_basis,
+            first_bar,last_bar,bar_count
+        ) VALUES ('test','CENSUS-ONLY','other','test','split_adjusted',%s,%s,1)
+        """,
+        (frontier, frontier),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_scan_watermark (strategy_id,strategy_version,frontier_date)
+        VALUES (%s,%s,%s)
+        """,
+        (strategy_id, version, frontier),
+    )
+
+    overview = get_strategy_overview(ebull_test_conn)
+    strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
+
+    assert strategy.scan.status == "current"
+    assert ebull_test_conn.execute("SELECT count(*) FROM research_price_daily").fetchone() == (0,)
 
 
 def test_scan_health_reads_durable_daily_counts_after_detail_retention(

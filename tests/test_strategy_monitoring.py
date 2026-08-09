@@ -13,10 +13,12 @@ from fastapi import HTTPException
 
 from app.api.strategies import (
     AllocationUpdateRequest,
+    StrategyPaperPoolUpdateRequest,
     _current_versions,
     get_fired_signals,
     get_strategy_overview,
     update_strategy_allocation,
+    update_strategy_paper_pool,
 )
 from app.security.sessions import SessionRow
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
@@ -362,10 +364,24 @@ def test_unprocessed_current_entry_is_visible_as_not_funded_with_reason(
         signal_date="2026-08-01",
         fill_price=Decimal("10"),
     )
+    other_signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id="s3-mean-reversion-in-trend",
+        strategy_version=_current_versions()["s3-mean-reversion-in-trend"],
+        signal_date="2026-08-02",
+        fill_price=Decimal("11"),
+    )
 
-    response = get_fired_signals(cursor=None, limit=50, conn=ebull_test_conn)
+    response = get_fired_signals(
+        cursor=None,
+        limit=50,
+        strategy_id=strategy_id,
+        conn=ebull_test_conn,
+    )
     signal = next(item for item in response.items if item.signal_id == signal_id)
 
+    assert other_signal_id not in {item.signal_id for item in response.items}
     assert signal.funding_status == "rejected"
     assert signal.funding_reason == "not_evaluated_by_allocator"
     assert signal.funded_amount is None
@@ -374,6 +390,53 @@ def test_unprocessed_current_entry_is_visible_as_not_funded_with_reason(
 def _session(username: str = "allocation-operator") -> SessionRow:
     now = datetime.now(UTC)
     return SessionRow("test-session", uuid4(), username, now + timedelta(hours=1), now)
+
+
+def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    conn.commit()
+    response = update_strategy_paper_pool(
+        StrategyPaperPoolUpdateRequest(
+            enabled=True,
+            capital_limit=Decimal("750"),
+            reason="bounded paper workspace",
+        ),
+        _session(),
+        conn,
+    )
+
+    assert response.enabled
+    assert response.capital_limit == Decimal("750")
+    assert response.remaining_capital == Decimal("750")
+    assert conn.execute(
+        "SELECT enabled,capital_limit,changed_by,reason FROM strategy_paper_pool_events"
+    ).fetchone() == (True, Decimal("750.000000"), "allocation-operator", "bounded paper workspace")
+    assert conn.execute("SELECT enable_auto_trading FROM runtime_config WHERE id=TRUE").fetchone() == (True,)
+    assert conn.execute(
+        """
+        SELECT old_value,new_value,changed_by,reason
+        FROM runtime_config_audit
+        WHERE field='enable_auto_trading'
+        ORDER BY audit_id DESC
+        LIMIT 1
+        """
+    ).fetchone() == ("false", "true", "allocation-operator", "bounded paper workspace")
+    conn.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_strategy_paper_pool(
+            StrategyPaperPoolUpdateRequest(
+                enabled=True,
+                capital_limit=Decimal("750"),
+                reason="no-op must not add audit noise",
+            ),
+            _session(),
+            conn,
+        )
+    assert exc_info.value.status_code == 409
+    assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
 
 
 def test_missing_evidence_refuses_new_allocation_without_writing_audit(

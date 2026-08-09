@@ -30,6 +30,7 @@ from app.services.result_ledger import store_holdout_result
 from app.services.strategy_control_plane import (
     configure_deployment,
     configure_execution_policy,
+    configure_paper_pool,
     create_strategy_trade,
     decide_funding,
     link_strategy_order,
@@ -51,6 +52,14 @@ _REQUEST_ID = UUID("1c94300c-90aa-4303-9d00-dec376d74efb")
 
 
 def _seed(conn: psycopg.Connection[Any], *, auto: bool = True) -> int:
+    if conn.execute("SELECT 1 FROM strategy_paper_pool_events LIMIT 1").fetchone() is None:
+        configure_paper_pool(
+            conn,
+            enabled=True,
+            capital_limit=Decimal("2000"),
+            changed_by="test",
+            reason="shared paper pool fixture",
+        )
     conn.execute(
         "INSERT INTO exchanges (exchange_id, country, asset_class) VALUES ('2', 'US', 'us_equity') "
         "ON CONFLICT (exchange_id) DO UPDATE SET asset_class='us_equity'"
@@ -319,6 +328,77 @@ def test_disabled_global_switch_keeps_an_unfunded_shadow_arm(
         "SELECT verdict, reason_code FROM strategy_funding_decisions WHERE signal_id=%s",
         (signal_id,),
     ).fetchone() == ("rejected", "auto_trading_disabled")
+
+
+def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("25"),
+        changed_by="operator",
+        reason="bounded shared pot",
+    )
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "submitted"
+    assert result.amount == Decimal("25.00")
+
+
+def test_shared_paper_pool_excludes_future_live_reservations(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("26"),
+        changed_by="operator",
+        reason="paper-only shared pot",
+    )
+    live_signal = conn.execute(
+        """
+        INSERT INTO strategy_signals (
+            strategy_id,strategy_version,instrument_id,signal_bar_date,
+            signal_kind,verdict,fill_bar_date,fill_price,universe,input_rule_set_versions
+        ) VALUES ('S-FUTURE-LIVE','v1',2449001,'2026-08-04','entry','fired',
+                  '2026-08-05',100,'survivor_only','{"indicator_series":"rules-v1"}'::jsonb)
+        RETURNING signal_id
+        """
+    ).fetchone()
+    live_deployment = conn.execute(
+        """
+        INSERT INTO strategy_deployments (
+            strategy_id,strategy_version,mode,capital_limit,currency,enabled,updated_by,reason
+        ) VALUES ('S-FUTURE-LIVE','v1','live',100,'USD',true,'test','future live fixture')
+        RETURNING deployment_id
+        """
+    ).fetchone()
+    assert live_signal is not None and live_deployment is not None
+    conn.execute(
+        """
+        INSERT INTO strategy_funding_decisions (
+            signal_id,deployment_id,verdict,amount,reason_code
+        ) VALUES (%s,%s,'allocated',25,'future_live_reservation')
+        """,
+        (live_signal[0], live_deployment[0]),
+    )
+    conn.commit()
+
+    result = execute_fired_paper_signal(conn, broker=_broker(), signal_id=signal_id, now=_NOW)
+
+    assert (result.verdict, result.reason_code, result.amount) == (
+        "submitted",
+        "broker_accepted",
+        Decimal("26.00"),
+    )
 
 
 def test_undocumented_cost_units_refuse_before_any_order_exists(

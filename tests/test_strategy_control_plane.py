@@ -141,6 +141,16 @@ def test_promotion_is_ordered_explicit_and_evidenced(
     assert first.from_stage is None
     assert current_stage(conn, "S-GOV", "v1") == "research_candidate"
 
+    with pytest.raises(StrategyControlError, match="strategy_id must be non-empty"):
+        promote_strategy(
+            conn,
+            strategy_id="",
+            strategy_version="v1",
+            to_stage="live_enabled",
+            promoted_by="operator",
+            reason="invalid identity must be rejected first",
+        )
+
     with pytest.raises(StrategyControlError, match="invalid promotion transition"):
         promote_strategy(
             conn,
