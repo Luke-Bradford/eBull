@@ -217,6 +217,15 @@ def test_same_instrument_manual_position_is_never_inferred_as_owned(
     _position(conn, manual_position_id, instrument_id)
     entry_order = _order(conn, instrument_id=instrument_id)
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=entry_order, purpose="entry")
+    duplicate_entry_order = _order(conn, instrument_id=instrument_id)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        with conn.transaction():
+            link_strategy_order(
+                conn,
+                strategy_trade_id=trade_id,
+                order_id=duplicate_entry_order,
+                purpose="entry",
+            )
 
     # Instrument equality is not provenance: the pre-existing manual position
     # cannot be claimed because detailed lookup did not return it for this order.
@@ -253,6 +262,16 @@ def test_same_instrument_manual_position_is_never_inferred_as_owned(
         strategy_trade_id=trade_id,
         broker_position_id=second_strategy_position_id,
     )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with conn.transaction():
+            conn.execute(
+                """
+                UPDATE strategy_position_ownership
+                SET status = 'released', released_at = now(), release_reason = NULL
+                WHERE strategy_trade_id = %s AND broker_position_id = %s
+                """,
+                (trade_id, second_strategy_position_id),
+            )
     with pytest.raises(StrategyOwnershipError, match="not actively owned"):
         assert_exact_position_owned(conn, strategy_trade_id=trade_id, broker_position_id=manual_position_id)
 
