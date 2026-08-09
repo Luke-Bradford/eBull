@@ -1207,3 +1207,69 @@ Filed as **#2441**.
 - **Quantpedia** — 900-1,200+ strategies, a subset replicated in QuantConnect.
   Use as a **hypothesis source with mechanisms attached**, never a shopping
   list. Every one taken is a declared trial.
+
+## ⚠⚠ The short side — where our own data actually has an edge (2026-08-09, #2437)
+
+**Shorting was permitted by operator decision on 2026-08-09** (research and paper
+trading; leverage still barred until validation). It immediately re-read three
+results this project had recorded as failures, and the lesson generalises:
+
+⚠⚠ **A hard constraint does not merely block strategies — it makes findings look
+like nulls.** "Buy the one-day loser" lost money monotonically and was written up as
+a null three times. It was never a null: an isolated stock that drops hard *keeps
+dropping*, which is the strongest and most consistent effect measured on our corpus.
+Long-only, that finding had no expression beyond "do not buy", so it was filed as
+absence of signal rather than presence of an inverted one.
+
+**The surviving arm — short a >=12% one-day drop, cover after 5 bars, 20% stop**
+(`scripts/verify_2437_short_stops.py`, 2020+, day-clustered, 1,364 event days):
+
+```text
+stop   gross  median  win%     t  ex-top1%   worst  net@30%/yr
+none   216.3   133.9  54.4  5.59      82.5  -41254       108.9
+ 20%   156.8    74.1  52.3  4.83      77.6   -8749        49.4
+ 12%   130.4   -68.7  48.1  4.61      81.0   -8749        23.0
+  5%    81.4  -500.0  32.2  3.94      46.6   -3429       -26.0
+```
+
+**Checks it passed that killed every sibling arm:**
+
+- ⚠ **`ex-top1%` barely moves** (82.5 → 77.6 → 81.0) as the stop tightens. Deleting
+  the best 1% of trades is the test for "is this a lottery on collapses". It is not.
+  Every **10-day** arm failed exactly here, inverting to negative.
+- **Delisting is not the driver.** Our corpus is survivorship-controlled, so a
+  backtested short collects in full from names that went to zero. Dying names are
+  0.4-1.0% of trades and their mean is *negative* at -12%; excluding them **raises**
+  the edge (333 → 341 bps).
+- **Survives borrow.** Still +49 bps net at a 30%/yr tier.
+
+⚠⚠ **A stop does not protect a short against a gap.** 141 of 1,402 stops filled at an
+OPEN above the level. Worst trade is **-87% even with the 20% stop**, and identical at
+12% and 8% — no stop level catches it. Shorts gap against you exactly when the news is
+good (takeover, trial result, beat). **Position sizing must survive -87% on one name
+regardless of the stop**; that is a concurrency and weight constraint, not a risk note.
+
+⚠ **Tighter is not safer.** Below a 20% stop the median goes negative and by 5% the
+win rate is 32%: you are stopped out of trades that would have won — spike, cover,
+then the collapse happens without you.
+
+⚠⚠ **Cost model for an eToro short is NOT the long one.** It is a CFD, not stock.
+Easy-to-borrow costs spread only; hard-to-borrow (>10%/yr) accrues daily at 21:00 GMT
+and **triple at weekends**, so borrow accrues per CALENDAR day. A name that just fell
+12% is the archetypal hard-to-borrow candidate, and eToro's docs name "temporary
+unavailability of shares to borrow" as a live restriction.
+
+⚠⚠ **Not yet a strategy.** This arm emerged from ~100 tested arms in one session, so
+`t 4.83` is a searched-over statistic — register it in `trial_register.py` with the
+full search count first. Outstanding: portfolio simulation (per-trade results say
+nothing about an equity curve at ~6 concurrent firings/day), eToro borrow
+availability at firing time, and a genuine out-of-sample window.
+
+### Why the long side kept failing, stated once
+
+⚠ Unconditional 10-day drift on the liquid universe is **44 bps against a 50 bps round
+trip.** The entire long-only short-horizon game is played inside the spread. No
+quantity of extra conditions repairs a cost problem — which is why the operator's
+shorting decision mattered more than any signal found in the same session: the short
+side has 200-440 bps of gross to work with, not 44.
+
