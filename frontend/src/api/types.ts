@@ -2457,15 +2457,76 @@ export interface StrategyOverview {
   evidence_windows: StrategyEvidenceWindow[];
   legacy_result_count: number;
   all_recent_evidence_complete: boolean;
-  allocation_ready: false;
+  stage: string | null;
+  attribution: StrategyAttribution;
+  pnl: StrategyPnl;
+  allocation: StrategyAllocation;
+  allocation_ready: boolean;
   allocation_refusals: string[];
+}
+
+export interface StrategyAttribution {
+  fired_entries: number;
+  funded_entries: number;
+  rejected_entries: number;
+  resolved_entries: number;
+  shadow_average_return_pct: string | null;
+  funded_shadow_average_return_pct: string | null;
+  rejected_shadow_average_return_pct: string | null;
+  opportunity_gap_pct: string | null;
+  funded_capture_rate: string | null;
+  filled_entries: number;
+  broker_rejected_entries: number;
+  fill_rate: string | null;
+  broker_rejection_rate: string | null;
+  average_slippage_pct: string | null;
+  average_stressed_cost_usd: string | null;
+  max_observed_account_drawdown_pct: string | null;
+}
+
+export interface StrategyPnl {
+  currency: "USD";
+  strategy_trade_count: number;
+  owned_position_count: number;
+  active_position_count: number;
+  close_event_count: number;
+  invested_capital: string | null;
+  realised_pnl: string | null;
+  unrealised_pnl: string | null;
+  total_pnl: string | null;
+  observed_fees: string | null;
+  complete: boolean;
+  incomplete_reasons: string[];
+}
+
+export interface StrategyAllocation {
+  deployment_id: number | null;
+  capital_limit: string;
+  currency: "USD";
+  enabled: boolean;
+  revision: number | null;
+  reserved_capital: string;
+  invested_capital: string | null;
+  remaining_capital: string;
+  policy_configured: boolean;
+  max_drawdown_limit_pct: string | null;
+}
+
+export interface StrategyEntryBlock {
+  new_entries_blocked: boolean;
+  global_kill_active: boolean;
+  global_kill_reason: string | null;
+  global_kill_activated_at: string | null;
+  global_kill_activated_by: string | null;
+  execution_block_reasons: string[];
 }
 
 export interface StrategyOverviewResponse {
   as_of: string;
-  observation_stage: "forward_observation";
-  execution_enabled: false;
-  storage_policy: "aggregate_results_only";
+  execution_enabled: boolean;
+  live_execution_enabled: boolean;
+  storage_policy: "fired_signals_and_material_mutations_only";
+  entry_block: StrategyEntryBlock;
   strategies: StrategyOverview[];
 }
 
@@ -2486,12 +2547,33 @@ export interface FiredSignal {
   exit_price: string | null;
   gross_return_pct: string | null;
   outcome_reason: string | null;
-  observation_stage: "forward_observation";
-  funding_status: "unfunded";
-  funding_reason: "execution_not_enabled";
+  funding_status: "funded" | "rejected" | "not_applicable";
+  funding_reason: string;
+  funded_amount: string | null;
+  strategy_trade_id: number | null;
+  execution_status: string | null;
+  actual_fill_price: string | null;
+  slippage_pct: string | null;
 }
 
 export interface FiredSignalsResponse {
   items: FiredSignal[];
   next_cursor: number | null;
+}
+
+export interface AllocationUpdateRequest {
+  strategy_version: string;
+  capital_limit: string;
+  enabled: boolean;
+  reason: string;
+}
+
+export interface AllocationUpdateResponse {
+  strategy_id: string;
+  strategy_version: string;
+  deployment_id: number;
+  capital_limit: string;
+  currency: "USD";
+  enabled: boolean;
+  revision: number;
 }

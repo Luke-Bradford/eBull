@@ -109,6 +109,16 @@ def _lock_strategy(conn: psycopg.Connection[Any], strategy_id: str, strategy_ver
     )
 
 
+def lock_strategy_control(conn: psycopg.Connection[Any], strategy_id: str, strategy_version: str) -> None:
+    """Serialize a compound governance read/write with promotion changes.
+
+    Callers that must evaluate evidence before invoking a control-plane
+    mutation acquire this transaction lock first.  The internal mutation lock
+    is re-entrant within the same transaction.
+    """
+    _lock_strategy(conn, strategy_id, strategy_version)
+
+
 def current_stage(conn: psycopg.Connection[Any], strategy_id: str, strategy_version: str) -> Stage | None:
     row = conn.execute(
         """
@@ -711,6 +721,7 @@ __all__ = [
     "current_stage",
     "decide_funding",
     "link_strategy_order",
+    "lock_strategy_control",
     "promote_strategy",
     "record_order_position_execution",
     "release_exact_position",
