@@ -1001,6 +1001,68 @@ high-turnover by construction.
 
 ---
 
+## 2.13 ⚠⚠ Opening Range Breakout — the strongest "day trading works" claim, and the arithmetic that kills it FOR US
+
+The operator asked whether anything works on **intraday candles alone** — no
+depth, no order book. There is one serious candidate and it deserves a fair
+hearing rather than a dismissal.
+
+**Zarattini, Barbon & Aziz, "A Profitable Day Trading Strategy For The U.S.
+Equity Market"** (SSRN 4729284). **7,000+ US stocks, 2016-2023**, 5-minute
+opening-range breakout. Headline: **1,484% versus 169% for QQQ.** Restricting to
+*"Stocks in Play"* improves it further, *"even after considering transaction
+costs"*.
+
+⚠ It needs **only candles**. No depth, no sizes, no trade side. **It is precisely
+the shape the operator asked about, and it is testable on data we can record
+ourselves from today forward.**
+
+### The conflicts, stated plainly
+
+- **Andrew Aziz** founded Peak Capital Trading and wrote *"How to Day Trade for a
+  Living"* — he **sells day-trading education**.
+- **Carlo Zarattini** runs Concretum Research, a firm focused on intraday US
+  markets; several of the hosting pages are the authors' own site.
+- ⚠ Andrea Barbon is a genuine academic (Swiss Finance Institute / St Gallen),
+  which is the counterweight. **This is not vendor content — but it is not
+  disinterested either.**
+- No independent replication found by this sweep.
+
+### ⚠⚠ The number that decides it for us
+
+Their assumptions: \$25,000 capital, **maximum 4x leverage**, commission
+**\$0.0005 per share**, size calibrated so a stop costs 1% of capital.
+
+**Our posture forbids leverage outright.** And the commission assumption is a US
+direct-access rate, where ours is a *spread*:
+
+```text
+             their round trip   ours     ratio
+$5   stock        0.0200%       1.450%     72x
+$20  stock        0.0050%       0.571%    114x
+$100 stock        0.0010%       0.509%    509x
+```
+
+> ⚠⚠ **The strategy was validated at a cost between 72x and 509x lower than
+> ours.** A day strategy turns the pot over roughly once per day; at ~0.5% round
+> trip that is ~125% of capital paid in spread per year. **No intraday edge of
+> this size survives that.**
+
+### What that actually means — and it is not "give up"
+
+1. **ORB is not disproven. It is priced out at OUR execution.** The finding is
+   about our broker, not about the strategy.
+2. ⚠ **This is the single strongest argument for caring about execution cost**
+   rather than signal quality. A 500x cost disadvantage cannot be out-thought.
+3. **The testable question it leaves is narrow and worth answering:** does ORB
+   survive at *our* costs on *our* recorded candles, restricted to the widest,
+   most liquid, tightest-spread names? The honest prior is no. ⚠ Measure it
+   before believing either answer — and pre-register it, because it is exactly
+   the kind of famous strategy that invites a favourable reading.
+4. **"Stocks in Play" is doing real work** in their result — a relative-volume
+   and gap filter. Any replication must include the selection step, not just the
+   breakout rule.
+
 ## 3. Family viability, with the evidence attached
 
 | family | evidence | our data | verdict |
