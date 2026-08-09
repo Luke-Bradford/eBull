@@ -215,8 +215,6 @@ def test_same_instrument_manual_position_is_never_inferred_as_owned(
     strategy_position_id = 900002
     second_strategy_position_id = 900003
     _position(conn, manual_position_id, instrument_id)
-    _position(conn, strategy_position_id, instrument_id)
-    _position(conn, second_strategy_position_id, instrument_id)
     entry_order = _order(conn, instrument_id=instrument_id)
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=entry_order, purpose="entry")
 
@@ -232,6 +230,8 @@ def test_same_instrument_manual_position_is_never_inferred_as_owned(
 
     record_order_position_execution(conn, order_id=entry_order, broker_position_id=strategy_position_id)
     record_order_position_execution(conn, order_id=entry_order, broker_position_id=second_strategy_position_id)
+    # Detailed lookup commonly leads portfolio sync. Exact ownership is
+    # claimable before either strategy position enters broker_positions.
     claim_exact_position(
         conn,
         strategy_trade_id=trade_id,

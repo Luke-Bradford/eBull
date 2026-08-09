@@ -448,7 +448,7 @@ def claim_exact_position(
     """Claim the exact position returned for this trade's strategy entry order."""
     row = conn.execute(
         """
-        SELECT t.instrument_id, p.instrument_id
+        SELECT 1
         FROM strategy_trades t
         JOIN strategy_trade_orders sto
           ON sto.strategy_trade_id = t.strategy_trade_id
@@ -457,15 +457,12 @@ def claim_exact_position(
         JOIN strategy_order_position_executions execution
           ON execution.order_id = o.order_id
          AND execution.broker_position_id = %s
-        JOIN broker_positions p ON p.position_id = %s
         WHERE t.strategy_trade_id = %s
         """,
-        (entry_order_id, broker_position_id, broker_position_id, strategy_trade_id),
+        (entry_order_id, broker_position_id, strategy_trade_id),
     ).fetchone()
     if row is None:
         raise StrategyOwnershipError("position claim requires the exact strategy entry order and broker position id")
-    if row[0] != row[1]:
-        raise StrategyOwnershipError("broker position instrument does not match the strategy trade")
     claimed = conn.execute(
         """
         INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id)
