@@ -142,10 +142,13 @@ conditions, then bucket the outcome by **how many are simultaneously true** and 
 for a gradient. Searching all subsets on 6,700 stocks over six years manufactures a
 winner every time; a monotonic gradient across alignment counts does not.
 
-⚠ And know what a flat gradient means. Ours rose sharply from 0 to ~4 aligned and
-then went flat: **confluence identified what to avoid and not what to buy.** That is
-a real result — a filter is not a signal — and it is only visible because the
-marginals were printed alongside the buckets.
+⚠ And know what a flat gradient means. After correcting the #2437 next-session
+market-return leak, ours is noisy rather than monotonic: at 10 days the `vs base`
+column runs −35, −28, −39, −17, −10, approximately 0, +5, +2, −6, +14, −26,
++15 bps as alignment rises from 0 to 11. The sparse 9/11 cells do not rescue the
+lack of a gradient. **Equal-count confluence did not identify a buy signal or a
+stable filter.** Reproduce with
+`PYTHONPATH=. uv run python scripts/verify_2437_confluence.py`.
 
 ### 1.7 ⚠⚠ A level type is only real if it beats its own placebo
 
@@ -167,13 +170,14 @@ P1 fake fib 29/44/71    18.82 (t 2.79)   44.45 (t 4.76)
 
 ⚠⚠ **Both placebos BEAT the real thing, and both real levels sit below the
 unconditional baseline (44.28 bps).** Arbitrary fractions 29/44/71 outperform
-38.2/50/61.8; a displaced pseudo-level outperforms an actual pivot low. This matches
-the 2021 study finding Fibonacci zones do not beat non-Fibonacci zones, and goes
-further by killing support proximity too.
+38.2/50/61.8; a displaced pseudo-level outperforms an actual pivot low. This
+falsifies unique unconditional directional value for THESE constructions. It does
+not falsify every causal support/resistance definition or their possible value for
+path geometry, invalidation, or exits.
 
-⚠ Note what makes this conclusive rather than another null: the real condition and
-its twin are **indistinguishable, and the twin won**. That cannot be explained by
-"we measured it badly" — the same measurement was applied to both.
+⚠ The placebo comparison is evidence against the specified level rules, not a
+universal claim about chart structure. A new construction is a new registered
+trial and still needs a matched firing-rate placebo.
 
 ### 1.8 ⚠⚠ Era-split before you get excited, not as a robustness check
 
@@ -267,6 +271,29 @@ profitable simple rule remained** on the DJIA, S&P 500 or S&P futures.
 
 ⚠ The register is a documented **floor** — under-counting `M` raises the DSR, so
 every stored value is an upper bound on the honest one.
+
+### 3.1 "Test every combination" is not exhaustive subset search
+
+An operator asking to validate every strategy is asking for **complete coverage
+of the declared catalogue**, not permission to enumerate every subset of every
+indicator and retain the winner. With `N` binary conditions there are `2^N`
+subsets before thresholds, windows, directions, stops and universes multiply the
+search again. The winning backtest from that search is a selection artefact until
+the entire search count is charged and untouched evidence confirms it.
+
+> **Rule: CI must prove every implementation is registered and every registered
+> version receives the same test matrix. Statistical combinations must be
+> bounded, pre-registered interaction hypotheses with an economic rationale.**
+
+Exhaustive tests belong on finite software state spaces — outcome classes,
+ownership transitions, missing-field combinations and closed vocabularies — not
+on an unbounded strategy powerset. Failed strategies and rejected combinations
+remain visible in the result catalogue; hiding them undercounts the trial budget.
+
+⚠ Allocating more capital to whichever strategy just performed best is itself a
+new timing strategy. Register and backtest that allocation rule, or keep capital
+changes as explicit operator decisions. Do not smuggle performance chasing into
+a "picker" and then attribute its result to the underlying strategies.
 
 ---
 

@@ -1,0 +1,351 @@
+# Strategy automation control plane — ownership, allocation and monitoring
+
+Date: 2026-08-09
+Status: Proposed contract; preflight adapter slice implemented, no strategy orders enabled
+Parent: #2437
+Companion: `2026-08-09-evidence-backed-signal-engine.md`
+
+## North star and non-promise
+
+The product goal is a hands-off **strategy sleeve** that can observe a validated
+signal, reserve explicitly allocated capital, place an exact broker order with a
+fixed SL/TP, manage only the position it opened, reconcile the full lifecycle and
+report strategy P&L separately from manual holdings.
+
+No system can promise winning trades. The enforceable target is narrower and
+testable: act only on pre-registered signals whose lower-bound net expectancy is
+positive under current broker constraints, and stop new entries when the live
+evidence or data quality breaches a declared limit.
+
+## Current repo reality
+
+Already present and reusable:
+
+- a complete versioned strategy manifest for S-1 through S-4;
+- daily `strategy_signal_scan`, scheduled after stored market data, recording
+  fired, not-fired and not-evaluable verdicts independently of funding;
+- signal, outcome and result ledgers;
+- next-bar fills, causal masks, ambiguity arms, portfolio backtesting, purged
+  folds/embargo, block bootstrap, Deflated Sharpe and synthetic controls;
+- per-position broker snapshots, exact position close API, fixed/trailing SL/TP
+  on entry, portfolio risk, execution guard and global kill switches;
+- current v2 eligibility and what-if-cost adapters, implemented without a writer.
+
+The first bounded authenticated demo census (2026-08-09) also proved that the
+preflight cannot be replaced by local catalogue state: one of four exact
+validated-universe instruments was refused for opening although the database
+marked it tradable. Eligibility arms and minimum exposure varied by instrument.
+Cost rows used an undocumented `value` field instead of documented `amount`, and
+one successful response was over five months stale. Those observations are
+useful blockers, not yet an execution-ready cost contract.
+
+The developer-database census on the same date found 34,698 signal-detail rows
+from the latest successful scan, zero resolved outcomes, 36 result rows and 48
+fold rows. The signal relation was already 32 MB (8 MB heap, 24 MB indexes).
+Every stored result covered 1962-01-02 through 2026-07-08, and S-4 had no result.
+Those result rows are legacy/stress evidence only: none satisfies the primary
+2022+ plus rolling 24/36-month relevance contract and none is allocation-ready.
+
+Not present and therefore blocking paper/live strategy execution:
+
+- no strategy catalogue/results/signals API or monitoring page;
+- no capital allocation/deployment record for a strategy version;
+- no durable link from a fired signal through a local order to the exact broker
+  `positionId`;
+- no pending/submitted-order reconciler despite the durable `submitted` state;
+- no strategy-owned position manager or SL/TP modification client;
+- no strategy-only realised/unrealised P&L view;
+- the existing recommendation EXIT path chooses the oldest broker position for
+  an instrument. It is unsafe for a strategy because that position can be manual;
+- `positions.source='ebull'` means only "opened through this app". A manual UI
+  order and a future automated strategy order are indistinguishable;
+- the historical outcome resolver is long-only. Short research may use the new
+  preflight to measure feasibility, but short execution remains blocked until
+  labels, returns, costs, guards and position accounting are side-aware.
+
+## The three ledgers must remain independent
+
+```text
+all evaluated bars -> signal ledger -> outcome ledger -> shadow performance
+                           |
+                           +-> funded candidate -> owned trade -> actual P&L
+```
+
+The monitoring surface reads both arms. A signal does not disappear because cash
+was unavailable, the strategy was paused, eligibility failed, or another trade
+already consumed the risk budget. This preserves the allocation-unbiased shadow
+track record and makes capture rate measurable.
+
+"All signals" on the operator page means every **fired** entry/exit signal,
+whether funded or not. Rendering millions of `not_fired` rows is neither useful
+nor the requirement. Those rows support coverage/exclusion statistics, shown as
+aggregates by date, strategy and reason.
+
+## Promotion and allocation are different decisions
+
+One immutable strategy version moves through:
+
+```text
+research_candidate -> historical_validated -> forward_observation
+                   -> paper_enabled -> live_enabled
+any enabled state  -> paused -> retired
+```
+
+- A computed metric never changes the stage automatically.
+- Each promotion pins the evidence/result ids, gate version, operator, time and
+  reason. A new code/parameter/universe/cost version starts again at research.
+- `paper_enabled` and `live_enabled` are separate promotions. The existing
+  `enable_auto_trading` and `enable_live_trading` switches remain higher-level
+  gates; neither promotes a strategy.
+- Allocation is an operator-entered maximum pot, not a command to spend it. The
+  gate sizes each order within available sleeve cash and portfolio-wide risk.
+- Capital is never automatically moved toward last month's winner. That creates
+  a second, unregistered timing strategy and performance-chasing bias. The picker
+  supplies comparable evidence; the operator changes allocations deliberately.
+
+## Strategy picker contract
+
+Each picker row must pin one strategy version and show, without favourable
+default sorting:
+
+- stage and whether observation/paper/live is enabled;
+- rules, universe, side, fill convention, SL/TP/timeout and cost model;
+- primary 2022+ and rolling 24/36-month net expectancy with confidence interval;
+- forward-observation and paper figures in separate columns, never pooled with
+  backtest results;
+- trade count and effective sample size, win rate, average win/loss, profit
+  factor, total/CAGR return, Sharpe/Sortino, maximum drawdown, turnover and
+  exposure time;
+- return versus buy-and-hold and matched random-entry control;
+- base and stressed costs, realised slippage, fill/rejection rate and unknown
+  cost coverage;
+- signal frequency, funded capture rate, concurrent-position demand and an
+  estimated capacity warning;
+- stability by year/regime/price/liquidity, dominance checks, DSR/trial count,
+  promotion refusals and live kill state;
+- allocated capital, currently reserved/invested capital, realised/unrealised
+  strategy P&L and remaining sleeve cash.
+
+Win rate is contextual metadata, never the ranking objective. A 35% hit-rate
+strategy can dominate a 70% one if its payoff distribution and costs are better.
+The primary comparison is lower-confidence-bound net expectancy alongside
+drawdown and capacity.
+
+A result missing the primary 2022+ and both rolling windows is visible as
+`legacy/stress only` and cannot be allocated. A missing strategy result, as for
+S-4 in the current database, is a displayed refusal rather than an omitted
+picker row. The UI must not reinterpret the current 1962-2026 aggregate as a
+recent result.
+
+## Manual-position isolation — hard invariant
+
+Ownership is a chain, not a label on an instrument:
+
+```text
+deployment -> fired signal -> strategy trade -> entry order
+           -> order lookup positionExecution -> broker positionId
+           -> stop changes / exact-position close -> exit order(s)
+```
+
+Rules:
+
+1. Never infer ownership from instrument id, symbol, `positions.source`, open
+   time, units or FIFO order.
+2. A strategy can close or patch SL/TP only when the exact `positionId` has one
+   active ownership record belonging to that strategy trade.
+3. Manual positions, including manual orders placed through eBull, never acquire
+   an ownership record and are therefore unmodifiable by strategy code.
+4. Manual positions still count toward portfolio cash, instrument/sector
+   concentration and total risk. Automation observes that exposure but does not
+   own or mutate it.
+5. eToro documents exact-position closes and detailed order lookup returning
+   `positionExecutions[].positionId`. The demo probe must still open two small
+   same-instrument positions through distinct flows and prove distinct ids survive
+   sync. If the broker ever nets or returns an ambiguous one-to-many execution,
+   the system enters `reconcile_required` and places no exit/ratchet. Until that
+   probe passes, a strategy entry on an instrument with a manual position must
+   fail closed.
+6. A disappeared owned position is not silently marked successful. Reconcile it
+   against order detail and trade history to distinguish broker SL/TP, manual
+   close, rejected/pending state and missing data.
+
+The existing `_load_position_id_for_exit()` FIFO lookup must never be called by a
+strategy executor. It can remain for the legacy recommendation path until that
+path receives its own ownership semantics.
+
+## Execution state machine
+
+One candidate progresses monotonically:
+
+```text
+observed -> rejected
+observed -> approved -> intent_persisted -> submitted
+submitted -> open | failed | reconcile_required
+open -> closing -> closed | reconcile_required
+```
+
+Before an entry:
+
+1. pin completed signal bar, feature snapshot and strategy/data versions;
+2. recheck stage, global switches, quote freshness, session and halt state;
+3. request current eligibility for the exact settlement/direction;
+4. request current what-if costs for the exact proposed ticket;
+5. recompute net EV and size from available **sleeve** capital;
+6. apply portfolio-wide cash, exposure, concentration, drawdown and gap-risk
+   limits, including manual holdings;
+7. persist a durable intent before broker I/O;
+8. place the order, reconcile order to exact position id, and verify broker SL/TP;
+9. refuse further action while identity or asynchronous state is ambiguous.
+
+For a stop ratchet, a completed causal bar proposes a new stop. The manager
+checks `new_stop > current_stop` for a long (opposite for a future short), broker
+eligibility, owned position id and current quote; persists an intent; sends the
+v2 PATCH; then re-syncs before recording it as applied. Every actual change is an
+event. Per-bar non-changes are metrics, not rows.
+
+## Real-time process boundaries
+
+- **Daily shadow scan (exists):** all registered daily strategies, no money.
+- **Intraday bar closer (new):** closes bounded 30m/5m/1m bars; never trades a
+  forming candle.
+- **Signal evaluator (extend):** writes every fired candidate before allocation.
+- **Allocation/execution gate (new):** consumes only enabled deployments and
+  current preflight data. One invocation, one audit verdict.
+- **Order reconciler (new, required before paper):** polls submitted/pending
+  orders, resolves exact position ids and detects orphan broker effects after a
+  crash.
+- **Owned-position manager (new):** SL/TP verification, causal ratchets, timeout
+  and strategy exit. It receives a trade id, never just an instrument id.
+- **Portfolio sync (exists, extend):** observes all positions but preserves the
+  separate durable ownership record.
+- **Health/kill monitor (new):** data freshness, scan heartbeat, queue lag,
+  reconciliation backlog, slippage/cost drift, drawdown and control-relative
+  alpha. A breach stops new entries; emergency owned-position exits remain
+  possible.
+
+"Real time" is strategy-relative and measured: completed bar time, evaluation
+time, preflight time, intent time, broker acceptance, fill and reconciliation
+time are all retained. A daily strategy does not need tick-level decisions; a
+five-minute strategy that finishes after the next bar is unhealthy.
+
+## Bounded database shape
+
+Do not add derived-indicator time series. After the capability/storage probes,
+the smallest control-plane schema is:
+
+| relation | grain | retention |
+| --- | --- | --- |
+| strategy promotions | one immutable stage change | durable; tens of rows |
+| strategy deployments | one current allocation per strategy version/mode | durable config + audit history |
+| candidate decisions | fired signal x allocation verdict | 24 months detailed; durable daily aggregates |
+| strategy trades | one funded lifecycle | durable |
+| strategy trade orders | one order linked to one owned trade and purpose | durable; joins existing orders/fills |
+| position ownership | one broker position id claimed by one trade | durable, including released ownership |
+| stop changes | one requested/applied/failed material change | durable; no heartbeat rows |
+| preflight observations | candidate request or changed eligibility state | 24 months; no unchanged polling rows |
+| strategy daily metrics | strategy/version/day/stage arm | durable compact aggregate |
+
+P&L is derived from owned trade order/fill links and broker close history; it is
+not copied into the general `positions` aggregate and not duplicated on every
+signal. The strategy page uses strategy-owned rows only. The main portfolio page
+continues to show the complete account, including manual and automated positions.
+
+The current signal scanner writes `instrument x declared signal leg x session`
+verdicts, not merely `universe x strategy`. The 2026-08-09 scan wrote 34,698
+rows; at 252 sessions that is **8.74 million rows/year**. The measured relation
+cost was about 963 bytes/row including indexes, implying roughly **8.42 GB/year**
+if its present detail and index shape is retained. Re-run
+`scripts/verify_2437_observation_storage.py` for current figures. Partitioning
+and retention must precede intraday verdicts. A proposed bounded policy is:
+
+- fired entry/exit signals and their outcomes: durable;
+- individual not-fired/not-evaluable daily rows: 90 days after a checked daily
+  aggregate exists;
+- aggregate counts by strategy/version/date/verdict/reason: durable;
+- intraday evaluations: write fired candidates plus aggregates, not one
+  `not_fired` row per instrument per minute.
+
+No deletion policy ships until a verifier proves aggregate counts equal the
+detail rows and no outcome/holdout/result foreign key depends on the deletion
+set. Retention drops partitions; it does not issue recurring mass deletes.
+
+## What "test every strategy or combination" means
+
+Exhaustively searching every subset, threshold and signal combination is
+impossible and would manufacture winners through multiple testing. The enforceable
+contract is:
+
+- every strategy implementation in the tree is in the manifest or CI fails;
+- every **permitted, pre-registered** strategy/version/combination runs through
+  the same test matrix and appears in the picker, including failures;
+- combinations are explicit interaction hypotheses with an economic rationale,
+  not the powerset of indicators;
+- every attempted variant increments the trial register, including abandoned
+  branches and manual inspection;
+- selection happens on train/validation only; one frozen holdout is opened once;
+- promotion uses recent-window stability, lower-bound net expectancy, costs,
+  portfolio simulation, random controls and untouched forward evidence;
+- paper/live performance is compared with the simultaneous unfunded shadow arm.
+
+Property tests should exhaust finite state/vocabulary combinations (ownership
+states, outcome classes, missing fields, side/settlement arms). Statistical
+hypotheses use bounded registered trials, not combinatorial enumeration.
+
+## Ordered implementation slices
+
+These are the ticket bodies; issue numbers are deliberately absent until issues
+are actually created.
+
+1. **Current v2 preflight adapters — implemented:** strict eligibility and
+   what-if types, bounded request validation, raw response retention in memory,
+   no writes and no execution use.
+2. **Authenticated demo capability census — four-instrument spike complete,
+   broader coverage open:** expand liquid/illiquid equity/ETF long/short
+   requests; establish cost units/freshness, response bytes, position-id
+   cardinality and v1-versus-v2 execution compatibility.
+3. **Recent-window result arms + read-only strategy observability:** compute the
+   fixed 2022+, rolling 24/36-month and per-year arms without overwriting legacy
+   evidence; then expose every manifest strategy, fired funded/unfunded signal,
+   outcome, exclusion, scan health, pinned metrics and explicit refusal state.
+   This can ship before trading; legacy-only rows are never allocatable.
+4. **Storage benchmark and retention:** actual bytes/query plans for signal
+   partitions, compact aggregates, preflight state changes and bounded intraday
+   bars. Migration follows evidence, not vice versa.
+5. **Promotion/deployment + ownership schema:** no broker writer yet. Enforce one
+   signal funding decision, exact order/trade/position links and immutable stage
+   changes.
+6. **Order/position reconciler:** consume detailed v2 order lookup and history;
+   close the existing submitted/pending crash gap; prove same-instrument manual
+   isolation in demo.
+7. **Paper allocator/executor:** exact strategy version, sleeve cash, current
+   preflight, SL/TP and portfolio guard; no live key path.
+8. **Owned-position manager:** exact-position exits, timeout and separately
+   registered ratchet variants; asynchronous PATCH re-sync.
+9. **Paper P&L and picker allocation controls:** strategy-only P&L, shadow versus
+   funded capture, manual allocation changes with audit.
+10. **Live promotion:** requires minimum forward/paper evidence, reconciliation
+    SLOs, kill drills and an explicit operator action in addition to both global
+    switches.
+
+## Acceptance tests before paper trading
+
+- strategy/manual positions on the same instrument retain distinct ids through
+  open, sync, partial close, SL/TP patch and strategy close;
+- attempting to close or patch an unowned/manual id fails before broker I/O;
+- a crash before call, during call and after broker acceptance reconciles without
+  a duplicate order or orphan position;
+- unknown/malformed/missing eligibility or cost fields refuse entry;
+- current total broker costs are included once and stressed, never selected by a
+  closed favourable vocabulary;
+- manual holdings affect risk capacity but never strategy P&L or lifecycle;
+- every fired signal appears with funded/rejected reason and later shadow outcome;
+- picker rows cannot mix strategy, data, cost, resolver, universe or ambiguity
+  versions;
+- no picker row is allocatable unless its fixed 2022+ and rolling 24/36-month
+  result arms exist and agree in sign after costs; pre-2000 data cannot rescue it;
+- strategy P&L reconciles to owned fills/history and the account-wide portfolio
+  reconciles separately to the broker;
+- retention preserves fired outcomes and daily census equality while staying
+  inside the declared database growth budget;
+- kill switch, stale data, scan lag, reconciliation backlog and drawdown tests
+  block new entries while leaving audited owned-position risk reduction usable.
