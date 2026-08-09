@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 
 from app.services.processes.param_metadata import MANUAL_TRIGGER_JOB_METADATA
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS, recent_evidence_window
 from app.services.strategy_result import EVALUATION_WINDOW_END, HOLDOUT_BOUNDARY
+from app.workers import scheduler
 
 
 def test_all_required_windows_are_named_and_inside_the_holdout_corpus() -> None:
@@ -38,3 +42,24 @@ def test_manual_job_exposes_ids_but_never_raw_dates() -> None:
     window = metadata["evidence_window"]
     assert window.field_type == "enum"
     assert window.enum_values == tuple(RECENT_EVIDENCE_WINDOWS)
+
+
+def test_invalid_window_is_recorded_inside_the_job_tracking_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def tracked(job_name: str) -> Iterator[SimpleNamespace]:
+        events.append(f"entered:{job_name}")
+        try:
+            yield SimpleNamespace(row_count=0)
+        finally:
+            events.append(f"exited:{job_name}")
+
+    monkeypatch.setattr(scheduler, "_tracked_job", tracked)
+
+    with pytest.raises(ValueError, match="unknown recent evidence window"):
+        scheduler.strategy_backtest_run({"evidence_window": "searched-favourable-dates"})
+
+    assert events == ["entered:strategy_backtest_run", "exited:strategy_backtest_run"]

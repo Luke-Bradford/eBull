@@ -57,7 +57,8 @@ after the primary recent-window run added 12 compact result rows
 Latest and cursor fired-signal pages used the `strategy_signals` primary key
 backwards and returned 50 fully joined rows in **under 1 ms**. Current-version
 scan aggregates deliberately used a 34,698-row sequential scan and completed in
-**15.2 ms**. The 48-row result ledger completed in **under 0.2 ms**. Those figures do
+**15.6 ms**. The exact-provenance query returned the 12 recent arms in **0.1 ms**
+and the separate all-result count completed in **0.03 ms** across 48 stored rows. Those figures do
 not justify another index today; #2448 re-measures after retention/partition
 design rather than paying write amplification speculatively.
 

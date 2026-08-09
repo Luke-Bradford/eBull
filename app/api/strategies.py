@@ -22,10 +22,13 @@ from app.api.auth import require_session_or_service_token
 from app.db import get_conn
 from app.services.backtest_run import BACKTEST_UNIVERSE, runnable_strategies
 from app.services.cost_model import COST_MODEL_ID
+from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
+from app.services.strategy_result import CORPUS_VERSION
 
 router = APIRouter(
     prefix="/strategies",
@@ -212,7 +215,22 @@ _RESULTS_SQL = """
         GROUP BY strategy_id, strategy_version
     ) a USING (strategy_id, strategy_version)
     WHERE r.strategy_version = ANY(%(versions)s)
+      AND r.namespace = 'hold_out'
+      AND r.corpus_version = %(corpus_version)s
+      AND r.cost_model_id = %(cost_model_id)s
+      AND r.sizing_rule = %(sizing_rule)s
+      AND r.benchmark_rule = %(benchmark_rule)s
+      AND r.position_rule_set_version = %(position_version)s
+      AND r.outcome_rule_set_version = %(outcome_version)s
+      AND r.input_rule_set_version = %(input_version)s
     ORDER BY r.strategy_id, r.window_start, r.window_end, r.ambiguity_arm, r.quarantine_arm
+"""
+
+_RESULT_COUNTS_SQL = """
+    SELECT strategy_id, COUNT(*) AS count
+    FROM strategy_results_store
+    WHERE strategy_version = ANY(%(versions)s)
+    GROUP BY strategy_id
 """
 
 _SCAN_SQL = """
@@ -246,10 +264,21 @@ def get_strategy_overview(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> StrategyOverviewResponse:
     versions = _current_versions()
-    params = {"versions": list(versions.values())}
+    params = {
+        "versions": list(versions.values()),
+        "corpus_version": CORPUS_VERSION,
+        "cost_model_id": COST_MODEL_ID,
+        "sizing_rule": SIZING_RULE_ID,
+        "benchmark_rule": BENCHMARK_RULE_ID,
+        "position_version": POSITION_RULE_SET_VERSION,
+        "outcome_version": OUTCOME_RULE_SET_VERSION,
+        "input_version": QUARANTINE_RULE_SET_VERSION,
+    }
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(_RESULTS_SQL, params)
         result_rows = list(cur.fetchall())
+        cur.execute(_RESULT_COUNTS_SQL, params)
+        result_count_rows = list(cur.fetchall())
         cur.execute(_SCAN_SQL, params)
         scan_rows = list(cur.fetchall())
         cur.execute(_EXCLUSIONS_SQL, params)
@@ -261,6 +290,7 @@ def get_strategy_overview(
     results_by_strategy: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in result_rows:
         results_by_strategy[str(row["strategy_id"])].append(row)
+    result_counts = {str(row["strategy_id"]): int(row["count"]) for row in result_count_rows}
     scan_by_strategy = {str(row["strategy_id"]): row for row in scan_rows}
     exclusions: dict[str, Counter[str]] = defaultdict(Counter)
     for row in exclusion_rows:
@@ -361,9 +391,8 @@ def get_strategy_overview(
                 exclusion_reason=excluded_by_id.get(strategy_id),
                 scan=scan,
                 evidence_windows=windows,
-                legacy_result_count=sum(
-                    (row["window_start"], row["window_end"]) not in declared_pairs for row in strategy_rows
-                ),
+                legacy_result_count=result_counts.get(strategy_id, 0)
+                - sum(len(rows) for key, rows in exact.items() if key in declared_pairs),
                 all_recent_evidence_complete=all_complete,
                 allocation_refusals=allocation_refusals,
             )

@@ -4954,10 +4954,9 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
     from app.services.backtest_run import run_backtest
     from app.services.strategy_recent_evidence import recent_evidence_window
 
-    evidence_window_id = _optional_str(params.get("evidence_window"))
-    evaluation_window = None if evidence_window_id is None else recent_evidence_window(evidence_window_id).window
-
     with _tracked_job(JOB_STRATEGY_BACKTEST_RUN) as tracker:
+        evidence_window_id = _optional_str(params.get("evidence_window"))
+        evaluation_window = None if evidence_window_id is None else recent_evidence_window(evidence_window_id).window
         with connect_job() as conn:
             report = run_backtest(
                 conn,

@@ -8,7 +8,16 @@ from decimal import Decimal
 import psycopg
 
 from app.api.strategies import ResultArm, _current_versions, _promotion_refusals, get_strategy_overview
+from app.services.cost_model import COST_MODEL_ID
+from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
+from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
+from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
+from app.services.result_ledger import store_holdout_result, store_in_sample_result
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
+from app.services.strategy_result import CORPUS_VERSION
+from tests.test_result_ledger import build_metrics, build_result
 
 
 def test_current_versions_cover_the_manifest_including_excluded_s4() -> None:
@@ -166,3 +175,67 @@ def test_completed_zero_signal_scan_uses_its_watermark(
     assert strategy.scan.fired_exits == 0
     assert strategy.scan.not_fired == 0
     assert strategy.scan.not_evaluable == 0
+
+
+def test_overview_maps_only_exact_current_holdout_provenance(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    window = RECENT_EVIDENCE_WINDOWS["primary-2022-plus"].window
+    identity = {
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "window_start": window.start,
+        "window_end": window.end,
+        "corpus_version": CORPUS_VERSION,
+        "cost_model_id": COST_MODEL_ID,
+        "sizing_rule": SIZING_RULE_ID,
+        "benchmark_rule": BENCHMARK_RULE_ID,
+        "position_rule_set_version": POSITION_RULE_SET_VERSION,
+        "outcome_rule_set_version": OUTCOME_RULE_SET_VERSION,
+        "input_rule_set_version": QUARANTINE_RULE_SET_VERSION,
+    }
+    metrics = build_metrics(
+        profit_factor=None,
+        sortino=None,
+        losing_trade_count=0,
+        losing_period_count=0,
+    )
+    exact = build_result(**identity, ambiguity_arm="best_case", quarantine_arm="admitted", metrics=metrics)
+    store_holdout_result(
+        ebull_test_conn,
+        exact,
+        accessed_by="tests/test_api_strategies.py",
+        purpose="verify API result mapping",
+    )
+    store_holdout_result(
+        ebull_test_conn,
+        build_result(
+            **{**identity, "cost_model_id": "stale-cost-v0"},
+            ambiguity_arm="worst_case",
+            quarantine_arm="admitted",
+        ),
+        accessed_by="tests/test_api_strategies.py",
+        purpose="prove stale provenance is excluded",
+    )
+    store_in_sample_result(
+        ebull_test_conn,
+        build_result(
+            **identity,
+            namespace="in_sample",
+            ambiguity_arm="worst_case",
+            quarantine_arm="masked",
+        ),
+    )
+
+    overview = get_strategy_overview(ebull_test_conn)
+    strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
+    primary = next(item for item in strategy.evidence_windows if item.window_id == "primary-2022-plus")
+
+    assert primary.status == "partial"
+    assert len(primary.arms) == 1
+    assert primary.arms[0].result_version == exact.identity.version
+    assert primary.arms[0].sortino is None
+    assert primary.arms[0].profit_factor is None
+    assert strategy.legacy_result_count == 2

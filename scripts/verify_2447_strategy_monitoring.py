@@ -16,6 +16,7 @@ import psycopg.sql
 
 from app.api.strategies import (
     _FIRED_SIGNALS_SQL,
+    _RESULT_COUNTS_SQL,
     _RESULTS_SQL,
     _SCAN_SQL,
     _current_versions,
@@ -23,8 +24,12 @@ from app.api.strategies import (
     get_strategy_overview,
 )
 from app.config import settings
+from app.services.cost_model import COST_MODEL_ID
+from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
+from app.services.strategy_result import CORPUS_VERSION
 from scripts._dev_guard import assert_dev_environment
 
 _PLAN_QUERIES = {
@@ -32,6 +37,7 @@ _PLAN_QUERIES = {
     "cursor_fired_page": _FIRED_SIGNALS_SQL,
     "scan_aggregate": _SCAN_SQL,
     "result_ledger": _RESULTS_SQL,
+    "result_counts": _RESULT_COUNTS_SQL,
 }
 
 
@@ -68,6 +74,11 @@ def main() -> None:
             "limit": 50,
             "outcome_version": OUTCOME_RULE_SET_VERSION,
             "input_version": QUARANTINE_RULE_SET_VERSION,
+            "corpus_version": CORPUS_VERSION,
+            "cost_model_id": COST_MODEL_ID,
+            "sizing_rule": SIZING_RULE_ID,
+            "benchmark_rule": BENCHMARK_RULE_ID,
+            "position_version": POSITION_RULE_SET_VERSION,
         }
         print(
             {
