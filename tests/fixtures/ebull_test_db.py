@@ -199,6 +199,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # current operator decision.
     "strategy_promotions",
     "strategy_deployments",
+    # #2451 — bounded current kill state has no FK by design.
+    "strategy_execution_blocks",
     "positions",
     "quotes",
     # #1919 — thesis generation attempts (FK → instruments + theses).

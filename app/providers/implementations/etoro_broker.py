@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
 from typing import Any
+from uuid import UUID, uuid4
 
 import httpx
 
@@ -30,9 +31,13 @@ from app.providers.broker import (
     BrokerLeverageConfig,
     BrokerMirror,
     BrokerMirrorPosition,
+    BrokerOrderDetail,
+    BrokerOrderLookupError,
+    BrokerOrderNotFound,
     BrokerOrderResult,
     BrokerPortfolio,
     BrokerPosition,
+    BrokerPositionExecution,
     BrokerProvider,
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
@@ -98,6 +103,10 @@ class TradingPreflightParseError(Exception):
     could turn an absent restriction or fee into permission, so malformed
     responses fail the whole preflight instead of dropping fields or rows.
     """
+
+
+class OrderDetailParseError(BrokerOrderLookupError):
+    """The exact-order response cannot safely establish position identity."""
 
 
 def _order_body_common(
@@ -180,11 +189,9 @@ class EtoroBrokerProvider(BrokerProvider):
         """Close the underlying HTTP client. Prefer using as a context manager."""
         self._client.close()
 
-    def _request_headers(self) -> dict[str, str]:
-        """Per-request headers — fresh UUID for x-request-id."""
-        from uuid import uuid4
-
-        return {"x-request-id": str(uuid4())}
+    def _request_headers(self, request_id: UUID | None = None) -> dict[str, str]:
+        """Return a caller-owned idempotency UUID or a fresh request identity."""
+        return {"x-request-id": str(request_id or uuid4())}
 
     # ------------------------------------------------------------------
     # BrokerProvider implementation
@@ -197,6 +204,8 @@ class EtoroBrokerProvider(BrokerProvider):
         amount: Decimal | None,
         units: Decimal | None,
         params: OrderParams | None = None,
+        *,
+        request_id: UUID | None = None,
     ) -> BrokerOrderResult:
         # Reject unrecognised actions before any HTTP call.
         if action not in _ALLOWED_PLACE_ORDER_ACTIONS:
@@ -267,7 +276,7 @@ class EtoroBrokerProvider(BrokerProvider):
             response = self._http_write.post(
                 endpoint,
                 json=body,
-                headers=self._request_headers(),
+                headers=self._request_headers(request_id),
             )
             response.raise_for_status()
             raw = response.json()
@@ -412,6 +421,58 @@ class EtoroBrokerProvider(BrokerProvider):
             )
 
         return _normalise_order_info_response(raw, broker_order_ref)
+
+    def lookup_order(
+        self,
+        *,
+        order_id: str | None = None,
+        reference_id: str | None = None,
+    ) -> BrokerOrderDetail:
+        """Resolve v2 order detail and every exact position execution.
+
+        eToro requires exactly one of ``orderId`` or ``referenceId``. The
+        latter is the X-Request-Id used for the idempotent submission, so it
+        closes the response-before-persist crash gap.
+        """
+        if (order_id is None) == (reference_id is None):
+            raise ValueError("exactly one of order_id or reference_id is required")
+        if order_id is not None:
+            try:
+                numeric_order_id = int(order_id)
+            except ValueError as exc:
+                raise ValueError("order_id must be a positive integer") from exc
+            if numeric_order_id <= 0:
+                raise ValueError("order_id must be a positive integer")
+            params: dict[str, str | int] = {"orderId": numeric_order_id}
+        else:
+            from uuid import UUID
+
+            assert reference_id is not None
+            try:
+                canonical_reference = str(UUID(reference_id))
+            except ValueError as exc:
+                raise ValueError("reference_id must be a UUID") from exc
+            params = {"referenceId": canonical_reference}
+
+        try:
+            response = self._http_read.get(
+                f"{self._v2_info_prefix}/orders:lookup",
+                params=params,
+                headers=self._request_headers(),
+            )
+            response.raise_for_status()
+            raw = response.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise BrokerOrderNotFound("broker order was not found") from exc
+            raise BrokerOrderLookupError(f"broker order lookup returned HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise BrokerOrderLookupError(f"broker order lookup transport error: {exc}") from exc
+        except ValueError as exc:
+            raise BrokerOrderLookupError("broker order lookup returned non-JSON data") from exc
+        if not isinstance(raw, dict):
+            raise OrderDetailParseError("order detail response must be an object")
+        return _parse_order_detail(raw, reference_id=reference_id)
 
     def check_instrument_eligibility(
         self,
@@ -732,6 +793,110 @@ def _parse_what_if_cost_response(raw: dict[str, Any]) -> BrokerWhatIfCostRespons
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise TradingPreflightParseError(f"malformed what-if cost response: {exc}") from exc
+
+
+def _order_detail_decimal(payload: dict[str, Any], key: str) -> Decimal | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except decimal.DecimalException as exc:
+        raise OrderDetailParseError(f"{key} must be numeric or null") from exc
+
+
+def _order_detail_time(payload: dict[str, Any], key: str) -> datetime | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise OrderDetailParseError(f"{key} must be an ISO timestamp or null") from exc
+    if parsed.tzinfo is None:
+        raise OrderDetailParseError(f"{key} must include a timezone")
+    return parsed
+
+
+def _parse_order_detail(raw: dict[str, Any], *, reference_id: str | None) -> BrokerOrderDetail:
+    """Strictly parse the documented v2 ``orders:lookup`` response."""
+    try:
+        order_id = int(raw["orderId"])
+        status_object = raw["status"]
+        asset = raw["asset"]
+        execution_rows = raw["positionExecutions"]
+        if order_id <= 0:
+            raise OrderDetailParseError("orderId must be positive")
+        if not isinstance(status_object, dict) or not isinstance(asset, dict):
+            raise OrderDetailParseError("status and asset must be objects")
+        broker_status = status_object.get("name")
+        if not isinstance(broker_status, str) or not broker_status:
+            raise OrderDetailParseError("status.name must be a non-empty string")
+        instrument_id = int(asset["instrumentId"])
+        if instrument_id <= 0:
+            raise OrderDetailParseError("asset.instrumentId must be positive")
+        if not isinstance(execution_rows, list):
+            raise OrderDetailParseError("positionExecutions must be an array")
+
+        executions: list[BrokerPositionExecution] = []
+        position_ids: set[int] = set()
+        for row in execution_rows:
+            if not isinstance(row, dict):
+                raise OrderDetailParseError("positionExecutions entries must be objects")
+            position_id = int(row["positionId"])
+            state = row["state"]
+            if position_id <= 0 or position_id in position_ids:
+                raise OrderDetailParseError("positionExecutions positionId values must be positive and unique")
+            if not isinstance(state, str) or not state:
+                raise OrderDetailParseError("positionExecutions state must be non-empty")
+            position_ids.add(position_id)
+            opening = row.get("openingData")
+            if opening is not None and not isinstance(opening, dict):
+                raise OrderDetailParseError("positionExecutions openingData must be an object or null")
+            opening_data = opening or {}
+            remaining_units = _order_detail_decimal(row, "remainingUnits")
+            opening_units = _order_detail_decimal(opening_data, "units")
+            average_price = _order_detail_decimal(opening_data, "avgPrice")
+            execution_time = _order_detail_time(opening_data, "executionTime")
+            fees = _order_detail_decimal(opening_data, "fees")
+            if opening_units is None or opening_units <= 0:
+                raise OrderDetailParseError("openingData.units must be positive for a position execution")
+            if average_price is None or average_price <= 0:
+                raise OrderDetailParseError("openingData.avgPrice must be positive for a position execution")
+            if execution_time is None:
+                raise OrderDetailParseError("openingData.executionTime is required for a position execution")
+            if remaining_units is None or remaining_units < 0:
+                raise OrderDetailParseError("remainingUnits must be non-negative for a position execution")
+            if fees is None or fees < 0:
+                raise OrderDetailParseError("openingData.fees must be non-negative for a position execution")
+            executions.append(
+                BrokerPositionExecution(
+                    position_id=position_id,
+                    state=state,
+                    remaining_units=remaining_units,
+                    opening_units=opening_units,
+                    average_price=average_price,
+                    execution_time=execution_time,
+                    fees=fees,
+                    raw_payload=dict(row),
+                )
+            )
+
+        normalised_status: OrderStatus = _STATUS_MAP.get(broker_status, "pending")
+        return BrokerOrderDetail(
+            broker_order_ref=str(order_id),
+            reference_id=reference_id,
+            status=normalised_status,
+            broker_status=broker_status,
+            instrument_id=instrument_id,
+            position_executions=tuple(executions),
+            last_update=_order_detail_time(raw, "lastUpdate"),
+            raw_payload=raw,
+        )
+    except OrderDetailParseError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OrderDetailParseError(f"malformed order detail response: {exc}") from exc
 
 
 def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:

@@ -53,9 +53,16 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
   justified by this evidence.
 - **Order-to-position reconciliation exists in v2:**
   `GET /api/v2/trading/info/{demo|real}/orders:lookup` returns
-  `positionExecutions[].positionId`. This is the durable way to bind a submitted
-  strategy entry to the exact position it owns; do not infer the position from
-  instrument or FIFO order.
+  `positionExecutions[].positionId`. The live detail page verified 2026-08-09
+  requires exactly one of numeric `orderId` or `referenceId`; `referenceId` is
+  the `X-Request-Id` sent on submission. The current v2 create-order page states
+  that this unique GUID is required for idempotency. Commit it before broker
+  I/O, never rotate it after an uncertain response, and use the same value for
+  lookup/retry. This is the durable way to bind a submitted strategy entry to
+  the exact position(s) it owns; do not infer a position from instrument, time,
+  units or FIFO order. The response also supplies opening units, average price,
+  execution time and fees; retain these compact facts to prove partial-fill and
+  one-to-many cardinality without storing every poll payload.
 
 ## ⚠⚠ WE HAVE INTRADAY HISTORY. Read this before saying otherwise — MEASURED 2026-08-09
 

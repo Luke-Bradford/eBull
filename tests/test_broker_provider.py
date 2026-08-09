@@ -12,22 +12,26 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
+from uuid import UUID, uuid4
 
 import httpx
 
 from app.providers.broker import (
     BrokerMirror,
     BrokerMirrorPosition,
+    BrokerOrderNotFound,
     BrokerPortfolio,
     BrokerWhatIfOrder,
     OrderParams,
 )
 from app.providers.implementations.etoro_broker import (
     EtoroBrokerProvider,
+    OrderDetailParseError,
     TradingPreflightParseError,
     _normalise_close_order_response,
     _normalise_open_order_response,
     _normalise_order_info_response,
+    _parse_order_detail,
 )
 
 # ---------------------------------------------------------------------------
@@ -64,6 +68,37 @@ FIXTURE_ORDER_INFO_RESPONSE = {
     "amount": 100.0,
     "units": 0.54,
     "positions": [{"positionID": 98765}],
+}
+
+FIXTURE_ORDER_DETAIL_RESPONSE = {
+    "orderId": 13902598,
+    "status": {"id": 3, "name": "Filled", "errorCode": 0, "errorMessage": None},
+    "asset": {"instrumentId": 1001, "symbol": "AAPL"},
+    "positionExecutions": [
+        {
+            "positionId": 9001,
+            "state": "open",
+            "remainingUnits": 6.5,
+            "openingData": {
+                "executionTime": "2026-08-09T09:00:01Z",
+                "units": 6.5,
+                "avgPrice": 95.25,
+                "fees": 2.5,
+            },
+        },
+        {
+            "positionId": 9002,
+            "state": "open",
+            "remainingUnits": 4,
+            "openingData": {
+                "executionTime": "2026-08-09T09:00:02Z",
+                "units": 4,
+                "avgPrice": 95.5,
+                "fees": 1.5,
+            },
+        },
+    ],
+    "lastUpdate": "2026-08-09T09:00:02Z",
 }
 
 FIXTURE_PORTFOLIO_RESPONSE = {
@@ -272,6 +307,26 @@ class TestPlaceOrderByAmount:
             assert body["Leverage"] == 1
             assert body["Amount"] == 100.0
             assert "AmountInUnits" not in body
+
+    def test_uses_caller_owned_request_id_for_idempotency(self) -> None:
+        request_id = UUID("6f0b1702-99f8-41fe-97d7-0841c448e603")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_OPEN_ORDER_RESPONSE
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+
+            broker.place_order(
+                1001,
+                "BUY",
+                amount=Decimal("100"),
+                units=None,
+                request_id=request_id,
+            )
+
+            headers = broker._http_write.post.call_args.kwargs["headers"]
+            assert headers["x-request-id"] == str(request_id)
 
     def test_returns_filled_result(self) -> None:
         mock_resp = MagicMock()
@@ -553,6 +608,77 @@ class TestGetOrderStatus:
 
             assert result.status == "failed"
             assert result.broker_order_ref == "12345"
+
+
+class TestDetailedOrderLookup:
+    def test_reference_id_routes_to_v2_and_preserves_exact_executions(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_ORDER_DETAIL_RESPONSE
+        reference_id = "1c94300c-90aa-4303-9d00-dec376d74efb"
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            result = broker.lookup_order(reference_id=reference_id)
+
+        call = broker._http_read.get.call_args
+        assert call.args[0] == "/api/v2/trading/info/demo/orders:lookup"
+        assert call.kwargs["params"] == {"referenceId": reference_id}
+        assert result.broker_order_ref == "13902598"
+        assert result.instrument_id == 1001
+        assert [execution.position_id for execution in result.position_executions] == [9001, 9002]
+        assert result.position_executions[0].opening_units == Decimal("6.5")
+        assert result.position_executions[0].average_price == Decimal("95.25")
+
+    def test_order_id_is_mutually_exclusive_and_positive(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            for kwargs in ({}, {"order_id": "1", "reference_id": str(uuid4())}, {"order_id": "0"}):
+                try:
+                    broker.lookup_order(**kwargs)  # type: ignore[arg-type]
+                except ValueError:
+                    pass
+                else:  # pragma: no cover - assertion helper branch
+                    raise AssertionError("unsafe lookup identity must be refused")
+
+    def test_404_is_distinct_from_transport_failure(self) -> None:
+        response = httpx.Response(404, request=httpx.Request("GET", "https://example.test"))
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.side_effect = httpx.HTTPStatusError(
+                "not found", request=response.request, response=response
+            )
+            try:
+                broker.lookup_order(order_id="123")
+            except BrokerOrderNotFound:
+                pass
+            else:  # pragma: no cover - assertion helper branch
+                raise AssertionError("404 must remain distinguishable for crash reconciliation")
+
+    def test_parser_refuses_duplicate_position_identity(self) -> None:
+        malformed = {
+            **FIXTURE_ORDER_DETAIL_RESPONSE,
+            "positionExecutions": [
+                FIXTURE_ORDER_DETAIL_RESPONSE["positionExecutions"][0],
+                FIXTURE_ORDER_DETAIL_RESPONSE["positionExecutions"][0],
+            ],
+        }
+        try:
+            _parse_order_detail(malformed, reference_id=None)
+        except OrderDetailParseError:
+            pass
+        else:  # pragma: no cover - assertion helper branch
+            raise AssertionError("duplicate exact position ids must fail closed")
+
+    def test_parser_refuses_execution_without_fill_facts(self) -> None:
+        execution = dict(FIXTURE_ORDER_DETAIL_RESPONSE["positionExecutions"][0])
+        execution["openingData"] = {"executionTime": "2026-08-09T09:00:01Z", "fees": 0}
+        malformed = {**FIXTURE_ORDER_DETAIL_RESPONSE, "positionExecutions": [execution]}
+        try:
+            _parse_order_detail(malformed, reference_id=None)
+        except OrderDetailParseError as exc:
+            assert "units" in str(exc)
+        else:  # pragma: no cover - assertion helper branch
+            raise AssertionError("position identity without positive fill facts must fail closed")
 
 
 # ---------------------------------------------------------------------------

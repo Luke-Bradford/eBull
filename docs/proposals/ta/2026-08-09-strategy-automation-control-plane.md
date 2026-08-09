@@ -365,9 +365,16 @@ are actually created.
    can be released. Global auto/live switches are not read by promotion and
    cannot change stage. Broker I/O remains absent and live execution remains
    disabled.
-6. **Order/position reconciler:** consume detailed v2 order lookup and history;
-   close the existing submitted/pending crash gap; prove same-instrument manual
-   isolation in demo.
+6. **Order/position reconciler — implemented:** persist an immutable submission
+   UUID before broker I/O, use it as both the documented v2 idempotency key and
+   `orders:lookup.referenceId`, and retain exact position cardinality, partial
+   units, average price, fees and execution time. Restart polling updates one
+   compact state row per order; malformed/unknown/rejected-with-position shapes
+   fail closed. An explicit reconciliation-age policy activates one bounded
+   new-entry kill row rather than appending polling heartbeats. Real-Postgres
+   crash-point tests cover before-call identity, during-call uncertainty,
+   after-acceptance replay, partial fills and a same-instrument manual position
+   that remains unclaimed. No broker writer or paper allocator is enabled.
 7. **Paper allocator/executor:** exact strategy version, sleeve cash, current
    preflight, SL/TP and portfolio guard; no live key path.
 8. **Owned-position manager:** exact-position exits, timeout and separately
