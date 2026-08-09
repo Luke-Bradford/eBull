@@ -391,8 +391,7 @@ def get_strategy_overview(
                 exclusion_reason=excluded_by_id.get(strategy_id),
                 scan=scan,
                 evidence_windows=windows,
-                legacy_result_count=result_counts.get(strategy_id, 0)
-                - sum(len(rows) for key, rows in exact.items() if key in declared_pairs),
+                legacy_result_count=result_counts.get(strategy_id, 0) - sum(len(rows) for rows in exact.values()),
                 all_recent_evidence_complete=all_complete,
                 allocation_refusals=allocation_refusals,
             )
