@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
+from uuid import UUID
 
 OrderStatus = Literal["filled", "pending", "rejected", "failed"]
 TradeDirection = Literal["buy", "sellShort"]
@@ -34,6 +35,42 @@ class BrokerOrderResult:
     filled_units: Decimal | None
     fees: Decimal
     raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerPositionExecution:
+    """One exact position created or affected by a detailed broker order."""
+
+    position_id: int
+    state: str
+    remaining_units: Decimal | None
+    opening_units: Decimal | None
+    average_price: Decimal | None
+    execution_time: datetime | None
+    fees: Decimal | None
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerOrderDetail:
+    """Current v2 order detail resolved by order id or submission UUID."""
+
+    broker_order_ref: str
+    reference_id: str | None
+    status: OrderStatus
+    broker_status: str
+    instrument_id: int
+    position_executions: tuple[BrokerPositionExecution, ...]
+    last_update: datetime | None
+    raw_payload: dict[str, Any]
+
+
+class BrokerOrderLookupError(RuntimeError):
+    """A detailed order lookup failed or returned an unsafe shape."""
+
+
+class BrokerOrderNotFound(BrokerOrderLookupError):
+    """No order currently resolves for the supplied durable identity."""
 
 
 @dataclass(frozen=True)
@@ -291,12 +328,16 @@ class BrokerProvider(ABC):
         amount: Decimal | None,
         units: Decimal | None,
         params: OrderParams | None = None,
+        *,
+        request_id: UUID | None = None,
     ) -> BrokerOrderResult:
         """
         Place an order with the broker.
 
         Exactly one of amount or units should be provided.
         params: optional SL/TP and leverage settings. None = broker defaults.
+        request_id: optional durable broker idempotency identity. Strategy
+        callers must commit this UUID before I/O and reuse it after uncertainty.
         Returns the broker's response, including fill details if immediately filled.
         """
 
@@ -336,6 +377,20 @@ class BrokerProvider(ABC):
         Non-abstract with a NotImplementedError default so existing test
         fakes that implement only the abstract surface keep working;
         the eToro implementation overrides it.
+        """
+        raise NotImplementedError
+
+    def lookup_order(
+        self,
+        *,
+        order_id: str | None = None,
+        reference_id: str | None = None,
+    ) -> BrokerOrderDetail:
+        """Resolve exact order/position detail using one durable identity.
+
+        ``reference_id`` is the idempotency UUID supplied when the order was
+        submitted.  It is therefore usable even when a process crashed before
+        persisting the broker-assigned order id.
         """
         raise NotImplementedError
 

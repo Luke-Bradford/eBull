@@ -88,6 +88,12 @@ momentum, not universally (Moreira-Muir vs Cederburg et al.).
   symbol/instrument matching, units, timestamps, source labels, or FIFO. A manual
   same-instrument position has no ownership row and must remain unmodifiable by
   strategy code, while still counting toward portfolio-wide risk.
+- **Broker submission identity is durable before I/O.** Commit one immutable
+  UUID, send it as eToro v2 `X-Request-Id`, and reuse it for both an idempotent
+  retry and `orders:lookup.referenceId`. After an uncertain response, never
+  rotate the UUID or submit a newly keyed order. Pending/partial executions are
+  owned by exact returned position id but keep the entry backlog unresolved;
+  an overdue backlog blocks new entries.
 
 ### `INITIAL_STOP`
 

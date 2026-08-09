@@ -147,7 +147,7 @@ GET+POST requests cannot exceed the API limit.
 | PATCH | `/api/v2/trading/{real\|demo}/positions/{positionId}` | Edit TP/SL on one exact open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). Async acceptance `{operationId, positionId, referenceId}` — re-sync before treating as landed | Planned — required for strategy-owned ratchets |
 | POST | `/api/v2/trading/info/{real\|demo}/eligibility` | Up to 100 ids/symbols; account-specific open/close/partial-close permission, min exposure, max units, order/fill types, and leverage + SL/TP constraints by settlement/direction | **Adapter implemented; no persistence/execution gate yet** |
 | POST | `/api/v2/trading/info/{real\|demo}/costs` | What-if open cost rows for `buy` / `sellShort`: open vocabulary including spread, markup, transaction, overnight/weekend and tax; returns `lastUpdated`. Demo returned `value` while omitting documented `amount`; controlled scaling did not establish one unit equation | **Adapter + bounded census implemented; fail closed for execution** |
-| GET | `/api/v2/trading/info/{real\|demo}/orders:lookup` | Detailed order and `positionExecutions[].positionId`; required to bind an entry order to the exact broker position | Not used — execution reconciliation gap |
+| GET | `/api/v2/trading/info/{real\|demo}/orders:lookup` | Exactly one of numeric `orderId` or submission `referenceId`; returns status and every `positionExecutions[].positionId` with opening units/average price. Shared 60 GET/min quota | **Active for strategy reconciliation** — strict adapter, exact execution persistence and restart backlog; no broker writer in this slice |
 | POST | `/api/v1/trading/execution/limit-orders` | Limit/MIT order | Not used (v1 is market-only) |
 | DELETE | `/api/v1/trading/execution/limit-orders/{orderId}` | Cancel limit order | Not used (v1) |
 | GET | `/api/v1/trading/info/portfolio` | Full portfolio: positions, orders, mirrors, credit | **Active** — portfolio sync |
@@ -162,6 +162,12 @@ and `BrokerWhatIfCostResponse` adapters. Documentation examples are not populati
 evidence: probe a bounded demo cohort before deciding which fields change often,
 which settlement/direction arms are actually returned, and whether observed
 `sellShort` eligibility and costs are adequate for a short strategy.
+
+The current v2 create-order contract also documents a unique `X-Request-Id`
+UUID as the idempotency key, and `orders:lookup.referenceId` as that same
+submission header. Strategy execution must commit this immutable UUID before
+network I/O and reuse it on every retry. A missing response therefore becomes a
+lookup/retry of one identity, never a newly keyed duplicate order.
 
 ### Authenticated demo census (2026-08-09)
 
