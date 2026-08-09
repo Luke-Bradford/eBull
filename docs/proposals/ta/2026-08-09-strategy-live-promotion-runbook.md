@@ -68,7 +68,8 @@ promotes automatically.
    remain available while global and per-strategy entry blocks are active.
 6. Inspect `GET /strategies/{id}/live-gate?requested_capital=...`. An explicit
    `POST /strategies/{id}/live-promotion-attempt` records a compact refusal and
-   evidence SHA-256; it does not place an order or create live authority.
+   evidence SHA-256, including when the policy itself is missing; it does not
+   place an order or create live authority.
 
 ## Pause, emergency action and retirement
 
@@ -87,7 +88,9 @@ promotes automatically.
 
 `sql/290_strategy_live_promotion_gate.sql` adds one policy row per immutable
 strategy version, one row per material drill, and one row per explicit promotion
-attempt. It adds no tick, bar, indicator, health-heartbeat or periodic P&L table.
+attempt. `sql/291_strategy_live_attempt_audit_identity.sql` makes a policy-less
+refusal identifiable and auditable in that same narrow ledger. It adds no tick,
+bar, indicator, health-heartbeat or periodic P&L table.
 The recurring loop changes five keyed health rows, one account high-water row
 and one paper-period high-water/maximum-drawdown row per deployment. It uses the existing one-row
 per fired signal/order/material mutation ledgers. Its only new indexes support
@@ -95,7 +98,8 @@ one policy lookup and latest drill/assessment history; none amplify market-data
 writes.
 
 Measured on PostgreSQL 17 after migration, all five empty relations plus their
-indexes total **96 KiB** (the three live audit/policy relations are 24 KiB each,
+indexes total **104 KiB** (the policy and drill relations are 24 KiB each, the
+live-attempt audit relation is 32 KiB,
 the per-deployment risk-state relation is 8 KiB and the shared paper-pool event
 ledger is 16 KiB). It adds one bounded current row per
 configured paper sleeve. This is fixed catalogue overhead; growth

@@ -12,7 +12,9 @@ import pytest
 
 from app.api.strategies import (
     KillDrillRequest,
+    LivePromotionAttemptRequest,
     StrategyLifecycleRequest,
+    attempt_live_promotion,
     change_strategy_lifecycle,
     execute_live_kill_drill,
 )
@@ -232,6 +234,37 @@ def test_each_kill_drill_commits_an_entry_block_then_restores_without_heartbeat_
         (policy_id,),
     ).fetchone() == (len(REQUIRED_KILL_DRILLS), True)
     assert conn.execute("SELECT count(*) FROM strategy_execution_blocks WHERE source LIKE 'drill:%'").fetchone() == (0,)
+
+
+def test_policyless_live_attempt_is_refused_and_audited(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _forward_stage(conn)
+    conn.commit()
+    monkeypatch.setattr("app.api.strategies._current_versions", lambda: {_STRATEGY_ID: _VERSION})
+
+    response = attempt_live_promotion(
+        _STRATEGY_ID,
+        LivePromotionAttemptRequest(
+            strategy_version=_VERSION,
+            requested_capital=Decimal("10"),
+            reason="prove policy-less refusal audit",
+        ),
+        _session(),
+        conn,
+    )
+
+    assert "live_gate_policy_missing" in response.report.refusal_codes
+    assert conn.execute(
+        """
+        SELECT live_gate_policy_id,strategy_id,strategy_version,passed,
+               refusal_codes @> ARRAY['live_gate_policy_missing']
+        FROM strategy_live_gate_assessments
+        WHERE live_gate_assessment_id=%s
+        """,
+        (response.assessment_id,),
+    ).fetchone() == (None, _STRATEGY_ID, _VERSION, False, True)
 
 
 def test_failed_kill_drill_assertion_still_restores_synthetic_source(

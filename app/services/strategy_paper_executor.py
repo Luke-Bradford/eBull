@@ -194,6 +194,9 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
                    (
                        SELECT COALESCE(SUM(fd.amount), 0)
                        FROM strategy_funding_decisions fd
+                       JOIN strategy_deployments reserved_d
+                         ON reserved_d.deployment_id = fd.deployment_id
+                        AND reserved_d.mode = 'paper'
                        LEFT JOIN strategy_trades st ON st.funding_decision_id = fd.funding_decision_id
                        WHERE fd.verdict = 'allocated'
                          AND (st.strategy_trade_id IS NULL OR st.status NOT IN ('closed', 'failed'))

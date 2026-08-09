@@ -102,7 +102,8 @@ real-money-capable connection is configured while live strategy activation is
 refused, the page shows one concise activation-unavailable warning.
 
 The shared strategy pot is an additional hard ceiling across every enabled
-strategy deployment. Under the existing allocator advisory lock, sizing takes
+paper strategy deployment; future live reservations are explicitly excluded.
+Under the existing allocator advisory lock, sizing takes
 the minimum of the shared remaining pot, per-strategy remaining ceiling,
 available cash and the existing portfolio/instrument risk limits. The master
 workspace switch updates that ceiling and the account-wide automatic-trading

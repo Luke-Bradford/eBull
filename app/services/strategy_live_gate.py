@@ -592,8 +592,6 @@ def record_live_promotion_attempt(
     """
     _require_text(assessed_by, "assessed_by")
     _require_text(reason, "reason")
-    if report.policy is None:
-        raise StrategyControlError("a live gate policy is required before recording an attempt")
     if report.passed:
         raise StrategyControlError("live promotion writer is unavailable until the broker contract is validated")
     payload = _jsonable({"facts": asdict(report.facts), "gate_version": LIVE_GATE_VERSION})
@@ -602,13 +600,16 @@ def record_live_promotion_attempt(
     row = conn.execute(
         """
         INSERT INTO strategy_live_gate_assessments (
-            live_gate_policy_id, requested_capital, passed, refusal_codes,
+            live_gate_policy_id, strategy_id, strategy_version,
+            requested_capital, passed, refusal_codes,
             evidence_sha256, evidence_json, assessed_by, reason
-        ) VALUES (%s,%s,false,%s,%s,%s::jsonb,%s,%s)
+        ) VALUES (%s,%s,%s,%s,false,%s,%s,%s::jsonb,%s,%s)
         RETURNING live_gate_assessment_id
         """,
         (
-            report.policy.live_gate_policy_id,
+            report.policy.live_gate_policy_id if report.policy is not None else None,
+            report.strategy_id,
+            report.strategy_version,
             report.requested_capital,
             list(report.refusal_codes),
             digest,

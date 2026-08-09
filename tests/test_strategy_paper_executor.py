@@ -351,6 +351,56 @@ def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
     assert result.amount == Decimal("25.00")
 
 
+def test_shared_paper_pool_excludes_future_live_reservations(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("26"),
+        changed_by="operator",
+        reason="paper-only shared pot",
+    )
+    live_signal = conn.execute(
+        """
+        INSERT INTO strategy_signals (
+            strategy_id,strategy_version,instrument_id,signal_bar_date,
+            signal_kind,verdict,fill_bar_date,fill_price,universe,input_rule_set_versions
+        ) VALUES ('S-FUTURE-LIVE','v1',2449001,'2026-08-04','entry','fired',
+                  '2026-08-05',100,'survivor_only','{"indicator_series":"rules-v1"}'::jsonb)
+        RETURNING signal_id
+        """
+    ).fetchone()
+    live_deployment = conn.execute(
+        """
+        INSERT INTO strategy_deployments (
+            strategy_id,strategy_version,mode,capital_limit,currency,enabled,updated_by,reason
+        ) VALUES ('S-FUTURE-LIVE','v1','live',100,'USD',true,'test','future live fixture')
+        RETURNING deployment_id
+        """
+    ).fetchone()
+    assert live_signal is not None and live_deployment is not None
+    conn.execute(
+        """
+        INSERT INTO strategy_funding_decisions (
+            signal_id,deployment_id,verdict,amount,reason_code
+        ) VALUES (%s,%s,'allocated',25,'future_live_reservation')
+        """,
+        (live_signal[0], live_deployment[0]),
+    )
+    conn.commit()
+
+    result = execute_fired_paper_signal(conn, broker=_broker(), signal_id=signal_id, now=_NOW)
+
+    assert (result.verdict, result.reason_code, result.amount) == (
+        "submitted",
+        "broker_accepted",
+        Decimal("26.00"),
+    )
+
+
 def test_undocumented_cost_units_refuse_before_any_order_exists(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
