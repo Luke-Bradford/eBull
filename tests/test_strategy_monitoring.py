@@ -1,0 +1,524 @@
+"""#2453 exact-owned P&L and allocation-unbiased attribution tests."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import uuid4
+
+import psycopg
+import pytest
+from fastapi import HTTPException
+
+from app.api.strategies import (
+    AllocationUpdateRequest,
+    _current_versions,
+    get_fired_signals,
+    get_strategy_overview,
+    update_strategy_allocation,
+)
+from app.security.sessions import SessionRow
+from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
+from app.services.strategy_monitoring import (
+    load_attribution,
+    load_control_state,
+    load_entry_block_state,
+    load_owned_pnl,
+)
+
+
+def _instrument(conn: psycopg.Connection[Any], instrument_id: int) -> None:
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, currency, is_tradable)
+        VALUES (%s, %s, %s, 'USD', true)
+        """,
+        (instrument_id, f"M{instrument_id}", f"Monitor {instrument_id}"),
+    )
+
+
+def _signal(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    strategy_id: str,
+    strategy_version: str,
+    signal_date: str,
+    fill_price: Decimal,
+) -> int:
+    row = conn.execute(
+        """
+        INSERT INTO strategy_signals (
+            strategy_id, strategy_version, instrument_id, signal_bar_date,
+            signal_kind, verdict, fill_bar_date, fill_price, universe,
+            input_rule_set_versions
+        ) VALUES (%s, %s, %s, %s, 'entry', 'fired', %s::date + 1,
+                  %s, 'survivorship_free',
+                  '{"indicator_series":"rules-v1"}'::jsonb)
+        RETURNING signal_id
+        """,
+        (strategy_id, strategy_version, instrument_id, signal_date, signal_date, fill_price),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _deployment(conn: psycopg.Connection[Any], strategy_id: str, strategy_version: str) -> int:
+    row = conn.execute(
+        """
+        INSERT INTO strategy_deployments (
+            strategy_id, strategy_version, mode, capital_limit, currency,
+            enabled, revision, updated_by, reason
+        ) VALUES (%s, %s, 'paper', 1000, 'USD', false, 1, 'tester', 'monitoring test')
+        RETURNING deployment_id
+        """,
+        (strategy_id, strategy_version),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _funded_trade(conn: psycopg.Connection[Any], *, signal_id: int, deployment_id: int, instrument_id: int) -> int:
+    decision = conn.execute(
+        """
+        INSERT INTO strategy_funding_decisions (
+            signal_id, deployment_id, verdict, amount, reason_code
+        ) VALUES (%s, %s, 'allocated', 100, 'test_funded')
+        RETURNING funding_decision_id
+        """,
+        (signal_id, deployment_id),
+    ).fetchone()
+    assert decision is not None
+    trade = conn.execute(
+        """
+        INSERT INTO strategy_trades (funding_decision_id, instrument_id, status)
+        VALUES (%s, %s, 'open') RETURNING strategy_trade_id
+        """,
+        (decision[0], instrument_id),
+    ).fetchone()
+    assert trade is not None
+    return int(trade[0])
+
+
+def test_owned_pnl_excludes_manual_same_instrument_lifecycle(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "monitoring-owned"
+    strategy_version = "monitoring-owned-v1"
+    instrument_id = 2453001
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO broker_positions (
+            position_id, instrument_id, is_buy, units, initial_units, amount,
+            initial_amount_in_dollars, open_rate, open_conversion_rate,
+            open_date_time, raw_payload
+        ) VALUES
+          (7001, %s, true, 5, 10, 100, 100, 10, 1, now(), '{}'::jsonb),
+          (7002, %s, true, 8, 8, 80, 80, 10, 1, now(), '{}'::jsonb)
+        """,
+        (instrument_id, instrument_id),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (
+            strategy_trade_id, broker_position_id, status
+        ) VALUES (%s, 7001, 'active')
+        """,
+        (trade_id,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO quotes (instrument_id, quoted_at, bid, ask, last)
+        VALUES (%s, now(), 11.9, 12.1, 12)
+        """,
+        (instrument_id,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id, etoro_instrument_id, instrument_id, event_kind, side,
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+        ) VALUES
+          (7001, %s, %s, 'close', 'sell', 5, 12, now(), 1.25, 12.50, 'etoro_history', '{}'::jsonb),
+          (7002, %s, %s, 'close', 'sell', 8, 30, now(), 20, 999, 'etoro_history', '{}'::jsonb)
+        """,
+        (instrument_id, instrument_id, instrument_id, instrument_id),
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert pnl.realised_pnl == Decimal("12.50")
+    assert pnl.unrealised_pnl == Decimal("10")
+    assert pnl.total_pnl == Decimal("22.50")
+    assert pnl.observed_fees == Decimal("1.25")
+    assert pnl.invested_capital == Decimal("100")
+    assert pnl.owned_position_count == 1
+    assert pnl.complete
+
+
+def test_missing_owned_mark_is_unknown_not_zero(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "monitoring-missing-mark"
+    strategy_version = "monitoring-missing-mark-v1"
+    instrument_id = 2453002
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO broker_positions (
+            position_id, instrument_id, is_buy, units, amount,
+            initial_amount_in_dollars, open_rate, open_conversion_rate,
+            open_date_time, raw_payload
+        ) VALUES (7101, %s, true, 5, 100, 100, 10, 1, now(), '{}'::jsonb)
+        """,
+        (instrument_id,),
+    )
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id) VALUES (%s, 7101)",
+        (trade_id,),
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert pnl.unrealised_pnl is None
+    assert pnl.total_pnl is None
+    assert "active_position_mark_unavailable" in pnl.incomplete_reasons
+
+
+def test_unreconciled_funding_makes_all_owned_money_unknown(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "monitoring-unreconciled"
+    strategy_version = "monitoring-unreconciled-v1"
+    instrument_id = 2453005
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_funding_decisions (
+            signal_id, deployment_id, verdict, amount, reason_code
+        ) VALUES (%s, %s, 'allocated', 100, 'awaiting_reconciliation')
+        """,
+        (signal_id, deployment_id),
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert pnl.realised_pnl is None
+    assert pnl.unrealised_pnl is None
+    assert pnl.total_pnl is None
+    assert pnl.invested_capital is None
+    assert pnl.observed_fees is None
+    assert pnl.incomplete_reasons == ("funding_not_reconciled_to_trade",)
+
+
+def test_shadow_statistics_do_not_depend_on_later_allocation_configuration(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "monitoring-shadow"
+    strategy_version = "monitoring-shadow-v1"
+    instrument_id = 2453003
+    _instrument(ebull_test_conn, instrument_id)
+    funded_signal = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("100"),
+    )
+    rejected_signal = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-03",
+        fill_price=Decimal("100"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=funded_signal,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    order = ebull_test_conn.execute(
+        """
+        INSERT INTO orders (
+            instrument_id, action, order_type, requested_amount, status, execution_origin
+        ) VALUES (%s, 'BUY', 'MARKET', 100, 'rejected', 'strategy') RETURNING order_id
+        """,
+        (instrument_id,),
+    ).fetchone()
+    assert order is not None
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_trade_orders (strategy_trade_id, order_id, purpose)
+        VALUES (%s, %s, 'entry')
+        """,
+        (trade_id, order[0]),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_order_position_executions (
+            order_id, broker_position_id, opening_units, average_price
+        ) VALUES (%s, 7201, 1, 101)
+        """,
+        (order[0],),
+    )
+    for signal_id, result in ((funded_signal, Decimal("10")), (rejected_signal, Decimal("-4"))):
+        ebull_test_conn.execute(
+            """
+            INSERT INTO strategy_outcomes (
+                signal_id, rule_set_version, input_rule_set_version, outcome,
+                resolution_method, exit_bar_date, exit_price, bars_held, gross_return_pct
+            ) VALUES (%s, %s, %s, 'expired', 'daily_bar', '2026-08-08', 100, 3, %s)
+            """,
+            (signal_id, OUTCOME_RULE_SET_VERSION, QUARANTINE_RULE_SET_VERSION, result),
+        )
+
+    before = load_attribution(
+        ebull_test_conn,
+        versions=[strategy_version],
+        outcome_version=OUTCOME_RULE_SET_VERSION,
+        input_version=QUARANTINE_RULE_SET_VERSION,
+    )[(strategy_id, strategy_version)]
+    ebull_test_conn.execute(
+        "UPDATE strategy_deployments SET capital_limit=750, revision=2 WHERE deployment_id=%s",
+        (deployment_id,),
+    )
+    after = load_attribution(
+        ebull_test_conn,
+        versions=[strategy_version],
+        outcome_version=OUTCOME_RULE_SET_VERSION,
+        input_version=QUARANTINE_RULE_SET_VERSION,
+    )[(strategy_id, strategy_version)]
+
+    assert before == after
+    assert before.shadow_average_return_pct == Decimal("3")
+    assert before.funded_shadow_average_return_pct == Decimal("10")
+    assert before.rejected_shadow_average_return_pct == Decimal("-4")
+    assert before.opportunity_gap_pct == Decimal("-14")
+    assert before.funded_capture_rate == Decimal("0.5")
+    assert before.fill_rate == Decimal("1")
+    assert before.broker_rejected_entries == 0
+    assert before.broker_rejection_rate == Decimal("0")
+    assert before.average_slippage_pct == Decimal("1")
+
+
+def test_unprocessed_current_entry_is_visible_as_not_funded_with_reason(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    instrument_id = 2453004
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+
+    response = get_fired_signals(cursor=None, limit=50, conn=ebull_test_conn)
+    signal = next(item for item in response.items if item.signal_id == signal_id)
+
+    assert signal.funding_status == "rejected"
+    assert signal.funding_reason == "not_evaluated_by_allocator"
+    assert signal.funded_amount is None
+
+
+def _session(username: str = "allocation-operator") -> SessionRow:
+    now = datetime.now(UTC)
+    return SessionRow("test-session", uuid4(), username, now + timedelta(hours=1), now)
+
+
+def test_missing_evidence_refuses_new_allocation_without_writing_audit(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    version = _current_versions()[strategy_id]
+    ebull_test_conn.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_strategy_allocation(
+            strategy_id,
+            AllocationUpdateRequest(
+                strategy_version=version,
+                capital_limit=Decimal("100"),
+                enabled=False,
+                reason="test unavailable evidence",
+            ),
+            _session(),
+            ebull_test_conn,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert isinstance(exc_info.value.detail, dict)
+    assert exc_info.value.detail.get("reason") == "allocation_unavailable"
+    assert ebull_test_conn.execute(
+        "SELECT count(*) FROM strategy_deployments WHERE strategy_id=%s", (strategy_id,)
+    ).fetchone() == (0,)
+    assert ebull_test_conn.execute("SELECT count(*) FROM strategy_deployment_events").fetchone() == (0,)
+
+
+def test_evidence_invalid_enabled_allocation_can_reduce_without_disabling(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    version = _current_versions()[strategy_id]
+    deployment_id = _deployment(ebull_test_conn, strategy_id, version)
+    ebull_test_conn.execute(
+        "UPDATE strategy_deployments SET enabled=true, currency='EUR' WHERE deployment_id=%s",
+        (deployment_id,),
+    )
+    ebull_test_conn.commit()
+
+    response = update_strategy_allocation(
+        strategy_id,
+        AllocationUpdateRequest(
+            strategy_version=version,
+            capital_limit=Decimal("500"),
+            enabled=True,
+            reason="reduce risk while evidence is unavailable",
+        ),
+        _session(),
+        ebull_test_conn,
+    )
+
+    assert response.enabled
+    assert response.capital_limit == Decimal("500")
+    assert response.currency == "EUR"
+    assert ebull_test_conn.execute(
+        "SELECT capital_limit, currency, enabled FROM strategy_deployment_events WHERE deployment_id=%s",
+        (deployment_id,),
+    ).fetchone() == (Decimal("500.000000"), "EUR", True)
+
+
+def test_disabled_pre_promotion_deployment_remains_visible_for_risk_reduction(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    version = _current_versions()[strategy_id]
+    deployment_id = _deployment(ebull_test_conn, strategy_id, version)
+
+    state = load_control_state(ebull_test_conn, versions=[version])[(strategy_id, version)]
+
+    assert state.stage is None
+    assert state.deployment_id == deployment_id
+    assert not state.enabled
+
+
+def test_missing_runtime_singleton_is_visible_as_an_entry_block(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    ebull_test_conn.execute("DELETE FROM runtime_config")
+
+    state = load_entry_block_state(ebull_test_conn)
+
+    assert state.new_entries_blocked
+    assert state.execution_block_reasons == ("runtime configuration unavailable",)
+    assert not state.auto_trading_enabled
+
+
+def test_disabled_automatic_trading_is_visible_as_an_entry_block(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    ebull_test_conn.execute("UPDATE runtime_config SET enable_auto_trading=false")
+
+    state = load_entry_block_state(ebull_test_conn)
+
+    assert state.new_entries_blocked
+    assert "automatic trading disabled" in state.execution_block_reasons
+    assert not state.auto_trading_enabled
+
+
+def test_operator_allocation_uses_session_identity_and_immutable_event(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    version = _current_versions()[strategy_id]
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_promotions (
+            strategy_id, strategy_version, from_stage, to_stage, gate_version,
+            evidence_ref, promoted_by, reason
+        ) VALUES
+          (%s, %s, NULL, 'research_candidate', 'test-v1', NULL, 'test', 'registered'),
+          (%s, %s, 'research_candidate', 'historical_validated', 'test-v1', 'e:hist', 'test', 'validated'),
+          (%s, %s, 'historical_validated', 'forward_observation', 'test-v1', 'e:fwd', 'test', 'observe'),
+          (%s, %s, 'forward_observation', 'paper_enabled', 'test-v1', 'e:paper', 'test', 'paper')
+        """,
+        (strategy_id, version, strategy_id, version, strategy_id, version, strategy_id, version),
+    )
+    overview = get_strategy_overview(ebull_test_conn)
+    strategy = next(row for row in overview.strategies if row.strategy_id == strategy_id)
+    strategy.allocation_ready = True
+    strategy.allocation_refusals = []
+    monkeypatch.setattr("app.api.strategies.get_strategy_overview", lambda _conn: overview)
+    ebull_test_conn.commit()
+
+    response = update_strategy_allocation(
+        strategy_id,
+        AllocationUpdateRequest(
+            strategy_version=version,
+            capital_limit=Decimal("250"),
+            enabled=True,
+            reason="bounded paper sleeve",
+        ),
+        _session("real-session-user"),
+        ebull_test_conn,
+    )
+
+    assert response.enabled
+    assert response.capital_limit == Decimal("250")
+    assert ebull_test_conn.execute(
+        """
+        SELECT capital_limit, enabled, changed_by, reason
+        FROM strategy_deployment_events WHERE deployment_id=%s
+        """,
+        (response.deployment_id,),
+    ).fetchone() == (Decimal("250.000000"), True, "real-session-user", "bounded paper sleeve")

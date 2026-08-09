@@ -1,10 +1,4 @@
-"""Read-only strategy evidence and fired-signal monitoring (#2447).
-
-This surface intentionally has no mutation route.  It reports the current
-manifest denominator, exact-version recent evidence, scan health, and every
-fired signal whether or not capital was available.  Allocation and execution
-remain disabled until later tickets add ownership-safe broker reconciliation.
-"""
+"""Strategy evidence, exact-owned P&L, attribution and allocation (#2447/#2453)."""
 
 from __future__ import annotations
 
@@ -15,18 +9,34 @@ from typing import Literal, cast
 
 import psycopg
 import psycopg.rows
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field, model_validator
 
-from app.api.auth import require_session_or_service_token
+from app.api.auth import require_session, require_session_or_service_token
 from app.db import get_conn
+from app.security.sessions import SessionRow
 from app.services.backtest_run import BACKTEST_UNIVERSE, runnable_strategies
 from app.services.cost_model import COST_MODEL_ID
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
+from app.services.strategy_control_plane import (
+    StrategyControlError,
+    configure_deployment,
+    is_risk_reducing_deployment_change,
+    lock_strategy_control,
+)
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_monitoring import (
+    StrategyAttribution,
+    StrategyControlState,
+    StrategyPnl,
+    load_attribution,
+    load_control_state,
+    load_entry_block_state,
+    load_owned_pnl,
+)
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import CORPUS_VERSION
 
@@ -104,15 +114,76 @@ class StrategyOverview(BaseModel):
     evidence_windows: list[EvidenceWindow]
     legacy_result_count: int
     all_recent_evidence_complete: bool
-    allocation_ready: bool = False
+    stage: str | None
+    attribution: StrategyAttributionView
+    pnl: StrategyPnlView
+    allocation: StrategyAllocationView
+    allocation_ready: bool
     allocation_refusals: list[str]
+
+
+class StrategyAttributionView(BaseModel):
+    fired_entries: int
+    funded_entries: int
+    rejected_entries: int
+    resolved_entries: int
+    shadow_average_return_pct: Decimal | None
+    funded_shadow_average_return_pct: Decimal | None
+    rejected_shadow_average_return_pct: Decimal | None
+    opportunity_gap_pct: Decimal | None
+    funded_capture_rate: Decimal | None
+    filled_entries: int
+    broker_rejected_entries: int
+    fill_rate: Decimal | None
+    broker_rejection_rate: Decimal | None
+    average_slippage_pct: Decimal | None
+    average_stressed_cost_usd: Decimal | None
+    max_observed_account_drawdown_pct: Decimal | None
+
+
+class StrategyPnlView(BaseModel):
+    currency: Literal["USD"] = "USD"
+    strategy_trade_count: int
+    owned_position_count: int
+    active_position_count: int
+    close_event_count: int
+    invested_capital: Decimal | None
+    realised_pnl: Decimal | None
+    unrealised_pnl: Decimal | None
+    total_pnl: Decimal | None
+    observed_fees: Decimal | None
+    complete: bool
+    incomplete_reasons: list[str]
+
+
+class StrategyAllocationView(BaseModel):
+    deployment_id: int | None
+    capital_limit: Decimal
+    currency: str
+    enabled: bool
+    revision: int | None
+    reserved_capital: Decimal
+    invested_capital: Decimal | None
+    remaining_capital: Decimal
+    policy_configured: bool
+    max_drawdown_limit_pct: Decimal | None
+
+
+class StrategyEntryBlockView(BaseModel):
+    new_entries_blocked: bool
+    global_kill_active: bool
+    global_kill_reason: str | None
+    global_kill_activated_at: datetime | None
+    global_kill_activated_by: str | None
+    execution_block_reasons: list[str]
 
 
 class StrategyOverviewResponse(BaseModel):
     as_of: datetime
-    observation_stage: Literal["forward_observation"] = "forward_observation"
-    execution_enabled: bool = False
-    storage_policy: str = "aggregate_results_only"
+    execution_enabled: bool
+    live_execution_enabled: bool
+    storage_policy: Literal["fired_signals_and_material_mutations_only"] = "fired_signals_and_material_mutations_only"
+    entry_block: StrategyEntryBlockView
     strategies: list[StrategyOverview]
 
 
@@ -133,14 +204,41 @@ class FiredSignal(BaseModel):
     exit_price: Decimal | None
     gross_return_pct: Decimal | None
     outcome_reason: str | None
-    observation_stage: Literal["forward_observation"] = "forward_observation"
-    funding_status: Literal["unfunded"] = "unfunded"
-    funding_reason: Literal["execution_not_enabled"] = "execution_not_enabled"
+    funding_status: Literal["funded", "rejected", "not_applicable"]
+    funding_reason: str
+    funded_amount: Decimal | None
+    strategy_trade_id: int | None
+    execution_status: str | None
+    actual_fill_price: Decimal | None
+    slippage_pct: Decimal | None
 
 
 class FiredSignalsResponse(BaseModel):
     items: list[FiredSignal]
     next_cursor: int | None
+
+
+class AllocationUpdateRequest(BaseModel):
+    strategy_version: str = Field(min_length=1, max_length=200)
+    capital_limit: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    enabled: bool
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def enabled_requires_capital(self) -> AllocationUpdateRequest:
+        if self.enabled and self.capital_limit <= 0:
+            raise ValueError("enabled allocation requires positive capital")
+        return self
+
+
+class AllocationUpdateResponse(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    deployment_id: int
+    capital_limit: Decimal
+    currency: str
+    enabled: bool
+    revision: int
 
 
 def _current_versions() -> dict[str, str]:
@@ -269,8 +367,9 @@ def get_strategy_overview(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> StrategyOverviewResponse:
     versions = _current_versions()
+    version_values = list(versions.values())
     params = {
-        "versions": list(versions.values()),
+        "versions": version_values,
         "corpus_version": CORPUS_VERSION,
         "cost_model_id": COST_MODEL_ID,
         "sizing_rule": SIZING_RULE_ID,
@@ -291,6 +390,16 @@ def get_strategy_overview(
         cur.execute(_LATEST_CORPUS_SQL)
         latest_row = cur.fetchone()
         latest_corpus_date = None if latest_row is None else latest_row["max"]
+
+    attribution_by_strategy = load_attribution(
+        conn,
+        versions=version_values,
+        outcome_version=OUTCOME_RULE_SET_VERSION,
+        input_version=QUARANTINE_RULE_SET_VERSION,
+    )
+    pnl_by_strategy = load_owned_pnl(conn, versions=version_values)
+    control_by_strategy = load_control_state(conn, versions=version_values)
+    entry_block = load_entry_block_state(conn)
 
     results_by_strategy: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in result_rows:
@@ -382,11 +491,39 @@ def get_strategy_overview(
             exclusions_by_reason=dict(exclusions[strategy_id]),
         )
         all_complete = all(window.status == "complete" for window in windows)
-        allocation_refusals = ["execution_not_enabled", "broker_cost_unknown"]
+        evidence_refused = any(arm.promotion_refusals for window in windows for arm in window.arms)
+        evidence_not_positive = (
+            any(
+                arm.expectancy_ci_low_pct is None or arm.expectancy_ci_low_pct <= 0
+                for window in windows
+                for arm in window.arms
+            )
+            or not windows
+        )
+        key = (strategy_id, versions[strategy_id])
+        attribution = attribution_by_strategy.get(key, StrategyAttribution())
+        pnl = pnl_by_strategy.get(key, StrategyPnl())
+        control = control_by_strategy.get(key, StrategyControlState())
+        allocation_refusals: list[str] = []
         if strategy_id not in runnable:
             allocation_refusals.append("strategy_not_runnable")
         if not all_complete:
             allocation_refusals.append("recent_evidence_incomplete")
+        if evidence_refused:
+            allocation_refusals.append("recent_evidence_gate_refused")
+        if evidence_not_positive:
+            allocation_refusals.append("recent_net_expectancy_not_positive")
+        if control.stage not in {"paper_enabled", "live_enabled"}:
+            allocation_refusals.append("paper_promotion_missing")
+        if not control.pinned_evidence_ready:
+            allocation_refusals.append("pinned_promotion_evidence_invalid")
+        if not control.policy_configured:
+            allocation_refusals.append("execution_policy_missing")
+        if scan.status != "current":
+            allocation_refusals.append("scan_not_current")
+        if control.currency != "USD":
+            allocation_refusals.append("deployment_currency_unsupported")
+        remaining = max(control.capital_limit - control.reserved_capital, Decimal("0"))
         strategies.append(
             StrategyOverview(
                 strategy_id=strategy_id,
@@ -398,25 +535,97 @@ def get_strategy_overview(
                 evidence_windows=windows,
                 legacy_result_count=result_counts.get(strategy_id, 0) - sum(len(rows) for rows in exact.values()),
                 all_recent_evidence_complete=all_complete,
+                stage=control.stage,
+                attribution=StrategyAttributionView(**attribution.__dict__),
+                pnl=StrategyPnlView(
+                    **{
+                        **pnl.__dict__,
+                        "incomplete_reasons": list(pnl.incomplete_reasons),
+                    }
+                ),
+                allocation=StrategyAllocationView(
+                    deployment_id=control.deployment_id,
+                    capital_limit=control.capital_limit,
+                    currency=control.currency,
+                    enabled=control.enabled,
+                    revision=control.revision,
+                    reserved_capital=control.reserved_capital,
+                    invested_capital=pnl.invested_capital,
+                    remaining_capital=remaining,
+                    policy_configured=control.policy_configured,
+                    max_drawdown_limit_pct=control.max_drawdown_limit_pct,
+                ),
+                allocation_ready=not allocation_refusals,
                 allocation_refusals=allocation_refusals,
             )
         )
-    return StrategyOverviewResponse(as_of=datetime.now(tz=UTC), strategies=strategies)
+    return StrategyOverviewResponse(
+        as_of=datetime.now(tz=UTC),
+        execution_enabled=entry_block.auto_trading_enabled,
+        live_execution_enabled=entry_block.live_trading_enabled,
+        entry_block=StrategyEntryBlockView(
+            new_entries_blocked=entry_block.new_entries_blocked,
+            global_kill_active=entry_block.global_kill_active,
+            global_kill_reason=entry_block.global_kill_reason,
+            global_kill_activated_at=entry_block.global_kill_activated_at,
+            global_kill_activated_by=entry_block.global_kill_activated_by,
+            execution_block_reasons=list(entry_block.execution_block_reasons),
+        ),
+        strategies=strategies,
+    )
 
 
 _FIRED_SIGNALS_SQL = """
+    WITH entry_execution AS (
+        SELECT sto.strategy_trade_id,
+               SUM(e.opening_units * e.average_price)
+                   / NULLIF(SUM(e.opening_units), 0) AS average_price
+        FROM strategy_trade_orders sto
+        JOIN strategy_order_position_executions e ON e.order_id = sto.order_id
+        WHERE sto.purpose = 'entry'
+          AND e.opening_units > 0 AND e.average_price > 0
+        GROUP BY sto.strategy_trade_id
+    ), entry_order AS (
+        SELECT DISTINCT ON (sto.strategy_trade_id)
+               sto.strategy_trade_id, ord.status
+        FROM strategy_trade_orders sto
+        JOIN orders ord ON ord.order_id = sto.order_id
+        WHERE sto.purpose = 'entry'
+        ORDER BY sto.strategy_trade_id, sto.linked_at DESC, sto.order_id DESC
+    )
     SELECT
         s.signal_id, s.strategy_id, s.strategy_version, s.instrument_id,
         i.symbol, i.company_name, s.signal_bar_date, s.signal_kind,
         s.fill_bar_date, s.fill_price, s.universe,
         o.outcome, o.exit_bar_date, o.exit_price, o.gross_return_pct,
-        o.reason AS outcome_reason
+        o.reason AS outcome_reason,
+        CASE
+            WHEN s.signal_kind <> 'entry' THEN 'not_applicable'
+            WHEN fd.verdict = 'allocated' THEN 'funded'
+            ELSE 'rejected'
+        END AS funding_status,
+        CASE
+            WHEN s.signal_kind <> 'entry' THEN 'capital_not_required_for_exit'
+            ELSE COALESCE(fd.reason_code, 'not_evaluated_by_allocator')
+        END AS funding_reason,
+        fd.amount AS funded_amount,
+        t.strategy_trade_id,
+        CASE
+            WHEN ee.average_price IS NOT NULL THEN 'filled'
+            ELSE COALESCE(eo.status, t.status)
+        END AS execution_status,
+        ee.average_price AS actual_fill_price,
+        ((ee.average_price - s.fill_price) / NULLIF(s.fill_price, 0)) * 100 AS slippage_pct
     FROM strategy_signals s
     JOIN instruments i ON i.instrument_id = s.instrument_id
     LEFT JOIN strategy_outcomes o
       ON o.signal_id = s.signal_id
      AND o.rule_set_version = %(outcome_version)s
      AND o.input_rule_set_version = %(input_version)s
+    LEFT JOIN strategy_funding_decisions fd ON fd.signal_id = s.signal_id
+    LEFT JOIN strategy_trades t ON t.funding_decision_id = fd.funding_decision_id
+    LEFT JOIN entry_execution ee ON ee.strategy_trade_id = t.strategy_trade_id
+    LEFT JOIN entry_order eo ON eo.strategy_trade_id = t.strategy_trade_id
     WHERE s.verdict = 'fired'
       AND s.strategy_version = ANY(%(versions)s)
       AND (%(cursor)s::bigint IS NULL OR s.signal_id < %(cursor)s)
@@ -443,6 +652,74 @@ def get_fired_signals(
         rows = list(cur.fetchall())
     items = [FiredSignal(**row) for row in rows]
     return FiredSignalsResponse(items=items, next_cursor=items[-1].signal_id if len(items) == limit else None)
+
+
+@router.put(
+    "/{strategy_id}/allocation",
+    response_model=AllocationUpdateResponse,
+    status_code=status.HTTP_200_OK,
+)
+def update_strategy_allocation(
+    strategy_id: str,
+    body: AllocationUpdateRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> AllocationUpdateResponse:
+    """Apply one operator-authenticated paper capital ceiling revision.
+
+    Evidence-invalid strategies may only move toward safety by disabling and
+    not increasing their existing ceiling.  The service appends the immutable
+    deployment event in the same transaction as the current-state update.
+    """
+    current_version = _current_versions().get(strategy_id)
+    if current_version is None:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    if body.strategy_version != current_version:
+        raise HTTPException(status_code=409, detail="strategy version changed; refresh required")
+
+    try:
+        with conn.transaction():
+            lock_strategy_control(conn, strategy_id, current_version)
+            overview = get_strategy_overview(conn)
+            row = next(item for item in overview.strategies if item.strategy_id == strategy_id)
+            risk_reducing = row.allocation.deployment_id is not None and is_risk_reducing_deployment_change(
+                current_capital_limit=row.allocation.capital_limit,
+                current_enabled=row.allocation.enabled,
+                current_currency=row.allocation.currency,
+                capital_limit=body.capital_limit,
+                enabled=body.enabled,
+                currency=row.allocation.currency,
+            )
+            if not row.allocation_ready and not risk_reducing:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "reason": "allocation_unavailable",
+                        "refusals": row.allocation_refusals,
+                    },
+                )
+            deployment = configure_deployment(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=current_version,
+                mode="paper",
+                capital_limit=body.capital_limit,
+                enabled=body.enabled,
+                changed_by=session.username,
+                reason=body.reason,
+                currency=row.allocation.currency,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail="allocation update refused") from exc
+    return AllocationUpdateResponse(
+        strategy_id=strategy_id,
+        strategy_version=current_version,
+        deployment_id=deployment.deployment_id,
+        capital_limit=deployment.capital_limit,
+        currency=row.allocation.currency,
+        enabled=deployment.enabled,
+        revision=deployment.revision,
+    )
 
 
 __all__ = ["router"]

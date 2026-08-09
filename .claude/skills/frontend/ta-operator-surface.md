@@ -93,15 +93,15 @@ column; if it has no column, it does not ship. Verify column names against
 
 | Operator-facing name | Backed by | Gate 2 — why it earns its place |
 | --- | --- | --- |
-| **Made you** | position P&L, `gross_return_pct` net of `cost_model` | the only figure most sessions need |
+| **Made you** | actual strategy arm: exact-owned `trade_events.realized_pnl_usd` + active owned mark-to-market; shadow arm: `strategy_outcomes.gross_return_pct` (gross, labelled shadow) | the only figure most sessions need; actual and shadow are never pooled |
 | **Worst dip** | `max_drawdown_pct` | what the operator *feels*; a strategy can end up and have halved on the way |
 | **Success rate** | `trade_count − losing_trade_count` over `trade_count` | "how often did it work" — the question actually asked |
 | **Per trade** | `expectancy_per_trade_pct` | decides whether it makes money at all; pair with success rate, never alone |
 | **vs buy &amp; hold** | `return_vs_buy_and_hold_pct` | the catalogue's own bar: fail it and it is not a strategy |
 | **Money working** | `exposure_time_pct` | answers "is my cash idle" |
 | **Turnaround** | `bars_held`, or `periods_per_year ÷ turnover_annualised` | half the return calculation — a fast small edge beats a slow big one |
-| **Captured** | `strategy_signals.verdict` funded ÷ fired | the missed-opportunity number |
-| **Why skipped** | `verdict` + `not_evaluable_reason` | tells the operator which lever to pull (pot size vs strategy choice) |
+| **Captured** | allocated `strategy_funding_decisions` ÷ fired entry `strategy_signals` | the missed-opportunity number; a missing legacy decision is not funded/not evaluated |
+| **Why skipped** | `strategy_funding_decisions.reason_code` (or explicit missing-decision state) | tells the operator which lever to pull (pot size vs strategy choice) |
 | **Confidence** | `deflated_sharpe` vs its threshold | one bar against one line; never the four DSR inputs on the surface |
 | Profit factor | `profit_factor` | drill-through — duplicates success rate + per trade for most readers |
 | Sharpe / Sortino / ESS / deff / block length / trial count | the DSR + bootstrap columns | **drill-through only.** These are how we know, not what we know |

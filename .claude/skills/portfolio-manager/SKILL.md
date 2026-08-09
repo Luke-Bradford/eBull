@@ -16,6 +16,9 @@ paths, or the review job
 `morning_candidate_review`, `app/jobs/runtime.py:294`). Also read it before
 changing a policy cap or how a score/thesis feeds an action.
 
+Also read the attribution boundary below before changing strategy-only P&L or
+joining automated positions into an operator surface.
+
 ## What it is
 
 `run_portfolio_review(conn, model_version=None)` is the one entry point:
@@ -110,3 +113,29 @@ Policy constants (single source of truth for `docs/trading-policy.md`; `portfoli
   insufficient-data HOLD cap, a CONSIDERED row with its block reason — **never
   paper over them with a neutral default**. `run_portfolio_review` does not raise
   on partial data: the affected name is held or blocked, reason in its rationale.
+
+## Managed-strategy attribution boundary (#2453)
+
+The account portfolio and managed-strategy P&L answer different questions and
+must not share an inference shortcut:
+
+- account-wide portfolio = manual + automated positions;
+- strategy P&L = exact `strategy_position_ownership.broker_position_id` joined
+  to broker history/current position state;
+- instrument, symbol, time, FIFO or order proximity is never ownership;
+- realised P&L is broker `trade_events.realized_pnl_usd` for exact owned close
+  events; unrealised P&L is the active exact position marked with the standard
+  positive quote/daily hierarchy; and
+- missing close history, ownership reconciliation, current broker position or
+  positive mark is `None` with a reason, never a zero-P&L fallback.
+
+Completeness follows the whole funded ownership chain, not only the arithmetic
+arm that happens to read the missing row. If an allocated decision has no trade
+or ownership reconciliation, realised P&L, unrealised P&L, invested capital,
+total P&L and observed fees are all unknown; none may silently retain its zero
+accumulator.
+
+The canonical formulas and database budget are in
+`docs/proposals/ta/2026-08-09-strategy-paper-pnl-allocation.md`. The read model
+must remain write-free: a price movement or page refresh does not justify a P&L
+snapshot row.

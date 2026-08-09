@@ -109,6 +109,29 @@ def _lock_strategy(conn: psycopg.Connection[Any], strategy_id: str, strategy_ver
     )
 
 
+def lock_strategy_control(conn: psycopg.Connection[Any], strategy_id: str, strategy_version: str) -> None:
+    """Serialize a compound governance read/write with promotion changes.
+
+    Callers that must evaluate evidence before invoking a control-plane
+    mutation acquire this transaction lock first.  The internal mutation lock
+    is re-entrant within the same transaction.
+    """
+    _lock_strategy(conn, strategy_id, strategy_version)
+
+
+def is_risk_reducing_deployment_change(
+    *,
+    current_capital_limit: Decimal,
+    current_enabled: bool,
+    current_currency: str,
+    capital_limit: Decimal,
+    enabled: bool,
+    currency: str,
+) -> bool:
+    """Return whether a deployment change cannot add capital authority."""
+    return capital_limit <= current_capital_limit and (not enabled or current_enabled) and currency == current_currency
+
+
 def current_stage(conn: psycopg.Connection[Any], strategy_id: str, strategy_version: str) -> Stage | None:
     row = conn.execute(
         """
@@ -240,22 +263,29 @@ def configure_deployment(
 
     _lock_strategy(conn, strategy_id, strategy_version)
     stage = current_stage(conn, strategy_id, strategy_version)
-    eligible: dict[Mode, frozenset[Stage]] = {
-        "paper": frozenset({"paper_enabled", "live_enabled"}),
-        "live": frozenset({"live_enabled"}),
-    }
-    if enabled and stage not in eligible[mode]:
-        raise StrategyControlError(f"{mode} deployment cannot be enabled at stage {stage!r}")
-
     existing = conn.execute(
         """
-        SELECT deployment_id, revision
+        SELECT deployment_id, revision, capital_limit, enabled, currency
         FROM strategy_deployments
         WHERE strategy_id = %s AND strategy_version = %s AND mode = %s
         FOR UPDATE
         """,
         (strategy_id, strategy_version, mode),
     ).fetchone()
+    risk_reducing = existing is not None and is_risk_reducing_deployment_change(
+        current_capital_limit=Decimal(str(existing[2])),
+        current_enabled=bool(existing[3]),
+        current_currency=str(existing[4]),
+        capital_limit=capital_limit,
+        enabled=enabled,
+        currency=currency,
+    )
+    eligible: dict[Mode, frozenset[Stage]] = {
+        "paper": frozenset({"paper_enabled", "live_enabled"}),
+        "live": frozenset({"live_enabled"}),
+    }
+    if enabled and stage not in eligible[mode] and not risk_reducing:
+        raise StrategyControlError(f"{mode} deployment cannot be enabled at stage {stage!r}")
     if existing is None:
         revision = 1
         row = conn.execute(
@@ -710,7 +740,9 @@ __all__ = [
     "create_strategy_trade",
     "current_stage",
     "decide_funding",
+    "is_risk_reducing_deployment_change",
     "link_strategy_order",
+    "lock_strategy_control",
     "promote_strategy",
     "record_order_position_execution",
     "release_exact_position",

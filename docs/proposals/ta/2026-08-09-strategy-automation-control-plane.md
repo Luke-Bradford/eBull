@@ -401,8 +401,18 @@ are actually created.
    An unowned id fails before I/O, same-instrument manual positions are never
    mutated, kill switches leave risk reduction available, and unchanged bars or
    polling heartbeats add no database rows. Live credentials are refused.
-9. **Paper P&L and picker allocation controls:** strategy-only P&L, shadow versus
-   funded capture, manual allocation changes with audit.
+9. **Paper P&L and picker allocation controls — implemented:** strategy-only
+   realised P&L is the sum of close-history net profit for exact owned broker
+   position ids; unrealised P&L uses only active exact ownership and a positive
+   live/daily mark. Missing lifecycle evidence is unknown, never zero, and
+   same-instrument manual positions are structurally excluded. The picker shows
+   allocation-unbiased shadow results, funded capture, fills/rejections,
+   slippage, skipped-versus-funded comparison, sleeve usage and explicit
+   refusal state. Operator/session-authenticated paper ceiling changes reuse
+   the immutable deployment event ledger; evidence-invalid versions may only
+   be disabled/reduced. The read model adds no schema or periodic P&L writer.
+   Formula, storage and test register:
+   `2026-08-09-strategy-paper-pnl-allocation.md`.
 10. **Live promotion:** requires minimum forward/paper evidence, reconciliation
     SLOs, kill drills and an explicit operator action in addition to both global
     switches.
