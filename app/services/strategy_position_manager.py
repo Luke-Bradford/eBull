@@ -456,14 +456,7 @@ def _resume_operation(
                     conn, operation_id=operation_id, raw_payload=raw
                 ),
             )
-        except BrokerPositionMutationError as exc:
-            if exc.raw_payload is not None:
-                with conn.transaction():
-                    conn.execute(
-                        "UPDATE strategy_position_operations SET broker_response_json=%s, updated_at=now() "
-                        "WHERE position_operation_id=%s",
-                        (Jsonb(exc.raw_payload), operation_id),
-                    )
+        except BrokerPositionMutationError:
             return PositionManagerResult(
                 owned.strategy_trade_id, owned.broker_position_id, "pending", "close_lookup_unavailable", operation_id
             )
@@ -476,11 +469,6 @@ def _resume_operation(
         with conn.transaction():
             order_status = "filled" if exact else "rejected"
             conn.execute("UPDATE orders SET status=%s WHERE order_id=%s", (order_status, operation["order_id"]))
-            conn.execute(
-                "UPDATE strategy_position_operations SET broker_response_json=%s, updated_at=now() "
-                "WHERE position_operation_id=%s",
-                (Jsonb(detail.raw_payload), operation_id),
-            )
             if exact:
                 _finish_close(
                     conn,
@@ -633,12 +621,6 @@ def _submit_edit(
     except BrokerPositionMutationError as exc:
         uncertain = isinstance(exc, BrokerPositionMutationUncertain)
         with conn.transaction():
-            if exc.raw_payload is not None:
-                conn.execute(
-                    "UPDATE strategy_position_operations SET broker_response_json=%s, updated_at=now() "
-                    "WHERE position_operation_id=%s",
-                    (Jsonb(exc.raw_payload), operation_id),
-                )
             _terminal(
                 conn,
                 operation_id=operation_id,
@@ -662,11 +644,10 @@ def _submit_edit(
         conn.execute(
             """
             UPDATE strategy_position_operations
-            SET status='submitted', broker_operation_id=%s, broker_response_json=%s,
-                submitted_at=now(), updated_at=now()
+            SET status='submitted', broker_operation_id=%s, submitted_at=now(), updated_at=now()
             WHERE position_operation_id=%s AND status='intent_persisted'
             """,
-            (submission.operation_id, Jsonb(submission.raw_payload), operation_id),
+            (submission.operation_id, operation_id),
         )
     # The 202 response is acceptance only. A future invocation re-syncs the
     # exact position before changing this operation to applied.
@@ -723,12 +704,8 @@ def _submit_close(
         uncertain = isinstance(exc, BrokerPositionMutationUncertain)
         with conn.transaction():
             conn.execute(
-                "UPDATE orders SET status=%s, raw_payload_json=COALESCE(%s, raw_payload_json) WHERE order_id=%s",
-                (
-                    "submitted" if uncertain else "rejected",
-                    Jsonb(exc.raw_payload) if exc.raw_payload is not None else None,
-                    order_id,
-                ),
+                "UPDATE orders SET status=%s WHERE order_id=%s",
+                ("submitted" if uncertain else "rejected", order_id),
             )
             _terminal(
                 conn,
@@ -749,8 +726,8 @@ def _submit_close(
         )
     with conn.transaction():
         conn.execute(
-            "UPDATE orders SET broker_order_ref=%s, raw_payload_json=%s WHERE order_id=%s",
-            (submission.broker_order_ref, Jsonb(submission.raw_payload), order_id),
+            "UPDATE orders SET broker_order_ref=%s WHERE order_id=%s",
+            (submission.broker_order_ref, order_id),
         )
         conn.execute(
             """

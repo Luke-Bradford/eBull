@@ -111,7 +111,7 @@ def _opened_trade(
         available_cash=Decimal("500"),
         raw_payload={},
     )
-    broker.edit_demo_strategy_position.return_value = BrokerPositionEditSubmission(
+    edit_submission = BrokerPositionEditSubmission(
         _EDIT_OPERATION_ID,
         _POSITION_ID,
         _REQUEST_ID,
@@ -121,11 +121,22 @@ def _opened_trade(
             "referenceId": str(_REQUEST_ID),
         },
     )
-    broker.close_demo_strategy_position.return_value = BrokerPositionCloseSubmission(
+    close_submission = BrokerPositionCloseSubmission(
         "24521234",
         _POSITION_ID,
         {"orderForClose": {"orderID": 24521234, "positionID": _POSITION_ID}},
     )
+
+    def _edit_position(**kwargs: Any) -> BrokerPositionEditSubmission:
+        kwargs["persist_response"](edit_submission.raw_payload)
+        return edit_submission
+
+    def _close_position(**kwargs: Any) -> BrokerPositionCloseSubmission:
+        kwargs["persist_response"](close_submission.raw_payload)
+        return close_submission
+
+    broker.edit_demo_strategy_position.side_effect = _edit_position
+    broker.close_demo_strategy_position.side_effect = _close_position
     return execution.strategy_trade_id, deployment_id, broker, manual
 
 
@@ -399,13 +410,16 @@ def test_exact_close_remains_available_under_kill_switch_and_reconciles(
     assert submitted.state == "submitted"
     assert broker.close_demo_strategy_position.call_args.kwargs["position_id"] == _POSITION_ID
 
-    broker.get_demo_close_order.return_value = BrokerCloseOrderDetail(
+    close_detail = BrokerCloseOrderDetail(
         broker_order_ref="24521234",
         status="filled",
         broker_status="1",
         position_ids=(_POSITION_ID,),
         reference_id=None,
         raw_payload={"orderID": 24521234, "statusID": 1, "positions": [{"positionID": _POSITION_ID}]},
+    )
+    broker.get_demo_close_order.side_effect = lambda **kwargs: (
+        kwargs["persist_response"](close_detail.raw_payload) or close_detail
     )
     broker.get_portfolio.return_value = BrokerPortfolio(
         positions=(manual,), available_cash=Decimal("600"), raw_payload={}
