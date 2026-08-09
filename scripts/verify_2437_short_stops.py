@@ -57,7 +57,19 @@ STOPS = (None, 0.20, 0.12, 0.08, 0.05)  # cover if price rises this far above en
 MIN_PRICE = 20.0
 MIN_DOLLAR_VOL = 10_000_000.0
 SPREAD_BPS = 50.0
-BORROW_TIERS = (0.0, 2.7, 8.2)  # bps per CALENDAR day: 0%, ~10%/yr, ~30%/yr
+BORROW_TIERS = (0.0, 2.7, 8.2)  # bps per financed day: 0%, ~10%/yr, ~30%/yr
+
+# ⚠ How many days of borrow a HOLD-bar position actually pays for.
+# eToro charges the fee at 21:00 GMT each day a position is open and TRIPLES it on
+# Friday for stocks, to cover the weekend. So a 5-trading-day hold pays four ordinary
+# nights plus one Friday at 3x = 4 + 3 = 7 day-equivalents.
+#
+# ⚠ It is a FLAT approximation and coarser than the docstring's prose: a real hold
+# straddles a different number of Fridays depending on the weekday it opens (0 or 1
+# here, more for longer holds), and holidays are ignored entirely. Every hold is
+# charged the worst case of exactly one triple, which errs against the strategy --
+# the right direction for a cost assumption, but it is an assumption, not a model.
+BORROW_DAY_EQUIVALENTS = (HOLD - 1) + 3
 
 _SERIES = "SELECT DISTINCT series_id FROM research_price_daily WHERE bar_date >= %(s)s ORDER BY series_id"
 _BARS = """
@@ -155,9 +167,8 @@ def main() -> int:
             f"{float(np.median(arr)):>9.1f}{float((arr > 0).mean()) * 100:>7.1f}{t:>7.2f}"
             f"{float(ex.mean()):>10.1f}{arr.min():>9.0f}"
         )
-        # ⚠ calendar days, because CFD financing accrues at weekends too
         for b in BORROW_TIERS:
-            line += f"{m - SPREAD_BPS - b * (HOLD * 7 / 5):>9.1f}"
+            line += f"{m - SPREAD_BPS - b * BORROW_DAY_EQUIVALENTS:>9.1f}"
         print(line)
 
     print("\n⚠ 'gapped' counts stops that filled at an OPEN above the level -- the case")

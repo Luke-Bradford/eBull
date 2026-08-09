@@ -59,6 +59,7 @@ HOLDS = (1, 2, 3, 5, 10)  # trading days, exit at the close
 MIN_PRICE = 20.0  # prior close, unadjusted -- the tradable price
 MIN_DOLLAR_VOL = 10_000_000.0  # 20-day median
 COST_BPS = 50.0  # round trip, deducted from every figure
+BREADTH_SIGNAL = -0.05  # ⚠ must be one of DROP_THRESHOLDS; asserted in _breadth_report
 
 _SERIES = """
     SELECT DISTINCT series_id
@@ -110,7 +111,12 @@ def _breadth_report(by_day: dict[tuple[float | None, int], dict[object, list[flo
     ⚠ Breadth is known at the close of day t, before the next open we enter at,
     so conditioning on it is not lookahead.
     """
-    print("\nBREADTH SPLIT -- does the crowd matter? (signal `1d <= -5%`)")
+    # ⚠ `by_day` is a defaultdict, so an absent key yields an EMPTY bucket rather
+    # than raising -- a future edit to DROP_THRESHOLDS would silently delete this
+    # whole report and print nothing but headers. Fail loudly instead.
+    if BREADTH_SIGNAL not in DROP_THRESHOLDS:
+        raise ValueError(f"BREADTH_SIGNAL {BREADTH_SIGNAL} is not in DROP_THRESHOLDS {DROP_THRESHOLDS}")
+    print(f"\nBREADTH SPLIT -- does the crowd matter? (signal `1d <= {BREADTH_SIGNAL:.0%}`)")
     print("breadth = number of qualifying events sharing that entry day.")
     print("⚠ each row is a mean ACROSS DAYS in the bucket, so days weigh equally.\n")
     header = f"{'breadth':>14}{'hold':>6}{'days':>7}{'events':>10}{'gross bps':>11}{'NET':>9}{'t':>8}"
@@ -120,7 +126,7 @@ def _breadth_report(by_day: dict[tuple[float | None, int], dict[object, list[flo
     for lo, hi in buckets:
         label = f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 10**9 else f"{lo}+")
         for k in HOLDS:
-            day_map = by_day[(-0.05, k)]
+            day_map = by_day[(BREADTH_SIGNAL, k)]
             sel = {d: v for d, v in day_map.items() if lo <= len(v) <= hi}
             if len(sel) < 5:
                 continue
