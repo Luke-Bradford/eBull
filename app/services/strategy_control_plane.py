@@ -454,10 +454,13 @@ def claim_exact_position(
           ON sto.strategy_trade_id = t.strategy_trade_id
          AND sto.order_id = %s AND sto.purpose = 'entry'
         JOIN orders o ON o.order_id = sto.order_id AND o.execution_origin = 'strategy'
+        JOIN strategy_order_position_executions execution
+          ON execution.order_id = o.order_id
+         AND execution.broker_position_id = %s
         JOIN broker_positions p ON p.position_id = %s
         WHERE t.strategy_trade_id = %s
         """,
-        (entry_order_id, broker_position_id, strategy_trade_id),
+        (entry_order_id, broker_position_id, broker_position_id, strategy_trade_id),
     ).fetchone()
     if row is None:
         raise StrategyOwnershipError("position claim requires the exact strategy entry order and broker position id")
@@ -473,6 +476,29 @@ def claim_exact_position(
     ).fetchone()
     assert claimed is not None
     return int(claimed[0])
+
+
+def record_order_position_execution(conn: psycopg.Connection[Any], *, order_id: int, broker_position_id: int) -> None:
+    """Persist one exact position id returned by detailed strategy-order lookup.
+
+    The future reconciler owns the broker call. This broker-free control-plane
+    method records its result and refuses manual-origin orders.
+    """
+    if broker_position_id <= 0:
+        raise StrategyOwnershipError("broker_position_id must be positive")
+    row = conn.execute(
+        "SELECT execution_origin FROM orders WHERE order_id = %s",
+        (order_id,),
+    ).fetchone()
+    if row is None or row[0] != "strategy":
+        raise StrategyOwnershipError("position executions may be recorded only for a strategy-origin order")
+    conn.execute(
+        """
+        INSERT INTO strategy_order_position_executions (order_id, broker_position_id)
+        VALUES (%s, %s)
+        """,
+        (order_id, broker_position_id),
+    )
 
 
 def assert_exact_position_owned(
@@ -532,5 +558,6 @@ __all__ = [
     "decide_funding",
     "link_strategy_order",
     "promote_strategy",
+    "record_order_position_execution",
     "release_exact_position",
 ]

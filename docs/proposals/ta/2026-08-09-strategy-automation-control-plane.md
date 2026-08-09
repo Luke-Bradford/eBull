@@ -265,6 +265,7 @@ the smallest control-plane schema is:
 | candidate decisions | fired signal x allocation verdict | 24 months detailed; durable daily aggregates |
 | strategy trades | one funded lifecycle | durable |
 | strategy trade orders | one order linked to one owned trade and purpose | durable; joins existing orders/fills |
+| order position executions | exact `positionExecutions[].positionId` returned for one strategy order | durable; typically one/few rows per entry |
 | position ownership | one broker position id claimed by one trade | durable, including released ownership |
 | stop changes | one requested/applied/failed material change | durable; no heartbeat rows |
 | preflight observations | candidate request or changed eligibility state | 24 months; no unchanged polling rows |
@@ -355,8 +356,8 @@ are actually created.
 5. **Promotion/deployment + ownership schema — implemented:** no broker writer.
    `sql/281` stores append-only ordered promotion events and pinned result ids,
    one current paper/live capital ceiling with a complete revision history, one
-   funding decision per fired signal, strategy trade/order links, and durable
-   exact broker-position ownership. Existing orders default to `manual`; a
+   funding decision per fired signal, strategy trade/order links, exact detailed
+   order `positionExecutions[]`, and durable broker-position ownership. Existing orders default to `manual`; a
    manual order cannot be linked as strategy authority. The service accepts a
    `(strategy_trade_id, broker_position_id)` pair and never an instrument-only
    mutation target. A real-Postgres same-instrument test proves an unowned manual

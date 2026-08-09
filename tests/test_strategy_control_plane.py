@@ -19,6 +19,7 @@ from app.services.strategy_control_plane import (
     decide_funding,
     link_strategy_order,
     promote_strategy,
+    record_order_position_execution,
     release_exact_position,
 )
 
@@ -218,6 +219,19 @@ def test_same_instrument_manual_position_is_never_inferred_as_owned(
     _position(conn, second_strategy_position_id, instrument_id)
     entry_order = _order(conn, instrument_id=instrument_id)
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=entry_order, purpose="entry")
+
+    # Instrument equality is not provenance: the pre-existing manual position
+    # cannot be claimed because detailed lookup did not return it for this order.
+    with pytest.raises(StrategyOwnershipError, match="exact strategy entry order"):
+        claim_exact_position(
+            conn,
+            strategy_trade_id=trade_id,
+            entry_order_id=entry_order,
+            broker_position_id=manual_position_id,
+        )
+
+    record_order_position_execution(conn, order_id=entry_order, broker_position_id=strategy_position_id)
+    record_order_position_execution(conn, order_id=entry_order, broker_position_id=second_strategy_position_id)
     claim_exact_position(
         conn,
         strategy_trade_id=trade_id,
