@@ -129,6 +129,12 @@ must not share an inference shortcut:
 - missing close history, ownership reconciliation, current broker position or
   positive mark is `None` with a reason, never a zero-P&L fallback.
 
+Completeness follows the whole funded ownership chain, not only the arithmetic
+arm that happens to read the missing row. If an allocated decision has no trade
+or ownership reconciliation, realised P&L, unrealised P&L, invested capital,
+total P&L and observed fees are all unknown; none may silently retain its zero
+accumulator.
+
 The canonical formulas and database budget are in
 `docs/proposals/ta/2026-08-09-strategy-paper-pnl-allocation.md`. The read model
 must remain write-free: a price movement or page refresh does not justify a P&L

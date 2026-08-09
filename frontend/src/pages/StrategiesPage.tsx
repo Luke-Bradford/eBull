@@ -143,8 +143,8 @@ function AllocationControl({
   const parsedLimit = Number(limit);
   const canReduceRisk =
     strategy.allocation.deployment_id !== null &&
-    !enabled &&
-    parsedLimit <= Number(strategy.allocation.capital_limit);
+    parsedLimit <= Number(strategy.allocation.capital_limit) &&
+    (!enabled || strategy.allocation.enabled);
   const canSubmit =
     !submitting &&
     reason.trim().length > 0 &&

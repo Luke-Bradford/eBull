@@ -220,6 +220,54 @@ describe("StrategiesPage", () => {
     expect(screen.getByLabelText("Reason for this audited change")).toBeEnabled();
   });
 
+  it("allows an enabled evidence-invalid sleeve to reduce without disabling", async () => {
+    const base = OVERVIEW.strategies[0]!;
+    const strategy = {
+      ...base,
+      allocation: {
+        ...base.allocation,
+        deployment_id: 7,
+        capital_limit: "250.000000",
+        enabled: true,
+        revision: 2,
+      },
+    };
+    vi.spyOn(strategiesApi, "fetchStrategyOverview").mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [strategy],
+    });
+    vi.spyOn(strategiesApi, "fetchFiredSignals").mockResolvedValue(SIGNALS);
+    const update = vi.spyOn(strategiesApi, "updateStrategyAllocation").mockResolvedValue({
+      strategy_id: strategy.strategy_id,
+      strategy_version: strategy.strategy_version,
+      deployment_id: 7,
+      capital_limit: "200.000000",
+      currency: "USD",
+      enabled: true,
+      revision: 3,
+    });
+    render(
+      <MemoryRouter>
+        <StrategiesPage />
+      </MemoryRouter>,
+    );
+
+    const limit = await screen.findByLabelText("Maximum USD capital");
+    await userEvent.clear(limit);
+    await userEvent.type(limit, "200");
+    await userEvent.type(screen.getByLabelText("Reason for this audited change"), "reduce risk");
+    await userEvent.click(screen.getByRole("button", { name: "Save allocation" }));
+
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(strategy.strategy_id, {
+        strategy_version: strategy.strategy_version,
+        capital_limit: "200.000000",
+        enabled: true,
+        reason: "reduce risk",
+      }),
+    );
+  });
+
   it("sends an explicit audited allocation and refetches the picker", async () => {
     const base = OVERVIEW.strategies[0]!;
     const available: StrategyOverviewResponse = {

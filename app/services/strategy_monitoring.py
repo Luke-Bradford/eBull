@@ -304,6 +304,8 @@ def load_owned_pnl(conn: psycopg.Connection[Any], *, versions: Sequence[str]) ->
             unrealised += direction * units * (mark - open_rate) * conversion
 
         realised_known = not {
+            "funding_not_reconciled_to_trade",
+            "trade_not_reconciled_to_position",
             "realised_pnl_missing_from_history",
             "released_position_missing_close_history",
         }.intersection(reasons)
@@ -318,7 +320,12 @@ def load_owned_pnl(conn: psycopg.Connection[Any], *, versions: Sequence[str]) ->
             "trade_not_reconciled_to_position",
             "active_position_missing_from_broker_snapshot",
         }.intersection(reasons)
-        fees_known = "fees_missing_from_history" not in reasons
+        fees_known = not {
+            "funding_not_reconciled_to_trade",
+            "trade_not_reconciled_to_position",
+            "released_position_missing_close_history",
+            "fees_missing_from_history",
+        }.intersection(reasons)
         realised_value = realised if realised_known else None
         unrealised_value = unrealised if unrealised_known else None
         result[key] = StrategyPnl(

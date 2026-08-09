@@ -250,22 +250,27 @@ def configure_deployment(
 
     _lock_strategy(conn, strategy_id, strategy_version)
     stage = current_stage(conn, strategy_id, strategy_version)
-    eligible: dict[Mode, frozenset[Stage]] = {
-        "paper": frozenset({"paper_enabled", "live_enabled"}),
-        "live": frozenset({"live_enabled"}),
-    }
-    if enabled and stage not in eligible[mode]:
-        raise StrategyControlError(f"{mode} deployment cannot be enabled at stage {stage!r}")
-
     existing = conn.execute(
         """
-        SELECT deployment_id, revision
+        SELECT deployment_id, revision, capital_limit, enabled, currency
         FROM strategy_deployments
         WHERE strategy_id = %s AND strategy_version = %s AND mode = %s
         FOR UPDATE
         """,
         (strategy_id, strategy_version, mode),
     ).fetchone()
+    risk_reducing = (
+        existing is not None
+        and capital_limit <= Decimal(str(existing[2]))
+        and (not enabled or bool(existing[3]))
+        and currency == str(existing[4])
+    )
+    eligible: dict[Mode, frozenset[Stage]] = {
+        "paper": frozenset({"paper_enabled", "live_enabled"}),
+        "live": frozenset({"live_enabled"}),
+    }
+    if enabled and stage not in eligible[mode] and not risk_reducing:
+        raise StrategyControlError(f"{mode} deployment cannot be enabled at stage {stage!r}")
     if existing is None:
         revision = 1
         row = conn.execute(

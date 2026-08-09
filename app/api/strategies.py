@@ -681,9 +681,9 @@ def update_strategy_allocation(
             overview = get_strategy_overview(conn)
             row = next(item for item in overview.strategies if item.strategy_id == strategy_id)
             risk_reducing = (
-                not body.enabled
-                and row.allocation.deployment_id is not None
+                row.allocation.deployment_id is not None
                 and body.capital_limit <= row.allocation.capital_limit
+                and (not body.enabled or row.allocation.enabled)
             )
             if not row.allocation_ready and not risk_reducing:
                 raise HTTPException(

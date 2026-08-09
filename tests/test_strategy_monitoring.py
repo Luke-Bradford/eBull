@@ -218,6 +218,41 @@ def test_missing_owned_mark_is_unknown_not_zero(
     assert "active_position_mark_unavailable" in pnl.incomplete_reasons
 
 
+def test_unreconciled_funding_makes_all_owned_money_unknown(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "monitoring-unreconciled"
+    strategy_version = "monitoring-unreconciled-v1"
+    instrument_id = 2453005
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_funding_decisions (
+            signal_id, deployment_id, verdict, amount, reason_code
+        ) VALUES (%s, %s, 'allocated', 100, 'awaiting_reconciliation')
+        """,
+        (signal_id, deployment_id),
+    )
+
+    pnl = load_owned_pnl(ebull_test_conn, versions=[strategy_version])[(strategy_id, strategy_version)]
+
+    assert pnl.realised_pnl is None
+    assert pnl.unrealised_pnl is None
+    assert pnl.total_pnl is None
+    assert pnl.invested_capital is None
+    assert pnl.observed_fees is None
+    assert pnl.incomplete_reasons == ("funding_not_reconciled_to_trade",)
+
+
 def test_shadow_statistics_do_not_depend_on_later_allocation_configuration(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
@@ -368,6 +403,38 @@ def test_missing_evidence_refuses_new_allocation_without_writing_audit(
         "SELECT count(*) FROM strategy_deployments WHERE strategy_id=%s", (strategy_id,)
     ).fetchone() == (0,)
     assert ebull_test_conn.execute("SELECT count(*) FROM strategy_deployment_events").fetchone() == (0,)
+
+
+def test_evidence_invalid_enabled_allocation_can_reduce_without_disabling(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    version = _current_versions()[strategy_id]
+    deployment_id = _deployment(ebull_test_conn, strategy_id, version)
+    ebull_test_conn.execute(
+        "UPDATE strategy_deployments SET enabled=true WHERE deployment_id=%s",
+        (deployment_id,),
+    )
+    ebull_test_conn.commit()
+
+    response = update_strategy_allocation(
+        strategy_id,
+        AllocationUpdateRequest(
+            strategy_version=version,
+            capital_limit=Decimal("500"),
+            enabled=True,
+            reason="reduce risk while evidence is unavailable",
+        ),
+        _session(),
+        ebull_test_conn,
+    )
+
+    assert response.enabled
+    assert response.capital_limit == Decimal("500")
+    assert ebull_test_conn.execute(
+        "SELECT capital_limit, enabled FROM strategy_deployment_events WHERE deployment_id=%s",
+        (deployment_id,),
+    ).fetchone() == (Decimal("500.000000"), True)
 
 
 def test_disabled_pre_promotion_deployment_remains_visible_for_risk_reduction(

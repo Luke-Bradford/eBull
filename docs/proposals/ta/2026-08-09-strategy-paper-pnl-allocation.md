@@ -71,8 +71,9 @@ with a complete immutable `strategy_deployment_events` revision. There is no
 automatic allocation optimiser or winner-chasing job.
 
 If evidence becomes invalid, a new/increased allocation is refused. An
-existing allocation can still be disabled and reduced: evidence failure must
-never trap capital in an enabled sleeve.
+existing allocation can still be disabled and/or have its ceiling reduced;
+a disabled allocation cannot be re-enabled through this exception. Evidence
+failure must never trap capital in an enabled sleeve.
 
 Global kill and reconciliation block state is visible in the picker and blocks
 new order entry in the executor. It does not erase the allocation audit and it
