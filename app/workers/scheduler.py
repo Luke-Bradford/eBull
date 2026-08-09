@@ -4939,6 +4939,8 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
       the service body before any corpus work.
     * ``trial_register_version`` (string) — optional assertion. A run cannot
       silently deflate against a register that has moved.
+    * ``evidence_window`` (enum) — one pinned recent-evidence window. Raw dates
+      are never accepted; selecting one also requires the audited hold-out pair.
 
     ⚠ ``row_count`` is RESULT ROWS written. Zero is never a success here: the
     service raises if a runnable strategy produced no row, because an absent row
@@ -4950,8 +4952,11 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
     insert of a pair would commit before the second failed.
     """
     from app.services.backtest_run import run_backtest
+    from app.services.strategy_recent_evidence import recent_evidence_window
 
     with _tracked_job(JOB_STRATEGY_BACKTEST_RUN) as tracker:
+        evidence_window_id = _optional_str(params.get("evidence_window"))
+        evaluation_window = None if evidence_window_id is None else recent_evidence_window(evidence_window_id).window
         with connect_job() as conn:
             report = run_backtest(
                 conn,
@@ -4959,6 +4964,7 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                 holdout_purpose=_optional_str(params.get("holdout_purpose")),
                 holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
                 trial_register_version=_optional_str(params.get("trial_register_version")),
+                evaluation_window=evaluation_window,
             )
             tracker.row_count = report.rows_written
 

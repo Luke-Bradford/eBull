@@ -331,15 +331,16 @@ must pin. All of them; here is where each comes from.
 | `sizing_rule` | `equity_curve.SIZING_RULE_ID` | no |
 | `cost_model_id` | `cost_model.COST_MODEL_ID` | no |
 | `corpus_version` | `strategy_result.CORPUS_VERSION` | no |
-| `window_start` / `window_end` | `EVALUATION_WINDOW_START` / `_END` | no |
+| `window_start` / `window_end` | frozen default, or `RECENT_EVIDENCE_WINDOWS` | pinned enum only |
 | `position_rule_set_version` | `position_builder.RULE_SET_VERSION` | no |
 | `outcome_rule_set_version` | `outcome_resolver`'s rule-set version | no |
 | `input_rule_set_version` | `price_quarantine.RULE_SET_VERSION` — see below | no |
 
 ⚠ **Thirteen of the fourteen are read from a module that froze them, and that is
-the design working.** The only operator-facing degree of freedom is whether the
-hold-out arm runs. A job that let an operator pass a sizing rule or a window
-would be minting result identities that no code path can reproduce.
+the design working.** #2447 adds only code-pinned recent windows: the operator
+selects an id from `RECENT_EVIDENCE_WINDOWS`, never raw dates, and the exact
+dates remain in the result hash. A job that accepted a sizing rule or arbitrary
+window would still mint identities that no code path can reproduce.
 
 ⚠⚠ **`input_rule_set_version` is the QUARANTINE rule set, and it is NOT the same
 thing as `StrategyIdentity.input_rule_set_versions`.** Two similarly-named

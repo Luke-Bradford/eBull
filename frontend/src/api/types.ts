@@ -11,6 +11,7 @@
  *   - /recommendations     -> app/api/recommendations.py
  *   - /audit              -> app/api/audit.py
  *   - /rankings            -> app/api/scores.py
+ *   - /strategies/*        -> app/api/strategies.py
  *
  * Rule: when a backend response_model changes, update this file in the same
  * PR. Drift here breaks every page silently. There is no codegen yet (#59
@@ -2392,4 +2393,105 @@ export interface BootstrapTimelineRunResponse {
 export interface BootstrapTimelineResponse {
   run: BootstrapTimelineRunResponse | null;
   stages: BootstrapTimelineStageResponse[];
+}
+
+// ---------------------------------------------------------------------------
+// /strategies (app/api/strategies.py, #2447)
+// ---------------------------------------------------------------------------
+
+export interface StrategyResultArm {
+  result_version: string;
+  ambiguity_arm: string;
+  quarantine_arm: string;
+  universe_basis: string;
+  corpus_version: string;
+  cost_model_id: string;
+  sizing_rule: string;
+  benchmark_rule: string;
+  position_rule_set_version: string;
+  outcome_rule_set_version: string;
+  input_rule_set_version: string;
+  evaluated_instrument_count: number;
+  trade_count: number;
+  expectancy_per_trade_pct: string;
+  expectancy_ci_low_pct: string | null;
+  expectancy_ci_high_pct: string | null;
+  total_return_pct: string;
+  cagr_pct: string;
+  sharpe: string;
+  sortino: string | null;
+  max_drawdown_pct: string;
+  profit_factor: string | null;
+  exposure_time_pct: string;
+  turnover_annualised: string;
+  return_vs_buy_and_hold_pct: string;
+  deflated_sharpe: string | null;
+  promotion_refusals: string[];
+}
+
+export interface StrategyEvidenceWindow {
+  window_id: string;
+  label: string;
+  window_start: string;
+  window_end: string;
+  status: "missing" | "partial" | "complete";
+  arms: StrategyResultArm[];
+}
+
+export interface StrategyOverview {
+  strategy_id: string;
+  strategy_version: string;
+  title: string;
+  runnable: boolean;
+  exclusion_reason: string | null;
+  scan: {
+    frontier_date: string | null;
+    updated_at: string | null;
+    status: "never_run" | "current" | "stale";
+    fired_entries: number;
+    fired_exits: number;
+    not_fired: number;
+    not_evaluable: number;
+    exclusions_by_reason: Record<string, number>;
+  };
+  evidence_windows: StrategyEvidenceWindow[];
+  legacy_result_count: number;
+  all_recent_evidence_complete: boolean;
+  allocation_ready: false;
+  allocation_refusals: string[];
+}
+
+export interface StrategyOverviewResponse {
+  as_of: string;
+  observation_stage: "forward_observation";
+  execution_enabled: false;
+  storage_policy: "aggregate_results_only";
+  strategies: StrategyOverview[];
+}
+
+export interface FiredSignal {
+  signal_id: number;
+  strategy_id: string;
+  strategy_version: string;
+  instrument_id: number;
+  symbol: string;
+  company_name: string | null;
+  signal_bar_date: string;
+  signal_kind: string;
+  fill_bar_date: string;
+  fill_price: string;
+  universe: string;
+  outcome: string | null;
+  exit_bar_date: string | null;
+  exit_price: string | null;
+  gross_return_pct: string | null;
+  outcome_reason: string | null;
+  observation_stage: "forward_observation";
+  funding_status: "unfunded";
+  funding_reason: "execution_not_enabled";
+}
+
+export interface FiredSignalsResponse {
+  items: FiredSignal[];
+  next_cursor: number | null;
 }

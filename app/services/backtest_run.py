@@ -260,6 +260,7 @@ _INSAMPLE_AXIS_SQL = """
     JOIN research_price_daily d ON d.series_id = s.series_id
     WHERE s.instrument_id = ANY(%(ids)s)
       AND d.bar_date >= %(start)s
+      AND d.bar_date <= %(end)s
       AND d.bar_date < %(boundary)s
     GROUP BY d.bar_date
     ORDER BY 1
@@ -867,6 +868,8 @@ class _Corpus:
     axis: tuple[date, ...]
     axis_pos: Mapping[date, int]
     pairs: tuple[tuple[int, int], ...]
+    evaluation_start: date = EVALUATION_WINDOW_START
+    evaluation_end: date = EVALUATION_WINDOW_END
     #: The pre-boundary prefix of ``axis``, and how many bars the panel carries
     #: on each of its dates. Criterion 5's fold cut is weighted by the latter.
     in_sample_axis: tuple[date, ...] = ()
@@ -874,18 +877,29 @@ class _Corpus:
 
     @property
     def window(self) -> Window:
-        return Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
+        return Window(start=self.evaluation_start, end=self.evaluation_end)
 
 
-def load_corpus(conn: psycopg.Connection[Any], *, limit: int | None = None) -> _Corpus:
+def load_corpus(
+    conn: psycopg.Connection[Any],
+    *,
+    limit: int | None = None,
+    evaluation_window: Window | None = None,
+) -> _Corpus:
     """The corpus ∩ §4.0 validated-universe slice, and its union calendar.
 
     ⚠ ``limit`` exists for a smoke run and the caller must say so in its report.
     A limited pass is not a full-population figure and no row written from one
     describes the population its ``evaluated_instrument_count`` claims.
     """
+    window = evaluation_window or Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
+    if window.start < EVALUATION_WINDOW_START or window.end > EVALUATION_WINDOW_END:
+        raise ValueError(
+            f"evaluation window {window.start} -> {window.end} lies outside the frozen corpus window "
+            f"{EVALUATION_WINDOW_START} -> {EVALUATION_WINDOW_END}"
+        )
     universe = load_validated_universe(conn)
-    bounds = {"ids": list(universe), "start": EVALUATION_WINDOW_START, "end": EVALUATION_WINDOW_END}
+    bounds = {"ids": list(universe), "start": window.start, "end": window.end}
     axis = tuple(row[0] for row in conn.execute(_AXIS_SQL, bounds).fetchall())
     pairs = [(int(row[0]), int(row[1])) for row in conn.execute(_SERIES_SQL, {"ids": list(universe)}).fetchall()]
     if limit is not None:
@@ -893,7 +907,7 @@ def load_corpus(conn: psycopg.Connection[Any], *, limit: int | None = None) -> _
 
     in_sample = conn.execute(
         _INSAMPLE_AXIS_SQL,
-        {"ids": list(universe), "start": EVALUATION_WINDOW_START, "boundary": HOLDOUT_BOUNDARY},
+        {"ids": list(universe), "start": window.start, "end": window.end, "boundary": HOLDOUT_BOUNDARY},
     ).fetchall()
     in_sample_axis = tuple(row[0] for row in in_sample)
     # ⚠⚠ THE PREFIX INVARIANT, ASSERTED AND NOT ASSUMED. Both queries run over
@@ -916,6 +930,8 @@ def load_corpus(conn: psycopg.Connection[Any], *, limit: int | None = None) -> _
         axis=axis,
         axis_pos={when: index for index, when in enumerate(axis)},
         pairs=tuple(pairs),
+        evaluation_start=window.start,
+        evaluation_end=window.end,
         in_sample_axis=in_sample_axis,
         in_sample_bar_counts=tuple(int(row[1]) for row in in_sample),
     )
@@ -1393,13 +1409,15 @@ def build_result(
     ambiguity_arm: AmbiguityArm,
     quarantine_arm: QuarantineArm,
     deflated: DeflatedSharpeResult | None,
+    evaluation_window: Window | None = None,
 ) -> StrategyResult:
     """One ``strategy_results`` row. §7's fourteen identity members, all pinned.
 
     ⚠ THIRTEEN OF THE FOURTEEN ARE READ FROM A MODULE THAT FROZE THEM, and that
-    is the design working. The only operator-facing degree of freedom is whether
-    the hold-out arm runs at all; a job that let an operator pass a sizing rule
-    or a window would be minting result identities no code path can reproduce.
+    is the design working. Recent-evidence windows are the sole exception: they
+    are selected from ``strategy_recent_evidence.RECENT_EVIDENCE_WINDOWS`` by
+    the caller and remain part of the result hash. Raw dates are not exposed as
+    job parameters, so an operator still cannot mint an unregistered window.
 
     ⚠⚠ ``input_rule_set_version`` IS THE QUARANTINE RULE SET, and it is NOT
     ``StrategyIdentity.input_rule_set_versions`` (which is indicator-only and is
@@ -1414,6 +1432,7 @@ def build_result(
     rather than a placeholder written — a blank would pass ``NOT NULL`` and
     silently merge two results (the #2286 shape).
     """
+    window = evaluation_window or Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
     return StrategyResult(
         identity=ResultIdentity(
             strategy_id=strategy_id,
@@ -1426,8 +1445,8 @@ def build_result(
             benchmark_rule=BENCHMARK_RULE_ID,
             cost_model_id=COST_MODEL_ID,
             corpus_version=CORPUS_VERSION,
-            window_start=EVALUATION_WINDOW_START,
-            window_end=EVALUATION_WINDOW_END,
+            window_start=window.start,
+            window_end=window.end,
             position_rule_set_version=POSITION_RULE_SET_VERSION,
             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
@@ -1551,6 +1570,7 @@ def run_backtest(
     holdout_accessed_by: str | None = None,
     trial_register_version: str | None = None,
     limit: int | None = None,
+    evaluation_window: Window | None = None,
     manifest: Mapping[str, StrategyEntry] = STRATEGY_MANIFEST,
 ) -> BacktestRunReport:
     """Evaluate every runnable strategy and persist criterion 9's arm pairs.
@@ -1578,7 +1598,10 @@ def run_backtest(
             "that does not describe the search"
         )
     holdout_requested = _check_holdout_pairing(purpose=holdout_purpose, accessed_by=holdout_accessed_by)
-    namespaces: tuple[ResultNamespace, ...] = ("in_sample", "hold_out") if holdout_requested else ("in_sample",)
+    namespaces = _namespaces_for_window(
+        holdout_requested=holdout_requested,
+        evaluation_window=evaluation_window,
+    )
 
     runnable, excluded = runnable_strategies(manifest)
     if strategy_id is not None:
@@ -1588,7 +1611,7 @@ def run_backtest(
     if not runnable:
         raise RuntimeError("no manifest strategy is runnable — every entry is blocked, so there is nothing to store")
 
-    corpus = load_corpus(conn, limit=limit)
+    corpus = load_corpus(conn, limit=limit, evaluation_window=evaluation_window)
     identities = {
         entry_id: manifest[entry_id].identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID)
         for entry_id in runnable
@@ -1605,8 +1628,8 @@ def run_backtest(
             benchmark_rule=BENCHMARK_RULE_ID,
             cost_model_id=COST_MODEL_ID,
             corpus_version=CORPUS_VERSION,
-            window_start=EVALUATION_WINDOW_START,
-            window_end=EVALUATION_WINDOW_END,
+            window_start=corpus.window.start,
+            window_end=corpus.window.end,
             position_rule_set_version=POSITION_RULE_SET_VERSION,
             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
@@ -1725,6 +1748,30 @@ def _check_holdout_pairing(*, purpose: str | None, accessed_by: str | None) -> b
     return True
 
 
+def _namespaces_for_window(
+    *,
+    holdout_requested: bool,
+    evaluation_window: Window | None,
+) -> tuple[ResultNamespace, ...]:
+    """Bind custom windows to audited hold-out evidence and nothing else.
+
+    The frozen 1962–2026 run keeps its original namespace behaviour. A custom
+    window is deliberately narrower: it may only inspect dates from the hold-out
+    side of the frozen boundary and cannot produce an ``in_sample`` row under a
+    different date range. The public runner only supplies registered windows.
+    """
+    if evaluation_window is None:
+        return ("in_sample", "hold_out") if holdout_requested else ("in_sample",)
+    if evaluation_window.start < HOLDOUT_BOUNDARY:
+        raise ValueError(
+            f"a custom recent-evidence window must start on or after the frozen hold-out boundary "
+            f"{HOLDOUT_BOUNDARY}; got {evaluation_window.start}"
+        )
+    if not holdout_requested:
+        raise ValueError("a custom recent-evidence window is hold-out evidence and requires an audited access")
+    return ("hold_out",)
+
+
 def _assert_ambiguity_unreachable(measurement: ArmMeasurement) -> None:
     """§6 — a runnable strategy cannot close ``ambiguous``, and this measures it.
 
@@ -1800,6 +1847,7 @@ def _write_rows(
                     ambiguity_arm=ambiguity,
                     quarantine_arm="masked",
                     deflated=_deflated_for(masked_arm.namespaces[namespace], deflations.get((namespace, "masked"))),
+                    evaluation_window=corpus.window,
                 )
                 admitted = build_result(
                     admitted_arm.namespaces[namespace],
@@ -1808,6 +1856,7 @@ def _write_rows(
                     ambiguity_arm=ambiguity,
                     quarantine_arm="admitted",
                     deflated=_deflated_for(admitted_arm.namespaces[namespace], deflations.get((namespace, "admitted"))),
+                    evaluation_window=corpus.window,
                 )
                 pending.append((strategy_id, namespace, ambiguity, masked, admitted))
 
