@@ -22,7 +22,7 @@ by a test.
 
 ---
 
-## 1. ⚠⚠ The five ways we have actually fooled ourselves
+## 1. ⚠⚠ The eight ways we have actually fooled ourselves
 
 ### 1.1 Pooling correlated observations as independent — the most expensive one
 
@@ -105,6 +105,91 @@ defect is the population of one, regardless of whether the sentence is true.
 > quantifier.**
 
 ---
+
+### 1.6 ⚠⚠ The univariate instrument — testing one condition and reporting the null
+
+**This is the biggest methodological error of the 2026-08-09 pass, and it produced
+three false nulls in a row.**
+
+Gap fade, 12-month momentum, one-day loser reversal: each tested as ONE condition,
+averaged across the whole cross-section, each returning nothing after costs and
+clustering, each written up as "the effect is dead".
+
+⚠⚠ **That conclusion does not follow.** A marginal test estimates `E[r | A]`. A
+trader claiming a setup is claiming `E[r | A,B,C,D,E]`. Those can have **opposite
+signs**. If an edge exists only where several conditions co-occur, then measuring
+each alone returns ~zero *by construction* — the firings where the others were
+absent swamp the few where they were present. The instrument cannot detect the
+thing, and the null it produces is about the instrument.
+
+⚠ Three failed univariate tests are **one** piece of evidence about univariate
+tests, not three about the market. Do not let them accumulate into a verdict.
+
+**Evidence:** Gu, Kelly & Xiu (NBER w25398) — ML asset-pricing gains come materially
+from **nonlinear predictor interactions**. Lo, Mamaysky & Wang (JF 2000) — technical
+patterns must be made algorithmic and tested as **conditional distributions**.
+
+**Our own proof, and it was sitting in the output:** buying a one-day −5% drop is
+−437 bps at breadth 2-5 and **+91 bps at breadth 101+**. Same signal, opposite sign,
+on a conditioning variable that was simply not being measured. The tell was
+day-clustered and year-clustered `t` disagreeing **in sign** (−4.49 vs +1.81) — when
+two clusterings of the same data disagree that way, the outcome covaries with
+something the test is averaging over. **That disagreement is a finding, not a
+nuisance.**
+
+**Test for the conjunction with ONE degree of freedom, not 2^N.** Pre-specify the
+conditions, then bucket the outcome by **how many are simultaneously true** and look
+for a gradient. Searching all subsets on 6,700 stocks over six years manufactures a
+winner every time; a monotonic gradient across alignment counts does not.
+
+⚠ And know what a flat gradient means. Ours rose sharply from 0 to ~4 aligned and
+then went flat: **confluence identified what to avoid and not what to buy.** That is
+a real result — a filter is not a signal — and it is only visible because the
+marginals were printed alongside the buckets.
+
+### 1.7 ⚠⚠ A level type is only real if it beats its own placebo
+
+Before claiming price behaves differently at support, Fibonacci, pivots, round
+numbers or an anchored VWAP: **construct an arbitrary level of the same shape and
+measure both.** Same tolerance, same swing, same ATR unit — only the level itself
+differs. Without the placebo arm, a hit rate measures the tolerance and the fact
+that price is often mid-range, not the level.
+
+**Measured 2026-08-09 (`scripts/verify_2437_confluence.py`, 2020+, 2.35M stock-days,
+day-clustered):**
+
+```text
+      8 near support    16.78 (t 2.46)   40.47 (t 4.33)
+     P2 fake support    18.84 (t 2.82)   42.26 (t 4.65)
+    9 fib 38/50/62      14.58 (t 2.16)   38.22 (t 4.09)
+P1 fake fib 29/44/71    18.82 (t 2.79)   44.45 (t 4.76)
+```
+
+⚠⚠ **Both placebos BEAT the real thing, and both real levels sit below the
+unconditional baseline (44.28 bps).** Arbitrary fractions 29/44/71 outperform
+38.2/50/61.8; a displaced pseudo-level outperforms an actual pivot low. This matches
+the 2021 study finding Fibonacci zones do not beat non-Fibonacci zones, and goes
+further by killing support proximity too.
+
+⚠ Note what makes this conclusive rather than another null: the real condition and
+its twin are **indistinguishable, and the twin won**. That cannot be explained by
+"we measured it badly" — the same measurement was applied to both.
+
+### 1.8 ⚠⚠ Era-split before you get excited, not as a robustness check
+
+A long sample averages over market structures that no longer exist. Cut at real
+structural events — **2001 decimalisation, 2007 Reg NMS, 2019 zero commissions** —
+never arbitrary dates.
+
+The gap-down fade measured **+156 bps at t 5.73 over 1962-2026**, and **+11.8 bps at
+t 1.39 over 2020-2026**. It paid 100-180 bps a year from 2001 to 2019 and has paid
+nothing since. ⚠ Pre-2001 the sign is **negative**, so the effect existed only inside
+one 19-year regime, opened and closed by structural change.
+
+⚠⚠ **The binding consequence: for anything short-horizon the usable sample is 2020+,
+about six years.** That is a much weaker statistical position than the corpus size
+suggests, and it is the honest one. A 64-year `t 5.73` described a market we cannot
+trade in.
 
 ## 2. Traps specific to price data
 

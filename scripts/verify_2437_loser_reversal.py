@@ -59,6 +59,7 @@ HOLDS = (1, 2, 3, 5, 10)  # trading days, exit at the close
 MIN_PRICE = 20.0  # prior close, unadjusted -- the tradable price
 MIN_DOLLAR_VOL = 10_000_000.0  # 20-day median
 COST_BPS = 50.0  # round trip, deducted from every figure
+BREADTH_SIGNAL = -0.05  # ⚠ must be one of DROP_THRESHOLDS; asserted in _breadth_report
 
 _SERIES = """
     SELECT DISTINCT series_id
@@ -89,6 +90,52 @@ def _cluster_t(groups: dict[object, list[float]], min_n: int = 1) -> tuple[float
     m = float(a.mean())
     se = float(a.std(ddof=1) / np.sqrt(len(a)))
     return m, (m / se if se > 0 else 0.0), len(a)
+
+
+def _breadth_report(by_day: dict[tuple[float | None, int], dict[object, list[float]]]) -> None:
+    """Split the drop signal by how MANY names dropped that day.
+
+    ⚠⚠ Why this exists: on the first run, day-clustered and year-clustered t
+    disagreed in SIGN (`1d <= -5%`, 10-day hold: t(day) -4.49 vs t(year) +1.81).
+    Both can only be true if outcome covaries with how many events a day carries
+    -- day-clustering weights every day equally, year-clustering pools events and
+    so is dominated by the days where hundreds of names fired at once.
+
+    That is a testable claim about mechanism rather than a statistical nuisance:
+    a market-wide crash is forced/correlated selling that can revert, whereas a
+    lone name dropping while the market is flat is firm-specific news that
+    reprices and stays repriced. `breadth` -- the count of qualifying events on
+    the entry day -- is the cheapest available proxy for which one happened, and
+    unlike a sector or beta control it needs no extra data.
+
+    ⚠ Breadth is known at the close of day t, before the next open we enter at,
+    so conditioning on it is not lookahead.
+    """
+    # ⚠ `by_day` is a defaultdict, so an absent key yields an EMPTY bucket rather
+    # than raising -- a future edit to DROP_THRESHOLDS would silently delete this
+    # whole report and print nothing but headers. Fail loudly instead.
+    if BREADTH_SIGNAL not in DROP_THRESHOLDS:
+        raise ValueError(f"BREADTH_SIGNAL {BREADTH_SIGNAL} is not in DROP_THRESHOLDS {DROP_THRESHOLDS}")
+    print(f"\nBREADTH SPLIT -- does the crowd matter? (signal `1d <= {BREADTH_SIGNAL:.0%}`)")
+    print("breadth = number of qualifying events sharing that entry day.")
+    print("⚠ each row is a mean ACROSS DAYS in the bucket, so days weigh equally.\n")
+    header = f"{'breadth':>14}{'hold':>6}{'days':>7}{'events':>10}{'gross bps':>11}{'NET':>9}{'t':>8}"
+    print(header)
+    print("-" * len(header))
+    buckets = ((1, 1), (2, 5), (6, 20), (21, 100), (101, 10**9))
+    for lo, hi in buckets:
+        label = f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 10**9 else f"{lo}+")
+        for k in HOLDS:
+            day_map = by_day[(BREADTH_SIGNAL, k)]
+            sel = {d: v for d, v in day_map.items() if lo <= len(v) <= hi}
+            if len(sel) < 5:
+                continue
+            m, t, n_days = _cluster_t(sel)
+            print(
+                f"{label:>14}{k:>6}{n_days:>7}{sum(len(v) for v in sel.values()):>10,}"
+                f"{m:>11.2f}{m - COST_BPS:>9.2f}{t:>8.2f}"
+            )
+        print()
 
 
 def main() -> int:
@@ -152,6 +199,8 @@ def main() -> int:
     header = f"{'signal':>14}{'hold':>6}{'events':>10}{'gross bps':>11}{'NET':>9}{'t(day)':>9}{'days':>7}{'t(year)':>9}"
     print(header)
     print("-" * len(header))
+
+    _breadth_report(by_day)
 
     survivors = 0
     for th in (None, *DROP_THRESHOLDS):

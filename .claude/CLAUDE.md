@@ -19,9 +19,20 @@ You are helping build **eBull**, a long-horizon AI-assisted investment engine fo
 
 - Demo-first
 - Small-capital live later
-- Long only in v1
-- No leverage
-- No shorting
+- **Shorting: PERMITTED for research and paper trading** (operator decision, 2026-08-09,
+  reversing "long only in v1" / "no shorting"). ⚠ Gated on the same bar as everything
+  else: *"we need to trust the strategies though"* — validated in backtest, then paper,
+  before any cash. ⚠⚠ A short on eToro is a **CFD**, not stock: contract with the broker,
+  no ownership. Easy-to-borrow costs spread only; **hard-to-borrow (>10% annual) accrues a
+  daily fee at 21:00 GMT, tripled at weekends** — and a name that just fell 12% is the
+  archetypal hard-to-borrow candidate, so the cost model cannot reuse the long one.
+  Shorting is also restricted by share availability, volatility halts, and region.
+  ⚠⚠ Short losses are unbounded, so a mean return is not a sufficient basis for a short
+  strategy — the tail and the delisting attribution decide (see #2437).
+- **No leverage — still barred, and deliberately sequenced after validation** (operator,
+  2026-08-09: *"I'd lean to leverage once we have validated that we have a high level of
+  success first"*). ⚠ Note a CFD short at x1 is unleveraged exposure and does not breach
+  this; anything above x1 does.
 - No silent bypass of failed checks
 
 ## Engineering discipline (non-negotiable)
