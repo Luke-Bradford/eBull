@@ -26,6 +26,7 @@ import pytest
 
 from app.services.indicator_series import BarSeries
 from app.services.signal_ledger import resolve_fills, store_signals
+from app.services.strategy_observation_storage import store_strategy_observations
 from app.services.strategy_registry import StrategyIdentity, StrategySignal
 from app.services.technical_analysis import OHLCVRow
 
@@ -89,7 +90,10 @@ def test_stored_fill_price_is_open_of_the_next_bar_in_price_daily(
         identity=_IDENTITY,
         instrument_id=instrument_id,
     )
-    assert store_signals(ebull_test_conn, rows) == len(rows)
+    report = store_strategy_observations(ebull_test_conn, rows)
+    assert report.logical_rows == len(rows)
+    assert report.fired_rows == 3
+    assert report.retained_observation_rows == 1
     ebull_test_conn.commit()
 
     # The join is the assertion: every stored fill must equal price_daily's
@@ -123,9 +127,13 @@ def test_stored_fill_price_is_open_of_the_next_bar_in_price_daily(
         # Friday → Monday. `signal_bar_date + 1 day` would be 2024-01-06.
         (date(2024, 1, 5), "fired", None, date(2024, 1, 8), Decimal("102.30")),
         (date(2024, 1, 8), "fired", None, date(2024, 1, 9), Decimal("103.40")),
-        # Acceptance 8 — the last bar has no t+1.
-        (date(2024, 1, 9), "not_evaluable", "no_fill_bar", None, None),
     ]
+    retained = ebull_test_conn.execute(
+        "SELECT signal_bar_date, verdict, reason_code FROM strategy_signal_observations WHERE instrument_id = %s",
+        (instrument_id,),
+    ).fetchall()
+    # Acceptance 8 — the last bar has no t+1, but routine detail is bounded.
+    assert retained == [(date(2024, 1, 9), "not_evaluable", "no_fill_bar")]
 
     # #2333 — the indicator rule set the signals were computed under, stored on
     # every row and equal to the one hashed into `strategy_version`. The

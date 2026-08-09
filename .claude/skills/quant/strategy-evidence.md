@@ -17,6 +17,12 @@ prior is how a session spends a week on a family the evidence killed in 2016.
 ⚠ Companion to `data-sources/market-structure.md`, which owns *indicator
 formulations*. This file owns *whether a strategy family is worth building*.
 
+⚠ Storage companion: `quant/data-capability.md` §7. Every logical signal must
+reach the durable daily census, but only fired signals are durable detail;
+routine verdict detail is retained 90 days in drop-only partitions. Bypassing
+`store_strategy_observations` both breaks census parity and recreates the
+measured 8.42 GB/year failure.
+
 ---
 
 ## 0. ⚠⚠ WHAT SURVIVED — read this first, the rest of the file is mostly what did not

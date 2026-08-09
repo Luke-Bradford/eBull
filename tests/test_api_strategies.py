@@ -177,6 +177,34 @@ def test_completed_zero_signal_scan_uses_its_watermark(
     assert strategy.scan.not_evaluable == 0
 
 
+def test_scan_health_reads_durable_daily_counts_after_detail_retention(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    version = _current_versions()[strategy_id]
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_scan_watermark (strategy_id, strategy_version, frontier_date)
+        VALUES (%s, %s, %s)
+        """,
+        (strategy_id, version, date(2026, 7, 8)),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_signal_daily_counts (
+            strategy_id, strategy_version, signal_bar_date,
+            signal_kind, verdict, reason_code, row_count
+        ) VALUES (%s, %s, %s, 'entry', 'fired', '', 17)
+        """,
+        (strategy_id, version, date(2026, 7, 7)),
+    )
+
+    overview = get_strategy_overview(ebull_test_conn)
+    strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
+
+    assert strategy.scan.fired_entries == 17
+
+
 def test_overview_maps_only_exact_current_holdout_provenance(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

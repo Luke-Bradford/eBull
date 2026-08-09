@@ -12,7 +12,7 @@ from scripts.verify_2437_observation_storage import (
 
 def test_declared_tier_row_caps_are_stable() -> None:
     assert {tier.name: tier.rows for tier in TIERS} == {
-        "30-minute context": 3_276_000,
+        "30-minute context": 6_552_000,
         "5-minute setup": 4_914_000,
         "1-minute execution": 585_000,
     }

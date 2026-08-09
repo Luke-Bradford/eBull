@@ -338,8 +338,10 @@ when one overruns). Scheduled-only, so NOT added to the
   orchestrator adapter inner-JobLock AND the operator manual-trigger path. NOT
   in SCHEDULED_JOBS (the DAG layer's cadence/freshness gate the run), so NOT
   added to the ``bootstrap_stages.lane`` CHECK.
-* ``strategy_scan`` — ``strategy_signal_scan`` (#2394 §3.1) only. DB-only
-  producer, sole writer of ``strategy_signals`` + ``strategy_scan_watermark``;
+* ``strategy_scan`` — ``strategy_signal_scan`` (#2394 §3.1) plus
+  ``strategy_observation_retention`` (#2448). The DB-only producer is sole
+  writer of the signal/count/observation relations and scan watermark; the
+  retention sibling drops only expired leaf partitions after the scan;
   reads ``price_daily`` / ``price_bar_quarantine`` MVCC-safe. ⚠ The lane is
   load-bearing for CORRECTNESS here, unlike the two above where it is a
   starvation fix: ``store_signals`` has no ``ON CONFLICT``, so two overlapping

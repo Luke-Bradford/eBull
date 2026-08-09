@@ -192,3 +192,29 @@ minimum** — that is the specific thing a data purchase must buy.
    removes the era confound above.
 3. **Amihud on the daily corpus.** No new data at all — a conditioner, a
    per-name cost model, and a priced factor in one.
+
+---
+
+## 7. ⚠ Intraday storage is a measured budget, not `price_intraday` permission
+
+Before adding any recurring intraday writer, read
+`docs/proposals/ta/2026-08-09-strategy-observation-storage.md` and reproduce:
+
+```bash
+PYTHONPATH=. uv run python scripts/verify_2437_observation_storage.py --benchmark
+```
+
+The fixed caps are 30m/1,000 instruments/24 months,
+5m/250/12 months and 1m/50/30 days. Together they are 12.051M retained bars.
+Two plausible schemas were measured and rejected at 2.99 GB and 2.28 GB. The
+accepted completed-OHLCV shape is 117.5 bytes/row including its BRIN index,
+1.422 GB at all caps after upward rounding, with a per-tier/instrument monotonic
+watermark replacing a per-row btree. `store_intraday_bars` transactionally
+enforces retained width, stored-plus-incoming daily row count, alignment,
+completion, retention horizon and watermark backpressure.
+
+⚠ Do not add a second btree, derived-indicator columns, forming bars or raw
+ticks to this relation. Any schema change must rerun the temporary-table
+benchmark and stay below the 1.5 GB retained-tier budget. WebSocket quote
+history still needs a separate honest bid/ask/spread shape plus subscription
+coverage; it must not masquerade as traded OHLCV.

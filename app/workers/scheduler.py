@@ -370,6 +370,9 @@ JOB_PRICE_QUARANTINE_REFRESH = "price_quarantine_refresh"
 # if candles have not moved, the frontier has not moved, and the watermark makes
 # the run a no-op. See app/services/strategy_signal_scan.py.
 JOB_STRATEGY_SIGNAL_SCAN = "strategy_signal_scan"
+# #2448 — range-partition retention. Shares ``strategy_scan`` so a partition
+# cannot be dropped while the scanner is inserting into it.
+JOB_STRATEGY_OBSERVATION_RETENTION = "strategy_observation_retention"
 # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
 # expensive: half an hour is a scheduled job's workload. The reasons are
 # governance — criterion 5 requires a hold-out purpose a cron fire cannot
@@ -1963,10 +1966,11 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         source="strategy_scan",
         description=(
             "Daily 06:45 UTC — evaluates every strategy in "
-            "STRATEGY_MANIFEST over the validated universe and writes "
-            "strategy_signals. Runs one bar in ARREARS: a signal on "
+            "STRATEGY_MANIFEST over the validated universe. Fired signals are "
+            "durable; routine detail is retained 90 days with durable counts. "
+            "Runs one bar in ARREARS: a signal on "
             "the last bar of a series has no t+1, so it is "
-            "not_evaluable/no_fill_bar, and store_signals has no ON "
+            "not_evaluable/no_fill_bar, and the stores have no ON "
             "CONFLICT to correct it with — a same-day scan would "
             "record 6,185 real fired decisions a day as permanently "
             "unevaluable (measured, full population). The date it "
@@ -1993,6 +1997,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         # new frontier, so it writes the whole gap. Catching up on boot would
         # fire a ~2-minute full-corpus pass on every dev-stack restart for a day
         # the next scheduled fire covers anyway.
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_OBSERVATION_RETENTION,
+        display_name="Strategy observation retention (#2448)",
+        source="strategy_scan",
+        description=(
+            "Daily 07:05 UTC — after the 06:45 signal scan, drops whole expired "
+            "range partitions: negative signal detail after 90 days, 30m bars "
+            "after 24 months, 5m bars after 12 months and 1m bars after 30 days. "
+            "Fired signals and daily counts are durable. Never issues a mass DELETE."
+        ),
+        cadence=Cadence.daily(hour=7, minute=5),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -4911,6 +4929,23 @@ def strategy_signal_scan() -> None:
         # run would be recorded green with a strategy silently dark.
         if failed:
             raise RuntimeError(f"strategy_signal_scan: {len(failed)} strategy(ies) failed: {failed}")
+
+
+def strategy_observation_retention() -> None:
+    """Drop only complete expired #2448 observation partitions."""
+    from datetime import UTC, datetime
+
+    from app.services.strategy_observation_storage import drop_expired_partitions
+
+    with _tracked_job(JOB_STRATEGY_OBSERVATION_RETENTION) as tracker:
+        with connect_job() as conn:
+            plan = drop_expired_partitions(conn, as_of=datetime.now(tz=UTC), dry_run=False)
+            tracker.row_count = len(plan.partitions)
+        logger.info(
+            "strategy_observation_retention: dropped %d signal + %d intraday partitions",
+            len(plan.signal_partitions),
+            len(plan.intraday_partitions),
+        )
 
 
 def strategy_backtest_run(params: Mapping[str, Any]) -> None:
