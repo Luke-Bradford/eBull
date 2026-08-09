@@ -104,6 +104,9 @@ def ensure_strategy_request_id(conn: psycopg.Connection[Any], *, order_id: int) 
 
 
 def _payload_hash(detail: BrokerOrderDetail) -> str:
+    # Settled review-prevention decision #471 removed duplicate raw persistence
+    # for etoro_broker once its decision-bearing fields land in SQL. Keep the
+    # response process-local and retain a reproducibility fingerprint instead.
     canonical = json.dumps(detail.raw_payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 

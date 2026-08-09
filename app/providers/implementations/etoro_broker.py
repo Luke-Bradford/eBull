@@ -445,8 +445,6 @@ class EtoroBrokerProvider(BrokerProvider):
                 raise ValueError("order_id must be a positive integer")
             params: dict[str, str | int] = {"orderId": numeric_order_id}
         else:
-            from uuid import UUID
-
             assert reference_id is not None
             try:
                 canonical_reference = str(UUID(reference_id))

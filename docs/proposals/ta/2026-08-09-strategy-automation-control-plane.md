@@ -374,7 +374,12 @@ are actually created.
    new-entry kill row rather than appending polling heartbeats. Real-Postgres
    crash-point tests cover before-call identity, during-call uncertainty,
    after-acceptance replay, partial fills and a same-instrument manual position
-   that remains unclaimed. No broker writer or paper allocator is enabled.
+   that remains unclaimed. Detailed lookup follows the settled eToro carve-out
+   in `docs/review-prevention-log.md` (#471): all decision-bearing identity,
+   status, execution, units, price, time and fee fields land in compact SQL;
+   the full body remains process-local and one SHA-256 fingerprint is retained
+   per order. Repeated polls append no JSON. No broker writer or paper allocator
+   is enabled.
 7. **Paper allocator/executor:** exact strategy version, sleeve cash, current
    preflight, SL/TP and portfolio guard; no live key path.
 8. **Owned-position manager:** exact-position exits, timeout and separately
