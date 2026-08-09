@@ -176,6 +176,18 @@ describe("StrategiesPage", () => {
     await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", reason: "Automated strategy workspace update" }));
   });
 
+  it("does not present automation as enabled while the system-wide guard is off", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...approvedOverview(),
+      execution_enabled: false,
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
+    expect(master).not.toBeChecked();
+    expect(master).toBeDisabled();
+    expect(screen.getByText("System-wide automatic trading is off. Enable that safety control before allowing new entries.")).toBeInTheDocument();
+  });
+
   it("shows stable primary evidence without paging through missing windows", async () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
@@ -213,5 +225,17 @@ describe("StrategiesPage", () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     await userEvent.click(await screen.findByRole("checkbox", { name: "Enabled" }));
     await waitFor(() => expect(update).toHaveBeenCalledWith("s1-time-series-momentum", expect.objectContaining({ enabled: false, reason: "Paused from automated strategy workspace" })));
+  });
+
+  it("does not enable an approved strategy without assigned capital", async () => {
+    const approved = approvedOverview();
+    const strategy = approved.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...approved,
+      paper_pool: { ...approved.paper_pool, enabled: false, capital_limit: "0", remaining_capital: "0" },
+      strategies: [{ ...strategy, allocation: { ...strategy.allocation, enabled: false, capital_limit: "0" } }],
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    expect(await screen.findByRole("checkbox", { name: "Paused" })).toBeDisabled();
   });
 });

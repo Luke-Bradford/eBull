@@ -227,18 +227,19 @@ function AutomationControl({
   onUpdated: () => void;
 }) {
   const pool = overview.paper_pool;
-  const [enabled, setEnabled] = useState(pool.enabled);
+  const [enabled, setEnabled] = useState(pool.enabled && overview.execution_enabled);
   const [limit, setLimit] = useState(pool.capital_limit);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
-    setEnabled(pool.enabled);
+    setEnabled(pool.enabled && overview.execution_enabled);
     setLimit(pool.capital_limit);
-  }, [pool.enabled, pool.capital_limit]);
+  }, [pool.enabled, pool.capital_limit, overview.execution_enabled]);
   const parsed = Number(limit);
   const valid = Number.isFinite(parsed) && parsed >= 0 && (!enabled || parsed > 0);
-  const dirty = enabled !== pool.enabled || parsed !== Number(pool.capital_limit);
-  const canEnable = approvedCount > 0;
+  const effectiveEnabled = pool.enabled && overview.execution_enabled;
+  const dirty = enabled !== effectiveEnabled || parsed !== Number(pool.capital_limit);
+  const canEnable = approvedCount > 0 && overview.execution_enabled;
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -304,7 +305,9 @@ function AutomationControl({
       </dl>
       {!canEnable ? (
         <p className="mt-4 text-xs text-amber-700 dark:text-amber-300">
-          Automation stays off until at least one strategy passes validation.
+          {!overview.execution_enabled
+            ? "System-wide automatic trading is off. Enable that safety control before allowing new entries."
+            : "Automation stays off until at least one strategy passes validation."}
         </p>
       ) : null}
       {overview.entry_block.new_entries_blocked ? (
@@ -354,8 +357,10 @@ function StrategyToggle({
 }) {
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
+  const availableCapital = Math.max(Number(strategy.allocation.capital_limit), Number(poolLimit));
+  const canEnable = strategy.allocation_ready && availableCapital > 0;
   async function toggle() {
-    if (saving || (!strategy.allocation.enabled && !strategy.allocation_ready)) return;
+    if (saving || (!strategy.allocation.enabled && !canEnable)) return;
     setSaving(true);
     setFailed(false);
     const enabled = !strategy.allocation.enabled;
@@ -379,7 +384,7 @@ function StrategyToggle({
   return (
     <div>
       <label className="flex min-h-11 cursor-pointer items-center justify-end gap-2 text-xs font-medium">
-        <input type="checkbox" checked={strategy.allocation.enabled} disabled={saving} onChange={() => void toggle()} className="h-5 w-5" />
+        <input type="checkbox" checked={strategy.allocation.enabled} disabled={saving || (!strategy.allocation.enabled && !canEnable)} onChange={() => void toggle()} className="h-5 w-5" />
         {strategy.allocation.enabled ? "Enabled" : "Paused"}
       </label>
       {failed ? <p className="text-xs text-red-700 dark:text-red-300">Not changed</p> : null}
