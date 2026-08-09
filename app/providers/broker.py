@@ -19,6 +19,9 @@ from decimal import Decimal
 from typing import Any, Literal
 
 OrderStatus = Literal["filled", "pending", "rejected", "failed"]
+TradeDirection = Literal["buy", "sellShort"]
+SettlementType = Literal["cfd", "real", "realFutures", "marginTrade"]
+PreflightOrderType = Literal["mkt", "mit", "limitIOC"]
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,105 @@ class OrderParams:
     take_profit_rate: Decimal | None = None
     is_tsl_enabled: bool = False
     leverage: int = 1
+
+
+@dataclass(frozen=True)
+class BrokerWhatIfOrder:
+    """A non-executing order shape for eToro's v2 cost preflight.
+
+    v1 deliberately supports the two transactions the current endpoint accepts
+    for an ``open`` action.  This type is evidence collection, not permission to
+    execute shorts: the execution path remains long-only until a separately
+    validated strategy and guard contract promote it.
+    """
+
+    instrument_id: int
+    transaction: TradeDirection
+    settlement_type: SettlementType
+    amount: Decimal | None = None
+    units: Decimal | None = None
+    order_type: PreflightOrderType = "mkt"
+    leverage: int = 1
+    order_currency: str = "usd"
+
+    def __post_init__(self) -> None:
+        if self.instrument_id <= 0:
+            raise ValueError("instrument_id must be positive")
+        if (self.amount is None) == (self.units is None):
+            raise ValueError("exactly one of amount or units must be provided")
+        value = self.amount if self.amount is not None else self.units
+        if value is None or value <= 0:
+            raise ValueError("amount or units must be positive")
+        if self.leverage < 1:
+            raise ValueError("leverage must be at least 1")
+        if self.order_currency.lower() != "usd":
+            raise ValueError("the current eToro preflight endpoint supports USD only")
+
+
+@dataclass(frozen=True)
+class BrokerLeverageConfig:
+    """One direction/settlement arm returned by trading eligibility."""
+
+    settlement_type: str
+    direction: str
+    leverage_values: tuple[int, ...]
+    min_position_amount: Decimal | None
+    allow_edit_stop_loss: bool | None
+    allow_edit_take_profit: bool | None
+    allow_stop_loss_take_profit: bool | None
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerInstrumentEligibility:
+    """Account-specific eligibility for one instrument at request time."""
+
+    instrument_id: int
+    symbol: str | None
+    min_position_exposure: Decimal | None
+    max_units_per_order: Decimal | None
+    allow_open_position: bool
+    allow_close_position: bool
+    allow_partial_close_position: bool
+    allow_trailing_stop_loss: bool
+    leverage_configs: tuple[BrokerLeverageConfig, ...]
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerEligibilityResponse:
+    """The complete resolved/not-found result of an eligibility preflight."""
+
+    currency: str
+    eligibilities: tuple[BrokerInstrumentEligibility, ...]
+    not_found_instrument_ids: tuple[int, ...]
+    not_found_symbols: tuple[str, ...]
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerCostComponent:
+    """One broker-named cost component; the vocabulary remains provider-owned."""
+
+    cost_type: str
+    # The docs show ``amount`` while the live demo response used ``value``.
+    # Preserve both until the provider documents or a controlled probe proves
+    # the unit semantics. Neither may be silently substituted for the other.
+    amount: Decimal | None
+    value: Decimal | None
+    currency: str
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BrokerWhatIfCostResponse:
+    """Current broker cost estimate for a hypothetical order."""
+
+    instrument_id: int
+    symbol: str | None
+    costs: tuple[BrokerCostComponent, ...]
+    last_updated: datetime
+    raw_payload: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -235,4 +337,20 @@ class BrokerProvider(ABC):
         fakes that implement only the abstract surface keep working;
         the eToro implementation overrides it.
         """
+        raise NotImplementedError
+
+    def check_instrument_eligibility(
+        self,
+        instrument_ids: Sequence[int],
+    ) -> BrokerEligibilityResponse:
+        """Fetch current account-specific trading constraints without trading.
+
+        Non-abstract so existing provider fakes remain source compatible.  A
+        strategy execution gate must treat ``NotImplementedError`` as a refusal,
+        never as eligibility.
+        """
+        raise NotImplementedError
+
+    def get_what_if_costs(self, order: BrokerWhatIfOrder) -> BrokerWhatIfCostResponse:
+        """Fetch current broker-estimated costs without placing an order."""
         raise NotImplementedError

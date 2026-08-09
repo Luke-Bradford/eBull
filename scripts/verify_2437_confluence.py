@@ -140,6 +140,24 @@ def _cluster(groups: dict[date, list[float]]) -> tuple[float, float, int]:
     return m, (m / se if se > 0 else 0.0), len(a)
 
 
+def _market_context(
+    signal_date: date,
+    lookback_date: date,
+    mkt: dict[date, float],
+    mkt_cum: dict[date, float],
+) -> tuple[float, bool] | None:
+    """Return causal market context observable at the signal close.
+
+    The trade is grouped by its next-open entry date, but market breadth and
+    relative strength belong to the completed signal bar.  Using the entry
+    date here leaks that session's return into a decision made the night before.
+    """
+    if signal_date not in mkt or signal_date not in mkt_cum or lookback_date not in mkt_cum:
+        return None
+    market_return_21d = mkt_cum[signal_date] / mkt_cum[lookback_date] - 1.0
+    return market_return_21d, mkt[signal_date] > 0
+
+
 def main() -> int:
     conn = psycopg.connect(settings.database_url)
     sids = [r[0] for r in conn.execute(_SERIES, {"s": START}).fetchall()]
@@ -217,9 +235,12 @@ def main() -> int:
             entry = adj_open[i + 1]
             if not np.isfinite(entry) or entry <= 0:
                 continue
-            day = dts[i + 1]
-            if day not in mkt:
+            signal_date = dts[i]
+            entry_date = dts[i + 1]
+            market_context = _market_context(signal_date, dts[i - 21], mkt, mkt_cum)
+            if market_context is None:
                 continue
+            m21, breadth_up = market_context
 
             w = adj[i - 251 : i + 1]
             hi252, lo60, hi60 = w.max(), adj_lo[i - 59 : i + 1].min(), adj_hi[i - 59 : i + 1].max()
@@ -229,8 +250,6 @@ def main() -> int:
             sup_d = min(((adj[i] - adj_lo[p]) / atr[i] for p in prior), default=99.0)
             fib = (adj[i] - lo60) / (hi60 - lo60) if hi60 > lo60 else -1.0
             r21 = adj[i] / adj[i - 21] - 1.0
-            m21 = mkt_cum[day] / mkt_cum[dts[i - 21]] - 1.0 if dts[i - 21] in mkt_cum else 0.0
-
             c = (
                 adj[i] > sma50[i] > sma200[i],
                 -0.12 <= pull <= -0.03,
@@ -242,7 +261,7 @@ def main() -> int:
                 sup_d <= 0.5,
                 any(abs(fib - lv) <= 0.03 for lv in (0.382, 0.5, 0.618)),
                 35.0 <= rsi[i] <= 55.0,
-                mkt[day] > 0,
+                breadth_up,
             )
             # ⚠ placebos are matched in SHAPE to conditions 9 and 8: the same
             # tolerance, the same swing, the same ATR unit -- only the level itself
@@ -258,14 +277,14 @@ def main() -> int:
             total += 1
             for h in HOLDS:
                 r = (adj[i + h] / entry - 1.0) * 1e4
-                base[h][day].append(r)
-                by_count[(k, h)][day].append(r)
+                base[h][entry_date].append(r)
+                by_count[(k, h)][entry_date].append(r)
                 for ci, on in enumerate(c):
                     if on:
-                        by_cond[(ci, h)][day].append(r)
+                        by_cond[(ci, h)][entry_date].append(r)
                 for pi, on in enumerate(p):
                     if on:
-                        by_placebo[(pi, h)][day].append(r)
+                        by_placebo[(pi, h)][entry_date].append(r)
         if n % 1000 == 0:
             print(f"  pass2 {n}/{len(sids)}", flush=True)
     conn.close()

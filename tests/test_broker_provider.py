@@ -19,10 +19,12 @@ from app.providers.broker import (
     BrokerMirror,
     BrokerMirrorPosition,
     BrokerPortfolio,
+    BrokerWhatIfOrder,
     OrderParams,
 )
 from app.providers.implementations.etoro_broker import (
     EtoroBrokerProvider,
+    TradingPreflightParseError,
     _normalise_close_order_response,
     _normalise_open_order_response,
     _normalise_order_info_response,
@@ -73,6 +75,46 @@ FIXTURE_PORTFOLIO_RESPONSE = {
     },
 }
 
+FIXTURE_ELIGIBILITY_RESPONSE = {
+    "currency": "USD",
+    "eligibilities": [
+        {
+            "instrumentId": 1001,
+            "symbol": "AAPL",
+            "minPositionExposure": 50,
+            "maxUnitsPerOrder": 10000,
+            "allowOpenPosition": True,
+            "allowClosePosition": True,
+            "allowPartialClosePosition": True,
+            "allowTrailingStopLoss": True,
+            "leverageConfigs": [
+                {
+                    "settlementType": "CFD",
+                    "direction": "LONG",
+                    "leverageValues": [1, 2, 5],
+                    "minPositionAmount": 50,
+                    "allowEditStopLoss": True,
+                    "allowEditTakeProfit": True,
+                    "allowStopLossTakeProfit": True,
+                }
+            ],
+        }
+    ],
+    "notFoundInstrumentIds": [9999],
+    "notFoundSymbols": [],
+}
+
+FIXTURE_WHAT_IF_COST_RESPONSE = {
+    "instrumentId": 1001,
+    "symbol": "AAPL",
+    "costs": [
+        {"costType": "marketSpread", "amount": 0.03, "currency": "USD"},
+        {"costType": "transactionFee", "amount": 1, "currency": "USD"},
+        {"costType": "overnightFee", "value": 0.0, "currency": "USD"},
+    ],
+    "lastUpdated": "2026-05-25T08:30:00Z",
+}
+
 
 # ---------------------------------------------------------------------------
 # Environment-scoped path prefixes
@@ -89,6 +131,118 @@ class TestEnvironmentPrefixes:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:
             assert broker._exec_prefix == "/api/v1/trading/execution"
             assert broker._info_prefix == "/api/v1/trading/info"
+
+
+# ---------------------------------------------------------------------------
+# v2 non-executing trading preflight (#2437)
+# ---------------------------------------------------------------------------
+
+
+class TestTradingPreflight:
+    def test_eligibility_posts_bounded_ids_to_current_demo_endpoint(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_ELIGIBILITY_RESPONSE
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+
+            result = broker.check_instrument_eligibility([1001, 9999])
+
+            call = broker._http_write.post.call_args
+            assert call.args[0] == "/api/v2/trading/info/demo/eligibility"
+            assert call.kwargs["json"] == {"instrumentIds": [1001, 9999], "currency": "USD"}
+            assert result.currency == "USD"
+            assert result.eligibilities[0].allow_open_position is True
+            assert result.eligibilities[0].leverage_configs[0].leverage_values == (1, 2, 5)
+            assert result.not_found_instrument_ids == (9999,)
+
+    def test_eligibility_refuses_unbounded_or_ambiguous_requests(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            for ids in ([], [1, 1], [0], list(range(1, 102))):
+                try:
+                    broker.check_instrument_eligibility(ids)
+                except ValueError:
+                    pass
+                else:  # pragma: no cover - assertion helper branch
+                    raise AssertionError(f"expected ValueError for {ids[:3]}")
+
+    def test_eligibility_fails_closed_when_permission_field_is_missing(self) -> None:
+        malformed = {
+            **FIXTURE_ELIGIBILITY_RESPONSE,
+            "eligibilities": [
+                {
+                    **FIXTURE_ELIGIBILITY_RESPONSE["eligibilities"][0],
+                    "allowOpenPosition": None,
+                }
+            ],
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = malformed
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+            try:
+                broker.check_instrument_eligibility([1001])
+            except TradingPreflightParseError as exc:
+                assert "allowOpenPosition" in str(exc)
+            else:  # pragma: no cover - assertion helper branch
+                raise AssertionError("missing permission must fail closed")
+
+    def test_what_if_costs_posts_order_shape_and_preserves_open_cost_vocabulary(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_WHAT_IF_COST_RESPONSE
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+            result = broker.get_what_if_costs(
+                BrokerWhatIfOrder(
+                    instrument_id=1001,
+                    transaction="buy",
+                    settlement_type="real",
+                    amount=Decimal("1000"),
+                )
+            )
+
+            call = broker._http_write.post.call_args
+            assert call.args[0] == "/api/v2/trading/info/demo/costs"
+            assert call.kwargs["json"] == {
+                "action": "open",
+                "transaction": "buy",
+                "instrumentId": 1001,
+                "settlementType": "real",
+                "orderType": "mkt",
+                "leverage": 1,
+                "orderCurrency": "usd",
+                "amount": 1000.0,
+            }
+            assert [(cost.cost_type, cost.amount, cost.value) for cost in result.costs] == [
+                ("marketSpread", Decimal("0.03"), None),
+                ("transactionFee", Decimal("1"), None),
+                ("overnightFee", None, Decimal("0.0")),
+            ]
+            assert result.last_updated.tzinfo is not None
+
+    def test_what_if_order_requires_exactly_one_positive_size(self) -> None:
+        for amount, units in (
+            (None, None),
+            (Decimal("1"), Decimal("1")),
+            (Decimal("0"), None),
+        ):
+            try:
+                BrokerWhatIfOrder(
+                    instrument_id=1001,
+                    transaction="buy",
+                    settlement_type="real",
+                    amount=amount,
+                    units=units,
+                )
+            except ValueError:
+                pass
+            else:  # pragma: no cover - assertion helper branch
+                raise AssertionError(f"invalid what-if size accepted: amount={amount}, units={units}")
 
 
 # ---------------------------------------------------------------------------

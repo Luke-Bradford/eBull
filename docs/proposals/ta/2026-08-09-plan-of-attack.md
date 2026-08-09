@@ -88,9 +88,12 @@ carving a fake hold-out.
 - **Intraday residual reversal** (Brogaard/Han/Kim, sample to Dec 2022) on **30-minute
   midpoints** — the granularity we can already pull ~1 month back. ⚠ Their construction
   is long-short; the long leg alone is the weaker one.
-- **`breadth up day`** was the largest single marginal in the confluence table (+91.56
-  bps at 10 days, t 7.93, double any other). ⚠ Probably beta, not alpha — check before
-  getting interested.
+- ~~**`breadth up day` was the largest single marginal.**~~ **INVALIDATED
+  2026-08-09.** The original confluence code used the next-open entry date's market
+  return in a prior-close signal. After the causal-date fix, breadth-up is **37.70
+  bps at 10 days versus a 44.28 bps unconditional baseline**. Reproduce with
+  `PYTHONPATH=. uv run python scripts/verify_2437_confluence.py`. Do not reuse the
+  old +91.56 bps / t 7.93 figure.
 - **A tick recorder.** `price_intraday` is empty with no writer. ⚠ Schema mismatch
   noted in `data-capability.md`. Lower priority now that REST history exists, but it is
   the only way past the 1000-bar ceiling.
@@ -121,7 +124,6 @@ carving a fake hold-out.
 ## 6. Merge state
 
 - PR **#2442** merged (`61fb17da`).
-- PR **#2444** — this work. APPROVE, CI green, two NITPICKs `FIXED 245481a8`.
-  ⚠ The follow-up push resets the review requirement; re-poll before merging.
-- ⚠ `~/Dev/eBull` is on `feature/2437-short-side-edge`, **not detached at origin/main**.
-  Re-detach after merge.
+- PR **#2444** merged (`dbe5107b`).
+- The evidence correction, broker preflight and automation control-plane
+  follow-up is on `feature/2437-automation-control-plane`; PR number pending.
