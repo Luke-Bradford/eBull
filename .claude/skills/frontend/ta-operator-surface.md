@@ -142,20 +142,23 @@ default, because the people building it can read it.
 
 ## Live-activation state
 
-Render paper availability and real-money activation as separate facts. Read
+Never infer strategy authority from the account-wide live flag. Read
 `live_strategy_activation_available` and its named blocker from the strategy
-overview; never infer strategy authority from the account-wide live flag. While
-the broker contract is unvalidated, show one page-level outcome banner:
-"Real-money strategy activation is unavailable." Keep cost vocabulary, drills
-and gate mechanics in the detail/runbook rather than repeating them on every
-strategy card. A disabled live control must never look like an evidence-ready
-control awaiting only a click.
+overview. On a demonstrably demo-only connection, do not spend landing-page
+space repeatedly explaining that activity is paper trading; keep the real-money
+blocker in the API, audit detail and runbook. If the configured connection can
+place real-money orders, show one page-level outcome banner and never render a
+disabled live control as though it awaits only a click.
 
-The Strategies landing view is a money workspace: total automated P&L and its
-close-event history, shared paper capital working/reserved/available, then one
-summary row per strategy. A row answers win rate, average return, typical time
-to outcome, recent signal frequency and enabled state. Render evidence and
-audit internals only in a side drawer, and do not request its paginated signal
-ledger until that drawer opens.
+The Strategies landing view is a money workspace: total automated P&L, trading
+capital working/reserved/available, then one summary row per strategy. Do not
+render an empty P&L chart before the first close. A row pairs success rate with
+average return, then gives time to outcome, recent signal frequency and enabled
+state. Observed results take precedence; until they exist, representative
+backtest figures must be visibly labelled and must not be mixed with observed
+figures in one aggregate. Expand at most one strategy's evidence windows inline.
+Instrument-level events belong in a separate Activity view, filtered to one
+selected strategy and bounded to 15 rows per page; evidence expansion never
+loads the instrument ledger.
 The overview freshness check must use the ingest-maintained series census, not
 aggregate the full research bar heap or justify a large page-only index.

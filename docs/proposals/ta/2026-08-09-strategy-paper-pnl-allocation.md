@@ -82,18 +82,33 @@ new order entry in the executor. It does not erase the allocation audit and it
 does not remove exact-position risk reduction.
 
 The default operator view is a money workspace, not an evidence dump. It leads
-with total exact-owned strategy P&L and a read-time cumulative close-event line,
-then the shared paper-capital pot. Each strategy occupies one summary row with
-P&L, win rate, average shadow return, median time-to-outcome, trailing 30-day
-signal count and an individual next-run switch. Backtest windows and paginated
-signals live in a side drawer and are requested only when opened.
+with total exact-owned strategy P&L, capital state, open positions, success rate
+and average return. The read-time cumulative close-event line is rendered only
+after a close exists; an empty chart does not consume the page. Until automated
+outcomes resolve, success and average-return fields are explicitly labelled as
+representative backtest evidence. Observed and backtest populations are never
+silently pooled in one aggregate.
 
-The shared paper pot is an additional hard ceiling across every enabled
+Each strategy occupies one summary row with P&L, paired success/average return,
+time to outcome, trailing 30-day signal count and an individual next-run switch.
+One strategy's bounded evidence windows can expand inline. Instrument-level
+events are a separate Activity view, explicitly filtered to one selected
+strategy and paginated at 15 rows. Opening evidence never loads or displays the
+instrument ledger.
+
+The overview response carries the configured broker connection mode. A demo
+connection does not repeat paper/live caveats across the workspace. If a
+real-money-capable connection is configured while live strategy activation is
+refused, the page shows one concise activation-unavailable warning.
+
+The shared strategy pot is an additional hard ceiling across every enabled
 strategy deployment. Under the existing allocator advisory lock, sizing takes
 the minimum of the shared remaining pot, per-strategy remaining ceiling,
 available cash and the existing portfolio/instrument risk limits. The master
-switch is paper-only and does not override the account kill switch, global
-automatic-trading flag, per-strategy evidence gate or live-activation refusal.
+workspace switch updates that ceiling and the account-wide automatic-trading
+flag under the allocator lock so the displayed state is effective, not cosmetic.
+It does not override the account kill switch, per-strategy evidence gate or the
+unconditional live-activation refusal.
 
 ## Database and performance impact
 

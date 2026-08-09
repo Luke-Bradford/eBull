@@ -14,6 +14,7 @@ export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
 
 export function fetchFiredSignals(cursor: number | null, strategyId?: string): Promise<FiredSignalsResponse> {
   const params = new URLSearchParams();
+  params.set("limit", "15");
   if (cursor !== null) params.set("cursor", String(cursor));
   if (strategyId) params.set("strategy_id", strategyId);
   const query = params.size === 0 ? "" : `?${params.toString()}`;

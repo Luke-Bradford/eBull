@@ -2413,6 +2413,9 @@ export interface StrategyResultArm {
   input_rule_set_version: string;
   evaluated_instrument_count: number;
   trade_count: number;
+  losing_trade_count: number;
+  open_trade_count: number;
+  unpriced_trade_count: number;
   expectancy_per_trade_pct: string;
   expectancy_ci_low_pct: string | null;
   expectancy_ci_high_pct: string | null;
@@ -2442,6 +2445,8 @@ export interface StrategyOverview {
   strategy_id: string;
   strategy_version: string;
   title: string;
+  description: string;
+  exit_timing: string;
   runnable: boolean;
   exclusion_reason: string | null;
   scan: {
@@ -2527,6 +2532,7 @@ export interface StrategyEntryBlock {
 
 export interface StrategyOverviewResponse {
   as_of: string;
+  demo_connection: boolean;
   execution_enabled: boolean;
   live_execution_enabled: boolean;
   live_strategy_activation_available: false;

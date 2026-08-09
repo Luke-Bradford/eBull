@@ -9,6 +9,7 @@ import { StrategiesPage } from "@/pages/StrategiesPage";
 
 const OVERVIEW: StrategyOverviewResponse = {
   as_of: "2026-08-09T12:00:00Z",
+  demo_connection: true,
   execution_enabled: true,
   live_execution_enabled: false,
   live_strategy_activation_available: false,
@@ -35,6 +36,8 @@ const OVERVIEW: StrategyOverviewResponse = {
     strategy_id: "s1-time-series-momentum",
     strategy_version: "strategy-registry-v1+abc",
     title: "Time-series momentum",
+    description: "Follows established price trends and exits when the trend turns.",
+    exit_timing: "Until the trend turns",
     runnable: true,
     exclusion_reason: null,
     scan: { frontier_date: "2026-08-07", updated_at: "2026-08-08T06:45:00Z", status: "current", fired_entries: 12, fired_exits: 0, not_fired: 100, not_evaluable: 0, exclusions_by_reason: {} },
@@ -86,34 +89,126 @@ describe("StrategiesPage", () => {
     expect(await screen.findByText("Automated P&L")).toBeInTheDocument();
     expect(screen.getAllByText(/50\.00/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/60\.00%/).length).toBeGreaterThan(0);
-    expect(screen.getByText("4 days")).toBeInTheDocument();
-    expect(screen.getByText("3 signals")).toBeInTheDocument();
-    expect(screen.queryByText("Allocation blockers: none")).not.toBeInTheDocument();
+    expect(screen.getByText("4 market days")).toBeInTheDocument();
+    expect(screen.getAllByText("Observed results").length).toBe(2);
+    expect(screen.getByText(/Follows established price trends/)).toBeInTheDocument();
+    expect(strategiesApi.fetchFiredSignals).not.toHaveBeenCalled();
   });
 
-  it("keeps technical evidence and paginated signals in a flyout", async () => {
+  it("labels representative backtest numbers when no automated outcomes have resolved", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    const evidenceWindow = strategy.evidence_windows[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{
+        ...strategy,
+        attribution: {
+          ...strategy.attribution,
+          resolved_entries: 0,
+          winning_entries: 0,
+          win_rate: null,
+          median_days_to_outcome: null,
+          shadow_average_return_pct: null,
+        },
+        evidence_windows: [{
+          ...evidenceWindow,
+          arms: [{
+            result_version: "result-v1",
+            ambiguity_arm: "worst_case",
+            quarantine_arm: "masked",
+            universe_basis: "survivorship_free",
+            corpus_version: "corpus-v1",
+            cost_model_id: "cost-v1",
+            sizing_rule: "size-v1",
+            benchmark_rule: "benchmark-v1",
+            position_rule_set_version: "position-v1",
+            outcome_rule_set_version: "outcome-v1",
+            input_rule_set_version: "input-v1",
+            evaluated_instrument_count: 100,
+            trade_count: 12,
+            losing_trade_count: 3,
+            open_trade_count: 0,
+            unpriced_trade_count: 0,
+            expectancy_per_trade_pct: "1.5",
+            expectancy_ci_low_pct: "0.5",
+            expectancy_ci_high_pct: "2.5",
+            total_return_pct: "18",
+            cagr_pct: "4",
+            sharpe: "1",
+            sortino: "1.2",
+            max_drawdown_pct: "-5",
+            profit_factor: "1.5",
+            exposure_time_pct: "25",
+            turnover_annualised: "4",
+            return_vs_buy_and_hold_pct: "2",
+            deflated_sharpe: "0.8",
+            promotion_refusals: [],
+          }],
+        }],
+      }],
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await screen.findByText("Automated P&L");
+    expect(screen.getAllByText("+75.00%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("+1.50%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Backtest evidence").length).toBe(2);
+    expect(screen.getByText("Until the trend turns")).toBeInTheDocument();
+  });
+
+  it("preserves an unknown observed average instead of treating it as zero", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{
+        ...strategy,
+        attribution: {
+          ...strategy.attribution,
+          shadow_average_return_pct: null,
+        },
+      }],
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await screen.findByText("Automated P&L");
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText("+0.00%")).not.toBeInTheDocument();
+  });
+
+  it("shows the live blocker only for a real-money-capable connection", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      demo_connection: false,
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    expect(
+      await screen.findByText("Real-money strategy activation is unavailable."),
+    ).toBeInTheDocument();
+  });
+
+  it("separates one inline breakdown from paginated instrument activity", async () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     await screen.findByText("Time-series momentum");
-    await userEvent.click(screen.getByRole("button", { name: "Details" }));
-    expect(screen.getByRole("dialog", { name: "Time-series momentum details" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Breakdown" }));
+    expect(screen.getByText("Historical breakdown")).toBeInTheDocument();
+    expect(screen.queryByText("AAA")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Activity" }));
     expect(await screen.findByText("AAA")).toBeInTheDocument();
-    expect(screen.getByText("Technical audit detail")).toBeInTheDocument();
+    expect(screen.getByText("15 events per page · newest first")).toBeInTheDocument();
   });
 
-  it("updates the shared paper pot without exposing an audit-reason field", async () => {
+  it("updates capital and the master automation state together", async () => {
     const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({ ...OVERVIEW.paper_pool, capital_limit: "1500" });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
-    const input = await screen.findByLabelText("Shared paper capital (USD)");
+    const input = await screen.findByLabelText("Trading capital (USD)");
     await userEvent.clear(input);
     await userEvent.type(input, "1500");
-    await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: true, capital_limit: "1500.000000", reason: "Strategy workspace paper-pool update" }));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: true, capital_limit: "1500.000000", reason: "Automated strategy workspace update" }));
   });
 
   it("toggles an individual strategy for the next run", async () => {
     const update = vi.spyOn(strategiesApi, "updateStrategyAllocation").mockResolvedValue({ strategy_id: "s1-time-series-momentum", strategy_version: "strategy-registry-v1+abc", deployment_id: 7, capital_limit: "1000", currency: "USD", enabled: false, revision: 3 });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     await userEvent.click(await screen.findByRole("checkbox", { name: "On" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith("s1-time-series-momentum", expect.objectContaining({ enabled: false, reason: "Paused from strategy workspace" })));
+    await waitFor(() => expect(update).toHaveBeenCalledWith("s1-time-series-momentum", expect.objectContaining({ enabled: false, reason: "Paused from automated strategy workspace" })));
   });
 });

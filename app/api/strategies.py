@@ -14,6 +14,7 @@ from psycopg.pq import TransactionStatus
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.auth import require_session, require_session_or_service_token
+from app.config import settings
 from app.db import get_conn
 from app.security.sessions import SessionRow
 from app.services.backtest_run import BACKTEST_UNIVERSE, runnable_strategies
@@ -22,7 +23,14 @@ from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
+from app.services.runtime_config import (
+    RuntimeConfigCorrupt,
+    RuntimeConfigNoOp,
+    get_runtime_config,
+    update_runtime_config,
+)
 from app.services.strategy_control_plane import (
+    PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
     configure_deployment,
     configure_paper_pool,
@@ -66,6 +74,25 @@ _TITLES = {
     "s4-volatility-compression-breakout": "Volatility compression breakout",
 }
 
+_PRESENTATION = {
+    "s1-time-series-momentum": (
+        "Follows established price trends and exits when the trend turns.",
+        "Until the trend turns",
+    ),
+    "s2-cross-sectional-momentum": (
+        "Selects the strongest shares and refreshes them on the monthly rebalance.",
+        "Next monthly rebalance",
+    ),
+    "s3-mean-reversion-in-trend": (
+        "Buys short pullbacks that occur inside longer-term uptrends.",
+        "Up to 10 market days",
+    ),
+    "s4-volatility-compression-breakout": (
+        "Looks for price breakouts after volatility has contracted.",
+        "Up to 40 market days",
+    ),
+}
+
 
 class ScanHealth(BaseModel):
     frontier_date: date | None
@@ -92,6 +119,9 @@ class ResultArm(BaseModel):
     input_rule_set_version: str
     evaluated_instrument_count: int
     trade_count: int
+    losing_trade_count: int
+    open_trade_count: int
+    unpriced_trade_count: int
     expectancy_per_trade_pct: Decimal
     expectancy_ci_low_pct: Decimal | None
     expectancy_ci_high_pct: Decimal | None
@@ -121,6 +151,8 @@ class StrategyOverview(BaseModel):
     strategy_id: str
     strategy_version: str
     title: str
+    description: str
+    exit_timing: str
     runnable: bool
     exclusion_reason: str | None
     scan: ScanHealth
@@ -207,6 +239,7 @@ class StrategyPaperPoolView(BaseModel):
 
 class StrategyOverviewResponse(BaseModel):
     as_of: datetime
+    demo_connection: bool
     execution_enabled: bool
     live_execution_enabled: bool
     live_strategy_activation_available: Literal[False] = False
@@ -719,6 +752,8 @@ def get_strategy_overview(
                 strategy_id=strategy_id,
                 strategy_version=versions[strategy_id],
                 title=_TITLES.get(strategy_id, strategy_id),
+                description=_PRESENTATION.get(strategy_id, ("Evidence-backed automated strategy.", "Rule based"))[0],
+                exit_timing=_PRESENTATION.get(strategy_id, ("Evidence-backed automated strategy.", "Rule based"))[1],
                 runnable=strategy_id in runnable,
                 exclusion_reason=excluded_by_id.get(strategy_id),
                 scan=scan,
@@ -758,6 +793,7 @@ def get_strategy_overview(
     )
     return StrategyOverviewResponse(
         as_of=datetime.now(tz=UTC),
+        demo_connection=settings.etoro_env == "demo",
         execution_enabled=entry_block.auto_trading_enabled,
         live_execution_enabled=entry_block.live_trading_enabled,
         entry_block=StrategyEntryBlockView(
@@ -914,17 +950,33 @@ def update_strategy_paper_pool(
     session: SessionRow = Depends(require_session),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> StrategyPaperPoolView:
-    """Set the audited shared ceiling used only by demo strategy entries."""
+    """Set the shared strategy ceiling and its higher-level automation flag."""
     try:
+        conn.rollback()
         with conn.transaction():
-            configure_paper_pool(
-                conn,
-                enabled=body.enabled,
-                capital_limit=body.capital_limit,
-                changed_by=session.username,
-                reason=body.reason,
-            )
-    except StrategyControlError as exc:
+            conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
+            current_pool = load_paper_pool(conn)
+            runtime = get_runtime_config(conn)
+            pool_changed = current_pool.enabled != body.enabled or current_pool.capital_limit != body.capital_limit
+            automation_changed = runtime.enable_auto_trading != body.enabled
+            if not pool_changed and not automation_changed:
+                raise StrategyControlError("automation change must alter enabled state or capital limit")
+            if pool_changed:
+                configure_paper_pool(
+                    conn,
+                    enabled=body.enabled,
+                    capital_limit=body.capital_limit,
+                    changed_by=session.username,
+                    reason=body.reason,
+                )
+            if automation_changed:
+                update_runtime_config(
+                    conn,
+                    updated_by=session.username,
+                    reason=body.reason,
+                    enable_auto_trading=body.enabled,
+                )
+    except (StrategyControlError, RuntimeConfigCorrupt, RuntimeConfigNoOp) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return get_strategy_overview(conn).paper_pool
 
