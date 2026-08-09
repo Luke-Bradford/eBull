@@ -24,12 +24,18 @@ import httpx
 from app.config import settings
 from app.providers.broker import (
     BrokerClosedTrade,
+    BrokerCostComponent,
+    BrokerEligibilityResponse,
+    BrokerInstrumentEligibility,
+    BrokerLeverageConfig,
     BrokerMirror,
     BrokerMirrorPosition,
     BrokerOrderResult,
     BrokerPortfolio,
     BrokerPosition,
     BrokerProvider,
+    BrokerWhatIfCostResponse,
+    BrokerWhatIfOrder,
     OrderParams,
     OrderStatus,
 )
@@ -82,6 +88,15 @@ class TradeHistoryParseError(Exception):
     Same design as PortfolioParseError: directly subclasses Exception
     so it is never swallowed by the incidental-exception handlers
     inside the parse loop.
+    """
+
+
+class TradingPreflightParseError(Exception):
+    """Raised when a trading preflight response cannot be trusted.
+
+    Eligibility and cost data are safety inputs.  A partial best-effort parse
+    could turn an absent restriction or fee into permission, so malformed
+    responses fail the whole preflight instead of dropping fields or rows.
     """
 
 
@@ -148,6 +163,7 @@ class EtoroBrokerProvider(BrokerProvider):
         env_segment = f"/{env}" if env == "demo" else ""
         self._exec_prefix = f"/api/v1/trading/execution{env_segment}"
         self._info_prefix = f"/api/v1/trading/info{env_segment}"
+        self._v2_info_prefix = f"/api/v2/trading/info/{env}"
 
     def __enter__(self) -> EtoroBrokerProvider:
         return self
@@ -397,6 +413,64 @@ class EtoroBrokerProvider(BrokerProvider):
 
         return _normalise_order_info_response(raw, broker_order_ref)
 
+    def check_instrument_eligibility(
+        self,
+        instrument_ids: Sequence[int],
+    ) -> BrokerEligibilityResponse:
+        """Call the current v2 account-specific eligibility endpoint.
+
+        This is intentionally a non-persisting capability slice.  The caller
+        decides whether an observed response is worth storing after coverage,
+        change frequency, and byte cost have been measured.
+        """
+        ids = tuple(instrument_ids)
+        if not ids:
+            raise ValueError("instrument_ids must not be empty")
+        if len(ids) > 100:
+            raise ValueError("eToro eligibility accepts at most 100 instruments")
+        if any(instrument_id <= 0 for instrument_id in ids):
+            raise ValueError("instrument_ids must all be positive")
+        if len(set(ids)) != len(ids):
+            raise ValueError("instrument_ids must not contain duplicates")
+
+        response = self._http_write.post(
+            f"{self._v2_info_prefix}/eligibility",
+            json={"instrumentIds": list(ids), "currency": "USD"},
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        raw = response.json()
+        if not isinstance(raw, dict):
+            raise TradingPreflightParseError("eligibility response must be an object")
+        return _parse_eligibility_response(raw)
+
+    def get_what_if_costs(self, order: BrokerWhatIfOrder) -> BrokerWhatIfCostResponse:
+        """Call the current v2 what-if endpoint without placing an order."""
+        body: dict[str, Any] = {
+            "action": "open",
+            "transaction": order.transaction,
+            "instrumentId": order.instrument_id,
+            "settlementType": order.settlement_type,
+            "orderType": order.order_type,
+            "leverage": order.leverage,
+            "orderCurrency": order.order_currency.lower(),
+        }
+        if order.amount is not None:
+            body["amount"] = float(order.amount)
+        else:
+            body["units"] = float(order.units) if order.units is not None else None
+
+        response = self._http_write.post(
+            f"{self._v2_info_prefix}/costs",
+            json=body,
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        raw = response.json()
+        if not isinstance(raw, dict):
+            raise TradingPreflightParseError("what-if cost response must be an object")
+        return _parse_what_if_cost_response(raw)
+
     # ------------------------------------------------------------------
     # Portfolio reads
     # ------------------------------------------------------------------
@@ -524,6 +598,139 @@ def _normalise_order_info_response(
     ``amount``, ``units``, and ``positions[]`` with ``positionID``.
     """
     return _build_result(raw, raw, fallback_ref=broker_order_ref)
+
+
+def _required_bool(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise TradingPreflightParseError(f"{key} must be a boolean")
+    return value
+
+
+def _optional_decimal(payload: dict[str, Any], key: str) -> Decimal | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except decimal.DecimalException as exc:
+        raise TradingPreflightParseError(f"{key} must be numeric or null") from exc
+
+
+def _parse_eligibility_response(raw: dict[str, Any]) -> BrokerEligibilityResponse:
+    """Strictly parse the documented v2 eligibility response."""
+    currency = raw.get("currency")
+    rows = raw.get("eligibilities")
+    missing_ids = raw.get("notFoundInstrumentIds")
+    missing_symbols = raw.get("notFoundSymbols")
+    if not isinstance(currency, str) or not currency:
+        raise TradingPreflightParseError("eligibility currency must be a non-empty string")
+    if not isinstance(rows, list) or not isinstance(missing_ids, list) or not isinstance(missing_symbols, list):
+        raise TradingPreflightParseError("eligibility response arrays are missing or malformed")
+
+    parsed: list[BrokerInstrumentEligibility] = []
+    try:
+        for row in rows:
+            if not isinstance(row, dict):
+                raise TradingPreflightParseError("eligibilities entries must be objects")
+            leverage_rows = row.get("leverageConfigs")
+            if not isinstance(leverage_rows, list):
+                raise TradingPreflightParseError("leverageConfigs must be an array")
+            leverage_configs: list[BrokerLeverageConfig] = []
+            for config in leverage_rows:
+                if not isinstance(config, dict):
+                    raise TradingPreflightParseError("leverageConfigs entries must be objects")
+                values = config.get("leverageValues")
+                if not isinstance(values, list) or any(not isinstance(value, int) for value in values):
+                    raise TradingPreflightParseError("leverageValues must be an integer array")
+                leverage_configs.append(
+                    BrokerLeverageConfig(
+                        settlement_type=str(config["settlementType"]),
+                        direction=str(config["direction"]),
+                        leverage_values=tuple(values),
+                        min_position_amount=_optional_decimal(config, "minPositionAmount"),
+                        allow_edit_stop_loss=config.get("allowEditStopLoss")
+                        if isinstance(config.get("allowEditStopLoss"), bool)
+                        else None,
+                        allow_edit_take_profit=config.get("allowEditTakeProfit")
+                        if isinstance(config.get("allowEditTakeProfit"), bool)
+                        else None,
+                        allow_stop_loss_take_profit=config.get("allowStopLossTakeProfit")
+                        if isinstance(config.get("allowStopLossTakeProfit"), bool)
+                        else None,
+                        raw_payload=dict(config),
+                    )
+                )
+            symbol = row.get("symbol")
+            if symbol is not None and not isinstance(symbol, str):
+                raise TradingPreflightParseError("symbol must be a string or null")
+            parsed.append(
+                BrokerInstrumentEligibility(
+                    instrument_id=int(row["instrumentId"]),
+                    symbol=symbol,
+                    min_position_exposure=_optional_decimal(row, "minPositionExposure"),
+                    max_units_per_order=_optional_decimal(row, "maxUnitsPerOrder"),
+                    allow_open_position=_required_bool(row, "allowOpenPosition"),
+                    allow_close_position=_required_bool(row, "allowClosePosition"),
+                    allow_partial_close_position=_required_bool(row, "allowPartialClosePosition"),
+                    allow_trailing_stop_loss=_required_bool(row, "allowTrailingStopLoss"),
+                    leverage_configs=tuple(leverage_configs),
+                    raw_payload=dict(row),
+                )
+            )
+        return BrokerEligibilityResponse(
+            currency=currency,
+            eligibilities=tuple(parsed),
+            not_found_instrument_ids=tuple(int(value) for value in missing_ids),
+            not_found_symbols=tuple(str(value) for value in missing_symbols),
+            raw_payload=raw,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TradingPreflightParseError(f"malformed eligibility response: {exc}") from exc
+
+
+def _parse_what_if_cost_response(raw: dict[str, Any]) -> BrokerWhatIfCostResponse:
+    """Strictly parse the documented v2 cost response without closing its vocabulary."""
+    rows = raw.get("costs")
+    if not isinstance(rows, list):
+        raise TradingPreflightParseError("costs must be an array")
+    symbol = raw.get("symbol")
+    if symbol is not None and not isinstance(symbol, str):
+        raise TradingPreflightParseError("symbol must be a string or null")
+    try:
+        costs: list[BrokerCostComponent] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise TradingPreflightParseError("cost entries must be objects")
+            cost_type = row["costType"]
+            currency = row["currency"]
+            if not isinstance(cost_type, str) or not cost_type or not isinstance(currency, str) or not currency:
+                raise TradingPreflightParseError("cost type and currency must be non-empty strings")
+            amount = _optional_decimal(row, "amount")
+            value = _optional_decimal(row, "value")
+            if amount is None and value is None:
+                raise TradingPreflightParseError("cost row must carry amount or value")
+            costs.append(
+                BrokerCostComponent(
+                    cost_type=cost_type,
+                    amount=amount,
+                    value=value,
+                    currency=currency,
+                    raw_payload=dict(row),
+                )
+            )
+        last_updated = datetime.fromisoformat(str(raw["lastUpdated"]).replace("Z", "+00:00"))
+        if last_updated.tzinfo is None:
+            raise TradingPreflightParseError("lastUpdated must include a timezone")
+        return BrokerWhatIfCostResponse(
+            instrument_id=int(raw["instrumentId"]),
+            symbol=symbol,
+            costs=tuple(costs),
+            last_updated=last_updated,
+            raw_payload=raw,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TradingPreflightParseError(f"malformed what-if cost response: {exc}") from exc
 
 
 def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:

@@ -75,7 +75,8 @@ Two-tier system, tracked per user key over a **1-minute rolling window**:
 
 | Tier | Limit | Applies to |
 |------|-------|------------|
-| **Standard** | **60 req/min** | All GET requests: market data, portfolio info, social reads, watchlist reads |
+| **Market data** | **120 req/min shared** | Instruments, rates, candles, closing prices, search and lookup catalogues; live portal index verified 2026-08-09 |
+| **Standard** | **60 req/min** | Ordinary portfolio/social/watchlist reads unless an endpoint declares another pool |
 | **Heavy** | **20 req/min** | All POST/PUT/DELETE: trade execution, watchlist writes, social writes |
 
 Exceeding returns **429 Too Many Requests**:
@@ -143,7 +144,10 @@ GET+POST requests cannot exceed the API limit.
 | DELETE | `/api/v1/trading/execution/market-open-orders/{orderId}` | Cancel pending open order | Not used (v1) |
 | POST | `/api/v1/trading/execution/market-close-orders/positions/{positionId}` | Close position — body `UnitsToDeduct` nullable → partial close (omit = full). Live doc also lists `InstrumentID` required; our impl omits it — verify on demo before relying | **Active** (full close; partial plumbed in provider, unexposed) |
 | DELETE | `/api/v1/trading/execution/market-close-orders/{orderId}` | Cancel pending close order | Not used (v1) |
-| PATCH | `/api/v2/trading/positions/{positionId}` | Edit TP/SL on open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). **202 async** `{operationId, positionId, referenceId}` — re-sync before treating as landed. Added between v1.158 and v1.279 (was orphaned `putTradeRequest` schema) | Planned — position detail page (spec 2026-07-04) |
+| PATCH | `/api/v2/trading/{real\|demo}/positions/{positionId}` | Edit TP/SL on one exact open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). Async acceptance `{operationId, positionId, referenceId}` — re-sync before treating as landed | Planned — required for strategy-owned ratchets |
+| POST | `/api/v2/trading/info/{real\|demo}/eligibility` | Up to 100 ids/symbols; account-specific open/close/partial-close permission, min exposure, max units, order/fill types, and leverage + SL/TP constraints by settlement/direction | **Adapter implemented; no persistence/execution gate yet** |
+| POST | `/api/v2/trading/info/{real\|demo}/costs` | What-if open cost rows for `buy` / `sellShort`: open vocabulary including spread, markup, transaction, overnight/weekend and tax; returns `lastUpdated`. Demo returned `value` while omitting documented `amount`; units and freshness are not yet proved | **Adapter implemented; no persistence/execution gate yet** |
+| GET | `/api/v2/trading/info/{real\|demo}/orders:lookup` | Detailed order and `positionExecutions[].positionId`; required to bind an entry order to the exact broker position | Not used — execution reconciliation gap |
 | POST | `/api/v1/trading/execution/limit-orders` | Limit/MIT order | Not used (v1 is market-only) |
 | DELETE | `/api/v1/trading/execution/limit-orders/{orderId}` | Cancel limit order | Not used (v1) |
 | GET | `/api/v1/trading/info/portfolio` | Full portfolio: positions, orders, mirrors, credit | **Active** — portfolio sync |
@@ -151,9 +155,30 @@ GET+POST requests cannot exceed the API limit.
 | GET | `/api/v1/trading/info/real/orders/{orderId}` | Single order status | **Active** — order polling |
 | GET | `/api/v1/trading/info/trade/history` | Trade history (`minDate` required) | Not used (v1) |
 
+⚠ **Live portal drift, detail pages verified 2026-08-09:** both preflights are
+v2 POSTs and each has a dedicated **20 requests/minute** limit. Their documented
+schemas are now represented by the non-persisting `BrokerEligibilityResponse`
+and `BrokerWhatIfCostResponse` adapters. Documentation examples are not population
+evidence: probe a bounded demo cohort before deciding which fields change often,
+which settlement/direction arms are actually returned, and whether observed
+`sellShort` eligibility and costs are adequate for a short strategy.
+
+The first authenticated demo census (2026-08-09, four exact members of the
+validated US-equity universe) found that HTTP success is not equivalent to
+orderability or current cost evidence. One instrument had
+`allowOpenPosition=false` despite eBull's stored `is_tradable=true`; the returned
+settlement/direction/leverage arms varied materially; minimum exposure ranged
+from USD 10 to USD 1,000; cost rows used `value` rather than documented
+`amount`; and one response's `lastUpdated` was more than five months old. This
+is sufficient to reject the current local tradability flag as an execution
+gate, but not sufficient to infer `value` units or full-universe coverage.
+
 ### Trading — Demo
 
-Same operations as Real, all prefixed with `/demo/` (e.g., `/api/v1/trading/execution/demo/market-open-orders/by-amount`; v2 TP/SL edit: `/api/v2/trading/demo/positions/{positionId}`).
+Same operations as Real with environment-specific paths (e.g., legacy v1 open:
+`/api/v1/trading/execution/demo/market-open-orders/by-amount`; current v2 TP/SL
+edit: `/api/v2/trading/demo/positions/{positionId}`; current v2 info:
+`/api/v2/trading/info/demo/...`).
 
 ### Agent portfolios (copy-trading management)
 

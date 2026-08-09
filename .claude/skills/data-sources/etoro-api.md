@@ -11,17 +11,46 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
 ## Verification protocol
 
 1. **Index:** fetch `https://api-portal.etoro.com/llms.txt` — lists every doc page slug, grouped (trading-real, trading-demo, market-data, …).
-2. **Endpoint detail:** fetch the specific page as markdown: `https://api-portal.etoro.com/api-reference/<section>/<slug>.md` — full method/path/body/response/auth/rate-limit per page.
+2. **Endpoint detail:** fetch `https://api-portal.etoro.com/api-reference/<section>/<slug>`
+   through the browser tool — full method/path/body/response/auth/rate-limit per
+   page. The `.md` form and direct `curl` may be rejected even when the HTML page
+   is live; navigate from a neighbouring live page when the safe-open check
+   rejects a double-hyphen section slug.
 3. **Spec version:** the api-reference index page states the current OpenAPI version — record it in anything you write ("verified against vX.Y.Z on DATE").
 4. **Tooling:** use WebFetch (or the running app's HTTP client). **`curl` from CLI gets Cloudflare-blocked (403 "Attention Required")** — the portal allows browser-agent fetches only.
 5. When our code disagrees with the live doc but works (e.g. close body: doc says `InstrumentID` required, `close_position()` omits it), note the discrepancy where you found it and verify empirically on demo before relying on either.
 
-## Stable facts (re-verify anything load-bearing; last verified 2026-07-04, spec v1.279.0)
+## Stable facts (re-verify anything load-bearing; market/trading index re-verified 2026-08-09)
 
 - Base URL `https://public-api.etoro.com`; auth headers `x-api-key` + `x-user-key` + `x-request-id` (UUID); demo endpoints carry `/demo/` in the path.
-- Rate limits: 60 GET/min shared; writes ~20/min shared across related endpoints. 429 → `{"errorCode": "TooManyRequests"}`, no guaranteed Retry-After.
+- Rate limits have DRIFTED. The live portal index on 2026-08-09 documents the
+  market-data family at **120 GET/min shared**, ordinary trading reads at 60/min
+  shared, order writes at 20/min shared, and eligibility/what-if-cost endpoints
+  at 20/min dedicated. Do not retain the older blanket 60-GET/min assumption.
+  429 → `{"errorCode": "TooManyRequests"}`, no guaranteed Retry-After.
 - Trading (verified live): open by-amount/by-units; close per position with optional `UnitsToDeduct` (partial); **`PATCH /api/v2/trading[/demo]/positions/{positionId}`** for TP/SL edit (`stopLossRate`, `takeProfitRate`, `stopLossType` fixed|trailing, `clearStopLoss`, `clearTakeProfit`; ≥1 field; **202 async** `{operationId, positionId, referenceId}`).
 - Write ops are asynchronous (202) — re-sync portfolio before treating them as landed.
+- **Two trading preflight endpoints exist in BOTH demo and real**, each at a
+  dedicated 20 requests/minute: `POST /api/v2/trading/info/{demo|real}/eligibility`
+  and `POST /api/v2/trading/info/{demo|real}/costs`. Eligibility accepts at most
+  100 ids/symbols and returns open/close/partial-close permission, min exposure,
+  max units, order-quantity/fill types and per-settlement/per-direction leverage
+  configs with SL/TP limits. What-if accepts `buy` or `sellShort` opens and
+  returns an OPEN vocabulary of named cost rows (documented examples include
+  markup, market spread, transaction fee, overnight, weekend and tax) plus
+  `lastUpdated`. **Observed demo 2026-08-09: live rows used `value` and omitted
+  the documented `amount`; the unit/scale of `value` is not established, and
+  `lastUpdated` can be stale even on an HTTP-success response.** Preserve both
+  fields and the timestamp, and fail any future execution gate until the unit,
+  completeness and freshness contract is empirically proved. Never coerce a
+  missing field to zero. Thin, non-persisting adapters are wired in
+  `EtoroBrokerProvider`; a broader authenticated demo population probe is still
+  required before a storage schema or execution gate is promoted.
+- **Order-to-position reconciliation exists in v2:**
+  `GET /api/v2/trading/info/{demo|real}/orders:lookup` returns
+  `positionExecutions[].positionId`. This is the durable way to bind a submitted
+  strategy entry to the exact position it owns; do not infer the position from
+  instrument or FIFO order.
 
 ## ⚠⚠ WE HAVE INTRADAY HISTORY. Read this before saying otherwise — MEASURED 2026-08-09
 
@@ -69,15 +98,16 @@ Reproduce: `curl -s "http://localhost:8000/_debug/etoro-candles-probe?instrument
 
 | capability | what it gives | limit |
 | --- | --- | --- |
-| REST intraday candles | OHLCV history, any instrument, on demand | 1000 bars, no date anchor; **60 GET/min shared** |
+| REST intraday candles | OHLCV history, any instrument, on demand | 1000 bars, no date anchor; **120 market-data GET/min shared** |
 | WS rate stream | live bid/ask/last ticks, all instruments | no depth, no sizes; forward-only |
 | `research_price_daily` | 25.9M daily bars 1962-2026, survivorship-controlled | daily granularity only |
 
-⚠ **Corpus arithmetic, because the rate limit binds hard.** 60 GET/min shared means a
-full 6,700-instrument intraday pull is **~112 minutes per interval per pass**, and it
-competes with every other eToro call. A cross-sectional intraday study is therefore a
-*scheduled harvest*, not an ad-hoc query — budget for it in the design, and prefer
-`FourHours` (deepest history per request) when bootstrapping.
+⚠ **Corpus arithmetic, because the rate limit binds hard.** The currently
+documented 120 market-data GET/min shared gives a full 6,700-instrument pull a
+theoretical floor of **~56 minutes per interval per pass**, and it competes with
+every other market-data call. A cross-sectional intraday study is therefore a
+*scheduled harvest*, not an ad-hoc query — budget for it in the design, and
+prefer `FourHours` (deepest history per request) when bootstrapping.
 
 ## Scope boundary — what this file is NOT
 
