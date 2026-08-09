@@ -31,13 +31,18 @@ Already present and reusable:
   on entry, portfolio risk, execution guard and global kill switches;
 - current v2 eligibility and what-if-cost adapters, implemented without a writer.
 
-The first bounded authenticated demo census (2026-08-09) also proved that the
-preflight cannot be replaced by local catalogue state: one of four exact
-validated-universe instruments was refused for opening although the database
-marked it tradable. Eligibility arms and minimum exposure varied by instrument.
-Cost rows used an undocumented `value` field instead of documented `amount`, and
-one successful response was over five months stale. Those observations are
-useful blockers, not yet an execution-ready cost contract.
+Two bounded authenticated demo censuses (2026-08-09) proved that preflight
+cannot be replaced by local catalogue state. The versioned follow-up used four
+stocks and four ETFs selected at deterministic liquidity quantiles: all eight
+resolved, but one locally tradable instrument was refused for opening. It then
+round-robin sampled 20 complete 1x/10x long-real and x1 short-CFD cost arms
+across seven permitted instruments, within the endpoint's 20/minute cap. Every
+response used undocumented `value` and omitted documented `amount`, so **zero
+of 20 were execution-usable**. Eighteen were about 41 hours stale and only two
+were within 24 hours. Exact scaling relationships were mixed: proportional,
+invariant, rounded/other and zero-only. The earlier five-month-stale refused
+instrument is no longer sent to the cost endpoint. These are measured blockers,
+not an execution-ready cost contract.
 
 The developer-database census on the same date found 34,698 signal-detail rows
 from the latest successful scan, zero resolved outcomes, 36 result rows and 48
@@ -299,10 +304,12 @@ are actually created.
 1. **Current v2 preflight adapters — implemented:** strict eligibility and
    what-if types, bounded request validation, raw response retention in memory,
    no writes and no execution use.
-2. **Authenticated demo capability census — four-instrument spike complete,
-   broader coverage open:** expand liquid/illiquid equity/ETF long/short
-   requests; establish cost units/freshness, response bytes, position-id
-   cardinality and v1-versus-v2 execution compatibility.
+2. **Authenticated demo capability census — complete, execution cost blocked:**
+   the deterministic equity/ETF population, long/short scaling arms, payload
+   bytes, mismatch denominator and freshness are measured. Undocumented
+   `value` semantics and mostly stale rows refuse cost consumption. Exact
+   position-id cardinality and v1-versus-v2 execution compatibility move to the
+   ownership/reconciliation slice, where an actual demo order exists.
 3. **Recent-window result arms + read-only strategy observability:** compute the
    fixed 2022+, rolling 24/36-month and per-year arms without overwriting legacy
    evidence; then expose every manifest strategy, fired funded/unfunded signal,

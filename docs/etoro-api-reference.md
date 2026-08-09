@@ -146,7 +146,7 @@ GET+POST requests cannot exceed the API limit.
 | DELETE | `/api/v1/trading/execution/market-close-orders/{orderId}` | Cancel pending close order | Not used (v1) |
 | PATCH | `/api/v2/trading/{real\|demo}/positions/{positionId}` | Edit TP/SL on one exact open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). Async acceptance `{operationId, positionId, referenceId}` — re-sync before treating as landed | Planned — required for strategy-owned ratchets |
 | POST | `/api/v2/trading/info/{real\|demo}/eligibility` | Up to 100 ids/symbols; account-specific open/close/partial-close permission, min exposure, max units, order/fill types, and leverage + SL/TP constraints by settlement/direction | **Adapter implemented; no persistence/execution gate yet** |
-| POST | `/api/v2/trading/info/{real\|demo}/costs` | What-if open cost rows for `buy` / `sellShort`: open vocabulary including spread, markup, transaction, overnight/weekend and tax; returns `lastUpdated`. Demo returned `value` while omitting documented `amount`; units and freshness are not yet proved | **Adapter implemented; no persistence/execution gate yet** |
+| POST | `/api/v2/trading/info/{real\|demo}/costs` | What-if open cost rows for `buy` / `sellShort`: open vocabulary including spread, markup, transaction, overnight/weekend and tax; returns `lastUpdated`. Demo returned `value` while omitting documented `amount`; controlled scaling did not establish one unit equation | **Adapter + bounded census implemented; fail closed for execution** |
 | GET | `/api/v2/trading/info/{real\|demo}/orders:lookup` | Detailed order and `positionExecutions[].positionId`; required to bind an entry order to the exact broker position | Not used — execution reconciliation gap |
 | POST | `/api/v1/trading/execution/limit-orders` | Limit/MIT order | Not used (v1 is market-only) |
 | DELETE | `/api/v1/trading/execution/limit-orders/{orderId}` | Cancel limit order | Not used (v1) |
@@ -162,6 +162,27 @@ and `BrokerWhatIfCostResponse` adapters. Documentation examples are not populati
 evidence: probe a bounded demo cohort before deciding which fields change often,
 which settlement/direction arms are actually returned, and whether observed
 `sellShort` eligibility and costs are adequate for a short strategy.
+
+### Authenticated demo census (2026-08-09)
+
+`etoro-preflight-v2` selected four Stocks and four ETFs at deterministic latest
+dollar-volume quantiles. Eligibility resolved 8/8, but refused opening for 1/8
+despite local `is_tradable=true`; the canonical parsed response was 12,579
+bytes. Within the dedicated 20-request budget, complete 1x/10x long-real and x1
+short-CFD pairs covered seven permitted instruments. All 20 calls succeeded
+(5,717 canonical parsed bytes total), all cost rows were USD-labelled `value`,
+and none supplied documented `amount`. Eighteen response timestamps were about
+41 hours old; only two were within the local conservative 24-hour ceiling.
+Scaling varied by component between ticket-proportional, invariant,
+rounded/other and zero-only. This evidence does not identify `value` as a
+monetary amount, rate or price-unit and **0/20 responses pass the execution-use
+contract**. Unknown fields are never coerced to zero.
+
+Reproduce against demo only:
+
+```bash
+PYTHONPATH=. uv run python scripts/verify_2437_trading_preflight.py --apply --limit 8 --max-cost-requests 20
+```
 
 The first authenticated demo census (2026-08-09, four exact members of the
 validated US-equity universe) found that HTTP success is not equivalent to
