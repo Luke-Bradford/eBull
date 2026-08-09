@@ -6,10 +6,10 @@ of ``2026-08-08-strategy-runner-and-manifest.md``). Manifest:
 Table: ``sql/255_strategy_signals.sql``. Watermark:
 ``sql/272_strategy_scan_watermark.sql``. Refs #2240, #2394.
 
-⚠⚠ EVERY ROW THIS JOB WRITES IS TERMINAL, AND THAT IS THE CONSTRAINT THE WHOLE
-SHAPE FOLLOWS FROM. ``store_signals`` has no ``ON CONFLICT`` — *"DO UPDATE would
-let a re-run overwrite a recorded decision"* — so a row written wrongly cannot be
-corrected, only superseded by a version bump. Four consequences, each measured
+⚠⚠ EVERY LOGICAL ROW THIS JOB WRITES IS TERMINAL, AND THAT IS THE CONSTRAINT THE
+WHOLE SHAPE FOLLOWS FROM. Fired detail, retained negative detail and the daily
+census all omit ``ON CONFLICT`` — a re-run cannot overwrite a recorded decision,
+only a version bump can supersede it. Four consequences, each measured
 rather than argued (``scripts/verify_2394_signal_scan_cost.py``, full population,
 2026-08-08):
 
@@ -58,9 +58,10 @@ from app.services.price_masked_bars import (
     load_masked_bars,
     load_union_calendar,
 )
-from app.services.signal_ledger import LedgerRow, resolve_fills, store_signals
+from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
+from app.services.strategy_observation_storage import store_strategy_observations
 from app.services.strategy_registry import (
     SignalKind,
     StrategyIdentity,
@@ -149,6 +150,10 @@ class StrategyScanResult:
     status: StrategyScanStatus
     resumed_from: date | None
     rows_written: int = 0
+    durable_signal_rows: int = 0
+    retained_observation_rows: int = 0
+    aggregate_rows: int = 0
+    storage_input_bytes: int = 0
     #: Expected rows per leg — the sum of the per-instrument windows the census
     #: is checked against. Spec §9: *"a mismatch is a failure, not a log line"*.
     expected_per_leg: int = 0
@@ -206,8 +211,8 @@ def choose_frontier(last_bars: Mapping[int, date]) -> Frontier | None:
     ⚠ NOT ``max``. Spec §3: on the day this was measured 7 instruments carried a
     bar at ``2026-08-08`` and 5,783 did not. A scan keyed on the maximum
     evaluates a date most of the universe is missing and manufactures thousands
-    of refusals out of a refresh still in flight — and by ``store_signals``'
-    missing ``ON CONFLICT``, those refusals are terminal.
+    of refusals out of a refresh still in flight — every storage tier's missing
+    ``ON CONFLICT`` makes those refusals terminal.
 
     Ties break on the later date so that a corpus split evenly between two
     consecutive sessions advances rather than stalls.
@@ -852,7 +857,7 @@ def _commit_strategy(
             eligible_instruments=eligible_instruments,
         )
         with conn.transaction():
-            written = store_signals(conn, rows)
+            storage = store_strategy_observations(conn, rows)
             advance_watermark(
                 conn,
                 strategy_id=plan.entry.strategy_id,
@@ -877,7 +882,11 @@ def _commit_strategy(
         strategy_version=plan.version,
         status="written",
         resumed_from=plan.watermark,
-        rows_written=written,
+        rows_written=storage.logical_rows,
+        durable_signal_rows=storage.fired_rows,
+        retained_observation_rows=storage.retained_observation_rows,
+        aggregate_rows=storage.aggregate_rows,
+        storage_input_bytes=storage.input_payload_bytes,
         expected_per_leg=expected_per_leg,
         instruments_evaluated=instruments_evaluated,
         census={key: count for bucket in census.values() for key, count in bucket.items()},
@@ -904,12 +913,17 @@ def log_report(report: ScanReport) -> None:
     )
     for result in report.per_strategy:
         logger.info(
-            "  %s %s (%s) resumed_from=%s rows=%d expected_per_leg=%d instruments=%d%s",
+            "  %s %s (%s) resumed_from=%s logical_rows=%d durable_fired=%d retained_detail=%d "
+            "aggregate_rows=%d input_bytes=%d expected_per_leg=%d instruments=%d%s",
             result.strategy_id,
             result.status,
             result.strategy_version,
             result.resumed_from,
             result.rows_written,
+            result.durable_signal_rows,
+            result.retained_observation_rows,
+            result.aggregate_rows,
+            result.storage_input_bytes,
             result.expected_per_leg,
             result.instruments_evaluated,
             f" error={result.error}" if result.error else "",

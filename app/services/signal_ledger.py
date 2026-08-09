@@ -306,7 +306,13 @@ _INSERT = """
 
 
 def store_signals(conn: psycopg.Connection[tuple], rows: Sequence[LedgerRow]) -> int:
-    """Insert ``rows``, returning the number written.
+    """Insert durable FIRED ``rows``, returning the number written.
+
+    Routine negative decisions go through
+    ``strategy_observation_storage.store_strategy_observations`` so they reach
+    the 90-day partition and durable daily census rather than this heavily
+    indexed, outcome-referenced ledger. Keeping this low-level function public
+    for outcome fixtures does not permit bypassing that #2448 boundary.
 
     ⚠⚠ **NO** ``ON CONFLICT``**, deliberately.** A colliding key raises
     ``UniqueViolation`` and aborts the batch. Both alternatives are worse:
@@ -325,6 +331,12 @@ def store_signals(conn: psycopg.Connection[tuple], rows: Sequence[LedgerRow]) ->
     """
     if not rows:
         return 0
+    non_fired = [row.verdict for row in rows if row.verdict != "fired"]
+    if non_fired:
+        raise ValueError(
+            f"strategy_signals is fired-only; got {len(non_fired)} routine verdict row(s) — "
+            "use store_strategy_observations so daily counts and retention stay complete"
+        )
     with conn.cursor() as cur:
         cur.executemany(
             _INSERT,

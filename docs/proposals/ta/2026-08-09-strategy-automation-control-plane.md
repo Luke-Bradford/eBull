@@ -1,7 +1,7 @@
 # Strategy automation control plane — ownership, allocation and monitoring
 
 Date: 2026-08-09
-Status: Slices 1–3 implemented through read-only monitoring; no strategy orders enabled
+Status: Slices 1–4 implemented through bounded read-only monitoring; no strategy orders enabled
 Parent: #2437
 Companion: `2026-08-09-evidence-backed-signal-engine.md`
 
@@ -275,13 +275,19 @@ not copied into the general `positions` aggregate and not duplicated on every
 signal. The strategy page uses strategy-owned rows only. The main portfolio page
 continues to show the complete account, including manual and automated positions.
 
-The current signal scanner writes `instrument x declared signal leg x session`
-verdicts, not merely `universe x strategy`. The 2026-08-09 scan wrote 34,698
-rows; at 252 sessions that is **8.74 million rows/year**. The measured relation
-cost was about 963 bytes/row including indexes, implying roughly **8.42 GB/year**
-if its present detail and index shape is retained. Re-run
-`scripts/verify_2437_observation_storage.py` for current figures. Partitioning
-and retention must precede intraday verdicts. A proposed bounded policy is:
+The 2026-08-09 scan evaluated 34,698 logical rows; the old all-detail shape
+projected **8.42 GB/year**. Slice 4 now stores only fired detail durably, retains
+routine detail in 90-day monthly partitions, and keeps a durable daily census.
+The one-time move proved zero aggregate/detail mismatches and zero outcome
+dependencies on routine verdicts before moving 29,527 rows. Monitoring's scan
+aggregate fell from 15.6 ms to 0.05 ms.
+
+The accepted intraday candidate stores only completed OHLCV bars under the
+fixed 30m/1,000/24m, 5m/250/12m and 1m/50/30d caps. Two earlier physical shapes
+were rejected at 2.99 GB and 2.28 GB. The watermark + BRIN shape measured 117.5
+bytes/row and **1.410 GB** at all caps, with an 8.7 ms representative read.
+Re-run `scripts/verify_2437_observation_storage.py --benchmark`; details are in
+`2026-08-09-strategy-observation-storage.md`. The shipped policy is:
 
 - fired entry/exit signals and their outcomes: durable;
 - individual not-fired/not-evaluable daily rows: 90 days after a checked daily
@@ -290,9 +296,10 @@ and retention must precede intraday verdicts. A proposed bounded policy is:
 - intraday evaluations: write fired candidates plus aggregates, not one
   `not_fired` row per instrument per minute.
 
-No deletion policy ships until a verifier proves aggregate counts equal the
-detail rows and no outcome/holdout/result foreign key depends on the deletion
-set. Retention drops partitions; it does not issue recurring mass deletes.
+The deletion policy shipped only after the verifier proved aggregate/detail
+equality and enumerated the one inbound dependency (`strategy_outcomes`), which
+cannot reference a routine verdict through its writer. Recurring retention drops
+partitions; it never issues mass row deletes.
 
 ## What "test every strategy or combination" means
 
@@ -340,9 +347,11 @@ are actually created.
    `complete` for S-1 through S-3, while the remaining registered windows render
    their measured `missing`/`partial` state and S-4 retains its explicit builder
    exclusion.
-4. **Storage benchmark and retention:** actual bytes/query plans for signal
-   partitions, compact aggregates, preflight state changes and bounded intraday
-   bars. Migration follows evidence, not vice versa.
+4. **Storage benchmark and retention — implemented:** actual temporary-table
+   bytes/query plans rejected two oversized candidates; durable fired signals,
+   90-day routine-detail partitions, daily aggregates, capped intraday bar
+   partitions, monotonic watermarks, BRIN reads and whole-partition retention
+   now enforce the measured 1.5 GB retained-tier budget.
 5. **Promotion/deployment + ownership schema:** no broker writer yet. Enforce one
    signal funding decision, exact order/trade/position links and immutable stage
    changes.

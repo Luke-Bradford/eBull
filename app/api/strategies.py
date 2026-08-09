@@ -239,21 +239,26 @@ _SCAN_SQL = """
         w.strategy_version,
         w.frontier_date,
         w.updated_at,
-        COUNT(*) FILTER (WHERE s.verdict = 'fired' AND s.signal_kind = 'entry') AS fired_entries,
-        COUNT(*) FILTER (WHERE s.verdict = 'fired' AND s.signal_kind = 'exit') AS fired_exits,
-        COUNT(*) FILTER (WHERE s.verdict = 'not_fired') AS not_fired,
-        COUNT(*) FILTER (WHERE s.verdict = 'not_evaluable') AS not_evaluable
+        COALESCE(SUM(s.row_count) FILTER (
+            WHERE s.verdict = 'fired' AND s.signal_kind = 'entry'
+        ), 0) AS fired_entries,
+        COALESCE(SUM(s.row_count) FILTER (
+            WHERE s.verdict = 'fired' AND s.signal_kind = 'exit'
+        ), 0) AS fired_exits,
+        COALESCE(SUM(s.row_count) FILTER (WHERE s.verdict = 'not_fired'), 0) AS not_fired,
+        COALESCE(SUM(s.row_count) FILTER (WHERE s.verdict = 'not_evaluable'), 0) AS not_evaluable
     FROM strategy_scan_watermark w
-    LEFT JOIN strategy_signals s USING (strategy_id, strategy_version)
+    LEFT JOIN strategy_signal_daily_counts s USING (strategy_id, strategy_version)
     WHERE w.strategy_version = ANY(%(versions)s)
     GROUP BY w.strategy_id, w.strategy_version, w.frontier_date, w.updated_at
 """
 
 _EXCLUSIONS_SQL = """
-    SELECT strategy_id, strategy_version, not_evaluable_reason, COUNT(*) AS count
-    FROM strategy_signals
-    WHERE strategy_version = ANY(%(versions)s) AND not_evaluable_reason IS NOT NULL
-    GROUP BY strategy_id, strategy_version, not_evaluable_reason
+    SELECT strategy_id, strategy_version, reason_code AS not_evaluable_reason,
+           SUM(row_count) AS count
+    FROM strategy_signal_daily_counts
+    WHERE strategy_version = ANY(%(versions)s) AND verdict = 'not_evaluable'
+    GROUP BY strategy_id, strategy_version, reason_code
 """
 
 _LATEST_CORPUS_SQL = "SELECT MAX(bar_date) FROM research_price_daily"
