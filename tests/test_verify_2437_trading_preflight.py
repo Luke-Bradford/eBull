@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from json import JSONDecodeError
 from unittest.mock import MagicMock
 
 from app.providers.broker import (
@@ -115,14 +116,28 @@ def test_cost_request_budget_cannot_exceed_endpoint_limit_or_split_scaling_pair(
 
 
 def test_malformed_cost_arm_is_reported_without_aborting_census() -> None:
+    order = _cost_orders(_eligibility())[0][2]
+    for error in (TradingPreflightParseError("drift"), JSONDecodeError("not JSON", "", 0)):
+        broker = MagicMock()
+        broker.get_what_if_costs.side_effect = error
+
+        result, error_type = _fetch_cost(broker, order)
+
+        assert result is None
+        assert error_type == type(error).__name__
+
+
+def test_programming_value_error_is_not_hidden_as_an_arm_error() -> None:
     broker = MagicMock()
-    broker.get_what_if_costs.side_effect = TradingPreflightParseError("drift")
+    broker.get_what_if_costs.side_effect = ValueError("local bug")
     order = _cost_orders(_eligibility())[0][2]
 
-    result, error_type = _fetch_cost(broker, order)
-
-    assert result is None
-    assert error_type == "TradingPreflightParseError"
+    try:
+        _fetch_cost(broker, order)
+    except ValueError as exc:
+        assert str(exc) == "local bug"
+    else:  # pragma: no cover - assertion helper branch
+        raise AssertionError("unrelated ValueError was hidden as a provider arm error")
 
 
 def test_scaling_equation_classifies_proportional_invariant_and_incomplete_fields() -> None:

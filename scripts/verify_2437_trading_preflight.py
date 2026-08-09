@@ -266,7 +266,7 @@ def _fetch_cost(
     """Keep one malformed arm from destroying the bounded population census."""
     try:
         return broker.get_what_if_costs(order), None
-    except (httpx.HTTPError, TradingPreflightParseError, ValueError) as exc:
+    except (httpx.HTTPError, TradingPreflightParseError, json.JSONDecodeError) as exc:
         return None, type(exc).__name__
 
 
