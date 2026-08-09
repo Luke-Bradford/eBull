@@ -271,10 +271,14 @@ def test_authenticated_drill_endpoint_ends_any_request_read_transaction(
     conn.commit()
     monkeypatch.setattr("app.api.strategies._current_versions", lambda: {_STRATEGY_ID: _VERSION})
 
-    class UnblockedState:
-        new_entries_blocked = False
+    class UnrelatedBlockState:
+        new_entries_blocked = True
+        execution_block_reasons = ("an unrelated block is already active",)
 
-    monkeypatch.setattr("app.services.strategy_live_gate.load_entry_block_state", lambda _conn: UnblockedState())
+    monkeypatch.setattr(
+        "app.services.strategy_live_gate.load_entry_block_state",
+        lambda _conn: UnrelatedBlockState(),
+    )
     conn.execute("SELECT 1")
 
     response = execute_live_kill_drill(

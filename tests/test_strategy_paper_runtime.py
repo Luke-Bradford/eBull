@@ -50,6 +50,7 @@ def test_cycle_refreshes_health_then_executes_one_current_paper_candidate(
 
 def test_broker_outage_and_drawdown_unknown_block_entries_without_row_growth(
     ebull_test_conn: psycopg.Connection[tuple],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     conn = ebull_test_conn
     _seed(conn)
@@ -67,6 +68,7 @@ def test_broker_outage_and_drawdown_unknown_block_entries_without_row_growth(
         "SELECT active FROM strategy_execution_blocks WHERE source='broker_availability'"
     ).fetchone() == (True,)
     assert conn.execute("SELECT active FROM strategy_execution_blocks WHERE source='drawdown'").fetchone() == (True,)
+    assert "strategy broker account-risk probe unavailable" in caplog.text
 
     conn.execute("UPDATE strategy_deployments SET enabled=false WHERE mode='paper'")
     conn.commit()

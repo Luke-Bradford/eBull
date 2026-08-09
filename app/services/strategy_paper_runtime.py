@@ -8,6 +8,7 @@ polls add no rows.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,8 @@ from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_order_reconciliation import enforce_reconciliation_slo, reconcile_backlog
 from app.services.strategy_paper_executor import execute_fired_paper_signal
 from app.services.strategy_position_manager import manage_owned_position
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,7 @@ def refresh_strategy_health(
             else "account drawdown is within configured paper limit"
         )
     except Exception:
+        logger.warning("strategy broker account-risk probe unavailable", exc_info=True)
         broker_active = True
         broker_reason = "broker account-risk probe unavailable"
         drawdown_active = True

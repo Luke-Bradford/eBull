@@ -647,6 +647,7 @@ def run_kill_drill(
         conn.rollback()
         raise StrategyControlError("kill drill requires a preregistered live gate policy")
     source = f"drill:{drill_kind}"
+    drill_reason = f"kill drill {drill_kind}: {reason}"
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute("SELECT * FROM strategy_execution_blocks WHERE source=%s", (source,))
         prior = cur.fetchone()
@@ -659,7 +660,7 @@ def run_kill_drill(
             ON CONFLICT (source) DO UPDATE SET active=true, reason=EXCLUDED.reason,
               blocked_at=now(), cleared_at=NULL, updated_at=now()
             """,
-            (source, f"kill drill {drill_kind}: {reason}"),
+            (source, drill_reason),
         )
     entry_block_observed = False
     state_restored = False
@@ -667,8 +668,11 @@ def run_kill_drill(
         active_drill_row = conn.execute(
             "SELECT active FROM strategy_execution_blocks WHERE source=%s", (source,)
         ).fetchone()
+        entry_block_state = load_entry_block_state(conn)
         entry_block_observed = (
-            bool(active_drill_row and active_drill_row[0]) and load_entry_block_state(conn).new_entries_blocked
+            bool(active_drill_row and active_drill_row[0])
+            and entry_block_state.new_entries_blocked
+            and drill_reason in entry_block_state.execution_block_reasons
         )
     finally:
         # A drill must not strand its synthetic source even when its assertion
