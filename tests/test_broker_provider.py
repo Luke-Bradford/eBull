@@ -20,7 +20,9 @@ from app.providers.broker import (
     BrokerMirror,
     BrokerMirrorPosition,
     BrokerOrderNotFound,
+    BrokerOrderSubmissionError,
     BrokerPortfolio,
+    BrokerStrategyOrder,
     BrokerWhatIfOrder,
     OrderParams,
 )
@@ -148,6 +150,28 @@ FIXTURE_WHAT_IF_COST_RESPONSE = {
         {"costType": "overnightFee", "value": 0.0, "currency": "USD"},
     ],
     "lastUpdated": "2026-05-25T08:30:00Z",
+}
+
+FIXTURE_ACCOUNT_PNL_RESPONSE = {
+    "credits": 1000,
+    "positions": [
+        {"instrumentId": 1001, "amount": 200, "unrealizedPnL": {"pnL": 20}},
+        {"instrumentId": 1002, "amount": 100, "unrealizedPnL": {"pnL": -5}},
+    ],
+    "mirrors": [
+        {
+            "availableAmount": 50,
+            "closedPositionsNetProfit": 10,
+            "positions": [
+                {"instrumentId": 1001, "amount": 25, "unrealizedPnL": {"pnL": 2}},
+            ],
+        }
+    ],
+    "ordersForOpen": [
+        {"instrumentId": 1001, "mirrorID": 0, "amount": 40, "totalExternalCosts": 1},
+        {"instrumentId": 1002, "mirrorID": 99, "amount": 999, "totalExternalCosts": 999},
+    ],
+    "orders": [{"instrumentId": 1002, "amount": 30}],
 }
 
 
@@ -278,6 +302,90 @@ class TestTradingPreflight:
                 pass
             else:  # pragma: no cover - assertion helper branch
                 raise AssertionError(f"invalid what-if size accepted: amount={amount}, units={units}")
+
+
+class TestStrategyAccountRisk:
+    def test_official_pnl_formula_counts_manual_positions_and_pending_orders(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_ACCOUNT_PNL_RESPONSE
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            result = broker.get_account_risk_snapshot()
+
+        assert result.available_cash == Decimal("930")  # 1000 - 40 - 30
+        assert result.total_invested == Decimal("436")  # 200+100+(50-10)+25+40+1+30
+        assert result.unrealized_pnl == Decimal("27")  # 20-5+2+10
+        assert result.equity == Decimal("1393")
+        assert [(row.instrument_id, row.amount) for row in result.instrument_investments] == [
+            (1001, Decimal("266")),
+            (1002, Decimal("130")),
+        ]
+
+    def test_account_risk_fails_closed_on_partial_pnl_shape(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {**FIXTURE_ACCOUNT_PNL_RESPONSE, "orders": None}
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            try:
+                broker.get_account_risk_snapshot()
+            except TradingPreflightParseError as exc:
+                assert "orders" in str(exc)
+            else:  # pragma: no cover
+                raise AssertionError("partial P&L response must fail closed")
+
+
+class TestDemoStrategyOrder:
+    def test_v2_writer_is_demo_only_x1_fixed_exit_and_idempotent(self) -> None:
+        request_id = UUID("1c94300c-90aa-4303-9d00-dec376d74efb")
+        token = UUID("066faaee-e1e9-49d2-a568-c6e1cc336ad8")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "token": str(token),
+            "orderId": 13902598,
+            "referenceId": str(request_id),
+        }
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+            result = broker.place_demo_strategy_order(
+                BrokerStrategyOrder(
+                    instrument_id=1001,
+                    amount=Decimal("100"),
+                    settlement_type="real",
+                    stop_loss_rate=Decimal("90"),
+                    take_profit_rate=Decimal("120"),
+                ),
+                request_id=request_id,
+            )
+            call = broker._http_write.post.call_args
+        assert call.args[0] == "/api/v2/trading/execution/demo/orders"
+        assert call.kwargs["headers"] == {"x-request-id": str(request_id)}
+        assert call.kwargs["json"]["leverage"] == 1
+        assert call.kwargs["json"]["stopLossType"] == "fixed"
+        assert call.kwargs["json"]["settlementType"] == "real"
+        assert result.broker_order_ref == "13902598"
+        assert result.reference_id == request_id
+
+    def test_real_credentials_cannot_select_a_strategy_writer(self) -> None:
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:
+            try:
+                broker.place_demo_strategy_order(
+                    BrokerStrategyOrder(
+                        instrument_id=1001,
+                        amount=Decimal("100"),
+                        settlement_type="real",
+                        stop_loss_rate=Decimal("90"),
+                        take_profit_rate=Decimal("120"),
+                    ),
+                    request_id=uuid4(),
+                )
+            except BrokerOrderSubmissionError:
+                pass
+            else:  # pragma: no cover
+                raise AssertionError("real credentials must not reach the paper writer")
 
 
 # ---------------------------------------------------------------------------

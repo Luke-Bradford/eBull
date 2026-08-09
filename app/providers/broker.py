@@ -73,6 +73,42 @@ class BrokerOrderNotFound(BrokerOrderLookupError):
     """No order currently resolves for the supplied durable identity."""
 
 
+class BrokerOrderSubmissionError(RuntimeError):
+    """A demo strategy submission failed before acceptance was established."""
+
+
+class BrokerOrderSubmissionUncertain(BrokerOrderSubmissionError):
+    """Transport/response failure requires lookup by the same request UUID."""
+
+
+@dataclass(frozen=True)
+class BrokerStrategyOrder:
+    """The deliberately narrow order shape allowed by the paper MVP."""
+
+    instrument_id: int
+    amount: Decimal
+    settlement_type: Literal["real"]
+    stop_loss_rate: Decimal
+    take_profit_rate: Decimal
+
+    def __post_init__(self) -> None:
+        if self.instrument_id <= 0 or self.amount <= 0:
+            raise ValueError("strategy order instrument and amount must be positive")
+        if self.settlement_type != "real":
+            raise ValueError("the paper MVP supports real settlement only")
+        if self.stop_loss_rate <= 0 or self.take_profit_rate <= 0:
+            raise ValueError("fixed stop-loss and take-profit rates are required")
+
+
+@dataclass(frozen=True)
+class BrokerOrderSubmission:
+    """Broker acceptance identity; execution detail is reconciled separately."""
+
+    broker_order_ref: str
+    reference_id: UUID
+    token: UUID
+
+
 @dataclass(frozen=True)
 class OrderParams:
     """Optional parameters for order placement.
@@ -282,6 +318,27 @@ class BrokerPortfolio:
 
 
 @dataclass(frozen=True)
+class BrokerInstrumentInvestment:
+    """USD capital currently committed to one instrument, any ownership."""
+
+    instrument_id: int
+    amount: Decimal
+
+
+@dataclass(frozen=True)
+class BrokerAccountRiskSnapshot:
+    """Decision-bearing account totals derived from eToro's P&L endpoint."""
+
+    available_cash: Decimal
+    total_invested: Decimal
+    unrealized_pnl: Decimal
+    equity: Decimal
+    instrument_investments: tuple[BrokerInstrumentInvestment, ...]
+    observed_at: datetime
+    raw_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class BrokerClosedTrade:
     """One closed-position slice from the broker's trade history.
 
@@ -408,4 +465,27 @@ class BrokerProvider(ABC):
 
     def get_what_if_costs(self, order: BrokerWhatIfOrder) -> BrokerWhatIfCostResponse:
         """Fetch current broker-estimated costs without placing an order."""
+        raise NotImplementedError
+
+    def place_demo_strategy_order(
+        self,
+        order: BrokerStrategyOrder,
+        *,
+        request_id: UUID,
+    ) -> BrokerOrderSubmission:
+        """Submit the strict v2 demo-only strategy shape.
+
+        Non-abstract for compatibility with existing test providers. A caller
+        must treat ``NotImplementedError`` as refusal, never fall back to the
+        generic/live-capable writer.
+        """
+        raise NotImplementedError
+
+    def get_account_risk_snapshot(self) -> BrokerAccountRiskSnapshot:
+        """Get demo-account cash, invested capital, P&L and equity.
+
+        A strategy gate must refuse when this capability is absent; the older
+        portfolio reader's ``credit`` field is not available cash because it
+        omits pending orders.
+        """
         raise NotImplementedError

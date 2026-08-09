@@ -94,6 +94,23 @@ momentum, not universally (Moreira-Muir vs Cederburg et al.).
   rotate the UUID or submit a newly keyed order. Pending/partial executions are
   owned by exact returned position id but keep the entry backlog unresolved;
   an overdue backlog blocks new entries.
+- **Paper allocation is a conjunction, not a score.** Current quote/session,
+  fresh signal scan, fresh halt feed/no unresolved halt, current exact-arm
+  eligibility, documented current costs, reconciliation health, global/strategy
+  switches, operator cap, account cash/exposure/concentration/drawdown and a
+  positive stressed lower-bound net expectancy must all pass. One strong metric
+  never compensates for a missing safety input.
+- **Size against the whole demo account.** Manual positions and pending orders
+  reduce cash, portfolio exposure and instrument concentration capacity, but
+  they never enter strategy P&L or become close/ratchet targets. Ticket size is
+  the minimum of operator ticket rule/cap, remaining strategy sleeve, broker
+  available cash, portfolio capacity and instrument capacity.
+- **Use lower-bound net expectancy:** `min(pinned bootstrap expectancy CI) -
+  stressed documented current costs / exact ticket amount * 100`. Unknown cost
+  units or unmodelled recurring-horizon fees are refusals, not zero.
+- **Persist the negative arm.** Each durable fired entry gets one compact funded
+  or rejected preflight. A rejection is monitoring evidence and must name its
+  closed reason; do not retain repeated raw broker/feed snapshots to achieve it.
 
 ### `INITIAL_STOP`
 

@@ -374,9 +374,47 @@ until the previous measurement is recorded:
 7. **Forward observation:** still no broker orders.
 8. **Paper execution:** separate operator promotion after untouched evidence.
 
-The parent #2437 documents the research thread. Dedicated implementation ticket
-numbers have not been verified in this workspace, so this spec must not pretend
-they already exist; create them from this slice order before implementation.
+The parent #2437 documents the research thread. The ordered implementation
+tickets now exist: #2447 evidence, #2448 bounded storage, #2454 governance and
+ownership, #2451 crash-safe reconciliation, #2449 paper allocation/execution,
+#2452 position management, #2453 monitoring/P&L and #2450 live gate.
+
+### Validated paper-execution contract (#2449)
+
+- Automated entry has one deliberately separate writer: eToro v2
+  `POST /api/v2/trading/execution/demo/orders`. It refuses non-demo credentials,
+  permits long `real` settlement at x1 only, requires fixed SL and TP, and sends
+  the immutable pre-I/O UUID as `X-Request-Id`. The live flag cannot select a
+  different endpoint.
+- Available cash, total invested and equity come from the demo P&L endpoint and
+  the formulas in eToro's current guides. `clientPortfolio.credit` alone is not
+  available cash because pending orders must be deducted. Every position and
+  pending order, manual or automated, consumes portfolio/instrument capacity;
+  only exact strategy order/position provenance grants mutation authority.
+- The current cost docs return USD `amount`, while the measured demo sample
+  returned undocumented `value`. The executor accepts only documented `amount`,
+  rejects `value`, stale/missing/negative/non-USD components and any positive
+  recurring fee whose holding horizon is unmodelled. Net expectancy is the
+  minimum pinned bootstrap expectancy CI less stressed current cost divided by
+  the exact ticket amount.
+- The free Nasdaq Trader RSS feed is the primary halt source. Its documented
+  once-per-minute refresh guidance, provider `(symbol, halt_at)` identity,
+  source publication time, halt code and trade-resumption time are retained.
+  Missing/stale/malformed feed state or an unresolved halt refuses entry.
+- Storage stays bounded: one policy current row plus revision events; one
+  preflight/shadow row per durable fired signal; one rolling account high-water
+  row; one halt-feed state row; and halt events retained for 90 days. Raw P&L,
+  eligibility, cost, order and RSS payloads stay process-local.
+- Every gate failure becomes the fired signal's sole unfunded shadow decision.
+  Passing all gates commits funding, trade, order link and request UUID before
+  broker I/O. A transport-uncertain submission is never retried under a new UUID;
+  it enters the existing reconciliation backlog and blocks later entries if it
+  breaches the configured SLO.
+
+Primary contracts verified 2026-08-09: [eToro create order](https://api-portal.etoro.com/api-reference/trading--demo/create-an-order),
+[eToro what-if costs](https://api-portal.etoro.com/api-reference/trading--demo/get-what-if-trading-cost-breakdown),
+[eToro equity formula](https://api-portal.etoro.com/guides/calculate-equity), and
+[Nasdaq Trader halt RSS](https://www.nasdaqtrader.com/Trader.aspx?id=TradeHaltRSS).
 
 ## Features to add before paper trading
 

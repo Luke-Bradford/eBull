@@ -24,10 +24,12 @@ import httpx
 
 from app.config import settings
 from app.providers.broker import (
+    BrokerAccountRiskSnapshot,
     BrokerClosedTrade,
     BrokerCostComponent,
     BrokerEligibilityResponse,
     BrokerInstrumentEligibility,
+    BrokerInstrumentInvestment,
     BrokerLeverageConfig,
     BrokerMirror,
     BrokerMirrorPosition,
@@ -35,10 +37,14 @@ from app.providers.broker import (
     BrokerOrderLookupError,
     BrokerOrderNotFound,
     BrokerOrderResult,
+    BrokerOrderSubmission,
+    BrokerOrderSubmissionError,
+    BrokerOrderSubmissionUncertain,
     BrokerPortfolio,
     BrokerPosition,
     BrokerPositionExecution,
     BrokerProvider,
+    BrokerStrategyOrder,
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
     OrderParams,
@@ -321,6 +327,66 @@ class EtoroBrokerProvider(BrokerProvider):
         raw["_ebull_action"] = action
         return _normalise_open_order_response(raw)
 
+    def place_demo_strategy_order(
+        self,
+        order: BrokerStrategyOrder,
+        *,
+        request_id: UUID,
+    ) -> BrokerOrderSubmission:
+        """Submit the v2 paper-MVP order; no real endpoint can be selected.
+
+        The generic v1 writer remains for manual behavior. Automated strategy
+        code must call this method and cannot inherit ``self._env`` into a real
+        path by mistake.
+        """
+        if self._env != "demo":
+            raise BrokerOrderSubmissionError("strategy paper orders require demo credentials")
+        body: dict[str, Any] = {
+            "action": "open",
+            "transaction": "buy",
+            "instrumentId": order.instrument_id,
+            "settlementType": "real",
+            "orderType": "mkt",
+            "leverage": 1,
+            "amount": float(order.amount),
+            "orderCurrency": "usd",
+            "stopLossRate": float(order.stop_loss_rate),
+            "takeProfitRate": float(order.take_profit_rate),
+            "stopLossType": "fixed",
+        }
+        try:
+            response = self._http_write.post(
+                "/api/v2/trading/execution/demo/orders",
+                json=body,
+                headers=self._request_headers(request_id),
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # The broker explicitly rejected a 4xx request. A 5xx may have
+            # accepted it before failing, so only the latter is uncertain.
+            if 400 <= exc.response.status_code < 500:
+                raise BrokerOrderSubmissionError(
+                    f"demo strategy order rejected with HTTP {exc.response.status_code}"
+                ) from exc
+            raise BrokerOrderSubmissionUncertain("demo strategy order returned a server error") from exc
+        except httpx.HTTPError as exc:
+            raise BrokerOrderSubmissionUncertain("demo strategy order transport failed") from exc
+        try:
+            raw = response.json()
+        except ValueError as exc:
+            raise BrokerOrderSubmissionUncertain("demo strategy order returned non-JSON data") from exc
+        if not isinstance(raw, dict):
+            raise BrokerOrderSubmissionUncertain("demo strategy order response must be an object")
+        try:
+            broker_order_id = int(raw["orderId"])
+            reference_id = UUID(str(raw["referenceId"]))
+            token = UUID(str(raw["token"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BrokerOrderSubmissionUncertain("demo strategy order response identity is malformed") from exc
+        if broker_order_id <= 0 or reference_id != request_id:
+            raise BrokerOrderSubmissionUncertain("demo strategy order response identity does not match intent")
+        return BrokerOrderSubmission(str(broker_order_id), reference_id, token)
+
     def close_position(
         self,
         position_id: int,
@@ -569,6 +635,20 @@ class EtoroBrokerProvider(BrokerProvider):
             raw_payload=raw,
             mirrors=tuple(_parse_mirrors_payload(raw_mirrors)),
         )
+
+    def get_account_risk_snapshot(self) -> BrokerAccountRiskSnapshot:
+        """Fetch and strictly derive the official demo P&L risk totals."""
+        if self._env != "demo":
+            raise TradingPreflightParseError("strategy account risk requires demo credentials")
+        response = self._http_read.get(
+            "/api/v1/trading/info/demo/pnl",
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        raw = response.json()
+        if not isinstance(raw, dict):
+            raise TradingPreflightParseError("account P&L response must be an object")
+        return _parse_account_risk_snapshot(raw, observed_at=datetime.now(UTC))
 
     def get_trade_history(self, min_date: datetime, page_size: int = 200) -> Sequence[BrokerClosedTrade]:
         """Fetch all closed-trade rows with closeTimestamp >= min_date.
@@ -895,6 +975,123 @@ def _parse_order_detail(raw: dict[str, Any], *, reference_id: str | None) -> Bro
         raise
     except (KeyError, TypeError, ValueError) as exc:
         raise OrderDetailParseError(f"malformed order detail response: {exc}") from exc
+
+
+def _parse_account_risk_snapshot(
+    raw: dict[str, Any],
+    *,
+    observed_at: datetime,
+) -> BrokerAccountRiskSnapshot:
+    """Apply eToro's published cash/invested/equity formulas exactly."""
+
+    def _array(parent: dict[str, Any], key: str) -> list[Any]:
+        value = parent.get(key)
+        if not isinstance(value, list):
+            raise TradingPreflightParseError(f"account P&L {key} must be an array")
+        return value
+
+    def _row(value: Any, label: str) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise TradingPreflightParseError(f"account P&L {label} row must be an object")
+        return value
+
+    def _money(parent: dict[str, Any], key: str) -> Decimal:
+        if key not in parent or isinstance(parent[key], bool):
+            raise TradingPreflightParseError(f"account P&L {key} is required")
+        try:
+            value = Decimal(str(parent[key]))
+        except decimal.DecimalException as exc:
+            raise TradingPreflightParseError(f"account P&L {key} must be numeric") from exc
+        if not value.is_finite():
+            raise TradingPreflightParseError(f"account P&L {key} must be finite")
+        return value
+
+    def _instrument_id(parent: dict[str, Any]) -> int:
+        raw_id = parent.get("instrumentId", parent.get("instrumentID"))
+        if raw_id is None:
+            raise TradingPreflightParseError("account P&L instrument id is required")
+        try:
+            value = int(raw_id)
+        except (TypeError, ValueError) as exc:
+            raise TradingPreflightParseError("account P&L instrument id is required") from exc
+        if value <= 0:
+            raise TradingPreflightParseError("account P&L instrument id must be positive")
+        return value
+
+    try:
+        credit = _money(raw, "credits")
+        positions = _array(raw, "positions")
+        mirrors = _array(raw, "mirrors")
+        open_orders = _array(raw, "ordersForOpen")
+        orders = _array(raw, "orders")
+        investments: dict[int, Decimal] = {}
+        total_invested = Decimal("0")
+        unrealized = Decimal("0")
+
+        for item in positions:
+            row = _row(item, "positions")
+            amount = _money(row, "amount")
+            pnl = _money(_row(row.get("unrealizedPnL"), "positions.unrealizedPnL"), "pnL")
+            instrument_id = _instrument_id(row)
+            total_invested += amount
+            unrealized += pnl
+            investments[instrument_id] = investments.get(instrument_id, Decimal("0")) + amount
+
+        for item in mirrors:
+            mirror = _row(item, "mirrors")
+            closed_profit = _money(mirror, "closedPositionsNetProfit")
+            total_invested += _money(mirror, "availableAmount") - closed_profit
+            unrealized += closed_profit
+            for item_position in _array(mirror, "positions"):
+                row = _row(item_position, "mirrors.positions")
+                amount = _money(row, "amount")
+                pnl = _money(_row(row.get("unrealizedPnL"), "mirrors.positions.unrealizedPnL"), "pnL")
+                instrument_id = _instrument_id(row)
+                total_invested += amount
+                unrealized += pnl
+                investments[instrument_id] = investments.get(instrument_id, Decimal("0")) + amount
+
+        pending_amount = Decimal("0")
+        for item in open_orders:
+            row = _row(item, "ordersForOpen")
+            mirror_id = int(row.get("mirrorID", row.get("mirrorId", 0)))
+            if mirror_id != 0:
+                continue
+            amount = _money(row, "amount")
+            external = _money(row, "totalExternalCosts")
+            instrument_id = _instrument_id(row)
+            pending_amount += amount
+            total_invested += amount + external
+            investments[instrument_id] = investments.get(instrument_id, Decimal("0")) + amount + external
+
+        for item in orders:
+            row = _row(item, "orders")
+            amount = _money(row, "amount")
+            instrument_id = _instrument_id(row)
+            pending_amount += amount
+            total_invested += amount
+            investments[instrument_id] = investments.get(instrument_id, Decimal("0")) + amount
+
+        available_cash = credit - pending_amount
+        equity = available_cash + total_invested + unrealized
+        if available_cash < 0 or total_invested < 0 or equity <= 0 or any(value < 0 for value in investments.values()):
+            raise TradingPreflightParseError("account P&L derived risk totals are outside safe bounds")
+        return BrokerAccountRiskSnapshot(
+            available_cash=available_cash,
+            total_invested=total_invested,
+            unrealized_pnl=unrealized,
+            equity=equity,
+            instrument_investments=tuple(
+                BrokerInstrumentInvestment(instrument_id, amount)
+                for instrument_id, amount in sorted(investments.items())
+            ),
+            observed_at=observed_at,
+            raw_payload=raw,
+        )
+    except TradingPreflightParseError:
+        raise
+    except (KeyError, TypeError, ValueError, decimal.DecimalException) as exc:
+        raise TradingPreflightParseError(f"malformed account P&L response: {exc}") from exc
 
 
 def _parse_direct_position(payload: dict[str, Any]) -> BrokerPosition:

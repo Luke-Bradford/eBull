@@ -36,6 +36,7 @@ from app.workers.scheduler import (
     JOB_ORPHAN_TEST_DB_REAP,
     JOB_OWNERSHIP_OBSERVATIONS_BACKFILL,
     JOB_PG_SIZE_SAMPLE,
+    JOB_QUOTES_REFRESH,
     JOB_RAW_DATA_RETENTION_SWEEP,
     JOB_RETRY_DEFERRED,
     JOB_RETRY_SWEEPER,
@@ -175,6 +176,10 @@ NON_GATED_SCHEDULED: frozenset[str] = frozenset(
         JOB_DAILY_NEWS_REFRESH,
         JOB_PG_SIZE_SAMPLE,
         JOB_THESIS_REFRESH,
+        # #2449 audit — current quotes have no bootstrap-produced input and
+        # the non-exempt job is already stopped by the universal gate. A
+        # second per-job gate would duplicate that authority.
+        JOB_QUOTES_REFRESH,
     }
 )
 

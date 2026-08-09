@@ -145,13 +145,13 @@ GET+POST requests cannot exceed the API limit.
 | POST | `/api/v1/trading/execution/market-close-orders/positions/{positionId}` | Close position — body `UnitsToDeduct` nullable → partial close (omit = full). Live doc also lists `InstrumentID` required; our impl omits it — verify on demo before relying | **Active** (full close; partial plumbed in provider, unexposed) |
 | DELETE | `/api/v1/trading/execution/market-close-orders/{orderId}` | Cancel pending close order | Not used (v1) |
 | PATCH | `/api/v2/trading/{real\|demo}/positions/{positionId}` | Edit TP/SL on one exact open position: `stopLossRate`, `takeProfitRate`, `stopLossType` (`fixed`\|`trailing`), `clearStopLoss`, `clearTakeProfit` (≥1 field). Async acceptance `{operationId, positionId, referenceId}` — re-sync before treating as landed | Planned — required for strategy-owned ratchets |
-| POST | `/api/v2/trading/info/{real\|demo}/eligibility` | Up to 100 ids/symbols; account-specific open/close/partial-close permission, min exposure, max units, order/fill types, and leverage + SL/TP constraints by settlement/direction | **Adapter implemented; no persistence/execution gate yet** |
-| POST | `/api/v2/trading/info/{real\|demo}/costs` | What-if open cost rows for `buy` / `sellShort`: open vocabulary including spread, markup, transaction, overnight/weekend and tax; returns `lastUpdated`. Demo returned `value` while omitting documented `amount`; controlled scaling did not establish one unit equation | **Adapter + bounded census implemented; fail closed for execution** |
-| GET | `/api/v2/trading/info/{real\|demo}/orders:lookup` | Exactly one of numeric `orderId` or submission `referenceId`; returns status and every `positionExecutions[].positionId` with opening units/average price. Shared 60 GET/min quota | **Active for strategy reconciliation** — strict adapter, exact execution persistence and restart backlog; no broker writer in this slice |
+| POST | `/api/v2/trading/info/{real\|demo}/eligibility` | Up to 100 ids/symbols; account-specific open/close/partial-close permission, min exposure, max units, order/fill types, and leverage + SL/TP constraints by settlement/direction | **Active as a just-in-time paper gate**; response is process-local |
+| POST | `/api/v2/trading/info/{real\|demo}/costs` | What-if open cost rows for `buy` / `sellShort`: open vocabulary including spread, markup, transaction, overnight/weekend and tax; returns `lastUpdated`. Demo returned `value` while omitting documented `amount`; controlled scaling did not establish one unit equation | **Active fail-closed paper gate**: documented fresh USD `amount` only; `value`/unknown horizon refuses |
+| GET | `/api/v2/trading/info/{real\|demo}/orders:lookup` | Exactly one of numeric `orderId` or submission `referenceId`; returns status and every `positionExecutions[].positionId` with opening units/average price. Shared 60 GET/min quota | **Active for strategy reconciliation** — strict adapter, exact execution persistence and restart backlog |
 | POST | `/api/v1/trading/execution/limit-orders` | Limit/MIT order | Not used (v1 is market-only) |
 | DELETE | `/api/v1/trading/execution/limit-orders/{orderId}` | Cancel limit order | Not used (v1) |
 | GET | `/api/v1/trading/info/portfolio` | Full portfolio: positions, orders, mirrors, credit | **Active** — portfolio sync |
-| GET | `/api/v1/trading/info/real/pnl` | Portfolio with P&L details | Not used — computed locally |
+| GET | `/api/v1/trading/info/{real\|demo}/pnl` | Positions, mirrors, pending orders, credit and P&L inputs for the published cash/invested/equity formula | **Demo active as a just-in-time paper risk gate**; raw response is process-local |
 | GET | `/api/v1/trading/info/real/orders/{orderId}` | Single order status | **Active** — order polling |
 | GET | `/api/v1/trading/info/trade/history` | Trade history (`minDate` required) | Not used (v1) |
 
@@ -168,6 +168,12 @@ UUID as the idempotency key, and `orders:lookup.referenceId` as that same
 submission header. Strategy execution must commit this immutable UUID before
 network I/O and reuse it on every retry. A missing response therefore becomes a
 lookup/retry of one identity, never a newly keyed duplicate order.
+
+`POST /api/v2/trading/execution/demo/orders` is now the sole automated paper
+writer. Its adapter refuses non-demo credentials and its accepted shape is
+long `buy`, `real`, market, x1, USD amount with fixed SL/TP. It validates a
+positive `orderId` and exact `referenceId == X-Request-Id`; the generic legacy
+writer remains manual and is not an automated fallback.
 
 ### Authenticated demo census (2026-08-09)
 
@@ -206,6 +212,11 @@ Same operations as Real with environment-specific paths (e.g., legacy v1 open:
 `/api/v1/trading/execution/demo/market-open-orders/by-amount`; current v2 TP/SL
 edit: `/api/v2/trading/demo/positions/{positionId}`; current v2 info:
 `/api/v2/trading/info/demo/...`).
+
+Automated paper entry uses the fixed path
+`/api/v2/trading/execution/demo/orders`; it is intentionally not formed from a
+real/demo environment prefix. Demo account risk uses
+`/api/v1/trading/info/demo/pnl` and applies the published formulas below.
 
 ### Agent portfolios (copy-trading management)
 
