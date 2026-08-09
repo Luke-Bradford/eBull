@@ -32,7 +32,7 @@ import psycopg
 
 from app.config import settings
 from app.providers.broker import BrokerInstrumentEligibility, BrokerWhatIfCostResponse, BrokerWhatIfOrder
-from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+from app.providers.implementations.etoro_broker import EtoroBrokerProvider, TradingPreflightParseError
 from app.security.master_key import ensure_broker_key_loaded
 from app.services.broker_credentials import CredentialNotFound, load_credential_for_provider_use
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
@@ -259,6 +259,17 @@ def _bounded_cost_arms(
     return arms[:max_requests]
 
 
+def _fetch_cost(
+    broker: EtoroBrokerProvider,
+    order: BrokerWhatIfOrder,
+) -> tuple[BrokerWhatIfCostResponse | None, str | None]:
+    """Keep one malformed arm from destroying the bounded population census."""
+    try:
+        return broker.get_what_if_costs(order), None
+    except (httpx.HTTPError, TradingPreflightParseError, ValueError) as exc:
+        return None, type(exc).__name__
+
+
 def _freshness(last_updated: datetime, observed_at: datetime) -> tuple[Decimal, str]:
     age = Decimal(str((observed_at - last_updated).total_seconds()))
     if age < 0:
@@ -428,9 +439,8 @@ def main() -> int:
         cost_rows: list[dict[str, object]] = []
         cost_errors: list[dict[str, object]] = []
         for arm_id, multiplier, order in selected_arms:
-            try:
-                result = broker.get_what_if_costs(order)
-            except (httpx.HTTPError, ValueError) as exc:
+            result, error_type = _fetch_cost(broker, order)
+            if result is None:
                 cost_errors.append(
                     {
                         "arm_id": arm_id,
@@ -438,7 +448,7 @@ def main() -> int:
                         "transaction": order.transaction,
                         "settlement_type": order.settlement_type,
                         "multiplier": str(multiplier),
-                        "error_type": type(exc).__name__,
+                        "error_type": error_type,
                     }
                 )
                 continue

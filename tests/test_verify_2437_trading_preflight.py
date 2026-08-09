@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import MagicMock
 
 from app.providers.broker import (
     BrokerCostComponent,
@@ -7,6 +8,7 @@ from app.providers.broker import (
     BrokerLeverageConfig,
     BrokerWhatIfCostResponse,
 )
+from app.providers.implementations.etoro_broker import TradingPreflightParseError
 from scripts.verify_2437_trading_preflight import (
     CENSUS_VERSION,
     MAX_COST_REQUESTS_PER_RUN,
@@ -15,6 +17,7 @@ from scripts.verify_2437_trading_preflight import (
     _classify_scaling,
     _cost_orders,
     _cost_response_usable,
+    _fetch_cost,
     _freshness,
     _interleave_cost_arms,
     _type_quotas,
@@ -109,6 +112,17 @@ def test_cost_request_budget_cannot_exceed_endpoint_limit_or_split_scaling_pair(
             pass
         else:  # pragma: no cover - assertion helper branch
             raise AssertionError(f"invalid request cap accepted: {invalid}")
+
+
+def test_malformed_cost_arm_is_reported_without_aborting_census() -> None:
+    broker = MagicMock()
+    broker.get_what_if_costs.side_effect = TradingPreflightParseError("drift")
+    order = _cost_orders(_eligibility())[0][2]
+
+    result, error_type = _fetch_cost(broker, order)
+
+    assert result is None
+    assert error_type == "TradingPreflightParseError"
 
 
 def test_scaling_equation_classifies_proportional_invariant_and_incomplete_fields() -> None:
