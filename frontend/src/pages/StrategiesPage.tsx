@@ -193,7 +193,7 @@ function AllocationControl({
       </div>
       <div className="grid gap-3 sm:grid-cols-[minmax(0,12rem)_auto_minmax(0,1fr)_auto] sm:items-end">
         <label className="text-xs font-medium text-slate-600 dark:text-slate-300">
-          Maximum USD capital
+          Maximum {strategy.allocation.currency} capital
           <input
             type="number"
             min="0"
@@ -284,10 +284,10 @@ function StrategyPanel({ strategy, onUpdated }: { readonly strategy: StrategyOve
           value={fraction(attribution.fill_rate)}
           detail={`${formatNumber(attribution.broker_rejected_entries, 0)} broker rejected`}
         />
-        <Metric label="Allocated ceiling" value={money(strategy.allocation.capital_limit, "USD")} />
-        <Metric label="Reserved" value={money(strategy.allocation.reserved_capital, "USD")} />
-        <Metric label="Currently invested" value={money(strategy.allocation.invested_capital, "USD")} />
-        <Metric label="Remaining" value={money(strategy.allocation.remaining_capital, "USD")} />
+        <Metric label="Allocated ceiling" value={money(strategy.allocation.capital_limit, strategy.allocation.currency)} />
+        <Metric label="Reserved" value={money(strategy.allocation.reserved_capital, strategy.allocation.currency)} />
+        <Metric label="Currently invested" value={money(strategy.allocation.invested_capital, strategy.allocation.currency)} />
+        <Metric label="Remaining" value={money(strategy.allocation.remaining_capital, strategy.allocation.currency)} />
       </div>
 
       {strategy.exclusion_reason ? (

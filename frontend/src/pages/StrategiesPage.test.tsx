@@ -14,12 +14,12 @@ const OVERVIEW: StrategyOverviewResponse = {
   live_execution_enabled: false,
   storage_policy: "fired_signals_and_material_mutations_only",
   entry_block: {
-    new_entries_blocked: false,
+    new_entries_blocked: true,
     global_kill_active: false,
     global_kill_reason: null,
     global_kill_activated_at: null,
     global_kill_activated_by: null,
-    execution_block_reasons: [],
+    execution_block_reasons: ["automatic trading disabled"],
   },
   strategies: [
     {
@@ -150,6 +150,7 @@ describe("StrategiesPage", () => {
     expect(await screen.findByText("Volatility compression breakout")).toBeInTheDocument();
     expect(screen.getByText(/Backtest exclusion:/)).toBeInTheDocument();
     expect(screen.getByText("AAA")).toBeInTheDocument();
+    expect(screen.getByText("New strategy entries are blocked")).toBeInTheDocument();
     expect(screen.getByText("Not funded")).toBeInTheDocument();
     expect(screen.getByText("Not evaluated by allocator")).toBeInTheDocument();
   });

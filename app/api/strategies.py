@@ -24,6 +24,7 @@ from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERS
 from app.services.strategy_control_plane import (
     StrategyControlError,
     configure_deployment,
+    is_risk_reducing_deployment_change,
     lock_strategy_control,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
@@ -158,7 +159,7 @@ class StrategyPnlView(BaseModel):
 class StrategyAllocationView(BaseModel):
     deployment_id: int | None
     capital_limit: Decimal
-    currency: Literal["USD"] = "USD"
+    currency: str
     enabled: bool
     revision: int | None
     reserved_capital: Decimal
@@ -235,7 +236,7 @@ class AllocationUpdateResponse(BaseModel):
     strategy_version: str
     deployment_id: int
     capital_limit: Decimal
-    currency: Literal["USD"] = "USD"
+    currency: str
     enabled: bool
     revision: int
 
@@ -545,6 +546,7 @@ def get_strategy_overview(
                 allocation=StrategyAllocationView(
                     deployment_id=control.deployment_id,
                     capital_limit=control.capital_limit,
+                    currency=control.currency,
                     enabled=control.enabled,
                     revision=control.revision,
                     reserved_capital=control.reserved_capital,
@@ -680,10 +682,13 @@ def update_strategy_allocation(
             lock_strategy_control(conn, strategy_id, current_version)
             overview = get_strategy_overview(conn)
             row = next(item for item in overview.strategies if item.strategy_id == strategy_id)
-            risk_reducing = (
-                row.allocation.deployment_id is not None
-                and body.capital_limit <= row.allocation.capital_limit
-                and (not body.enabled or row.allocation.enabled)
+            risk_reducing = row.allocation.deployment_id is not None and is_risk_reducing_deployment_change(
+                current_capital_limit=row.allocation.capital_limit,
+                current_enabled=row.allocation.enabled,
+                current_currency=row.allocation.currency,
+                capital_limit=body.capital_limit,
+                enabled=body.enabled,
+                currency=row.allocation.currency,
             )
             if not row.allocation_ready and not risk_reducing:
                 raise HTTPException(
@@ -702,7 +707,7 @@ def update_strategy_allocation(
                 enabled=body.enabled,
                 changed_by=session.username,
                 reason=body.reason,
-                currency="USD",
+                currency=row.allocation.currency,
             )
     except StrategyControlError as exc:
         raise HTTPException(status_code=409, detail="allocation update refused") from exc
@@ -711,6 +716,7 @@ def update_strategy_allocation(
         strategy_version=current_version,
         deployment_id=deployment.deployment_id,
         capital_limit=deployment.capital_limit,
+        currency=row.allocation.currency,
         enabled=deployment.enabled,
         revision=deployment.revision,
     )

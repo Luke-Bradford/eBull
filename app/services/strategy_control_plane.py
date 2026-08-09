@@ -119,6 +119,19 @@ def lock_strategy_control(conn: psycopg.Connection[Any], strategy_id: str, strat
     _lock_strategy(conn, strategy_id, strategy_version)
 
 
+def is_risk_reducing_deployment_change(
+    *,
+    current_capital_limit: Decimal,
+    current_enabled: bool,
+    current_currency: str,
+    capital_limit: Decimal,
+    enabled: bool,
+    currency: str,
+) -> bool:
+    """Return whether a deployment change cannot add capital authority."""
+    return capital_limit <= current_capital_limit and (not enabled or current_enabled) and currency == current_currency
+
+
 def current_stage(conn: psycopg.Connection[Any], strategy_id: str, strategy_version: str) -> Stage | None:
     row = conn.execute(
         """
@@ -259,11 +272,13 @@ def configure_deployment(
         """,
         (strategy_id, strategy_version, mode),
     ).fetchone()
-    risk_reducing = (
-        existing is not None
-        and capital_limit <= Decimal(str(existing[2]))
-        and (not enabled or bool(existing[3]))
-        and currency == str(existing[4])
+    risk_reducing = existing is not None and is_risk_reducing_deployment_change(
+        current_capital_limit=Decimal(str(existing[2])),
+        current_enabled=bool(existing[3]),
+        current_currency=str(existing[4]),
+        capital_limit=capital_limit,
+        enabled=enabled,
+        currency=currency,
     )
     eligible: dict[Mode, frozenset[Stage]] = {
         "paper": frozenset({"paper_enabled", "live_enabled"}),
@@ -725,6 +740,7 @@ __all__ = [
     "create_strategy_trade",
     "current_stage",
     "decide_funding",
+    "is_risk_reducing_deployment_change",
     "link_strategy_order",
     "lock_strategy_control",
     "promote_strategy",

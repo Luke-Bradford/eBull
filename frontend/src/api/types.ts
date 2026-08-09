@@ -2502,7 +2502,7 @@ export interface StrategyPnl {
 export interface StrategyAllocation {
   deployment_id: number | null;
   capital_limit: string;
-  currency: "USD";
+  currency: string;
   enabled: boolean;
   revision: number | null;
   reserved_capital: string;
@@ -2573,7 +2573,7 @@ export interface AllocationUpdateResponse {
   strategy_version: string;
   deployment_id: number;
   capital_limit: string;
-  currency: "USD";
+  currency: string;
   enabled: boolean;
   revision: number;
 }

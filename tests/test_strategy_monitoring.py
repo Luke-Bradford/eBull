@@ -412,7 +412,7 @@ def test_evidence_invalid_enabled_allocation_can_reduce_without_disabling(
     version = _current_versions()[strategy_id]
     deployment_id = _deployment(ebull_test_conn, strategy_id, version)
     ebull_test_conn.execute(
-        "UPDATE strategy_deployments SET enabled=true WHERE deployment_id=%s",
+        "UPDATE strategy_deployments SET enabled=true, currency='EUR' WHERE deployment_id=%s",
         (deployment_id,),
     )
     ebull_test_conn.commit()
@@ -431,10 +431,11 @@ def test_evidence_invalid_enabled_allocation_can_reduce_without_disabling(
 
     assert response.enabled
     assert response.capital_limit == Decimal("500")
+    assert response.currency == "EUR"
     assert ebull_test_conn.execute(
-        "SELECT capital_limit, enabled FROM strategy_deployment_events WHERE deployment_id=%s",
+        "SELECT capital_limit, currency, enabled FROM strategy_deployment_events WHERE deployment_id=%s",
         (deployment_id,),
-    ).fetchone() == (Decimal("500.000000"), True)
+    ).fetchone() == (Decimal("500.000000"), "EUR", True)
 
 
 def test_disabled_pre_promotion_deployment_remains_visible_for_risk_reduction(
@@ -460,6 +461,18 @@ def test_missing_runtime_singleton_is_visible_as_an_entry_block(
 
     assert state.new_entries_blocked
     assert state.execution_block_reasons == ("runtime configuration unavailable",)
+    assert not state.auto_trading_enabled
+
+
+def test_disabled_automatic_trading_is_visible_as_an_entry_block(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    ebull_test_conn.execute("UPDATE runtime_config SET enable_auto_trading=false")
+
+    state = load_entry_block_state(ebull_test_conn)
+
+    assert state.new_entries_blocked
+    assert "automatic trading disabled" in state.execution_block_reasons
     assert not state.auto_trading_enabled
 
 

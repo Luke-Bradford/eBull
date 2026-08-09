@@ -73,7 +73,9 @@ automatic allocation optimiser or winner-chasing job.
 If evidence becomes invalid, a new/increased allocation is refused. An
 existing allocation can still be disabled and/or have its ceiling reduced;
 a disabled allocation cannot be re-enabled through this exception. Evidence
-failure must never trap capital in an enabled sleeve.
+failure must never trap capital in an enabled sleeve. A legacy non-USD sleeve
+preserves its currency during such a reduction; it cannot be converted or
+newly enabled because USD remains the only supported allocation currency.
 
 Global kill and reconciliation block state is visible in the picker and blocks
 new order entry in the executor. It does not erase the allocation audit and it
