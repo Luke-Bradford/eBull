@@ -643,20 +643,21 @@ def _parse_eligibility_response(raw: dict[str, Any]) -> BrokerEligibilityRespons
                 values = config.get("leverageValues")
                 if not isinstance(values, list) or any(not isinstance(value, int) for value in values):
                     raise TradingPreflightParseError("leverageValues must be an integer array")
+                allow_edit_stop_loss = config.get("allowEditStopLoss")
+                allow_edit_take_profit = config.get("allowEditTakeProfit")
+                allow_stop_loss_take_profit = config.get("allowStopLossTakeProfit")
                 leverage_configs.append(
                     BrokerLeverageConfig(
                         settlement_type=str(config["settlementType"]),
                         direction=str(config["direction"]),
                         leverage_values=tuple(values),
                         min_position_amount=_optional_decimal(config, "minPositionAmount"),
-                        allow_edit_stop_loss=config.get("allowEditStopLoss")
-                        if isinstance(config.get("allowEditStopLoss"), bool)
+                        allow_edit_stop_loss=allow_edit_stop_loss if isinstance(allow_edit_stop_loss, bool) else None,
+                        allow_edit_take_profit=allow_edit_take_profit
+                        if isinstance(allow_edit_take_profit, bool)
                         else None,
-                        allow_edit_take_profit=config.get("allowEditTakeProfit")
-                        if isinstance(config.get("allowEditTakeProfit"), bool)
-                        else None,
-                        allow_stop_loss_take_profit=config.get("allowStopLossTakeProfit")
-                        if isinstance(config.get("allowStopLossTakeProfit"), bool)
+                        allow_stop_loss_take_profit=allow_stop_loss_take_profit
+                        if isinstance(allow_stop_loss_take_profit, bool)
                         else None,
                         raw_payload=dict(config),
                     )

@@ -3,6 +3,7 @@ import pytest
 from scripts.verify_2437_observation_storage import (
     TIERS,
     Tier,
+    measured_bytes_per_row,
     projected_annual_signal_bytes,
     projected_annual_signal_rows,
     projected_bytes,
@@ -39,3 +40,8 @@ def test_signal_projection_includes_every_daily_verdict_leg() -> None:
 def test_signal_projection_refuses_an_unmeasured_row_size() -> None:
     with pytest.raises(ValueError, match="measured_rows must be positive"):
         projected_annual_signal_bytes(100, measured_rows=0, measured_total_bytes=0)
+
+
+def test_measured_bytes_per_row_handles_an_empty_relation() -> None:
+    assert measured_bytes_per_row(0, 0) is None
+    assert measured_bytes_per_row(4, 100) == 25.0

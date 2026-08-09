@@ -68,6 +68,13 @@ def projected_annual_signal_bytes(
     )
 
 
+def measured_bytes_per_row(rows: int, total_bytes: int) -> float | None:
+    """Return measured relation density, or ``None`` for an empty relation."""
+    if rows < 0 or total_bytes < 0:
+        raise ValueError("measured rows and bytes must be non-negative")
+    return total_bytes / rows if rows else None
+
+
 def main() -> None:
     query = """
         SELECT pg_database_size(current_database()),
@@ -108,13 +115,15 @@ def main() -> None:
         signal_total_bytes,
         latest_scan_rows,
     ) = map(int, row)
-    price_bpr = price_bytes / price_rows
-    research_bpr = research_bytes / research_rows
+    price_bpr = measured_bytes_per_row(price_rows, price_bytes)
+    research_bpr = measured_bytes_per_row(research_rows, research_bytes)
+    price_bpr_text = f"{price_bpr:.1f}" if price_bpr is not None else "n/a"
+    research_bpr_text = f"{research_bpr:.1f}" if research_bpr is not None else "n/a"
 
     print(f"database: {db_bytes:,} bytes")
     print(f"tradable instruments: {instruments:,}")
-    print(f"price_daily: {price_rows:,} rows, {price_bytes:,} bytes, {price_bpr:.1f} bytes/row")
-    print(f"research_price_daily: {research_rows:,} rows, {research_bytes:,} bytes, {research_bpr:.1f} bytes/row")
+    print(f"price_daily: {price_rows:,} rows, {price_bytes:,} bytes, {price_bpr_text} bytes/row")
+    print(f"research_price_daily: {research_rows:,} rows, {research_bytes:,} bytes, {research_bpr_text} bytes/row")
     print(
         f"strategy_signals: {signal_rows:,} rows, {signal_total_bytes:,} bytes "
         f"(heap {signal_heap_bytes:,}; indexes {signal_index_bytes:,})"
