@@ -222,40 +222,52 @@ re-measuring the three we have under a size screen with value or inverse-vol
 weighting, because §1 says our current construction inflates exactly the segment
 we most heavily weight.*
 
-**Falsifiable, and specified before running** — ⚠ the first draft said "re-run
-with (a) sub-$5 excluded and (b) inverse-vol weighting" and judged it on whether
-results "barely move". That confounds two variables and has no rejection rule.
-Codex was right to refuse it. **Four arms, one variable each:**
+**⚠⚠ REDESIGNED after the evidence review — the first version tested the wrong
+variable and would have burned 2h15m for an uninterpretable answer.**
 
-| arm | universe | weighting |
-| --- | --- | --- |
-| 0 baseline | as today | `equal_weight_concurrent_v1` |
-| 1 size screen only | exclude close < $5 at the decision bar | equal weight |
-| 2 weighting only | as today | `inverse_vol_v1` |
-| 3 both | exclude close < $5 | `inverse_vol_v1` |
+Two errors. **(1) Price is not size.** HXZ's method is *NYSE breakpoints and
+value weighting* — market capitalisation. The draft used a `$5` price floor. A
+$3 stock can be a $2bn company and a $300 stock can be small, so a price screen
+does not test the claim it is aimed at. Market cap is computable from
+`share_count_history` (135,683 point-in-time rows) × price. **(2) Two literatures
+were collapsed into one arm.** HXZ says value-weight by cap; Moreira & Muir say
+inverse-variance weight. Different claims, opposite predictions on s3, and one
+arm cannot separate them.
 
-Run for all three strategies, in-sample only, holding corpus, cost model,
-benchmark rule, namespace and both arms identical. Declared to
-`trial_register.py` before the first measurement.
+**One arm per hypothesis, each with a directional prediction stated before the
+run.** That is what makes a null result informative rather than ambiguous.
 
-**Pre-registered rejection rule**, so the answer cannot be argued after the fact:
+| arm | change | tests | ⚠ prediction |
+| --- | --- | --- | --- |
+| 0 | baseline as today | — | — |
+| 1 | market-cap screen, NYSE-breakpoint equivalent | Hou/Xue/Zhang | large move ⇒ our results are microcap artefacts |
+| 2 | value weighting (by market cap) | Hou/Xue/Zhang | same direction as arm 1; if 1 and 2 disagree, the effect is weighting, not universe |
+| 3 | `inverse_vol_v1` | Moreira-Muir vs Cederburg et al. | **helps s1 and s2, NOT s3.** ⚠ Helping s3 most is a red flag, not a win |
+| 4 | **buy/hold spread** — stricter to establish than to maintain | Novy-Marx & Velikov | **the only arm that addresses s1's and s3's actual failure** |
 
-- **Thesis SUPPORTED** if arm 3 moves `return_vs_buy_and_hold_pct` by **more than
-  50% of arm 0's absolute value** on at least two of the three strategies. That
-  says the microcap/equal-weight construction, not the signal, is driving the
-  result — and every stored number needs re-basing before anything new is built.
-- **Thesis REJECTED** if every arm lands within **±20%** of arm 0. The strategies
-  are simply weak, the construction is not what is hiding an edge, and effort
-  belongs on new families instead.
-- **Anything between is INCONCLUSIVE** and is reported as such — ⚠ not
-  reinterpreted into whichever story is more convenient.
+⚠⚠ **Arm 4 is the one that matters for s1 and s3, and the reading is what
+revealed it.** Their binding constraint is turnover — 600%/month and 333%/month
+against a ~50% bar — and *no size screen or weighting change reduces turnover*.
+Arms 1-3 cannot save them even in principle. If budget allowed only one arm for
+those two strategies, it is arm 4.
 
-Arms 1 and 2 separate *which* correction did the work, which is the thing arm 3
-alone cannot tell us.
+Conversely s2 already sits inside the turnover bar, so arm 4 is largely irrelevant to
+it and arms 1-2 are the ones that bite.
 
-⚠ One measurement, three strategies, four arms, no new data — and it decides
-whether the next months go on new signals or on re-basing the measurement of the
-ones we have. **That is the next thing to run.**
+**Pre-registered rejection rule**, so the answer cannot be argued afterwards:
+
+- **SUPPORTED** if the arm its prediction names moves `return_vs_buy_and_hold_pct`
+  by **more than 50%** of arm 0's absolute value.
+- **REJECTED** if every arm lands within **±20%** of arm 0.
+- Anything else is **INCONCLUSIVE** and reported as such — ⚠ not reinterpreted
+  into whichever story reads better.
+
+All arms hold corpus, cost model, benchmark rule, namespace and both
+quarantine/ambiguity arms identical, and are declared to `trial_register.py`
+before the first measurement.
+
+⚠ Five arms × ~34 min ≈ **2h50m** unattended. The redesign adds one arm and
+removes the risk of learning nothing.
 
 ---
 

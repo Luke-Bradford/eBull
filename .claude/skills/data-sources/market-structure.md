@@ -181,6 +181,132 @@ captured by holding, not by trading. Its corollary is worth carrying into strate
 idle" but "how much of the premium am I giving up", and it is the reason
 `return_vs_buy_and_hold_pct` is the catalogue's bar.
 
+## The actual formulas — what we compute, exactly
+
+⚠ Transcribed from the code, not from a textbook. Every constant below is hashed
+into `RULE_SET_VERSION`, so changing one invalidates every dependent signal.
+
+### Peaks and troughs — `detect_swings(bars, n)`
+
+A pivot high at `i` requires `high[i]` **strictly greater** than all `2n`
+neighbours; a pivot low, strictly less.
+
+```text
+pivot_high(i)  <=>  high[i] > high[j]  for all j in [i-n, i+n], j != i
+```
+
+⚠⚠ **Strictly.** A plateau — two equal highs in one window — yields **no** pivot
+rather than two. An equal high is the absence of a new extreme, and emitting
+both inflates a level's touch count, which is the only thing a level asserts.
+
+⚠⚠ **A pivot at `i` is knowable only at `i + n`.** It needs `n` right-hand bars.
+"The last swing low" is not available in real time and this is the look-ahead
+that caught S-6.
+
+`SWING_LADDER` = `{short: 5, medium: 21, long: 63}` — roughly a week, a month, a
+quarter either side. ⚠ The docstring is explicit that N *can* be fitted; the
+claim is only that this ladder was not fitted here.
+
+### Support and resistance — `cluster_levels`
+
+**Single-linkage agglomeration on price**, tolerance ATR-relative:
+
+```text
+merge two swings into one level  <=>  |p_a - p_b|  <=  k * ATR14(at the later bar)
+k = CLUSTER_ATR_K = 0.5          (half a day's true range)
+```
+
+⚠ Highs and lows cluster **separately** — a level asserts which side price
+approached from, and merging the two makes that unstateable. `touches` is
+emitted, never filtered on. ⚠ **No published formulation exists**; fixed by
+construction, ATR-relative rather than a percentage because a fixed percentage
+means different things on a \$3 stock and a \$600 one, and different things on
+the same name in 2008 and 2017.
+
+### Fibonacci — `select_leg` then `fib_levels`
+
+**Leg selection** (deterministic, because fractals do NOT alternate — three
+highs in a row with no low between is ordinary): take the **last swing** as the
+leg end, then walk back to the **most recent swing of the opposite kind**.
+
+**The arithmetic depends on direction**, and an early spec draft omitted this —
+two anchors alone do not say whether you measure down from the high or up from
+the low:
+
+```text
+span = high - low
+up-leg   (ends on a high):   level(r) = high - r * span
+down-leg (ends on a low):    level(r) = low  + r * span
+
+FIB_RATIOS = (0.236, 0.382, 0.5, 0.618, 0.786)
+```
+
+⚠ **0.5 is not a Fibonacci ratio** — it is Dow Theory's halfway retracement,
+conventionally included. The constant's name implies a provenance one of its five
+members does not have.
+
+⚠ `usable_from_index` is the **later of the two anchors' confirmations** — the
+retracement is not knowable before it, whatever the arithmetic says.
+
+### Volatility and the band width
+
+```text
+ATR      Wilder smoothing, period 14 — NOT a simple mean
+Bollinger  SMA(20) +/- k*sigma;  BandWidth = (upper - lower) / middle
+Squeeze  BandWidth at its LOWEST in 126 trading days (six months)
+```
+
+⚠ The Squeeze is a six-month extreme, **not a percentile cut** — the #2279
+precedent, caught by Codex.
+
+### Momentum
+
+```text
+RSI      100 - 100/(1 + RS),  RS = avg gain / avg loss, WILDER-smoothed (recursive, causal)
+MACD     EMA12 - EMA26;  signal = EMA9(MACD);  histogram = MACD - signal
+Stoch    (close - low_n) / (high_n - low_n) * 100
+```
+
+⚠⚠ Wilder smoothing is **recursive and causal**. #2260 claimed RSI<30 → 76.8%
+win; with causal Wilder it is **51.8% / 50.4%** and the claim was withdrawn. Any
+RSI result from a non-causal smoother is wrong in the flattering direction.
+
+### Liquidity / order-flow footprint
+
+```text
+Amihud illiquidity = mean( |return| / dollar volume )
+```
+
+⚠ Daily data only, no tape. Proxies price impact per unit of order flow (the
+empirical cousin of Kyle's λ). **Not implemented yet** — but computable on all
+25.9M bars with nothing new ingested, and it is also the quantity behind
+Wyckoff's "effort versus result".
+
+---
+
+## ⚠⚠ What we do NOT have: projection
+
+**Where a reversal might LEAD has no implementation at all.** Grepped
+2026-08-09: no Fibonacci extensions (1.272, 1.618, 2.618), no measured moves, no
+point-and-figure counts, no swing projections. Nothing in
+`price_structure.py` or `indicator_series.py` computes a price target.
+
+That is the asymmetry to be aware of: **we can find structure, and we cannot
+project from it.** Concretely missing —
+
+| concept | the maths | why it matters |
+| --- | --- | --- |
+| Fib extension | `level(r) = end +/- r * span`, `r in (1.272, 1.618, 2.618)` | the conventional target after a retracement holds |
+| measured move | project the prior leg's span from the breakout point | the flag/pennant target |
+| P&F count | horizontal congestion width x box size x reversal | ⚠ Wyckoff's Law of Cause and Effect rests entirely on this, and it is Buying Test #1 |
+| ATR-multiple stop/target | `entry +/- m * ATR14` | ⚠ **the one that blocks S-4** — `ExitLevels` exists in `outcome_resolver.py` and nothing computes one |
+
+⚠ The ATR-multiple row is not a research question. It is a small piece of
+arithmetic standing between S-4 and being runnable, and the same primitive gives
+every other strategy a principled stop instead of none.
+
+---
+
 ## Before speccing a new pattern — the checklist
 
 1. **Name the published formulation, or state that none exists.** No third option.
