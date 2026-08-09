@@ -35,7 +35,7 @@ ownership_insiders_*           ~300K
 def14a_beneficial_holdings     110,832
 benchmark/sector series        102,027   16 comparators, SPY 1993-01-29 -> 2024-09-27
 quotes                           1,557   ⚠ LATEST only, one row per instrument
-price_intraday                       0   ⚠ table exists, empty
+price_intraday                       0   ⚠ empty = BUILD gap, NOT a data gap (see below)
 ```
 
 ---
@@ -55,6 +55,49 @@ operator corrected it more than once.** The accurate statement:
 | tick-level updates | depth beyond L1 |
 | all instruments (on subscription) | trade-side / aggressor classification |
 | observed `spread_pct` | reliable traded volume |
+
+### ⚠⚠ And the WebSocket is only HALF the answer — we also have REST intraday HISTORY
+
+The table above was still not the full correction, which is why the error kept
+regenerating: it describes the LIVE feed, so a reader who wants *history* concludes
+we must record it forward from today. **We do not.**
+
+`EtoroMarketDataProvider.get_intraday_candles` serves intraday OHLCV on demand, per
+instrument, right now. Measured 2026-08-09 on AAPL at `count=1000`:
+
+| interval | reach back |
+| --- | --- |
+| `OneMinute` | ~2 days |
+| `FiveMinutes` | ~5 days |
+| `ThirtyMinutes` | ~1 month |
+| `OneHour` | ~2 months |
+| `FourHours` | **~8 months** |
+
+⚠ `count` caps at 1000 and **the URL carries no date anchor** — always the *last* N
+bars, so reach is a pure function of interval and going deeper does require polling
+forward. ⚠ Volume IS populated. ⚠ Extended hours ARE included, so an RTH-only study
+must filter sessions itself.
+
+⚠⚠ **This matters for what we can test, not just what we hold.** Brogaard/Han/Kim's
+intraday residual reversal — the strongest recent price-only evidence found in the
+#2437 sweep, sample through Dec 2022 — is measured on **30-minute midpoints**, which
+is exactly what this endpoint returns for the last month.
+
+⚠ Rate limit binds the corpus, not the capability: **60 GET/min shared** means a full
+6,700-instrument pass is ~112 minutes per interval and competes with every other eToro
+call. A cross-sectional intraday study is a scheduled harvest, not an ad-hoc query.
+
+**Three distinct capabilities. Collapsing them is the error itself:**
+
+| capability | gives | limit |
+| --- | --- | --- |
+| REST intraday candles | OHLCV history on demand | 1000 bars, no date anchor, 60 GET/min |
+| WS rate stream | live bid/ask/last, all instruments | **no depth, no sizes** — the real gap |
+| `research_price_daily` | 25.9M daily bars 1962-2026 | daily granularity |
+
+Source of truth: `.claude/skills/data-sources/etoro-api.md` § "WE HAVE INTRADAY
+HISTORY". Probe before asserting:
+`curl -s "http://localhost:8000/_debug/etoro-candles-probe?instrument_id=1001&count=1000&interval=FourHours"`
 
 ⚠ Every occurrence of "size" in `app/services/etoro_websocket.py` refers to
 **WebSocket frame bytes**, not order size. Verified by grep, not assumed.
