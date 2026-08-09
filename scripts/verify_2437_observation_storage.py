@@ -20,6 +20,7 @@ from typing import Any, LiteralString, cast
 import psycopg
 
 from app.config import settings
+from app.services.strategy_observation_storage import SIGNAL_DETAIL_RETENTION_DAYS
 
 TRADING_DAYS = 252
 RTH_MINUTES = 390
@@ -228,9 +229,7 @@ def _benchmark_candidate_tables(conn: psycopg.Connection[Any], *, sample_rows: i
 
 
 def _verify_signal_parity_and_dependencies(conn: psycopg.Connection[Any]) -> None:
-    mismatches = _scalar(
-        conn,
-        """
+    parity_query = f"""
         WITH detail AS (
             SELECT strategy_id, strategy_version, signal_bar_date, signal_kind,
                    verdict, COALESCE(not_evaluable_reason, '') AS reason_code, COUNT(*) AS row_count
@@ -240,7 +239,7 @@ def _verify_signal_parity_and_dependencies(conn: psycopg.Connection[Any]) -> Non
             SELECT strategy_id, strategy_version, signal_bar_date, signal_kind,
                    verdict, reason_code, COUNT(*) AS row_count
             FROM strategy_signal_observations
-            WHERE signal_bar_date >= CURRENT_DATE - 90
+            WHERE signal_bar_date >= CURRENT_DATE - {SIGNAL_DETAIL_RETENTION_DAYS}
             GROUP BY 1, 2, 3, 4, 5, 6
         ), combined AS (
             SELECT strategy_id, strategy_version, signal_bar_date, signal_kind,
@@ -252,7 +251,7 @@ def _verify_signal_parity_and_dependencies(conn: psycopg.Connection[Any]) -> Non
                     verdict, reason_code, row_count
              FROM strategy_signal_daily_counts
              WHERE verdict = 'fired'
-                OR signal_bar_date >= CURRENT_DATE - 90
+                OR signal_bar_date >= CURRENT_DATE - {SIGNAL_DETAIL_RETENTION_DAYS}
              EXCEPT ALL
              SELECT * FROM combined)
             UNION ALL
@@ -262,10 +261,13 @@ def _verify_signal_parity_and_dependencies(conn: psycopg.Connection[Any]) -> Non
                     verdict, reason_code, row_count
              FROM strategy_signal_daily_counts
              WHERE verdict = 'fired'
-                OR signal_bar_date >= CURRENT_DATE - 90)
+                OR signal_bar_date >= CURRENT_DATE - {SIGNAL_DETAIL_RETENTION_DAYS})
         )
         SELECT COUNT(*) FROM delta
-        """,
+    """
+    mismatches = _scalar(
+        conn,
+        parity_query,
     )
     dependencies = conn.execute(
         """

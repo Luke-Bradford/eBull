@@ -178,6 +178,9 @@ _ADVANCE_INTRADAY_WATERMARK = """
      WHERE EXCLUDED.last_bar_time > strategy_intraday_watermarks.last_bar_time
 """
 
+# These use PostgreSQL's two-int advisory-lock space as (2448, tier id).
+# Strategy identities below use the separate one-bigint overload, so their
+# hash can only over-serialise another identity; it cannot collide with a tier.
 _TIER_LOCK_IDS: Final[Mapping[Timeframe, int]] = MappingProxyType({"30m": 30, "5m": 5, "1m": 1})
 
 _FIND_CROSS_TABLE_SIGNAL_CONFLICT = """
