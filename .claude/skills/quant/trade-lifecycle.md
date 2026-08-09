@@ -82,6 +82,12 @@ momentum, not universally (Moreira-Muir vs Cederburg et al.).
 - ⚠⚠ **Never measure close-to-open alpha as fillable.** A measured +43.9 bps
   effect lived entirely in that unreachable window and the tradable half had the
   **opposite sign**.
+- **Ownership is exact, never inferred.** Persist strategy trade → strategy
+  entry order → detailed broker order lookup → `positionExecutions[].positionId`.
+  A strategy may patch or close only that actively owned `positionId`; never use
+  symbol/instrument matching, units, timestamps, source labels, or FIFO. A manual
+  same-instrument position has no ownership row and must remain unmodifiable by
+  strategy code, while still counting toward portfolio-wide risk.
 
 ### `INITIAL_STOP`
 

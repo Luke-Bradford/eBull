@@ -193,6 +193,12 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # carries yet (the record is written BEFORE the row it authorises), so an FK
     # would refuse the exact ordering the trigger requires.
     "strategy_holdout_accesses",
+    # #2454 — governance roots.  Their children are discovered through inbound
+    # FKs, but neither root has an FK path from instruments.  Keeping them here
+    # prevents a promotion/deployment in one DB test becoming another test's
+    # current operator decision.
+    "strategy_promotions",
+    "strategy_deployments",
     "positions",
     "quotes",
     # #1919 — thesis generation attempts (FK → instruments + theses).

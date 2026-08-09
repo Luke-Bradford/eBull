@@ -404,7 +404,15 @@ class TestVocabularyIsDefinedOnce:
         from pathlib import Path
 
         sql_dir = Path(__file__).resolve().parents[1] / "sql"
-        pattern = re.compile(rf"{column}[^;]*?IN \(([^)]*)\)", re.DOTALL)
+        # Bind the column match to the DDL statement for THIS table.  Looking
+        # only for the table name somewhere in the file let sql/281's FK to
+        # strategy_signals make the unrelated funding-decision ``verdict``
+        # vocabulary look like strategy_signals.verdict.
+        pattern = re.compile(
+            rf"(?:CREATE TABLE(?: IF NOT EXISTS)?|ALTER TABLE)\s+{re.escape(table)}"
+            rf"[^;]*?{re.escape(column)}[^;]*?IN \(([^)]*)\)",
+            re.DOTALL,
+        )
         for path in sorted(sql_dir.glob("*.sql"), reverse=True):
             body = re.sub(r"--[^\n]*", "", path.read_text())
             if table not in body:
