@@ -367,3 +367,29 @@ arm's own session.
 ## Maintenance
 
 When you verify a NEW capability or find drift: update `docs/etoro-api-reference.md` + the memory reference files in the same session (skill-ownership rule — no "later").
+
+## Automated paper-entry boundary — VERIFIED 2026-08-09 (#2449)
+
+- Use only `POST /api/v2/trading/execution/demo/orders` for strategy entry.
+  The adapter must refuse `env != demo`; never derive a strategy endpoint from a
+  generic real/demo prefix and never fall back to the legacy manual writer.
+- Commit one UUID before I/O and send that exact value as `X-Request-Id`.
+  Acceptance returns `orderId`, `referenceId` and `token`; require a positive
+  order id and `referenceId == request UUID`. Any malformed/transport/5xx result
+  is uncertain and resolves through `orders:lookup`, not a newly keyed POST.
+- The MVP shape is long `buy`, `real`, market, x1, USD amount, fixed stop loss
+  and take profit. Shorts are CFDs and are outside this contract.
+- Current cost docs show `costs[].amount` in USD plus `lastUpdated`, but the
+  measured demo spike returned undocumented `value`. `amount` and `value` are
+  not aliases: automated use rejects `value`, stale/missing/negative/non-USD
+  components and positive recurring fees without an explicit hold horizon.
+- Do not treat portfolio `credit` as spendable cash. The official P&L formulas
+  are: available cash = credits minus manual pending-open orders and other
+  pending orders; total invested includes direct/mirror positions, mirror
+  adjusted cash, pending orders and external costs; equity = available cash +
+  total invested + unrealised P&L. All manual holdings count toward risk even
+  though strategy ownership remains exact-order provenance only.
+
+Primary pages: `trading--demo/create-an-order`,
+`trading--demo/get-what-if-trading-cost-breakdown`, and guides
+`calculate-available-cash`, `calculate-total-invested`, `calculate-equity`.

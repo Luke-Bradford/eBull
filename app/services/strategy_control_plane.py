@@ -77,6 +77,26 @@ class Deployment:
     revision: int
 
 
+@dataclass(frozen=True)
+class ExecutionPolicy:
+    deployment_id: int
+    revision: int
+    ticket_fraction: Decimal
+    max_ticket_amount: Decimal
+    stop_loss_pct: Decimal
+    take_profit_pct: Decimal
+    max_quote_age_seconds: int
+    max_scan_age_seconds: int
+    max_halt_feed_age_seconds: int
+    max_cost_age_seconds: int
+    max_reconciliation_age_seconds: int
+    max_instrument_exposure_pct: Decimal
+    max_portfolio_exposure_pct: Decimal
+    max_drawdown_pct: Decimal
+    min_net_expectancy_pct: Decimal
+    cost_stress_multiplier: Decimal
+
+
 def _require_text(value: str, field: str) -> None:
     if not value.strip():
         raise StrategyControlError(f"{field} must be non-empty")
@@ -291,6 +311,141 @@ def configure_deployment(
         enabled,
         revision,
     )
+
+
+def configure_execution_policy(
+    conn: psycopg.Connection[Any],
+    *,
+    deployment_id: int,
+    ticket_fraction: Decimal,
+    max_ticket_amount: Decimal,
+    stop_loss_pct: Decimal,
+    take_profit_pct: Decimal,
+    max_quote_age_seconds: int,
+    max_scan_age_seconds: int,
+    max_halt_feed_age_seconds: int,
+    max_cost_age_seconds: int,
+    max_reconciliation_age_seconds: int,
+    max_instrument_exposure_pct: Decimal,
+    max_portfolio_exposure_pct: Decimal,
+    max_drawdown_pct: Decimal,
+    min_net_expectancy_pct: Decimal,
+    cost_stress_multiplier: Decimal,
+    changed_by: str,
+    reason: str,
+) -> ExecutionPolicy:
+    """Set explicit paper-execution limits and append the complete revision.
+
+    There are intentionally no policy defaults: every number can authorise or
+    refuse capital and must therefore be an operator decision visible in the
+    audit stream.
+    """
+    for value, field in ((changed_by, "changed_by"), (reason, "reason")):
+        _require_text(value, field)
+    if not (Decimal("0") < ticket_fraction <= Decimal("1")):
+        raise StrategyControlError("ticket_fraction must be in (0, 1]")
+    if max_ticket_amount <= 0:
+        raise StrategyControlError("max_ticket_amount must be positive")
+    if not (Decimal("0") < stop_loss_pct < Decimal("100")) or take_profit_pct <= 0:
+        raise StrategyControlError("stop/take-profit percentages must be positive and stop_loss_pct < 100")
+    ages = (
+        max_quote_age_seconds,
+        max_scan_age_seconds,
+        max_halt_feed_age_seconds,
+        max_cost_age_seconds,
+        max_reconciliation_age_seconds,
+    )
+    if any(value <= 0 for value in ages):
+        raise StrategyControlError("freshness and reconciliation ages must be positive")
+    if not (Decimal("0") < max_instrument_exposure_pct <= Decimal("100")):
+        raise StrategyControlError("max_instrument_exposure_pct must be in (0, 100]")
+    if not (Decimal("0") < max_portfolio_exposure_pct <= Decimal("100")):
+        raise StrategyControlError("max_portfolio_exposure_pct must be in (0, 100]")
+    if not (Decimal("0") < max_drawdown_pct < Decimal("100")):
+        raise StrategyControlError("max_drawdown_pct must be in (0, 100)")
+    if cost_stress_multiplier < 1:
+        raise StrategyControlError("cost_stress_multiplier must be at least 1")
+
+    deployment = conn.execute(
+        "SELECT mode FROM strategy_deployments WHERE deployment_id = %s FOR UPDATE",
+        (deployment_id,),
+    ).fetchone()
+    if deployment is None:
+        raise StrategyControlError("deployment does not exist")
+    if deployment[0] != "paper":
+        raise StrategyControlError("the MVP execution policy is paper-only")
+    current = conn.execute(
+        "SELECT revision FROM strategy_execution_policies WHERE deployment_id = %s",
+        (deployment_id,),
+    ).fetchone()
+    revision = 1 if current is None else int(current[0]) + 1
+    values = (
+        deployment_id,
+        revision,
+        ticket_fraction,
+        max_ticket_amount,
+        stop_loss_pct,
+        take_profit_pct,
+        max_quote_age_seconds,
+        max_scan_age_seconds,
+        max_halt_feed_age_seconds,
+        max_cost_age_seconds,
+        max_reconciliation_age_seconds,
+        max_instrument_exposure_pct,
+        max_portfolio_exposure_pct,
+        max_drawdown_pct,
+        min_net_expectancy_pct,
+        cost_stress_multiplier,
+        changed_by,
+        reason,
+    )
+    conn.execute(
+        """
+        INSERT INTO strategy_execution_policies (
+            deployment_id, revision, ticket_fraction, max_ticket_amount,
+            stop_loss_pct, take_profit_pct, max_quote_age_seconds,
+            max_scan_age_seconds, max_halt_feed_age_seconds,
+            max_cost_age_seconds, max_reconciliation_age_seconds,
+            max_instrument_exposure_pct, max_portfolio_exposure_pct,
+            max_drawdown_pct, min_net_expectancy_pct,
+            cost_stress_multiplier, updated_by, reason
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (deployment_id) DO UPDATE SET
+            revision = EXCLUDED.revision,
+            ticket_fraction = EXCLUDED.ticket_fraction,
+            max_ticket_amount = EXCLUDED.max_ticket_amount,
+            stop_loss_pct = EXCLUDED.stop_loss_pct,
+            take_profit_pct = EXCLUDED.take_profit_pct,
+            max_quote_age_seconds = EXCLUDED.max_quote_age_seconds,
+            max_scan_age_seconds = EXCLUDED.max_scan_age_seconds,
+            max_halt_feed_age_seconds = EXCLUDED.max_halt_feed_age_seconds,
+            max_cost_age_seconds = EXCLUDED.max_cost_age_seconds,
+            max_reconciliation_age_seconds = EXCLUDED.max_reconciliation_age_seconds,
+            max_instrument_exposure_pct = EXCLUDED.max_instrument_exposure_pct,
+            max_portfolio_exposure_pct = EXCLUDED.max_portfolio_exposure_pct,
+            max_drawdown_pct = EXCLUDED.max_drawdown_pct,
+            min_net_expectancy_pct = EXCLUDED.min_net_expectancy_pct,
+            cost_stress_multiplier = EXCLUDED.cost_stress_multiplier,
+            updated_by = EXCLUDED.updated_by, reason = EXCLUDED.reason,
+            updated_at = now()
+        """,
+        values,
+    )
+    conn.execute(
+        """
+        INSERT INTO strategy_execution_policy_events (
+            deployment_id, revision, ticket_fraction, max_ticket_amount,
+            stop_loss_pct, take_profit_pct, max_quote_age_seconds,
+            max_scan_age_seconds, max_halt_feed_age_seconds,
+            max_cost_age_seconds, max_reconciliation_age_seconds,
+            max_instrument_exposure_pct, max_portfolio_exposure_pct,
+            max_drawdown_pct, min_net_expectancy_pct,
+            cost_stress_multiplier, changed_by, reason
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        values,
+    )
+    return ExecutionPolicy(*values[:16])
 
 
 def decide_funding(
@@ -543,6 +698,7 @@ def release_exact_position(
 
 __all__ = [
     "Deployment",
+    "ExecutionPolicy",
     "GOVERNANCE_GATE_VERSION",
     "Promotion",
     "StrategyControlError",
@@ -550,6 +706,7 @@ __all__ = [
     "assert_exact_position_owned",
     "claim_exact_position",
     "configure_deployment",
+    "configure_execution_policy",
     "create_strategy_trade",
     "current_stage",
     "decide_funding",

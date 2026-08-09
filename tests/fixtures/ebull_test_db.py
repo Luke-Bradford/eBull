@@ -201,6 +201,12 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "strategy_deployments",
     # #2451 — bounded current kill state has no FK by design.
     "strategy_execution_blocks",
+    # #2448/#2449 — bounded strategy current-state roots have no FKs. Their
+    # signal/deployment children are derived by the planner from roots above.
+    "strategy_scan_watermark",
+    "strategy_halt_feed_state",
+    "strategy_market_halts",
+    "strategy_paper_account_risk_state",
     "positions",
     "quotes",
     # #1919 — thesis generation attempts (FK → instruments + theses).
