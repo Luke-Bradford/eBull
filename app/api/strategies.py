@@ -25,8 +25,10 @@ from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERS
 from app.services.strategy_control_plane import (
     StrategyControlError,
     configure_deployment,
+    configure_paper_pool,
     current_stage,
     is_risk_reducing_deployment_change,
+    load_paper_pool,
     lock_strategy_control,
     promote_strategy,
 )
@@ -138,6 +140,10 @@ class StrategyAttributionView(BaseModel):
     funded_entries: int
     rejected_entries: int
     resolved_entries: int
+    winning_entries: int
+    win_rate: Decimal | None
+    median_days_to_outcome: Decimal | None
+    signals_last_30_days: int
     shadow_average_return_pct: Decimal | None
     funded_shadow_average_return_pct: Decimal | None
     rejected_shadow_average_return_pct: Decimal | None
@@ -189,6 +195,16 @@ class StrategyEntryBlockView(BaseModel):
     execution_block_reasons: list[str]
 
 
+class StrategyPaperPoolView(BaseModel):
+    configured: bool
+    enabled: bool
+    capital_limit: Decimal
+    currency: Literal["USD"] = "USD"
+    reserved_capital: Decimal
+    invested_capital: Decimal | None
+    remaining_capital: Decimal
+
+
 class StrategyOverviewResponse(BaseModel):
     as_of: datetime
     execution_enabled: bool
@@ -199,7 +215,30 @@ class StrategyOverviewResponse(BaseModel):
     )
     storage_policy: Literal["fired_signals_and_material_mutations_only"] = "fired_signals_and_material_mutations_only"
     entry_block: StrategyEntryBlockView
+    paper_pool: StrategyPaperPoolView
     strategies: list[StrategyOverview]
+
+
+class StrategyPaperPoolUpdateRequest(BaseModel):
+    enabled: bool
+    capital_limit: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def enabled_requires_capital(self) -> StrategyPaperPoolUpdateRequest:
+        if self.enabled and self.capital_limit <= 0:
+            raise ValueError("enabled paper pool requires positive capital")
+        return self
+
+
+class StrategyPnlHistoryPoint(BaseModel):
+    date: date
+    total_pnl: Decimal
+    strategy_pnl: dict[str, Decimal]
+
+
+class StrategyPnlHistoryResponse(BaseModel):
+    points: list[StrategyPnlHistoryPoint]
 
 
 class FiredSignal(BaseModel):
@@ -354,7 +393,7 @@ class KillDrillRequest(BaseModel):
 class KillDrillResponse(BaseModel):
     kill_drill_event_id: int
     drill_kind: str
-    passed: bool = True
+    passed: bool
 
 
 class StrategyLifecycleRequest(BaseModel):
@@ -506,7 +545,10 @@ _EXCLUSIONS_SQL = """
     GROUP BY strategy_id, strategy_version, reason_code
 """
 
-_LATEST_CORPUS_SQL = "SELECT MAX(bar_date) FROM research_price_daily"
+# The ingest transaction maintains this census on every series. Reading its
+# ~one-row-per-symbol metadata avoids a full scan of the multi-million-row bar
+# corpus on every Strategies page load.
+_LATEST_CORPUS_SQL = "SELECT MAX(last_bar) FROM research_price_series"
 
 
 @router.get("/overview", response_model=StrategyOverviewResponse)
@@ -547,6 +589,7 @@ def get_strategy_overview(
     pnl_by_strategy = load_owned_pnl(conn, versions=version_values)
     control_by_strategy = load_control_state(conn, versions=version_values)
     entry_block = load_entry_block_state(conn)
+    paper_pool = load_paper_pool(conn)
 
     results_by_strategy: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in result_rows:
@@ -706,6 +749,13 @@ def get_strategy_overview(
                 allocation_refusals=allocation_refusals,
             )
         )
+    reserved_total = sum((item.allocation.reserved_capital for item in strategies), Decimal("0"))
+    invested_values = [item.allocation.invested_capital for item in strategies]
+    invested_total = (
+        sum((value for value in invested_values if value is not None), Decimal("0"))
+        if all(value is not None for value in invested_values)
+        else None
+    )
     return StrategyOverviewResponse(
         as_of=datetime.now(tz=UTC),
         execution_enabled=entry_block.auto_trading_enabled,
@@ -717,6 +767,14 @@ def get_strategy_overview(
             global_kill_activated_at=entry_block.global_kill_activated_at,
             global_kill_activated_by=entry_block.global_kill_activated_by,
             execution_block_reasons=list(entry_block.execution_block_reasons),
+        ),
+        paper_pool=StrategyPaperPoolView(
+            configured=paper_pool.event_id is not None,
+            enabled=paper_pool.enabled,
+            capital_limit=paper_pool.capital_limit,
+            reserved_capital=reserved_total,
+            invested_capital=invested_total,
+            remaining_capital=max(paper_pool.capital_limit - reserved_total, Decimal("0")),
         ),
         strategies=strategies,
     )
@@ -775,6 +833,7 @@ _FIRED_SIGNALS_SQL = """
     LEFT JOIN entry_order eo ON eo.strategy_trade_id = t.strategy_trade_id
     WHERE s.verdict = 'fired'
       AND s.strategy_version = ANY(%(versions)s)
+      AND (%(strategy_id)s::text IS NULL OR s.strategy_id = %(strategy_id)s)
       AND (%(cursor)s::bigint IS NULL OR s.signal_id < %(cursor)s)
     ORDER BY s.signal_id DESC
     LIMIT %(limit)s
@@ -785,12 +844,16 @@ _FIRED_SIGNALS_SQL = """
 def get_fired_signals(
     cursor: int | None = Query(default=None, ge=1),
     limit: int = Query(default=50, ge=1, le=100),
+    strategy_id: str | None = Query(default=None, min_length=1, max_length=200),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> FiredSignalsResponse:
+    # Direct service/test callers do not receive FastAPI's default coercion.
+    selected_strategy = strategy_id if isinstance(strategy_id, str) else None
     params = {
         "versions": list(_current_versions().values()),
         "cursor": cursor,
         "limit": limit,
+        "strategy_id": selected_strategy,
         "outcome_version": OUTCOME_RULE_SET_VERSION,
         "input_version": QUARANTINE_RULE_SET_VERSION,
     }
@@ -799,6 +862,71 @@ def get_fired_signals(
         rows = list(cur.fetchall())
     items = [FiredSignal(**row) for row in rows]
     return FiredSignalsResponse(items=items, next_cursor=items[-1].signal_id if len(items) == limit else None)
+
+
+@router.get("/pnl-history", response_model=StrategyPnlHistoryResponse)
+def get_strategy_pnl_history(
+    days: int = Query(default=365, ge=30, le=1825),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyPnlHistoryResponse:
+    """Return a bounded, read-time cumulative curve from exact close events."""
+    rows = cast(
+        list[tuple[date, str, Decimal]],
+        conn.execute(
+            """
+        SELECT (event.executed_at AT TIME ZONE 'UTC')::date AS pnl_date,
+               signal.strategy_id,SUM(event.realized_pnl_usd) AS daily_pnl
+        FROM strategy_position_ownership ownership
+        JOIN strategy_trades trade ON trade.strategy_trade_id=ownership.strategy_trade_id
+        JOIN strategy_funding_decisions funding ON funding.funding_decision_id=trade.funding_decision_id
+        JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
+        JOIN trade_events event ON event.position_id=ownership.broker_position_id
+        WHERE event.event_kind='close' AND event.realized_pnl_usd IS NOT NULL
+          AND event.executed_at >= now() - make_interval(days => %s)
+          AND signal.strategy_version=ANY(%s)
+        GROUP BY pnl_date,signal.strategy_id
+        ORDER BY pnl_date,signal.strategy_id
+        """,
+            (days, list(_current_versions().values())),
+        ).fetchall(),
+    )
+    daily: dict[date, dict[str, Decimal]] = defaultdict(dict)
+    for pnl_date, strategy_id, value in rows:
+        daily[cast(date, pnl_date)][str(strategy_id)] = Decimal(str(value))
+    running: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    points: list[StrategyPnlHistoryPoint] = []
+    for pnl_date in sorted(daily):
+        for strategy_id, value in daily[pnl_date].items():
+            running[strategy_id] += value
+        points.append(
+            StrategyPnlHistoryPoint(
+                date=pnl_date,
+                total_pnl=sum(running.values(), Decimal("0")),
+                strategy_pnl=dict(running),
+            )
+        )
+    return StrategyPnlHistoryResponse(points=points)
+
+
+@router.put("/paper-pool", response_model=StrategyPaperPoolView)
+def update_strategy_paper_pool(
+    body: StrategyPaperPoolUpdateRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyPaperPoolView:
+    """Set the audited shared ceiling used only by demo strategy entries."""
+    try:
+        with conn.transaction():
+            configure_paper_pool(
+                conn,
+                enabled=body.enabled,
+                capital_limit=body.capital_limit,
+                changed_by=session.username,
+                reason=body.reason,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return get_strategy_overview(conn).paper_pool
 
 
 @router.put(
@@ -954,7 +1082,16 @@ def execute_live_kill_drill(
         )
     except StrategyControlError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return KillDrillResponse(kill_drill_event_id=event_id, drill_kind=drill_kind)
+    event = cast(
+        tuple[bool] | None,
+        conn.execute(
+            "SELECT passed FROM strategy_kill_drill_events WHERE kill_drill_event_id=%s",
+            (event_id,),
+        ).fetchone(),
+    )
+    if event is None:
+        raise HTTPException(status_code=500, detail="kill drill audit result unavailable")
+    return KillDrillResponse(kill_drill_event_id=event_id, drill_kind=drill_kind, passed=bool(event[0]))
 
 
 @router.post("/{strategy_id}/live-promotion-attempt", response_model=LivePromotionAttemptResponse)

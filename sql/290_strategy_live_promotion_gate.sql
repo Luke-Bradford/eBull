@@ -54,10 +54,9 @@ CREATE TABLE IF NOT EXISTS strategy_kill_drill_events (
         'reconciliation_backlog', 'drawdown'
     )),
     entry_block_observed    BOOLEAN NOT NULL,
-    risk_reduction_observed BOOLEAN NOT NULL,
     state_restored          BOOLEAN NOT NULL,
     passed                  BOOLEAN GENERATED ALWAYS AS (
-        entry_block_observed AND risk_reduction_observed AND state_restored
+        entry_block_observed AND state_restored
     ) STORED,
     run_by              TEXT NOT NULL CHECK (char_length(run_by) BETWEEN 1 AND 200),
     reason              TEXT NOT NULL CHECK (char_length(reason) BETWEEN 1 AND 1000),
@@ -90,6 +89,17 @@ CREATE TABLE IF NOT EXISTS strategy_live_gate_assessments (
 CREATE INDEX IF NOT EXISTS idx_strategy_live_gate_assessment_recent
     ON strategy_live_gate_assessments (live_gate_policy_id, assessed_at DESC);
 
+CREATE TABLE IF NOT EXISTS strategy_paper_pool_events (
+    strategy_paper_pool_event_id BIGSERIAL PRIMARY KEY,
+    enabled                      BOOLEAN NOT NULL,
+    capital_limit                NUMERIC(18,6) NOT NULL CHECK (capital_limit >= 0),
+    currency                     TEXT NOT NULL CHECK (currency = 'USD'),
+    changed_by                   TEXT NOT NULL CHECK (char_length(changed_by) BETWEEN 1 AND 200),
+    reason                       TEXT NOT NULL CHECK (char_length(reason) BETWEEN 1 AND 1000),
+    changed_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT strategy_paper_pool_enabled_has_capital CHECK (NOT enabled OR capital_limit > 0)
+);
+
 COMMENT ON TABLE strategy_live_gate_policies IS
     'Immutable, pre-paper live-promotion thresholds. No defaults: policy values '
     'are preregistered operator decisions, not universal market constants.';
@@ -101,3 +111,7 @@ COMMENT ON TABLE strategy_paper_deployment_risk_state IS
 COMMENT ON TABLE strategy_live_gate_assessments IS
     'One compact evidence snapshot per explicit operator promotion attempt. '
     'Periodic health reads do not write assessment rows.';
+
+COMMENT ON TABLE strategy_paper_pool_events IS
+    'Material operator revisions to the shared paper-only strategy capital '
+    'ceiling. The latest row is current state; no scheduler heartbeat writes.';

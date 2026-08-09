@@ -270,6 +270,11 @@ def test_authenticated_drill_endpoint_ends_any_request_read_transaction(
     _policy(conn)
     conn.commit()
     monkeypatch.setattr("app.api.strategies._current_versions", lambda: {_STRATEGY_ID: _VERSION})
+
+    class UnblockedState:
+        new_entries_blocked = False
+
+    monkeypatch.setattr("app.services.strategy_live_gate.load_entry_block_state", lambda _conn: UnblockedState())
     conn.execute("SELECT 1")
 
     response = execute_live_kill_drill(
@@ -280,8 +285,12 @@ def test_authenticated_drill_endpoint_ends_any_request_read_transaction(
         conn,
     )
 
-    assert response.passed
-    assert conn.execute("SELECT count(*) FROM strategy_kill_drill_events").fetchone() == (1,)
+    stored = conn.execute(
+        "SELECT passed FROM strategy_kill_drill_events WHERE kill_drill_event_id=%s",
+        (response.kill_drill_event_id,),
+    ).fetchone()
+    assert stored is not None
+    assert response.passed is stored[0] is False
 
 
 def test_missing_order_reconciliation_state_is_a_live_gate_breach(

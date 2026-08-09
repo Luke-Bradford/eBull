@@ -27,6 +27,10 @@ class StrategyAttribution:
     funded_entries: int = 0
     rejected_entries: int = 0
     resolved_entries: int = 0
+    winning_entries: int = 0
+    win_rate: Decimal | None = None
+    median_days_to_outcome: Decimal | None = None
+    signals_last_30_days: int = 0
     shadow_average_return_pct: Decimal | None = None
     funded_shadow_average_return_pct: Decimal | None = None
     rejected_shadow_average_return_pct: Decimal | None = None
@@ -109,6 +113,12 @@ _ATTRIBUTION_SQL = """
            COUNT(*) FILTER (WHERE fd.verdict = 'allocated') AS funded_entries,
            COUNT(*) FILTER (WHERE fd.verdict IS DISTINCT FROM 'allocated') AS rejected_entries,
            COUNT(*) FILTER (WHERE o.gross_return_pct IS NOT NULL) AS resolved_entries,
+           COUNT(*) FILTER (WHERE o.gross_return_pct > 0) AS winning_entries,
+           percentile_cont(0.5) WITHIN GROUP (
+               ORDER BY (o.exit_bar_date - s.fill_bar_date)
+           ) FILTER (WHERE o.gross_return_pct IS NOT NULL AND o.exit_bar_date IS NOT NULL)
+               AS median_days_to_outcome,
+           COUNT(*) FILTER (WHERE s.signal_bar_date >= CURRENT_DATE - 30) AS signals_last_30_days,
            AVG(o.gross_return_pct) AS shadow_average_return_pct,
            AVG(o.gross_return_pct) FILTER (WHERE fd.verdict = 'allocated')
                AS funded_shadow_average_return_pct,
@@ -167,13 +177,21 @@ def load_attribution(
         funded = int(row["funded_entries"])
         funded_shadow = row["funded_shadow_average_return_pct"]
         rejected_shadow = row["rejected_shadow_average_return_pct"]
+        resolved = int(row["resolved_entries"])
+        winners = int(row["winning_entries"])
         filled = int(row["filled_entries"])
         broker_rejected = int(row["broker_rejected_entries"])
         result[(str(row["strategy_id"]), str(row["strategy_version"]))] = StrategyAttribution(
             fired_entries=fired,
             funded_entries=funded,
             rejected_entries=int(row["rejected_entries"]),
-            resolved_entries=int(row["resolved_entries"]),
+            resolved_entries=resolved,
+            winning_entries=winners,
+            win_rate=Decimal(winners) / Decimal(resolved) if resolved else None,
+            median_days_to_outcome=(
+                Decimal(str(row["median_days_to_outcome"])) if row["median_days_to_outcome"] is not None else None
+            ),
+            signals_last_30_days=int(row["signals_last_30_days"]),
             shadow_average_return_pct=row["shadow_average_return_pct"],
             funded_shadow_average_return_pct=funded_shadow,
             rejected_shadow_average_return_pct=rejected_shadow,

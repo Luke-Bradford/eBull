@@ -94,9 +94,10 @@ per fired signal/order/material mutation ledgers. Its only new indexes support
 one policy lookup and latest drill/assessment history; none amplify market-data
 writes.
 
-Measured on PostgreSQL 17 after migration, all four empty relations plus their
-indexes total **80 KiB** (the three audit/policy relations are 24 KiB each; the
-per-deployment risk-state relation is 8 KiB). It adds one bounded current row per
+Measured on PostgreSQL 17 after migration, all five empty relations plus their
+indexes total **96 KiB** (the three live audit/policy relations are 24 KiB each,
+the per-deployment risk-state relation is 8 KiB and the shared paper-pool event
+ledger is 16 KiB). It adds one bounded current row per
 configured paper sleeve. This is fixed catalogue overhead; growth
 is driven only by human policy/drill/promotion actions, not the five-minute loop.
 

@@ -30,6 +30,7 @@ from app.services.result_ledger import store_holdout_result
 from app.services.strategy_control_plane import (
     configure_deployment,
     configure_execution_policy,
+    configure_paper_pool,
     create_strategy_trade,
     decide_funding,
     link_strategy_order,
@@ -51,6 +52,14 @@ _REQUEST_ID = UUID("1c94300c-90aa-4303-9d00-dec376d74efb")
 
 
 def _seed(conn: psycopg.Connection[Any], *, auto: bool = True) -> int:
+    if conn.execute("SELECT 1 FROM strategy_paper_pool_events LIMIT 1").fetchone() is None:
+        configure_paper_pool(
+            conn,
+            enabled=True,
+            capital_limit=Decimal("2000"),
+            changed_by="test",
+            reason="shared paper pool fixture",
+        )
     conn.execute(
         "INSERT INTO exchanges (exchange_id, country, asset_class) VALUES ('2', 'US', 'us_equity') "
         "ON CONFLICT (exchange_id) DO UPDATE SET asset_class='us_equity'"
@@ -319,6 +328,27 @@ def test_disabled_global_switch_keeps_an_unfunded_shadow_arm(
         "SELECT verdict, reason_code FROM strategy_funding_decisions WHERE signal_id=%s",
         (signal_id,),
     ).fetchone() == ("rejected", "auto_trading_disabled")
+
+
+def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("25"),
+        changed_by="operator",
+        reason="bounded shared pot",
+    )
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "submitted"
+    assert result.amount == Decimal("25.00")
 
 
 def test_undocumented_cost_units_refuse_before_any_order_exists(

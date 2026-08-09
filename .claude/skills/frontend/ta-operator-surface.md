@@ -150,3 +150,12 @@ the broker contract is unvalidated, show one page-level outcome banner:
 and gate mechanics in the detail/runbook rather than repeating them on every
 strategy card. A disabled live control must never look like an evidence-ready
 control awaiting only a click.
+
+The Strategies landing view is a money workspace: total automated P&L and its
+close-event history, shared paper capital working/reserved/available, then one
+summary row per strategy. A row answers win rate, average return, typical time
+to outcome, recent signal frequency and enabled state. Render evidence and
+audit internals only in a side drawer, and do not request its paginated signal
+ledger until that drawer opens.
+The overview freshness check must use the ingest-maintained series census, not
+aggregate the full research bar heap or justify a large page-only index.

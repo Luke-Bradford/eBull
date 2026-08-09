@@ -33,6 +33,7 @@ GOVERNANCE_GATE_VERSION = "strategy-governance-v1"
 # documented namespace; hashtext(strategy identity) supplies the per-version
 # key.  Do not reuse 2454 for an unrelated advisory lock.
 _ADVISORY_LOCK_NAMESPACE = 2454
+PAPER_ALLOCATOR_ADVISORY_LOCK = (2449, 1)
 
 _NEXT_STAGE: dict[Stage | None, frozenset[Stage]] = {
     None: frozenset({"research_candidate"}),
@@ -75,6 +76,59 @@ class Deployment:
     capital_limit: Decimal
     enabled: bool
     revision: int
+
+
+@dataclass(frozen=True)
+class PaperPool:
+    event_id: int | None
+    enabled: bool
+    capital_limit: Decimal
+    currency: str = "USD"
+
+
+def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
+    row = conn.execute(
+        """
+        SELECT strategy_paper_pool_event_id,enabled,capital_limit,currency
+        FROM strategy_paper_pool_events
+        ORDER BY strategy_paper_pool_event_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return PaperPool(None, False, Decimal("0"))
+    return PaperPool(int(row[0]), bool(row[1]), Decimal(str(row[2])), str(row[3]))
+
+
+def configure_paper_pool(
+    conn: psycopg.Connection[Any],
+    *,
+    enabled: bool,
+    capital_limit: Decimal,
+    changed_by: str,
+    reason: str,
+) -> PaperPool:
+    """Append one material shared paper-capital authority revision."""
+    _require_text(changed_by, "changed_by")
+    _require_text(reason, "reason")
+    if not capital_limit.is_finite() or capital_limit < 0 or (enabled and capital_limit <= 0):
+        raise StrategyControlError("enabled paper pool requires a positive finite USD capital limit")
+    # Conflict with the executor's session lock so a pause/lower cannot race an
+    # already-sized order between its authority read and demo broker submit.
+    conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
+    current = load_paper_pool(conn)
+    if current.enabled == enabled and current.capital_limit == capital_limit:
+        raise StrategyControlError("paper pool change must alter enabled state or capital limit")
+    row = conn.execute(
+        """
+        INSERT INTO strategy_paper_pool_events (enabled,capital_limit,currency,changed_by,reason)
+        VALUES (%s,%s,'USD',%s,%s)
+        RETURNING strategy_paper_pool_event_id
+        """,
+        (enabled, capital_limit, changed_by, reason),
+    ).fetchone()
+    assert row is not None
+    return PaperPool(int(row[0]), enabled, capital_limit)
 
 
 @dataclass(frozen=True)
@@ -732,6 +786,8 @@ __all__ = [
     "Deployment",
     "ExecutionPolicy",
     "GOVERNANCE_GATE_VERSION",
+    "PaperPool",
+    "PAPER_ALLOCATOR_ADVISORY_LOCK",
     "Promotion",
     "StrategyControlError",
     "StrategyOwnershipError",
@@ -739,11 +795,13 @@ __all__ = [
     "claim_exact_position",
     "configure_deployment",
     "configure_execution_policy",
+    "configure_paper_pool",
     "create_strategy_trade",
     "current_stage",
     "decide_funding",
     "is_risk_reducing_deployment_change",
     "link_strategy_order",
+    "load_paper_pool",
     "lock_strategy_control",
     "promote_strategy",
     "record_order_position_execution",

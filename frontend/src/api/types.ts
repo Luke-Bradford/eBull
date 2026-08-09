@@ -2470,6 +2470,10 @@ export interface StrategyAttribution {
   funded_entries: number;
   rejected_entries: number;
   resolved_entries: number;
+  winning_entries: number;
+  win_rate: string | null;
+  median_days_to_outcome: string | null;
+  signals_last_30_days: number;
   shadow_average_return_pct: string | null;
   funded_shadow_average_return_pct: string | null;
   rejected_shadow_average_return_pct: string | null;
@@ -2529,7 +2533,28 @@ export interface StrategyOverviewResponse {
   live_strategy_activation_blocker: "live_strategy_broker_contract_not_validated";
   storage_policy: "fired_signals_and_material_mutations_only";
   entry_block: StrategyEntryBlock;
+  paper_pool: StrategyPaperPool;
   strategies: StrategyOverview[];
+}
+
+export interface StrategyPaperPool {
+  configured: boolean;
+  enabled: boolean;
+  capital_limit: string;
+  currency: "USD";
+  reserved_capital: string;
+  invested_capital: string | null;
+  remaining_capital: string;
+}
+
+export interface StrategyPnlHistoryPoint {
+  date: string;
+  total_pnl: string;
+  strategy_pnl: Record<string, string>;
+}
+
+export interface StrategyPnlHistoryResponse {
+  points: StrategyPnlHistoryPoint[];
 }
 
 export interface FiredSignal {

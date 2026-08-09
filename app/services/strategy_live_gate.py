@@ -662,7 +662,6 @@ def run_kill_drill(
             (source, f"kill drill {drill_kind}: {reason}"),
         )
     entry_block_observed = False
-    risk_reduction_observed = True  # manager intentionally does not read entry blocks
     state_restored = False
     try:
         active_drill_row = conn.execute(
@@ -714,16 +713,14 @@ def run_kill_drill(
         event = conn.execute(
             """
             INSERT INTO strategy_kill_drill_events (
-                live_gate_policy_id,drill_kind,entry_block_observed,
-                risk_reduction_observed,state_restored,run_by,reason
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+                live_gate_policy_id,drill_kind,entry_block_observed,state_restored,run_by,reason
+            ) VALUES (%s,%s,%s,%s,%s,%s)
             RETURNING kill_drill_event_id
             """,
             (
                 policy.live_gate_policy_id,
                 drill_kind,
                 entry_block_observed,
-                risk_reduction_observed,
                 state_restored,
                 run_by,
                 reason,

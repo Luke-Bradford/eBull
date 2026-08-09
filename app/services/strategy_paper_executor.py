@@ -33,6 +33,7 @@ from app.providers.broker import (
 from app.services.market_calendar import us_market_status
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 from app.services.strategy_control_plane import (
+    PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
     create_strategy_trade,
     decide_funding,
@@ -46,7 +47,7 @@ from app.services.strategy_order_reconciliation import (
 _NY = ZoneInfo("America/New_York")
 _CENT = Decimal("0.01")
 _RECURRING_COSTS = frozenset({"overnightfee", "overweekendfee"})
-_ALLOCATOR_ADVISORY_LOCK = (2449, 1)
+_ALLOCATOR_ADVISORY_LOCK = PAPER_ALLOCATOR_ADVISORY_LOCK
 
 
 class StrategyPaperExecutionError(StrategyControlError):
@@ -72,6 +73,8 @@ class _Intent:
     symbol: str
     deployment_id: int
     deployment_limit: Decimal
+    pool_limit: Decimal
+    pool_reserved: Decimal
     policy_revision: int
     ticket_fraction: Decimal
     max_ticket_amount: Decimal
@@ -168,6 +171,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
             SELECT s.signal_id, s.strategy_id, s.strategy_version, s.instrument_id,
                    i.symbol, i.is_tradable, e.asset_class,
                    d.deployment_id, d.capital_limit, d.enabled, d.currency,
+                   pool.enabled AS pool_enabled, pool.capital_limit AS pool_limit,
                    p.revision AS policy_revision, p.*,
                    q.quoted_at, q.ask, q.spread_flag,
                    w.updated_at AS scan_at,
@@ -187,6 +191,13 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
                        WHERE fd.deployment_id = d.deployment_id AND fd.verdict = 'allocated'
                          AND (st.strategy_trade_id IS NULL OR st.status NOT IN ('closed', 'failed'))
                    ) AS reserved,
+                   (
+                       SELECT COALESCE(SUM(fd.amount), 0)
+                       FROM strategy_funding_decisions fd
+                       LEFT JOIN strategy_trades st ON st.funding_decision_id = fd.funding_decision_id
+                       WHERE fd.verdict = 'allocated'
+                         AND (st.strategy_trade_id IS NULL OR st.status NOT IN ('closed', 'failed'))
+                   ) AS pool_reserved,
                    evidence.result_count, evidence.qualified_result_count,
                    evidence.expectancy_ci_low_pct
             FROM strategy_signals s
@@ -196,6 +207,12 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
               ON d.strategy_id = s.strategy_id AND d.strategy_version = s.strategy_version
              AND d.mode = 'paper'
             LEFT JOIN strategy_execution_policies p ON p.deployment_id = d.deployment_id
+            LEFT JOIN LATERAL (
+                SELECT enabled,capital_limit
+                FROM strategy_paper_pool_events
+                ORDER BY strategy_paper_pool_event_id DESC
+                LIMIT 1
+            ) pool ON true
             LEFT JOIN quotes q ON q.instrument_id = s.instrument_id
             LEFT JOIN strategy_scan_watermark w
               ON w.strategy_id = s.strategy_id AND w.strategy_version = s.strategy_version
@@ -241,6 +258,8 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         (bool(row["is_tradable"]), "instrument_not_tradable"),
         (row["asset_class"] == "us_equity", "unsupported_market_session"),
         (row["deployment_id"] is not None, "paper_deployment_missing"),
+        (row["pool_limit"] is not None, "paper_pool_unconfigured"),
+        (bool(row["pool_enabled"]), "paper_pool_disabled"),
         (bool(row["enabled"]), "paper_deployment_disabled"),
         (row["currency"] == "USD", "deployment_currency_unsupported"),
         (row["policy_revision"] is not None, "execution_policy_missing"),
@@ -283,6 +302,8 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         symbol=str(row["symbol"]),
         deployment_id=int(row["deployment_id"]),
         deployment_limit=Decimal(str(row["capital_limit"])),
+        pool_limit=Decimal(str(row["pool_limit"])),
+        pool_reserved=Decimal(str(row["pool_reserved"])),
         policy_revision=int(row["policy_revision"]),
         ticket_fraction=Decimal(str(row["ticket_fraction"])),
         max_ticket_amount=Decimal(str(row["max_ticket_amount"])),
@@ -461,6 +482,7 @@ def _risk_and_amount(
     if drawdown > intent.max_drawdown_pct:
         return "account_drawdown_limit"
     deployment_remaining = max(Decimal("0"), intent.deployment_limit - intent.reserved)
+    pool_remaining = max(Decimal("0"), intent.pool_limit - intent.pool_reserved)
     portfolio_capacity = max(
         Decimal("0"),
         risk.equity * intent.max_portfolio_exposure_pct / Decimal("100") - risk.total_invested - pending_total,
@@ -473,6 +495,7 @@ def _risk_and_amount(
         intent.deployment_limit * intent.ticket_fraction,
         intent.max_ticket_amount,
         deployment_remaining,
+        pool_remaining,
         max(Decimal("0"), risk.available_cash - pending_total),
         portfolio_capacity,
         instrument_capacity,

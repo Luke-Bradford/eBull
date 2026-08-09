@@ -81,10 +81,26 @@ Global kill and reconciliation block state is visible in the picker and blocks
 new order entry in the executor. It does not erase the allocation audit and it
 does not remove exact-position risk reduction.
 
+The default operator view is a money workspace, not an evidence dump. It leads
+with total exact-owned strategy P&L and a read-time cumulative close-event line,
+then the shared paper-capital pot. Each strategy occupies one summary row with
+P&L, win rate, average shadow return, median time-to-outcome, trailing 30-day
+signal count and an individual next-run switch. Backtest windows and paginated
+signals live in a side drawer and are requested only when opened.
+
+The shared paper pot is an additional hard ceiling across every enabled
+strategy deployment. Under the existing allocator advisory lock, sizing takes
+the minimum of the shared remaining pot, per-strategy remaining ceiling,
+available cash and the existing portfolio/instrument risk limits. The master
+switch is paper-only and does not override the account kill switch, global
+automatic-trading flag, per-strategy evidence gate or live-activation refusal.
+
 ## Database and performance impact
 
-This slice adds **no table, column, payload or periodic writer**. It is a read
-model over bounded/existing ledgers:
+The read model adds no snapshot or periodic writer. Shared-pot authority uses
+one narrow `strategy_paper_pool_events` row per human revision; the latest row
+is current state and there is no heartbeat/current-state duplicate. Everything
+else reads bounded/existing ledgers:
 
 - fired signals and outcomes already retained by the observation policy;
 - one funding/preflight row per fired entry;
@@ -97,7 +113,10 @@ Repeated page refreshes and P&L changes write zero rows. There is therefore no
 new retention job or database-growth allowance. Existing keys/indexes cover the
 joins: unique funding decision per signal, trade-order indexes, unique broker
 position ownership, the partial trade-event open/close indexes, current quote
-PK and daily-price PK. A future material scale change must be demonstrated with
+PK and daily-price PK. Scan freshness reads the ingest-maintained
+`research_price_series.last_bar` census rather than aggregating the full
+`research_price_daily` bar heap; this avoids adding a large date-only index just
+for the page. A future material scale change must be demonstrated with
 `EXPLAIN (ANALYZE, BUFFERS)` before adding an aggregate snapshot table.
 
 Dev-DB measurement on 2026-08-09 (warm cache, exact current versions) was
