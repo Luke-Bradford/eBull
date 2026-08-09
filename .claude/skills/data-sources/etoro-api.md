@@ -423,3 +423,25 @@ Primary pages: `trading--demo/create-an-order`,
 Primary pages: `trading--demo/modify-stop-loss-and-take-profit-settings-on-an-open-position`,
 `trading--demo/close-demo-position-by-units`, and
 `trading--demo/get-close-order-information-and-closed-position-details`.
+
+## Strategy live-promotion boundary — VERIFIED 2026-08-09 (#2450)
+
+- Re-check `llms.txt` and the real create-order page before any live-strategy
+  change. The current portal exposes `POST /api/v2/trading/execution/orders`,
+  requires the unique request id, supports fixed SL/TP, and shares the 20/minute
+  order-write cap. Endpoint existence does not validate automated live use.
+- Keep live strategy activation refused while what-if costs return undocumented
+  `value`, the current strategy writer accepts demo credentials only, or no
+  current strategy version passes recent and untouched paper evidence.
+- Never let `enable_live_trading`, a generic stage transition, or a live
+  deployment select the real endpoint. Require the dedicated immutable policy,
+  complete report, five kill drills, explicit operator attempt and separately
+  validated live writer. Until then emit
+  `live_strategy_broker_contract_not_validated`.
+- Keep the recurring lifecycle demo-only and bounded per cycle: 20 uncertain
+  order lookups, five exact-owned positions and five new candidates. Update the
+  five keyed health blocks in place; do not persist broker health/cost polling
+  payloads or heartbeat rows.
+
+Primary page: `trading--real/create-an-order`. Operational contract:
+`docs/proposals/ta/2026-08-09-strategy-live-promotion-runbook.md`.

@@ -139,3 +139,14 @@ Walk the rendered page top to bottom. For **each section**, then **each figure i
 Record the pass as a table in the PR description: figure · gate result · action. A pass
 with no demotions is a pass that was not run — this surface accretes engineering detail by
 default, because the people building it can read it.
+
+## Live-activation state
+
+Render paper availability and real-money activation as separate facts. Read
+`live_strategy_activation_available` and its named blocker from the strategy
+overview; never infer strategy authority from the account-wide live flag. While
+the broker contract is unvalidated, show one page-level outcome banner:
+"Real-money strategy activation is unavailable." Keep cost vocabulary, drills
+and gate mechanics in the detail/runbook rather than repeating them on every
+strategy card. A disabled live control must never look like an evidence-ready
+control awaiting only a click.

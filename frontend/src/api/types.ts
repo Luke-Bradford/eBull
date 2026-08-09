@@ -2525,6 +2525,8 @@ export interface StrategyOverviewResponse {
   as_of: string;
   execution_enabled: boolean;
   live_execution_enabled: boolean;
+  live_strategy_activation_available: false;
+  live_strategy_activation_blocker: "live_strategy_broker_contract_not_validated";
   storage_policy: "fired_signals_and_material_mutations_only";
   entry_block: StrategyEntryBlock;
   strategies: StrategyOverview[];

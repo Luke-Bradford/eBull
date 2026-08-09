@@ -12,6 +12,8 @@ const OVERVIEW: StrategyOverviewResponse = {
   as_of: "2026-08-09T12:00:00Z",
   execution_enabled: false,
   live_execution_enabled: false,
+  live_strategy_activation_available: false,
+  live_strategy_activation_blocker: "live_strategy_broker_contract_not_validated",
   storage_policy: "fired_signals_and_material_mutations_only",
   entry_block: {
     new_entries_blocked: true,
@@ -151,6 +153,7 @@ describe("StrategiesPage", () => {
     expect(screen.getByText(/Backtest exclusion:/)).toBeInTheDocument();
     expect(screen.getByText("AAA")).toBeInTheDocument();
     expect(screen.getByText("New strategy entries are blocked")).toBeInTheDocument();
+    expect(screen.getByText("Real-money strategy activation is unavailable")).toBeInTheDocument();
     expect(screen.getByText("Not funded")).toBeInTheDocument();
     expect(screen.getByText("Not evaluated by allocator")).toBeInTheDocument();
   });

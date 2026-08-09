@@ -355,6 +355,16 @@ export function StrategiesPage() {
         <EntryBlockBanner state={displayedEntryBlock} stale={overview.data === null} />
       ) : null}
 
+      {overview.data && !overview.data.live_strategy_activation_available ? (
+        <div className="border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+          <div className="font-semibold">Real-money strategy activation is unavailable</div>
+          <div className="mt-1 text-xs">
+            Paper monitoring and execution can run, but the measured broker cost and live-order contract has not
+            passed validation. Enabling the global live switch cannot bypass this strategy gate.
+          </div>
+        </div>
+      ) : null}
+
       <Section title="Strategy picker" action="Exact current versions">
         {overview.loading ? <SectionSkeleton rows={8} /> : null}
         {overview.error ? <SectionError onRetry={overview.refetch} /> : null}

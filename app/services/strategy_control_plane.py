@@ -164,6 +164,8 @@ def promote_strategy(
     belong to this exact strategy version.  Global auto/live switches are not
     read here and therefore cannot create or advance a promotion.
     """
+    if to_stage == "live_enabled":
+        raise StrategyControlError("live_enabled requires the dedicated measured live-promotion gate")
     for value, field in (
         (strategy_id, "strategy_id"),
         (strategy_version, "strategy_version"),

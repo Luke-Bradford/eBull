@@ -1,0 +1,389 @@
+"""#2450 fail-closed live promotion and kill-drill integration tests."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import uuid4
+
+import psycopg
+import pytest
+
+from app.api.strategies import (
+    KillDrillRequest,
+    StrategyLifecycleRequest,
+    change_strategy_lifecycle,
+    execute_live_kill_drill,
+)
+from app.security.sessions import SessionRow
+from app.services.strategy_control_plane import (
+    StrategyControlError,
+    configure_deployment,
+    promote_strategy,
+)
+from app.services.strategy_live_gate import (
+    REQUIRED_KILL_DRILLS,
+    assess_live_gate,
+    record_live_promotion_attempt,
+    register_live_gate_policy,
+    run_kill_drill,
+)
+from tests.test_strategy_position_manager import _opened_trade
+
+pytestmark = pytest.mark.integration
+
+_STRATEGY_ID = "S-LIVE-GATE"
+_VERSION = "live-gate-v1"
+
+
+def _session() -> SessionRow:
+    now = datetime.now(UTC)
+    return SessionRow("live-gate-session", uuid4(), "operator", now + timedelta(hours=1), now)
+
+
+def _forward_stage(conn: psycopg.Connection[Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO strategy_promotions (
+            strategy_id,strategy_version,from_stage,to_stage,gate_version,
+            evidence_ref,promoted_by,reason,promoted_at
+        ) VALUES
+          (%s,%s,NULL,'research_candidate','test-v1',NULL,'test','registered',now()-interval '40 days'),
+          (%s,%s,'research_candidate','historical_validated','test-v1',
+           'hist','test','history',now()-interval '39 days'),
+          (%s,%s,'historical_validated','forward_observation','test-v1',
+           'forward','test','observe',now()-interval '38 days')
+        """,
+        (_STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION),
+    )
+
+
+def _policy(conn: psycopg.Connection[Any]) -> int:
+    policy = register_live_gate_policy(
+        conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        min_forward_resolved_signals=2,
+        min_forward_days=10,
+        min_paper_closed_trades=2,
+        min_paper_days=10,
+        max_reconciliation_age_seconds=60,
+        min_shadow_alpha_pct=Decimal("0"),
+        max_cost_drift_pct=Decimal("0.25"),
+        max_average_slippage_pct=Decimal("0.50"),
+        max_drawdown_pct=Decimal("5"),
+        max_scan_age_seconds=300,
+        max_quote_age_seconds=60,
+        max_broker_health_age_seconds=60,
+        max_live_capital=Decimal("250"),
+        registered_by="operator",
+        reason="preregister before paper",
+    )
+    return policy.live_gate_policy_id
+
+
+def test_generic_promotion_cannot_bypass_dedicated_live_gate(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    _forward_stage(ebull_test_conn)
+    promote_strategy(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        to_stage="paper_enabled",
+        promoted_by="operator",
+        reason="paper",
+        evidence_ref="paper:evidence",
+    )
+
+    with pytest.raises(StrategyControlError, match="dedicated measured"):
+        promote_strategy(
+            ebull_test_conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_VERSION,
+            to_stage="live_enabled",
+            promoted_by="operator",
+            reason="must not bypass",
+            evidence_ref="made-up",
+        )
+
+    assert ebull_test_conn.execute(
+        "SELECT count(*) FROM strategy_promotions WHERE to_stage='live_enabled'"
+    ).fetchone() == (0,)
+
+
+def test_policy_is_immutable_and_must_precede_paper_observation(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    _forward_stage(conn)
+    _policy(conn)
+    with pytest.raises(StrategyControlError, match="immutable"):
+        _policy(conn)
+    promote_strategy(
+        conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        to_stage="paper_enabled",
+        promoted_by="operator",
+        reason="begin untouched paper",
+        evidence_ref="paper:start",
+    )
+
+    with pytest.raises(StrategyControlError, match="forward_observation"):
+        _policy(conn)
+
+    assert conn.execute("SELECT count(*) FROM strategy_live_gate_policies").fetchone() == (1,)
+
+
+def test_report_names_every_missing_measured_prerequisite_and_live_writer_block(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    _forward_stage(conn)
+    _policy(conn)
+    promote_strategy(
+        conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        to_stage="paper_enabled",
+        promoted_by="operator",
+        reason="paper",
+        evidence_ref="paper:start",
+    )
+    conn.execute("INSERT INTO exchanges (exchange_id,country,asset_class) VALUES ('2450','US','us_equity')")
+    conn.execute(
+        "INSERT INTO instruments (instrument_id,symbol,company_name,exchange,currency,is_tradable) "
+        "VALUES (2450001,'UNGATED','Unresolved forward fixture','2450','USD',true)"
+    )
+    conn.execute(
+        """
+        INSERT INTO strategy_signals (
+          strategy_id,strategy_version,instrument_id,signal_bar_date,
+          signal_kind,verdict,fill_bar_date,fill_price,universe,
+          input_rule_set_versions,created_at
+        ) VALUES (%s,%s,2450001,current_date-20,'entry','fired',current_date-19,
+                  100,'survivor_only','{"indicator_series":"rules-v1"}'::jsonb,now()-interval '20 days')
+        """,
+        (_STRATEGY_ID, _VERSION),
+    )
+
+    report = assess_live_gate(
+        conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        requested_capital=Decimal("251"),
+        now=datetime.now(UTC),
+    )
+
+    assert not report.passed
+    assert {
+        "forward_sample_insufficient",
+        "paper_sample_insufficient",
+        "shadow_alpha_below_policy",
+        "reconciliation_slo_failed",
+        "kill_drills_incomplete",
+        "live_capital_exceeds_preregistered_cap",
+        "live_strategy_broker_contract_not_validated",
+    }.issubset(report.refusal_codes)
+    assert report.facts.forward_resolved_signals == 0
+    assert report.facts.paper_closed_trades == 0
+    assert report.facts.active_owned_instrument_count == 0
+    assert "quote_health_stale" not in report.refusal_codes
+    assessment_id = record_live_promotion_attempt(
+        conn,
+        report=report,
+        assessed_by="operator",
+        reason="record the measured refusal",
+    )
+    assert conn.execute(
+        """
+        SELECT passed,promotion_id,refusal_codes @> ARRAY['live_strategy_broker_contract_not_validated'],
+               char_length(evidence_sha256)
+        FROM strategy_live_gate_assessments
+        WHERE live_gate_assessment_id=%s
+        """,
+        (assessment_id,),
+    ).fetchone() == (False, None, True, 64)
+
+
+def test_each_kill_drill_commits_an_entry_block_then_restores_without_heartbeat_heap(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    _forward_stage(conn)
+    policy_id = _policy(conn)
+    conn.commit()
+
+    for drill_kind in REQUIRED_KILL_DRILLS:
+        event_id = run_kill_drill(
+            conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_VERSION,
+            drill_kind=drill_kind,
+            run_by="operator",
+            reason=f"exercise {drill_kind}",
+        )
+        assert event_id > 0
+
+    assert conn.execute(
+        "SELECT count(*),bool_and(passed) FROM strategy_kill_drill_events WHERE live_gate_policy_id=%s",
+        (policy_id,),
+    ).fetchone() == (len(REQUIRED_KILL_DRILLS), True)
+    assert conn.execute("SELECT count(*) FROM strategy_execution_blocks WHERE source LIKE 'drill:%'").fetchone() == (0,)
+
+
+def test_failed_kill_drill_assertion_still_restores_synthetic_source(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _forward_stage(conn)
+    _policy(conn)
+    conn.commit()
+
+    def fail_gate_read(_conn: psycopg.Connection[Any]) -> None:
+        raise RuntimeError("simulated assertion failure")
+
+    monkeypatch.setattr("app.services.strategy_live_gate.load_entry_block_state", fail_gate_read)
+    with pytest.raises(RuntimeError, match="simulated assertion failure"):
+        run_kill_drill(
+            conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_VERSION,
+            drill_kind="quote_lag",
+            run_by="operator",
+            reason="prove cleanup",
+        )
+
+    assert conn.execute("SELECT count(*) FROM strategy_execution_blocks WHERE source='drill:quote_lag'").fetchone() == (
+        0,
+    )
+    assert conn.execute("SELECT count(*) FROM strategy_kill_drill_events").fetchone() == (0,)
+
+
+def test_authenticated_drill_endpoint_ends_any_request_read_transaction(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _forward_stage(conn)
+    _policy(conn)
+    conn.commit()
+    monkeypatch.setattr("app.api.strategies._current_versions", lambda: {_STRATEGY_ID: _VERSION})
+    conn.execute("SELECT 1")
+
+    response = execute_live_kill_drill(
+        _STRATEGY_ID,
+        "quote_lag",
+        KillDrillRequest(strategy_version=_VERSION, reason="authenticated drill"),
+        _session(),
+        conn,
+    )
+
+    assert response.passed
+    assert conn.execute("SELECT count(*) FROM strategy_kill_drill_events").fetchone() == (1,)
+
+
+def test_missing_order_reconciliation_state_is_a_live_gate_breach(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _opened_trade(conn, monkeypatch)
+    conn.execute("DELETE FROM strategy_order_reconciliation_state")
+    conn.commit()
+
+    report = assess_live_gate(
+        conn,
+        strategy_id="S-ALLOC",
+        strategy_version="v1",
+        requested_capital=Decimal("1"),
+    )
+
+    assert report.facts.reconciliation_order_count == 1
+    assert report.facts.reconciliation_breach_count == 1
+
+
+def test_paper_duration_uses_observation_time_not_pre_2000_signal_bar(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    _forward_stage(conn)
+    _policy(conn)
+    conn.execute(
+        """
+        UPDATE strategy_promotions SET promoted_at=now()-interval '5 days'
+        WHERE strategy_id=%s AND to_stage='forward_observation'
+        """,
+        (_STRATEGY_ID,),
+    )
+    promote_strategy(
+        conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        to_stage="paper_enabled",
+        promoted_by="operator",
+        reason="paper now",
+        evidence_ref="paper:start",
+    )
+
+    report = assess_live_gate(
+        conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        requested_capital=Decimal("1"),
+        now=datetime.now(UTC) + timedelta(days=2),
+    )
+
+    assert report.facts.forward_days == 5
+    assert report.facts.paper_days == 2
+
+
+def test_pause_disables_allocations_and_retirement_is_separately_audited(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _forward_stage(conn)
+    promote_strategy(
+        conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        to_stage="paper_enabled",
+        promoted_by="operator",
+        reason="paper",
+        evidence_ref="paper:start",
+    )
+    deployment = configure_deployment(
+        conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        mode="paper",
+        capital_limit=Decimal("100"),
+        enabled=True,
+        changed_by="operator",
+        reason="paper sleeve",
+    )
+    conn.commit()
+    monkeypatch.setattr("app.api.strategies._current_versions", lambda: {_STRATEGY_ID: _VERSION})
+
+    paused = change_strategy_lifecycle(
+        _STRATEGY_ID,
+        StrategyLifecycleRequest(strategy_version=_VERSION, action="pause", reason="evidence drift"),
+        _session(),
+        conn,
+    )
+    retired = change_strategy_lifecycle(
+        _STRATEGY_ID,
+        StrategyLifecycleRequest(strategy_version=_VERSION, action="retire", reason="end strategy"),
+        _session(),
+        conn,
+    )
+
+    assert paused.stage == "paused"
+    assert retired.stage == "retired"
+    assert conn.execute(
+        "SELECT enabled,revision FROM strategy_deployments WHERE deployment_id=%s", (deployment.deployment_id,)
+    ).fetchone() == (False, 2)
+    assert conn.execute(
+        "SELECT to_stage FROM strategy_promotions WHERE strategy_id=%s ORDER BY promotion_id DESC LIMIT 2",
+        (_STRATEGY_ID,),
+    ).fetchall() == [("retired",), ("paused",)]

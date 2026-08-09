@@ -373,6 +373,8 @@ JOB_STRATEGY_SIGNAL_SCAN = "strategy_signal_scan"
 # #2448 — range-partition retention. Shares ``strategy_scan`` so a partition
 # cannot be dropped while the scanner is inserting into it.
 JOB_STRATEGY_OBSERVATION_RETENTION = "strategy_observation_retention"
+# #2450 — bounded demo execution/reconciliation/owned-position health loop.
+JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
 # expensive: half an hour is a scheduled job's workload. The reasons are
 # governance — criterion 5 requires a hold-out purpose a cron fire cannot
@@ -2011,6 +2013,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "Fired signals and daily counts are durable. Never issues a mass DELETE."
         ),
         cadence=Cadence.daily(hour=7, minute=5),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_PAPER_CYCLE,
+        display_name="Strategy paper lifecycle (#2450)",
+        source="strategy_execution",
+        description=(
+            "Every five minutes — demo-only reconciliation, current health "
+            "blocks, exact owned-position protection and at most five newest "
+            "eligible fired entries. Real credentials are refused; health "
+            "polling updates five bounded rows rather than appending heartbeats."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -4945,6 +4961,30 @@ def strategy_observation_retention() -> None:
             "strategy_observation_retention: dropped %d signal + %d intraday partitions",
             len(plan.signal_partitions),
             len(plan.intraday_partitions),
+        )
+
+
+def strategy_paper_cycle() -> None:
+    """Run the bounded demo strategy lifecycle; never select live credentials."""
+    from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.strategy_paper_runtime import run_strategy_paper_cycle
+
+    if settings.etoro_env != "demo":
+        _record_prereq_skip(JOB_STRATEGY_PAPER_CYCLE, "strategy paper lifecycle requires demo environment")
+        return
+    creds = _load_etoro_credentials(JOB_STRATEGY_PAPER_CYCLE)
+    if creds is None:
+        _record_prereq_skip(JOB_STRATEGY_PAPER_CYCLE, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_STRATEGY_PAPER_CYCLE) as tracker:
+        with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
+            with connect_job() as conn:
+                result = run_strategy_paper_cycle(conn, broker=broker)
+        tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
+        tracker.note = (
+            f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
+            f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks}"
         )
 
 

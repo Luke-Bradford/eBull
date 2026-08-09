@@ -10,6 +10,7 @@ from typing import Literal, cast
 import psycopg
 import psycopg.rows
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from psycopg.pq import TransactionStatus
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.auth import require_session, require_session_or_service_token
@@ -24,8 +25,18 @@ from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERS
 from app.services.strategy_control_plane import (
     StrategyControlError,
     configure_deployment,
+    current_stage,
     is_risk_reducing_deployment_change,
     lock_strategy_control,
+    promote_strategy,
+)
+from app.services.strategy_live_gate import (
+    REQUIRED_KILL_DRILLS,
+    LiveGateReport,
+    assess_live_gate,
+    record_live_promotion_attempt,
+    register_live_gate_policy,
+    run_kill_drill,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_monitoring import (
@@ -182,6 +193,10 @@ class StrategyOverviewResponse(BaseModel):
     as_of: datetime
     execution_enabled: bool
     live_execution_enabled: bool
+    live_strategy_activation_available: Literal[False] = False
+    live_strategy_activation_blocker: Literal["live_strategy_broker_contract_not_validated"] = (
+        "live_strategy_broker_contract_not_validated"
+    )
     storage_policy: Literal["fired_signals_and_material_mutations_only"] = "fired_signals_and_material_mutations_only"
     entry_block: StrategyEntryBlockView
     strategies: list[StrategyOverview]
@@ -239,6 +254,138 @@ class AllocationUpdateResponse(BaseModel):
     currency: str
     enabled: bool
     revision: int
+
+
+class LiveGatePolicyRequest(BaseModel):
+    strategy_version: str = Field(min_length=1, max_length=200)
+    min_forward_resolved_signals: int = Field(gt=0)
+    min_forward_days: int = Field(gt=0)
+    min_paper_closed_trades: int = Field(gt=0)
+    min_paper_days: int = Field(gt=0)
+    max_reconciliation_age_seconds: int = Field(gt=0)
+    min_shadow_alpha_pct: Decimal
+    max_cost_drift_pct: Decimal = Field(ge=0)
+    max_average_slippage_pct: Decimal = Field(ge=0)
+    max_drawdown_pct: Decimal = Field(gt=0, lt=100)
+    max_scan_age_seconds: int = Field(gt=0)
+    max_quote_age_seconds: int = Field(gt=0)
+    max_broker_health_age_seconds: int = Field(gt=0)
+    max_live_capital: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class LiveGatePolicyView(BaseModel):
+    live_gate_policy_id: int
+    strategy_id: str
+    strategy_version: str
+    min_forward_resolved_signals: int
+    min_forward_days: int
+    min_paper_closed_trades: int
+    min_paper_days: int
+    max_reconciliation_age_seconds: int
+    min_shadow_alpha_pct: Decimal
+    max_cost_drift_pct: Decimal
+    max_average_slippage_pct: Decimal
+    max_drawdown_pct: Decimal
+    max_scan_age_seconds: int
+    max_quote_age_seconds: int
+    max_broker_health_age_seconds: int
+    max_live_capital: Decimal
+    currency: str
+    leverage: int
+    registered_at: datetime
+
+
+class LiveGateFactsView(BaseModel):
+    stage: str | None
+    forward_resolved_signals: int
+    forward_days: int
+    paper_closed_trades: int
+    paper_days: int
+    funded_shadow_average_return_pct: Decimal | None
+    unfunded_shadow_average_return_pct: Decimal | None
+    shadow_alpha_pct: Decimal | None
+    average_slippage_pct: Decimal | None
+    cost_drift_pct: Decimal | None
+    max_observed_drawdown_pct: Decimal | None
+    reconciliation_order_count: int
+    reconciliation_breach_count: int
+    scan_age_seconds: Decimal | None
+    active_owned_instrument_count: int
+    oldest_owned_quote_age_seconds: Decimal | None
+    halt_feed_age_seconds: Decimal | None
+    broker_health_age_seconds: Decimal | None
+    broker_health_active_block: bool | None
+    paper_pnl_complete: bool
+    completed_kill_drills: list[str]
+    auto_trading_enabled: bool
+    live_trading_enabled: bool
+    global_kill_active: bool
+    active_execution_block_count: int
+
+
+class LiveGateResponse(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    requested_capital: Decimal
+    policy: LiveGatePolicyView | None
+    facts: LiveGateFactsView
+    required_kill_drills: list[str]
+    passed: bool
+    refusal_codes: list[str]
+
+
+class LivePromotionAttemptRequest(BaseModel):
+    strategy_version: str = Field(min_length=1, max_length=200)
+    requested_capital: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class LivePromotionAttemptResponse(BaseModel):
+    assessment_id: int
+    report: LiveGateResponse
+
+
+class KillDrillRequest(BaseModel):
+    strategy_version: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class KillDrillResponse(BaseModel):
+    kill_drill_event_id: int
+    drill_kind: str
+    passed: bool = True
+
+
+class StrategyLifecycleRequest(BaseModel):
+    strategy_version: str = Field(min_length=1, max_length=200)
+    action: Literal["pause", "retire"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class StrategyLifecycleResponse(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    stage: Literal["paused", "retired"]
+    promotion_id: int
+
+
+def _live_gate_view(report: LiveGateReport) -> LiveGateResponse:
+    return LiveGateResponse(
+        strategy_id=report.strategy_id,
+        strategy_version=report.strategy_version,
+        requested_capital=report.requested_capital,
+        policy=(LiveGatePolicyView(**report.policy.__dict__) if report.policy else None),
+        facts=LiveGateFactsView(
+            **{
+                **report.facts.__dict__,
+                "completed_kill_drills": list(report.facts.completed_kill_drills),
+            }
+        ),
+        required_kill_drills=list(REQUIRED_KILL_DRILLS),
+        passed=report.passed,
+        refusal_codes=list(report.refusal_codes),
+    )
 
 
 def _current_versions() -> dict[str, str]:
@@ -719,6 +866,202 @@ def update_strategy_allocation(
         currency=row.allocation.currency,
         enabled=deployment.enabled,
         revision=deployment.revision,
+    )
+
+
+def _require_current_strategy_version(strategy_id: str, strategy_version: str) -> None:
+    current_version = _current_versions().get(strategy_id)
+    if current_version is None:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    if strategy_version != current_version:
+        raise HTTPException(status_code=409, detail="strategy version changed; refresh required")
+
+
+@router.get("/{strategy_id}/live-gate", response_model=LiveGateResponse)
+def get_live_gate(
+    strategy_id: str,
+    requested_capital: Decimal = Query(default=Decimal("0"), ge=0),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> LiveGateResponse:
+    version = _current_versions().get(strategy_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    report = assess_live_gate(
+        conn,
+        strategy_id=strategy_id,
+        strategy_version=version,
+        requested_capital=requested_capital,
+    )
+    return _live_gate_view(report)
+
+
+@router.post("/{strategy_id}/live-gate/policy", response_model=LiveGatePolicyView, status_code=201)
+def create_live_gate_policy(
+    strategy_id: str,
+    body: LiveGatePolicyRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> LiveGatePolicyView:
+    _require_current_strategy_version(strategy_id, body.strategy_version)
+    try:
+        with conn.transaction():
+            policy = register_live_gate_policy(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=body.strategy_version,
+                min_forward_resolved_signals=body.min_forward_resolved_signals,
+                min_forward_days=body.min_forward_days,
+                min_paper_closed_trades=body.min_paper_closed_trades,
+                min_paper_days=body.min_paper_days,
+                max_reconciliation_age_seconds=body.max_reconciliation_age_seconds,
+                min_shadow_alpha_pct=body.min_shadow_alpha_pct,
+                max_cost_drift_pct=body.max_cost_drift_pct,
+                max_average_slippage_pct=body.max_average_slippage_pct,
+                max_drawdown_pct=body.max_drawdown_pct,
+                max_scan_age_seconds=body.max_scan_age_seconds,
+                max_quote_age_seconds=body.max_quote_age_seconds,
+                max_broker_health_age_seconds=body.max_broker_health_age_seconds,
+                max_live_capital=body.max_live_capital,
+                registered_by=session.username,
+                reason=body.reason,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return LiveGatePolicyView(**policy.__dict__)
+
+
+@router.post("/{strategy_id}/live-gate/drills/{drill_kind}", response_model=KillDrillResponse)
+def execute_live_kill_drill(
+    strategy_id: str,
+    drill_kind: Literal["quote_lag", "scan_lag", "broker_outage", "reconciliation_backlog", "drawdown"],
+    body: KillDrillRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> KillDrillResponse:
+    _require_current_strategy_version(strategy_id, body.strategy_version)
+    # The drill commits a synthetic block so concurrent workers can observe it.
+    # End any dependency/read transaction before handing it the connection.
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.rollback()
+    try:
+        event_id = run_kill_drill(
+            conn,
+            strategy_id=strategy_id,
+            strategy_version=body.strategy_version,
+            drill_kind=drill_kind,
+            run_by=session.username,
+            reason=body.reason,
+        )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return KillDrillResponse(kill_drill_event_id=event_id, drill_kind=drill_kind)
+
+
+@router.post("/{strategy_id}/live-promotion-attempt", response_model=LivePromotionAttemptResponse)
+def attempt_live_promotion(
+    strategy_id: str,
+    body: LivePromotionAttemptRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> LivePromotionAttemptResponse:
+    """Audit an explicit live request; real execution remains fail-closed."""
+    _require_current_strategy_version(strategy_id, body.strategy_version)
+    report = assess_live_gate(
+        conn,
+        strategy_id=strategy_id,
+        strategy_version=body.strategy_version,
+        requested_capital=body.requested_capital,
+    )
+    try:
+        with conn.transaction():
+            assessment_id = record_live_promotion_attempt(
+                conn,
+                report=report,
+                assessed_by=session.username,
+                reason=body.reason,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return LivePromotionAttemptResponse(assessment_id=assessment_id, report=_live_gate_view(report))
+
+
+@router.post("/{strategy_id}/lifecycle", response_model=StrategyLifecycleResponse)
+def change_strategy_lifecycle(
+    strategy_id: str,
+    body: StrategyLifecycleRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyLifecycleResponse:
+    """Pause new entries or permanently retire an already-paused version."""
+    _require_current_strategy_version(strategy_id, body.strategy_version)
+    target: Literal["paused", "retired"] = "paused" if body.action == "pause" else "retired"
+    try:
+        with conn.transaction():
+            lock_strategy_control(conn, strategy_id, body.strategy_version)
+            stage = current_stage(conn, strategy_id, body.strategy_version)
+            if target == "paused" and stage not in {
+                "research_candidate",
+                "historical_validated",
+                "forward_observation",
+                "paper_enabled",
+                "live_enabled",
+            }:
+                raise StrategyControlError(f"strategy cannot be paused from stage {stage!r}")
+            if target == "retired":
+                if stage != "paused":
+                    raise StrategyControlError("strategy must be paused before retirement")
+                active = conn.execute(
+                    """
+                    SELECT 1
+                    FROM strategy_position_ownership own
+                    JOIN strategy_trades t ON t.strategy_trade_id=own.strategy_trade_id
+                    JOIN strategy_funding_decisions fd ON fd.funding_decision_id=t.funding_decision_id
+                    JOIN strategy_deployments d ON d.deployment_id=fd.deployment_id
+                    WHERE d.strategy_id=%s AND d.strategy_version=%s AND own.status='active'
+                    LIMIT 1
+                    """,
+                    (strategy_id, body.strategy_version),
+                ).fetchone()
+                if active is not None:
+                    raise StrategyControlError("owned positions must be closed before retirement")
+            deployments = conn.execute(
+                """
+                SELECT mode,capital_limit,currency,enabled
+                FROM strategy_deployments
+                WHERE strategy_id=%s AND strategy_version=%s
+                ORDER BY mode
+                """,
+                (strategy_id, body.strategy_version),
+            ).fetchall()
+            for deployment_row in deployments:
+                mode, capital, currency, enabled = cast(tuple[object, object, object, object], deployment_row)
+                if enabled:
+                    configure_deployment(
+                        conn,
+                        strategy_id=strategy_id,
+                        strategy_version=body.strategy_version,
+                        mode=cast(Literal["paper", "live"], mode),
+                        capital_limit=Decimal(str(capital)),
+                        currency=str(currency),
+                        enabled=False,
+                        changed_by=session.username,
+                        reason=f"{body.action}: {body.reason}",
+                    )
+            promotion = promote_strategy(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=body.strategy_version,
+                to_stage=target,
+                promoted_by=session.username,
+                reason=body.reason,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return StrategyLifecycleResponse(
+        strategy_id=strategy_id,
+        strategy_version=body.strategy_version,
+        stage=target,
+        promotion_id=promotion.promotion_id,
     )
 
 

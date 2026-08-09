@@ -1,7 +1,7 @@
 # Strategy automation control plane — ownership, allocation and monitoring
 
 Date: 2026-08-09
-Status: Slices 1–4 implemented through bounded read-only monitoring; no strategy orders enabled
+Status: Slices 1–10 implemented; bounded demo paper loop available, real-money strategy activation evidence-blocked
 Parent: #2437
 Companion: `2026-08-09-evidence-backed-signal-engine.md`
 
@@ -72,18 +72,16 @@ refusals. S-4 remains explicitly excluded because its level-based entry has no
 outcome at the pinned version pair. These results validate the storage and
 monitoring path; they do not validate a winning strategy.
 
-Not present and therefore blocking paper/live strategy execution:
+The original execution gaps below are now implemented for the demo paper
+lifecycle: explicit allocation and policies, crash-safe reconciliation, exact
+ownership, owned-position management, strategy-only P&L, health blocks and the
+recurring bounded scheduler. The remaining blockers are deliberately narrower:
 
-- no capital allocation/deployment record for a strategy version;
-- no durable link from a fired signal through a local order to the exact broker
-  `positionId`;
-- no pending/submitted-order reconciler despite the durable `submitted` state;
-- no strategy-owned position manager or SL/TP modification client;
-- no strategy-only realised/unrealised P&L view;
-- the existing recommendation EXIT path chooses the oldest broker position for
-  an instrument. It is unsafe for a strategy because that position can be manual;
-- `positions.source='ebull'` means only "opened through this app". A manual UI
-  order and a future automated strategy order are indistinguishable;
+- no registered strategy version currently passes the recent evidence and
+  paper-observation requirements;
+- the measured eToro cost response is not execution-usable, because it supplies
+  undocumented `value` rather than current documented monetary `amount`;
+- a live strategy writer has therefore not been validated or made selectable;
 - the historical outcome resolver is long-only. Short research may use the new
   preflight to measure feasibility, but short execution remains blocked until
   labels, returns, costs, guards and position accounting are side-aware.
@@ -336,8 +334,7 @@ hypotheses use bounded registered trials, not combinatorial enumeration.
 
 ## Ordered implementation slices
 
-These are the ticket bodies; issue numbers are deliberately absent until issues
-are actually created.
+These are the implemented #2437 child-ticket slices.
 
 1. **Current v2 preflight adapters — implemented:** strict eligibility and
    what-if types, bounded request validation, raw response retention in memory,
@@ -413,9 +410,18 @@ are actually created.
    be disabled/reduced. The read model adds no schema or periodic P&L writer.
    Formula, storage and test register:
    `2026-08-09-strategy-paper-pnl-allocation.md`.
-10. **Live promotion:** requires minimum forward/paper evidence, reconciliation
-    SLOs, kill drills and an explicit operator action in addition to both global
-    switches.
+10. **Live promotion control — implemented, activation blocked by evidence:**
+    one immutable policy is preregistered before paper observation. A read-only
+    report measures forward/paper sample and duration, shadow-control alpha,
+    actual-vs-stressed cost drift, slippage, drawdown, reconciliation, source
+    freshness and all five kill drills. An explicit operator attempt stores one
+    compact evidence hash/refusal record. Generic promotion cannot bypass this
+    path; the strategy page states that real-money activation is unavailable.
+    Pause disables paper/live allocations and retirement requires a prior pause
+    plus zero active owned positions. The five-minute demo loop is bounded to 20
+    uncertain orders, five owned positions and five new signals. Live remains
+    unreachable until the broker cost and order contract is separately measured
+    and validated. See `2026-08-09-strategy-live-promotion-runbook.md`.
 
 ## Acceptance tests before paper trading
 

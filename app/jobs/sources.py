@@ -93,6 +93,7 @@ Lane = Literal[
     "fair_value_band",
     "price_quarantine",
     "strategy_scan",
+    "strategy_execution",
     "strategy_backtest",
     "bootstrap",
     "finra",

@@ -397,6 +397,12 @@ def test_exact_close_remains_available_under_kill_switch_and_reconciles(
     conn = ebull_test_conn
     trade_id, _, broker, manual = _opened_trade(conn, monkeypatch)
     conn.execute("UPDATE kill_switch SET is_active=true WHERE id=true")
+    conn.execute(
+        """
+        INSERT INTO strategy_execution_blocks (source,active,reason,blocked_at,cleared_at)
+        VALUES ('drawdown',true,'simulated live kill drill',now(),NULL)
+        """
+    )
     conn.commit()
 
     submitted = manage_owned_position(

@@ -199,6 +199,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # current operator decision.
     "strategy_promotions",
     "strategy_deployments",
+    # #2450 — immutable preregistered live threshold root. Drill and
+    # assessment children are discovered through their FKs.
+    "strategy_live_gate_policies",
     # #2451 — bounded current kill state has no FK by design.
     "strategy_execution_blocks",
     # #2448/#2449 — bounded strategy current-state roots have no FKs. Their
