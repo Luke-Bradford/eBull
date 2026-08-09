@@ -38,14 +38,19 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
   configs with SL/TP limits. What-if accepts `buy` or `sellShort` opens and
   returns an OPEN vocabulary of named cost rows (documented examples include
   markup, market spread, transaction fee, overnight, weekend and tax) plus
-  `lastUpdated`. **Observed demo 2026-08-09: live rows used `value` and omitted
-  the documented `amount`; the unit/scale of `value` is not established, and
-  `lastUpdated` can be stale even on an HTTP-success response.** Preserve both
-  fields and the timestamp, and fail any future execution gate until the unit,
-  completeness and freshness contract is empirically proved. Never coerce a
-  missing field to zero. Thin, non-persisting adapters are wired in
-  `EtoroBrokerProvider`; a broader authenticated demo population probe is still
-  required before a storage schema or execution gate is promoted.
+  `lastUpdated`. **Measured demo 2026-08-09:** `etoro-preflight-v2` resolved a
+  deterministic four-Stock/four-ETF cohort but refused one locally tradable
+  name. Twenty complete 1x/10x long-real and x1 short-CFD requests across seven
+  permitted instruments all used `value` and omitted documented `amount`;
+  18/20 timestamps were about 41 hours old, 2/20 current. Scaling relationships
+  varied by component (proportional, invariant, rounded/other, zero-only), so
+  scale does not prove a unit. **Zero of 20 responses were execution-usable.**
+  Preserve both fields and the timestamp; fail execution until the provider
+  documents `value` or starts returning current documented monetary `amount`.
+  Never coerce a missing field to zero. Thin, non-persisting adapters and the
+  bounded census are wired in `EtoroBrokerProvider` and
+  `scripts/verify_2437_trading_preflight.py`; no recurring cost writer is
+  justified by this evidence.
 - **Order-to-position reconciliation exists in v2:**
   `GET /api/v2/trading/info/{demo|real}/orders:lookup` returns
   `positionExecutions[].positionId`. This is the durable way to bind a submitted

@@ -350,11 +350,18 @@ the required contract.
 The work must land as independent, reviewable slices. Later slices are blocked
 until the previous measurement is recorded:
 
-1. **Capability spike:** typed demo eligibility + what-if-cost adapters are now
-   implemented and unit-tested. A four-instrument authenticated census proved
-   response drift, stale costs and a local-tradability mismatch; broader
-   population coverage and cost-unit proof remain. No migration and no recurring
-   writer until those measurements are recorded.
+1. **Capability spike — complete, cost use blocked:** typed demo eligibility +
+   what-if-cost adapters are implemented and unit-tested. The versioned
+   `etoro-preflight-v2` census selected four stocks and four ETFs at deterministic
+   liquidity quantiles. All eight resolved; one locally tradable name was
+   refused. Twenty bounded 1x/10x long-real and x1 short-CFD requests sampled
+   seven permitted names: all returned USD-labelled `value`, none documented
+   `amount`; 18/20 timestamps were about 41 hours old and 2/20 current. Scaling
+   was not one equation across components. Consequently 0/20 responses are
+   execution-usable. No migration or recurring writer is justified by this
+   endpoint. Reproduce with `PYTHONPATH=. uv run python
+   scripts/verify_2437_trading_preflight.py --apply --limit 8
+   --max-cost-requests 20` in demo.
 2. **Storage benchmark:** representative temporary-table load, actual bytes/row,
    insert throughput, index/query plan and retention-partition drop timing.
 3. **Eligibility observations:** state-change-only writer and latest view.
@@ -373,10 +380,13 @@ they already exist; create them from this slice order before implementation.
 
 ## Features to add before paper trading
 
-1. **Eligibility/cost endpoint spike** — endpoint schemas and thin calls are
-   implemented with full raw payload retention in memory. Next measure a bounded
-   demo cohort: field presence, direction/settlement arms, unknown cost types,
-   response size and state-change frequency before designing tables.
+1. **Eligibility/cost endpoint spike — measured:** endpoint schemas and thin
+   calls retain raw payloads in memory. The deterministic bounded demo census
+   records field presence, direction/settlement arms, cost vocabulary, canonical
+   parsed-response bytes, exact scaling relationships and timestamp age. It
+   proves current cost results are not safe to persist as normalised monetary
+   costs or consume in execution; eligibility may later be stored as compact
+   state changes, but recurring cost polling remains unjustified.
 2. **Instrument eligibility observations** — preserve eToro's current open,
    tradable, buy-enabled and delisted fields with `observed_at`; add SELL-specific
    state only if the eligibility probe proves it exists.
