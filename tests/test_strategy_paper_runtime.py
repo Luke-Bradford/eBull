@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import psycopg
 import pytest
+from psycopg.pq import TransactionStatus
 
 from app.services.strategy_live_gate import assess_live_gate
 from app.services.strategy_paper_runtime import refresh_strategy_health, run_strategy_paper_cycle
@@ -74,6 +75,25 @@ def test_broker_outage_and_drawdown_unknown_block_entries_without_row_growth(
     conn.commit()
     assert refresh_strategy_health(conn, broker=broker, now=_NOW) == 0
     assert conn.execute("SELECT count(*) FROM strategy_execution_blocks WHERE active").fetchone() == (0,)
+
+
+def test_health_refresh_ends_read_transaction_before_broker_call(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    broker = _broker()
+    snapshot = broker.get_account_risk_snapshot.return_value
+
+    def observe_broker_call() -> object:
+        assert conn.info.transaction_status == TransactionStatus.IDLE
+        return snapshot
+
+    broker.get_account_risk_snapshot.side_effect = observe_broker_call
+
+    refresh_strategy_health(conn, broker=broker, now=_NOW)
+
+    assert conn.info.transaction_status == TransactionStatus.IDLE
 
 
 def test_cycle_does_not_fund_a_signal_created_before_paper_promotion(

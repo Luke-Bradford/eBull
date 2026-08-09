@@ -132,34 +132,40 @@ def refresh_strategy_health(
         quotes = cur.fetchone()
         assert quotes is not None
 
+    # End the read transaction before the broker network round-trip. Risk state
+    # is read afresh afterwards in the transaction that persists the decision.
+    conn.rollback()
+
     risk = None
-    high_water = Decimal("0")
-    drawdown = Decimal("100")
     try:
         risk = broker.get_account_risk_snapshot()
         broker_active = risk.observed_at < observed_at - timedelta(seconds=int(policy["quote_age"]))
         broker_reason = "broker account-risk snapshot stale" if broker_active else "broker account-risk probe healthy"
-        drawdown_row = conn.execute(
-            "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id=true"
-        ).fetchone()
-        high_water = max(Decimal(str(drawdown_row[0])) if drawdown_row else risk.equity, risk.equity)
-        drawdown = (high_water - risk.equity) / high_water * Decimal("100") if high_water > 0 else Decimal("100")
-        drawdown_active = drawdown > Decimal(str(policy["drawdown_limit"]))
-        drawdown_reason = (
-            f"account drawdown {drawdown}% exceeds configured paper limit"
-            if drawdown_active
-            else "account drawdown is within configured paper limit"
-        )
     except Exception:
         logger.warning("strategy broker account-risk probe unavailable", exc_info=True)
         broker_active = True
         broker_reason = "broker account-risk probe unavailable"
-        drawdown_active = True
-        drawdown_reason = "drawdown unavailable because broker risk is unavailable"
 
     scan_active = int(scan["stale"]) > 0
     quote_active = int(quotes["stale"]) > 0
+    high_water = Decimal("0")
+    drawdown = Decimal("100")
     with conn.transaction():
+        if risk is None:
+            drawdown_active = True
+            drawdown_reason = "drawdown unavailable because broker risk is unavailable"
+        else:
+            drawdown_row = conn.execute(
+                "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id=true"
+            ).fetchone()
+            high_water = max(Decimal(str(drawdown_row[0])) if drawdown_row else risk.equity, risk.equity)
+            drawdown = (high_water - risk.equity) / high_water * Decimal("100") if high_water > 0 else Decimal("100")
+            drawdown_active = drawdown > Decimal(str(policy["drawdown_limit"]))
+            drawdown_reason = (
+                f"account drawdown {drawdown}% exceeds configured paper limit"
+                if drawdown_active
+                else "account drawdown is within configured paper limit"
+            )
         if risk is not None and not broker_active:
             conn.execute(
                 """
