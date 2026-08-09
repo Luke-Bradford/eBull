@@ -600,6 +600,68 @@ observed spreads over time replaces a calibration with a measurement.**
    receive**, and that our own asset — SEC filings at depth — is a different
    game with a different mechanism (§3.1).
 
+## 2.10c Trailing stops — the evidence is SPLIT, and the split is usable
+
+Asked whether a stop should ratchet up as price clears resistance. The evidence
+divides cleanly and the dividing line tells us where to apply it.
+
+**FOR — and specifically for momentum:**
+
+- **Han, Zhou & Zhu (2014)** — stop-loss enhanced momentum strategies show a
+  **67% reduction in maximum drawdown and a 94% improvement in Sharpe ratio.**
+- ETFs 2001-2021 — thresholds of **1.0 to 1.5 standard deviations** give
+  significantly higher excess returns, positive **even after transaction costs**.
+- Stop-loss rules raise returns on stocks with **lottery features** (sporadic big
+  gains, frequent small losses) — cut the frequent small losses, keep the tail.
+
+**AGAINST — for broad holding:**
+
+- US stocks **1926-2016**: trailing-stop portfolios show lower total risk but
+  ⚠ **lower returns AND lower Sharpe** than the benchmark. The stop cuts the
+  compounding path.
+
+> **The rule that falls out: stops belong on MOMENTUM and lottery-shaped
+> positions, not on a broad hold.** Applied indiscriminately they are a tax on
+> compounding; applied to momentum they are the medicine for its known disease.
+
+⚠⚠ **And that disease is one we already measured.** Daniel & Moskowitz (§2.8b)
+show momentum's tail risk is concentrated in forecastable panic states — 28 of
+357 months on our own SPY series, clustered on 2001-03 and 2008-10. **Han/Zhou/Zhu
+and Daniel/Moskowitz are two treatments for the same illness**: scale down on the
+risk forecast, and stop out when it happens anyway.
+
+### ⚠⚠ Ratcheting on RESISTANCE specifically — and why the obvious design is wrong
+
+**I found no evidence for ratcheting a stop on structural levels.** The evidenced
+form is **volatility-based** (σ or ATR multiples, ~1.0-1.5σ). Structure-based
+ratcheting is practitioner convention, untested in the literature this sweep
+reached.
+
+⚠⚠ **Worse than untested — Osler (§2.12) gives a positive reason to AVOID the
+obvious placement.** Her order-book data shows **stop-loss orders cluster just
+beyond round numbers and support levels**, and that clustering is *what produces
+the rapid move once a level breaks*.
+
+> **So putting your stop just under the obvious support puts it inside the
+> cluster that gets run.** The level is where the liquidity hunt happens. If
+> structure informs the stop at all, it should be an OFFSET from the level — far
+> enough back to sit outside the cluster — and the offset should be measured in
+> ATR, which is the one quantity we can forecast.
+
+**Design that follows from the evidence:**
+
+| element | rule | source |
+| --- | --- | --- |
+| initial stop | `entry - m * ATR14`, m ~ 1.0-1.5σ-equivalent | ETF study threshold range |
+| trail | ratchet UP only, never down, on a volatility distance | Han/Zhou/Zhu |
+| structure | use levels to *offset* the stop away from the cluster, not to place it at one | ⚠ Osler, inverted |
+| when to apply | momentum and lottery-shaped names only | the 1926-2016 result |
+| when NOT to | a broad long-term hold | same |
+
+⚠ Still to be measured on our data before shipping: **the m that is right for our
+universe**, and whether the ratchet earns its turnover after our cost model. The
+literature gives a range, not our number.
+
 ## 2.11a ⚠⚠ Is our one surviving finding just the bid-ask bounce? — INCONCLUSIVE
 
 After clustering, short-horizon reversal is the **only** part of the term
