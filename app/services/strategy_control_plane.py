@@ -323,10 +323,12 @@ def decide_funding(
             raise StrategyControlError("capital may only be allocated to an entry signal")
         if deployment_id is None or amount is None or amount <= 0:
             raise StrategyControlError("allocated verdict requires deployment_id and positive amount")
+        _lock_strategy(conn, str(signal[0]), str(signal[1]))
         deployment = conn.execute(
             """
             SELECT strategy_id, strategy_version, mode, capital_limit, enabled
             FROM strategy_deployments WHERE deployment_id = %s
+            FOR UPDATE
             """,
             (deployment_id,),
         ).fetchone()
@@ -334,7 +336,32 @@ def decide_funding(
             raise StrategyControlError("allocation requires an enabled deployment")
         if (deployment[0], deployment[1]) != (signal[0], signal[1]):
             raise StrategyControlError("signal and deployment strategy versions do not match")
-        if amount > Decimal(str(deployment[3])):
+        stage = current_stage(conn, str(signal[0]), str(signal[1]))
+        mode = cast(Mode, deployment[2])
+        eligible: dict[Mode, frozenset[Stage]] = {
+            "paper": frozenset({"paper_enabled", "live_enabled"}),
+            "live": frozenset({"live_enabled"}),
+        }
+        if stage not in eligible[mode]:
+            raise StrategyControlError(f"{mode} funding cannot be allocated at strategy stage {stage!r}")
+
+        # The deployment lock serialises the reservation read with concurrent
+        # decisions. Decisions with no trade are pending; reconciliations stay
+        # reserved. Closed/failed trades release their allocation capacity.
+        reserved_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(d.amount), 0)
+            FROM strategy_funding_decisions d
+            LEFT JOIN strategy_trades t
+              ON t.funding_decision_id = d.funding_decision_id
+            WHERE d.deployment_id = %s AND d.verdict = 'allocated'
+              AND (t.strategy_trade_id IS NULL OR t.status NOT IN ('closed', 'failed'))
+            """,
+            (deployment_id,),
+        ).fetchone()
+        assert reserved_row is not None
+        reserved = Decimal(str(reserved_row[0]))
+        if reserved + amount > Decimal(str(deployment[3])):
             raise StrategyControlError("allocation exceeds the deployment capital_limit")
     elif deployment_id is not None or amount is not None:
         raise StrategyControlError("rejected verdict cannot reserve deployment capital")

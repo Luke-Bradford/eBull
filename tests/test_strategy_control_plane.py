@@ -212,8 +212,10 @@ def test_same_instrument_manual_position_is_never_inferred_as_owned(
 
     manual_position_id = 900001
     strategy_position_id = 900002
+    second_strategy_position_id = 900003
     _position(conn, manual_position_id, instrument_id)
     _position(conn, strategy_position_id, instrument_id)
+    _position(conn, second_strategy_position_id, instrument_id)
     entry_order = _order(conn, instrument_id=instrument_id)
     link_strategy_order(conn, strategy_trade_id=trade_id, order_id=entry_order, purpose="entry")
     claim_exact_position(
@@ -222,8 +224,21 @@ def test_same_instrument_manual_position_is_never_inferred_as_owned(
         entry_order_id=entry_order,
         broker_position_id=strategy_position_id,
     )
+    # One entry order may produce several positionExecutions. Each exact id is
+    # owned independently while the same-instrument manual id remains outside.
+    claim_exact_position(
+        conn,
+        strategy_trade_id=trade_id,
+        entry_order_id=entry_order,
+        broker_position_id=second_strategy_position_id,
+    )
 
     assert_exact_position_owned(conn, strategy_trade_id=trade_id, broker_position_id=strategy_position_id)
+    assert_exact_position_owned(
+        conn,
+        strategy_trade_id=trade_id,
+        broker_position_id=second_strategy_position_id,
+    )
     with pytest.raises(StrategyOwnershipError, match="not actively owned"):
         assert_exact_position_owned(conn, strategy_trade_id=trade_id, broker_position_id=manual_position_id)
 
@@ -291,4 +306,79 @@ def test_funding_is_once_only_and_cannot_exceed_operator_cap(
             signal_id=signal_id,
             verdict="rejected",
             reason_code="duplicate",
+        )
+
+
+def test_funding_rechecks_stage_and_aggregate_active_reservations(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    for instrument_id in (2454011, 2454012, 2454013):
+        _instrument(conn, instrument_id)
+    _paper_stage(conn)
+    deployment = configure_deployment(
+        conn,
+        strategy_id="S-OWN",
+        strategy_version="v1",
+        mode="paper",
+        capital_limit=Decimal("100"),
+        enabled=True,
+        changed_by="operator",
+        reason="aggregate reservation test",
+    )
+    first_signal = _signal(conn, instrument_id=2454011)
+    first_decision = decide_funding(
+        conn,
+        signal_id=first_signal,
+        verdict="allocated",
+        deployment_id=deployment.deployment_id,
+        amount=Decimal("60"),
+        reason_code="within_risk_budget",
+    )
+    first_trade = create_strategy_trade(conn, first_decision)
+
+    second_signal = _signal(conn, instrument_id=2454012)
+    with pytest.raises(StrategyControlError, match="exceeds"):
+        decide_funding(
+            conn,
+            signal_id=second_signal,
+            verdict="allocated",
+            deployment_id=deployment.deployment_id,
+            amount=Decimal("41"),
+            reason_code="would_exceed_active_reservations",
+        )
+
+    # Closed/failed trades release capacity; lifetime allocations do not make
+    # an operator's fixed pot unusable forever.
+    conn.execute(
+        "UPDATE strategy_trades SET status = 'closed' WHERE strategy_trade_id = %s",
+        (first_trade,),
+    )
+    second_decision = decide_funding(
+        conn,
+        signal_id=second_signal,
+        verdict="allocated",
+        deployment_id=deployment.deployment_id,
+        amount=Decimal("100"),
+        reason_code="capacity_released",
+    )
+    assert second_decision > first_decision
+
+    promote_strategy(
+        conn,
+        strategy_id="S-OWN",
+        strategy_version="v1",
+        to_stage="paused",
+        promoted_by="operator",
+        reason="pause new entries",
+    )
+    third_signal = _signal(conn, instrument_id=2454013)
+    with pytest.raises(StrategyControlError, match="cannot be allocated"):
+        decide_funding(
+            conn,
+            signal_id=third_signal,
+            verdict="allocated",
+            deployment_id=deployment.deployment_id,
+            amount=Decimal("1"),
+            reason_code="must_fail_while_paused",
         )
