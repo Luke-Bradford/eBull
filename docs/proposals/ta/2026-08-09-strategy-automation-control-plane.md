@@ -1,7 +1,7 @@
 # Strategy automation control plane — ownership, allocation and monitoring
 
 Date: 2026-08-09
-Status: Proposed contract; preflight adapter slice implemented, no strategy orders enabled
+Status: Slices 1–3 implemented through read-only monitoring; no strategy orders enabled
 Parent: #2437
 Companion: `2026-08-09-evidence-backed-signal-engine.md`
 
@@ -51,9 +51,28 @@ Every stored result covered 1962-01-02 through 2026-07-08, and S-4 had no result
 Those result rows are legacy/stress evidence only: none satisfies the primary
 2022+ plus rolling 24/36-month relevance contract and none is allocation-ready.
 
+The #2447 read paths were measured on that population after implementation and
+after the primary recent-window run added 12 compact result rows
+(`PYTHONPATH=. uv run python scripts/verify_2447_strategy_monitoring.py`).
+Latest and cursor fired-signal pages used the `strategy_signals` primary key
+backwards and returned 50 fully joined rows in **under 1 ms**. Current-version
+scan aggregates deliberately used a 34,698-row sequential scan and completed in
+**15.2 ms**. The 48-row result ledger completed in **under 0.2 ms**. Those figures do
+not justify another index today; #2448 re-measures after retention/partition
+design rather than paying write amplification speculatively.
+
+The audited primary 2022-01-01 through 2026-07-08 run is complete for all four
+ambiguity/quarantine arms of S-1 through S-3. Its admitted/best-case results
+were S-1: -84.75% total return, -2.23 Sharpe and -84.98% maximum drawdown;
+S-2: +41.33%, 0.44 Sharpe and -30.55% drawdown; S-3: -48.45%, -0.46 Sharpe and
+-52.41% drawdown. None is allocation-ready: every arm records the measured
+survivor-only universe, unmodelled carry and absent synthetic control as
+refusals. S-4 remains explicitly excluded because its level-based entry has no
+outcome at the pinned version pair. These results validate the storage and
+monitoring path; they do not validate a winning strategy.
+
 Not present and therefore blocking paper/live strategy execution:
 
-- no strategy catalogue/results/signals API or monitoring page;
 - no capital allocation/deployment record for a strategy version;
 - no durable link from a fired signal through a local order to the exact broker
   `positionId`;
@@ -310,11 +329,16 @@ are actually created.
    `value` semantics and mostly stale rows refuse cost consumption. Exact
    position-id cardinality and v1-versus-v2 execution compatibility move to the
    ownership/reconciliation slice, where an actual demo order exists.
-3. **Recent-window result arms + read-only strategy observability:** compute the
+3. **Recent-window result arms + read-only strategy observability — implemented:** compute the
    fixed 2022+, rolling 24/36-month and per-year arms without overwriting legacy
    evidence; then expose every manifest strategy, fired funded/unfunded signal,
    outcome, exclusion, scan health, pinned metrics and explicit refusal state.
-   This can ship before trading; legacy-only rows are never allocatable.
+   The runner accepts only a code-pinned window id and hashes its exact dates;
+   the API/page are read-only, exact-current-version and keyset-paginated.
+   Legacy-only rows are never allocatable. The primary 2022+ window now renders
+   `complete` for S-1 through S-3, while the remaining registered windows render
+   their measured `missing`/`partial` state and S-4 retains its explicit builder
+   exclusion.
 4. **Storage benchmark and retention:** actual bytes/query plans for signal
    partitions, compact aggregates, preflight state changes and bounded intraday
    bars. Migration follows evidence, not vice versa.

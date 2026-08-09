@@ -1189,6 +1189,28 @@ Filed as **#2441**.
    prior. The repo's rule stands: *grep before cite, run it or delete the
    quantifier.*
 
+### Recent-regime and storage contract (#2437)
+
+Do not let a 1962–2026 aggregate answer whether a strategy is viable now. Keep
+that row as stress/context evidence and require the code-pinned windows in
+`strategy_recent_evidence.RECENT_EVIDENCE_WINDOWS`: primary 2022+, rolling
+24/36 months, and each calendar year/YTD. Each window is part of
+`ResultIdentity.version`; never accept raw dates from an operator. A strategy
+must fail closed when any required recent window is absent or loses its net
+expectancy sign. Pre-2000 performance cannot rescue it.
+
+Store only the aggregate result arms. At the current three runnable strategies,
+the complete recent matrix is 96 rows (8 windows x 3 strategies x 2 ambiguity x
+2 quarantine). Reuse the daily corpus during compute; do not persist indicator,
+position or equity-curve time series merely to render the picker. Fired signals
+remain durable; non-fired/not-evaluable detail is a bounded-retention concern and
+must have checked daily aggregates before deletion.
+
+Keep historical backtest, forward observation, paper and live as separate arms.
+All fired signals remain visible when unfunded. Missing broker cost semantics,
+survivorship, carry, outcomes, controls or ownership produce named refusals; they
+never become zero/default inputs.
+
 ---
 
 ## 5. Open-source landscape
@@ -1272,4 +1294,3 @@ trip.** The entire long-only short-horizon game is played inside the spread. No
 quantity of extra conditions repairs a cost problem — which is why the operator's
 shorting decision mattered more than any signal found in the same session: the short
 side has 200-440 bps of gross to work with, not 44.
-

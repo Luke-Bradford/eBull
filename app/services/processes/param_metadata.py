@@ -238,11 +238,11 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
     # price_quarantine_refresh — #2261 full-corpus quarantine recompute. No
     # operator params: scope is the whole priced universe.
     "price_quarantine_refresh": (),
-    # strategy_backtest_run — #2394 §3.2. Four params, and the two hold-out ones
-    # are the only operator-facing degree of freedom the job HAS: §7 pins
-    # thirteen of the fourteen result-identity members to module constants, so
-    # exposing a sizing rule or a window would let an operator mint result
-    # identities no code path can reproduce.
+    # strategy_backtest_run — #2394 §3.2. Five params. ``evidence_window`` is
+    # an enum over code-pinned dates, not an operator-tunable date range. The
+    # hold-out pair controls audited access; the enum selects a reproducible
+    # identity already declared in code. A sizing rule or raw window remains
+    # forbidden because it would mint an identity no code path owns.
     #
     # ⚠⚠ ``holdout_purpose`` AND ``holdout_accessed_by`` ARE REQUIRED TOGETHER,
     # AND THAT IS NOT EXPRESSIBLE HERE. ParamMetadata declares per-key type and
@@ -297,6 +297,25 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
                 "version, so it cannot silently deflate against a register that has moved."
             ),
             field_type="string",
+        ),
+        ParamMetadata(
+            name="evidence_window",
+            label="Recent evidence window",
+            help_text=(
+                "Optional code-pinned recent-regime window. Selecting one evaluates only audited hold-out "
+                "evidence and therefore requires both hold-out fields. Raw dates are never accepted."
+            ),
+            field_type="enum",
+            enum_values=(
+                "primary-2022-plus",
+                "rolling-36m",
+                "rolling-24m",
+                "year-2022",
+                "year-2023",
+                "year-2024",
+                "year-2025",
+                "year-2026-ytd",
+            ),
         ),
     ),
     "risk_metrics_refresh": (),

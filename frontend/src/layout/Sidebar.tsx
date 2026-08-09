@@ -4,6 +4,7 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean }[] = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/portfolio", label: "Portfolio" },
   { to: "/calendar", label: "Calendar" },
+  { to: "/strategies", label: "Strategies" },
   // #1917 — one Research item; Instruments/Rankings/Theses/Recommendations are
   // now view presets under /research.
   { to: "/research", label: "Research" },

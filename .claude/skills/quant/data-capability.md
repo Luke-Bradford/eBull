@@ -136,9 +136,12 @@ minimum** — that is the specific thing a data purchase must buy.
 ## 4. Known gaps, ranked by what they would unlock
 
 1. **Survivorship-free universe** — ⚠⚠ **the highest-value gap.** Only **2 of
-   7,709** series carry a delisting date. #2346 measured free archives serving
-   **258/259** of a delisted cohort, so the data is obtainable. It closes a
-   standing promotion refusal *and* removes the bias inflating every number.
+   7,709** series carry a delisting date. Do not repeat the stale claim that a
+   free archive serves 258/259 delisted names: #2284's issuer-resolved 2023 Form
+   25 cohort found Yahoo/free snapshots served **0 of 382** usable delisting
+   histories, with ticker reuse and OTC continuation making apparent hits
+   unsafe. A genuinely survivorship-free adjusted corpus is a paid validation
+   gate; development remains survivor-labelled and unpromotable.
 2. **Options / implied volatility** — the largest missing conditioner. Our
    best-understood effect (Nagel) is vol-conditioned, and we can only build the
    trailing-realised proxy.

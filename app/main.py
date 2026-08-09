@@ -55,6 +55,7 @@ from app.api.recommendations import router as recommendations_router
 from app.api.reports import router as reports_router
 from app.api.scores import router as scores_router
 from app.api.sse_quotes import router as sse_quotes_router
+from app.api.strategies import router as strategies_router
 from app.api.sync import router as sync_router
 from app.api.system import router as system_router
 from app.api.tax import router as tax_router
@@ -558,6 +559,7 @@ app.include_router(recommendations_router)
 app.include_router(reports_router)
 app.include_router(scores_router)
 app.include_router(sse_quotes_router)
+app.include_router(strategies_router)
 app.include_router(sync_router)
 app.include_router(system_router)
 app.include_router(tax_router)

@@ -38,6 +38,7 @@ from app.services.backtest_run import (
     _fills,
     _measure_namespace,
     _NamespaceBook,
+    _namespaces_for_window,
     _shifted,
     assert_no_existing_results,
     build_in_sample_split,
@@ -49,6 +50,7 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
+from app.services.position_builder import Window
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QUARANTINE_RULE_SET_VERSION
 from app.services.signal_ledger import LedgerRow
 from app.services.strategy_result import (
@@ -467,6 +469,43 @@ class TestBuildResult:
         from dataclasses import replace
 
         assert replace(masked.identity, quarantine_arm="admitted") == admitted.identity
+
+    def test_a_recent_window_is_part_of_the_result_identity(self) -> None:
+        recent = Window(date(2024, 7, 9), EVALUATION_WINDOW_END)
+        legacy = build_result(
+            _measurement(),
+            strategy_id="s1-time-series-momentum",
+            strategy_version="strategy-v1+abc",
+            ambiguity_arm="worst_case",
+            quarantine_arm="masked",
+            deflated=None,
+        )
+        result = build_result(
+            _measurement(),
+            strategy_id="s1-time-series-momentum",
+            strategy_version="strategy-v1+abc",
+            ambiguity_arm="worst_case",
+            quarantine_arm="masked",
+            deflated=None,
+            evaluation_window=recent,
+        )
+        assert (result.identity.window_start, result.identity.window_end) == (recent.start, recent.end)
+        assert result.identity.version != legacy.identity.version
+
+
+class TestRecentWindowNamespace:
+    def test_registered_recent_window_is_holdout_only_and_audited(self) -> None:
+        recent = Window(date(2022, 1, 1), EVALUATION_WINDOW_END)
+        assert _namespaces_for_window(holdout_requested=True, evaluation_window=recent) == ("hold_out",)
+        with pytest.raises(ValueError, match="requires an audited access"):
+            _namespaces_for_window(holdout_requested=False, evaluation_window=recent)
+
+    def test_custom_window_cannot_reclassify_pre_boundary_data(self) -> None:
+        with pytest.raises(ValueError, match="on or after the frozen hold-out boundary"):
+            _namespaces_for_window(
+                holdout_requested=True,
+                evaluation_window=Window(date(2020, 1, 1), date(2022, 1, 1)),
+            )
 
 
 class TestPlannedIdentities:

@@ -568,7 +568,7 @@ class TestProductionInvokerRegistry:
             # test exists to force: criterion 5 requires a hold-out purpose and
             # an accessor that a cron fire cannot supply, so a scheduled fire
             # could only ever produce in-sample rows. Source-lock
-            # "strategy_backtest" + four params in MANUAL_TRIGGER_JOB_METADATA
+            # "strategy_backtest" + five params in MANUAL_TRIGGER_JOB_METADATA
             # complete the triangle. ⚠ It does NOT share strategy_signal_scan's
             # lane — that one IS scheduled, and blocking the daily shadow track
             # record behind a ~30-50 minute backtest is the coupling §3 of the
