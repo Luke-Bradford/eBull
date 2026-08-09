@@ -198,3 +198,91 @@ Every rule and every confirming condition is declared to `trial_register.py`
 before measurement. ⚠ Testing 10 setups × 10 conditions is **100 trials**, which
 raises the deflated-Sharpe bar to roughly the 0.174 level. Budget accordingly, or
 test fewer things properly.
+
+---
+
+## 7. The loser reversal: tested, falsified, and the gradient underneath it
+
+Codex round 5 was briefed with SEC/fundamental data **hard-forbidden** (our measured
+SEC ingest lag is a median of **2 days**, p90 37, with only 4.6% same-day — and even
+at zero latency, Form 4s are machine-parsed off EDGAR dissemination in milliseconds,
+so that race was never available). Its verdict:
+
+> **"No daily-bars-only long-only strategy is already proven, post-2020, to clear
+> 50 bps after retail costs."**
+
+It surfaced exactly one candidate: **extreme one-day loser reversal**, ~+1.1% over 10
+days after left-tail daily shocks, CRSP common stocks, sample through 2022.
+
+`scripts/verify_2437_loser_reversal.py` tests it on our own 2020-2026 data. Entry at
+the **next bar's adjusted open**, exit at the adjusted close k bars later, adjusted
+prices throughout (which kills the ex-dividend contamination ranked #1 in §2),
+day-clustered inference, universe of prior close ≥ \$20 and 20-day median dollar
+volume ≥ \$10m.
+
+```text
+     signal  hold    events  gross bps      NET   t(day)  t(year)
+unconditional  10 2,517,714      38.21   -11.79     3.59     1.92
+  1d <= -5%    10    82,712     -91.74  -141.74    -4.49    +1.81
+  1d <= -8%    10    25,644    -199.25  -249.25    -6.00    +0.30
+ 1d <= -12%    10     8,015    -333.31  -383.31    -5.72    -0.85
+```
+
+⚠⚠ **The sign is inverted and the dose-response is monotonic in both directions** —
+bigger drop is worse, longer hold is worse. **0 of 15 conditional arms** clear net > 0
+with day-clustered t ≥ 2. A monotonic gradient is far harder to dismiss than a single
+null: this is continuation, not reversal.
+
+### ⚠⚠ The clustering disagreement was a finding, not a nuisance
+
+At `1d <= -5%`, 10-day hold: **t(day) −4.49 but t(year) +1.81.** Opposite signs. Both
+can only be true if the outcome covaries with **how many names fire on the same day** —
+day-clustering weights each day equally, year-clustering pools events and is therefore
+dominated by the days carrying hundreds of them.
+
+That is a claim about mechanism, and it is directly testable. Breadth (the count of
+qualifying events sharing an entry day) is known at the close of day t, before the
+open we enter at, so conditioning on it is not lookahead.
+
+```text
+breadth   10-day hold    gross bps      NET       t    days
+  2-5                      -437.80  -487.80   -4.87     111
+ 6-20                      -154.34  -204.34   -4.45     550
+21-100                      -39.12   -89.12   -1.47     730
+ 101+                       +91.09   +41.09   +1.34     201
+```
+
+**Perfectly monotonic in breadth.** An isolated stock dropping 5% while the market is
+calm keeps falling — **−487 bps net over ten days**. The sign only turns positive when
+101+ names drop together.
+
+**Mechanism, and it is the one Codex proposed in §4.2 for the gap fade:** a lone name
+dropping is firm-specific news that reprices and *stays* repriced; a market-wide drop
+is correlated, partly forced selling that can revert. Our data now says the same thing
+from the other direction.
+
+### ⚠ Why this is still not a strategy
+
+1. ⚠⚠ **The profitable bucket is not a stock signal.** "101+ names down ≥5% on one
+   day" is a **market crash**. This is beta timing — buy-the-dip on the index — not
+   stock selection. It would not tell us *which* name to buy.
+2. **It is not significant.** t 1.34, net +41 bps.
+3. ⚠⚠ **The effective sample is far smaller than 201 days.** Those days cluster into
+   a handful of episodes (COVID, the 2022 bear). Independent events are perhaps 5-15,
+   so even t 1.34 overstates it. Codex's own arithmetic applies —
+   `N_eff = N / (1 + (N-1)·rho)` — and crash days are the maximum-rho case.
+4. **The best-evidenced version is long-short** (Brogaard/Han/Kim intraday residual
+   reversal, 30-minute midpoints, sample to Dec 2022). We are long-only, the weaker leg.
+
+### What is worth keeping
+
+⚠ **Breadth is the first conditioning variable this session with a mechanism behind it
+rather than a curve fit**, it is free to compute, it is known before entry, and it
+produced a clean monotonic gradient rather than a lone significant bucket. Carry it as
+a *feature* into any future short-horizon test; do not trade it as a signal.
+
+⚠⚠ **And the corrected capability premise:** this pass was framed around "daily bars
+only". That was false. `get_intraday_candles` serves `FourHours` ~8 months back and
+`ThirtyMinutes` ~1 month back for every instrument today — the exact granularity
+Brogaard/Han/Kim measure on. See `.claude/skills/data-sources/etoro-api.md`
+§ "WE HAVE INTRADAY HISTORY".

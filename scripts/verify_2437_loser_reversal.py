@@ -91,6 +91,47 @@ def _cluster_t(groups: dict[object, list[float]], min_n: int = 1) -> tuple[float
     return m, (m / se if se > 0 else 0.0), len(a)
 
 
+def _breadth_report(by_day: dict[tuple[float | None, int], dict[object, list[float]]]) -> None:
+    """Split the drop signal by how MANY names dropped that day.
+
+    ⚠⚠ Why this exists: on the first run, day-clustered and year-clustered t
+    disagreed in SIGN (`1d <= -5%`, 10-day hold: t(day) -4.49 vs t(year) +1.81).
+    Both can only be true if outcome covaries with how many events a day carries
+    -- day-clustering weights every day equally, year-clustering pools events and
+    so is dominated by the days where hundreds of names fired at once.
+
+    That is a testable claim about mechanism rather than a statistical nuisance:
+    a market-wide crash is forced/correlated selling that can revert, whereas a
+    lone name dropping while the market is flat is firm-specific news that
+    reprices and stays repriced. `breadth` -- the count of qualifying events on
+    the entry day -- is the cheapest available proxy for which one happened, and
+    unlike a sector or beta control it needs no extra data.
+
+    ⚠ Breadth is known at the close of day t, before the next open we enter at,
+    so conditioning on it is not lookahead.
+    """
+    print("\nBREADTH SPLIT -- does the crowd matter? (signal `1d <= -5%`)")
+    print("breadth = number of qualifying events sharing that entry day.")
+    print("⚠ each row is a mean ACROSS DAYS in the bucket, so days weigh equally.\n")
+    header = f"{'breadth':>14}{'hold':>6}{'days':>7}{'events':>10}{'gross bps':>11}{'NET':>9}{'t':>8}"
+    print(header)
+    print("-" * len(header))
+    buckets = ((1, 1), (2, 5), (6, 20), (21, 100), (101, 10**9))
+    for lo, hi in buckets:
+        label = f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 10**9 else f"{lo}+")
+        for k in HOLDS:
+            day_map = by_day[(-0.05, k)]
+            sel = {d: v for d, v in day_map.items() if lo <= len(v) <= hi}
+            if len(sel) < 5:
+                continue
+            m, t, n_days = _cluster_t(sel)
+            print(
+                f"{label:>14}{k:>6}{n_days:>7}{sum(len(v) for v in sel.values()):>10,}"
+                f"{m:>11.2f}{m - COST_BPS:>9.2f}{t:>8.2f}"
+            )
+        print()
+
+
 def main() -> int:
     # threshold -> hold -> day -> [returns bps]; None threshold = unconditional
     by_day: dict[tuple[float | None, int], dict[object, list[float]]] = defaultdict(lambda: defaultdict(list))
@@ -152,6 +193,8 @@ def main() -> int:
     header = f"{'signal':>14}{'hold':>6}{'events':>10}{'gross bps':>11}{'NET':>9}{'t(day)':>9}{'days':>7}{'t(year)':>9}"
     print(header)
     print("-" * len(header))
+
+    _breadth_report(by_day)
 
     survivors = 0
     for th in (None, *DROP_THRESHOLDS):
