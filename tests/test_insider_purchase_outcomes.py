@@ -44,6 +44,7 @@ def _signal(insider_class: InsiderClass, *, cik: str, instrument_id: int = 7) ->
         signal_year=2024,
         signal_month=1,
         accession_numbers=("a",),
+        disclosed_value=Decimal("1000"),
         latest_acceptance=None,
     )
 
@@ -54,7 +55,7 @@ def _outcome(
     cik: str,
     long_net: float,
     short_net: float,
-    market_cap: str,
+    weight_value: str,
 ) -> FirmMonthOutcome:
     return FirmMonthOutcome(
         signal=_signal(insider_class, cik=cik),
@@ -63,7 +64,7 @@ def _outcome(
         net_return_pct=long_net,
         short_net_return_pct=short_net,
         gross_return_pct=long_net,
-        market_cap=Decimal(market_cap),
+        weight_value=Decimal(weight_value),
         median_dollar_volume=Decimal("20000000"),
         market_relative_pct=long_net,
         short_market_relative_pct=short_net,
@@ -136,20 +137,20 @@ def test_control_excludes_treated_months_across_both_classes() -> None:
 
 
 def test_portfolio_groups_different_usable_entry_days_in_same_target_month() -> None:
-    opportunistic = _outcome("opportunistic", cik="1", long_net=3, short_net=-4, market_cap="1")
-    routine = _outcome("routine", cik="2", long_net=1, short_net=-2, market_cap="1")
+    opportunistic = _outcome("opportunistic", cik="1", long_net=3, short_net=-4, weight_value="1")
+    routine = _outcome("routine", cik="2", long_net=1, short_net=-2, weight_value="1")
     routine = FirmMonthOutcome(**{**routine.__dict__, "entry_date": date(2024, 2, 2)})
     monthly = _portfolio_months([opportunistic, routine], Counter())
     assert len(monthly) == 1
     assert monthly[0].entry_date == date(2024, 2, 1)
 
 
-def test_primary_weights_by_market_cap_and_charges_short_routine_leg() -> None:
+def test_primary_weights_by_disclosed_value_and_charges_short_routine_leg() -> None:
     monthly = _portfolio_months(
         [
-            _outcome("opportunistic", cik="1", long_net=0, short_net=-1, market_cap="1"),
-            _outcome("opportunistic", cik="2", long_net=8, short_net=-9, market_cap="3"),
-            _outcome("routine", cik="3", long_net=4, short_net=-6, market_cap="2"),
+            _outcome("opportunistic", cik="1", long_net=0, short_net=-1, weight_value="1"),
+            _outcome("opportunistic", cik="2", long_net=8, short_net=-9, weight_value="3"),
+            _outcome("routine", cik="3", long_net=4, short_net=-6, weight_value="2"),
         ],
         Counter(),
     )
@@ -175,8 +176,6 @@ def test_partial_frontier_month_and_late_acceptance_are_refused() -> None:
         prior_sessions=20,
         valid_liquidity_sessions=20,
         median_dollar_volume=Decimal("20000000"),
-        shares_outstanding=Decimal("1000000"),
-        shares_filed_date=date(2023, 12, 1),
     )
     assert _eligible_window(window) == "incomplete_target_month_at_corpus_frontier"
     late = FirmMonthWindow(

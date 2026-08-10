@@ -43,8 +43,9 @@ Only a row satisfying every condition below is a purchase observation:
 CMP include officers, directors and 10% owners. This trial therefore imposes no
 post-hoc role, direct/indirect ownership or purchase-size selection. Multiple
 qualifying rows in one accession and transaction month are aggregated to one
-insider purchase observation with summed disclosed value. Trade value is audit
-metadata only and never determines inclusion, weights or thresholds.
+insider purchase observation with summed disclosed value. Trade value never
+determines inclusion or thresholds; it is the frozen split-invariant portfolio
+weight described below.
 
 An issuer is mapped to the frozen research corpus by SEC issuer CIK and exact
 reported trading symbol against the corpus-native vendor symbol. A unique-CIK
@@ -98,16 +99,20 @@ The primary monthly return is the executable long-opportunistic/short-routine
 spread; both legs pay their own round-trip costs:
 
 ```text
-opportunistic-minus-routine = value_weighted_long_net(opportunistic purchases)
-                              + value_weighted_short_net(routine purchases)
+opportunistic-minus-routine = purchase_value_weighted_long_net(opportunistic)
+                              + purchase_value_weighted_short_net(routine)
 ```
 
-Weights use market capitalisation known before formation: the most recently
-filed positive SEC common-shares count known by entry, multiplied by the prior
-usable close. A share count filed more than 15 months before entry is stale.
-Missing or stale shares and multi-class ambiguity refuse the firm-month.
-Weights are recomputed independently within each portfolio and sum to one.
-Equal-weight results are diagnostic and cannot replace the primary.
+The paper's market-cap weights cannot be reproduced honestly with this corpus:
+historical OHLC is back-adjusted for future splits, SEC share counts are
+as-reported, and `price_adjustments` contains no factors with which to put them
+on one basis. Multiplying those units would inject future split information.
+The frozen executable adaptation therefore weights each firm-month by the sum
+of its qualifying, contemporaneously disclosed `shares × transaction price`.
+These purchase-dollar weights are causal and split-invariant, but are **not**
+CMP market-cap weights and cannot inherit their headline result. Weights are
+recomputed independently within each portfolio and sum to one. Equal-weight
+results are diagnostic and cannot replace the primary.
 
 ## Prices, liquidity, costs and controls
 
@@ -128,7 +133,7 @@ Equal-weight results are diagnostic and cannot replace the primary.
 ## Sealed evidence and gate
 
 The report includes full 2022+, trailing 24/36 months, each recent calendar
-year, firm-month counts, active months, after-cost value-weight expectancy,
+year, firm-month counts, active months, after-cost purchase-value-weighted expectancy,
 month-clustered confidence interval, win rate, profit factor, worst month,
 expected shortfall, drawdown, turnover, gross concurrency/capacity proxies,
 market/sector-relative returns and every exclusion reason.

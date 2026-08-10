@@ -25,7 +25,6 @@ CONTROL_SEED: Final = 2480001
 BOOTSTRAP_SEED: Final = 2480
 MIN_ENTRY_PRICE: Final = Decimal("5")
 MIN_MEDIAN_DOLLAR_VOLUME: Final = Decimal("10000000")
-MAX_SHARE_AGE_MONTHS: Final = 15
 
 
 @dataclass(frozen=True)
@@ -36,6 +35,7 @@ class FirmMonthSignal:
     signal_year: int
     signal_month: int
     accession_numbers: tuple[str, ...]
+    disclosed_value: Decimal
     latest_acceptance: datetime | None
 
     @property
@@ -59,8 +59,6 @@ class FirmMonthWindow:
     prior_sessions: int
     valid_liquidity_sessions: int
     median_dollar_volume: Decimal | None
-    shares_outstanding: Decimal | None
-    shares_filed_date: date | None
 
 
 @dataclass(frozen=True)
@@ -71,7 +69,7 @@ class FirmMonthOutcome:
     net_return_pct: float
     short_net_return_pct: float
     gross_return_pct: float
-    market_cap: Decimal
+    weight_value: Decimal
     median_dollar_volume: Decimal
     market_relative_pct: float | None
     short_market_relative_pct: float | None
@@ -129,6 +127,10 @@ def build_firm_month_signals(classified: Sequence[ClassifiedPurchase]) -> tuple[
                 signal_year=year,
                 signal_month=month,
                 accession_numbers=tuple(sorted({item.observation.accession_number for item in items})),
+                disclosed_value=sum(
+                    (item.observation.disclosed_value for item in items),
+                    start=Decimal("0"),
+                ),
                 latest_acceptance=max(acceptances, default=None),
             )
         )
@@ -265,31 +267,10 @@ _WINDOW_SQL = """
            t.entry_date, t.entry_open, t.exit_date, t.exit_close,
            coalesce(t.holding_sessions, 0), t.holding_usable,
            p.prior_close, p.prior_close_usable, coalesce(p.prior_sessions, 0),
-           coalesce(p.valid_liquidity_sessions, 0), p.median_dollar_volume,
-           sh.shares_outstanding, sh.filed_date
+           coalesce(p.valid_liquidity_sessions, 0), p.median_dollar_volume
     FROM event_series e
     LEFT JOIN target t USING (event_index)
     LEFT JOIN prior p USING (event_index)
-    LEFT JOIN LATERAL (
-        SELECT candidate.values[1] AS shares_outstanding, candidate.filed_date
-        FROM (
-            SELECT f.filed_date, f.concept,
-                   array_agg(DISTINCT f.val ORDER BY f.val) AS values,
-                   row_number() OVER (
-                       ORDER BY f.filed_date DESC,
-                                CASE WHEN f.concept = 'EntityCommonStockSharesOutstanding' THEN 0 ELSE 1 END,
-                                max(f.period_end) DESC
-                   ) AS rn
-            FROM financial_facts_raw f
-            WHERE f.instrument_id = e.instrument_id
-              AND f.concept IN ('EntityCommonStockSharesOutstanding', 'CommonStockSharesOutstanding')
-              AND f.val > 0
-              AND t.entry_date IS NOT NULL
-              AND f.filed_date < t.entry_date
-            GROUP BY f.filed_date, f.concept
-        ) candidate
-        WHERE candidate.rn = 1 AND cardinality(candidate.values) = 1
-    ) sh ON TRUE
     ORDER BY e.event_index
 """
 
@@ -327,15 +308,9 @@ def load_windows(conn: psycopg.Connection[Any], signals: Sequence[FirmMonthSigna
             prior_sessions=int(row[11]),
             valid_liquidity_sessions=int(row[12]),
             median_dollar_volume=None if row[13] is None else Decimal(row[13]),
-            shares_outstanding=None if row[14] is None else Decimal(row[14]),
-            shares_filed_date=row[15],
         )
         for row in rows
     )
-
-
-def _month_distance(later: date, earlier: date) -> int:
-    return (later.year - earlier.year) * 12 + later.month - earlier.month
 
 
 def _eligible_window(window: FirmMonthWindow) -> str | None:
@@ -359,10 +334,8 @@ def _eligible_window(window: FirmMonthWindow) -> str | None:
         return "median_dollar_volume_below_floor"
     if window.prior_close is None or window.prior_close <= 0:
         return "prior_close_missing"
-    if window.shares_outstanding is None or window.shares_filed_date is None:
-        return "point_in_time_shares_missing_or_ambiguous"
-    if _month_distance(window.entry_date, window.shares_filed_date) > MAX_SHARE_AGE_MONTHS:
-        return "point_in_time_shares_stale"
+    if not window.signal.disclosed_value.is_finite() or window.signal.disclosed_value <= 0:
+        return "disclosed_purchase_value_invalid"
     acceptance = window.signal.latest_acceptance
     if acceptance is not None and acceptance.date() >= window.entry_date:
         return "acceptance_not_before_formation"
@@ -425,28 +398,28 @@ def _portfolio_months(
         if not opportunistic or not routine:
             refusals["primary_month_missing_one_cohort"] += 1
             continue
-        opp_return = _weighted([(item.net_return_pct, item.market_cap) for item in opportunistic])
-        routine_return = _weighted([(item.net_return_pct, item.market_cap) for item in routine])
-        routine_short = _weighted([(item.short_net_return_pct, item.market_cap) for item in routine])
+        opp_return = _weighted([(item.net_return_pct, item.weight_value) for item in opportunistic])
+        routine_return = _weighted([(item.net_return_pct, item.weight_value) for item in routine])
+        routine_short = _weighted([(item.short_net_return_pct, item.weight_value) for item in routine])
         opp_equal = mean(item.net_return_pct for item in opportunistic)
         routine_short_equal = mean(item.short_net_return_pct for item in routine)
         market_pairs_opp = [
-            (item.market_relative_pct, item.market_cap)
+            (item.market_relative_pct, item.weight_value)
             for item in opportunistic
             if item.market_relative_pct is not None
         ]
         market_pairs_routine = [
-            (item.short_market_relative_pct, item.market_cap)
+            (item.short_market_relative_pct, item.weight_value)
             for item in routine
             if item.short_market_relative_pct is not None
         ]
         sector_pairs_opp = [
-            (item.sector_relative_pct, item.market_cap)
+            (item.sector_relative_pct, item.weight_value)
             for item in opportunistic
             if item.sector_relative_pct is not None
         ]
         sector_pairs_routine = [
-            (item.short_sector_relative_pct, item.market_cap)
+            (item.short_sector_relative_pct, item.weight_value)
             for item in routine
             if item.short_sector_relative_pct is not None
         ]
@@ -497,7 +470,6 @@ def evaluate_portfolios(conn: psycopg.Connection[Any], signals: Sequence[FirmMon
             or window.exit_date is None
             or window.exit_close is None
             or window.prior_close is None
-            or window.shares_outstanding is None
             or window.median_dollar_volume is None
         ):
             raise RuntimeError("ineligible insider window escaped the refusal gate")
@@ -515,7 +487,6 @@ def evaluate_portfolios(conn: psycopg.Connection[Any], signals: Sequence[FirmMon
         short_net = float(
             (entry_proceeds - buy_price(window.exit_close, half_spread=half_spread)) / entry_proceeds * 100
         )
-        market_cap = window.prior_close * window.shares_outstanding
         spy_entry = comparators.get("SPY", {}).get(window.entry_date)
         spy_exit = comparators.get("SPY", {}).get(window.exit_date)
         market_relative = None
@@ -548,7 +519,7 @@ def evaluate_portfolios(conn: psycopg.Connection[Any], signals: Sequence[FirmMon
                 net_return_pct=net,
                 short_net_return_pct=short_net,
                 gross_return_pct=gross,
-                market_cap=market_cap,
+                weight_value=window.signal.disclosed_value,
                 median_dollar_volume=window.median_dollar_volume,
                 market_relative_pct=market_relative,
                 short_market_relative_pct=short_market_relative,

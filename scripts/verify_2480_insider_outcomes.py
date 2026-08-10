@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"source-classified observations: {len(source.source_classified):,}")
     print(f"research-resolved classified observations: {len(source.classified):,}")
     print(f"deduplicated firm-month signals: {len(signals):,}")
-    print("\nmonthly opportunistic-minus-routine value-weight returns")
+    print("\nmonthly opportunistic-minus-routine disclosed-purchase-value-weighted returns")
     _print_segment("2022+ primary", evidence.monthly_returns, BOOTSTRAP_SEED)
     _print_segment("matched random", control.monthly_returns, BOOTSTRAP_SEED + 1)
     for months in (36, 24):
