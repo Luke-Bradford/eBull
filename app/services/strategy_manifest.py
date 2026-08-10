@@ -69,10 +69,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Set
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Literal, Protocol, get_args
 
 from app.services.indicator_series import BarSeries, Universe
+from app.services.outcome_resolver import ExitLevels
 from app.services.position_builder import ExitRegime
 from app.services.strategies.s1_time_series_momentum import S1_STRATEGY_ID, s1_identity, s1_signals
 from app.services.strategies.s2_cross_sectional_momentum import (
@@ -86,7 +88,12 @@ from app.services.strategies.s2_cross_sectional_momentum import (
 from app.services.strategies.s3_mean_reversion_in_trend import MAX_HOLD_BARS as S3_MAX_HOLD_BARS
 from app.services.strategies.s3_mean_reversion_in_trend import S3_STRATEGY_ID, s3_identity, s3_signals
 from app.services.strategies.s4_volatility_compression_breakout import MAX_HOLD_BARS as S4_MAX_HOLD_BARS
-from app.services.strategies.s4_volatility_compression_breakout import S4_STRATEGY_ID, s4_identity, s4_signals
+from app.services.strategies.s4_volatility_compression_breakout import (
+    S4_STRATEGY_ID,
+    s4_exit_bracket,
+    s4_identity,
+    s4_signals,
+)
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
     CrossSectionalMember,
@@ -178,6 +185,19 @@ class ExitRegimeFactory(Protocol):
     def __call__(self, decision_dates: frozenset[date] | None) -> ExitRegime: ...
 
 
+class ExitLevelsFactory(Protocol):
+    """A level strategy's causal bracket construction at one filled entry."""
+
+    def __call__(
+        self,
+        series: BarSeries,
+        *,
+        signal_index: int,
+        entry_price: Decimal,
+        universe: Universe,
+    ) -> ExitLevels: ...
+
+
 @dataclass(frozen=True)
 class StrategyEntry:
     """One registered strategy: how to identify it, how to invoke it, how it exits.
@@ -204,6 +224,9 @@ class StrategyEntry:
     member: MemberStager | None = None
     select: CrossSectionalSelect | None = None
     min_participants: int | None = None
+    #: Level-based only. Its absence is a named runner exclusion rather than a
+    #: silent max-hold fallback.
+    exit_levels: ExitLevelsFactory | None = None
 
     def __post_init__(self) -> None:
         if not self.strategy_id.strip():
@@ -330,14 +353,29 @@ def _s3_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
 def _s4_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
     """S-4 exits on an ATR stop/target fixed at signal time, or on the hold cap.
 
-    ⚠ ``level_based=True`` says the levels EXIST; nothing in ``app/`` computes
-    them yet (only ``scripts/verify_2240_outcome_resolver.py`` builds an
-    ``ExitLevels`` at all, generically). Stated rather than left to be
-    discovered: a runner reaching this entry needs a level provider, and the
-    manifest is not it.
+    ``level_based=True`` and ``StrategyEntry.exit_levels`` move together: the
+    regime tells the position builder an outcome is mandatory, while the
+    manifest supplies the strategy-owned causal factory that can produce one.
     """
     _reject_decision_dates(S4_STRATEGY_ID, decision_dates)
     return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=S4_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s4_exit_levels(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> ExitLevels:
+    """Adapt S-4's hashed strategy values to the versioned outcome contract."""
+    target, stop, max_hold = s4_exit_bracket(
+        series,
+        signal_index=signal_index,
+        entry_price=entry_price,
+        universe=universe,
+    )
+    return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
 
 #: Every strategy in the catalogue, keyed by ``strategy_id``.
@@ -388,6 +426,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             exit_regime=_s4_exit_regime,
             decision_calendar=_no_decision_calendar,
             signals=_s4_signals,
+            exit_levels=_s4_exit_levels,
         ),
     }
 )
@@ -398,6 +437,7 @@ __all__ = [
     "STRATEGY_MANIFEST",
     "DecisionCalendar",
     "ExitRegimeFactory",
+    "ExitLevelsFactory",
     "IdentityFactory",
     "MemberStager",
     "PerSeriesSignals",

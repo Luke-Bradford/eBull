@@ -197,7 +197,16 @@ class TestLevelClose:
     def _level_regime(self, *, max_hold: int | None = 4) -> ExitRegime:
         return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=max_hold, rebalance_dates=None)
 
-    def _outcome(self, outcome: str, *, at: int | None, price: Decimal | None, signal: int = 1) -> ResolvedOutcome:
+    def _outcome(
+        self,
+        outcome: str,
+        *,
+        at: int | None,
+        price: Decimal | None,
+        signal: int = 1,
+        reason: str | None = None,
+        unresolved_until: int | None = None,
+    ) -> ResolvedOutcome:
         return ResolvedOutcome(
             signal_id=signal,
             rule_set_version=_PIN.rule_set_version,
@@ -205,6 +214,8 @@ class TestLevelClose:
             outcome=outcome,  # type: ignore[arg-type]
             exit_bar_date=None if at is None else _d(at),
             exit_price=price,
+            reason=("missing_bar_data" if outcome == "unresolved" and reason is None else reason),  # type: ignore[arg-type]
+            unresolved_until_bar_date=None if unresolved_until is None else _d(unresolved_until),
         )
 
     def test_tp_hit_closes_at_the_stored_exit(self) -> None:
@@ -258,6 +269,29 @@ class TestLevelClose:
         assert position.close_source is None
         assert position.open_reason == "unresolved_outcome"
         assert position.mark_price == Decimal(119)
+
+    def test_a_series_break_outcome_is_unmarked_but_does_not_suppress_the_new_segment(self) -> None:
+        built = _build(
+            entries=[_entry(1, 2), _entry(2, 6)],
+            outcomes=[
+                self._outcome(
+                    "unresolved",
+                    at=None,
+                    price=None,
+                    reason="series_break",
+                    unresolved_until=6,
+                ),
+                self._outcome("tp_hit", at=8, price=Decimal("110"), signal=2),
+            ],
+            outcome_pin=_PIN,
+            regime=self._level_regime(),
+        )
+        first, second = built.positions
+        assert first.open_reason == "series_break"
+        assert first.mark_price is None
+        assert (second.entry_fill_bar_date, second.close_bar_date) == (_d(6), _d(8))
+        assert built.superseded_open_position == 0
+        assert built.marks_unavailable == 1
 
     def test_expired_and_the_max_hold_bar_agree(self) -> None:
         """For S-4 the two are redundant BY DESIGN (§3.2 C3), and the label the
@@ -606,6 +640,19 @@ class TestRowInvariants:
                 outcome="unresolved",
                 exit_bar_date=_d(4),
                 exit_price=None,
+                reason="missing_bar_data",
+            )
+
+    def test_a_series_break_outcome_requires_its_resume_boundary(self) -> None:
+        with pytest.raises(ValueError, match="a boundary is required exactly for series_break"):
+            ResolvedOutcome(
+                signal_id=1,
+                rule_set_version="a",
+                input_rule_set_version="b",
+                outcome="unresolved",
+                exit_bar_date=None,
+                exit_price=None,
+                reason="series_break",
             )
 
     def test_a_booked_outcome_must_carry_a_price(self) -> None:
@@ -638,9 +685,9 @@ class TestSpecConstants:
     typed out from ``2026-08-07-bounded-backtester.md`` §3's table."""
 
     SPEC_CLOSE_SOURCES = {"signal_pair", "level", "max_hold", "calendar", "ambiguous"}
-    #: ⚠ The spec's §3.2 rule 5 names exactly these two. ``close_bar_unfillable``
-    #: is OURS and is deliberately absent here, so that adopting a spec reason
-    #: later cannot silently land on our side of the line.
+    #: ⚠ The spec's §3.2 rule 5 names exactly these two. The implementation's
+    #: explicitly declared additions are deliberately absent here, so adopting
+    #: a spec reason later cannot silently land on our side of the line.
     SPEC_OPEN_REASONS = {"unresolved_outcome", "window_end"}
     SPEC_S3_MAX_HOLD_BARS = 10
     SPEC_S4_MAX_HOLD_BARS = 40

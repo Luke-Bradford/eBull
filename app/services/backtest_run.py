@@ -32,12 +32,11 @@ requires a purpose a cron fire cannot supply (§4), and a stored row is
 meaningless if its identity moved between runs (§10). Neither is affected by
 making the run faster.
 
-⚠ S-4 IS EXCLUDED, NOT SKIPPED. It is the only ``level_based`` manifest entry,
-``build_positions`` refuses a level-based entry with no outcome at the pinned
-version pair, and nothing in ``app/`` constructs an ``ExitLevels`` to produce
-one. ``runnable_strategies`` DEMONSTRATES that refusal by calling the builder
-rather than quoting its docstring, and the run reports the exclusion with the
-message — criterion 9's *"exclusion is visible rather than assumed harmless"*.
+⚠ S-4 IS RUNNABLE ONLY BECAUSE ITS MANIFEST ENTRY OWNS A CAUSAL LEVEL FACTORY.
+The runner computes ATR at signal bar ``t``, fixes the bracket around the
+``t+1`` open, and resolves the daily-OHLC uncertainty twice. A future
+``level_based`` entry with no factory remains a named exclusion; it is never
+silently skipped.
 
 ⚠ IT READS THE FROZEN RESEARCH CORPUS ONLY. ``load_masked_series`` at
 ``CORPUS_VERSION``; ``strategy_signal_scan`` reads live ``price_daily`` through
@@ -53,11 +52,13 @@ import logging
 import math
 import time
 from array import array
+from bisect import bisect_left
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from itertools import pairwise
 from typing import Any, Final
 
 import numpy as np
@@ -82,12 +83,14 @@ from app.services.equity_curve import (
 )
 from app.services.indicator_series import BarSeries, Universe
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+from app.services.outcome_resolver import UnresolvedReason, resolve_outcome
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.position_builder import (
     EntryFill,
     ExitFill,
     ExitRegime,
     OutcomePin,
+    ResolvedOutcome,
     Window,
     build_positions,
 )
@@ -194,8 +197,8 @@ STANDING_REFUSALS: Final[frozenset[PromotionRefusal]] = frozenset(
 #: is supposed to be closed, and would let a widened vocabulary reach the row
 #: unchecked. The tuples below are typed, and the completeness assertion under
 #: them is what stops a THIRD arm being added to the vocabulary and silently
-#: never written: the job would otherwise keep producing 24 rows while the arm
-#: space said 36.
+#: never written: the job would otherwise keep producing 32 rows while the arm
+#: space said 48.
 AMBIGUITY_ARM_ORDER: Final[tuple[AmbiguityArm, ...]] = ("best_case", "worst_case")
 QUARANTINE_ARM_ORDER: Final[tuple[QuarantineArm, ...]] = ("admitted", "masked")
 
@@ -240,6 +243,14 @@ _SERIES_SQL = """
     FROM research_price_series
     WHERE instrument_id = ANY(%(ids)s)
     ORDER BY instrument_id, series_id
+"""
+
+_UNRESOLVED_BREAKS_SQL = """
+    SELECT instrument_id, break_date
+    FROM price_series_break
+    WHERE instrument_id = ANY(%(ids)s)
+      AND resolved_by IS NULL
+    ORDER BY instrument_id, break_date
 """
 
 #: The IN-SAMPLE axis and its per-date bar count — criterion 5's fold cut is
@@ -345,6 +356,9 @@ class ArmMeasurement:
     close_sources: Mapping[str, int]
     series_evaluated: int
     elapsed_s: float
+    #: ``None`` means the strategy cannot produce an ambiguous level touch, so
+    #: one measured population is shared by both stored ambiguity identities.
+    ambiguity_arm: AmbiguityArm | None = None
 
 
 @dataclass(frozen=True)
@@ -467,6 +481,14 @@ def runnable_strategies(
         entry = manifest[strategy_id]
         regime = _regime_for(entry, calendar)
         if not regime.level_based:
+            if entry.exit_levels is not None:
+                raise RuntimeError(
+                    f"{strategy_id} supplies exit levels for a non-level regime — the declared close source and "
+                    "its consumer disagree"
+                )
+            runnable.append(strategy_id)
+            continue
+        if entry.exit_levels is not None:
             runnable.append(strategy_id)
             continue
         refusal = _demonstrate_level_refusal(entry, regime)
@@ -540,6 +562,133 @@ def _fills(rows: Sequence[LedgerRow], instrument_id: int) -> tuple[list[EntryFil
                 )
             )
     return entries, exits
+
+
+def _resolved_level_outcomes(
+    entry: StrategyEntry,
+    entries: Sequence[EntryFill],
+    *,
+    series: BarSeries,
+    ambiguity_arm: AmbiguityArm,
+    quarantine_arm: QuarantineArm,
+    unresolved_breaks: Sequence[date],
+) -> list[ResolvedOutcome]:
+    """Resolve a level strategy with causal levels and a declared OHLC bound.
+
+    Daily OHLC cannot reveal which resting order touched first when one bar
+    spans both. The resolver therefore emits ``ambiguous`` and this adapter
+    converts only those rows to the declared best/worst sensitivity price.
+    """
+    if entry.exit_levels is None:
+        raise ValueError(f"{entry.strategy_id} is level-based but declares no exit-level factory")
+    bar_index = {when: index for index, when in enumerate(series.dates)}
+    missing_reason: UnresolvedReason = "quarantined_bar" if quarantine_arm == "masked" else "missing_bar_data"
+    masked_reasons: dict[int, UnresolvedReason] = {
+        index: missing_reason
+        for index, row in enumerate(series.rows)
+        if any(row.get(field) is None for field in ("open", "high", "low", "close"))
+    }
+    resolved: list[ResolvedOutcome] = []
+    for fill in entries:
+        signal_index = bar_index[fill.signal_bar_date]
+        fill_index = bar_index[fill.fill_bar_date]
+        signal_series, local_signal_index = _segment_for_index(
+            series,
+            index=signal_index,
+            unresolved_breaks=unresolved_breaks,
+        )
+        levels = entry.exit_levels(
+            signal_series,
+            signal_index=local_signal_index,
+            entry_price=fill.fill_price,
+            universe=BACKTEST_UNIVERSE,
+        )
+        segment_end_index = _segment_end_index(
+            series,
+            fill_index=fill_index,
+            unresolved_breaks=unresolved_breaks,
+        )
+        outcome = resolve_outcome(
+            series=series,
+            fill_index=fill_index,
+            entry_price=fill.fill_price,
+            levels=levels,
+            masked_bar_reasons=masked_reasons,
+            segment_end_index=segment_end_index,
+        )
+        outcome_name = outcome.outcome
+        exit_price = outcome.exit_price
+        if outcome_name == "ambiguous":
+            outcome_name = "tp_hit" if ambiguity_arm == "best_case" else "sl_hit"
+            exit_price = levels.take_profit if ambiguity_arm == "best_case" else levels.stop_loss
+        resolved.append(
+            ResolvedOutcome(
+                signal_id=fill.signal_id,
+                rule_set_version=OUTCOME_RULE_SET_VERSION,
+                input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+                outcome=outcome_name,
+                exit_bar_date=outcome.exit_bar_date,
+                exit_price=exit_price,
+                reason=outcome.reason,
+                unresolved_until_bar_date=(
+                    series.dates[segment_end_index + 1]
+                    if outcome.reason == "series_break" and segment_end_index is not None
+                    else None
+                ),
+            )
+        )
+    return resolved
+
+
+def _segment_end_index(
+    series: BarSeries,
+    *,
+    fill_index: int,
+    unresolved_breaks: Sequence[date],
+) -> int | None:
+    """Last bar before the next unresolved scale break after this fill.
+
+    ``break_date`` names the first date at the new scale. A fill on that date is
+    already inside the new segment, so only a strictly later break bounds it.
+    ``bisect_left`` also handles a break date absent from this vendor series:
+    the segment still ends on the final stored bar preceding the transition.
+    """
+    if not 0 <= fill_index < len(series):
+        raise ValueError(f"fill_index {fill_index} is outside the {len(series)}-bar series")
+    for start, end in _series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
+        if start <= fill_index < end:
+            return None if end == len(series) else end - 1
+    raise RuntimeError(f"fill_index {fill_index} belongs to no price segment")
+
+
+def _series_segment_bounds(
+    series: BarSeries,
+    *,
+    unresolved_breaks: Sequence[date],
+) -> tuple[tuple[int, int], ...]:
+    """Half-open bar-index ranges separated by unresolved scale transitions."""
+    ordered = tuple(unresolved_breaks)
+    if tuple(sorted(ordered)) != ordered or len(set(ordered)) != len(ordered):
+        raise ValueError("unresolved break dates must be unique and ordered")
+    cuts = {0, len(series)}
+    cuts.update(bisect_left(series.dates, break_date) for break_date in ordered)
+    ordered_cuts = sorted(cuts)
+    return tuple((start, end) for start, end in pairwise(ordered_cuts) if start < end)
+
+
+def _segment_for_index(
+    series: BarSeries,
+    *,
+    index: int,
+    unresolved_breaks: Sequence[date],
+) -> tuple[BarSeries, int]:
+    """The one independent indicator segment containing ``index``."""
+    if not 0 <= index < len(series):
+        raise ValueError(f"index {index} is outside the {len(series)}-bar series")
+    for start, end in _series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
+        if start <= index < end:
+            return BarSeries(dates=series.dates[start:end], rows=series.rows[start:end]), index - start
+    raise RuntimeError(f"index {index} belongs to no price segment")
 
 
 def _mark_index(series: BarSeries, *, window: Window, not_before: date) -> int | None:
@@ -874,6 +1023,9 @@ class _Corpus:
     #: on each of its dates. Criterion 5's fold cut is weighted by the latter.
     in_sample_axis: tuple[date, ...] = ()
     in_sample_bar_counts: tuple[int, ...] = ()
+    #: Unresolved scale transitions keyed by instrument. Each date is the first
+    #: bar at the new scale and therefore bounds a position opened before it.
+    unresolved_breaks: Mapping[int, tuple[date, ...]] = field(default_factory=dict)
 
     @property
     def window(self) -> Window:
@@ -904,6 +1056,11 @@ def load_corpus(
     pairs = [(int(row[0]), int(row[1])) for row in conn.execute(_SERIES_SQL, {"ids": list(universe)}).fetchall()]
     if limit is not None:
         pairs = pairs[:limit]
+    included_ids = sorted({instrument_id for instrument_id, _series_id in pairs})
+    break_rows = conn.execute(_UNRESOLVED_BREAKS_SQL, {"ids": included_ids}).fetchall() if included_ids else []
+    unresolved_breaks: dict[int, list[date]] = {}
+    for instrument_id, break_date in break_rows:
+        unresolved_breaks.setdefault(int(instrument_id), []).append(break_date)
 
     in_sample = conn.execute(
         _INSAMPLE_AXIS_SQL,
@@ -934,6 +1091,7 @@ def load_corpus(
         evaluation_end=window.end,
         in_sample_axis=in_sample_axis,
         in_sample_bar_counts=tuple(int(row[1]) for row in in_sample),
+        unresolved_breaks={instrument_id: tuple(dates) for instrument_id, dates in unresolved_breaks.items()},
     )
 
 
@@ -1047,6 +1205,7 @@ def evaluate_arm(
     *,
     corpus: _Corpus,
     quarantine_arm: QuarantineArm,
+    ambiguity_arm: AmbiguityArm | None,
     identity: StrategyIdentity,
     namespaces: Sequence[ResultNamespace],
 ) -> ArmMeasurement:
@@ -1065,6 +1224,10 @@ def evaluate_arm(
     """
     started = time.monotonic()
     regime = _regime_for(entry, corpus.axis)
+    if regime.level_based != (ambiguity_arm is not None):
+        raise ValueError(
+            f"{entry.strategy_id} level_based={regime.level_based} received ambiguity arm {ambiguity_arm!r}"
+        )
     books: dict[ResultNamespace, _NamespaceBook] = {
         name: _NamespaceBook(records_label_windows=(name == "in_sample")) for name in namespaces
     }
@@ -1099,16 +1262,34 @@ def evaluate_arm(
                 closes[slot - first_axis_index] = float(close)
         closes_by_instrument[instrument_id] = (first_axis_index, array("d", closes))
 
-        signals = _signals_for(entry, series, instrument_id=instrument_id, ranking=ranking)
+        signals = _signals_for(
+            entry,
+            series,
+            instrument_id=instrument_id,
+            ranking=ranking,
+            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+        )
         rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
         entries, exits = _fills(rows, instrument_id)
+        outcomes = (
+            _resolved_level_outcomes(
+                entry,
+                entries,
+                series=series,
+                ambiguity_arm=ambiguity_arm,
+                quarantine_arm=quarantine_arm,
+                unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+            )
+            if ambiguity_arm is not None
+            else []
+        )
         built = build_positions(
             strategy_id=entry.strategy_id,
             strategy_version=identity.version,
             entries=entries,
             exits=exits,
-            outcomes=[],
-            outcome_pin=None,
+            outcomes=outcomes,
+            outcome_pin=_OUTCOME_PIN if regime.level_based else None,
             series={instrument_id: series},
             regime=regime,
             window=corpus.window,
@@ -1139,6 +1320,7 @@ def evaluate_arm(
     return ArmMeasurement(
         strategy_id=entry.strategy_id,
         strategy_version=identity.version,
+        ambiguity_arm=ambiguity_arm,
         quarantine_arm=quarantine_arm,
         namespaces=measured,
         holdout_positions_discarded=discarded.get("hold_out", 0),
@@ -1172,9 +1354,32 @@ def _signals_for(
     *,
     instrument_id: int,
     ranking: _CrossSection | None,
+    unresolved_breaks: Sequence[date] = (),
 ) -> list[StrategySignal]:
     """One instrument's whole-series verdicts, per-series or cross-sectional."""
     if entry.signals is not None:
+        if entry.exit_levels is not None and unresolved_breaks:
+            signals: list[StrategySignal] = []
+            for start, end in _series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
+                segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
+                signals.extend(
+                    StrategySignal(
+                        verdict=signal.verdict,
+                        signal_index=signal.signal_index + start,
+                        kind=signal.kind,
+                        reason=signal.reason,
+                    )
+                    for signal in entry.signals(
+                        segment,
+                        universe=BACKTEST_UNIVERSE,
+                        masked_reason="quarantined_bar",
+                    )
+                )
+            if len(signals) != len(series):
+                raise RuntimeError(
+                    f"{entry.strategy_id} produced {len(signals)} segmented verdicts for {len(series)} bars"
+                )
+            return signals
         return entry.signals(series, universe=BACKTEST_UNIVERSE, masked_reason="quarantined_bar")
     assert entry.member is not None and ranking is not None
     staged = stage_cross_sectional_member(
@@ -1472,6 +1677,7 @@ def _candidate(
     evaluated: frozenset[int],
     holdout_evaluations: int,
     recorded_accesses: int,
+    ambiguity_material: bool | None,
 ) -> PromotionCandidate:
     """The gate's inputs, supplied DIRECTLY rather than read back.
 
@@ -1483,12 +1689,11 @@ def _candidate(
     its own automation. This job wrote both arms in the same transaction, so it
     knows, and it must not ask the database a question it is the answer to.
 
-    ⚠ ``ambiguity_material`` is ``False`` for the same reason and is not an
-    assumption: the two ambiguity arms of a runnable strategy are ONE
-    measurement (§6 — ``ambiguous`` is unreachable without a ``level_based``
-    regime, asserted by ``runnable_strategies`` and corroborated by the
-    close-source census), so their Sharpe gap is exactly zero and cannot exceed
-    any non-negative threshold §3.4 could set.
+    ``ambiguity_material`` is computed from the measurements already in memory.
+    It is ``False`` for a shared non-level measurement, ``False`` for two
+    numerically equal level arms, and ``None`` when the arms differ but this run
+    has no synthetic-control threshold with which §3.4 can judge materiality.
+    The last state deliberately adds ``ambiguity_arms_not_compared``.
     """
     return PromotionCandidate(
         result=result,
@@ -1496,13 +1701,58 @@ def _candidate(
         validated_universe_ids=validated,
         holdout_evaluations=holdout_evaluations,
         recorded_accesses=recorded_accesses,
-        ambiguity_material=False,
+        ambiguity_material=ambiguity_material,
         quarantine_arms_compared=True,
     )
 
 
+def _ambiguity_material_for(
+    arms: Sequence[ArmMeasurement],
+    result: StrategyResult,
+) -> bool | None:
+    """Return §3.4's pair verdict without inventing a comparison threshold.
+
+    Non-level strategies carry one shared measurement which is copied to the
+    two stored identities, so its gap is provably zero. A level strategy has two
+    real measurements. Equal numeric Sharpes also prove a zero gap; unequal or
+    unpriced Sharpes need the random cohort's 95th-percentile gap. This runner
+    does not attach that cohort yet, so the only honest verdict is ``None`` and
+    the promotion gate stays closed.
+    """
+    matching = [
+        measurement
+        for measurement in arms
+        if measurement.strategy_id == result.identity.strategy_id
+        and measurement.quarantine_arm == result.identity.quarantine_arm
+    ]
+    if any(measurement.ambiguity_arm is None for measurement in matching):
+        return False
+    by_arm = {measurement.ambiguity_arm: measurement for measurement in matching}
+    if set(by_arm) != set(AMBIGUITY_ARM_ORDER):
+        raise RuntimeError(
+            f"{result.identity.strategy_id}/{result.identity.quarantine_arm} has ambiguity measurements "
+            f"{sorted(arm for arm in by_arm if arm is not None)} rather than both declared arms"
+        )
+    sharpes: list[float] = []
+    for ambiguity in AMBIGUITY_ARM_ORDER:
+        outcome = by_arm[ambiguity].namespaces.get(result.identity.namespace)
+        if outcome is None:
+            raise RuntimeError(
+                f"{result.identity.strategy_id}/{ambiguity}/{result.identity.quarantine_arm} has no "
+                f"{result.identity.namespace} measurement for a row built from that namespace"
+            )
+        if outcome.metrics.sharpe is None:
+            return None
+        sharpes.append(outcome.metrics.sharpe)
+    return False if sharpes[0] == sharpes[1] else None
+
+
 def _expected_refusals(
-    *, holdout_requested: bool, deflated: bool, prior_holdout_evaluations: int = 0
+    *,
+    holdout_requested: bool,
+    deflated: bool,
+    ambiguity_material: bool | None = False,
+    prior_holdout_evaluations: int = 0,
 ) -> frozenset[PromotionRefusal]:
     """What §9's table says a row from this run must still refuse on.
 
@@ -1525,6 +1775,10 @@ def _expected_refusals(
         expected.add("holdout_never_evaluated")
     if not deflated:
         expected.update({"deflated_sharpe_not_computed", "trial_count_undeclared"})
+    if ambiguity_material is None:
+        expected.add("ambiguity_arms_not_compared")
+    elif ambiguity_material:
+        expected.add("ambiguity_material")
     return frozenset(expected)
 
 
@@ -1657,40 +1911,56 @@ def run_backtest(
     # 1. Evaluate every strategy x quarantine arm, holding metrics in memory.
     arms: list[ArmMeasurement] = []
     for entry_id in runnable:
+        regime = _regime_for(manifest[entry_id], corpus.axis)
+        ambiguity_arms: tuple[AmbiguityArm | None, ...] = AMBIGUITY_ARM_ORDER if regime.level_based else (None,)
         for quarantine in QUARANTINE_ARM_ORDER:
-            measurement = evaluate_arm(
-                conn,
-                manifest[entry_id],
-                corpus=corpus,
-                quarantine_arm=quarantine,
-                identity=identities[entry_id],
-                namespaces=namespaces,
-            )
-            _assert_ambiguity_unreachable(measurement)
-            arms.append(measurement)
-            logger.info(
-                "strategy_backtest_run: %s/%s evaluated %d series in %.1fs — %s, hold-out discarded %d",
-                entry_id,
-                quarantine,
-                measurement.series_evaluated,
-                measurement.elapsed_s,
-                {name: outcome.position_count for name, outcome in measurement.namespaces.items()},
-                measurement.holdout_positions_discarded,
-            )
+            for ambiguity in ambiguity_arms:
+                measurement = evaluate_arm(
+                    conn,
+                    manifest[entry_id],
+                    corpus=corpus,
+                    quarantine_arm=quarantine,
+                    ambiguity_arm=ambiguity,
+                    identity=identities[entry_id],
+                    namespaces=namespaces,
+                )
+                _assert_ambiguity_contract(measurement)
+                arms.append(measurement)
+                logger.info(
+                    "strategy_backtest_run: %s/%s/%s evaluated %d series in %.1fs — %s, hold-out discarded %d",
+                    entry_id,
+                    ambiguity or "shared",
+                    quarantine,
+                    measurement.series_evaluated,
+                    measurement.elapsed_s,
+                    {name: outcome.position_count for name, outcome in measurement.namespaces.items()},
+                    measurement.holdout_positions_discarded,
+                )
 
     # 2. Deflate once per (namespace, quarantine arm) group.
-    by_group: dict[tuple[ResultNamespace, QuarantineArm], dict[str, NamespaceMeasurement]] = {}
-    for measurement in arms:
-        for name, outcome in measurement.namespaces.items():
-            by_group.setdefault((name, measurement.quarantine_arm), {})[measurement.strategy_id] = outcome
-    deflations: dict[tuple[ResultNamespace, QuarantineArm], _Deflation | None] = {}
+    by_group: dict[tuple[ResultNamespace, AmbiguityArm, QuarantineArm], dict[str, NamespaceMeasurement]] = {}
+    for ambiguity in AMBIGUITY_ARM_ORDER:
+        for measurement in arms:
+            if measurement.ambiguity_arm not in {None, ambiguity}:
+                continue
+            for name, outcome in measurement.namespaces.items():
+                by_group.setdefault((name, ambiguity, measurement.quarantine_arm), {})[measurement.strategy_id] = (
+                    outcome
+                )
+    deflations: dict[tuple[ResultNamespace, AmbiguityArm, QuarantineArm], _Deflation | None] = {}
     refusals: dict[str, str] = {}
     for group, measurements in by_group.items():
         deflation, reason = deflate_group(measurements)
         deflations[group] = deflation
         if reason is not None:
-            refusals[f"{group[0]}/{group[1]}"] = reason
-            logger.warning("strategy_backtest_run: no Deflated Sharpe for %s/%s — %s", group[0], group[1], reason)
+            refusals[f"{group[0]}/{group[1]}/{group[2]}"] = reason
+            logger.warning(
+                "strategy_backtest_run: no Deflated Sharpe for %s/%s/%s — %s",
+                group[0],
+                group[1],
+                group[2],
+                reason,
+            )
 
     # 3. Write, one transaction per arm pair.
     validated = frozenset(corpus.universe)
@@ -1772,21 +2042,14 @@ def _namespaces_for_window(
     return ("hold_out",)
 
 
-def _assert_ambiguity_unreachable(measurement: ArmMeasurement) -> None:
-    """§6 — a runnable strategy cannot close ``ambiguous``, and this measures it.
-
-    ``position_builder`` assigns ``close_source == "ambiguous"`` only inside its
-    ``if regime.level_based:`` branch and ``runnable_strategies`` has already
-    refused every level-based entry, so the census is the corroboration on real
-    data. If it ever moves, the two ambiguity arms are NOT one measurement and
-    writing the second as a relabelled copy of the first would be a fabrication.
-    """
+def _assert_ambiguity_contract(measurement: ArmMeasurement) -> None:
+    """Shared measurements cannot contain ambiguity; bounded arms must resolve it."""
     count = measurement.close_sources.get("ambiguous", 0)
     if count:
         raise RuntimeError(
-            f"{measurement.strategy_id}/{measurement.quarantine_arm} closed {count} position(s) 'ambiguous' on a "
-            "non-level regime — §6's claim that the two ambiguity arms are one measurement is falsified, and the "
-            "second arm may no longer be written as the first under another label"
+            f"{measurement.strategy_id}/{measurement.ambiguity_arm or 'shared'}/{measurement.quarantine_arm} "
+            f"closed {count} position(s) as ambiguous after arm resolution — each bounded arm must carry an "
+            "explicit stop or target price, while a shared non-level measurement cannot reach ambiguity"
         )
 
 
@@ -1794,7 +2057,7 @@ def _write_rows(
     conn: psycopg.Connection[Any],
     *,
     arms: Sequence[ArmMeasurement],
-    deflations: Mapping[tuple[ResultNamespace, QuarantineArm], _Deflation | None],
+    deflations: Mapping[tuple[ResultNamespace, AmbiguityArm, QuarantineArm], _Deflation | None],
     validated: frozenset[int],
     holdout_requested: bool,
     holdout_purpose: str | None,
@@ -1828,25 +2091,34 @@ def _write_rows(
     reachable. ⚠ It does NOT make the invocation atomic: the grain is the pair,
     exactly as it already was, and a failure at pair 7 still leaves 6 committed.
     """
-    by_strategy: dict[str, dict[QuarantineArm, ArmMeasurement]] = {}
+    by_strategy: dict[str, dict[tuple[AmbiguityArm | None, QuarantineArm], ArmMeasurement]] = {}
     for measurement in arms:
-        by_strategy.setdefault(measurement.strategy_id, {})[measurement.quarantine_arm] = measurement
+        key = (measurement.ambiguity_arm, measurement.quarantine_arm)
+        if key in by_strategy.setdefault(measurement.strategy_id, {}):
+            raise RuntimeError(f"{measurement.strategy_id}/{key} produced two measurements")
+        by_strategy[measurement.strategy_id][key] = measurement
 
     pending: list[tuple[str, ResultNamespace, AmbiguityArm, StrategyResult, StrategyResult]] = []
     for strategy_id in sorted(by_strategy):
-        by_arm = by_strategy[strategy_id]
-        masked_arm, admitted_arm = by_arm.get("masked"), by_arm.get("admitted")
-        if masked_arm is None or admitted_arm is None:  # pragma: no cover - both arms are always evaluated
-            raise RuntimeError(f"{strategy_id} produced {sorted(by_arm)} rather than both quarantine arms")
-        for namespace in sorted(set(masked_arm.namespaces) & set(admitted_arm.namespaces)):
-            for ambiguity in AMBIGUITY_ARM_ORDER:
+        measured = by_strategy[strategy_id]
+        for ambiguity in AMBIGUITY_ARM_ORDER:
+            masked_arm = measured.get((ambiguity, "masked")) or measured.get((None, "masked"))
+            admitted_arm = measured.get((ambiguity, "admitted")) or measured.get((None, "admitted"))
+            if masked_arm is None or admitted_arm is None:
+                raise RuntimeError(
+                    f"{strategy_id}/{ambiguity} produced {sorted(measured)} rather than both quarantine arms"
+                )
+            for namespace in sorted(set(masked_arm.namespaces) & set(admitted_arm.namespaces)):
                 masked = build_result(
                     masked_arm.namespaces[namespace],
                     strategy_id=strategy_id,
                     strategy_version=masked_arm.strategy_version,
                     ambiguity_arm=ambiguity,
                     quarantine_arm="masked",
-                    deflated=_deflated_for(masked_arm.namespaces[namespace], deflations.get((namespace, "masked"))),
+                    deflated=_deflated_for(
+                        masked_arm.namespaces[namespace],
+                        deflations.get((namespace, ambiguity, "masked")),
+                    ),
                     evaluation_window=corpus.window,
                 )
                 admitted = build_result(
@@ -1855,7 +2127,10 @@ def _write_rows(
                     strategy_version=admitted_arm.strategy_version,
                     ambiguity_arm=ambiguity,
                     quarantine_arm="admitted",
-                    deflated=_deflated_for(admitted_arm.namespaces[namespace], deflations.get((namespace, "admitted"))),
+                    deflated=_deflated_for(
+                        admitted_arm.namespaces[namespace],
+                        deflations.get((namespace, ambiguity, "admitted")),
+                    ),
                     evaluation_window=corpus.window,
                 )
                 pending.append((strategy_id, namespace, ambiguity, masked, admitted))
@@ -1867,12 +2142,18 @@ def _write_rows(
         key = (masked.identity.strategy_id, masked.identity.strategy_version)
         if key not in prior_holdout:
             prior_holdout[key] = holdout_access_counts(conn, *key).holdout_evaluations
-    _preflight_gate(pending, validated=validated, holdout_requested=holdout_requested, prior_holdout=prior_holdout)
+    _preflight_gate(
+        pending,
+        arms=arms,
+        validated=validated,
+        holdout_requested=holdout_requested,
+        prior_holdout=prior_holdout,
+    )
     splits = _cut_splits(arms, corpus=corpus)
     _assert_every_in_sample_row_has_a_split(pending, splits)
 
     stored: list[tuple[int, StrategyResult, int]] = []
-    for strategy_id, namespace, _ambiguity, masked, admitted in pending:
+    for strategy_id, namespace, ambiguity, masked, admitted in pending:
         if namespace == "hold_out":
             assert holdout_purpose is not None and holdout_accessed_by is not None
             ids = store_holdout_arm_pair(
@@ -1894,7 +2175,13 @@ def _write_rows(
         with conn.transaction():
             ids = store_in_sample_arm_pair(conn, masked, admitted)
             for result_id, result in zip(ids, (masked, admitted), strict=True):
-                folds = store_walk_forward_folds(conn, result_id, splits[(strategy_id, result.identity.quarantine_arm)])
+                split_key = (strategy_id, ambiguity, result.identity.quarantine_arm)
+                shared_key = (strategy_id, None, result.identity.quarantine_arm)
+                folds = store_walk_forward_folds(
+                    conn,
+                    result_id,
+                    splits.get(split_key) or splits[shared_key],
+                )
                 stored.append((result_id, result, folds))
 
     # Criterion 8 — RE-MEASURED on every written row, with the hold-out counts
@@ -1910,6 +2197,7 @@ def _write_rows(
             counts = holdout_access_counts(conn, *key)
             counts_cache[key] = (counts.holdout_evaluations, counts.recorded_accesses)
         evaluations, accesses = counts_cache[key]
+        ambiguity_material = _ambiguity_material_for(arms, result)
         outcome = check_promotable(
             _candidate(
                 result,
@@ -1917,6 +2205,7 @@ def _write_rows(
                 evaluated=_evaluated_ids(arms, result),
                 holdout_evaluations=evaluations,
                 recorded_accesses=accesses,
+                ambiguity_material=ambiguity_material,
             )
         )
         # ⚠ The SAME ``evaluations`` the outcome was derived from. Predicting the
@@ -1925,6 +2214,7 @@ def _write_rows(
         expected = _expected_refusals(
             holdout_requested=holdout_requested,
             deflated=result.deflated is not None,
+            ambiguity_material=ambiguity_material,
             prior_holdout_evaluations=evaluations,
         )
         if set(outcome) != expected:
@@ -1951,7 +2241,7 @@ def _write_rows(
 
 def _assert_every_in_sample_row_has_a_split(
     pending: Sequence[tuple[str, ResultNamespace, AmbiguityArm, StrategyResult, StrategyResult]],
-    splits: Mapping[tuple[str, QuarantineArm], WalkForwardFolds],
+    splits: Mapping[tuple[str, AmbiguityArm | None, QuarantineArm], WalkForwardFolds],
 ) -> None:
     """Every in-sample row about to be written has a split waiting for it.
 
@@ -1972,11 +2262,12 @@ def _assert_every_in_sample_row_has_a_split(
     """
     missing = sorted(
         {
-            (strategy_id, result.identity.quarantine_arm)
-            for strategy_id, namespace, _ambiguity, masked, admitted in pending
+            (strategy_id, ambiguity, result.identity.quarantine_arm)
+            for strategy_id, namespace, ambiguity, masked, admitted in pending
             if namespace == "in_sample"
             for result in (masked, admitted)
-            if (strategy_id, result.identity.quarantine_arm) not in splits
+            if (strategy_id, ambiguity, result.identity.quarantine_arm) not in splits
+            and (strategy_id, None, result.identity.quarantine_arm) not in splits
         }
     )
     if missing:
@@ -1991,14 +2282,14 @@ def _cut_splits(
     arms: Sequence[ArmMeasurement],
     *,
     corpus: _Corpus,
-) -> dict[tuple[str, QuarantineArm], WalkForwardFolds]:
+) -> dict[tuple[str, AmbiguityArm | None, QuarantineArm], WalkForwardFolds]:
     """Criterion 5's split for each ``(strategy, quarantine arm)`` in-sample population.
 
     ⚠ A hold-out measurement contributes nothing and is skipped rather than
     refused: an invocation that requested both namespaces still cuts folds only
     on the in-sample side, which is the whole of ``walk_forward``'s scope.
     """
-    splits: dict[tuple[str, QuarantineArm], WalkForwardFolds] = {}
+    splits: dict[tuple[str, AmbiguityArm | None, QuarantineArm], WalkForwardFolds] = {}
     for measurement in arms:
         outcome = measurement.namespaces.get("in_sample")
         if outcome is None:
@@ -2031,7 +2322,7 @@ def _cut_splits(
         # ``WalkForwardFolds`` makes for a split assembled from more than one
         # run, one level up. Found by a Codex pass on the rebuttal, not by the
         # diff review.
-        key = (measurement.strategy_id, measurement.quarantine_arm)
+        key = (measurement.strategy_id, measurement.ambiguity_arm, measurement.quarantine_arm)
         if key in splits:
             raise RuntimeError(
                 f"{key} produced a second in-sample measurement — one arm is one population, and silently keeping "
@@ -2046,6 +2337,7 @@ def _evaluated_ids(arms: Sequence[ArmMeasurement], result: StrategyResult) -> fr
         if (
             measurement.strategy_id == result.identity.strategy_id
             and measurement.quarantine_arm == result.identity.quarantine_arm
+            and measurement.ambiguity_arm in {None, result.identity.ambiguity_arm}
         ):
             outcome = measurement.namespaces.get(result.identity.namespace)
             if outcome is not None:
@@ -2058,6 +2350,7 @@ def _evaluated_ids(arms: Sequence[ArmMeasurement], result: StrategyResult) -> fr
 def _preflight_gate(
     pending: Sequence[tuple[str, ResultNamespace, AmbiguityArm, StrategyResult, StrategyResult]],
     *,
+    arms: Sequence[ArmMeasurement],
     validated: frozenset[int],
     holdout_requested: bool,
     prior_holdout: Mapping[tuple[str, str], int],
@@ -2085,6 +2378,7 @@ def _preflight_gate(
     for _strategy_id, _namespace, _ambiguity, masked, admitted in pending:
         for result in (masked, admitted):
             count = projected[(result.identity.strategy_id, result.identity.strategy_version)]
+            ambiguity_material = _ambiguity_material_for(arms, result)
             outcome = check_promotable(
                 _candidate(
                     result,
@@ -2097,11 +2391,13 @@ def _preflight_gate(
                     evaluated=frozenset({next(iter(validated))}) if validated else frozenset(),
                     holdout_evaluations=count,
                     recorded_accesses=count,
+                    ambiguity_material=ambiguity_material,
                 )
             )
             expected = _expected_refusals(
                 holdout_requested=holdout_requested,
                 deflated=result.deflated is not None,
+                ambiguity_material=ambiguity_material,
                 prior_holdout_evaluations=prior_holdout.get(
                     (result.identity.strategy_id, result.identity.strategy_version), 0
                 ),
@@ -2122,11 +2418,11 @@ def _assert_every_runnable_produced_rows(
 ) -> None:
     """§11 — a RUNNABLE strategy that produced no row FAILS the run.
 
-    ⚠ Against the RUNNABLE set, never against the manifest. S-4 is expected to
-    be absent and its exclusion is a reported reason, not a failure; the two are
-    distinguished by the runnable computation itself. Same construction §3.1
-    landed after the review bot found its population gate anchored on the wrong
-    side.
+    ⚠ Against the RUNNABLE set, never against the manifest. A future level
+    strategy lacking an outcome producer is an exclusion, not a failure; the
+    two are distinguished by the runnable computation itself. Same construction
+    §3.1 landed after the review bot found its population gate anchored on the
+    wrong side.
     """
     expected = len(report.runnable) * len(namespaces) * len(AMBIGUITY_ARMS) * len(QUARANTINE_ARMS)
     produced = Counter(row.strategy_id for row in report.rows)

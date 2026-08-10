@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from array import array
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -29,7 +29,8 @@ from app.services.backtest_run import (
     ExcludedStrategy,
     NamespaceMeasurement,
     WrittenRow,
-    _assert_ambiguity_unreachable,
+    _ambiguity_material_for,
+    _assert_ambiguity_contract,
     _assert_every_runnable_produced_rows,
     _benchmark_book,
     _check_holdout_pairing,
@@ -39,7 +40,9 @@ from app.services.backtest_run import (
     _measure_namespace,
     _NamespaceBook,
     _namespaces_for_window,
+    _segment_end_index,
     _shifted,
+    _signals_for,
     assert_no_existing_results,
     build_in_sample_split,
     build_result,
@@ -49,10 +52,12 @@ from app.services.backtest_run import (
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
+from app.services.indicator_series import BarSeries
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.position_builder import Window
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QUARANTINE_RULE_SET_VERSION
 from app.services.signal_ledger import LedgerRow
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
     CORPUS_VERSION,
@@ -60,6 +65,7 @@ from app.services.strategy_result import (
     EVALUATION_WINDOW_START,
     HOLDOUT_BOUNDARY,
     ResultIdentity,
+    StrategyResult,
 )
 from app.services.strategy_statistics import StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER
@@ -129,19 +135,17 @@ def _measurement(
 
 
 class TestRunnableStrategies:
-    """§3 — S-4 is refused with the builder's own message, never skipped."""
+    """§3 — every declared close source must have its outcome producer."""
 
-    def test_three_runnable_and_s4_excluded_with_the_builder_message(self) -> None:
+    def test_all_four_are_runnable_once_s4_declares_causal_exit_levels(self) -> None:
         runnable, excluded = runnable_strategies()
         assert list(runnable) == [
             "s1-time-series-momentum",
             "s2-cross-sectional-momentum",
             "s3-mean-reversion-in-trend",
+            "s4-volatility-compression-breakout",
         ]
-        assert [entry.strategy_id for entry in excluded] == ["s4-volatility-compression-breakout"]
-        # ⚠ The message is the RAISE's, demonstrated by calling the builder —
-        # not a paraphrase, which would go stale silently the day the rule moves.
-        assert "level-based entry with no outcome" in excluded[0].reason
+        assert excluded == ()
 
     def test_every_manifest_entry_is_accounted_for(self) -> None:
         from app.services.strategy_manifest import STRATEGY_MANIFEST
@@ -162,9 +166,13 @@ class TestRunnableStrategies:
         only way to reach the branch, and a branch nothing can reach is a branch
         nothing can prove works.
         """
+        from app.services.strategy_manifest import STRATEGY_MANIFEST
+
+        s4 = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
+        manifest = {**STRATEGY_MANIFEST, s4.strategy_id: replace(s4, exit_levels=None)}
         monkeypatch.setattr(backtest_run, "_demonstrate_level_refusal", lambda entry, regime: None)
         with pytest.raises(RuntimeError, match="did NOT refuse"):
-            runnable_strategies()
+            runnable_strategies(manifest)
 
 
 class TestArmVocabularyCoverage:
@@ -772,11 +780,56 @@ class TestAmbiguityCensus:
         )
 
     def test_a_clean_census_passes(self) -> None:
-        _assert_ambiguity_unreachable(self._arm({"signal_pair": 10, "open_at_window_end": 1}))
+        _assert_ambiguity_contract(self._arm({"signal_pair": 10, "open_at_window_end": 1}))
 
     def test_one_ambiguous_close_falsifies_the_single_measurement_claim(self) -> None:
-        with pytest.raises(RuntimeError, match="ambiguity arms are one measurement is falsified"):
-            _assert_ambiguity_unreachable(self._arm({"signal_pair": 10, "ambiguous": 1}))
+        with pytest.raises(RuntimeError, match="after arm resolution"):
+            _assert_ambiguity_contract(self._arm({"signal_pair": 10, "ambiguous": 1}))
+
+
+class TestAmbiguityMateriality:
+    """A real level-arm delta cannot be waved through without its threshold."""
+
+    @staticmethod
+    def _arm(ambiguity: str | None, sharpe: float) -> ArmMeasurement:
+        return ArmMeasurement(
+            strategy_id="s4",
+            strategy_version="v1",
+            ambiguity_arm=ambiguity,  # type: ignore[arg-type]
+            quarantine_arm="masked",
+            namespaces={"in_sample": _measurement(sharpe=sharpe)},
+            holdout_positions_discarded=0,
+            close_sources={},
+            series_evaluated=1,
+            elapsed_s=0.0,
+        )
+
+    @staticmethod
+    def _result() -> StrategyResult:
+        return build_result(
+            _measurement(),
+            strategy_id="s4",
+            strategy_version="v1",
+            ambiguity_arm="best_case",
+            quarantine_arm="masked",
+            deflated=None,
+        )
+
+    def test_a_shared_non_level_measurement_proves_zero_gap(self) -> None:
+        assert _ambiguity_material_for((self._arm(None, 0.5),), self._result()) is False
+
+    def test_equal_level_arms_prove_zero_gap(self) -> None:
+        arms = (self._arm("best_case", 0.5), self._arm("worst_case", 0.5))
+        assert _ambiguity_material_for(arms, self._result()) is False
+
+    def test_unequal_level_arms_refuse_until_the_control_threshold_is_attached(self) -> None:
+        arms = (self._arm("best_case", 0.6), self._arm("worst_case", 0.4))
+        assert _ambiguity_material_for(arms, self._result()) is None
+        assert "ambiguity_arms_not_compared" in _expected_refusals(
+            holdout_requested=True,
+            deflated=True,
+            ambiguity_material=None,
+        )
 
 
 class TestRowCompleteness:
@@ -1027,12 +1080,12 @@ class TestCutSplits:
             (self._arm("masked", [0, 2], [1, 3]), self._arm("admitted", [0, 2, 4, 6], [1, 3, 5, 7])),
             corpus=self._corpus(),
         )
-        assert sorted(splits) == [("s1", "admitted"), ("s1", "masked")]
-        assert splits[("s1", "masked")].observation_count == 2
-        assert splits[("s1", "admitted")].observation_count == 4
+        assert sorted(splits) == [("s1", None, "admitted"), ("s1", None, "masked")]
+        assert splits[("s1", None, "masked")].observation_count == 2
+        assert splits[("s1", None, "admitted")].observation_count == 4
         # The geometry is shared; only the censuses moved.
-        assert [r.fold.first_index for r in splits[("s1", "masked")].folds] == [
-            r.fold.first_index for r in splits[("s1", "admitted")].folds
+        assert [r.fold.first_index for r in splits[("s1", None, "masked")].folds] == [
+            r.fold.first_index for r in splits[("s1", None, "admitted")].folds
         ]
 
     def test_a_pending_in_sample_row_with_no_split_is_refused_before_any_insert(self) -> None:
@@ -1048,7 +1101,10 @@ class TestCutSplits:
             (self._arm("masked", [0, 2], [1, 3]),), corpus=self._corpus()
         )
         # Only the masked arm was cut, so the admitted row of the pair is uncovered.
-        with pytest.raises(RuntimeError, match=r"no walk-forward split was cut for \[\('s1', 'admitted'\)\]"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"no walk-forward split was cut for \[\('s1', 'best_case', 'admitted'\)\]",
+        ):
             backtest_run._assert_every_in_sample_row_has_a_split(pending, splits)  # type: ignore[arg-type]  # noqa: SLF001
 
     def test_a_covered_pair_passes_and_a_hold_out_row_needs_no_split(self) -> None:
@@ -1169,3 +1225,76 @@ class TestFills:
         assert len(exits) == 1
         assert entries[0].fill_price == Decimal("10.5")
         assert exits[0].instrument_id == 7
+
+
+class TestSeriesBreakBoundary:
+    """An unresolved transition bounds only positions opened before it."""
+
+    @staticmethod
+    def _series() -> BarSeries:
+        dates = tuple(date(2020, 1, day) for day in (1, 2, 4, 5))
+        row = {"open": Decimal("10"), "high": Decimal("11"), "low": Decimal("9"), "close": Decimal("10")}
+        return BarSeries(dates=dates, rows=(row, row, row, row))  # type: ignore[arg-type]
+
+    def test_the_last_pre_break_bar_bounds_an_earlier_fill(self) -> None:
+        assert (
+            _segment_end_index(
+                self._series(),
+                fill_index=0,
+                unresolved_breaks=(date(2020, 1, 4),),
+            )
+            == 1
+        )
+
+    def test_a_fill_on_the_break_date_is_inside_the_new_segment(self) -> None:
+        assert (
+            _segment_end_index(
+                self._series(),
+                fill_index=2,
+                unresolved_breaks=(date(2020, 1, 4),),
+            )
+            is None
+        )
+
+    def test_a_break_date_missing_from_vendor_bars_still_ends_the_old_segment(self) -> None:
+        assert (
+            _segment_end_index(
+                self._series(),
+                fill_index=0,
+                unresolved_breaks=(date(2020, 1, 3),),
+            )
+            == 1
+        )
+
+    def test_breaks_must_be_unique_and_ordered(self) -> None:
+        with pytest.raises(ValueError, match="unique and ordered"):
+            _segment_end_index(
+                self._series(),
+                fill_index=0,
+                unresolved_breaks=(date(2020, 1, 4), date(2020, 1, 3)),
+            )
+
+    def test_s4_restarts_state_and_warmup_after_a_break(self) -> None:
+        dates = tuple(date(2020, 1, 1) + timedelta(days=index) for index in range(260))
+        rows = tuple(
+            {
+                "open": Decimal(100 + index),
+                "high": Decimal(101 + index),
+                "low": Decimal(99 + index),
+                "close": Decimal(100 + index),
+            }
+            for index in range(260)
+        )
+        series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
+        entry = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
+        whole = _signals_for(entry, series, instrument_id=1, ranking=None)
+        segmented = _signals_for(
+            entry,
+            series,
+            instrument_id=1,
+            ranking=None,
+            unresolved_breaks=(dates[150],),
+        )
+        assert whole[200].verdict == "fired"
+        assert (segmented[149].verdict, segmented[149].reason) == ("not_evaluable", "no_fill_bar")
+        assert (segmented[200].verdict, segmented[200].reason) == ("not_evaluable", "insufficient_warmup")

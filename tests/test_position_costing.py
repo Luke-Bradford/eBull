@@ -152,10 +152,14 @@ class TestAnOpenPosition:
 
     @pytest.mark.parametrize("reason", ["window_end", "unresolved_outcome", "close_bar_unfillable"])
     def test_every_open_reason_is_costed_the_same_way(self, reason: str) -> None:
-        """All three are open positions with capital committed; §3.4 puts every
-        one of them in exposure. Only 5d cares WHY."""
+        """These open positions have capital committed; §3.4 puts each in
+        exposure. Only 5d cares WHY."""
         costed = cost_position(_open_position(open_reason=reason))
         assert costed.exit_basis == "mark"
+
+    def test_a_series_break_position_cannot_carry_a_cross_scale_mark(self) -> None:
+        with pytest.raises(ValueError, match="cannot be marked on the new price scale"):
+            _open_position(open_reason="series_break")
 
     def test_an_open_position_with_no_mark_is_excluded_and_counted(self) -> None:
         costed = cost_position(_open_position(mark_price=None))
