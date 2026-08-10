@@ -90,9 +90,6 @@ def test_missing_or_unknown_point_in_time_data_refuses_by_name() -> None:
     assert context.refusal_reason == "missing:primary_listing_market,spread_bps,vix"
 
 
-pytestmark = pytest.mark.integration
-
-
 def _seed_instrument(conn: psycopg.Connection[tuple[Any, ...]], iid: int) -> None:
     conn.execute(
         """
@@ -105,6 +102,7 @@ def _seed_instrument(conn: psycopg.Connection[tuple[Any, ...]], iid: int) -> Non
     )
 
 
+@pytest.mark.integration
 def test_reconcile_records_prospective_classification_and_same_day_correction(
     ebull_test_conn: psycopg.Connection[tuple[Any, ...]],  # noqa: F811
 ) -> None:
@@ -138,6 +136,7 @@ def test_reconcile_records_prospective_classification_and_same_day_correction(
     assert rows == [("nyse", "etf")]
 
 
+@pytest.mark.integration
 def test_current_metadata_cannot_leak_into_historical_decision(
     ebull_test_conn: psycopg.Connection[tuple[Any, ...]],  # noqa: F811
 ) -> None:
@@ -151,6 +150,7 @@ def test_current_metadata_cannot_leak_into_historical_decision(
     assert load_market_classification(conn, instrument_id=iid, decision_at=datetime.now(UTC)) is not None
 
 
+@pytest.mark.integration
 def test_later_classification_change_closes_prior_row_without_overlap(
     ebull_test_conn: psycopg.Connection[tuple[Any, ...]],  # noqa: F811
 ) -> None:
@@ -193,6 +193,7 @@ def test_later_classification_change_closes_prior_row_without_overlap(
     ]
 
 
+@pytest.mark.integration
 def test_context_round_trip_and_database_completeness_guard(
     ebull_test_conn: psycopg.Connection[tuple[Any, ...]],  # noqa: F811
 ) -> None:
