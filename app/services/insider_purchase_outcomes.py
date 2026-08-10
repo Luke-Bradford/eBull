@@ -352,6 +352,7 @@ def _instrument_context(conn: psycopg.Connection[Any]) -> dict[int, str | None]:
         FROM research_price_series s
         LEFT JOIN instrument_sec_profile p ON p.instrument_id = s.instrument_id
         WHERE s.vendor = %s
+          AND s.instrument_id IS NOT NULL
         """,
         (CORPUS_VENDORS[0],),
     ).fetchall()
