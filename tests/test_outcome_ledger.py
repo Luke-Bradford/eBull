@@ -32,6 +32,7 @@ from app.services.outcome_resolver import (
 from app.services.technical_analysis import OHLCVRow
 
 _MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "256_strategy_outcomes.sql"
+_REASON_MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "296_strategy_outcomes_unorderable_exit_levels.sql"
 
 _VERSIONS = {"rule_set_version": "outcome-resolver-v1+abc123", "input_rule_set_version": "price-quarantine-v1+def456"}
 
@@ -284,7 +285,7 @@ class TestMigrationVocabularyContract:
         assert self._check_members("resolution_method") == set(RESOLUTION_METHODS)
 
     def test_unresolved_reasons(self) -> None:
-        text = _MIGRATION.read_text()
+        text = _REASON_MIGRATION.read_text()
         match = re.search(r"reason IS NULL OR reason IN \(([^)]*)\)", text, re.DOTALL)
         assert match is not None
         assert set(re.findall(r"'([^']+)'", match.group(1))) == set(UNRESOLVED_REASONS)

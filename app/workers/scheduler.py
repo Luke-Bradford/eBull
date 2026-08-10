@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -5018,6 +5019,164 @@ def strategy_paper_cycle() -> None:
         )
 
 
+_BACKTEST_PROGRESS_FLUSH_SECONDS: Final = 5.0
+
+
+class _BacktestProgressWriter:
+    """Best-effort transient telemetry on a connection outside evidence work."""
+
+    def __init__(
+        self,
+        conn: psycopg.Connection[Any],
+        *,
+        run_id: int,
+        total_windows: int,
+        already_complete: int,
+    ) -> None:
+        self._conn: psycopg.Connection[Any] | None = conn
+        self._run_id = run_id
+        self._total_windows = total_windows
+        self._already_complete = already_complete
+        self._completed = 0
+        self._window_id: str | None = None
+        self._last_flush = 0.0
+        self._last_stage: tuple[object, ...] | None = None
+
+    def start_window(self, window_id: str) -> None:
+        self._window_id = window_id
+        self._last_stage = None
+
+    def __call__(self, event: object) -> None:
+        from app.services.backtest_run import BacktestProgressEvent
+
+        if not isinstance(event, BacktestProgressEvent) or self._conn is None:
+            return
+        stage = (
+            event.phase,
+            event.strategy_id,
+            event.quarantine_arm,
+            event.ambiguity_arm,
+        )
+        now = time.monotonic()
+        stage_changed = stage != self._last_stage
+        final_tick = event.series_total is not None and event.series_seen == event.series_total
+        if not stage_changed and not final_tick and now - self._last_flush < _BACKTEST_PROGRESS_FLUSH_SECONDS:
+            return
+        payload = self._payload(
+            active={
+                "window_id": self._window_id,
+                "phase": event.phase,
+                "strategy_id": event.strategy_id,
+                "quarantine_arm": event.quarantine_arm,
+                "ambiguity_arm": event.ambiguity_arm,
+                "series_seen": event.series_seen,
+                "series_total": event.series_total,
+            }
+        )
+        try:
+            self._conn.execute(
+                """
+                UPDATE job_runs
+                   SET progress_json = %(progress)s,
+                       processed_count = %(processed)s,
+                       target_count = %(target)s,
+                       last_progress_at = now()
+                 WHERE run_id = %(run_id)s AND status = 'running'
+                """,
+                {
+                    "progress": Jsonb(payload),
+                    "processed": event.series_seen,
+                    "target": event.series_total,
+                    "run_id": self._run_id,
+                },
+            )
+        except Exception:
+            # Telemetry happens after the job row exists and is never evidence.
+            # Disabling it cannot turn committed or in-flight evidence into a
+            # failure, and avoids repeated pool/lock pressure after one fault.
+            logger.warning("strategy evidence progress telemetry disabled after write failure", exc_info=True)
+            self.close()
+            return
+        self._last_flush = now
+        self._last_stage = stage
+
+    def record_window_commit(self, *, rows_written: int, completed: int) -> bool:
+        """Publish only a checkpoint the evidence connection already committed."""
+        if self._conn is None:
+            return False
+        self._completed = completed
+        try:
+            self._conn.execute(
+                """
+                UPDATE job_runs
+                   SET row_count = %(rows)s,
+                       progress_json = %(progress)s,
+                       processed_count = 0,
+                       target_count = NULL,
+                       last_progress_at = now()
+                 WHERE run_id = %(run_id)s AND status = 'running'
+                """,
+                {
+                    "rows": rows_written,
+                    "progress": Jsonb(self._payload(active=None)),
+                    "run_id": self._run_id,
+                },
+            )
+        except Exception:
+            logger.warning("strategy evidence checkpoint telemetry disabled after write failure", exc_info=True)
+            self.close()
+            return False
+        return True
+
+    def _payload(self, *, active: Mapping[str, object] | None) -> dict[str, object]:
+        return {
+            "candidates_seen": self._total_windows,
+            "outcomes": {
+                "already_complete": self._already_complete,
+                "completed": self._completed,
+            },
+            "errors": {},
+            "active": None if active is None else dict(active),
+        }
+
+    def close(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            logger.warning("failed to close strategy evidence progress connection", exc_info=True)
+
+
+def _open_backtest_progress_writer(
+    *,
+    run_id: int,
+    total_windows: int,
+    already_complete: int,
+) -> _BacktestProgressWriter | None:
+    if run_id <= 0:
+        return None
+    try:
+        # One short-lived connection for the refresh, not one connection per
+        # heartbeat. Tight SQL/lock bounds make telemetry unable to queue behind
+        # the evidence writer or amplify a saturated connection pool.
+        conn = connect_job(
+            autocommit=True,
+            connect_timeout=3,
+            options="-c statement_timeout=2000 -c lock_timeout=500",
+        )
+    except Exception:
+        logger.warning("strategy evidence progress telemetry unavailable", exc_info=True)
+        return None
+    return _BacktestProgressWriter(
+        conn,
+        run_id=run_id,
+        total_windows=total_windows,
+        already_complete=already_complete,
+    )
+
+
 def strategy_backtest_run(params: Mapping[str, Any]) -> None:
     """Persist criterion 9's arm pairs for every runnable strategy (#2394 §3.2).
 
@@ -5078,46 +5237,65 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                     )
                 rows_written = 0
                 newly_completed = 0
-                for window_id, item in RECENT_EVIDENCE_WINDOWS.items():
-                    if window_id in complete:
-                        continue
-                    report = run_backtest(
-                        conn,
-                        holdout_purpose=_optional_str(params.get("holdout_purpose")),
-                        holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
-                        trial_register_version=_optional_str(params.get("trial_register_version")),
-                        evaluation_window=item.window,
-                    )
-                    # A window is the restart boundary. The ledger identities
-                    # are immutable, so keeping earlier windows uncommitted
-                    # would make an hours-long refresh start from zero.
-                    conn.commit()
-                    rows_written += report.rows_written
-                    newly_completed += 1
-                    tracker.row_count = rows_written
-                    tracker.progress = JobProgress(
-                        candidates_seen=len(RECENT_EVIDENCE_WINDOWS),
-                        outcomes={
-                            "already_complete": len(complete),
-                            "completed": newly_completed,
-                        },
-                    )
-                    if tracker.run_id:
-                        conn.execute(
-                            """
-                            UPDATE job_runs
-                            SET row_count = %(rows)s,
-                                progress_json = %(progress)s,
-                                last_progress_at = now()
-                            WHERE run_id = %(run_id)s AND status = 'running'
-                            """,
-                            {
-                                "rows": rows_written,
-                                "progress": Jsonb(tracker.progress.as_json()),
-                                "run_id": tracker.run_id,
+                progress_writer = _open_backtest_progress_writer(
+                    run_id=tracker.run_id,
+                    total_windows=len(RECENT_EVIDENCE_WINDOWS),
+                    already_complete=len(complete),
+                )
+                try:
+                    for window_id, item in RECENT_EVIDENCE_WINDOWS.items():
+                        if window_id in complete:
+                            continue
+                        if progress_writer is not None:
+                            progress_writer.start_window(window_id)
+                        report = run_backtest(
+                            conn,
+                            holdout_purpose=_optional_str(params.get("holdout_purpose")),
+                            holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
+                            trial_register_version=_optional_str(params.get("trial_register_version")),
+                            evaluation_window=item.window,
+                            progress=progress_writer,
+                        )
+                        # A window is the restart boundary. The ledger identities
+                        # are immutable, so keeping earlier windows uncommitted
+                        # would make an hours-long refresh start from zero.
+                        conn.commit()
+                        rows_written += report.rows_written
+                        newly_completed += 1
+                        tracker.row_count = rows_written
+                        tracker.progress = JobProgress(
+                            candidates_seen=len(RECENT_EVIDENCE_WINDOWS),
+                            outcomes={
+                                "already_complete": len(complete),
+                                "completed": newly_completed,
                             },
                         )
-                        conn.commit()
+                        checkpoint_recorded = progress_writer is not None and progress_writer.record_window_commit(
+                            rows_written=rows_written,
+                            completed=newly_completed,
+                        )
+                        if tracker.run_id and not checkpoint_recorded:
+                            # Fallback after telemetry connection failure. This
+                            # runs only after the evidence commit and therefore
+                            # cannot expose a partial immutable window.
+                            conn.execute(
+                                """
+                                UPDATE job_runs
+                                SET row_count = %(rows)s,
+                                    progress_json = %(progress)s,
+                                    last_progress_at = now()
+                                WHERE run_id = %(run_id)s AND status = 'running'
+                                """,
+                                {
+                                    "rows": rows_written,
+                                    "progress": Jsonb(tracker.progress.as_json()),
+                                    "run_id": tracker.run_id,
+                                },
+                            )
+                            conn.commit()
+                finally:
+                    if progress_writer is not None:
+                        progress_writer.close()
                 tracker.row_count = rows_written
                 tracker.progress = JobProgress(
                     candidates_seen=len(RECENT_EVIDENCE_WINDOWS),

@@ -212,9 +212,10 @@ Each of these was a Codex ckpt-1 finding and each needs settling before code:
   `outcome_ledger.select_pending_fills()`, not "prior open signals" as first written.
 - **`strategy_outcomes` keys on `(rule_set_version, input_rule_set_version)`** — the daily
   scan must declare both, and the first draft named neither.
-- **Immature windows need a policy.** A signal whose max-hold has not elapsed is not an
-  outcome; `window_truncated` / `missing_bar_data` / `quarantined_bar` / `series_break` all
-  have to resolve to something explicit rather than being skipped.
+- **Immature or unorderable outcomes need a policy.** A signal whose max-hold has not elapsed
+  is not an outcome; `window_truncated` / `missing_bar_data` / `quarantined_bar` /
+  `series_break` / `unorderable_exit_levels` all have to resolve to something explicit rather
+  than being skipped.
 - **S-4 needs exit levels fixed at signal time** — a manifest of `(identity, signals)` alone
   cannot express that, which is part of why §2's operational contract exists.
 

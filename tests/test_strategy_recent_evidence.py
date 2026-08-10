@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.api.strategies import _evidence_window_counts
+from app.services.backtest_run import BacktestProgressEvent
 from app.services.processes.param_metadata import MANUAL_TRIGGER_JOB_METADATA
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS, recent_evidence_window
 from app.services.strategy_result import EVALUATION_WINDOW_END, HOLDOUT_BOUNDARY
@@ -131,6 +132,182 @@ def test_refresh_recent_refuses_partial_immutable_window(
                 "holdout_accessed_by": "operator",
             }
         )
+
+
+def test_refresh_progress_is_transient_until_evidence_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = SimpleNamespace(row_count=None, run_id=9, progress=None, note=None)
+    conn = MagicMock()
+    events: list[str] = []
+    conn.commit.side_effect = lambda: events.append("evidence_commit")
+    missing = next(reversed(RECENT_EVIDENCE_WINDOWS))
+
+    class Writer:
+        def start_window(self, window_id: str) -> None:
+            events.append(f"start:{window_id}")
+
+        def __call__(self, event: BacktestProgressEvent) -> None:
+            events.append(f"progress:{event.phase}")
+
+        def record_window_commit(self, *, rows_written: int, completed: int) -> bool:
+            events.append(f"checkpoint:{rows_written}:{completed}")
+            return True
+
+        def close(self) -> None:
+            events.append("closed")
+
+    writer = Writer()
+
+    @contextmanager
+    def tracked(_job_name: str) -> Iterator[SimpleNamespace]:
+        yield tracker
+
+    @contextmanager
+    def connected() -> Iterator[MagicMock]:
+        yield conn
+
+    def run_backtest(_conn: object, **kwargs: object) -> SimpleNamespace:
+        progress = kwargs["progress"]
+        assert callable(progress)
+        progress(BacktestProgressEvent(phase="evaluation", series_seen=25, series_total=100))
+        return SimpleNamespace(rows_written=16)
+
+    monkeypatch.setattr(scheduler, "_tracked_job", tracked)
+    monkeypatch.setattr(scheduler, "connect_job", connected)
+    monkeypatch.setattr(
+        scheduler,
+        "_recent_evidence_completion",
+        lambda _conn: (set(RECENT_EVIDENCE_WINDOWS) - {missing}, set()),
+    )
+    monkeypatch.setattr(scheduler, "_open_backtest_progress_writer", lambda **_kwargs: writer)
+    monkeypatch.setattr("app.services.backtest_run.run_backtest", run_backtest)
+
+    scheduler.strategy_backtest_run(
+        {
+            "refresh_recent": True,
+            "holdout_purpose": "declared recent evidence",
+            "holdout_accessed_by": "operator",
+        }
+    )
+
+    assert events == [
+        f"start:{missing}",
+        "progress:evaluation",
+        "evidence_commit",
+        "checkpoint:16:1",
+        "closed",
+    ]
+    assert conn.execute.call_count == 0
+
+
+def test_refresh_failure_before_commit_never_publishes_a_window_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = SimpleNamespace(row_count=None, run_id=9, progress=None, note=None)
+    conn = MagicMock()
+    events: list[str] = []
+
+    class Writer:
+        def start_window(self, window_id: str) -> None:
+            events.append(f"start:{window_id}")
+
+        def __call__(self, _event: BacktestProgressEvent) -> None:
+            events.append("progress")
+
+        def record_window_commit(self, *, rows_written: int, completed: int) -> bool:
+            events.append(f"checkpoint:{rows_written}:{completed}")
+            return True
+
+        def close(self) -> None:
+            events.append("closed")
+
+    @contextmanager
+    def tracked(_job_name: str) -> Iterator[SimpleNamespace]:
+        yield tracker
+
+    @contextmanager
+    def connected() -> Iterator[MagicMock]:
+        yield conn
+
+    monkeypatch.setattr(scheduler, "_tracked_job", tracked)
+    monkeypatch.setattr(scheduler, "connect_job", connected)
+    monkeypatch.setattr(scheduler, "_recent_evidence_completion", lambda _conn: (set(), set()))
+    monkeypatch.setattr(scheduler, "_open_backtest_progress_writer", lambda **_kwargs: Writer())
+
+    def fail(_conn: object, **kwargs: object) -> None:
+        progress = kwargs["progress"]
+        assert callable(progress)
+        progress(BacktestProgressEvent(phase="evaluation", series_seen=25, series_total=100))
+        raise RuntimeError("cancelled before evidence commit")
+
+    monkeypatch.setattr("app.services.backtest_run.run_backtest", fail)
+
+    with pytest.raises(RuntimeError, match="cancelled before evidence commit"):
+        scheduler.strategy_backtest_run(
+            {
+                "refresh_recent": True,
+                "holdout_purpose": "declared recent evidence",
+                "holdout_accessed_by": "operator",
+            }
+        )
+
+    assert events == [f"start:{next(iter(RECENT_EVIDENCE_WINDOWS))}", "progress", "closed"]
+    conn.commit.assert_not_called()
+
+
+def test_progress_writer_failure_is_non_fatal_and_disables_future_writes() -> None:
+    conn = MagicMock()
+    conn.execute.side_effect = RuntimeError("telemetry unavailable")
+    writer = scheduler._BacktestProgressWriter(  # noqa: SLF001 - the failure boundary is the contract under test
+        conn,
+        run_id=9,
+        total_windows=8,
+        already_complete=0,
+    )
+    writer.start_window("primary-2022-plus")
+    event = BacktestProgressEvent(phase="evaluation", series_seen=25, series_total=100)
+
+    writer(event)
+    writer(event)
+
+    assert conn.execute.call_count == 1
+    conn.close.assert_called_once_with()
+
+
+def test_progress_writer_does_not_claim_window_completion_before_commit() -> None:
+    conn = MagicMock()
+    writer = scheduler._BacktestProgressWriter(  # noqa: SLF001 - SQL/payload boundary under test
+        conn,
+        run_id=9,
+        total_windows=8,
+        already_complete=2,
+    )
+    writer.start_window("rolling-24m")
+
+    writer(
+        BacktestProgressEvent(
+            phase="evaluation",
+            strategy_id="s4-volatility-compression-breakout",
+            quarantine_arm="masked",
+            series_seen=50,
+            series_total=100,
+        )
+    )
+
+    sql, params = conn.execute.call_args.args
+    assert "row_count" not in sql
+    payload = params["progress"].obj
+    assert payload["outcomes"] == {"already_complete": 2, "completed": 0}
+    assert payload["active"] == {
+        "window_id": "rolling-24m",
+        "phase": "evaluation",
+        "strategy_id": "s4-volatility-compression-breakout",
+        "quarantine_arm": "masked",
+        "ambiguity_arm": None,
+        "series_seen": 50,
+        "series_total": 100,
+    }
 
 
 def test_overview_counts_missing_members_and_empty_runnable_set_without_crashing() -> None:

@@ -53,11 +53,11 @@ import math
 import time
 from array import array
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, Literal, cast
 
 import numpy as np
 import psycopg
@@ -81,7 +81,7 @@ from app.services.equity_curve import (
 )
 from app.services.indicator_series import BarSeries, Universe
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
-from app.services.outcome_resolver import UnresolvedReason, resolve_outcome
+from app.services.outcome_resolver import ExitLevels, UnresolvedReason, resolve_outcome
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.position_builder import (
     EntryFill,
@@ -96,7 +96,7 @@ from app.services.position_costing import CostedPosition, cost_positions
 from app.services.price_segments import (
     load_unresolved_breaks,
     segment_end_index,
-    segment_for_index,
+    series_segment_bounds,
 )
 from app.services.price_structure import StructureBar
 from app.services.research_price_structure_store import (
@@ -145,6 +145,54 @@ from app.services.walk_forward import (
 )
 
 logger = logging.getLogger(__name__)
+
+BacktestPhase = Literal["corpus", "ranking", "evaluation", "deflation", "write"]
+
+
+@dataclass(frozen=True)
+class BacktestProgressEvent:
+    """One transient checkpoint; never evidence completion or a result row."""
+
+    phase: BacktestPhase
+    strategy_id: str | None = None
+    quarantine_arm: QuarantineArm | None = None
+    ambiguity_arm: AmbiguityArm | None = None
+    series_seen: int = 0
+    series_total: int | None = None
+
+
+ProgressCallback = Callable[[BacktestProgressEvent], None]
+
+
+def _emit_progress(callback: ProgressCallback | None, event: BacktestProgressEvent) -> None:
+    if callback is not None:
+        callback(event)
+
+
+def _emit_series_progress(
+    callback: ProgressCallback | None,
+    *,
+    phase: Literal["ranking", "evaluation"],
+    entry: StrategyEntry,
+    quarantine_arm: QuarantineArm,
+    ambiguity_arm: AmbiguityArm | None,
+    series_seen: int,
+    series_total: int,
+) -> None:
+    """Bound callback overhead while guaranteeing an early and final tick."""
+    if series_seen == 1 or series_seen == series_total or series_seen % 25 == 0:
+        _emit_progress(
+            callback,
+            BacktestProgressEvent(
+                phase=phase,
+                strategy_id=entry.strategy_id,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=ambiguity_arm,
+                series_seen=series_seen,
+                series_total=series_total,
+            ),
+        )
+
 
 #: The research corpus is survivor-only (#2284) and every row this job writes
 #: inherits that label (#2288). ⚠ It is BOTH the ``Universe`` hashed into
@@ -477,10 +525,10 @@ def runnable_strategies(
         entry = manifest[strategy_id]
         regime = _regime_for(entry, calendar)
         if not regime.level_based:
-            if entry.exit_levels is not None:
+            if entry.exit_levels is not None or entry.exit_levels_batch is not None:
                 raise RuntimeError(
-                    f"{strategy_id} supplies exit levels for a non-level regime — the declared close source and "
-                    "its consumer disagree"
+                    f"{strategy_id} supplies scalar or batch exit levels for a non-level regime — the declared "
+                    "close source and its consumer disagree"
                 )
             runnable.append(strategy_id)
             continue
@@ -575,8 +623,45 @@ def _resolved_level_outcomes(
     spans both. The resolver therefore emits ``ambiguous`` and this adapter
     converts only those rows to the declared best/worst sensitivity price.
     """
-    if entry.exit_levels is None:
-        raise ValueError(f"{entry.strategy_id} is level-based but declares no exit-level factory")
+    return _resolved_level_outcomes_for_arms(
+        entry,
+        entries,
+        series=series,
+        ambiguity_arms=(ambiguity_arm,),
+        quarantine_arm=quarantine_arm,
+        unresolved_breaks=unresolved_breaks,
+    )[ambiguity_arm]
+
+
+def _resolved_level_outcomes_for_arms(
+    entry: StrategyEntry,
+    entries: Sequence[EntryFill],
+    *,
+    series: BarSeries,
+    ambiguity_arms: Sequence[AmbiguityArm],
+    quarantine_arm: QuarantineArm,
+    unresolved_breaks: Sequence[date],
+) -> dict[AmbiguityArm, list[ResolvedOutcome]]:
+    """Resolve one filled population once, then project declared OHLC arms.
+
+    Only a genuinely ambiguous daily bar differs between ``best_case`` and
+    ``worst_case``. Signal fills, causal levels, gap outcomes, expiry and
+    unresolved reasons are shared facts. Each returned list is nevertheless a
+    distinct mutable container so later position/book accumulation cannot leak
+    between arms.
+    """
+    requested = tuple(ambiguity_arms)
+    if not requested or len(set(requested)) != len(requested):
+        raise ValueError("ambiguity_arms must be a non-empty sequence without duplicates")
+    unknown = {arm for arm in requested if arm not in AMBIGUITY_ARMS}
+    if unknown:
+        raise ValueError(f"unknown ambiguity arms {sorted(unknown)}")
+    levels_by_entry = _exit_levels_for_entries(
+        entry,
+        entries,
+        series=series,
+        unresolved_breaks=unresolved_breaks,
+    )
     bar_index = {when: index for index, when in enumerate(series.dates)}
     missing_reason: UnresolvedReason = "quarantined_bar" if quarantine_arm == "masked" else "missing_bar_data"
     masked_reasons: dict[int, UnresolvedReason] = {
@@ -584,21 +669,23 @@ def _resolved_level_outcomes(
         for index, row in enumerate(series.rows)
         if any(row.get(field) is None for field in ("open", "high", "low", "close"))
     }
-    resolved: list[ResolvedOutcome] = []
-    for fill in entries:
-        signal_index = bar_index[fill.signal_bar_date]
+    resolved: dict[AmbiguityArm, list[ResolvedOutcome]] = {arm: [] for arm in requested}
+    for fill, levels in zip(entries, levels_by_entry, strict=True):
+        if isinstance(levels, str):
+            for ambiguity_arm in requested:
+                resolved[ambiguity_arm].append(
+                    ResolvedOutcome(
+                        signal_id=fill.signal_id,
+                        rule_set_version=OUTCOME_RULE_SET_VERSION,
+                        input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+                        outcome="unresolved",
+                        exit_bar_date=None,
+                        exit_price=None,
+                        reason=levels,
+                    )
+                )
+            continue
         fill_index = bar_index[fill.fill_bar_date]
-        signal_series, local_signal_index = segment_for_index(
-            series,
-            index=signal_index,
-            unresolved_breaks=unresolved_breaks,
-        )
-        levels = entry.exit_levels(
-            signal_series,
-            signal_index=local_signal_index,
-            entry_price=fill.fill_price,
-            universe=BACKTEST_UNIVERSE,
-        )
         position_segment_end = segment_end_index(
             series,
             fill_index=fill_index,
@@ -612,28 +699,87 @@ def _resolved_level_outcomes(
             masked_bar_reasons=masked_reasons,
             segment_end_index=position_segment_end,
         )
-        outcome_name = outcome.outcome
-        exit_price = outcome.exit_price
-        if outcome_name == "ambiguous":
-            outcome_name = "tp_hit" if ambiguity_arm == "best_case" else "sl_hit"
-            exit_price = levels.take_profit if ambiguity_arm == "best_case" else levels.stop_loss
-        resolved.append(
-            ResolvedOutcome(
-                signal_id=fill.signal_id,
-                rule_set_version=OUTCOME_RULE_SET_VERSION,
-                input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
-                outcome=outcome_name,
-                exit_bar_date=outcome.exit_bar_date,
-                exit_price=exit_price,
-                reason=outcome.reason,
-                unresolved_until_bar_date=(
-                    series.dates[position_segment_end + 1]
-                    if outcome.reason == "series_break" and position_segment_end is not None
-                    else None
+        for ambiguity_arm in requested:
+            outcome_name = outcome.outcome
+            exit_price = outcome.exit_price
+            if outcome_name == "ambiguous":
+                outcome_name = "tp_hit" if ambiguity_arm == "best_case" else "sl_hit"
+                exit_price = levels.take_profit if ambiguity_arm == "best_case" else levels.stop_loss
+            resolved[ambiguity_arm].append(
+                ResolvedOutcome(
+                    signal_id=fill.signal_id,
+                    rule_set_version=OUTCOME_RULE_SET_VERSION,
+                    input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+                    outcome=outcome_name,
+                    exit_bar_date=outcome.exit_bar_date,
+                    exit_price=exit_price,
+                    reason=outcome.reason,
+                    unresolved_until_bar_date=(
+                        series.dates[position_segment_end + 1]
+                        if outcome.reason == "series_break" and position_segment_end is not None
+                        else None
+                    ),
                 ),
             )
-        )
     return resolved
+
+
+def _exit_levels_for_entries(
+    entry: StrategyEntry,
+    entries: Sequence[EntryFill],
+    *,
+    series: BarSeries,
+    unresolved_breaks: Sequence[date],
+) -> tuple[ExitLevels | UnresolvedReason, ...]:
+    """Build level objects in entry order, batching only within one segment.
+
+    Indicators restart at every unresolved scale break. Grouping by the exact
+    half-open segment preserves that reset while avoiding one full ATR pass per
+    entry. The scalar manifest factory remains the mandatory fallback and test
+    oracle.
+    """
+    if entry.exit_levels is None:
+        raise ValueError(f"{entry.strategy_id} is level-based but declares no exit-level factory")
+    if not entries:
+        return ()
+    bar_index = {when: index for index, when in enumerate(series.dates)}
+    indexed = [(position, fill, bar_index[fill.signal_bar_date]) for position, fill in enumerate(entries)]
+    unassigned = object()
+    built: list[ExitLevels | UnresolvedReason | object] = [unassigned] * len(entries)
+    for start, end in series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
+        segment_entries = [(position, fill, index - start) for position, fill, index in indexed if start <= index < end]
+        if not segment_entries:
+            continue
+        signal_series = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
+        requests = tuple((local_index, fill.fill_price) for _, fill, local_index in segment_entries)
+        if entry.exit_levels_batch is not None:
+            levels = tuple(
+                entry.exit_levels_batch(
+                    signal_series,
+                    requests=requests,
+                    universe=BACKTEST_UNIVERSE,
+                )
+            )
+        else:
+            levels = tuple(
+                entry.exit_levels(
+                    signal_series,
+                    signal_index=local_index,
+                    entry_price=fill.fill_price,
+                    universe=BACKTEST_UNIVERSE,
+                )
+                for _, fill, local_index in segment_entries
+            )
+        if len(levels) != len(segment_entries):
+            raise RuntimeError(
+                f"{entry.strategy_id} batch exit factory returned {len(levels)} levels for "
+                f"{len(segment_entries)} requests"
+            )
+        for (position, _fill, _local_index), level in zip(segment_entries, levels, strict=True):
+            built[position] = level
+    if any(level is unassigned for level in built):
+        raise RuntimeError(f"{entry.strategy_id} could not assign an exit bracket to every filled entry")
+    return cast(tuple[ExitLevels | UnresolvedReason, ...], tuple(built))
 
 
 def _mark_index(series: BarSeries, *, window: Window, not_before: date) -> int | None:
@@ -1150,6 +1296,7 @@ def evaluate_arm(
     ambiguity_arm: AmbiguityArm | None,
     identity: StrategyIdentity,
     namespaces: Sequence[ResultNamespace],
+    progress: ProgressCallback | None = None,
 ) -> ArmMeasurement:
     """One ``(strategy, quarantine arm)`` corpus pass, end to end.
 
@@ -1179,16 +1326,41 @@ def evaluate_arm(
     ranking: _CrossSection | None = None
 
     if entry.strategy_class == "cross_sectional":
-        ranking = _rank_cross_section(conn, entry, corpus=corpus, quarantine_arm=quarantine_arm)
+        ranking = _rank_cross_section(
+            conn,
+            entry,
+            corpus=corpus,
+            quarantine_arm=quarantine_arm,
+            progress=progress,
+        )
 
     evaluated = 0
-    for instrument_id, series_id in corpus.pairs:
+    total = len(corpus.pairs)
+    for series_seen, (instrument_id, series_id) in enumerate(corpus.pairs, start=1):
         masked = load_masked_series(conn, series_id, arm=quarantine_arm)
         if not masked.bars:
+            _emit_series_progress(
+                progress,
+                phase="evaluation",
+                entry=entry,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=ambiguity_arm,
+                series_seen=series_seen,
+                series_total=total,
+            )
             continue
         series = _to_series(masked.bars)
         indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
         if len(indices) < 2:
+            _emit_series_progress(
+                progress,
+                phase="evaluation",
+                entry=entry,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=ambiguity_arm,
+                series_seen=series_seen,
+                series_total=total,
+            )
             continue
         evaluated += 1
         first_axis_index, last_axis_index = indices[0], indices[-1]
@@ -1248,6 +1420,15 @@ def evaluate_arm(
             close_sources=close_sources,
             discarded=discarded,
         )
+        _emit_series_progress(
+            progress,
+            phase="evaluation",
+            entry=entry,
+            quarantine_arm=quarantine_arm,
+            ambiguity_arm=ambiguity_arm,
+            series_seen=series_seen,
+            series_total=total,
+        )
 
     measured: dict[ResultNamespace, NamespaceMeasurement] = {}
     for name in namespaces:
@@ -1270,6 +1451,167 @@ def evaluate_arm(
         series_evaluated=evaluated,
         elapsed_s=time.monotonic() - started,
     )
+
+
+def evaluate_level_arms(
+    conn: psycopg.Connection[Any],
+    entry: StrategyEntry,
+    *,
+    corpus: _Corpus,
+    quarantine_arm: QuarantineArm,
+    identity: StrategyIdentity,
+    namespaces: Sequence[ResultNamespace],
+    progress: ProgressCallback | None = None,
+) -> tuple[ArmMeasurement, ...]:
+    """Evaluate both daily-OHLC ambiguity projections from one corpus pass.
+
+    The two arms differ only where one daily bar spans both fixed levels. They
+    therefore share immutable series reads, signal rows, fill ids, causal level
+    construction and the raw resolver outcome. Namespace books, close-source
+    counters and discarded-position counters remain arm-local, so the two
+    measurements cannot influence one another after that common evidence.
+    """
+    started = time.monotonic()
+    regime = _regime_for(entry, corpus.axis)
+    if not regime.level_based:
+        raise ValueError(f"{entry.strategy_id} is not level-based and has no ambiguity arms to share")
+    books: dict[AmbiguityArm, dict[ResultNamespace, _NamespaceBook]] = {
+        ambiguity: {name: _NamespaceBook(records_label_windows=(name == "in_sample")) for name in namespaces}
+        for ambiguity in AMBIGUITY_ARM_ORDER
+    }
+    close_sources: dict[AmbiguityArm, Counter[str]] = {ambiguity: Counter() for ambiguity in AMBIGUITY_ARM_ORDER}
+    discarded: dict[AmbiguityArm, Counter[str]] = {ambiguity: Counter() for ambiguity in AMBIGUITY_ARM_ORDER}
+    closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
+    ranking = (
+        _rank_cross_section(
+            conn,
+            entry,
+            corpus=corpus,
+            quarantine_arm=quarantine_arm,
+            progress=progress,
+        )
+        if entry.strategy_class == "cross_sectional"
+        else None
+    )
+
+    evaluated = 0
+    total = len(corpus.pairs)
+    for series_seen, (instrument_id, series_id) in enumerate(corpus.pairs, start=1):
+        masked = load_masked_series(conn, series_id, arm=quarantine_arm)
+        if not masked.bars:
+            _emit_series_progress(
+                progress,
+                phase="evaluation",
+                entry=entry,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=None,
+                series_seen=series_seen,
+                series_total=total,
+            )
+            continue
+        series = _to_series(masked.bars)
+        indices = [corpus.axis_pos[when] for when in series.dates if when in corpus.axis_pos]
+        if len(indices) < 2:
+            _emit_series_progress(
+                progress,
+                phase="evaluation",
+                entry=entry,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=None,
+                series_seen=series_seen,
+                series_total=total,
+            )
+            continue
+        evaluated += 1
+        first_axis_index, last_axis_index = indices[0], indices[-1]
+        closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
+        for when, row in zip(series.dates, series.rows, strict=True):
+            slot = corpus.axis_pos.get(when)
+            close = row.get("close")
+            if slot is not None and close is not None:
+                closes[slot - first_axis_index] = float(close)
+        # Read-only after construction. Both namespace measurements must mark
+        # against the same observations; no arm mutates this array.
+        closes_by_instrument[instrument_id] = (first_axis_index, array("d", closes))
+
+        signals = _signals_for(
+            entry,
+            series,
+            instrument_id=instrument_id,
+            ranking=ranking,
+            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+        )
+        rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
+        entries, exits = _fills(rows, instrument_id)
+        outcomes = _resolved_level_outcomes_for_arms(
+            entry,
+            entries,
+            series=series,
+            ambiguity_arms=AMBIGUITY_ARM_ORDER,
+            quarantine_arm=quarantine_arm,
+            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+        )
+        for ambiguity in AMBIGUITY_ARM_ORDER:
+            built = build_positions(
+                strategy_id=entry.strategy_id,
+                strategy_version=identity.version,
+                entries=entries,
+                exits=exits,
+                outcomes=outcomes[ambiguity],
+                outcome_pin=_OUTCOME_PIN,
+                series={instrument_id: series},
+                regime=regime,
+                window=corpus.window,
+            )
+            _absorb(
+                list(cost_positions(built.positions)),
+                series=series,
+                window=corpus.window,
+                axis_pos=corpus.axis_pos,
+                closes=closes,
+                first_axis_index=first_axis_index,
+                instrument_id=instrument_id,
+                books=books[ambiguity],
+                close_sources=close_sources[ambiguity],
+                discarded=discarded[ambiguity],
+            )
+        _emit_series_progress(
+            progress,
+            phase="evaluation",
+            entry=entry,
+            quarantine_arm=quarantine_arm,
+            ambiguity_arm=None,
+            series_seen=series_seen,
+            series_total=total,
+        )
+
+    elapsed = time.monotonic() - started
+    measurements: list[ArmMeasurement] = []
+    for ambiguity in AMBIGUITY_ARM_ORDER:
+        measured: dict[ResultNamespace, NamespaceMeasurement] = {}
+        for name in namespaces:
+            outcome = _measure_namespace(
+                name,
+                books[ambiguity][name],
+                corpus=corpus,
+                closes_by_instrument=closes_by_instrument,
+            )
+            if outcome is not None:
+                measured[name] = outcome
+        measurements.append(
+            ArmMeasurement(
+                strategy_id=entry.strategy_id,
+                strategy_version=identity.version,
+                ambiguity_arm=ambiguity,
+                quarantine_arm=quarantine_arm,
+                namespaces=measured,
+                holdout_positions_discarded=discarded[ambiguity].get("hold_out", 0),
+                close_sources=dict(close_sources[ambiguity]),
+                series_evaluated=evaluated,
+                elapsed_s=elapsed,
+            )
+        )
+    return tuple(measurements)
 
 
 @dataclass(frozen=True)
@@ -1342,6 +1684,7 @@ def _rank_cross_section(
     *,
     corpus: _Corpus,
     quarantine_arm: QuarantineArm,
+    progress: ProgressCallback | None = None,
 ) -> _CrossSection:
     """Sub-pass A: stage every member and rank each decision date's cross-section.
 
@@ -1361,12 +1704,31 @@ def _rank_cross_section(
         raise RuntimeError(f"{entry.strategy_id} is cross_sectional but returned no decision calendar")
 
     scores: dict[date, dict[int, float]] = {}
-    for instrument_id, series_id in corpus.pairs:
+    total = len(corpus.pairs)
+    for series_seen, (instrument_id, series_id) in enumerate(corpus.pairs, start=1):
         masked = load_masked_series(conn, series_id, arm=quarantine_arm)
         if not masked.bars:
+            _emit_series_progress(
+                progress,
+                phase="ranking",
+                entry=entry,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=None,
+                series_seen=series_seen,
+                series_total=total,
+            )
             continue
         series = _to_series(masked.bars)
         if len(series) < 2:
+            _emit_series_progress(
+                progress,
+                phase="ranking",
+                entry=entry,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=None,
+                series_seen=series_seen,
+                series_total=total,
+            )
             continue
         staged = segmented_member(
             entry,
@@ -1378,6 +1740,15 @@ def _rank_cross_section(
         )
         for when, value in staged.scores.items():
             scores.setdefault(when, {})[instrument_id] = value
+        _emit_series_progress(
+            progress,
+            phase="ranking",
+            entry=entry,
+            quarantine_arm=quarantine_arm,
+            ambiguity_arm=None,
+            series_seen=series_seen,
+            series_total=total,
+        )
 
     winners: dict[date, frozenset[int]] = {}
     thin: set[date] = set()
@@ -1679,6 +2050,7 @@ def _expected_refusals(
     *,
     holdout_requested: bool,
     deflated: bool,
+    purpose: StrategyPurpose = "capital_candidate",
     ambiguity_material: bool | None = False,
     prior_holdout_evaluations: int = 0,
 ) -> frozenset[PromotionRefusal]:
@@ -1699,6 +2071,8 @@ def _expected_refusals(
     buy-and-hold run rejected here after a full corpus pass.
     """
     expected = set(STANDING_REFUSALS)
+    if purpose == "harness_validation":
+        expected.add("harness_validation_only")
     if not holdout_requested and prior_holdout_evaluations <= 0:
         expected.add("holdout_never_evaluated")
     if not deflated:
@@ -1754,6 +2128,7 @@ def run_backtest(
     limit: int | None = None,
     evaluation_window: Window | None = None,
     manifest: Mapping[str, StrategyEntry] = STRATEGY_MANIFEST,
+    progress: ProgressCallback | None = None,
 ) -> BacktestRunReport:
     """Evaluate every runnable strategy and persist criterion 9's arm pairs.
 
@@ -1793,7 +2168,16 @@ def run_backtest(
     if not runnable:
         raise RuntimeError("no manifest strategy is runnable — every entry is blocked, so there is nothing to store")
 
+    _emit_progress(progress, BacktestProgressEvent(phase="corpus"))
     corpus = load_corpus(conn, limit=limit, evaluation_window=evaluation_window)
+    _emit_progress(
+        progress,
+        BacktestProgressEvent(
+            phase="corpus",
+            series_seen=len(corpus.pairs),
+            series_total=len(corpus.pairs),
+        ),
+    )
     identities = {
         entry_id: manifest[entry_id].identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID)
         for entry_id in runnable
@@ -1840,24 +2224,37 @@ def run_backtest(
     arms: list[ArmMeasurement] = []
     for entry_id in runnable:
         regime = _regime_for(manifest[entry_id], corpus.axis)
-        ambiguity_arms: tuple[AmbiguityArm | None, ...] = AMBIGUITY_ARM_ORDER if regime.level_based else (None,)
         for quarantine in QUARANTINE_ARM_ORDER:
-            for ambiguity in ambiguity_arms:
-                measurement = evaluate_arm(
+            if regime.level_based:
+                measurements = evaluate_level_arms(
                     conn,
                     manifest[entry_id],
                     corpus=corpus,
                     quarantine_arm=quarantine,
-                    ambiguity_arm=ambiguity,
                     identity=identities[entry_id],
                     namespaces=namespaces,
+                    progress=progress,
                 )
+            else:
+                measurements = (
+                    evaluate_arm(
+                        conn,
+                        manifest[entry_id],
+                        corpus=corpus,
+                        quarantine_arm=quarantine,
+                        ambiguity_arm=None,
+                        identity=identities[entry_id],
+                        namespaces=namespaces,
+                        progress=progress,
+                    ),
+                )
+            for measurement in measurements:
                 _assert_ambiguity_contract(measurement)
                 arms.append(measurement)
                 logger.info(
                     "strategy_backtest_run: %s/%s/%s evaluated %d series in %.1fs — %s, hold-out discarded %d",
                     entry_id,
-                    ambiguity or "shared",
+                    measurement.ambiguity_arm or "shared",
                     quarantine,
                     measurement.series_evaluated,
                     measurement.elapsed_s,
@@ -1866,6 +2263,7 @@ def run_backtest(
                 )
 
     # 2. Deflate once per (namespace, quarantine arm) group.
+    _emit_progress(progress, BacktestProgressEvent(phase="deflation"))
     by_group: dict[tuple[ResultNamespace, AmbiguityArm, QuarantineArm], dict[str, NamespaceMeasurement]] = {}
     for ambiguity in AMBIGUITY_ARM_ORDER:
         for measurement in arms:
@@ -1891,6 +2289,7 @@ def run_backtest(
             )
 
     # 3. Write, one transaction per arm pair.
+    _emit_progress(progress, BacktestProgressEvent(phase="write"))
     validated = frozenset(corpus.universe)
     written = _write_rows(
         conn,
@@ -2146,6 +2545,7 @@ def _write_rows(
         expected = _expected_refusals(
             holdout_requested=holdout_requested,
             deflated=result.deflated is not None,
+            purpose=result.purpose,
             ambiguity_material=ambiguity_material,
             prior_holdout_evaluations=evaluations,
         )
@@ -2329,6 +2729,7 @@ def _preflight_gate(
             expected = _expected_refusals(
                 holdout_requested=holdout_requested,
                 deflated=result.deflated is not None,
+                purpose=result.purpose,
                 ambiguity_material=ambiguity_material,
                 prior_holdout_evaluations=prior_holdout.get(
                     (result.identity.strategy_id, result.identity.strategy_version), 0

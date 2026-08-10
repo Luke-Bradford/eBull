@@ -46,6 +46,8 @@ from app.services.backtest_run import (
     build_in_sample_split,
     build_result,
     deflate_group,
+    evaluate_arm,
+    evaluate_level_arms,
     runnable_strategies,
 )
 from app.services.cost_model import COST_MODEL_ID
@@ -54,7 +56,12 @@ from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.position_builder import Window
-from app.services.research_price_structure_store import QUARANTINE_ARMS, QUARANTINE_RULE_SET_VERSION
+from app.services.price_structure import StructureBar
+from app.services.research_price_structure_store import (
+    QUARANTINE_ARMS,
+    QUARANTINE_RULE_SET_VERSION,
+    MaskedSeries,
+)
 from app.services.signal_ledger import LedgerRow
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import (
@@ -169,7 +176,10 @@ class TestRunnableStrategies:
         from app.services.strategy_manifest import STRATEGY_MANIFEST
 
         s4 = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
-        manifest = {**STRATEGY_MANIFEST, s4.strategy_id: replace(s4, exit_levels=None)}
+        manifest = {
+            **STRATEGY_MANIFEST,
+            s4.strategy_id: replace(s4, exit_levels=None, exit_levels_batch=None),
+        }
         monkeypatch.setattr(backtest_run, "_demonstrate_level_refusal", lambda entry, regime: None)
         with pytest.raises(RuntimeError, match="did NOT refuse"):
             runnable_strategies(manifest)
@@ -190,6 +200,88 @@ class TestArmVocabularyCoverage:
         this pins that the two are not accidentally coupled.
         """
         assert QUARANTINE_ARM_ORDER[0] == "admitted"
+
+
+class TestLevelArmSharedPass:
+    """The S-4 fast path is result-equivalent to two isolated arm passes."""
+
+    @staticmethod
+    def _fixture() -> tuple[_Corpus, MaskedSeries]:
+        start = date(2022, 1, 3)
+        dates = tuple(start + timedelta(days=index) for index in range(220))
+        bars = tuple(
+            StructureBar(
+                bar_date=when,
+                open=Decimal(str(100 + index)),
+                high=Decimal(str(100 + index + (20 if index == 150 else 1))),
+                low=Decimal(str(100 + index - (20 if index == 150 else 1))),
+                close=Decimal(str(100 + index)),
+                volume=1000,
+            )
+            for index, when in enumerate(dates)
+        )
+        corpus = _Corpus(
+            universe=(1,),
+            axis=dates,
+            axis_pos={when: index for index, when in enumerate(dates)},
+            pairs=((1, 10),),
+            evaluation_start=dates[0],
+            evaluation_end=dates[-1],
+        )
+        return corpus, MaskedSeries(
+            series_id=10,
+            bars=bars,
+            range_masked=0,
+            return_masked=0,
+            range_flagged=0,
+            return_flagged=0,
+            bars_flagged=0,
+            arm="admitted",
+        )
+
+    def test_shared_pass_matches_isolated_measurements_and_loads_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        corpus, loaded = self._fixture()
+        entry = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
+        identity = entry.identity(universe="survivor_only", cost_model_id=COST_MODEL_ID)
+        calls: list[int] = []
+
+        def load(_conn: object, series_id: int, *, arm: str) -> MaskedSeries:
+            calls.append(series_id)
+            return replace(loaded, arm=arm)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(backtest_run, "load_masked_series", load)
+        isolated = tuple(
+            evaluate_arm(
+                object(),  # type: ignore[arg-type]
+                entry,
+                corpus=corpus,
+                quarantine_arm="admitted",
+                ambiguity_arm=ambiguity,
+                identity=identity,
+                namespaces=("hold_out",),
+            )
+            for ambiguity in AMBIGUITY_ARM_ORDER
+        )
+        assert calls == [10, 10]
+
+        calls.clear()
+        shared = evaluate_level_arms(
+            object(),  # type: ignore[arg-type]
+            entry,
+            corpus=corpus,
+            quarantine_arm="admitted",
+            identity=identity,
+            namespaces=("hold_out",),
+        )
+
+        assert calls == [10]
+        assert tuple(replace(item, elapsed_s=0.0) for item in shared) == tuple(
+            replace(item, elapsed_s=0.0) for item in isolated
+        )
+        assert shared[0].namespaces["hold_out"].metrics != shared[1].namespaces["hold_out"].metrics
 
 
 class TestHoldoutPairing:
@@ -232,6 +324,13 @@ class TestExpectedRefusals:
 
     def test_full_holdout_run_with_a_dsr_leaves_only_the_three_standing_refusals(self) -> None:
         assert _expected_refusals(holdout_requested=True, deflated=True) == STANDING_REFUSALS
+
+    def test_harness_validation_purpose_is_predicted_before_the_write(self) -> None:
+        assert _expected_refusals(
+            holdout_requested=True,
+            deflated=True,
+            purpose="harness_validation",
+        ) == STANDING_REFUSALS | {"harness_validation_only"}
 
     def test_in_sample_run_adds_holdout_never_evaluated(self) -> None:
         assert _expected_refusals(holdout_requested=False, deflated=True) == STANDING_REFUSALS | {

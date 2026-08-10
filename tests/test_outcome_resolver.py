@@ -444,7 +444,11 @@ def test_the_inherited_reason_codes_match_the_registrys_spelling() -> None:
     (#2218) exists for."""
     assert INHERITED_REASONS <= NOT_EVALUABLE_REASONS
     assert INHERITED_REASONS == {"series_break", "quarantined_bar"}
-    assert OUR_ADDITIONAL_REASONS == {"window_truncated", "missing_bar_data"}
+    assert OUR_ADDITIONAL_REASONS == {
+        "window_truncated",
+        "missing_bar_data",
+        "unorderable_exit_levels",
+    }
     assert OUR_ADDITIONAL_REASONS | INHERITED_REASONS == UNRESOLVED_REASONS
     assert not OUR_ADDITIONAL_REASONS & NOT_EVALUABLE_REASONS
 
