@@ -111,7 +111,7 @@ from app.services.result_ledger import (
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
-from app.services.strategy_registry import StrategyIdentity, StrategySignal, stage_cross_sectional_member
+from app.services.strategy_registry import StagedMember, StrategyIdentity, StrategySignal, stage_cross_sectional_member
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
     CORPUS_VERSION,
@@ -1358,7 +1358,7 @@ def _signals_for(
 ) -> list[StrategySignal]:
     """One instrument's whole-series verdicts, per-series or cross-sectional."""
     if entry.signals is not None:
-        if entry.exit_levels is not None and unresolved_breaks:
+        if unresolved_breaks:
             signals: list[StrategySignal] = []
             for start, end in _series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
                 segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
@@ -1375,20 +1375,19 @@ def _signals_for(
                         masked_reason="quarantined_bar",
                     )
                 )
-            if len(signals) != len(series):
+            per_kind = Counter(signal.kind for signal in signals)
+            if not per_kind or any(count != len(series) for count in per_kind.values()):
                 raise RuntimeError(
-                    f"{entry.strategy_id} produced {len(signals)} segmented verdicts for {len(series)} bars"
+                    f"{entry.strategy_id} produced segmented verdict counts {dict(per_kind)} for {len(series)} bars"
                 )
             return signals
         return entry.signals(series, universe=BACKTEST_UNIVERSE, masked_reason="quarantined_bar")
     assert entry.member is not None and ranking is not None
-    staged = stage_cross_sectional_member(
-        entry.member(
-            series,
-            panel_decision_dates=ranking.decision_dates,
-            universe=BACKTEST_UNIVERSE,
-            masked_reason="quarantined_bar",
-        )
+    staged = _stage_cross_sectional_segments(
+        entry,
+        series,
+        decision_dates=ranking.decision_dates,
+        unresolved_breaks=unresolved_breaks,
     )
     signals: list[StrategySignal] = []
     for index, verdict in enumerate(staged.verdicts):
@@ -1408,6 +1407,48 @@ def _signals_for(
         fired = instrument_id in ranking.winners.get(when, frozenset())
         signals.append(StrategySignal(verdict="fired" if fired else "not_fired", signal_index=index, kind="entry"))
     return signals
+
+
+def _stage_cross_sectional_segments(
+    entry: StrategyEntry,
+    series: BarSeries,
+    *,
+    decision_dates: frozenset[date],
+    unresolved_breaks: Sequence[date],
+) -> StagedMember:
+    """Stage one ranked member with indicator state restarted at scale breaks."""
+    assert entry.member is not None
+    bounds = _series_segment_bounds(series, unresolved_breaks=unresolved_breaks)
+    verdicts: list[StrategySignal | None] = []
+    scores: dict[date, float] = {}
+    for start, end in bounds:
+        segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
+        staged = stage_cross_sectional_member(
+            entry.member(
+                segment,
+                panel_decision_dates=decision_dates,
+                universe=BACKTEST_UNIVERSE,
+                masked_reason="quarantined_bar",
+            )
+        )
+        verdicts.extend(
+            None
+            if verdict is None
+            else StrategySignal(
+                verdict=verdict.verdict,
+                signal_index=verdict.signal_index + start,
+                kind=verdict.kind,
+                reason=verdict.reason,
+            )
+            for verdict in staged.verdicts
+        )
+        overlap = scores.keys() & staged.scores.keys()
+        if overlap:  # pragma: no cover - BarSeries dates and segments are disjoint
+            raise RuntimeError(f"{entry.strategy_id} produced duplicate segmented score dates {sorted(overlap)}")
+        scores.update(staged.scores)
+    if len(verdicts) != len(series):
+        raise RuntimeError(f"{entry.strategy_id} staged {len(verdicts)} segmented bars for {len(series)} inputs")
+    return StagedMember(verdicts=tuple(verdicts), scores=scores)
 
 
 def _rank_cross_section(
@@ -1442,13 +1483,11 @@ def _rank_cross_section(
         series = _to_series(masked.bars)
         if len(series) < 2:
             continue
-        staged = stage_cross_sectional_member(
-            entry.member(
-                series,
-                panel_decision_dates=decision_dates,
-                universe=BACKTEST_UNIVERSE,
-                masked_reason="quarantined_bar",
-            )
+        staged = _stage_cross_sectional_segments(
+            entry,
+            series,
+            decision_dates=decision_dates,
+            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
         )
         for when, value in staged.scores.items():
             scores.setdefault(when, {})[instrument_id] = value

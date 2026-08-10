@@ -1298,3 +1298,42 @@ class TestSeriesBreakBoundary:
         assert whole[200].verdict == "fired"
         assert (segmented[149].verdict, segmented[149].reason) == ("not_evaluable", "no_fill_bar")
         assert (segmented[200].verdict, segmented[200].reason) == ("not_evaluable", "insufficient_warmup")
+
+    def test_cross_sectional_state_also_restarts_after_a_break(self) -> None:
+        dates = tuple(date(2020, 1, 1) + timedelta(days=index) for index in range(600))
+        rows = tuple(
+            {
+                "open": Decimal(100 + index),
+                "high": Decimal(101 + index),
+                "low": Decimal(99 + index),
+                "close": Decimal(100 + index),
+            }
+            for index in range(600)
+        )
+        series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
+        entry = STRATEGY_MANIFEST["s2-cross-sectional-momentum"]
+        decision_dates = frozenset(dates)
+        whole = backtest_run._stage_cross_sectional_segments(  # noqa: SLF001
+            entry,
+            series,
+            decision_dates=decision_dates,
+            unresolved_breaks=(),
+        )
+        segmented = backtest_run._stage_cross_sectional_segments(  # noqa: SLF001
+            entry,
+            series,
+            decision_dates=decision_dates,
+            unresolved_breaks=(dates[300],),
+        )
+        assert whole.verdicts[400] is None
+        before_break = segmented.verdicts[299]
+        after_break = segmented.verdicts[400]
+        assert before_break is not None and after_break is not None
+        assert (before_break.verdict, before_break.reason) == (
+            "not_evaluable",
+            "no_fill_bar",
+        )
+        assert (after_break.verdict, after_break.reason) == (
+            "not_evaluable",
+            "insufficient_warmup",
+        )
