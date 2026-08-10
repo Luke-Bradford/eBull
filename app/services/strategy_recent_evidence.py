@@ -8,9 +8,11 @@ complete denominator: a missing row is visible as missing evidence.
 
 Only compact aggregate result rows are stored.  Daily bars remain in the
 existing research corpus and indicators/positions are recomputed while a run is
-active, so adding all eight windows costs 96 rows at the current three runnable
-strategies (8 windows x 3 strategies x 2 ambiguity x 2 quarantine), not another
-time-series store.
+active, so adding all eight windows costs 128 rows at the current four runnable
+controls (8 windows x 4 strategies x 2 ambiguity x 2 quarantine), not another
+time-series store.  Only S-4 independently resolves best/worst ambiguity; the
+shared non-level measurement for S-1..S-3 is deliberately carried under both
+arm identities to keep the immutable denominator complete.
 """
 
 from __future__ import annotations

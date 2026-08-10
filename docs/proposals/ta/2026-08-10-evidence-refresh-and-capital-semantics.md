@@ -14,6 +14,13 @@ The Strategies page separates three facts:
 3. allocation/execution approval, which remains unavailable until every
    evidence, cost, risk and broker-contract gate passes.
 
+⚠ The validated equity corpus reaches that frontier. Its 16 comparator-only
+market/sector series have `instrument_id IS NULL`, stay outside the tradable
+universe by construction, and all stop on **2024-09-27**. Historical claims
+ending by that date remain computable; any benchmark, beta or regime window that
+extends later must fail closed until #2482 supplies compatible source and
+adjustment provenance. Missing market context is never interpreted as zero.
+
 “Refresh evidence” means complete the declared recent-regime denominator. It
 does not append today's data to the frozen corpus, select arbitrary dates, or
 replace an existing result. Advancing the frozen date is a deliberate corpus
@@ -83,13 +90,85 @@ remain outside strategy capital ownership and lifecycle decisions.
 
 ## Candidate expansion
 
-The four current manifest rows are research controls, not a claim that only
-four trading ideas exist. New short-horizon candidates enter as registered,
-disabled trials. Current evidence supports investigating intraday residual
-reversal and carefully defined extreme-move reversal; the internal post-drop
-short result is a discovery candidate, not a clean hold-out result. Opening
-range breakout remains a cost-sensitivity spike. Order-flow imbalance is out
-of scope until a free source provides causal depth/aggressor data.
+The four current manifest rows are permanent `harness_validation` controls, not
+a claim that only four trading ideas exist. #2478 makes that purpose immutable;
+none can receive capital. S-4's causal ATR bracket plus resolver wiring
+establish a backtest/forward-outcome path, not strategy profitability.
+
+Every new hypothesis receives a fixed specification and trial identity
+**before** measurement. Its measured trial is retained in the shared register
+whatever the outcome. Passing a preregistered candidate spike is what can later
+add a separate, disabled `capital_candidate` to the manifest; it never changes
+a harness control. A definition-gated ticket is not yet a trial and may not run
+until the missing choices below are transcribed into an immutable contract. The
+current research programme spans intraday through multi-month horizons:
+
+- the weaker time-series/XBRL SEC earnings-surprise drift (#2476) is
+  **definition-gated**. No run may start until one cited seasonal-SUE equation,
+  its minimum eight-quarter history and restatement rule are frozen. The
+  decision time is SEC acceptance, entry is the next executable regular-session
+  open, and the primary outcome is the price-compatible market/sector-adjusted
+  return over sessions +2 through +62. The primary portfolio is equal-weight
+  long the top SUE decile and short the bottom decile, with overlapping vintages
+  scaled to equal gross exposure; a positive-SUE long-only arm is reported but
+  cannot inherit the long-short result. Observed/estimated entry and exit spread,
+  slippage, short carry and refusal are charged. It must beat matched random
+  filing entries and the compatible market/sector comparator with a positive
+  clustered lower confidence bound on net expectancy. Any 5/20/40-session
+  diagnostic is a separately declared arm, never a best-horizon search;
+- opportunistic Form 4 code-`P` purchases (#2480) use filing acceptance as
+  knowledge time and the next executable regular-session open as entry. The
+  causal adaptation of the published classifier calls an insider routine only
+  after purchases in the same calendar month in each of the preceding three
+  years; every other sufficiently observed insider is opportunistic, while
+  insufficient history is its own refusal/control cohort. The
+  primary test is a purchase-only, monthly rebalanced value-weight portfolio
+  held for one month, against routine purchases, matched random entries and a
+  price-compatible market/sector comparator. Sales never enter the long signal;
+  observed/estimated spread and slippage are charged on the next-open entry and
+  monthly exit. Its primary pass metric is the opportunistic-minus-routine net
+  monthly return with a positive clustered lower confidence bound; ATR exits or
+  other horizons are separately registered trials;
+- the discovered >=12% one-day-drop **short continuation** (#2481): next-open
+  entry, five-bar hold and 20% gap-through stop. It came from roughly 100
+  searched arms, has no clean recent historical holdout, suffered an observed
+  -87% trade, and needs decision-time borrow eligibility and CFD financing.
+  Positions are equal risk at the declared 20% stop, with a fixed per-trade risk
+  budget, per-name and gross-exposure caps and pro-rata refusal when the event
+  cohort exceeds available capital. Its event-time portfolio simulation applies
+  conservative same-day cash/margin ordering and correlated-gap stress. The
+  primary metric is five-bar after-spread/slippage/borrow net expectancy with a
+  day-clustered positive lower confidence bound; portfolio drawdown must also
+  beat matched random five-bar shorts under identical construction. A genuinely
+  new prospective out-of-sample cohort is required before it can be a candidate;
+- the published long-short 30-minute midpoint/factor-residual reversal (#2484)
+  is **definition- and data-gated**. Before any outcome is read, the primary PDF
+  must pin the S&P 500 point-in-time universe, regular-session 30-minute bins,
+  bid/ask midpoint, previous-bin residual formation, exact intraday factor
+  regression and normalisation, cross-sectional breakpoints/weights, next-bin
+  fill, one-bin hold/rebalance, both long and short legs, observed spread and
+  CFD costs. The primary metric is the after-cost one-bin return of the complete
+  published long-short portfolio, with time-clustered lower confidence bound
+  above zero; raw-return reversal, random residual-decile labels and each leg
+  alone are controls/attribution, not substitutes. It is forbidden from silently
+  degrading to candle closes, raw returns or the weaker long leg; and
+- an unlevered, eToro-costed Opening Range Breakout **falsification** (#2485),
+  preserving the published Stocks-in-Play selection. It is definition-gated
+  until the final paper pins the 5-minute regular-session opening range,
+  relative-volume/gap selection, breakout fill, stop and same-session exit.
+  Measurement uses observed eToro bid/ask costs, no leverage, a matched/random
+  control and a selection-only control, month by month. Positions use the
+  paper's stop-distance risk weighting capped at 1% research capital at the
+  stop, the top-20 selection limit, total gross exposure at or below 100%, and
+  pro-rata scaling rather than leverage when signals overlap. The falsification
+  survives only if its after-cost daily portfolio return has a positive
+  day-clustered lower confidence bound and beats both controls. It remains a
+  filter-level rejection test and never becomes a strategy-menu entry; a pass
+  can only motivate a new separately preregistered candidate.
+
+#2477 owns bounded prospective intraday collection. Order-flow imbalance stays
+out of scope because the free eToro feed lacks causal size/depth and aggressor
+history; missing fields cannot be guessed from candles.
 
 Long/short support also requires borrow availability, financing, gap-through
 loss treatment, broker short eligibility and direction-aware signal/outcome/
