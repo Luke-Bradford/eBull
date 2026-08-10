@@ -83,7 +83,7 @@ contained delistings would have series that stop in 1998. It does not.
 | A position spanning the boundary is hold-out | §5.2, verbatim. Implemented in `strategy_result.namespace_for_position`. |
 | Result identity's members | `sql/262`'s grain comment + `ResultIdentity`. Fourteen fields; §7 below lists who supplies each. |
 | Hold-out access is logged | Criterion 5, enforced by `sql/264`'s trigger — a hold-out row with no `evaluate` record is refused by the database. |
-| `M`, the declared trial count | Criterion 6. `app/services/trial_register.TRIAL_REGISTER`, version `trial-register-2026-08-07`, **M = 11**. ⚠ Includes abandoned branches; not derivable from the manifest. |
+| `M`, the declared trial count | Criterion 6. `app/services/trial_register.TRIAL_REGISTER`, version `trial-register-2026-08-10`, **M = 12**. ⚠ Includes abandoned branches; not derivable from the manifest. |
 | The two ambiguity arms | §3.4. Both computed, both reported; a material gap blocks promotion. |
 | The two quarantine arms | Criterion 9. Both stored, through `result_ledger.store_*_arm_pair`, which makes the lone-arm state unreachable. |
 | A duplicate identity raises | §2 of the runner spec: *"raising, loudly. `DO NOTHING` would hide corpus drift"*. |

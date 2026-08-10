@@ -54,6 +54,9 @@ class TestTheShippedDeclaration:
         """
         assert any(trial.startswith("rsi30") for trial in TRIAL_REGISTER.trial_ids)
 
+    def test_the_inconclusive_pead_trial_is_counted(self) -> None:
+        assert "pead-historical-sue-net-income-v1" in TRIAL_REGISTER.trial_ids
+
     def test_designed_but_unevaluated_rules_are_absent(self) -> None:
         """⚠ S-5 and S-6 are specified and blocked on #2279, never run.
 
