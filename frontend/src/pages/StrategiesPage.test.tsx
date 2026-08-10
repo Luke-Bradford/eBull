@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as strategiesApi from "@/api/strategies";
-import type { StrategyOverviewResponse, StrategyResultArm } from "@/api/types";
+import type { StrategyOverviewResponse, StrategyOwnedPosition, StrategyResultArm } from "@/api/types";
 import { StrategiesPage } from "@/pages/StrategiesPage";
 
 const ARM: StrategyResultArm = {
@@ -110,6 +110,31 @@ const OVERVIEW: StrategyOverviewResponse = {
   }],
 };
 
+const OWNED_POSITION: StrategyOwnedPosition = {
+  strategy_trade_id: 41,
+  broker_position_id: 7001,
+  strategy_id: "s1-time-series-momentum",
+  strategy_version: "strategy-registry-v1+abc",
+  strategy_title: "Time-series momentum",
+  instrument_id: 101,
+  symbol: "ACME",
+  company_name: "Acme Corp",
+  direction: "long",
+  units: "5",
+  assigned_value: "100",
+  current_value: "110",
+  unrealised_pnl: "10",
+  unrealised_return_pct: "10",
+  open_rate: "10",
+  current_price: "12",
+  stop_loss_rate: "9",
+  take_profit_rate: "14",
+  opened_at: "2026-08-08T12:00:00Z",
+  currency: "USD",
+  trade_status: "open",
+  valuation_available: true,
+};
+
 function approvedOverview(): StrategyOverviewResponse {
   const strategy = OVERVIEW.strategies[0]!;
   return {
@@ -142,6 +167,10 @@ describe("StrategiesPage", () => {
     vi.restoreAllMocks();
     vi.spyOn(strategiesApi, "fetchStrategyOverview").mockResolvedValue(OVERVIEW);
     vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({ points: [] });
+    vi.spyOn(strategiesApi, "fetchStrategyOwnedPositions").mockResolvedValue({
+      positions: [],
+      live_quote_instrument_ids: [],
+    });
   });
 
   it("keeps unapproved backtests out of portfolio performance", async () => {
@@ -216,6 +245,42 @@ describe("StrategiesPage", () => {
     expect(within(performance).getByText("+60.00%")).toBeInTheDocument();
     expect(screen.getByText("1 approved")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Enabled" })).toBeEnabled();
+  });
+
+  it("shows a compact portfolio row for each exact automated position", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [OWNED_POSITION],
+      live_quote_instrument_ids: [101],
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const section = (await screen.findByText("Open automated positions")).closest("section")!;
+    expect(within(section).getByText("ACME")).toBeInTheDocument();
+    expect(within(section).getByText("US$100.00")).toBeInTheDocument();
+    expect(within(section).getByText("US$110.00")).toBeInTheDocument();
+    expect(within(section).getByText("+10.00%")).toBeInTheDocument();
+    expect(within(section).getByText("US$9.00")).toBeInTheDocument();
+    expect(within(section).getByText("US$14.00")).toBeInTheDocument();
+  });
+
+  it("submits an exact strategy-aware close and explains that manual positions are untouched", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
+    vi.mocked(strategiesApi.fetchStrategyOwnedPositions).mockResolvedValue({
+      positions: [OWNED_POSITION],
+      live_quote_instrument_ids: [101],
+    });
+    const close = vi.spyOn(strategiesApi, "closeStrategyOwnedPosition").mockResolvedValue({
+      strategy_trade_id: 41,
+      broker_position_id: 7001,
+      state: "submitted",
+      reason_code: "broker_close_accepted",
+      operation_id: 88,
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "Close" }));
+    expect(screen.getByText("A separate manual position in ACME is not part of this request and will remain untouched.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Close position" }));
+    await waitFor(() => expect(close).toHaveBeenCalledWith(41, 7001));
   });
 
   it("toggles an approved strategy for the next run", async () => {

@@ -455,6 +455,30 @@ def test_exact_close_remains_available_under_kill_switch_and_reconciles(
     )
 
 
+def test_operator_close_records_its_reason_and_never_targets_manual_same_instrument_position(
+    ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    trade_id, _, broker, manual = _opened_trade(conn, monkeypatch)
+
+    result = manage_owned_position(
+        conn,
+        broker=broker,
+        strategy_trade_id=trade_id,
+        broker_position_id=_POSITION_ID,
+        close_reason="operator_close",
+        now=_NOW,
+    )
+
+    assert result.state == "submitted"
+    assert broker.close_demo_strategy_position.call_args.kwargs["position_id"] == _POSITION_ID
+    assert manual.position_id == _MANUAL_POSITION_ID
+    assert conn.execute("SELECT operation_type, trigger_code FROM strategy_position_operations").fetchone() == (
+        "close",
+        "operator_close",
+    )
+
+
 def test_configured_timeout_submits_an_exact_position_close(
     ebull_test_conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
