@@ -22,7 +22,7 @@ cannot be tested, and the discovery usually happens after the spec is written.
 ## 1. What we actually hold
 
 ```text
-research_price_daily        25,920,971 bars   7,709 series, 1962-2026, daily OHLC + adj_close
+research_price_daily        25,939,169 bars   7,727 series, 1962-2026, daily OHLC + adj_close
 price_daily                  6,724,254        the eToro-fed operational series
 filing_documents             9,243,776   ⚠ a MANIFEST of URLs -- NO document bodies
 ownership_institutions_*        ~7M      13F, quarterly partitions
@@ -33,17 +33,19 @@ insider_transactions         1,052,947   filer_cik, txn_date, txn_code, filer_ro
 finra_regsho_daily_*           539,388   ⚠ short VOLUME, not short interest
 ownership_insiders_*           ~300K
 def14a_beneficial_holdings     110,832
-benchmark/sector series        102,027   16 comparators, ALL stop 2024-09-27 (#2482)
+legacy benchmark/sector        102,027   16 comparators, stop 2024-09-27
+recent benchmark/sector         18,198   18 price-return comparators through 2026-07-08 (#2482)
 quotes                           1,557   ⚠ LATEST only, one row per instrument
 price_intraday                       0   ⚠ empty = BUILD gap, NOT a data gap (see below)
 ```
 
-⚠ The comparator set is present, but it is **not current**. Every frozen
-benchmark/sector series ends on 2024-09-27, so it cannot support 2025/2026 or
-rolling-recent market/sector-relative evidence. Live `price_daily` ETF bars do
-not repair that automatically: they have different provenance and no separate
-dividend-adjusted close. #2482 owns a compatible, explicitly re-frozen extension.
-Until it lands, recent benchmark/regime features are **unavailable, not zero**.
+The recent comparator set is a **separate immutable price-return snapshot**, not
+an append to the older dividend-adjusted source. Snapshot
+`etoro-comparators-2026-07-08-v1` has 18,198 rows, SHA-256
+`f1e551274d4b07d8900c0371bcb38f8d460d78d3d2c822b610063ce6b2127fed`, and
+all 11 sector SPDRs. It supports recent market trend, realised volatility,
+beta and sector-relative price returns. `adj_close` is NULL by contract, so a
+recent **total-return** claim remains unavailable.
 
 ---
 
@@ -171,10 +173,10 @@ minimum** — that is the specific thing a data purchase must buy.
   is price-return, not total-return** (#2429). `adj_close` is split **and**
   dividend adjusted and is what returns should use. Both legs are affected, so
   the *relative* comparison is less wrong than either absolute figure.
-- **Benchmark coverage ends 2024-09-27** while the corpus runs to 2026-07-08 —
-  **~21 months with no market leg**. Every regime series must be **fail-closed on
-  absence**, never carried forward (#1817 shipped that bug once: stale closes
-  rendering as a computed 0%).
+- **Comparator identity is basis-bearing.** The legacy total-return-capable
+  series ends 2024-09-27; the recent eToro series reaches 2026-07-08 but is
+  price-return only. Never splice them, substitute one silently, or carry a
+  missing session forward (#1817 shipped stale closes as a computed 0% once).
 - **`instruments.last_seen_at` means "last CHANGED"**, not last observed.
 - **RegSHO is short volume**, not short interest, not days-to-cover.
 - **The cost model is size-independent** — a flat per-band half-spread. Fine at

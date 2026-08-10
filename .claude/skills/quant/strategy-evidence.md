@@ -450,10 +450,11 @@ names. Reproduce with `scripts/` or the CTE in this section's git history.
 
 ⚠ Three papers now converge on the same instruction for momentum specifically:
 Moreira-Muir (scale by inverse variance), Cederburg et al. (vol management works
-*for momentum*), Daniel-Moskowitz (dynamic scaling doubles Sharpe). ⚠ Coverage
-caveat: SPY stops **2024-09-27** while the corpus runs to 2026-07-08, so the
-state is unavailable for the last ~21 months and must be **fail-closed**, not
-carried forward.
+*for momentum*), Daniel-Moskowitz (dynamic scaling doubles Sharpe). #2482's
+separate immutable SPY price-return comparator reaches **2026-07-08**, so this
+state is now measurable on recent windows. The candidate identity must name
+that snapshot; missing sessions remain fail-closed and are never carried
+forward.
 
 ## 2.9 Most measures are redundant — Green, Hand & Zhang (2017)
 
@@ -942,7 +943,7 @@ most of which we can compute today:**
 | 4 | downtrend line penetrated | ✅ `detect_swings` + a fitted line |
 | 5 | higher lows | ✅ `detect_swings` |
 | 6 | higher highs | ✅ `detect_swings` |
-| 7 | **stock stronger than the market** | ⚠ historical relative strength is computable only through the SPY comparator's 2024-09-27 data frontier; later windows wait on #2482 |
+| 7 | **stock stronger than the market** | recent price-relative strength is computable through 2026-07-08 using immutable snapshot `etoro-comparators-2026-07-08-v1`; total-return-relative claims still refuse because recent comparator `adj_close` is NULL |
 | 8 | base forming (horizontal price line) | ✅ `cluster_levels` |
 | 9 | profit potential >= 3x risk | ✅ a reward:risk filter on the level distance |
 

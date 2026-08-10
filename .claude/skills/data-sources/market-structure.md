@@ -48,17 +48,18 @@ Measured on the dev corpus, 2026-08-08. Re-measure before citing — these move.
 
 | Gap | Evidence | Blocks |
 | --- | --- | --- |
-| **Recent benchmark/sector frontier** (#2482; original absence #2398 closed) | 16 comparators / **102,027 bars** are loaded, but every one stops `2024-09-27`. `vendor = 'icyDenev/Intrader'`, `scripts/ingest_2398_benchmark_series.py --verify`. ⚠ Stored `instrument_id IS NULL` so the `resolution_evidenced` CHECK keeps them out of the validated universe **by construction** — never resolve them to an instrument | beta, relative strength, sector rotation and regime conditioning are computable only through 2024-09-27. They are **unavailable, not zero**, for 2025/2026 and rolling-recent windows until #2482 lands |
+| **Recent total-return benchmark** | #2482 adds 18 separate eToro price-return comparators / **18,198 bars** through `2026-07-08`, snapshot `etoro-comparators-2026-07-08-v1`. Their `adj_close` is deliberately NULL: eToro exposes price candles, not dividend-adjusted closes | recent market trend, realised vol, beta and sector-relative **price-return** features are available; a recent total-return benchmark remains unavailable |
 | ~~Split-adjusted only~~ **CORRECTED — total return IS available** | `adjustment_basis = 'split_adjusted'` describes **OHLC only**. `adj_close` is split **+ dividend** adjusted. Verified full-population: latest factor `= 1.0` on **7,693/7,693**, no factor `> 1`, monotone increasing except 22 material steps in 9 series (0.12%) | nothing. Use `adj_close` for returns and `close` for price levels. Reading `adjustment_basis` as describing `adj_close` understates what is computable — a mistake this file made in its first version |
-| **No intraday bars** | `price_intraday` → **0 rows** | true session VWAP, intraday scalping, any sub-daily entry. `anchored_vwap` over daily bars is a daily approximation, not the intraday benchmark traders mean |
+| **No retained intraday research corpus** | `price_intraday` → **0 rows**, but eToro REST serves up to 1,000 bars on demand for OneMinute..FourHours | deep walk-forward intraday validation. Short on-demand windows are available; prospective bounded collection is #2477 |
 | **No volume-flow indicators** | no OBV / accumulation-distribution anywhere in `app/services` | volume confirmation as a *signal*. Raw volume IS present on all 25,818,944 rows, so these are buildable — just absent |
 | Delisting linkage thin | 2 series carry a `delisting_date` | survivorship correction inside the research corpus specifically (the Form 25 register is separate) |
 
-**The benchmark frontier is the cheapest high-value fix on the board.** The historical
-series exist, but recent cross-asset evidence cannot be claimed until #2482 extends them
-under compatible source and adjustment provenance. Do not splice live `price_daily`
-closes onto the frozen dividend-adjusted series: a source/basis change is a new corpus
-identity, not a harmless append.
+**The recent price-return frontier is now available (#2482).** Do not splice it
+onto the frozen dividend-adjusted series: it is a separate immutable identity,
+fingerprinted in `research_comparator_snapshots`. The 18-symbol overlap verifier
+reports daily-return correlation 0.994657–0.999779 after accounting for State
+Street's five official December-2025 2:1 splits. Use `close` for recent
+price-return features; refuse any claim requiring a recent total-return series.
 
 ---
 
