@@ -1,0 +1,17 @@
+fixture_label: dev_frozen_research_corpus_year_2026_ytd
+target_table: null
+row_counts:
+  research_price_daily: 25920971
+  research_price_series: 7709
+  validated_series_pairs: 5266
+  strategy_results_store_before: 132
+  strategy_results_store_after_rollback: 132
+window_id: year-2026-ytd
+window_start: 2026-01-01
+window_end: 2026-07-08
+strategy_count: 4
+namespace_count: 1
+ambiguity_identity_count: 2
+quarantine_arm_count: 2
+planned_result_rows: 16
+corpus_storage_note: indicators, positions, returns, and equity curves were recomputed and not persisted
