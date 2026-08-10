@@ -99,6 +99,14 @@ class CandidateDefinition:
     liquidity_input: str = "prior-20-close*volume-computed-in-feature-engine"
     outcome_classes: tuple[str, ...] = OUTCOME_CLASSES
     primary_start: str = "2022-01-01"
+    candidate_filter: str = "shock_z<0"
+    trade_decision: str = "predicted-net-ev>0"
+    payoff_basis: str = "after-static-spread-per-outcome"
+    timeout_payoff: str = "training-fold-mean-net-timeout-return"
+    same_instrument_overlap: str = "first-accepted-signal-wins-until-exit"
+    walk_forward_tests: tuple[str, ...] = ("2024-01-01/2024-12-31", "2025-01-01/2025-12-31")
+    terminal_holdout: str = "2026-01-01/2026-07-08"
+    fold_training: str = "anchored-prior-only-outcomes-complete-before-test"
 
 
 DEFINITION: Final = CandidateDefinition()
@@ -412,6 +420,35 @@ def expected_net_value_pct(
     )
 
 
+def expected_net_value_from_net_payoffs_pct(
+    probabilities: dict[OutcomeClass, float],
+    *,
+    target_net_payoff_pct: float,
+    stop_net_payoff_pct: float,
+    mean_timeout_net_payoff_pct: float,
+) -> float:
+    """Expected return when each class payoff already includes both spreads.
+
+    The target and stop payoffs come from the signal's fixed bracket and entry
+    price.  The timeout payoff is the training fold's mean net return among
+    timeout-labelled rows.  Carry and FX remain unavailable and therefore
+    remain promotion refusals rather than being silently treated as zero.
+    """
+    if set(probabilities) != set(OUTCOME_CLASSES):
+        raise FeatureRefusal("net EV requires exactly the three declared outcome probabilities")
+    values = tuple(probabilities[label] for label in OUTCOME_CLASSES)
+    if any(not math.isfinite(item) or item < 0 or item > 1 for item in values) or not math.isclose(
+        sum(values), 1.0, rel_tol=0, abs_tol=1e-9
+    ):
+        raise FeatureRefusal("outcome probabilities must be finite, bounded and sum to one")
+    payoffs = (target_net_payoff_pct, stop_net_payoff_pct, mean_timeout_net_payoff_pct)
+    if any(not math.isfinite(float(item)) for item in payoffs):
+        raise FeatureRefusal("net outcome payoff is non-finite")
+    if target_net_payoff_pct <= 0 or stop_net_payoff_pct >= 0:
+        raise FeatureRefusal("target net payoff must be positive and stop net payoff negative")
+    return sum(probability * payoff for probability, payoff in zip(values, payoffs, strict=True))
+
+
 __all__ = [
     "ATR_PERIOD",
     "CANDIDATE_VERSION",
@@ -425,5 +462,6 @@ __all__ = [
     "definition_hash",
     "definition_json",
     "expected_net_value_pct",
+    "expected_net_value_from_net_payoffs_pct",
     "fit_model",
 ]

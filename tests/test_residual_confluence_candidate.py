@@ -16,6 +16,7 @@ from app.services.residual_confluence_candidate import (
     compute_features,
     definition_hash,
     definition_json,
+    expected_net_value_from_net_payoffs_pct,
     expected_net_value_pct,
     fit_model,
 )
@@ -51,8 +52,8 @@ def _inputs() -> dict[str, object]:
 
 def test_definition_is_complete_stable_and_contains_no_measured_result() -> None:
     payload = definition_json()
-    assert definition_hash() == "a5084b66774625c0ff3fec05c238c05dae75b8663ddfd7b269265d134ccca0d8"
-    assert CANDIDATE_VERSION == "residual-confluence-v1+a5084b667746"
+    assert definition_hash() == "946d549861ccca18e1e0d78a1615815e97a989afd45009de12aabf7e0384fc26"
+    assert CANDIDATE_VERSION == "residual-confluence-v1+946d549861cc"
     assert DEFINITION.market_vol_long_lookback == 252
     assert DEFINITION.model_features == MODEL_FEATURE_NAMES
     assert "expectancy" not in payload
@@ -245,4 +246,21 @@ def test_expected_net_value_uses_all_outcomes_and_costs() -> None:
             stop_loss_pct=2,
             expected_timeout_payoff_pct=0,
             total_cost_pct=0.2,
+        )
+
+
+def test_expected_net_value_from_net_payoffs_uses_exact_class_payoffs() -> None:
+    result = expected_net_value_from_net_payoffs_pct(
+        {"target_first": 0.55, "stop_first": 0.30, "timeout": 0.15},
+        target_net_payoff_pct=2.7,
+        stop_net_payoff_pct=-2.2,
+        mean_timeout_net_payoff_pct=-0.4,
+    )
+    assert result == pytest.approx(0.765)
+    with pytest.raises(FeatureRefusal, match="stop net payoff negative"):
+        expected_net_value_from_net_payoffs_pct(
+            {"target_first": 0.55, "stop_first": 0.30, "timeout": 0.15},
+            target_net_payoff_pct=2.7,
+            stop_net_payoff_pct=0.1,
+            mean_timeout_net_payoff_pct=-0.4,
         )

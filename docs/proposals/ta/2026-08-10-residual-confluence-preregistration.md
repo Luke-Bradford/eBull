@@ -113,8 +113,30 @@ p_target*target_payoff - p_stop*stop_loss
 ```
 
 A feature match is not pending. After a completed bar it either produces a
-positive lower estimate of net EV or records a refusal. Before completion there
-is no signal.
+positive predicted net EV or records a refusal. Before completion there is no
+signal. The cohort-level after-cost expectancy confidence interval—not an
+invented per-row confidence bound—is the promotion gate.
+
+The executable decision contract, fixed before outcome access, is:
+
+- only rows with `shock_z < 0` enter the candidate population;
+- target and stop class payoffs are calculated after applying the frozen static
+  half-spread to the entry and the corresponding gross exit;
+- the timeout class payoff is the mean after-spread timeout return learned from
+  the training fold only;
+- act exactly when the three class probabilities times those three net payoffs
+  sum to greater than zero; no EV threshold is searched;
+- after one signal is accepted for an instrument, later signals in that
+  instrument are suppressed through its exit session.
+
+Because the frozen eToro comparator snapshot begins in 2022 and the feature
+contract needs 252 prior sessions, the exact anchored evaluation is: train on
+all eligible prior rows whose outcomes completed before 2024 and test calendar
+2024; extend training through 2024 and test calendar 2025; then train through
+2025 and read 2026-01-01 through the frozen 2026-07-08 frontier once as the
+terminal holdout. The last five frontier sessions without a complete outcome
+are refused. This is a recent-data constraint, not a claim that 2022 itself can
+produce signals.
 
 ## Validation and one-read rule
 
