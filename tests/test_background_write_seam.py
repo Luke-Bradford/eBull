@@ -77,6 +77,25 @@ def test_background_write_connection_raw_fallback_when_unset(settings_use_test_d
 
 
 @pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
+def test_transactional_borrow_restores_pooled_autocommit(settings_use_test_db: str) -> None:
+    from app.jobs.background_pool import BackgroundConnectionPool
+
+    bg = BackgroundConnectionPool(max_size=1)
+    set_background_pool(bg)
+    try:
+        with background_write_connection(autocommit=False) as conn:
+            assert conn.autocommit is False
+            conn.execute("SELECT 1")
+            conn.commit()
+        with background_write_connection() as conn:
+            assert conn.autocommit is True
+            assert conn.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        set_background_pool(None)
+        bg.close()
+
+
+@pytest.mark.skipif(not test_db_available(), reason="test DB unavailable")
 def test_executor_audit_writer_routes_through_seam(monkeypatch: pytest.MonkeyPatch, settings_use_test_db: str) -> None:
     """An executor audit writer must borrow via ``background_write_connection``
     (not a direct ``psycopg.connect``), so when the jobs process registers a

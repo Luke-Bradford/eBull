@@ -59,9 +59,11 @@ from psycopg_pool import ConnectionPool
 
 from app.config import settings
 from app.db.background_write import background_write_connection
+from app.db.pg_settings import JOBS_NON_SEC_MAX_CONCURRENCY
 from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.locks import JobAlreadyRunning, JobLock
-from app.jobs.sources import JobInvoker
+from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
+from app.jobs.sources import JobInvoker, source_for
 from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, fetch_latest_successful_runs, record_job_skip
 from app.services.process_stop import acquire_prelude_lock
 from app.services.processes.bootstrap_gate import check_bootstrap_state_gate
@@ -633,6 +635,28 @@ _RECURRING_JOB_ID_PREFIX: Final[str] = "recurring:"
 # running job triggers it too), so the honest label is "an instance is already
 # active"; the operator tells wedge from slow via the running row's age.
 _MAX_INSTANCES_SKIP_REASON: Final[str] = "max_instances_active"
+
+_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(SEC_LANE_MAX_CONCURRENCY)
+_NON_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_NON_SEC_MAX_CONCURRENCY)
+
+
+@contextmanager
+def _job_execution_slot(job_name: str) -> Iterator[None]:
+    """Bound every runtime entry path before it opens lock/body connections."""
+    try:
+        source = source_for(job_name)
+    except KeyError:
+        # Preserve the runtime's existing registry-drift handling: the
+        # bootstrap gate and later JobLock remain responsible for surfacing an
+        # unknown name.  For connection budgeting, the conservative safe
+        # classification is the smaller non-SEC allowance.
+        source = None
+    slots = _SEC_EXECUTION_SLOTS if source == "sec_rate" else _NON_SEC_EXECUTION_SLOTS
+    slots.acquire()
+    try:
+        yield
+    finally:
+        slots.release()
 
 
 # ---------------------------------------------------------------------------
@@ -1994,7 +2018,7 @@ class JobRuntime:
         database_url = self._database_url
         job = self._job_registry.get(job_name)
 
-        def wrapped() -> None:
+        def run_bounded() -> None:
             # Materialise + validate the registry-default params for this
             # scheduled fire. ParamValidationError here means the
             # registry itself is misconfigured (a default that violates
@@ -2187,9 +2211,39 @@ class JobRuntime:
                     job_name,
                 )
 
+        def wrapped() -> None:
+            # The execution budget is the outermost boundary: parameter-error
+            # audit writes, gate/prerequisite checks, advisory locks, the job
+            # body, and terminal writes all occur only after a slot is held.
+            # Catch-up reuses this wrapper, so it has the same bound as the
+            # regular APScheduler path.
+            with _job_execution_slot(job_name):
+                run_bounded()
+
         return wrapped
 
     def _run_manual(
+        self,
+        job_name: str,
+        invoker: JobInvoker,
+        request_id: int | None,
+        mode: str | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Hold the connection-budget slot across the full manual lifecycle."""
+        entered = False
+        try:
+            with _job_execution_slot(job_name):
+                entered = True
+                self._run_manual_bounded(job_name, invoker, request_id, mode, params)
+        finally:
+            # The bounded implementation normally owns the in-flight release.
+            # If slot acquisition itself raises, it never gets control, so the
+            # submission lock must be returned here.
+            if not entered:
+                self._inflight[job_name].release()
+
+    def _run_manual_bounded(
         self,
         job_name: str,
         invoker: JobInvoker,

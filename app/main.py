@@ -254,7 +254,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await asyncio.to_thread(_ensure_exchanges_seeded_probe)
 
     # Open the connection pool after migrations so the schema is up to date.
-    pool = open_pool("db_pool", min_size=1, max_size=DB_POOL_MAX_SIZE)
+    pool = open_pool(
+        "db_pool",
+        min_size=1,
+        max_size=DB_POOL_MAX_SIZE,
+        application_name="ebull-api-db-pool",
+    )
     logger.info("Connection pool opened (min=1, max=%d).", DB_POOL_MAX_SIZE)
     app.state.db_pool = pool
 
@@ -275,7 +280,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # (1 after #1472 PR2b) — audit writes are short-lived single-row
     # INSERTs that don't need parallelism. ADR 0001 requires audit-on-
     # every-decryption to be durable independent of caller outcome.
-    audit_pool = open_pool("audit_pool", min_size=1, max_size=AUDIT_POOL_MAX_SIZE)
+    audit_pool = open_pool(
+        "audit_pool",
+        min_size=1,
+        max_size=AUDIT_POOL_MAX_SIZE,
+        application_name="ebull-api-audit-pool",
+    )
     logger.info("Audit pool opened (min=1, max=%d).", AUDIT_POOL_MAX_SIZE)
     app.state.audit_pool = audit_pool
 

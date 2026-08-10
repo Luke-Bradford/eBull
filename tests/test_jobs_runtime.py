@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -76,6 +77,15 @@ def _reset_fake_locks() -> Iterator[None]:
 @pytest.fixture
 def patched_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.jobs.runtime.JobLock", _FakeLock)
+
+    @contextmanager
+    def unbounded_test_slot(_job_name: str) -> Iterator[None]:
+        yield
+
+    # Most unit cases use synthetic unregistered names and exercise locking,
+    # not the production connection-budget gate. Dedicated tests below use the
+    # real gate with registered names.
+    monkeypatch.setattr("app.jobs.runtime._job_execution_slot", unbounded_test_slot)
     # #1071 — admin control hub PR3 added a lock+fence prelude inside
     # _wrap_invoker / _run_manual that opens its own DB connection.
     # Tests in this module pass a stub URL ("postgresql://stub/stub")
@@ -220,6 +230,163 @@ class TestDistinctJobConcurrency:
         finally:
             release.set()
             rt._manual_executor.shutdown(wait=True)
+
+
+class TestConnectionBudgetExecutionGate:
+    def test_third_non_sec_execution_waits_without_opening_a_connection(self) -> None:
+        from app.jobs.runtime import _job_execution_slot
+
+        release = threading.Event()
+        entered = [threading.Event() for _ in range(3)]
+
+        def hold(job_name: str, marker: threading.Event) -> None:
+            with _job_execution_slot(job_name):
+                marker.set()
+                release.wait(timeout=2.0)
+
+        threads = [
+            threading.Thread(target=hold, args=("strategy_paper_cycle", entered[0]), daemon=True),
+            threading.Thread(target=hold, args=("thesis_refresh", entered[1]), daemon=True),
+            threading.Thread(target=hold, args=("pg_size_sample", entered[2]), daemon=True),
+        ]
+        try:
+            threads[0].start()
+            threads[1].start()
+            assert entered[0].wait(timeout=1.0)
+            assert entered[1].wait(timeout=1.0)
+            threads[2].start()
+            assert not entered[2].wait(timeout=0.1)
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(timeout=1.0)
+        assert entered[2].is_set()
+
+    def test_fifth_sec_execution_waits_for_one_of_four_slots(self) -> None:
+        from app.jobs.runtime import _job_execution_slot
+
+        release = threading.Event()
+        entered = [threading.Event() for _ in range(5)]
+
+        def hold(marker: threading.Event) -> None:
+            with _job_execution_slot("daily_research_refresh"):
+                marker.set()
+                release.wait(timeout=2.0)
+
+        threads = [threading.Thread(target=hold, args=(marker,), daemon=True) for marker in entered]
+        try:
+            for thread in threads[:4]:
+                thread.start()
+            assert all(marker.wait(timeout=1.0) for marker in entered[:4])
+            threads[4].start()
+            assert not entered[4].wait(timeout=0.1)
+        finally:
+            release.set()
+            for thread in threads:
+                if thread.ident is not None:
+                    thread.join(timeout=1.0)
+        assert entered[4].is_set()
+
+    def test_scheduled_gate_precedes_check_connection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        patched_runtime: None,
+    ) -> None:
+        active = False
+
+        @contextmanager
+        def tracked_slot(_job_name: str) -> Iterator[None]:
+            nonlocal active
+            assert not active
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        @contextmanager
+        def checked_connection() -> Iterator[MagicMock]:
+            assert active, "scheduled check connection opened before execution slot"
+            yield MagicMock()
+
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", tracked_slot)
+        rt = _make_runtime({"strategy_paper_cycle": lambda: None})
+        monkeypatch.setattr(rt, "_scheduled_fire_check_connection", checked_connection)
+
+        rt._wrap_invoker("strategy_paper_cycle", rt._invokers["strategy_paper_cycle"])()
+
+    def test_manual_gate_precedes_advisory_lock(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        patched_runtime: None,
+    ) -> None:
+        active = False
+        invoked = threading.Event()
+
+        @contextmanager
+        def tracked_slot(_job_name: str) -> Iterator[None]:
+            nonlocal active
+            assert not active
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        class CheckedLock(_FakeLock):
+            def __enter__(self) -> _FakeLock:
+                assert active, "manual advisory lock opened before execution slot"
+                return super().__enter__()
+
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", tracked_slot)
+        monkeypatch.setattr("app.jobs.runtime.JobLock", CheckedLock)
+        rt = _make_runtime({"strategy_paper_cycle": invoked.set})
+        try:
+            rt.trigger("strategy_paper_cycle")
+            assert invoked.wait(timeout=2.0)
+        finally:
+            rt._manual_executor.shutdown(wait=True)
+
+    def test_manual_failure_audit_stays_inside_budget_gate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        patched_runtime: None,
+    ) -> None:
+        active = False
+        rejected = False
+
+        @contextmanager
+        def tracked_slot(_job_name: str) -> Iterator[None]:
+            nonlocal active
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        def reject(_conn: object, request_id: int, *, error_msg: str) -> None:
+            nonlocal rejected
+            assert request_id == 7
+            assert error_msg == "RuntimeError: failed"
+            assert active, "manual failure write happened after execution slot release"
+            rejected = True
+
+        def fail() -> None:
+            raise RuntimeError("failed")
+
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", tracked_slot)
+        monkeypatch.setattr("app.jobs.runtime.psycopg.connect", lambda *_args, **_kwargs: mock_conn)
+        monkeypatch.setattr("app.services.sync_orchestrator.dispatcher.mark_request_rejected", reject)
+
+        rt = _make_runtime({"strategy_paper_cycle": fail})
+        assert rt._inflight["strategy_paper_cycle"].acquire(blocking=False)
+        rt._run_manual("strategy_paper_cycle", rt._invokers["strategy_paper_cycle"], 7)
+
+        assert rejected
+        assert not active
 
 
 class TestScheduledFireWrapper:
@@ -723,6 +890,39 @@ class TestCatchUpOnBoot:
     the scheduler registration path is not exercised — that is already
     covered by ``TestStartWiring``.
     """
+
+    def test_catch_up_execution_uses_outer_budget_gate(
+        self,
+        patched_runtime: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        active = False
+        fired = threading.Event()
+
+        @contextmanager
+        def tracked_slot(_job_name: str) -> Iterator[None]:
+            nonlocal active
+            assert not active
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        def invoker() -> None:
+            assert active, "catch-up invoker ran outside execution slot"
+            fired.set()
+
+        monkeypatch.setattr("app.jobs.runtime._job_execution_slot", tracked_slot)
+        rt, _ = _make_catchup_runtime(
+            [_DAILY_JOB],
+            {"daily_job": invoker},
+            monkeypatch,
+            latest_runs={},
+        )
+        rt._catch_up()
+        rt._manual_executor.shutdown(wait=True)
+        assert fired.is_set()
 
     def test_never_run_job_is_fired(
         self,

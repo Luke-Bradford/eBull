@@ -24,6 +24,12 @@ pytestmark = pytest.mark.skipif(
 
 
 class TestJobLockAcquire:
+    def test_lock_connection_is_attributable(self) -> None:
+        with JobLock.test_only_per_name(test_database_url(), "test_application_name") as lock:
+            assert lock._conn is not None
+            row = lock._conn.execute("SELECT current_setting('application_name')").fetchone()
+            assert row == ("ebull-job-lock:test",)
+
     def test_first_acquire_succeeds(self) -> None:
         with JobLock.test_only_per_name(test_database_url(), "test_first_acquire"):
             pass  # acquired and released cleanly
