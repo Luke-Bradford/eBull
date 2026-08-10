@@ -176,6 +176,7 @@ def _carrier(strategy_id: str, *, namespace: str, quarantine_arm: str, trade_cou
             outcome_rule_set_version="outcome-resolver-verify",
             input_rule_set_version="price-quarantine-verify",
         ),
+        purpose="capital_candidate",
         metrics=_carrier_metrics(trade_count),
         universe_basis="survivor_only",
         carry_unmodelled=True,

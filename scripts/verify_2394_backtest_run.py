@@ -674,6 +674,7 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
                 outcome_rule_set_version=_OUTCOME_PIN.rule_set_version,
                 input_rule_set_version=_OUTCOME_PIN.input_rule_set_version,
             ),
+            purpose=entry.purpose,
             metrics=metrics,
             universe_basis=UNIVERSE,
             carry_unmodelled=CARRY_UNMODELLED,

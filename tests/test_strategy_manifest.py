@@ -74,6 +74,8 @@ SPEC_CLASSES: dict[str, str] = {
     SPEC_S4: "per_series",
 }
 
+SPEC_PURPOSES = {strategy_id: "harness_validation" for strategy_id in (SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4)}
+
 
 def _bars(closes: Sequence[float | None], *, start: date = date(2020, 1, 1)) -> BarSeries:
     """One bar per close. ``None`` is a MASKED field, as ``load_masked_series``
@@ -190,6 +192,9 @@ class TestEntriesDescribeTheirStrategy:
 
     def test_classes_are_the_spec_classes(self) -> None:
         assert {key: entry.strategy_class for key, entry in STRATEGY_MANIFEST.items()} == SPEC_CLASSES
+
+    def test_all_catalogue_rules_are_explicit_harness_controls(self) -> None:
+        assert {key: entry.purpose for key, entry in STRATEGY_MANIFEST.items()} == SPEC_PURPOSES
 
     def test_declared_signal_kinds_are_the_spec_legs(self) -> None:
         assert {key: set(entry.signal_kinds) for key, entry in STRATEGY_MANIFEST.items()} == {
@@ -317,6 +322,7 @@ class TestEntryRefusesAContradictoryRegistration:
     def _kwargs(**overrides: object) -> dict[str, object]:
         base: dict[str, object] = {
             "strategy_id": "s9-test",
+            "purpose": "capital_candidate",
             "identity": s1_identity,
             "strategy_class": "per_series",
             "signal_kinds": frozenset({"entry"}),
@@ -366,6 +372,10 @@ class TestEntryRefusesAContradictoryRegistration:
     def test_an_unknown_class(self) -> None:
         with pytest.raises(ValueError, match="unknown strategy class"):
             StrategyEntry(**self._kwargs(strategy_class="per_bar"))  # type: ignore[arg-type]
+
+    def test_an_unknown_purpose(self) -> None:
+        with pytest.raises(ValueError, match="unknown strategy purpose"):
+            StrategyEntry(**self._kwargs(purpose="looks_promising"))  # type: ignore[arg-type]
 
     def test_an_unknown_signal_kind(self) -> None:
         with pytest.raises(ValueError, match="unknown signal kinds"):

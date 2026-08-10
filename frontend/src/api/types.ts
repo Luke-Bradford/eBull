@@ -2401,6 +2401,7 @@ export interface BootstrapTimelineResponse {
 
 export interface StrategyResultArm {
   result_version: string;
+  purpose: "harness_validation" | "capital_candidate";
   ambiguity_arm: string;
   quarantine_arm: string;
   universe_basis: string;
@@ -2444,6 +2445,7 @@ export interface StrategyEvidenceWindow {
 export interface StrategyOverview {
   strategy_id: string;
   strategy_version: string;
+  purpose: "harness_validation" | "capital_candidate";
   title: string;
   description: string;
   exit_timing: string;

@@ -155,6 +155,7 @@ def _metrics_without_bootstrap(**overrides: object) -> StrategyMetrics:
 def _result(**overrides: object) -> StrategyResult:
     base: dict[str, object] = {
         "identity": _identity(),
+        "purpose": "capital_candidate",
         "metrics": _metrics(),
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
@@ -538,6 +539,20 @@ class TestPromotionGateClears:
 
 
 class TestPromotionGateRefusals:
+    def test_a_harness_control_is_permanently_refused(self) -> None:
+        assert (
+            check_promotable(
+                _clean_candidate(
+                    result=_result(
+                        **_CLEAN_RESULT_FIELDS,
+                        purpose="harness_validation",
+                        synthetic_control=_passing_control(),
+                    )
+                )
+            )[0]
+            == "harness_validation_only"
+        )
+
     """One test per refusal, each breaking exactly one thing off the clean candidate."""
 
     def test_an_absent_basis_is_refused_distinctly_from_survivor_only(self) -> None:

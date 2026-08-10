@@ -109,10 +109,12 @@ from app.services.strategy_registry import (
 #: "hold the top decile" is a statement about the cross-section and not about
 #: any one member (see ``strategy_registry.evaluate_cross_sectional``).
 StrategyClass = Literal["per_series", "cross_sectional"]
+StrategyPurpose = Literal["harness_validation", "capital_candidate"]
 
 #: ⚠ DERIVED, never restated — the closed-vocabulary-in-N-places defect the
 #: registry already fixed with ``get_args`` (#2218).
 STRATEGY_CLASSES: frozenset[str] = frozenset(get_args(StrategyClass))
+STRATEGY_PURPOSES: frozenset[str] = frozenset(get_args(StrategyPurpose))
 
 
 class IdentityFactory(Protocol):
@@ -210,6 +212,7 @@ class StrategyEntry:
     """
 
     strategy_id: str
+    purpose: StrategyPurpose
     identity: IdentityFactory
     strategy_class: StrategyClass
     #: The legs this strategy emits. S-1/S-3 emit entry AND exit; S-2/S-4 entry
@@ -231,6 +234,8 @@ class StrategyEntry:
     def __post_init__(self) -> None:
         if not self.strategy_id.strip():
             raise ValueError("strategy_id must be a non-empty declaration")
+        if self.purpose not in STRATEGY_PURPOSES:
+            raise ValueError(f"unknown strategy purpose {self.purpose!r}; must be one of {sorted(STRATEGY_PURPOSES)}")
         if self.strategy_class not in STRATEGY_CLASSES:
             raise ValueError(
                 f"unknown strategy class {self.strategy_class!r}; must be one of {sorted(STRATEGY_CLASSES)}"
@@ -391,6 +396,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
     {
         S1_STRATEGY_ID: StrategyEntry(
             strategy_id=S1_STRATEGY_ID,
+            purpose="harness_validation",
             identity=s1_identity,
             strategy_class="per_series",
             signal_kinds=frozenset({"entry", "exit"}),
@@ -400,6 +406,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
         ),
         S2_STRATEGY_ID: StrategyEntry(
             strategy_id=S2_STRATEGY_ID,
+            purpose="harness_validation",
             identity=s2_identity,
             strategy_class="cross_sectional",
             signal_kinds=frozenset({"entry"}),
@@ -411,6 +418,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
         ),
         S3_STRATEGY_ID: StrategyEntry(
             strategy_id=S3_STRATEGY_ID,
+            purpose="harness_validation",
             identity=s3_identity,
             strategy_class="per_series",
             signal_kinds=frozenset({"entry", "exit"}),
@@ -420,6 +428,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
         ),
         S4_STRATEGY_ID: StrategyEntry(
             strategy_id=S4_STRATEGY_ID,
+            purpose="harness_validation",
             identity=s4_identity,
             strategy_class="per_series",
             signal_kinds=frozenset({"entry"}),
@@ -443,4 +452,5 @@ __all__ = [
     "PerSeriesSignals",
     "StrategyClass",
     "StrategyEntry",
+    "StrategyPurpose",
 ]
