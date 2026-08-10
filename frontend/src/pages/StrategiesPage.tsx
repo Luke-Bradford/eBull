@@ -818,7 +818,7 @@ export function StrategiesPage() {
   const [refreshingEvidence, setRefreshingEvidence] = useState(false);
   const [refreshEvidenceError, setRefreshEvidenceError] = useState<string | null>(null);
   const summary = useMemo(() => overview.data ? aggregate(overview.data) : null, [overview.data]);
-  const approvedStrategies = overview.data?.strategies.filter((strategy) => strategy.allocation_ready || strategy.allocation.enabled) ?? [];
+  const approvedStrategies = overview.data?.strategies.filter((strategy) => strategy.purpose === "capital_candidate" && (strategy.allocation_ready || strategy.allocation.enabled)) ?? [];
   const researchCandidates = overview.data?.strategies.filter((strategy) => strategy.purpose === "capital_candidate" && !strategy.allocation_ready && !strategy.allocation.enabled) ?? [];
   const validationControls = overview.data?.strategies.filter((strategy) => strategy.purpose === "harness_validation") ?? [];
 

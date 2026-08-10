@@ -231,6 +231,23 @@ describe("StrategiesPage", () => {
     expect(screen.queryByRole("button", { name: "View evidence" })).not.toBeInTheDocument();
   });
 
+  it("does not present a legacy enabled harness deployment as approved", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{
+        ...strategy,
+        purpose: "harness_validation",
+        allocation: { ...strategy.allocation, enabled: true, capital_limit: "100" },
+        allocation_refusals: ["harness_validation_only"],
+      }],
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    expect(await screen.findByText("Validation controls")).toBeInTheDocument();
+    expect(screen.queryByText("Approved strategies")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Time-series momentum/ })).not.toBeInTheDocument();
+  });
+
   it("uses a compact capital control while still allowing the limit to be saved", async () => {
     const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({ ...OVERVIEW.paper_pool, capital_limit: "1500" });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);

@@ -21,6 +21,7 @@ from app.providers.broker import (
     BrokerInstrumentEligibility,
     BrokerInstrumentInvestment,
     BrokerLeverageConfig,
+    BrokerOrderNotFound,
     BrokerOrderSubmission,
     BrokerOrderSubmissionUncertain,
     BrokerProvider,
@@ -606,12 +607,6 @@ def test_transport_uncertainty_retries_only_the_committed_uuid(
 
     first = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
     assert first.verdict == "submission_uncertain"
-    harness = next(iter(STRATEGY_MANIFEST.values()))
-    ebull_test_conn.execute(
-        "UPDATE strategy_signals SET strategy_id=%s WHERE signal_id=%s",
-        (harness.strategy_id, signal_id),
-    )
-    ebull_test_conn.commit()
     second = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
 
     assert second.verdict == "submitted"
@@ -622,6 +617,31 @@ def test_transport_uncertainty_retries_only_the_committed_uuid(
     assert ebull_test_conn.execute(
         "SELECT strategy_request_id FROM orders WHERE execution_origin='strategy'"
     ).fetchall() == [(_REQUEST_ID,)]
+
+
+def test_uncertain_harness_submission_is_looked_up_without_resubmission(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_id = _seed(ebull_test_conn)
+    broker = _broker()
+    broker.place_demo_strategy_order.side_effect = BrokerOrderSubmissionUncertain("timeout")
+    broker.lookup_order.side_effect = BrokerOrderNotFound("not found yet")
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+    first = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
+    assert first.verdict == "submission_uncertain"
+    harness = next(iter(STRATEGY_MANIFEST.values()))
+    ebull_test_conn.execute(
+        "UPDATE strategy_signals SET strategy_id=%s WHERE signal_id=%s",
+        (harness.strategy_id, signal_id),
+    )
+    ebull_test_conn.commit()
+
+    second = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert second.verdict == "submission_uncertain"
+    assert broker.place_demo_strategy_order.call_count == 1
+    assert broker.lookup_order.call_args.kwargs == {"reference_id": str(_REQUEST_ID)}
 
 
 def test_unexpected_initial_submission_bug_propagates_with_reconciliation_authority(

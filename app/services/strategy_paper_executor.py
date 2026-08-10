@@ -44,6 +44,7 @@ from app.services.strategy_monitoring import load_paper_realised_pnl
 from app.services.strategy_order_reconciliation import (
     enforce_reconciliation_slo,
     ensure_strategy_request_id,
+    reconcile_strategy_order,
 )
 
 _NY = ZoneInfo("America/New_York")
@@ -655,17 +656,15 @@ def _execute_fired_paper_signal_locked(
         return existing
     signal_row = conn.execute("SELECT strategy_id FROM strategy_signals WHERE signal_id=%s", (signal_id,)).fetchone()
     conn.commit()
-    if (
-        existing is None
-        and signal_row is not None
-        and registered_strategy_purpose(str(signal_row[0])) == "harness_validation"
-    ):
-        return _persist_rejection(
-            conn,
-            signal_id=signal_id,
-            reason_code="harness_validation_only",
-            now=evaluated_at,
-        )
+    if signal_row is not None and registered_strategy_purpose(str(signal_row[0])) == "harness_validation":
+        if existing is not None:
+            if existing.order_id is None:
+                raise StrategyPaperExecutionError("uncertain harness submission is missing durable order authority")
+            reconcile_strategy_order(conn, broker=broker, order_id=existing.order_id)
+            refreshed = _existing_result(conn, signal_id)
+            conn.commit()
+            return refreshed or existing
+        return _persist_rejection(conn, signal_id=signal_id, reason_code="harness_validation_only", now=evaluated_at)
     try:
         runtime = get_runtime_config(conn)
         kill_row = conn.execute("SELECT is_active FROM kill_switch WHERE id = true").fetchone()
