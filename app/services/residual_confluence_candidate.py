@@ -154,6 +154,17 @@ class FeatureStandardisation:
     means: tuple[float, ...]
     sample_stds: tuple[float, ...]
 
+    def __post_init__(self) -> None:
+        expected = len(MODEL_FEATURE_NAMES)
+        if len(self.means) != expected or len(self.sample_stds) != expected:
+            raise FeatureRefusal(f"standardisation requires {expected} means and sample standard deviations")
+        means = np.asarray(self.means, dtype=float)
+        sample_stds = np.asarray(self.sample_stds, dtype=float)
+        if not np.isfinite(means).all() or not np.isfinite(sample_stds).all():
+            raise FeatureRefusal("standardisation contains a non-finite value")
+        if np.any(sample_stds <= np.finfo(float).eps):
+            raise FeatureRefusal("standardisation sample deviation is zero or unavailable")
+
     def transform(self, row: Sequence[float]) -> tuple[float, ...]:
         if len(row) != len(MODEL_FEATURE_NAMES):
             raise FeatureRefusal(f"model row requires {len(MODEL_FEATURE_NAMES)} features, got {len(row)}")
@@ -253,13 +264,16 @@ def compute_features(
     open_price = _finite_scalar("signal_open", signal_open)
     high = _finite_scalar("signal_high", signal_high)
     low = _finite_scalar("signal_low", signal_low)
+    signal_close_decimal = Decimal(str(signal_close))
+    if not signal_close_decimal.is_finite():
+        raise FeatureRefusal("signal_close is non-finite")
     close = _finite_scalar("signal_close", signal_close)
     volume = _finite_scalar("signal_volume", signal_volume)
     if min(open_price, high, low, close, volume) <= 0:
         raise FeatureRefusal("signal OHLCV values must be positive")
     if high < max(open_price, close) or low > min(open_price, close) or high <= low:
         raise FeatureRefusal("signal bar has an invalid or zero-range OHLC envelope")
-    if Decimal(str(close)) < MIN_SIGNAL_CLOSE:
+    if signal_close_decimal < MIN_SIGNAL_CLOSE:
         raise FeatureRefusal(f"signal close is below the frozen {MIN_SIGNAL_CLOSE} USD floor")
 
     median_volume = float(median(float(item) for item in volumes))

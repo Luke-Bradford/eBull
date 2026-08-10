@@ -11,6 +11,7 @@ from app.services.residual_confluence_candidate import (
     DEFINITION,
     MODEL_FEATURE_NAMES,
     FeatureRefusal,
+    FeatureStandardisation,
     build_exit_bracket,
     compute_features,
     definition_hash,
@@ -123,6 +124,18 @@ def test_price_floor_is_checked_after_a_valid_ohlc_envelope() -> None:
         compute_features(**inputs)  # type: ignore[arg-type]
 
 
+def test_price_floor_uses_original_decimal_without_float_round_trip() -> None:
+    inputs = _inputs()
+    inputs.update(
+        signal_open=Decimal("20"),
+        signal_high=Decimal("20.5"),
+        signal_low=Decimal("19.5"),
+        signal_close=Decimal("19.999999999999999999"),
+    )
+    with pytest.raises(FeatureRefusal, match="20 USD floor"):
+        compute_features(**inputs)  # type: ignore[arg-type]
+
+
 def test_zero_residual_volatility_is_refused() -> None:
     inputs = _inputs()
     market = inputs["prior_market_returns"][-126:]  # type: ignore[index]
@@ -198,6 +211,22 @@ def test_model_refuses_zero_variation_missing_class_and_unknown_label() -> None:
     bad_labels[0] = "profit"
     with pytest.raises(FeatureRefusal, match="unknown outcome"):
         fit_model(rows, bad_labels)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("means", "sample_stds", "message"),
+    [
+        ((0.0,) * 5, (1.0,) * 6, "requires 6"),
+        ((0.0,) * 6, (1.0,) * 5, "requires 6"),
+        ((0.0,) * 5 + (float("nan"),), (1.0,) * 6, "non-finite"),
+        ((0.0,) * 6, (1.0,) * 5 + (0.0,), "zero or unavailable"),
+    ],
+)
+def test_standardisation_cannot_be_constructed_with_unsafe_scales(
+    means: tuple[float, ...], sample_stds: tuple[float, ...], message: str
+) -> None:
+    with pytest.raises(FeatureRefusal, match=message):
+        FeatureStandardisation(means, sample_stds)
 
 
 def test_expected_net_value_uses_all_outcomes_and_costs() -> None:
