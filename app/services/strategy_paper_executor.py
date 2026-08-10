@@ -655,7 +655,11 @@ def _execute_fired_paper_signal_locked(
         return existing
     signal_row = conn.execute("SELECT strategy_id FROM strategy_signals WHERE signal_id=%s", (signal_id,)).fetchone()
     conn.commit()
-    if signal_row is not None and registered_strategy_purpose(str(signal_row[0])) == "harness_validation":
+    if (
+        existing is None
+        and signal_row is not None
+        and registered_strategy_purpose(str(signal_row[0])) == "harness_validation"
+    ):
         return _persist_rejection(
             conn,
             signal_id=signal_id,

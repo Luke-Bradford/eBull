@@ -606,6 +606,12 @@ def test_transport_uncertainty_retries_only_the_committed_uuid(
 
     first = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
     assert first.verdict == "submission_uncertain"
+    harness = next(iter(STRATEGY_MANIFEST.values()))
+    ebull_test_conn.execute(
+        "UPDATE strategy_signals SET strategy_id=%s WHERE signal_id=%s",
+        (harness.strategy_id, signal_id),
+    )
+    ebull_test_conn.commit()
     second = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
 
     assert second.verdict == "submitted"
