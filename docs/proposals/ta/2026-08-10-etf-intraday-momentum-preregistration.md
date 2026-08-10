@@ -3,6 +3,13 @@
 Status: formula and source contract frozen before retained eToro outcomes are
 opened for #2502. Parent #2469.
 
+Source-contract correction, still before an outcome was loaded: the harvester
+stores provenance as `etoro/<universe_version>/nyse_rth`, not the bare `etoro`
+label originally written in the candidate module. The first read-only census
+therefore returned zero eligible rows. The contract and candidate hash were
+corrected to require that namespaced RTH form before rerunning the census; the
+formula, instruments, dates, thresholds and outcome fields were unchanged.
+
 ## Published hypothesis and adaptation boundary
 
 Gao, Han, Li and Zhou, *Market intraday momentum*, Journal of Financial
