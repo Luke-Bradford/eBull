@@ -81,3 +81,41 @@ hit rate, holding time, turnover, concentration and cost sensitivity. Sparse or
 directionally unstable cells refuse promotion. At least two recent purged
 walk-forward folds and a later untouched/prospective interval must agree before
 the candidate is exposed as an allocation control.
+
+## Shared cohort verifier
+
+Implemented in `app/services/strategy_cohort_report.py`. It consumes immutable,
+already-costed candidate observations and always emits the unpooled population
+plus every non-empty, predeclared cell for:
+
+- mechanism, security type, primary listing, price and dollar-volume axes;
+- mechanism × price, mechanism × dollar volume;
+- listing × price and listing × dollar volume.
+
+The dimensions are a module constant rather than a caller argument. This is the
+guard against asking the same outcomes for arbitrary combinations until one
+looks attractive. Both positive and losing cells remain in the report.
+
+Each cell reports nominal trades and entry dates, date-clustered effective
+sample size and 95% expectancy interval, profit factor, hit rate, median and
+mean return, double-cost expectancy, holding time, turnover, worst trade,
+five-percent expected shortfall, worst MAE, event-time portfolio max drawdown,
+exposure and largest date/name/sector shares. Drawdown is a required,
+version-stamped input from the portfolio simulator: it is not reconstructed
+from closed trades, because doing so would hide overlapping positions and
+intratrade marks. Its absence is a named fail-closed refusal.
+A cell refuses when it has fewer than 30 trades, effective sample below 30, an
+uncomputable bootstrap, a non-positive lower expectancy bound or non-positive
+expectancy at double execution cost. The 30-independent-trade floor is reused
+from the prospective activation contract; it is not a newly tuned threshold.
+
+`assess_recent_stability` is the next-level gate. A named, preregistered cohort
+must remain economically positive in at least two non-overlapping walk-forward
+folds and one later untouched or prospective interval. Reports with different
+strategy, context, outcome or cost-model versions cannot be assembled into one
+claim.
+
+This completes the pure shared reporter. Loading real candidates remains
+blocked honestly where point-in-time classification, causal execution inputs or
+completed costed outcomes do not exist; the reporter does not backfill them
+from current metadata.
