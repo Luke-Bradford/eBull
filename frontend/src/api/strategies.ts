@@ -4,6 +4,7 @@ import type {
   AllocationUpdateResponse,
   FiredSignalsResponse,
   StrategyOverviewResponse,
+  StrategyEvidenceRefreshResponse,
   StrategyOwnedPositionsResponse,
   StrategyPaperPool,
   StrategyPnlHistoryResponse,
@@ -12,6 +13,10 @@ import type {
 
 export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
   return apiFetch("/strategies/overview");
+}
+
+export function requestStrategyEvidenceRefresh(): Promise<StrategyEvidenceRefreshResponse> {
+  return apiFetch("/strategies/evidence-refresh", { method: "POST" });
 }
 
 export function fetchFiredSignals(cursor: number | null, strategyId?: string): Promise<FiredSignalsResponse> {

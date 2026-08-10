@@ -2540,7 +2540,25 @@ export interface StrategyOverviewResponse {
   storage_policy: "fired_signals_and_material_mutations_only";
   entry_block: StrategyEntryBlock;
   paper_pool: StrategyPaperPool;
+  evidence_refresh: {
+    frozen_through: string;
+    completed_windows: number;
+    partial_windows: number;
+    total_windows: number;
+    status: "idle" | "queued" | "running" | "failed" | "complete";
+    request_id: number | null;
+    requested_at: string | null;
+    finished_at: string | null;
+    last_error: string | null;
+    progress: Record<string, unknown> | null;
+  };
   strategies: StrategyOverview[];
+}
+
+export interface StrategyEvidenceRefreshResponse {
+  request_id: number;
+  status: "queued" | "running";
+  already_active: boolean;
 }
 
 export interface StrategyPaperPool {

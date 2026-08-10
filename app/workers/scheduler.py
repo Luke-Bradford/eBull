@@ -25,7 +25,7 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 import psycopg
 import psycopg.rows
@@ -5016,6 +5016,9 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
       silently deflate against a register that has moved.
     * ``evidence_window`` (enum) — one pinned recent-evidence window. Raw dates
       are never accepted; selecting one also requires the audited hold-out pair.
+    * ``refresh_recent`` (bool) — complete every missing pinned recent window.
+      Each window commits independently, so a killed process resumes at the
+      next missing identity. Existing evidence is immutable and skipped.
 
     ⚠ ``row_count`` is RESULT ROWS written. Zero is never a success here: the
     service raises if a runnable strategy produced no row, because an absent row
@@ -5027,12 +5030,78 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
     insert of a pair would commit before the second failed.
     """
     from app.services.backtest_run import run_backtest
-    from app.services.strategy_recent_evidence import recent_evidence_window
+    from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS, recent_evidence_window
 
     with _tracked_job(JOB_STRATEGY_BACKTEST_RUN) as tracker:
+        refresh_recent = params.get("refresh_recent") is True
         evidence_window_id = _optional_str(params.get("evidence_window"))
+        if refresh_recent and (evidence_window_id is not None or _optional_str(params.get("strategy_id")) is not None):
+            raise ValueError("refresh_recent cannot be combined with evidence_window or strategy_id")
         evaluation_window = None if evidence_window_id is None else recent_evidence_window(evidence_window_id).window
         with connect_job() as conn:
+            if refresh_recent:
+                complete, partial = _recent_evidence_completion(conn)
+                if partial:
+                    raise RuntimeError(
+                        "recent evidence contains partial immutable windows "
+                        f"{sorted(partial)}; operator repair is required before a safe resume"
+                    )
+                rows_written = 0
+                newly_completed = 0
+                for window_id, item in RECENT_EVIDENCE_WINDOWS.items():
+                    if window_id in complete:
+                        continue
+                    report = run_backtest(
+                        conn,
+                        holdout_purpose=_optional_str(params.get("holdout_purpose")),
+                        holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
+                        trial_register_version=_optional_str(params.get("trial_register_version")),
+                        evaluation_window=item.window,
+                    )
+                    # A window is the restart boundary. The ledger identities
+                    # are immutable, so keeping earlier windows uncommitted
+                    # would make an hours-long refresh start from zero.
+                    conn.commit()
+                    rows_written += report.rows_written
+                    newly_completed += 1
+                    tracker.row_count = rows_written
+                    tracker.progress = JobProgress(
+                        candidates_seen=len(RECENT_EVIDENCE_WINDOWS),
+                        outcomes={
+                            "already_complete": len(complete),
+                            "completed": newly_completed,
+                        },
+                    )
+                    if tracker.run_id:
+                        conn.execute(
+                            """
+                            UPDATE job_runs
+                            SET row_count = %(rows)s,
+                                progress_json = %(progress)s,
+                                last_progress_at = now()
+                            WHERE run_id = %(run_id)s AND status = 'running'
+                            """,
+                            {
+                                "rows": rows_written,
+                                "progress": Jsonb(tracker.progress.as_json()),
+                                "run_id": tracker.run_id,
+                            },
+                        )
+                        conn.commit()
+                tracker.row_count = rows_written
+                tracker.progress = JobProgress(
+                    candidates_seen=len(RECENT_EVIDENCE_WINDOWS),
+                    outcomes={
+                        "already_complete": len(complete),
+                        "completed": newly_completed,
+                    },
+                )
+                tracker.note = (
+                    "all pinned recent evidence was already complete"
+                    if newly_completed == 0
+                    else f"completed {newly_completed} missing recent evidence window(s)"
+                )
+                return
             report = run_backtest(
                 conn,
                 strategy_id=_optional_str(params.get("strategy_id")),
@@ -5042,6 +5111,74 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                 evaluation_window=evaluation_window,
             )
             tracker.row_count = report.rows_written
+
+
+def _recent_evidence_completion(
+    conn: psycopg.Connection[Any],
+) -> tuple[set[str], set[str]]:
+    """Return structurally complete and partial pinned recent windows.
+
+    Expected result versions use the writer's complete immutable identity.
+    Counting dates alone could mistake stale cost, corpus or rule-set rows for
+    current evidence.
+    """
+    from app.services.backtest_run import BACKTEST_UNIVERSE, RESULT_SCOPE, runnable_strategies
+    from app.services.cost_model import COST_MODEL_ID
+    from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
+    from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+    from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
+    from app.services.research_price_structure_store import (
+        QUARANTINE_ARMS,
+        QUARANTINE_RULE_SET_VERSION,
+        QuarantineArm,
+    )
+    from app.services.strategy_manifest import STRATEGY_MANIFEST
+    from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
+    from app.services.strategy_result import AMBIGUITY_ARMS, CORPUS_VERSION, AmbiguityArm, ResultIdentity
+
+    runnable, _excluded = runnable_strategies()
+    expected: dict[str, set[str]] = {}
+    for window_id, item in RECENT_EVIDENCE_WINDOWS.items():
+        versions: set[str] = set()
+        for strategy_id in runnable:
+            entry = STRATEGY_MANIFEST[strategy_id]
+            strategy_version = entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
+            for ambiguity_arm in AMBIGUITY_ARMS:
+                for quarantine_arm in QUARANTINE_ARMS:
+                    versions.add(
+                        ResultIdentity(
+                            strategy_id=strategy_id,
+                            strategy_version=strategy_version,
+                            result_scope=RESULT_SCOPE,
+                            namespace="hold_out",
+                            ambiguity_arm=cast(AmbiguityArm, ambiguity_arm),
+                            quarantine_arm=cast(QuarantineArm, quarantine_arm),
+                            sizing_rule=SIZING_RULE_ID,
+                            benchmark_rule=BENCHMARK_RULE_ID,
+                            cost_model_id=COST_MODEL_ID,
+                            corpus_version=CORPUS_VERSION,
+                            window_start=item.window.start,
+                            window_end=item.window.end,
+                            position_rule_set_version=POSITION_RULE_SET_VERSION,
+                            outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
+                            input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+                        ).version
+                    )
+        expected[window_id] = versions
+
+    all_versions = [version for versions in expected.values() for version in versions]
+    existing = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT result_version FROM strategy_results_store WHERE result_version = ANY(%s)",
+            (all_versions,),
+        ).fetchall()
+    }
+    complete = {window_id for window_id, versions in expected.items() if versions and versions <= existing}
+    partial = {
+        window_id for window_id, versions in expected.items() if versions & existing and not versions <= existing
+    }
+    return complete, partial
 
 
 def _optional_str(value: object) -> str | None:

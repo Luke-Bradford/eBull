@@ -65,6 +65,18 @@ const OVERVIEW: StrategyOverviewResponse = {
     invested_capital: "0.000000",
     remaining_capital: "1000.000000",
   },
+  evidence_refresh: {
+    frozen_through: "2026-07-08",
+    completed_windows: 1,
+    partial_windows: 0,
+    total_windows: 8,
+    status: "idle",
+    request_id: null,
+    requested_at: null,
+    finished_at: null,
+    last_error: null,
+    progress: null,
+  },
   strategies: [{
     strategy_id: "s1-time-series-momentum",
     strategy_version: "strategy-registry-v1+abc",
@@ -225,6 +237,20 @@ describe("StrategiesPage", () => {
     expect(screen.getByText("• Recent evidence windows are incomplete")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Next" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Previous" })).not.toBeInTheDocument();
+  });
+
+  it("queues the fixed recent-evidence denominator from the research header", async () => {
+    const refresh = vi.spyOn(strategiesApi, "requestStrategyEvidenceRefresh").mockResolvedValue({
+      request_id: 42,
+      status: "queued",
+      already_active: false,
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+
+    expect(await screen.findByText(/Evidence 1\/8/)).toHaveTextContent("frozen through 08 Jul 2026");
+    await userEvent.click(screen.getByRole("button", { name: "Refresh evidence" }));
+
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
   });
 
   it("summarises fired observations without rendering a ticker activity feed", async () => {

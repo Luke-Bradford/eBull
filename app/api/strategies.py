@@ -75,6 +75,7 @@ from app.services.strategy_position_manager import (
 )
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import CORPUS_VERSION
+from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 
 router = APIRouter(
     prefix="/strategies",
@@ -83,6 +84,8 @@ router = APIRouter(
 )
 
 logger = logging.getLogger(__name__)
+
+_STRATEGY_BACKTEST_JOB = "strategy_backtest_run"
 
 _TITLES = {
     "s1-time-series-momentum": "Time-series momentum",
@@ -254,6 +257,19 @@ class StrategyPaperPoolView(BaseModel):
     remaining_capital: Decimal
 
 
+class EvidenceRefreshView(BaseModel):
+    frozen_through: date
+    completed_windows: int
+    partial_windows: int
+    total_windows: int
+    status: Literal["idle", "queued", "running", "failed", "complete"]
+    request_id: int | None
+    requested_at: datetime | None
+    finished_at: datetime | None
+    last_error: str | None
+    progress: dict[str, object] | None
+
+
 class StrategyOverviewResponse(BaseModel):
     as_of: datetime
     demo_connection: bool
@@ -266,7 +282,14 @@ class StrategyOverviewResponse(BaseModel):
     storage_policy: Literal["fired_signals_and_material_mutations_only"] = "fired_signals_and_material_mutations_only"
     entry_block: StrategyEntryBlockView
     paper_pool: StrategyPaperPoolView
+    evidence_refresh: EvidenceRefreshView
     strategies: list[StrategyOverview]
+
+
+class EvidenceRefreshRequestResponse(BaseModel):
+    request_id: int
+    status: Literal["queued", "running"]
+    already_active: bool
 
 
 class StrategyPaperPoolUpdateRequest(BaseModel):
@@ -638,6 +661,42 @@ _EXCLUSIONS_SQL = """
 # corpus on every Strategies page load.
 _LATEST_CORPUS_SQL = "SELECT MAX(last_bar) FROM research_price_series"
 
+_LATEST_EVIDENCE_REFRESH_SQL = """
+    SELECT p.request_id, p.status AS request_status, p.requested_at, p.error_msg AS request_error,
+           j.status AS run_status, j.finished_at, j.error_msg AS run_error, j.progress_json
+    FROM pending_job_requests p
+    LEFT JOIN LATERAL (
+        SELECT status, finished_at, error_msg, progress_json
+        FROM job_runs
+        WHERE linked_request_id = p.request_id
+        ORDER BY run_id DESC
+        LIMIT 1
+    ) j ON true
+    WHERE p.job_name = %(job_name)s
+      AND p.request_kind = 'manual_job'
+      AND p.payload -> 'params' ->> 'refresh_recent' = 'true'
+    ORDER BY p.request_id DESC
+    LIMIT 1
+"""
+
+
+def _evidence_refresh_status(
+    row: dict[str, object] | None,
+) -> tuple[Literal["idle", "queued", "running", "failed", "complete"], str | None]:
+    if row is None:
+        return "idle", None
+    run_status = row["run_status"]
+    request_status = row["request_status"]
+    if run_status == "failure" or request_status == "rejected":
+        return "failed", cast(str | None, row["run_error"] or row["request_error"])
+    if run_status == "running":
+        return "running", None
+    if request_status == "completed" and run_status in {"success", "degraded"}:
+        return "complete", cast(str | None, row["run_error"])
+    if request_status in {"pending", "claimed", "dispatched"}:
+        return "queued", None
+    return "idle", None
+
 
 @router.get("/overview", response_model=StrategyOverviewResponse)
 def get_strategy_overview(
@@ -667,6 +726,8 @@ def get_strategy_overview(
         cur.execute(_LATEST_CORPUS_SQL)
         latest_row = cur.fetchone()
         latest_corpus_date = None if latest_row is None else latest_row["max"]
+        cur.execute(_LATEST_EVIDENCE_REFRESH_SQL, {"job_name": _STRATEGY_BACKTEST_JOB})
+        refresh_row = cur.fetchone()
 
     attribution_by_strategy = load_attribution(
         conn,
@@ -846,6 +907,22 @@ def get_strategy_overview(
         if all(value is not None for value in invested_values)
         else None
     )
+    runnable_rows = [item for item in strategies if item.runnable]
+    completed_windows = sum(
+        all(
+            next(window for window in item.evidence_windows if window.window_id == window_id).status == "complete"
+            for item in runnable_rows
+        )
+        for window_id in RECENT_EVIDENCE_WINDOWS
+    )
+    partial_windows = sum(
+        any(
+            next(window for window in item.evidence_windows if window.window_id == window_id).status == "partial"
+            for item in runnable_rows
+        )
+        for window_id in RECENT_EVIDENCE_WINDOWS
+    )
+    refresh_status, refresh_error = _evidence_refresh_status(refresh_row)
     return StrategyOverviewResponse(
         as_of=datetime.now(tz=UTC),
         demo_connection=settings.etoro_env == "demo",
@@ -867,8 +944,86 @@ def get_strategy_overview(
             invested_capital=invested_total,
             remaining_capital=max(paper_pool.capital_limit - reserved_total, Decimal("0")),
         ),
+        evidence_refresh=EvidenceRefreshView(
+            frozen_through=max(item.window.end for item in RECENT_EVIDENCE_WINDOWS.values()),
+            completed_windows=completed_windows,
+            partial_windows=partial_windows,
+            total_windows=len(RECENT_EVIDENCE_WINDOWS),
+            status=refresh_status,
+            request_id=None if refresh_row is None else int(refresh_row["request_id"]),
+            requested_at=None if refresh_row is None else cast(datetime, refresh_row["requested_at"]),
+            finished_at=None if refresh_row is None else cast(datetime | None, refresh_row["finished_at"]),
+            last_error=refresh_error,
+            progress=None
+            if refresh_row is None or refresh_row["progress_json"] is None
+            else cast(dict[str, object], refresh_row["progress_json"]),
+        ),
         strategies=strategies,
     )
+
+
+@router.post(
+    "/evidence-refresh",
+    response_model=EvidenceRefreshRequestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_evidence_refresh(
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> EvidenceRefreshRequestResponse:
+    """Queue completion of the declared recent-regime evidence denominator.
+
+    There are deliberately no window or date inputs on this surface. The job
+    skips immutable completed identities, commits each missing pinned window as
+    a restart boundary, and refuses partial identities rather than overwriting
+    an audit record.
+    """
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("strategy-evidence-refresh",))
+        active = conn.execute(
+            """
+            SELECT p.request_id, p.status,
+                   EXISTS (
+                       SELECT 1 FROM job_runs j
+                       WHERE j.linked_request_id = p.request_id AND j.status = 'running'
+                   ) AS running
+            FROM pending_job_requests p
+            WHERE p.job_name = %(job_name)s
+              AND p.request_kind = 'manual_job'
+              AND p.status IN ('pending', 'claimed', 'dispatched')
+              AND p.payload -> 'params' ->> 'refresh_recent' = 'true'
+              AND NOT EXISTS (
+                  SELECT 1 FROM job_runs j
+                  WHERE j.linked_request_id = p.request_id
+                    AND j.status IN ('success', 'failure', 'degraded')
+              )
+            ORDER BY p.request_id DESC
+            LIMIT 1
+            FOR UPDATE OF p
+            """,
+            {"job_name": _STRATEGY_BACKTEST_JOB},
+        ).fetchone()
+        if active is not None:
+            active_row = cast(tuple[object, object, object], active)
+            return EvidenceRefreshRequestResponse(
+                request_id=int(cast(int, active_row[0])),
+                status="running" if active_row[2] else "queued",
+                already_active=True,
+            )
+        request_id = publish_manual_job_request_with_conn(
+            conn,
+            _STRATEGY_BACKTEST_JOB,
+            requested_by=session.username,
+            payload={
+                "params": {
+                    "refresh_recent": True,
+                    "holdout_purpose": "complete declared recent-regime evidence denominator",
+                    "holdout_accessed_by": session.username,
+                },
+                "control": {"override_bootstrap_gate": False},
+            },
+        )
+    return EvidenceRefreshRequestResponse(request_id=request_id, status="queued", already_active=False)
 
 
 _FIRED_SIGNALS_SQL = """
