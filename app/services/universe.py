@@ -14,6 +14,7 @@ import psycopg
 
 from app.providers.market_data import InstrumentRecord, MarketDataProvider
 from app.services.instrument_history import reconcile_symbol_history
+from app.services.instrument_market_classification import reconcile_instrument_market_classification
 from app.services.universe_membership import reconcile_universe_membership
 
 logger = logging.getLogger(__name__)
@@ -240,6 +241,26 @@ def sync_universe(
                 membership.reopened_same_day,
                 membership.closed,
                 membership.confirmed,
+            )
+
+        classification = reconcile_instrument_market_classification(conn)
+        if any(
+            (
+                classification.confirmed,
+                classification.opened,
+                classification.changed,
+                classification.corrected_same_day,
+                classification.closed,
+            )
+        ):
+            logger.info(
+                "Universe sync: market classification confirmed=%d opened=%d changed=%d "
+                "corrected_same_day=%d closed=%d",
+                classification.confirmed,
+                classification.opened,
+                classification.changed,
+                classification.corrected_same_day,
+                classification.closed,
             )
 
     # Re-query to get accurate inserted/updated counts.
