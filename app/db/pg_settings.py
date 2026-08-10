@@ -171,6 +171,15 @@ JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION: Final[int] = 2
 ``JobLock`` connection plus one body/run-scoped connection. Some jobs use
 fewer, but the budget must charge the upper bound."""
 
+JOBS_BACKTEST_PROGRESS_CONNECTIONS: Final[int] = 1
+"""Additional body connection held by the one strategy backtest execution.
+
+The backtest keeps its evidence transaction isolated from best-effort progress
+telemetry, so ``pg_stat_activity`` shows two labelled body connections plus its
+ordinary ``JobLock``. The source lane serialises strategy backtests; at most one
+such extra connection can coexist with the two generic non-SEC executions.
+"""
+
 CONNECTION_BUDGET_RESERVE: Final[int] = 3
 """Headroom over the steady-state baseline for transient connections
 that briefly coexist with it: serialized boot singleton-probes, the
@@ -265,6 +274,7 @@ def _dev_profile_connection_demand() -> int:
         + BACKGROUND_POOL_MAX_SIZE
         + JOBS_FIXED_LONGLIVED_CONNS
         + JOBS_NON_SEC_MAX_CONCURRENCY * JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION
+        + JOBS_BACKTEST_PROGRESS_CONNECTIONS
         + SEC_LANE_MAX_CONCURRENCY
     )
 
