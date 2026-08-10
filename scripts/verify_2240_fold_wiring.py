@@ -108,6 +108,9 @@ def _report_splits(*, limit: int | None) -> list[str]:
                     entry,
                     corpus=corpus,
                     quarantine_arm=arm,
+                    # One conservative population is enough to verify fold
+                    # wiring; the production runner measures both S-4 bounds.
+                    ambiguity_arm="worst_case" if entry.exit_levels is not None else None,
                     identity=identity,
                     namespaces=("in_sample",),
                 )

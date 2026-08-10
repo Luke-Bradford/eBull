@@ -37,16 +37,17 @@ has none. This is S-3's ``MAX_HOLD_BARS`` reasoning applied to the whole exit
 rather than to one half of it. The parameters are NOT dropped: ``ATR_STOP_MULTIPLE``,
 ``ATR_TARGET_MULTIPLE`` and ``MAX_HOLD_BARS`` are carried in ``S4_PARAMS``, so
 criterion 11 hashes them into the identity, and their consumer is
-``outcome_resolver.ExitLevels`` (phase 4a), whose caller is phase 5.
+``s4_exit_bracket`` below, which returns the strategy-owned values used to
+construct the outcome runner's version-pinned level object.
 
 ⚠ THE ATR THAT SIZES THE BRACKET IS INDEXED AT THE SIGNAL BAR, AND THIS MODULE
-CANNOT GET THAT WRONG BECAUSE IT DOES NOT EMIT IT. A ``StrategySignal`` carries a
-bar index and nothing else (3a's module docstring), so whoever builds the
-``ExitLevels`` recomputes ``atr_series`` and reads ``signal_index`` — never
+IS THE ONE PLACE ALLOWED TO EMIT IT. A ``StrategySignal`` carries a bar index
+and nothing else (3a's module docstring), so ``s4_exit_bracket`` recomputes
+``atr_series`` and reads ``signal_index`` — never
 ``signal_index + 1``. §4 flags this as the exact trap ("sizing a stop off the fill
 bar's own range leaks that bar into the decision that produced it") and it was one
-of the five findings Codex's second spec round caught. The API shape is what
-prevents it here, in the same way the absent fill field prevents a same-bar fill.
+of the five findings Codex's second spec round caught. The factory's API shape
+is what prevents it, in the same way the absent fill field prevents a same-bar fill.
 
 ⚠ "BOTTOM QUARTILE" HAS NO PUBLISHED FORMULATION AND IS THEREFORE FIXED BY
 CONSTRUCTION HERE, NOT INVENTED SILENTLY.
@@ -100,9 +101,10 @@ segment are ``not_evaluable``, not absent."* The high/low half is enforced here
 transitively and correctly: ``atr_series`` refuses on a NULL high, a NULL low or
 a NULL previous close, so a bar with a good close and a missing high is refused
 rather than judged. The ``price_series_break`` half is the CALLER's, and
-deliberately so — ``series_break`` is one of criterion 8's seven reason codes and
-this module has no database access, so it takes the code from the caller through
-``masked_reason`` in the same way S-1 and S-3 do.
+deliberately so — this module has no database access. The bounded runner splits
+S-4 into independent segments, making the final pre-break bar unfillable and
+restarting ATR warm-up at the new scale; the outcome resolver separately refuses
+an open position that would cross the next boundary.
 
 ⚠ WHAT THIS MODULE DOES NOT GUARD, INHERITED FROM ``indicator_series``.
 Quarantine and adjustment basis are the CALLER's gate. There is no database
@@ -113,6 +115,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from decimal import Decimal
 from pathlib import Path
 
 from app.services.indicator_series import (
@@ -223,6 +226,36 @@ def s4_identity(*, universe: Universe, cost_model_id: str) -> StrategyIdentity:
         cost_model_id=cost_model_id,
         source_hash=_source_hash(),
     )
+
+
+def s4_exit_bracket(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> tuple[Decimal, Decimal, int]:
+    """Build S-4's fixed bracket from ATR on the causal signal bar.
+
+    The entry is the next bar's open, but the distance is deliberately read at
+    ``signal_index``. Recomputing ATR at the fill index would let the fill bar's
+    range alter levels that had to exist before that bar was observed.
+    """
+    if not 0 <= signal_index < len(series):
+        raise ValueError(f"signal_index {signal_index} is outside the {len(series)}-bar series")
+    if entry_price <= 0:
+        raise ValueError(f"entry_price must be positive, got {entry_price}")
+    atr = atr_series(series, period=ATR_PERIOD, universe=universe).values[signal_index]
+    if atr is None or atr <= 0:
+        raise ValueError(f"ATR{ATR_PERIOD} is unavailable or non-positive at signal index {signal_index}")
+    distance = Decimal(str(atr))
+    stop = entry_price - Decimal(str(ATR_STOP_MULTIPLE)) * distance
+    target = entry_price + Decimal(str(ATR_TARGET_MULTIPLE)) * distance
+    if stop <= 0:
+        raise ValueError(
+            f"S-4's 2xATR stop {stop} is non-positive for entry {entry_price}; the bracket is not broker-orderable"
+        )
+    return target, stop, MAX_HOLD_BARS
 
 
 def _close_input(series: BarSeries, *, universe: Universe) -> IndicatorSeries:
@@ -336,10 +369,9 @@ def s4_signals(
     is unprobeable and is called out here rather than left to look load-bearing.
 
     ``masked_reason`` is the code recorded when an OHLC field is missing, and it
-    comes from the caller because only the caller knows why: bars from
-    ``load_masked_series`` are missing because the quarantine masked them
-    (``quarantined_bar``), whereas §4's *"any bar inside a ``price_series_break``
-    segment"* is ``series_break``. A different loader owes a different code.
+    comes from the caller because only the caller knows why. Segment boundaries
+    are structural rather than missing fields and are therefore applied by the
+    runner before this function is called.
     """
     if masked_reason not in NOT_EVALUABLE_REASONS:
         raise ValueError(f"unknown reason code {masked_reason!r}; must be one of {sorted(NOT_EVALUABLE_REASONS)}")

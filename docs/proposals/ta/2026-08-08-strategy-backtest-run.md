@@ -143,7 +143,7 @@ by `--runnable`, **every one of the 4 manifest ids is a declared trial id**, so
 strategy landing without a register entry fails there rather than silently
 under-counting `M` — which raises the DSR, in the favourable direction.
 
-## 3. S-4 cannot be backtested, and the CODE refuses it — not the docstring
+## 3. S-4's causal bracket makes it runnable; missing providers still refuse
 
 `--runnable`, over `STRATEGY_MANIFEST` rather than a hand-written list:
 
@@ -151,29 +151,38 @@ under-counting `M` — which raises the DSR, in the favourable direction.
 s1-time-series-momentum              per_series       RUNNABLE
 s2-cross-sectional-momentum          cross_sectional  RUNNABLE
 s3-mean-reversion-in-trend           per_series       RUNNABLE
-s4-volatility-compression-breakout   per_series       BLOCKED
-  build_positions refuses: signal 1 is a level-based entry with no outcome at
-  the pinned version pair — resolve it before building positions rather than
-  falling through to the max-hold close
-runnable 3 of 4
+s4-volatility-compression-breakout   per_series       RUNNABLE
+runnable 4 of 4
 ```
 
-The refusal is **demonstrated by calling `build_positions`**, not quoted from its
-docstring, because the entire exclusion of S-4 rests on it and a docstring cannot
-be wrong in CI. The chain is: S-4 is the only entry with `level_based=True` →
-`build_positions` raises on a level-based entry with no outcome at the pin →
-outcomes come only from `outcome_resolver.resolve_outcome` → that needs an
-`ExitLevels` → **`grep -rn 'ExitLevels(' app scripts tests` returns one verify
-script and two test modules and nothing in `app/`**.
+S-4 owns `s4_exit_bracket`: it recomputes ATR14 at signal bar `t` and fixes stop
+and target around the next-open fill. The manifest adapter constructs the
+version-pinned `ExitLevels` handed to `outcome_resolver.resolve_outcome`. Keeping
+that adapter outside the strategy package avoids making the outcome rule-set
+version part of every strategy's input hash; it is already a separate result
+identity member. A daily bar spanning both levels is resolved twice, once at the
+stop and once at the target. No future bar participates in level construction.
 
-Same blocker the §3.1 spec §7 records for the outcome-resolution job. Neither job
-is waiting on the other; both are waiting on an S-4 exit-level provider.
+Unresolved `price_series_break` dates are loaded once for the corpus instruments.
+For each fill, the next strictly later break bounds the old segment at its final
+stored bar; a fill on the break date is already in the new segment. Measured
+2026-08-10: **79 unresolved boundaries across 68 research-resolved instruments**
+would otherwise be available to span. Crossing one produces
+`unresolved(series_break)`, never a target or stop result on a different scale.
+That position remains counted but deliberately has no mark: a close from the
+new scale cannot be compared with its old-scale fill, so it is excluded from
+return and equity evidence rather than silently manufacturing a gain or loss.
+Its structural hold ends at the first stored bar on the new scale, allowing a
+new-scale signal on that boundary or later to form a separate position; the
+unpriceable old trade must not truncate the rest of the instrument's evidence.
+S-4's signal input is split at the same boundaries: the old segment's final bar
+cannot fill across the transition, and ATR/compression/breakout warm-up restarts
+inside the new scale instead of carrying pre-break state forward.
 
-⚠ **S-4 is excluded, not skipped silently.** The job emits it as a refusal with
-this reason, per criterion 9's *"exclusion is visible rather than assumed
-harmless"*. A three-of-four run that reports "3 strategies evaluated" is the
-manifest defect (#2394 §2) reappearing one layer up, which is exactly what the
-manifest exists to stop.
+The old refusal remains executable as a contract probe. A `level_based` manifest
+entry without an `exit_levels` factory is a named exclusion, and
+`build_positions` is called to demonstrate the precise reason. It is not skipped
+or promoted by convention.
 
 ## 4. ⚠⚠ Both namespaces come out of ONE pass — so criterion 5 has to be enforced by the JOB
 
@@ -278,40 +287,37 @@ the window is what the arm was cut from. Storing the truncated span in
 `--arms`, every factor a `len()` of the thing that defines it:
 
 ```
-runnable strategies      3   s1-…, s2-…, s3-…
+runnable strategies      4   s1-…, s2-…, s3-…, s4-…
 namespaces               2   hold_out, in_sample
 ambiguity arms           2   best_case, worst_case
 quarantine arms          2   admitted, masked
 result scopes            2   portfolio, sleeve
-product                 48   result rows per full invocation
-sleeve scope only       24
+product                 64   result rows per full invocation
+sleeve scope only       32
 ```
 
 **`portfolio` scope is out.** It is a statement about a cross-strategy allocator
-and nothing in `app/` allocates across strategies. 24 sleeve rows.
+and nothing in `app/` allocates across strategies. 32 sleeve rows.
 
-⚠ **24 rows is NOT 24 corpus passes**, and the difference is the whole cost
+⚠ **32 rows is NOT 32 corpus passes**, and the difference is the whole cost
 argument:
 
 - the **two namespaces** are one pass (§4);
-- the **two ambiguity arms** are one pass for all three runnable strategies, and
-  the argument is STRUCTURAL rather than a generalisation from the one strategy
-  `--arm` runs. `position_builder` assigns `close_source == "ambiguous"` only
-  inside its `if regime.level_based:` branch; `--runnable` checks over the whole
-  manifest that **no runnable strategy is level_based**, and fails if one ever
-  is. So an `ambiguous` close is unreachable for every strategy in the runnable
-  set, including the two `--arm` did not execute. `--arm`'s close-source census
-  on S-1 masked corroborates it on real data — **`signal_pair` 3,133,100,
-  `open_at_window_end` 2,255, `ambiguous` 0** — and fails if that zero moves;
+- the **two ambiguity arms** share one pass for S-1, S-2 and S-3 because their
+  non-level close regimes cannot produce an ambiguous touch. S-4 is genuinely
+  evaluated twice: the same-bar class is booked at its target in `best_case`
+  and its stop in `worst_case`;
 - the **two quarantine arms** are genuinely two passes: `masked` and `admitted`
   are different bar sets.
 
-So: **3 strategies × 2 quarantine arms = 6 corpus passes → 24 stored rows.**
+So: **3 non-level strategies × 2 quarantine arms + S-4 × 2 ambiguity arms ×
+2 quarantine arms = 10 corpus passes → 32 stored rows.**
 
-⚠ The second ambiguity row is written as the same numbers under the other label,
-and the job **asserts** the two are equal rather than recomputing them. §3.4
-requires both reported; recomputing an identical pass to produce an identical row
-is cost with no evidence in it.
+For a non-level strategy the second ambiguity row is the same measured population
+under the required identity. For S-4 both are real populations. Equal Sharpes
+prove a zero gap. If they differ, this runner has no attached random-control
+threshold for §3.4's materiality comparison, so the gate records
+`ambiguity_arms_not_compared` and remains closed.
 
 ## 7. The identity — fourteen members, and who supplies each
 
@@ -561,7 +567,8 @@ Per run, per `(strategy_id, namespace, ambiguity_arm, quarantine_arm)`:
 - the per-namespace axis bounds (§5), measured, so a widening is visible;
 - the refusal list from `check_promotable` for each row, so the operator reads
   *why* nothing is promotable without querying;
-- **every excluded strategy with its reason** — S-4's level-based refusal today.
+- **every excluded strategy with its reason** — including any future level-based
+  strategy that omits a causal level factory.
 
 ⚠⚠ **Computing the refusal list must not itself touch the hold-out access log.**
 `PromotionCandidate.quarantine_arms_compared` has a database-reading helper —
@@ -577,8 +584,8 @@ it holds.
 ⚠ A strategy that produced **no row** must be visible, and no index can say so;
 the count is emitted against the runnable set the job computed, and a shortfall
 **fails the run**. ⚠ **"Shortfall" means against the RUNNABLE set, not against
-the manifest** — S-4 is expected to be absent and its exclusion is a reported
-reason, not a failure. The two are distinguished by the runnable computation
+the manifest** — an entry with no declared outcome producer is an exclusion,
+not a failure. The two are distinguished by the runnable computation
 itself: a strategy that was runnable at plan time and produced no row is the
 failure; one that was never runnable is a line in the exclusion list. Same
 construction §3.1 landed after the review bot found its population gate anchored
@@ -594,8 +601,9 @@ on the wrong side.
   are not comparable. ⚠ **The research loader is the only bar source this job may
   use, and S-2 is where that could slip** — assembling a panel is the one place a
   `price_daily` read would look like a convenience rather than a corpus change.
-- **It does not resolve outcomes.** Blocked on the same S-4 exit-level provider,
-  and it must carry the §3.1 spec §7 immature-window rule when it lands.
+- **It does not store forward outcomes.** It resolves S-4 outcomes in memory for
+  the frozen corpus only; a separate forward job owns `strategy_outcomes` and
+  must carry the §3.1 spec §7 immature-window rule.
 - **It does not run the walk-forward split.** `store_walk_forward_folds` exists
   and `WalkForwardFolds` refuses a partial set; wiring it is a follow-on once a
   result row exists to attach folds to.
@@ -631,11 +639,12 @@ maintenance problem.
 
 ## 14. Acceptance
 
-1. A full invocation writes 24 sleeve rows — 3 runnable strategies × 2
+1. A full invocation writes 32 sleeve rows — 4 runnable strategies × 2
    namespaces × 2 ambiguity arms × 2 quarantine arms. A **runnable** strategy
    that produced no row fails the run; a never-runnable one is a named line in
    the exclusion list (§11).
-2. S-4 is refused with the `build_positions` message in §3, not skipped.
+2. S-4 levels use ATR at signal bar `t`, the next-open fill, fixed 2×/3× ATR
+   levels and a 40-bar cap; a level-based entry with no factory is refused.
 3. A hold-out row is written **only** when `holdout_purpose` and
    `holdout_accessed_by` are both supplied and non-empty, and
    `strategy_holdout_accesses` gains **exactly one** `evaluate` record per
@@ -653,8 +662,9 @@ maintenance problem.
 8. `check_promotable` is re-measured on **every** written row and returns exactly
    the refusals §9's table says the job cannot close, and no others. §9's
    measured 8-refusal list is the bare-row worst case, not this criterion.
-9. The two ambiguity arms of a runnable strategy are asserted equal, and the
-   close-source census shows `ambiguous = 0` for each strategy actually run.
+9. Non-level ambiguity arms are asserted shared. S-4 is measured under both
+   daily-OHLC bounds; an unequal pair remains refused until the random-control
+   materiality threshold is attached.
 10. Every figure in §§0, 3, 4, 5, 6, 9 and the per-arm timings in §8 is printed
     by `scripts/verify_2394_backtest_run.py --all`, exit 0. ⚠ **Three things in
     this document are NOT script output and are labelled where they appear:**

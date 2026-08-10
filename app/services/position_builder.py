@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 from app.services.indicator_series import BarSeries
-from app.services.outcome_resolver import OUTCOME_CLASSES, OutcomeClass
+from app.services.outcome_resolver import OUTCOME_CLASSES, UNRESOLVED_REASONS, OutcomeClass, UnresolvedReason
 
 # Same construction as `indicator_series` / `outcome_resolver`: a stable id plus
 # a hash of THIS MODULE'S SOURCE. Parent criterion 11 makes the execution
@@ -77,18 +77,16 @@ CloseSource = Literal["signal_pair", "level", "max_hold", "calendar", "ambiguous
 #: SEPARATELY (§3.2 rule 5) because they say different things: one is a window
 #: that ended, one is a resolver that refused to judge.
 #:
-#: ⚠ ``close_bar_unfillable`` is OURS — spec §3.2 rule 5 names only the other
-#: two — and it is flagged as an addition rather than smuggled in, the same way
-#: ``strategy_registry`` flags ``no_fill_bar``. It exists because the forced
-#: close bar of a max-hold or calendar regime can be present and UNPRICED: the
-#: hold ended there by construction and cannot be booked, which is neither of
-#: the other two states. Measured cause on this corpus: 16 bars across 9 series
-#: whose stored ``open`` is 0, all of them already quarantined on both axes.
-OpenReason = Literal["unresolved_outcome", "window_end", "close_bar_unfillable"]
+#: ⚠ ``close_bar_unfillable`` and ``series_break`` are OURS — spec §3.2 rule
+#: 5 names only the other two — and they are flagged as additions rather than
+#: smuggled in, the same way ``strategy_registry`` flags ``no_fill_bar``. The
+#: former exists because a forced close bar can be present and UNPRICED. The
+#: latter refuses to compare prices on opposite sides of a known scale break.
+OpenReason = Literal["unresolved_outcome", "series_break", "window_end", "close_bar_unfillable"]
 
 #: Kept as an explicit subtraction so adopting a spec reason later cannot
 #: silently land on our side of the line — ``strategy_registry``'s construction.
-OUR_ADDITIONAL_OPEN_REASONS: frozenset[str] = frozenset({"close_bar_unfillable"})
+OUR_ADDITIONAL_OPEN_REASONS: frozenset[str] = frozenset({"close_bar_unfillable", "series_break"})
 
 # ⚠ DERIVED from the Literals, never restated — the closed-vocabulary-in-N-places
 # defect the prevention log carries from #2218.
@@ -175,6 +173,11 @@ class ResolvedOutcome:
     outcome: OutcomeClass
     exit_bar_date: date | None
     exit_price: Decimal | None
+    reason: UnresolvedReason | None = None
+    #: First stored bar on the new scale. This is runner-only structural
+    #: metadata rather than a booked exit and therefore is not projected into
+    #: ``exit_bar_date`` (an unresolved ledger outcome has no exit location).
+    unresolved_until_bar_date: date | None = None
 
     def __post_init__(self) -> None:
         if self.outcome not in OUTCOME_CLASSES:
@@ -196,6 +199,18 @@ class ResolvedOutcome:
             raise ValueError(
                 f"outcome {self.outcome!r} on signal {self.signal_id} carries exit_price "
                 f"{self.exit_price!r}: a price exists exactly for tp_hit / sl_hit / expired"
+            )
+        if self.reason is not None and self.reason not in UNRESOLVED_REASONS:
+            raise ValueError(f"unknown unresolved reason {self.reason!r}; must be one of {sorted(UNRESOLVED_REASONS)}")
+        if (self.outcome == "unresolved") != (self.reason is not None):
+            raise ValueError(
+                f"outcome {self.outcome!r} on signal {self.signal_id} and reason {self.reason!r} disagree: "
+                "a reason is required exactly for an unresolved outcome"
+            )
+        if (self.reason == "series_break") != (self.unresolved_until_bar_date is not None):
+            raise ValueError(
+                f"reason {self.reason!r} on signal {self.signal_id} and unresolved boundary "
+                f"{self.unresolved_until_bar_date!r} disagree: a boundary is required exactly for series_break"
             )
 
 
@@ -373,6 +388,8 @@ class Position:
                 raise ValueError("a closed position has a realised close, not a mark")
         elif self.close_price is not None:
             raise ValueError("an open position has no close price")
+        if self.open_reason == "series_break" and self.mark_price is not None:
+            raise ValueError("a position crossing a series break cannot be marked on the new price scale")
 
 
 @dataclass(frozen=True)
@@ -651,6 +668,8 @@ def build_positions(
             entry_index = _bar_index(bars, entry.fill_bar_date, bar_index, what="fill_bar_date")
             candidates: list[_Candidate] = []
             unresolved = False
+            unresolved_reason: UnresolvedReason | None = None
+            unresolved_until: date | None = None
 
             if regime.signal_pair:
                 after = bisect_right(exit_dates, entry.fill_bar_date)
@@ -668,6 +687,8 @@ def build_positions(
                     )
                 if outcome.outcome == "unresolved":
                     unresolved = True
+                    unresolved_reason = outcome.reason
+                    unresolved_until = outcome.unresolved_until_bar_date
                 else:
                     assert outcome.exit_bar_date is not None  # narrowed by ResolvedOutcome's own check
                     source: CloseSource = "ambiguous" if outcome.outcome == "ambiguous" else "level"
@@ -748,11 +769,17 @@ def build_positions(
                 )
                 open_until = chosen.when
             else:
-                mark = _mark_price(bars, window=window, not_before=entry.fill_bar_date)
+                mark = (
+                    None
+                    if unresolved_reason == "series_break"
+                    else _mark_price(bars, window=window, not_before=entry.fill_bar_date)
+                )
                 if mark is None:
                     marks_missing += 1
-                if unresolved:
-                    open_reason: OpenReason = "unresolved_outcome"
+                if unresolved_reason == "series_break":
+                    open_reason: OpenReason = "series_break"
+                elif unresolved:
+                    open_reason = "unresolved_outcome"
                 elif ceiling is not None and ceiling <= window.end:
                     open_reason = "close_bar_unfillable"
                 else:
@@ -779,7 +806,13 @@ def build_positions(
                 # construction. Suppressing every later entry in that instrument
                 # would silently drop the rest of its history over one masked
                 # bar, which is a narrowing far larger than the defect.
-                open_until = ceiling if open_reason == "close_bar_unfillable" else None
+                open_until = (
+                    ceiling
+                    if open_reason == "close_bar_unfillable"
+                    else unresolved_until
+                    if open_reason == "series_break"
+                    else None
+                )
             holding = True
 
     return PositionSet(

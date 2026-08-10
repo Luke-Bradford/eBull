@@ -45,6 +45,7 @@ from app.services.strategies.s4_volatility_compression_breakout import (
     WARMUP_BARS,
     compression_rank_series,
     prior_high_close_series,
+    s4_exit_bracket,
     s4_identity,
     s4_signals,
 )
@@ -561,12 +562,41 @@ class TestNoExitLeg:
         assert {s.kind for s in signals} == {"entry"}
         assert len(signals) == len(CYCLE_CLOSES)
 
-    def test_the_exit_parameters_are_carried_in_the_identity_even_though_unread(self) -> None:
-        """Nothing in the module reads them, so the identity hash is the ONLY
-        thing keeping them attached to the rule."""
+    def test_the_exit_parameters_are_carried_in_the_identity(self) -> None:
         assert dict(S4_PARAMS)["atr_stop_multiple"] == SPEC_ATR_STOP_MULTIPLE
         assert dict(S4_PARAMS)["atr_target_multiple"] == SPEC_ATR_TARGET_MULTIPLE
         assert dict(S4_PARAMS)["max_hold_bars"] == SPEC_MAX_HOLD_BARS
+
+
+class TestExitLevels:
+    """The bracket is fixed from signal-bar ATR around the next-open fill."""
+
+    def test_constant_two_point_true_range_builds_the_declared_bracket(self) -> None:
+        series = _bars(RISING)
+        target, stop, max_hold = s4_exit_bracket(
+            series,
+            signal_index=150,
+            entry_price=Decimal("300"),
+            universe=UNIVERSE,
+        )
+        assert stop == Decimal("296.0")
+        assert target == Decimal("306.0")
+        assert max_hold == SPEC_MAX_HOLD_BARS
+
+    def test_future_bars_cannot_move_a_fixed_bracket(self) -> None:
+        full = _bars(RISING)
+        truncated = BarSeries(dates=full.dates[:152], rows=full.rows[:152])
+        kwargs = {"signal_index": 150, "entry_price": Decimal("300"), "universe": UNIVERSE}
+        assert s4_exit_bracket(full, **kwargs) == s4_exit_bracket(truncated, **kwargs)
+
+    def test_an_unorderable_nonpositive_stop_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="not broker-orderable"):
+            s4_exit_bracket(
+                _bars(RISING),
+                signal_index=150,
+                entry_price=Decimal("3"),
+                universe=UNIVERSE,
+            )
 
 
 class TestLastBar:
