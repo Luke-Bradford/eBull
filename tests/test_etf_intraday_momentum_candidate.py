@@ -23,7 +23,7 @@ def _bar(
     close: str = "101",
     timeframe: str = "30m",
     instrument_id: int = 1,
-    source: str = "etoro",
+    source: str = "etoro/ETORO-RTH-V1/nyse_rth",
 ) -> IntradayBar:
     opening = Decimal(open_)
     closing = Decimal(close)
@@ -121,7 +121,7 @@ def test_last_bar_must_be_same_session_and_exact_interval() -> None:
 
 def test_source_instrument_and_immediate_prior_session_are_structural() -> None:
     opening = _bar("2026-08-10T13:30:00+00:00")
-    with pytest.raises(CandidateRefusal, match="frozen etoro source"):
+    with pytest.raises(CandidateRefusal, match="frozen namespaced etoro RTH source"):
         opening_signal(
             symbol="SPY",
             prior_close_bar=_bar("2026-08-07T19:30:00+00:00", source="other"),

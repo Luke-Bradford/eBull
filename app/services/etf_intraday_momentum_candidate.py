@@ -49,7 +49,7 @@ class CandidateDefinition:
     paper_doi: str = "10.1016/j.jfineco.2018.05.009"
     primary_symbol: str = PRIMARY_SYMBOL
     robustness_symbols: tuple[str, ...] = ROBUSTNESS_SYMBOLS
-    source: str = "etoro"
+    source: str = "etoro/<universe_version>/nyse_rth"
     timeframe: str = "30m"
     session: str = "NYSE regular full session; half-days excluded"
     opening_return: str = "09:30 candle close / prior full-session 15:30 candle close - 1"
@@ -110,13 +110,19 @@ class GrossFeasibilityOutcome:
 def _require_bar(bar: IntradayBar, *, expected_start: time, label: str) -> None:
     if bar.timeframe != "30m":
         raise CandidateRefusal(f"{label} requires a 30m bar")
-    if bar.source != "etoro":
-        raise CandidateRefusal(f"{label} requires the frozen etoro source")
+    if not is_eligible_source(bar.source):
+        raise CandidateRefusal(f"{label} requires the frozen namespaced etoro RTH source")
     local = bar.bar_time.astimezone(_NY)
     if local.time().replace(tzinfo=None) != expected_start:
         raise CandidateRefusal(f"{label} must start at {expected_start.isoformat()} America/New_York")
     if us_market_status(local.date()) != "open":
         raise CandidateRefusal("candidate excludes closed and half-day sessions")
+
+
+def is_eligible_source(source: str) -> bool:
+    """Accept only the harvester's durable, universe-versioned RTH provenance."""
+    parts = source.split("/")
+    return len(parts) == 3 and parts[0] == "etoro" and bool(parts[1]) and parts[2] == "nyse_rth"
 
 
 def opening_signal(
@@ -193,6 +199,7 @@ __all__ = [
     "OpeningSignal",
     "definition_hash",
     "definition_json",
+    "is_eligible_source",
     "opening_signal",
     "resolve_gross_feasibility",
 ]
