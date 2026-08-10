@@ -129,6 +129,7 @@ from app.workers.scheduler import (
     JOB_SEC_NPORT_FILER_DIRECTORY_SYNC,
     JOB_SEED_COST_MODELS,
     JOB_STRATEGY_BACKTEST_RUN,
+    JOB_STRATEGY_HALT_FEED_REFRESH,
     JOB_STRATEGY_INTRADAY_HARVEST,
     JOB_STRATEGY_OBSERVATION_RETENTION,
     JOB_STRATEGY_OUTCOME_RESOLUTION,
@@ -199,6 +200,7 @@ from app.workers.scheduler import (
     sec_nport_filer_directory_sync,
     seed_cost_models,
     strategy_backtest_run,
+    strategy_halt_feed_refresh,
     strategy_intraday_harvest,
     strategy_observation_retention,
     strategy_outcome_resolution,
@@ -354,6 +356,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # the frontier watermark rather than by a DAG edge. Own "strategy_scan" lane,
     # resolved from SCHEDULED_JOBS, so no MANUAL_TRIGGER_JOB_SOURCES entry.
     JOB_STRATEGY_SIGNAL_SCAN: _adapt_zero_arg(strategy_signal_scan),
+    JOB_STRATEGY_HALT_FEED_REFRESH: _adapt_zero_arg(strategy_halt_feed_refresh),
     JOB_STRATEGY_INTRADAY_HARVEST: _adapt_zero_arg(strategy_intraday_harvest),
     JOB_STRATEGY_OUTCOME_RESOLUTION: _adapt_zero_arg(strategy_outcome_resolution),
     JOB_STRATEGY_OBSERVATION_RETENTION: _adapt_zero_arg(strategy_observation_retention),

@@ -28,6 +28,7 @@ _NY = ZoneInfo("America/New_York")
 _MAX_BYTES = 2_000_000
 _MAX_ITEMS = 5_000
 _RETENTION_DAYS = 90
+_MAX_SOURCE_LAG = timedelta(minutes=5)
 
 
 class HaltFeedError(ValueError):
@@ -59,10 +60,16 @@ def _text(item: ET.Element, name: str, *, required: bool = False) -> str | None:
 
 
 def _market_time(date_value: str, time_value: str) -> datetime:
-    try:
-        local = datetime.strptime(f"{date_value} {time_value}", "%m/%d/%Y %H:%M:%S.%f").replace(tzinfo=_NY)
-    except ValueError as exc:
-        raise HaltFeedError("halt feed contains an invalid market timestamp") from exc
+    raw = f"{date_value} {time_value}"
+    local: datetime | None = None
+    for format_string in ("%m/%d/%Y %H:%M:%S.%f", "%m/%d/%Y %H:%M:%S"):
+        try:
+            local = datetime.strptime(raw, format_string).replace(tzinfo=_NY)
+            break
+        except ValueError:
+            continue
+    if local is None:
+        raise HaltFeedError("halt feed contains an invalid market timestamp")
     return local.astimezone(UTC)
 
 
@@ -103,7 +110,10 @@ def parse_halt_rss(payload: bytes) -> HaltSnapshot:
         halt_at = _market_time(halt_date, halt_time)
         resume_date = _text(item, "ResumptionDate")
         resume_time = _text(item, "ResumptionTradeTime")
-        if (resume_date is None) != (resume_time is None):
+        # The live feed populates ResumptionDate on some active halts before a
+        # trade-resumption time exists.  A time without a date is malformed;
+        # a date without a time is still an active halt.
+        if resume_time is not None and resume_date is None:
             raise HaltFeedError("halt feed has an incomplete resumption timestamp")
         resumed_at = _market_time(resume_date, resume_time) if resume_date and resume_time else None
         if resumed_at is not None and resumed_at < halt_at:
@@ -131,6 +141,14 @@ def store_halt_snapshot(
         raise HaltFeedError("fetched_at must be timezone-aware")
     if snapshot.source_pub_at > fetched_at + timedelta(minutes=5):
         raise HaltFeedError("halt feed pubDate is implausibly in the future")
+    if snapshot.source_pub_at < fetched_at - _MAX_SOURCE_LAG:
+        raise HaltFeedError("halt feed pubDate is stale")
+    current = conn.execute(
+        "SELECT source_pub_at FROM strategy_halt_feed_state WHERE source = %s FOR UPDATE",
+        (SOURCE,),
+    ).fetchone()
+    if current is not None and snapshot.source_pub_at < current[0]:
+        raise HaltFeedError("halt feed publication time regressed")
     with conn.cursor() as cur:
         cur.executemany(
             """
@@ -183,16 +201,20 @@ def refresh_halt_feed(
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise HaltFeedError("halt refresh requires an idle database connection")
     observed = (fetched_at or datetime.now(UTC)).astimezone(UTC)
+    snapshot = fetch_halt_snapshot(client)
+    with conn.transaction():
+        store_halt_snapshot(conn, snapshot=snapshot, fetched_at=observed)
+    return snapshot
+
+
+def fetch_halt_snapshot(client: httpx.Client) -> HaltSnapshot:
+    """Fetch and parse without requiring or holding a database connection."""
     try:
         response = client.get(NASDAQ_HALT_RSS_URL, timeout=20.0)
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise HaltFeedError("Nasdaq halt feed request failed") from exc
-    payload = response.content
-    snapshot = parse_halt_rss(payload)
-    with conn.transaction():
-        store_halt_snapshot(conn, snapshot=snapshot, fetched_at=observed)
-    return snapshot
+    return parse_halt_rss(response.content)
 
 
 __all__ = [
@@ -202,6 +224,7 @@ __all__ = [
     "NASDAQ_HALT_RSS_URL",
     "SOURCE",
     "active_halt_symbols",
+    "fetch_halt_snapshot",
     "parse_halt_rss",
     "refresh_halt_feed",
     "store_halt_snapshot",

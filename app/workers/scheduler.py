@@ -26,13 +26,16 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from zoneinfo import ZoneInfo
 
 import psycopg
 import psycopg.rows
 import psycopg.sql
 from psycopg.types.json import Jsonb
+
+if TYPE_CHECKING:
+    from app.services.strategy_halts import HaltSnapshot
 
 from app.config import settings
 from app.db.background_write import background_write_connection
@@ -384,6 +387,9 @@ JOB_STRATEGY_OBSERVATION_RETENTION = "strategy_observation_retention"
 # the provider lane (not strategy_scan): the eToro client's request floor is
 # the rate budget, while the storage writer carries its own tier locks.
 JOB_STRATEGY_INTRADAY_HARVEST = "strategy_intraday_harvest"
+# #2507 — primary-source Nasdaq halt state. Safety input only: a fresh
+# snapshot can refuse an order but can never create trading authority.
+JOB_STRATEGY_HALT_FEED_REFRESH = "strategy_halt_feed_refresh"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
@@ -686,6 +692,29 @@ def _strategy_intraday_collection_due(conn: psycopg.Connection[Any]) -> Prerequi
         return (False, reason)
     if not _strategy_intraday_collection_window_open(datetime.now(tz=UTC)):
         return (False, "outside the completed US regular-session bar collection window")
+    return (True, "")
+
+
+def _strategy_halt_collection_window_open(now: datetime) -> bool:
+    """Bound automatic halt polling to the US pre-open/RTH safety window."""
+    if now.tzinfo is None:
+        raise ValueError("halt collection window requires an aware datetime")
+    local = now.astimezone(_NEW_YORK)
+    status = us_market_status(local.date())
+    if status == "closed":
+        return False
+    minute = local.hour * 60 + local.minute
+    close_minute = 13 * 60 if status == "half_day" else 16 * 60
+    return 9 * 60 <= minute <= close_minute + 15
+
+
+def _strategy_halt_collection_due(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """Gate scheduled polls while manual repair remains available off-hours."""
+    bootstrap_met, reason = _bootstrap_complete(conn)
+    if not bootstrap_met:
+        return (False, reason)
+    if not _strategy_halt_collection_window_open(datetime.now(tz=UTC)):
+        return (False, "outside the US pre-open/regular-session halt safety window")
     return (True, "")
 
 
@@ -2088,6 +2117,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=7, minute=5),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_HALT_FEED_REFRESH,
+        display_name="Nasdaq strategy halt safety feed (#2507)",
+        source="nasdaq",
+        description=(
+            "Every five minutes from 09:00 ET through the regular/early close plus 15 minutes — "
+            "refreshes Nasdaq Trader's primary-source halt RSS into one current feed-state row "
+            "and a 90-day provider-identity history. Missing, malformed or stale publication "
+            "timestamps fail visibly; this safety feed can refuse but never create a trade."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
+        catch_up_on_boot=False,
+        prerequisite=_strategy_halt_collection_due,
     ),
     ScheduledJob(
         name=JOB_STRATEGY_PAPER_CYCLE,
@@ -5082,6 +5125,28 @@ def strategy_intraday_harvest() -> None:
             raise RuntimeError(f"strategy_intraday_harvest: {len(report.failures)} member(s) failed: {detail}")
 
 
+def _refresh_strategy_halt_feed() -> HaltSnapshot:
+    """Fetch without a DB connection, then atomically store the snapshot."""
+    import httpx
+
+    from app.services.strategy_halts import fetch_halt_snapshot, store_halt_snapshot
+
+    with httpx.Client(follow_redirects=True) as client:
+        snapshot = fetch_halt_snapshot(client)
+    fetched_at = datetime.now(tz=UTC)
+    with connect_job() as conn, conn.transaction():
+        store_halt_snapshot(conn, snapshot=snapshot, fetched_at=fetched_at)
+    return snapshot
+
+
+def strategy_halt_feed_refresh() -> None:
+    """Refresh the bounded Nasdaq halt safety observation."""
+    with _tracked_job(JOB_STRATEGY_HALT_FEED_REFRESH) as tracker:
+        snapshot = _refresh_strategy_halt_feed()
+        tracker.row_count = len(snapshot.halts)
+        tracker.note = f"source_pub_at={snapshot.source_pub_at.isoformat()} items={len(snapshot.halts)}"
+
+
 def strategy_paper_cycle() -> None:
     """Run the bounded demo strategy lifecycle; never select live credentials."""
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
@@ -5096,13 +5161,19 @@ def strategy_paper_cycle() -> None:
         return
     api_key, user_key = creds
     with _tracked_job(JOB_STRATEGY_PAPER_CYCLE) as tracker:
+        # Refresh immediately before any entry evaluation. The independent
+        # scheduled poll keeps monitoring alive when automation is disabled;
+        # this second fail-closed read prevents same-tick job ordering or a
+        # tight policy age from making the execution cycle use stale state.
+        halt_snapshot = _refresh_strategy_halt_feed()
         with EtoroBrokerProvider(api_key=api_key, user_key=user_key, env="demo") as broker:
             with connect_job() as conn:
                 result = run_strategy_paper_cycle(conn, broker=broker)
         tracker.row_count = result.reconciled_orders + result.managed_positions + result.evaluated_signals
         tracker.note = (
             f"reconciled={result.reconciled_orders} managed={result.managed_positions} "
-            f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks}"
+            f"evaluated={result.evaluated_signals} active_blocks={result.active_health_blocks} "
+            f"halt_source_pub_at={halt_snapshot.source_pub_at.isoformat()}"
         )
 
 

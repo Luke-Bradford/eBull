@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -57,6 +58,50 @@ def test_partial_resumption_and_count_drift_fail_closed() -> None:
     ):
         with pytest.raises(HaltFeedError):
             parse_halt_rss(malformed)
+
+
+def test_provider_date_without_trade_time_remains_an_active_halt() -> None:
+    live_shape = _XML.replace(
+        b"<ndaq:ResumptionDate />",
+        b"<ndaq:ResumptionDate>08/07/2026</ndaq:ResumptionDate>",
+    )
+    snapshot = parse_halt_rss(live_shape)
+    assert snapshot.halts[0].resumed_at is None
+
+
+def test_provider_timestamp_without_fractional_seconds_is_supported() -> None:
+    live_shape = _XML.replace(b"10:00:00.000", b"10:00:00")
+    snapshot = parse_halt_rss(live_shape)
+    assert snapshot.halts[1].resumed_at == datetime(2026, 8, 7, 14, 0, tzinfo=UTC)
+
+
+def test_stale_source_publication_is_not_made_fresh_by_fetch_time(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    snapshot = parse_halt_rss(_XML)
+    with pytest.raises(HaltFeedError, match="pubDate is stale"):
+        store_halt_snapshot(
+            ebull_test_conn,
+            snapshot=snapshot,
+            fetched_at=datetime(2026, 8, 7, 15, 6, tzinfo=UTC),
+        )
+
+
+def test_feed_publication_time_cannot_regress(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    snapshot = parse_halt_rss(_XML)
+    fetched = datetime(2026, 8, 7, 15, 0, tzinfo=UTC)
+    store_halt_snapshot(ebull_test_conn, snapshot=snapshot, fetched_at=fetched)
+    with pytest.raises(HaltFeedError, match="publication time regressed"):
+        store_halt_snapshot(
+            ebull_test_conn,
+            snapshot=replace(snapshot, source_pub_at=fetched - timedelta(minutes=1)),
+            fetched_at=fetched + timedelta(minutes=1),
+        )
+    assert ebull_test_conn.execute(
+        "SELECT source_pub_at FROM strategy_halt_feed_state WHERE source = 'nasdaq_trader_rss'"
+    ).fetchone() == (fetched,)
 
 
 @pytest.mark.integration
