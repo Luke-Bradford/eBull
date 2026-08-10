@@ -8,6 +8,7 @@ import pytest
 
 from app.services.insider_purchase_candidate import (
     PurchaseObservation,
+    build_research_resolution,
     classify_purchases,
     resolve_research_instrument,
     validate_archive_sequence,
@@ -80,3 +81,15 @@ def test_exact_cik_symbol_resolves_a_multi_series_issuer_before_unique_fallback(
     exact = {("0000000001", "AAA"): 1, ("0000000001", "AAB"): 2}
     assert resolve_research_instrument("0000000001", "AAB", exact, {}) == (2, False)
     assert resolve_research_instrument("0000000002", "OLD", exact, {"0000000002": 3}) == (3, True)
+
+
+def test_duplicate_exact_cik_symbol_mapping_is_refused() -> None:
+    exact, unique = build_research_resolution(
+        [
+            ("0000000001", "AAA", 1),
+            ("0000000001", "AAA", 2),
+        ]
+    )
+    assert exact == {}
+    assert unique == {}
+    assert resolve_research_instrument("0000000001", "AAA", exact, unique) == (None, False)

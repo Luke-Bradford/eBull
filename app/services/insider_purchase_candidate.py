@@ -305,6 +305,20 @@ def classify_purchases(
     return tuple(classified), counters
 
 
+def build_research_resolution(
+    rows: Iterable[tuple[str, str, int]],
+) -> tuple[dict[tuple[str, str], int], dict[str, int]]:
+    """Build only unambiguous exact and unique-CIK resolution maps."""
+    exact_candidates: dict[tuple[str, str], set[int]] = defaultdict(set)
+    by_cik: dict[str, set[int]] = defaultdict(set)
+    for cik, symbol, instrument_id in rows:
+        exact_candidates[(str(cik), str(symbol))].add(int(instrument_id))
+        by_cik[str(cik)].add(int(instrument_id))
+    exact = {key: next(iter(ids)) for key, ids in exact_candidates.items() if len(ids) == 1}
+    unique = {cik: next(iter(ids)) for cik, ids in by_cik.items() if len(ids) == 1}
+    return exact, unique
+
+
 def _load_research_resolution(conn: psycopg.Connection[Any]) -> tuple[dict[tuple[str, str], int], dict[str, int]]:
     rows = conn.execute(
         """
@@ -320,13 +334,7 @@ def _load_research_resolution(conn: psycopg.Connection[Any]) -> tuple[dict[tuple
         """,
         (CORPUS_VENDORS[0],),
     ).fetchall()
-    exact: dict[tuple[str, str], int] = {}
-    by_cik: dict[str, set[int]] = defaultdict(set)
-    for cik, symbol, instrument_id in rows:
-        exact[(str(cik), str(symbol))] = int(instrument_id)
-        by_cik[str(cik)].add(int(instrument_id))
-    unique = {cik: next(iter(ids)) for cik, ids in by_cik.items() if len(ids) == 1}
-    return exact, unique
+    return build_research_resolution((str(cik), str(symbol), int(instrument_id)) for cik, symbol, instrument_id in rows)
 
 
 def resolve_research_instrument(
@@ -436,6 +444,7 @@ __all__ = [
     "InsiderSourceBuild",
     "PurchaseObservation",
     "build_source",
+    "build_research_resolution",
     "classify_purchases",
     "enrich_point_in_time",
     "enrich_classified_point_in_time",
