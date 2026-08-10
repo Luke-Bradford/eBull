@@ -33,10 +33,17 @@ insider_transactions         1,052,947   filer_cik, txn_date, txn_code, filer_ro
 finra_regsho_daily_*           539,388   ⚠ short VOLUME, not short interest
 ownership_insiders_*           ~300K
 def14a_beneficial_holdings     110,832
-benchmark/sector series        102,027   16 comparators, SPY 1993-01-29 -> 2024-09-27
+benchmark/sector series        102,027   16 comparators, ALL stop 2024-09-27 (#2482)
 quotes                           1,557   ⚠ LATEST only, one row per instrument
 price_intraday                       0   ⚠ empty = BUILD gap, NOT a data gap (see below)
 ```
+
+⚠ The comparator set is present, but it is **not current**. Every frozen
+benchmark/sector series ends on 2024-09-27, so it cannot support 2025/2026 or
+rolling-recent market/sector-relative evidence. Live `price_daily` ETF bars do
+not repair that automatically: they have different provenance and no separate
+dividend-adjusted close. #2482 owns a compatible, explicitly re-frozen extension.
+Until it lands, recent benchmark/regime features are **unavailable, not zero**.
 
 ---
 

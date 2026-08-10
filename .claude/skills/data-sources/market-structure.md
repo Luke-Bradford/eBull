@@ -48,14 +48,17 @@ Measured on the dev corpus, 2026-08-08. Re-measure before citing — these move.
 
 | Gap | Evidence | Blocks |
 | --- | --- | --- |
-| ~~No benchmark or sector series~~ **CLOSED 2026-08-08 (#2398)** | 16 comparators loaded, **102,027 bars**, SPY `1993-01-29 → 2024-09-27`. `vendor = 'icyDenev/Intrader'`, `scripts/ingest_2398_benchmark_series.py`. ⚠ Stored `instrument_id IS NULL` so the `resolution_evidenced` CHECK keeps them out of the validated universe **by construction** — never resolve them to an instrument | nothing. Beta, relative strength, sector rotation and regime conditioning are all computable. ⚠ Coverage stops **2024-09-27**, so anything after that date has no market leg |
+| **Recent benchmark/sector frontier** (#2482; original absence #2398 closed) | 16 comparators / **102,027 bars** are loaded, but every one stops `2024-09-27`. `vendor = 'icyDenev/Intrader'`, `scripts/ingest_2398_benchmark_series.py --verify`. ⚠ Stored `instrument_id IS NULL` so the `resolution_evidenced` CHECK keeps them out of the validated universe **by construction** — never resolve them to an instrument | beta, relative strength, sector rotation and regime conditioning are computable only through 2024-09-27. They are **unavailable, not zero**, for 2025/2026 and rolling-recent windows until #2482 lands |
 | ~~Split-adjusted only~~ **CORRECTED — total return IS available** | `adjustment_basis = 'split_adjusted'` describes **OHLC only**. `adj_close` is split **+ dividend** adjusted. Verified full-population: latest factor `= 1.0` on **7,693/7,693**, no factor `> 1`, monotone increasing except 22 material steps in 9 series (0.12%) | nothing. Use `adj_close` for returns and `close` for price levels. Reading `adjustment_basis` as describing `adj_close` understates what is computable — a mistake this file made in its first version |
 | **No intraday bars** | `price_intraday` → **0 rows** | true session VWAP, intraday scalping, any sub-daily entry. `anchored_vwap` over daily bars is a daily approximation, not the intraday benchmark traders mean |
 | **No volume-flow indicators** | no OBV / accumulation-distribution anywhere in `app/services` | volume confirmation as a *signal*. Raw volume IS present on all 25,818,944 rows, so these are buildable — just absent |
 | Delisting linkage thin | 2 series carry a `delisting_date` | survivorship correction inside the research corpus specifically (the Form 25 register is separate) |
 
-**The benchmark gap is the cheapest high-value fix on the board.** These are the most
-available series in existence, and nothing cross-asset can be specced until they land.
+**The benchmark frontier is the cheapest high-value fix on the board.** The historical
+series exist, but recent cross-asset evidence cannot be claimed until #2482 extends them
+under compatible source and adjustment provenance. Do not splice live `price_daily`
+closes onto the frozen dividend-adjusted series: a source/basis change is a new corpus
+identity, not a harmless append.
 
 ---
 
