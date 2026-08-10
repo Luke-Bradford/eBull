@@ -2096,9 +2096,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "Every five minutes during the US regular-session collection window -- fetches at "
             "most twelve predeclared eToro research windows, "
             "retains completed NYSE-RTH bars only, removes watermark overlap and records gaps "
-            "without imputation. The active versioned panel is deliberately small; storage "
-            "remains partitioned and retention-capped. Operator Run now uses the same collector "
-            "and can repair gaps outside the automatic request window."
+            "without imputation. One batch also records best bid/ask or an explicit missing/invalid "
+            "coverage row for each unique panel instrument, at most once per five-minute bucket. "
+            "The active versioned panel is deliberately small; storage remains retention-capped. "
+            "Operator Run uses the same collector and can repair bars outside the automatic window."
         ),
         cadence=Cadence.every_n_minutes(interval=5),
         catch_up_on_boot=False,
@@ -2112,7 +2113,8 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "Daily 07:05 UTC — after the 06:45 scan and 06:55 outcome pass, drops whole expired "
             "range partitions: negative signal detail after 90 days, 30m bars "
             "after 24 months, 5m bars after 12 months and 1m bars after 30 days. "
-            "Fired signals and daily counts are durable. Never issues a mass DELETE."
+            "Prospective five-minute quote samples expire after 24 months. Fired signals and "
+            "daily counts are durable; quote outcomes retain their compact cost attribution."
         ),
         cadence=Cadence.daily(hour=7, minute=5),
         catch_up_on_boot=False,
@@ -5084,22 +5086,27 @@ def strategy_observation_retention() -> None:
     from datetime import UTC, datetime
 
     from app.services.strategy_observation_storage import drop_expired_partitions
+    from app.services.strategy_quote_observation import retire_quote_observations
 
     with _tracked_job(JOB_STRATEGY_OBSERVATION_RETENTION) as tracker:
         with connect_job() as conn:
-            plan = drop_expired_partitions(conn, as_of=datetime.now(tz=UTC), dry_run=False)
-            tracker.row_count = len(plan.partitions) + plan.intraday_gap_rows
+            as_of = datetime.now(tz=UTC)
+            plan = drop_expired_partitions(conn, as_of=as_of, dry_run=False)
+            quote_rows = retire_quote_observations(conn, as_of=as_of, dry_run=False)
+            tracker.row_count = len(plan.partitions) + plan.intraday_gap_rows + quote_rows
         logger.info(
-            "strategy_observation_retention: dropped %d signal + %d intraday partitions + %d gap rows",
+            "strategy_observation_retention: dropped %d signal + %d intraday partitions + %d gap rows + %d quote rows",
             len(plan.signal_partitions),
             len(plan.intraday_partitions),
             plan.intraday_gap_rows,
+            quote_rows,
         )
 
 
 def strategy_intraday_harvest() -> None:
-    """Collect one bounded slice of completed eToro intraday evidence."""
+    """Collect bounded completed bars and prospective eToro quote evidence."""
     from app.services.strategy_intraday_harvest import run_intraday_harvest
+    from app.services.strategy_quote_observation import capture_active_universe_quotes
 
     creds = _load_etoro_credentials(JOB_STRATEGY_INTRADAY_HARVEST)
     if creds is None:
@@ -5113,16 +5120,27 @@ def strategy_intraday_harvest() -> None:
             # member must not roll back bars already collected for its peers.
             connect_job(autocommit=True) as conn,
         ):
-            report = run_intraday_harvest(conn, provider, observed_at=datetime.now(tz=UTC))
-        tracker.row_count = report.written
+            observed_at = datetime.now(tz=UTC)
+            report = run_intraday_harvest(conn, provider, observed_at=observed_at)
+            quote_report = capture_active_universe_quotes(conn, provider)
+        tracker.row_count = report.written + quote_report.rows_written
         tracker.note = (
             f"universe={report.universe_version} selected={report.selected} fetched={report.fetched} "
             f"completed_rth={report.completed_rth} written={report.written} "
-            f"gaps={report.gaps_recorded} failures={len(report.failures)}"
+            f"gaps={report.gaps_recorded} quote_expected={quote_report.expected} "
+            f"quote_observed={quote_report.observed} quote_missing={quote_report.missing} "
+            f"quote_invalid={quote_report.invalid} quote_written={quote_report.rows_written} "
+            f"failures={len(report.failures) + len(quote_report.failures)}"
         )
-        if report.failures:
-            detail = "; ".join(f"{failure.timeframe}/{failure.symbol}: {failure.reason}" for failure in report.failures)
-            raise RuntimeError(f"strategy_intraday_harvest: {len(report.failures)} member(s) failed: {detail}")
+        if report.failures or quote_report.failures:
+            detail = "; ".join(
+                [f"{failure.timeframe}/{failure.symbol}: {failure.reason}" for failure in report.failures]
+                + [f"quote/{failure.symbol}: {failure.reason}" for failure in quote_report.failures]
+            )
+            raise RuntimeError(
+                "strategy_intraday_harvest: "
+                f"{len(report.failures) + len(quote_report.failures)} member(s) failed: {detail}"
+            )
 
 
 def _refresh_strategy_halt_feed() -> HaltSnapshot:
