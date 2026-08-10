@@ -327,7 +327,12 @@ class JobLock:
         # transaction-scoped, so autocommit changes nothing about
         # the lock semantics -- it just stops us wasting a backend
         # transaction slot.
-        conn = psycopg.connect(self._database_url, autocommit=True)
+        lock_owner = self._source if self._source is not None else "test"
+        conn = psycopg.connect(
+            self._database_url,
+            autocommit=True,
+            application_name=f"ebull-job-lock:{lock_owner}",
+        )
         try:
             with conn.cursor() as cur:
                 cur.execute(

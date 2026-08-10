@@ -34,7 +34,8 @@ import psycopg.sql
 from psycopg.types.json import Jsonb
 
 from app.config import settings
-from app.jobs.job_connection import connect_job, job_statement_timeout_ms
+from app.db.background_write import background_write_connection
+from app.jobs.job_connection import connect_job, job_application_name, job_statement_timeout_ms
 from app.jobs.sources import Lane
 from app.providers.implementations.companies_house import CompaniesHouseFilingsProvider
 from app.providers.implementations.etoro import EtoroMarketDataProvider
@@ -2236,6 +2237,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
     # nests for the orchestrator inner-adapter re-entry.
     _job = _JOBS_BY_NAME.get(job_name)
     _timeout_token = job_statement_timeout_ms.set(_job.statement_timeout_ms if _job is not None else None)
+    _application_name_token = job_application_name.set(job_name)
     try:
         if pre_allocated_run_id is not None:
             tracker.run_id = pre_allocated_run_id
@@ -2249,7 +2251,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                         classify_exception,
                     )
 
-                    with psycopg.connect(settings.database_url) as conn:
+                    with background_write_connection(autocommit=False) as conn:
                         record_job_finish(
                             conn,
                             tracker.run_id,
@@ -2262,7 +2264,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                 raise
             else:
                 try:
-                    with psycopg.connect(settings.database_url) as conn:
+                    with background_write_connection(autocommit=False) as conn:
                         _finish_tracked(conn, tracker)
                         if tracker.row_count is not None:
                             spike = check_row_count_spike(
@@ -2278,7 +2280,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             return
 
         try:
-            with psycopg.connect(settings.database_url) as conn:
+            with background_write_connection(autocommit=False) as conn:
                 tracker.run_id = record_job_start(
                     conn,
                     job_name,
@@ -2297,7 +2299,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
                 # Function-local import: scheduler is above classify_exception in the orchestrator graph.
                 from app.services.sync_orchestrator.exception_classifier import classify_exception
 
-                with psycopg.connect(settings.database_url) as conn:
+                with background_write_connection(autocommit=False) as conn:
                     record_job_finish(
                         conn,
                         tracker.run_id,
@@ -2310,7 +2312,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             raise
         else:
             try:
-                with psycopg.connect(settings.database_url) as conn:
+                with background_write_connection(autocommit=False) as conn:
                     _finish_tracked(conn, tracker)
                     # Check for row-count spikes after recording the successful run.
                     # Exclude the current run_id so we compare against the *previous*
@@ -2322,6 +2324,7 @@ def _tracked_job(job_name: str) -> Generator[_JobTracker]:
             except Exception:
                 logger.error("Failed to record job success for %s", job_name, exc_info=True)
     finally:
+        job_application_name.reset(_application_name_token)
         job_statement_timeout_ms.reset(_timeout_token)
 
 

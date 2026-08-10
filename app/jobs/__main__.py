@@ -892,7 +892,12 @@ def serve(stop_event: threading.Event | None = None) -> int:
     boot_id = _boot_id()
     logger.info("jobs entrypoint: starting (boot_id=%s)", boot_id)
 
-    pool = open_pool("jobs_pool", min_size=1, max_size=JOBS_POOL_MAX_SIZE)
+    pool = open_pool(
+        "jobs_pool",
+        min_size=1,
+        max_size=JOBS_POOL_MAX_SIZE,
+        application_name="ebull-jobs-pool",
+    )
 
     # #1484: install the cross-process SEC rate gate, backed by the jobs
     # pool, BEFORE any SEC provider is constructed in this process.
