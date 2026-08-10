@@ -10,6 +10,7 @@ import {
   requestStrategyEvidenceRefresh,
   updateStrategyAllocation,
   updateStrategyPaperPool,
+  updateStrategySizing,
 } from "@/api/strategies";
 import type {
   StrategyEvidenceWindow,
@@ -433,16 +434,18 @@ function AutomationControl({
   const pool = overview.paper_pool;
   const [enabled, setEnabled] = useState(pool.enabled && overview.execution_enabled);
   const [limit, setLimit] = useState(pool.capital_limit);
+  const [capitalMode, setCapitalMode] = useState(pool.capital_mode);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     setEnabled(pool.enabled && overview.execution_enabled);
     setLimit(pool.capital_limit);
-  }, [pool.enabled, pool.capital_limit, overview.execution_enabled]);
+    setCapitalMode(pool.capital_mode);
+  }, [pool.enabled, pool.capital_limit, pool.capital_mode, overview.execution_enabled]);
   const parsed = Number(limit);
   const valid = Number.isFinite(parsed) && parsed >= 0 && (!enabled || parsed > 0);
   const effectiveEnabled = pool.enabled && overview.execution_enabled;
-  const dirty = enabled !== effectiveEnabled || parsed !== Number(pool.capital_limit);
+  const dirty = enabled !== effectiveEnabled || parsed !== Number(pool.capital_limit) || capitalMode !== pool.capital_mode;
   const canEnable = approvedCount > 0 && overview.execution_enabled;
 
   async function save(event: FormEvent) {
@@ -454,6 +457,7 @@ function AutomationControl({
       await updateStrategyPaperPool({
         enabled,
         capital_limit: parsed.toFixed(6),
+        capital_mode: capitalMode,
         reason: "Automated strategy workspace update",
       });
       onUpdated();
@@ -497,12 +501,24 @@ function AutomationControl({
               className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-sm tabular-nums dark:border-slate-700 dark:bg-slate-950"
             />
           </label>
+          <label className="w-52 text-xs font-medium text-slate-600 dark:text-slate-300">
+            Profit treatment
+            <select
+              value={capitalMode}
+              onChange={(event) => setCapitalMode(event.target.value as "fixed" | "compound")}
+              className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+            >
+              <option value="fixed">Keep principal limit fixed</option>
+              <option value="compound">Reinvest realised P&amp;L</option>
+            </select>
+          </label>
           <button type="submit" disabled={!valid || !dirty || saving || (enabled && !canEnable)} className="min-h-11 cursor-pointer border border-blue-700 bg-blue-700 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
             {saving ? "Saving…" : "Save"}
           </button>
         </div>
       </form>
-      <dl className="mt-5 grid grid-cols-3 gap-3 border-t border-slate-200 pt-4 text-xs dark:border-slate-800">
+      <dl className="mt-5 grid grid-cols-2 gap-3 border-t border-slate-200 pt-4 text-xs sm:grid-cols-4 dark:border-slate-800">
+        <div><dt className="text-slate-500">Risk base</dt><dd className="font-semibold tabular-nums">{money(pool.effective_capital)}</dd></div>
         <div><dt className="text-slate-500">Working</dt><dd className="font-semibold tabular-nums">{money(pool.invested_capital)}</dd></div>
         <div><dt className="text-slate-500">Reserved</dt><dd className="font-semibold tabular-nums">{money(pool.reserved_capital)}</dd></div>
         <div><dt className="text-slate-500">Available</dt><dd className="font-semibold tabular-nums">{money(pool.remaining_capital)}</dd></div>
@@ -596,6 +612,77 @@ function StrategyToggle({
   );
 }
 
+function StrategySizingControl({ strategy, onUpdated }: { strategy: StrategyOverview; onUpdated: () => void }) {
+  const allocation = strategy.allocation;
+  const [mode, setMode] = useState<"percent" | "fixed">(allocation.ticket_sizing_mode ?? "percent");
+  const [value, setValue] = useState(allocation.ticket_value ?? "");
+  const [maximum, setMaximum] = useState(allocation.max_ticket_amount ?? "");
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setMode(allocation.ticket_sizing_mode ?? "percent");
+    setValue(allocation.ticket_value ?? "");
+    setMaximum(allocation.max_ticket_amount ?? "");
+  }, [allocation.ticket_sizing_mode, allocation.ticket_value, allocation.max_ticket_amount]);
+  const parsedValue = Number(value);
+  const parsedMaximum = Number(maximum);
+  const valid = Number.isFinite(parsedValue) && parsedValue > 0
+    && Number.isFinite(parsedMaximum) && parsedMaximum > 0
+    && (mode !== "percent" || parsedValue <= 100)
+    && (mode !== "fixed" || parsedMaximum >= parsedValue);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (!valid || saving) return;
+    setSaving(true);
+    setFailed(false);
+    try {
+      await updateStrategySizing(strategy.strategy_id, {
+        strategy_version: strategy.strategy_version,
+        ticket_sizing_mode: mode,
+        ticket_value: parsedValue.toFixed(6),
+        max_ticket_amount: parsedMaximum.toFixed(6),
+        reason: "Per-signal sizing updated from automated strategy workspace",
+      });
+      onUpdated();
+    } catch (error) {
+      console.error("Strategy sizing update failed:", error);
+      setFailed(true);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!allocation.policy_configured) return null;
+  return (
+    <details className="mt-2 text-xs text-slate-500">
+      <summary className="cursor-pointer">
+        Per signal: {allocation.ticket_sizing_mode === "fixed" ? money(allocation.ticket_value) : `${allocation.ticket_value ?? "—"}%`}
+        {allocation.max_ticket_amount ? ` · max ${money(allocation.max_ticket_amount)}` : ""}
+      </summary>
+      <form onSubmit={(event) => void save(event)} className="mt-3 flex flex-wrap items-end gap-2">
+        <label>
+          Method
+          <select value={mode} onChange={(event) => setMode(event.target.value as "percent" | "fixed")} className="mt-1 block min-h-10 border border-slate-300 bg-white px-2 dark:border-slate-700 dark:bg-slate-950">
+            <option value="percent">Percent</option>
+            <option value="fixed">Fixed USD</option>
+          </select>
+        </label>
+        <label>
+          {mode === "percent" ? "Percent" : "Amount"}
+          <input type="number" min="0.01" max={mode === "percent" ? "100" : undefined} step="0.01" value={value} onChange={(event) => setValue(event.target.value)} className="mt-1 block min-h-10 w-24 border border-slate-300 bg-white px-2 tabular-nums dark:border-slate-700 dark:bg-slate-950" />
+        </label>
+        <label>
+          Hard max USD
+          <input type="number" min="0.01" step="0.01" value={maximum} onChange={(event) => setMaximum(event.target.value)} className="mt-1 block min-h-10 w-28 border border-slate-300 bg-white px-2 tabular-nums dark:border-slate-700 dark:bg-slate-950" />
+        </label>
+        <button type="submit" disabled={!valid || saving} className="min-h-10 border border-slate-300 px-3 font-medium text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200">{saving ? "Saving…" : "Save sizing"}</button>
+      </form>
+      {failed ? <p className="mt-2 text-red-700 dark:text-red-300">Sizing was not changed.</p> : null}
+    </details>
+  );
+}
+
 function ApprovedStrategy({
   strategy,
   poolLimit,
@@ -615,6 +702,7 @@ function ApprovedStrategy({
           </Badge>
         </div>
         <p className="mt-1 max-w-md text-xs text-slate-500">{strategy.description}</p>
+        <StrategySizingControl strategy={strategy} onUpdated={onUpdated} />
       </div>
       <div><span className="text-xs text-slate-500">P&amp;L</span><strong className="block tabular-nums">{money(strategy.pnl.total_pnl)}</strong></div>
       <div><span className="text-xs text-slate-500">Completed</span><strong className="block tabular-nums">{formatNumber(strategy.attribution.resolved_entries, 0)}</strong></div>

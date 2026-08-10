@@ -39,6 +39,7 @@ from app.services.strategy_control_plane import (
     decide_funding,
     link_strategy_order,
 )
+from app.services.strategy_monitoring import load_paper_realised_pnl
 from app.services.strategy_order_reconciliation import (
     enforce_reconciliation_slo,
     ensure_strategy_request_id,
@@ -74,9 +75,12 @@ class _Intent:
     deployment_id: int
     deployment_limit: Decimal
     pool_limit: Decimal
+    capital_mode: Literal["fixed", "compound"]
     pool_reserved: Decimal
     policy_revision: int
-    ticket_fraction: Decimal
+    ticket_sizing_mode: Literal["percent", "fixed"]
+    ticket_fraction: Decimal | None
+    fixed_ticket_amount: Decimal | None
     max_ticket_amount: Decimal
     stop_loss_pct: Decimal
     take_profit_pct: Decimal
@@ -172,6 +176,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
                    i.symbol, i.is_tradable, e.asset_class,
                    d.deployment_id, d.capital_limit, d.enabled, d.currency,
                    pool.enabled AS pool_enabled, pool.capital_limit AS pool_limit,
+                   pool.capital_mode,
                    p.revision AS policy_revision, p.*,
                    q.quoted_at, q.ask, q.spread_flag,
                    w.updated_at AS scan_at,
@@ -211,7 +216,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
              AND d.mode = 'paper'
             LEFT JOIN strategy_execution_policies p ON p.deployment_id = d.deployment_id
             LEFT JOIN LATERAL (
-                SELECT enabled,capital_limit
+                SELECT enabled,capital_limit,capital_mode
                 FROM strategy_paper_pool_events
                 ORDER BY strategy_paper_pool_event_id DESC
                 LIMIT 1
@@ -306,9 +311,14 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         deployment_id=int(row["deployment_id"]),
         deployment_limit=Decimal(str(row["capital_limit"])),
         pool_limit=Decimal(str(row["pool_limit"])),
+        capital_mode=cast(Literal["fixed", "compound"], row["capital_mode"]),
         pool_reserved=Decimal(str(row["pool_reserved"])),
         policy_revision=int(row["policy_revision"]),
-        ticket_fraction=Decimal(str(row["ticket_fraction"])),
+        ticket_sizing_mode=cast(Literal["percent", "fixed"], row["ticket_sizing_mode"]),
+        ticket_fraction=Decimal(str(row["ticket_fraction"])) if row["ticket_fraction"] is not None else None,
+        fixed_ticket_amount=(
+            Decimal(str(row["fixed_ticket_amount"])) if row["fixed_ticket_amount"] is not None else None
+        ),
         max_ticket_amount=Decimal(str(row["max_ticket_amount"])),
         stop_loss_pct=Decimal(str(row["stop_loss_pct"])),
         take_profit_pct=Decimal(str(row["take_profit_pct"])),
@@ -462,7 +472,11 @@ def _risk_and_amount(
     assert pending_row is not None
     pending_total = Decimal(str(pending_row[0]))
     pending_instrument = Decimal(str(pending_row[1]))
+    capital_bases = _effective_capital_bases(conn, intent)
     conn.commit()
+    if isinstance(capital_bases, str):
+        return capital_bases
+    deployment_base, pool_base = capital_bases
     with conn.transaction():
         row = conn.execute(
             "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id = true FOR UPDATE"
@@ -484,8 +498,8 @@ def _risk_and_amount(
         )
     if drawdown > intent.max_drawdown_pct:
         return "account_drawdown_limit"
-    deployment_remaining = max(Decimal("0"), intent.deployment_limit - intent.reserved)
-    pool_remaining = max(Decimal("0"), intent.pool_limit - intent.pool_reserved)
+    deployment_remaining = max(Decimal("0"), deployment_base - intent.reserved)
+    pool_remaining = max(Decimal("0"), pool_base - intent.pool_reserved)
     portfolio_capacity = max(
         Decimal("0"),
         risk.equity * intent.max_portfolio_exposure_pct / Decimal("100") - risk.total_invested - pending_total,
@@ -494,8 +508,16 @@ def _risk_and_amount(
         Decimal("0"),
         risk.equity * intent.max_instrument_exposure_pct / Decimal("100") - current_instrument - pending_instrument,
     )
+    if intent.ticket_sizing_mode == "fixed":
+        if intent.fixed_ticket_amount is None:
+            return "execution_policy_invalid"
+        requested_ticket = intent.fixed_ticket_amount
+    else:
+        if intent.ticket_fraction is None:
+            return "execution_policy_invalid"
+        requested_ticket = deployment_base * intent.ticket_fraction
     amount = min(
-        intent.deployment_limit * intent.ticket_fraction,
+        requested_ticket,
         intent.max_ticket_amount,
         deployment_remaining,
         pool_remaining,
@@ -506,6 +528,26 @@ def _risk_and_amount(
     if amount <= 0:
         return "risk_capacity_exhausted"
     return amount, current_instrument, drawdown
+
+
+def _effective_capital_bases(
+    conn: psycopg.Connection[Any],
+    intent: _Intent,
+) -> tuple[Decimal, Decimal] | str:
+    """Resolve capped or compounding bases from realised P&L, never open marks."""
+    realised_by_strategy = load_paper_realised_pnl(conn)
+    if realised_by_strategy is None:
+        return "realised_pnl_incomplete"
+
+    strategy_realised = realised_by_strategy.get((intent.strategy_id, intent.strategy_version), Decimal("0"))
+    pool_realised = sum(realised_by_strategy.values(), Decimal("0"))
+    if intent.capital_mode == "fixed":
+        strategy_realised = min(strategy_realised, Decimal("0"))
+        pool_realised = min(pool_realised, Decimal("0"))
+    return (
+        max(Decimal("0"), intent.deployment_limit + strategy_realised),
+        max(Decimal("0"), intent.pool_limit + pool_realised),
+    )
 
 
 def _resume_uncertain_submission(

@@ -28,6 +28,7 @@ from app.api.strategies import (
 from app.security.sessions import SessionRow
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
+from app.services.runtime_config import get_runtime_config, update_runtime_config
 from app.services.strategy_monitoring import (
     load_attribution,
     load_control_state,
@@ -567,11 +568,22 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     conn = ebull_test_conn
+    # runtime_config is a deliberately persistent singleton, unlike the
+    # per-test pool event stream. Establish the transition this test asserts
+    # when an earlier executor test enabled automation.
+    if get_runtime_config(conn).enable_auto_trading:
+        update_runtime_config(
+            conn,
+            updated_by="test-precondition",
+            reason="establish disabled automation precondition",
+            enable_auto_trading=False,
+        )
     conn.commit()
     response = update_strategy_paper_pool(
         StrategyPaperPoolUpdateRequest(
             enabled=True,
             capital_limit=Decimal("750"),
+            capital_mode="compound",
             reason="bounded paper workspace",
         ),
         _session(),
@@ -580,10 +592,12 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
 
     assert response.enabled
     assert response.capital_limit == Decimal("750")
+    assert response.capital_mode == "compound"
+    assert response.effective_capital == Decimal("750")
     assert response.remaining_capital == Decimal("750")
     assert conn.execute(
-        "SELECT enabled,capital_limit,changed_by,reason FROM strategy_paper_pool_events"
-    ).fetchone() == (True, Decimal("750.000000"), "allocation-operator", "bounded paper workspace")
+        "SELECT enabled,capital_limit,capital_mode,changed_by,reason FROM strategy_paper_pool_events"
+    ).fetchone() == (True, Decimal("750.000000"), "compound", "allocation-operator", "bounded paper workspace")
     assert conn.execute("SELECT enable_auto_trading FROM runtime_config WHERE id=TRUE").fetchone() == (True,)
     assert conn.execute(
         """
@@ -601,6 +615,7 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
             StrategyPaperPoolUpdateRequest(
                 enabled=True,
                 capital_limit=Decimal("750"),
+                capital_mode="compound",
                 reason="no-op must not add audit noise",
             ),
             _session(),

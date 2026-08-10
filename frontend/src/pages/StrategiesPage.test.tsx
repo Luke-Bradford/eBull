@@ -60,6 +60,8 @@ const OVERVIEW: StrategyOverviewResponse = {
     configured: true,
     enabled: false,
     capital_limit: "1000.000000",
+    capital_mode: "fixed",
+    effective_capital: "1000.000000",
     currency: "USD",
     reserved_capital: "0.000000",
     invested_capital: "0.000000",
@@ -116,7 +118,7 @@ const OVERVIEW: StrategyOverviewResponse = {
       max_observed_account_drawdown_pct: null,
     },
     pnl: { currency: "USD", strategy_trade_count: 0, owned_position_count: 0, active_position_count: 0, close_event_count: 0, invested_capital: "0", realised_pnl: "0", unrealised_pnl: "0", total_pnl: "0", observed_fees: "0", complete: true, incomplete_reasons: [] },
-    allocation: { deployment_id: null, capital_limit: "0", currency: "USD", enabled: false, revision: null, reserved_capital: "0", invested_capital: "0", remaining_capital: "0", policy_configured: false, max_drawdown_limit_pct: null },
+    allocation: { deployment_id: null, capital_limit: "0", currency: "USD", enabled: false, revision: null, reserved_capital: "0", invested_capital: "0", remaining_capital: "0", policy_configured: false, max_drawdown_limit_pct: null, ticket_sizing_mode: null, ticket_value: null, max_ticket_amount: null },
     allocation_ready: false,
     allocation_refusals: ["recent_evidence_incomplete", "paper_promotion_missing", "execution_policy_missing"],
   }],
@@ -167,7 +169,7 @@ function approvedOverview(): StrategyOverviewResponse {
         shadow_average_return_pct: "1.25",
       },
       pnl: { ...strategy.pnl, strategy_trade_count: 3, owned_position_count: 3, active_position_count: 1, close_event_count: 2, invested_capital: "200", realised_pnl: "40", unrealised_pnl: "10", total_pnl: "50" },
-      allocation: { deployment_id: 7, capital_limit: "1000", currency: "USD", enabled: true, revision: 2, reserved_capital: "250", invested_capital: "200", remaining_capital: "750", policy_configured: true, max_drawdown_limit_pct: "5" },
+      allocation: { deployment_id: 7, capital_limit: "1000", currency: "USD", enabled: true, revision: 2, reserved_capital: "250", invested_capital: "200", remaining_capital: "750", policy_configured: true, max_drawdown_limit_pct: "5", ticket_sizing_mode: "percent", ticket_value: "20", max_ticket_amount: "500" },
       allocation_ready: true,
       allocation_refusals: [],
     }],
@@ -213,7 +215,7 @@ describe("StrategiesPage", () => {
     expect(input.parentElement).toHaveClass("w-48");
     fireEvent.change(input, { target: { value: "1500" } });
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", reason: "Automated strategy workspace update" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", capital_mode: "fixed", reason: "Automated strategy workspace update" }));
   });
 
   it("does not present automation as enabled while the system-wide guard is off", async () => {
@@ -271,6 +273,36 @@ describe("StrategiesPage", () => {
     expect(within(performance).getByText("+60.00%")).toBeInTheDocument();
     expect(screen.getByText("1 approved")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Enabled" })).toBeEnabled();
+  });
+
+  it("keeps per-signal sizing behind the approved strategy disclosure", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
+    const update = vi.spyOn(strategiesApi, "updateStrategySizing").mockResolvedValue({
+      strategy_id: "s1-time-series-momentum",
+      strategy_version: "strategy-registry-v1+abc",
+      deployment_id: 7,
+      revision: 3,
+      ticket_sizing_mode: "fixed",
+      ticket_value: "75",
+      max_ticket_amount: "100",
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+
+    await userEvent.click(await screen.findByText(/Per signal: 20%/));
+    await userEvent.selectOptions(screen.getByLabelText("Method"), "fixed");
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "75" } });
+    fireEvent.change(screen.getByLabelText("Hard max USD"), { target: { value: "100" } });
+    const save = screen.getByRole("button", { name: "Save sizing" });
+    expect(save).toBeEnabled();
+    await userEvent.click(save);
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith("s1-time-series-momentum", {
+      strategy_version: "strategy-registry-v1+abc",
+      ticket_sizing_mode: "fixed",
+      ticket_value: "75.000000",
+      max_ticket_amount: "100.000000",
+      reason: "Per-signal sizing updated from automated strategy workspace",
+    }));
   });
 
   it("shows a compact portfolio row for each exact automated position", async () => {

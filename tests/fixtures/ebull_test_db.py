@@ -204,6 +204,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "strategy_live_gate_policies",
     # #2451 — bounded current kill state has no FK by design.
     "strategy_execution_blocks",
+    # #2469 — the shared paper-pool current state is an append-only standalone
+    # event stream. It intentionally has no FK to a deployment, so the inbound
+    # FK closure cannot discover it from the strategy roots above.
+    "strategy_paper_pool_events",
     # #2448/#2449 — bounded strategy current-state roots have no FKs. Their
     # signal/deployment children are derived by the planner from roots above.
     "strategy_scan_watermark",

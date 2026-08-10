@@ -56,17 +56,21 @@ safety claim. Promotion continues to require, at minimum:
 No rule is enabled merely because the UI can display it or a historical win
 rate exceeds a threshold.
 
-## Capital model (next implementation slice)
+## Capital model
 
-The shared pot will carry an explicit mode:
+The shared pot carries an explicit, audited mode:
 
 - `fixed`: the configured principal is the hard strategy-system ceiling;
-  profits do not increase it and losses reduce what remains available;
+  net realised profits do not increase it and net realised losses reduce what
+  remains available;
 - `compound`: the risk base is configured principal plus reconciled realised
-  strategy P&L; open marks never increase buying power, and incomplete P&L
-  reconciliation blocks new entries.
+  strategy P&L.
 
-Each approved strategy will carry an explicit ticket mode:
+Open marks never increase buying power. In either mode, incomplete realised
+P&L reconciliation blocks new entries because an unknown loss must not be
+subsidised by the wider broker account.
+
+Each approved strategy carries an explicit, revisioned ticket mode:
 
 - `fixed`: one configured currency amount per accepted signal; or
 - `percent`: one configured fraction of its effective allocated base, still

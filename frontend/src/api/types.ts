@@ -2519,6 +2519,9 @@ export interface StrategyAllocation {
   remaining_capital: string;
   policy_configured: boolean;
   max_drawdown_limit_pct: string | null;
+  ticket_sizing_mode: "percent" | "fixed" | null;
+  ticket_value: string | null;
+  max_ticket_amount: string | null;
 }
 
 export interface StrategyEntryBlock {
@@ -2565,10 +2568,22 @@ export interface StrategyPaperPool {
   configured: boolean;
   enabled: boolean;
   capital_limit: string;
+  capital_mode: "fixed" | "compound";
+  effective_capital: string | null;
   currency: "USD";
   reserved_capital: string;
   invested_capital: string | null;
-  remaining_capital: string;
+  remaining_capital: string | null;
+}
+
+export interface StrategySizingUpdateResponse {
+  strategy_id: string;
+  strategy_version: string;
+  deployment_id: number;
+  revision: number;
+  ticket_sizing_mode: "percent" | "fixed";
+  ticket_value: string;
+  max_ticket_amount: string;
 }
 
 export interface StrategyPnlHistoryPoint {
