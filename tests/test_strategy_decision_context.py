@@ -24,8 +24,12 @@ from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 def _complete_inputs(**overrides: Decimal | None) -> DecisionInputs:
     values: dict[str, Decimal | None] = {
         "as_traded_price": Decimal("49.99"),
+        "trailing_mean_share_volume": Decimal("1200000"),
         "trailing_median_share_volume": Decimal("1000000"),
+        "trailing_mean_dollar_volume": Decimal("30000000"),
         "trailing_median_dollar_volume": Decimal("24999999"),
+        "zero_volume_frequency": Decimal("0"),
+        "intraday_coverage": Decimal("1"),
         "relative_volume": Decimal("1.8"),
         "spread_bps": Decimal("7.5"),
         "realised_volatility": Decimal("0.32"),
@@ -68,6 +72,7 @@ def test_complete_context_is_eligible() -> None:
     assert context.refusal_reason is None
     assert context.price_band == "20_to_50"
     assert context.dollar_volume_band == "10m_to_25m"
+    assert context.volume_lookback_sessions == 20
 
 
 def test_missing_or_unknown_point_in_time_data_refuses_by_name() -> None:
@@ -88,6 +93,19 @@ def test_missing_or_unknown_point_in_time_data_refuses_by_name() -> None:
     )
     assert context.candidate_verdict == "refused"
     assert context.refusal_reason == "missing:primary_listing_market,spread_bps,vix"
+
+
+def test_volume_coverage_outside_fraction_range_is_rejected() -> None:
+    with pytest.raises(ValueError, match="intraday_coverage must be inside 0-1"):
+        build_decision_context(
+            strategy_id="candidate-1",
+            strategy_version="sha256:abc",
+            instrument_id=1,
+            decision_at=datetime(2026, 8, 10, 14, 35, tzinfo=UTC),
+            signal_id=None,
+            classification=None,
+            inputs=_complete_inputs(intraday_coverage=Decimal("1.01")),
+        )
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple[Any, ...]], iid: int) -> None:
