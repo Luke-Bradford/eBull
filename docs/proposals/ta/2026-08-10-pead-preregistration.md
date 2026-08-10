@@ -40,10 +40,10 @@ extraordinary items.
 - Q4 is the as-known annual duration fact of 300-400 days less the same fiscal
   year's three exact, earlier as-filed quarters. Missing or ambiguous legs
   refuse the quarter.
-- A SUE needs 25 consecutive fiscal quarters: four seasonal lags plus the 21
-  prior seasonal differences used to estimate drift and dispersion. No shorter
-  history, zero dispersion, non-finite value or discontinuous fiscal sequence
-  is imputed.
+- A SUE needs the current quarter plus 25 consecutive prior fiscal quarters:
+  four seasonal lags plus the 21 prior seasonal differences used to estimate
+  drift and dispersion. No shorter history, zero dispersion, non-finite value
+  or discontinuous fiscal sequence is imputed.
 
 ## Knowledge time and fill
 
@@ -55,9 +55,10 @@ than `filed_date`. That fallback is deliberately late and causal; it is never
 allowed to fill on the filing date. Live observation requires `accepted_at` and
 refuses without it.
 
-Entry is the next eligible session open. The primary exit is the close after 62
-completed sessions. Five-, 20- and 40-session outcomes are declared diagnostics
-and cannot replace the primary result after measurement.
+Entry is the next eligible session open. The primary exit is the close of the
+62nd eligible session, counting the entry session as session one. Five-, 20-
+and 40-session outcomes use the same counting convention, are declared
+diagnostics and cannot replace the primary result after measurement.
 
 ## Causal cross-sectional trigger
 
@@ -75,6 +76,12 @@ The equal-gross long-short arm is the published-family primary comparison. It
 remains research-only because free historical borrow availability and eToro
 CFD carry are absent. The long-only arm is reported independently and cannot
 inherit a long-short result.
+
+Equal-gross expectancy is one half of the long-arm mean plus one half of the
+short-arm mean, regardless of retained event-count imbalance. Its interval
+combines separate date-clustered 97.5% marginal intervals with Bonferroni
+bounds, providing at least 95% joint coverage without assuming the arms are
+independent.
 
 ## Universe, prices and costs
 
@@ -107,11 +114,27 @@ inherit a long-short result.
 
 ## Required report and pass gate
 
-The retained result includes the complete exclusion census, event and date
-cluster counts, after-cost expectancy with a date-clustered confidence
-interval, win rate, profit factor, drawdown, expected shortfall/worst trade,
-turnover, concurrency/capacity, year/regime stability, market/sector-relative
-return and a matched random-filing control under identical fills and costs.
+The retained effect-screen result includes the complete exclusion census,
+event and date-cluster counts, after-cost expectancy with a date-clustered
+confidence interval, win rate, profit factor, expected shortfall/worst trade,
+holding duration, observed event concurrency, year stability,
+market/sector-relative return and a matched random-filing control under
+identical fills and costs.
+
+The control is selected before prices are read, one-for-one without replacement
+from causally classified middle-SUE filings. It is matched on filing calendar
+quarter and fiscal quarter using seed `2476001`, then inherits the paired
+signal's long/short direction. The same price, liquidity, quarantine and cost
+filters apply. A depleted match cell is counted, never replaced from another
+period.
+
+This effect spike intentionally defines no capital sizing path. Portfolio-level
+drawdown, exposure, turnover and dollar capacity are therefore `not_measured`,
+not inferred from independently compounded overlapping event returns, and each
+is a promotion refusal. If the effect screen passes, a separately
+preregistered fixed-cap portfolio trial must define those quantities and the
+bracket before any paper allocation. This staging prevents a sizing choice made
+after seeing event returns from flattering the same trial.
 
 This one declared arm is appended to the global prior-trial register when it is
 measured. A negative or inconclusive result remains retained. No threshold,
