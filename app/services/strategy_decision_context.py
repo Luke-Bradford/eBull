@@ -24,6 +24,8 @@ ListingMarket = Literal["nyse", "nasdaq", "other", "unknown"]
 CandidateVerdict = Literal["eligible", "refused"]
 PriceBand = Literal["under_5", "5_to_20", "20_to_50", "50_to_150", "150_plus"]
 DollarVolumeBand = Literal["under_1m", "1m_to_10m", "10m_to_25m", "25m_to_100m", "100m_plus"]
+AsTradedPriceBasis = Literal["observed_unadjusted", "reconstructed_unadjusted", "unknown"]
+AS_TRADED_PRICE_BASES: Final = frozenset({"observed_unadjusted", "reconstructed_unadjusted", "unknown"})
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,7 @@ class ContextDefinition:
     volume_lookback_sessions: int = 20
     volume_capacity_statistic: str = "causal_mean"
     listing_semantics: str = "primary_listing_not_execution_venue"
+    eligible_price_bases: tuple[str, ...] = ("observed_unadjusted", "reconstructed_unadjusted")
 
 
 DEFINITION: Final = ContextDefinition()
@@ -88,6 +91,7 @@ class MarketClassification:
 @dataclass(frozen=True)
 class DecisionInputs:
     as_traded_price: Decimal | None
+    as_traded_price_basis: AsTradedPriceBasis | None
     trailing_mean_share_volume: Decimal | None
     trailing_median_share_volume: Decimal | None
     trailing_mean_dollar_volume: Decimal | None
@@ -118,6 +122,7 @@ class DecisionContext:
     provider_exchange_id: str | None
     instrument_type_id: int | None
     as_traded_price: Decimal | None
+    as_traded_price_basis: AsTradedPriceBasis | None
     price_band: PriceBand | None
     volume_lookback_sessions: int
     trailing_mean_share_volume: Decimal | None
@@ -137,6 +142,7 @@ class DecisionContext:
 
 _REQUIRED_INPUTS: Final = (
     "as_traded_price",
+    "as_traded_price_basis",
     "trailing_mean_share_volume",
     "trailing_median_share_volume",
     "trailing_mean_dollar_volume",
@@ -204,6 +210,8 @@ def build_decision_context(
         raise ValueError("instrument_id must be positive")
     if decision_at.tzinfo is None:
         raise ValueError("decision_at must be timezone-aware")
+    if inputs.as_traded_price_basis is not None and inputs.as_traded_price_basis not in AS_TRADED_PRICE_BASES:
+        raise ValueError(f"unknown as_traded_price_basis {inputs.as_traded_price_basis!r}")
     for name in (
         "trailing_mean_share_volume",
         "trailing_median_share_volume",
@@ -223,6 +231,8 @@ def build_decision_context(
             raise ValueError(f"{name} must be inside 0-1")
 
     missing: list[str] = [name for name in _REQUIRED_INPUTS if getattr(inputs, name) is None]
+    if inputs.as_traded_price_basis == "unknown":
+        missing.append("as_traded_price_basis")
     if classification is None:
         missing.append("point_in_time_classification")
     else:
@@ -255,6 +265,7 @@ def build_decision_context(
         provider_exchange_id=None if classification is None else classification.provider_exchange_id,
         instrument_type_id=None if classification is None else classification.instrument_type_id,
         as_traded_price=inputs.as_traded_price,
+        as_traded_price_basis=inputs.as_traded_price_basis,
         price_band=price_band,
         volume_lookback_sessions=DEFINITION.volume_lookback_sessions,
         trailing_mean_share_volume=inputs.trailing_mean_share_volume,
@@ -278,7 +289,8 @@ _INSERT_CONTEXT = """
         strategy_id, strategy_version, instrument_id, decision_at, signal_id,
         candidate_verdict, refusal_reason, context_version,
         classification_effective_from, security_type, primary_listing_market,
-        provider_exchange_id, instrument_type_id, as_traded_price, price_band,
+        provider_exchange_id, instrument_type_id, as_traded_price,
+        as_traded_price_basis, price_band,
         volume_lookback_sessions, trailing_mean_share_volume,
         trailing_median_share_volume, trailing_mean_dollar_volume,
         trailing_median_dollar_volume, dollar_volume_band,
@@ -289,7 +301,8 @@ _INSERT_CONTEXT = """
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(decision_at)s, %(signal_id)s,
         %(candidate_verdict)s, %(refusal_reason)s, %(context_version)s,
         %(classification_effective_from)s, %(security_type)s, %(primary_listing_market)s,
-        %(provider_exchange_id)s, %(instrument_type_id)s, %(as_traded_price)s, %(price_band)s,
+        %(provider_exchange_id)s, %(instrument_type_id)s, %(as_traded_price)s,
+        %(as_traded_price_basis)s, %(price_band)s,
         %(volume_lookback_sessions)s, %(trailing_mean_share_volume)s,
         %(trailing_median_share_volume)s, %(trailing_mean_dollar_volume)s,
         %(trailing_median_dollar_volume)s, %(dollar_volume_band)s,
@@ -310,6 +323,7 @@ def store_decision_context(conn: psycopg.Connection[Any], context: DecisionConte
 
 
 __all__ = [
+    "AS_TRADED_PRICE_BASES",
     "CONTEXT_VERSION",
     "DecisionContext",
     "DecisionInputs",

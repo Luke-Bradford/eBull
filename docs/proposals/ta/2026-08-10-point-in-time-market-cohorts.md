@@ -26,6 +26,8 @@ this table. The row contains:
 - provider security type and normalised common-stock/ETF/other classification;
 - primary listing market (NYSE/Nasdaq/other), explicitly not execution venue;
 - contemporaneous as-traded price and fixed price band;
+- explicit price-level provenance: directly observed unadjusted or reconstructed
+  from point-in-time corporate-action factors;
 - 20 completed causal sessions of mean share/dollar volume (capacity), median
   share/dollar volume (typical-day robustness), relative volume, zero-volume
   frequency, intraday coverage and dollar-volume band;
@@ -60,6 +62,9 @@ live candidate rate.
 
 - The imported classification is prospective from 2026-08-10. Historical
   backtests before that date refuse until an authoritative dated source exists.
+- An `as_traded_price` name is not evidence of its basis. Split-adjusted and
+  unknown-basis research levels are valid return inputs but are refused for
+  nominal price, transaction-cost and dollar-volume cohort attribution (#2400).
 - Primary listing affects listing rules, auctions and halt identity. It is not
   where an eToro order executed. Spread/slippage and broker execution evidence
   remain separate requirements.
