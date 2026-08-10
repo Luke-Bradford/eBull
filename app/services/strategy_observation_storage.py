@@ -636,13 +636,9 @@ def _partition_names(conn: psycopg.Connection[Any]) -> tuple[str, ...]:
     return tuple(str(row[0]) for row in rows)
 
 
-def retention_plan(conn: psycopg.Connection[Any], *, as_of: datetime) -> RetentionPlan:
-    """Return only leaf relations whose entire bound is outside retention."""
-    if as_of.tzinfo is None:
-        raise ValueError("as_of must be timezone-aware")
-    today = as_of.astimezone(UTC).date()
-    signal_cutoff = today - timedelta(days=SIGNAL_DETAIL_RETENTION_DAYS)
-    intraday_cutoffs = {
+def _intraday_retention_cutoffs(today: date) -> dict[Timeframe, date]:
+    """Resolve each tier's day/month policy to one exclusive date cutoff."""
+    return {
         timeframe: (
             today - timedelta(days=tier.retention_days)
             if tier.retention_days is not None
@@ -650,6 +646,15 @@ def retention_plan(conn: psycopg.Connection[Any], *, as_of: datetime) -> Retenti
         )
         for timeframe, tier in INTRADAY_TIERS.items()
     }
+
+
+def retention_plan(conn: psycopg.Connection[Any], *, as_of: datetime) -> RetentionPlan:
+    """Return only leaf relations whose entire bound is outside retention."""
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    today = as_of.astimezone(UTC).date()
+    signal_cutoff = today - timedelta(days=SIGNAL_DETAIL_RETENTION_DAYS)
+    intraday_cutoffs = _intraday_retention_cutoffs(today)
     signal: list[str] = []
     intraday: list[str] = []
     for name in _partition_names(conn):
@@ -699,14 +704,7 @@ def drop_expired_partitions(conn: psycopg.Connection[Any], *, as_of: datetime, d
             # second boundary. A caller can never supply a relation name.
             conn.execute(psycopg.sql.SQL("DROP TABLE {}").format(psycopg.sql.Identifier(name)))
         today = as_of.astimezone(UTC).date()
-        intraday_cutoffs = {
-            timeframe: (
-                today - timedelta(days=tier.retention_days)
-                if tier.retention_days is not None
-                else _months_before(today, cast(int, tier.retention_months))
-            )
-            for timeframe, tier in INTRADAY_TIERS.items()
-        }
+        intraday_cutoffs = _intraday_retention_cutoffs(today)
         deleted_gaps = conn.execute(
             """
             DELETE FROM strategy_intraday_gaps

@@ -214,7 +214,7 @@ def test_harvest_reports_member_failure_without_writing(ebull_test_conn: psycopg
     assert report.written == 0
     assert len(report.failures) == 1
     assert report.failures[0].symbol == "HARVEST"
-    assert "provider down" in report.failures[0].reason
+    assert report.failures[0].reason == "RuntimeError"
 
 
 def test_unresolved_member_does_not_erase_healthy_peer(ebull_test_conn: psycopg.Connection[tuple]) -> None:

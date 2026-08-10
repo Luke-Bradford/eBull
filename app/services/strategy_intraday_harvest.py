@@ -318,7 +318,10 @@ def run_intraday_harvest(
             written += report.rows_written
             gaps_recorded += _record_gaps(conn, member=member, gaps=gaps, observed_at=observed_at.astimezone(UTC))
         except Exception as exc:
-            failures.append(HarvestFailure(member.timeframe, member.symbol, f"{type(exc).__name__}: {exc}"))
+            # Provider messages can contain request URLs, identifiers or
+            # upstream response fragments. Persist the stable exception class
+            # for diagnosis without copying those internals into job_runs.
+            failures.append(HarvestFailure(member.timeframe, member.symbol, type(exc).__name__))
         finally:
             _advance_cursor(conn, member)
     return HarvestReport(
