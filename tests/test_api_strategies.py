@@ -20,7 +20,7 @@ from app.services.strategy_result import CORPUS_VERSION
 from tests.test_result_ledger import build_metrics, build_result
 
 
-def test_current_versions_cover_the_manifest_including_excluded_s4() -> None:
+def test_current_versions_cover_the_manifest_including_s4() -> None:
     versions = _current_versions()
     assert set(versions) == set(STRATEGY_MANIFEST)
     assert "s4-volatility-compression-breakout" in versions
@@ -151,8 +151,8 @@ def test_empty_ledgers_still_return_all_manifest_strategies(
     assert all(not item.all_recent_evidence_complete for item in overview.strategies)
     assert all(len(item.evidence_windows) == 8 for item in overview.strategies)
     s4 = next(item for item in overview.strategies if item.strategy_id == "s4-volatility-compression-breakout")
-    assert not s4.runnable
-    assert s4.exclusion_reason is not None
+    assert s4.runnable
+    assert s4.exclusion_reason is None
 
 
 def test_completed_zero_signal_scan_uses_its_watermark(
