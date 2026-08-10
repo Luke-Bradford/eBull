@@ -26,11 +26,10 @@ rather than argued (``scripts/verify_2394_signal_scan_cost.py``, full population
    function* and ``StrategyIdentity`` records no K. The measured 0/3290 and
    0/2033 disagreement at K=250/750 is a negative result about this corpus's
    depth, not a licence.
-4. **Signals only.** ``strategy_outcomes`` is fed exclusively by the level-based
-   resolver, S-4 is the only ``level_based`` strategy, and nothing in ``app/``
-   constructs an ``ExitLevels``. Worse, an outcome stored for an immature window
-   drops that signal out of ``select_pending_fills`` **permanently**. Outcome
-   resolution is a separate job on a separate ticket.
+4. **Signals only.** Outcome resolution remains a separate scheduled job. It
+   consumes only level-based entries with a manifest-owned ``ExitLevels``
+   factory and deliberately leaves an immature window pending: storing it would
+   drop that signal out of ``select_pending_fills`` **permanently**.
 
 ⚠ IT DOES NOT BACKFILL, AND THE COLD-START RULE IS WHERE THAT IS ENFORCED. See
 ``write_window_indices``: with no watermark the scan writes the single
@@ -58,6 +57,7 @@ from app.services.price_masked_bars import (
     load_masked_bars,
     load_union_calendar,
 )
+from app.services.price_segments import load_unresolved_breaks
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
@@ -67,8 +67,8 @@ from app.services.strategy_registry import (
     StrategyIdentity,
     StrategySignal,
     Verdict,
-    stage_cross_sectional_member,
 )
+from app.services.strategy_segmented_evaluation import segmented_member, segmented_signals
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +468,7 @@ def run_signal_scan(
     eligible = sorted(
         instrument_id for instrument_id, span in spans.items() if span.last_bar == frontier.bar_date and span.bars >= 2
     )
+    unresolved_breaks = load_unresolved_breaks(conn, eligible)
     at_frontier = sum(1 for span in spans.values() if span.last_bar == frontier.bar_date)
 
     watermarks = read_watermarks(conn)
@@ -563,7 +564,14 @@ def run_signal_scan(
                 continue
             expected[plan.entry.strategy_id] += len(window)
             if plan.entry.strategy_class == "per_series":
-                _scan_per_series(plan, series, instrument_id, window, rows[plan.entry.strategy_id])
+                _scan_per_series(
+                    plan,
+                    series,
+                    instrument_id,
+                    window,
+                    rows[plan.entry.strategy_id],
+                    unresolved_breaks=unresolved_breaks.get(instrument_id, ()),
+                )
             else:
                 assert panel_dates is not None
                 _stage_cross_sectional(
@@ -574,6 +582,7 @@ def run_signal_scan(
                     panel_dates=panel_dates,
                     pending=pending[plan.entry.strategy_id],
                     scores=scores[plan.entry.strategy_id],
+                    unresolved_breaks=unresolved_breaks.get(instrument_id, ()),
                 )
 
     for plan in cross_sectional:
@@ -619,6 +628,8 @@ def _scan_per_series(
     instrument_id: int,
     window: range,
     out: list[LedgerRow],
+    *,
+    unresolved_breaks: Sequence[date] = (),
 ) -> None:
     """Full-history recompute, filtered to the window, resolved through the writer.
 
@@ -634,8 +645,13 @@ def _scan_per_series(
     ``signal_index``, so a subset of signals against the full series resolves
     each fill from the same bar it always would.
     """
-    assert plan.entry.signals is not None
-    signals = plan.entry.signals(series, universe=SCAN_UNIVERSE, masked_reason=MASKED_REASON)
+    signals = segmented_signals(
+        plan.entry,
+        series,
+        universe=SCAN_UNIVERSE,
+        masked_reason=MASKED_REASON,
+        unresolved_breaks=unresolved_breaks,
+    )
     windowed = [signal for signal in signals if signal.signal_index in window]
     out.extend(resolve_fills(windowed, series=series, identity=plan.identity, instrument_id=instrument_id))
 
@@ -649,6 +665,7 @@ def _stage_cross_sectional(
     panel_dates: frozenset[date],
     pending: dict[int, _PendingMember],
     scores: dict[date, dict[int, float]],
+    unresolved_breaks: Sequence[date] = (),
 ) -> None:
     """Everything decidable about one member without seeing the others.
 
@@ -658,14 +675,14 @@ def _stage_cross_sectional(
     would re-implement the staging pass, which is how a census and the strategy
     it measures come to disagree."*
     """
-    assert plan.entry.member is not None
-    member = plan.entry.member(
+    staged = segmented_member(
+        plan.entry,
         series,
         panel_decision_dates=panel_dates,
         universe=SCAN_UNIVERSE,
         masked_reason=MASKED_REASON,
+        unresolved_breaks=unresolved_breaks,
     )
-    staged = stage_cross_sectional_member(member)
 
     start = window.start
     trimmed = BarSeries(dates=series.dates[start:], rows=series.rows[start:])

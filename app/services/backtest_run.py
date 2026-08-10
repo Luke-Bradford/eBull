@@ -52,13 +52,11 @@ import logging
 import math
 import time
 from array import array
-from bisect import bisect_left
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from itertools import pairwise
 from typing import Any, Final
 
 import numpy as np
@@ -95,6 +93,11 @@ from app.services.position_builder import (
     build_positions,
 )
 from app.services.position_costing import CostedPosition, cost_positions
+from app.services.price_segments import (
+    load_unresolved_breaks,
+    segment_end_index,
+    segment_for_index,
+)
 from app.services.price_structure import StructureBar
 from app.services.research_price_structure_store import (
     QUARANTINE_ARMS,
@@ -111,7 +114,7 @@ from app.services.result_ledger import (
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
-from app.services.strategy_registry import StagedMember, StrategyIdentity, StrategySignal, stage_cross_sectional_member
+from app.services.strategy_registry import StrategyIdentity, StrategySignal
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
     CORPUS_VERSION,
@@ -127,6 +130,7 @@ from app.services.strategy_result import (
     check_promotable,
     namespace_for_position,
 )
+from app.services.strategy_segmented_evaluation import segmented_member, segmented_signals
 from app.services.strategy_statistics import StrategyMetrics, TradeReturns, compute_metrics
 from app.services.technical_analysis import OHLCVRow
 from app.services.trial_register import TRIAL_REGISTER
@@ -243,14 +247,6 @@ _SERIES_SQL = """
     FROM research_price_series
     WHERE instrument_id = ANY(%(ids)s)
     ORDER BY instrument_id, series_id
-"""
-
-_UNRESOLVED_BREAKS_SQL = """
-    SELECT instrument_id, break_date
-    FROM price_series_break
-    WHERE instrument_id = ANY(%(ids)s)
-      AND resolved_by IS NULL
-    ORDER BY instrument_id, break_date
 """
 
 #: The IN-SAMPLE axis and its per-date bar count — criterion 5's fold cut is
@@ -592,7 +588,7 @@ def _resolved_level_outcomes(
     for fill in entries:
         signal_index = bar_index[fill.signal_bar_date]
         fill_index = bar_index[fill.fill_bar_date]
-        signal_series, local_signal_index = _segment_for_index(
+        signal_series, local_signal_index = segment_for_index(
             series,
             index=signal_index,
             unresolved_breaks=unresolved_breaks,
@@ -603,7 +599,7 @@ def _resolved_level_outcomes(
             entry_price=fill.fill_price,
             universe=BACKTEST_UNIVERSE,
         )
-        segment_end_index = _segment_end_index(
+        position_segment_end = segment_end_index(
             series,
             fill_index=fill_index,
             unresolved_breaks=unresolved_breaks,
@@ -614,7 +610,7 @@ def _resolved_level_outcomes(
             entry_price=fill.fill_price,
             levels=levels,
             masked_bar_reasons=masked_reasons,
-            segment_end_index=segment_end_index,
+            segment_end_index=position_segment_end,
         )
         outcome_name = outcome.outcome
         exit_price = outcome.exit_price
@@ -631,64 +627,13 @@ def _resolved_level_outcomes(
                 exit_price=exit_price,
                 reason=outcome.reason,
                 unresolved_until_bar_date=(
-                    series.dates[segment_end_index + 1]
-                    if outcome.reason == "series_break" and segment_end_index is not None
+                    series.dates[position_segment_end + 1]
+                    if outcome.reason == "series_break" and position_segment_end is not None
                     else None
                 ),
             )
         )
     return resolved
-
-
-def _segment_end_index(
-    series: BarSeries,
-    *,
-    fill_index: int,
-    unresolved_breaks: Sequence[date],
-) -> int | None:
-    """Last bar before the next unresolved scale break after this fill.
-
-    ``break_date`` names the first date at the new scale. A fill on that date is
-    already inside the new segment, so only a strictly later break bounds it.
-    ``bisect_left`` also handles a break date absent from this vendor series:
-    the segment still ends on the final stored bar preceding the transition.
-    """
-    if not 0 <= fill_index < len(series):
-        raise ValueError(f"fill_index {fill_index} is outside the {len(series)}-bar series")
-    for start, end in _series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
-        if start <= fill_index < end:
-            return None if end == len(series) else end - 1
-    raise RuntimeError(f"fill_index {fill_index} belongs to no price segment")
-
-
-def _series_segment_bounds(
-    series: BarSeries,
-    *,
-    unresolved_breaks: Sequence[date],
-) -> tuple[tuple[int, int], ...]:
-    """Half-open bar-index ranges separated by unresolved scale transitions."""
-    ordered = tuple(unresolved_breaks)
-    if tuple(sorted(ordered)) != ordered or len(set(ordered)) != len(ordered):
-        raise ValueError("unresolved break dates must be unique and ordered")
-    cuts = {0, len(series)}
-    cuts.update(bisect_left(series.dates, break_date) for break_date in ordered)
-    ordered_cuts = sorted(cuts)
-    return tuple((start, end) for start, end in pairwise(ordered_cuts) if start < end)
-
-
-def _segment_for_index(
-    series: BarSeries,
-    *,
-    index: int,
-    unresolved_breaks: Sequence[date],
-) -> tuple[BarSeries, int]:
-    """The one independent indicator segment containing ``index``."""
-    if not 0 <= index < len(series):
-        raise ValueError(f"index {index} is outside the {len(series)}-bar series")
-    for start, end in _series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
-        if start <= index < end:
-            return BarSeries(dates=series.dates[start:end], rows=series.rows[start:end]), index - start
-    raise RuntimeError(f"index {index} belongs to no price segment")
 
 
 def _mark_index(series: BarSeries, *, window: Window, not_before: date) -> int | None:
@@ -1057,10 +1002,7 @@ def load_corpus(
     if limit is not None:
         pairs = pairs[:limit]
     included_ids = sorted({instrument_id for instrument_id, _series_id in pairs})
-    break_rows = conn.execute(_UNRESOLVED_BREAKS_SQL, {"ids": included_ids}).fetchall() if included_ids else []
-    unresolved_breaks: dict[int, list[date]] = {}
-    for instrument_id, break_date in break_rows:
-        unresolved_breaks.setdefault(int(instrument_id), []).append(break_date)
+    unresolved_breaks = load_unresolved_breaks(conn, included_ids)
 
     in_sample = conn.execute(
         _INSAMPLE_AXIS_SQL,
@@ -1091,7 +1033,7 @@ def load_corpus(
         evaluation_end=window.end,
         in_sample_axis=in_sample_axis,
         in_sample_bar_counts=tuple(int(row[1]) for row in in_sample),
-        unresolved_breaks={instrument_id: tuple(dates) for instrument_id, dates in unresolved_breaks.items()},
+        unresolved_breaks=unresolved_breaks,
     )
 
 
@@ -1358,35 +1300,20 @@ def _signals_for(
 ) -> list[StrategySignal]:
     """One instrument's whole-series verdicts, per-series or cross-sectional."""
     if entry.signals is not None:
-        if unresolved_breaks:
-            signals: list[StrategySignal] = []
-            for start, end in _series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
-                segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
-                signals.extend(
-                    StrategySignal(
-                        verdict=signal.verdict,
-                        signal_index=signal.signal_index + start,
-                        kind=signal.kind,
-                        reason=signal.reason,
-                    )
-                    for signal in entry.signals(
-                        segment,
-                        universe=BACKTEST_UNIVERSE,
-                        masked_reason="quarantined_bar",
-                    )
-                )
-            per_kind = Counter(signal.kind for signal in signals)
-            if not per_kind or any(count != len(series) for count in per_kind.values()):
-                raise RuntimeError(
-                    f"{entry.strategy_id} produced segmented verdict counts {dict(per_kind)} for {len(series)} bars"
-                )
-            return signals
-        return entry.signals(series, universe=BACKTEST_UNIVERSE, masked_reason="quarantined_bar")
+        return segmented_signals(
+            entry,
+            series,
+            universe=BACKTEST_UNIVERSE,
+            masked_reason="quarantined_bar",
+            unresolved_breaks=unresolved_breaks,
+        )
     assert entry.member is not None and ranking is not None
-    staged = _stage_cross_sectional_segments(
+    staged = segmented_member(
         entry,
         series,
-        decision_dates=ranking.decision_dates,
+        panel_decision_dates=ranking.decision_dates,
+        universe=BACKTEST_UNIVERSE,
+        masked_reason="quarantined_bar",
         unresolved_breaks=unresolved_breaks,
     )
     signals: list[StrategySignal] = []
@@ -1407,48 +1334,6 @@ def _signals_for(
         fired = instrument_id in ranking.winners.get(when, frozenset())
         signals.append(StrategySignal(verdict="fired" if fired else "not_fired", signal_index=index, kind="entry"))
     return signals
-
-
-def _stage_cross_sectional_segments(
-    entry: StrategyEntry,
-    series: BarSeries,
-    *,
-    decision_dates: frozenset[date],
-    unresolved_breaks: Sequence[date],
-) -> StagedMember:
-    """Stage one ranked member with indicator state restarted at scale breaks."""
-    assert entry.member is not None
-    bounds = _series_segment_bounds(series, unresolved_breaks=unresolved_breaks)
-    verdicts: list[StrategySignal | None] = []
-    scores: dict[date, float] = {}
-    for start, end in bounds:
-        segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
-        staged = stage_cross_sectional_member(
-            entry.member(
-                segment,
-                panel_decision_dates=decision_dates,
-                universe=BACKTEST_UNIVERSE,
-                masked_reason="quarantined_bar",
-            )
-        )
-        verdicts.extend(
-            None
-            if verdict is None
-            else StrategySignal(
-                verdict=verdict.verdict,
-                signal_index=verdict.signal_index + start,
-                kind=verdict.kind,
-                reason=verdict.reason,
-            )
-            for verdict in staged.verdicts
-        )
-        overlap = scores.keys() & staged.scores.keys()
-        if overlap:  # pragma: no cover - BarSeries dates and segments are disjoint
-            raise RuntimeError(f"{entry.strategy_id} produced duplicate segmented score dates {sorted(overlap)}")
-        scores.update(staged.scores)
-    if len(verdicts) != len(series):
-        raise RuntimeError(f"{entry.strategy_id} staged {len(verdicts)} segmented bars for {len(series)} inputs")
-    return StagedMember(verdicts=tuple(verdicts), scores=scores)
 
 
 def _rank_cross_section(
@@ -1483,10 +1368,12 @@ def _rank_cross_section(
         series = _to_series(masked.bars)
         if len(series) < 2:
             continue
-        staged = _stage_cross_sectional_segments(
+        staged = segmented_member(
             entry,
             series,
-            decision_dates=decision_dates,
+            panel_decision_dates=decision_dates,
+            universe=BACKTEST_UNIVERSE,
+            masked_reason="quarantined_bar",
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
         )
         for when, value in staged.scores.items():

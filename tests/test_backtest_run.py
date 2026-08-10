@@ -40,7 +40,6 @@ from app.services.backtest_run import (
     _measure_namespace,
     _NamespaceBook,
     _namespaces_for_window,
-    _segment_end_index,
     _shifted,
     _signals_for,
     assert_no_existing_results,
@@ -67,6 +66,7 @@ from app.services.strategy_result import (
     ResultIdentity,
     StrategyResult,
 )
+from app.services.strategy_segmented_evaluation import segmented_member
 from app.services.strategy_statistics import StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER
 from app.services.walk_forward import FOLD_COUNT, WALK_FORWARD_MODEL_ID
@@ -1228,51 +1228,7 @@ class TestFills:
 
 
 class TestSeriesBreakBoundary:
-    """An unresolved transition bounds only positions opened before it."""
-
-    @staticmethod
-    def _series() -> BarSeries:
-        dates = tuple(date(2020, 1, day) for day in (1, 2, 4, 5))
-        row = {"open": Decimal("10"), "high": Decimal("11"), "low": Decimal("9"), "close": Decimal("10")}
-        return BarSeries(dates=dates, rows=(row, row, row, row))  # type: ignore[arg-type]
-
-    def test_the_last_pre_break_bar_bounds_an_earlier_fill(self) -> None:
-        assert (
-            _segment_end_index(
-                self._series(),
-                fill_index=0,
-                unresolved_breaks=(date(2020, 1, 4),),
-            )
-            == 1
-        )
-
-    def test_a_fill_on_the_break_date_is_inside_the_new_segment(self) -> None:
-        assert (
-            _segment_end_index(
-                self._series(),
-                fill_index=2,
-                unresolved_breaks=(date(2020, 1, 4),),
-            )
-            is None
-        )
-
-    def test_a_break_date_missing_from_vendor_bars_still_ends_the_old_segment(self) -> None:
-        assert (
-            _segment_end_index(
-                self._series(),
-                fill_index=0,
-                unresolved_breaks=(date(2020, 1, 3),),
-            )
-            == 1
-        )
-
-    def test_breaks_must_be_unique_and_ordered(self) -> None:
-        with pytest.raises(ValueError, match="unique and ordered"):
-            _segment_end_index(
-                self._series(),
-                fill_index=0,
-                unresolved_breaks=(date(2020, 1, 4), date(2020, 1, 3)),
-            )
+    """Every strategy computation restarts at an unresolved transition."""
 
     def test_s4_restarts_state_and_warmup_after_a_break(self) -> None:
         dates = tuple(date(2020, 1, 1) + timedelta(days=index) for index in range(260))
@@ -1313,16 +1269,20 @@ class TestSeriesBreakBoundary:
         series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
         entry = STRATEGY_MANIFEST["s2-cross-sectional-momentum"]
         decision_dates = frozenset(dates)
-        whole = backtest_run._stage_cross_sectional_segments(  # noqa: SLF001
+        whole = segmented_member(
             entry,
             series,
-            decision_dates=decision_dates,
+            panel_decision_dates=decision_dates,
+            universe="survivor_only",
+            masked_reason="quarantined_bar",
             unresolved_breaks=(),
         )
-        segmented = backtest_run._stage_cross_sectional_segments(  # noqa: SLF001
+        segmented = segmented_member(
             entry,
             series,
-            decision_dates=decision_dates,
+            panel_decision_dates=decision_dates,
+            universe="survivor_only",
+            masked_reason="quarantined_bar",
             unresolved_breaks=(dates[300],),
         )
         assert whole.verdicts[400] is None

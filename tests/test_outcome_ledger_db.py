@@ -433,6 +433,59 @@ class TestSelectPendingFills:
         assert {fill.universe for fill in fills} == {"survivor_only"}
         assert all(fill.fill_price == Decimal("100") for fill in fills)
 
+    def test_the_signal_id_batch_is_bounded(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        signals: dict[str, int],
+    ) -> None:
+        fills = select_pending_fills(
+            ebull_test_conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_STRATEGY_VERSION,
+            rule_set_version=_RULE_SET,
+            input_rule_set_version=_INPUT_RULE_SET,
+            limit=1,
+        )
+        assert len(fills) == 1
+        assert fills[0].signal_id == signals["fired_entry"]
+        assert fills[0].signal_bar_date == date(2024, 1, 2)
+
+    def test_cursor_bounds_select_the_next_slice(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+        signals: dict[str, int],
+    ) -> None:
+        after_first = select_pending_fills(
+            ebull_test_conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_STRATEGY_VERSION,
+            rule_set_version=_RULE_SET,
+            input_rule_set_version=_INPUT_RULE_SET,
+            after_signal_id=signals["fired_entry"],
+        )
+        wrapped = select_pending_fills(
+            ebull_test_conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_STRATEGY_VERSION,
+            rule_set_version=_RULE_SET,
+            input_rule_set_version=_INPUT_RULE_SET,
+            after_signal_id=0,
+            at_or_before_signal_id=signals["fired_entry"],
+        )
+        assert [fill.signal_id for fill in after_first] == [signals["second_fired_entry"]]
+        assert [fill.signal_id for fill in wrapped] == [signals["fired_entry"]]
+
+    def test_non_positive_limit_is_refused(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        with pytest.raises(ValueError, match="limit must be positive"):
+            select_pending_fills(
+                ebull_test_conn,
+                strategy_id=_STRATEGY_ID,
+                strategy_version=_STRATEGY_VERSION,
+                rule_set_version=_RULE_SET,
+                input_rule_set_version=_INPUT_RULE_SET,
+                limit=0,
+            )
+
     def test_another_strategy_version_is_out_of_scope(
         self, ebull_test_conn: psycopg.Connection[tuple], signals: dict[str, int]
     ) -> None:

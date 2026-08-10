@@ -32,7 +32,7 @@ from app.services.processes.param_metadata import (
     materialise_scheduled_params,
     validate_job_params,
 )
-from app.workers.scheduler import SCHEDULED_JOBS
+from app.workers.scheduler import JOB_STRATEGY_OUTCOME_RESOLUTION, SCHEDULED_JOBS
 
 _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
     {
@@ -168,6 +168,15 @@ class TestScheduledJobSourceField:
     def test_every_source_is_valid_lane(self) -> None:
         bad = [(j.name, j.source) for j in SCHEDULED_JOBS if j.source not in _ALLOWED_SOURCES]
         assert not bad, f"jobs with invalid source: {bad}"
+
+    def test_forward_outcomes_run_between_signal_scan_and_retention_on_the_same_lane(self) -> None:
+        job = next(item for item in SCHEDULED_JOBS if item.name == JOB_STRATEGY_OUTCOME_RESOLUTION)
+        assert (job.source, job.cadence.kind, job.cadence.hour, job.cadence.minute) == (
+            "strategy_scan",
+            "daily",
+            6,
+            55,
+        )
 
     def test_no_legacy_sec_lane_leak(self) -> None:
         """Regression — pre-#1020 catch-all lane='sec' MUST NOT appear in source keys.

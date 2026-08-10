@@ -128,6 +128,7 @@ from app.workers.scheduler import (
     JOB_SEED_COST_MODELS,
     JOB_STRATEGY_BACKTEST_RUN,
     JOB_STRATEGY_OBSERVATION_RETENTION,
+    JOB_STRATEGY_OUTCOME_RESOLUTION,
     JOB_STRATEGY_PAPER_CYCLE,
     JOB_STRATEGY_SIGNAL_SCAN,
     JOB_THESIS_BREAK_SCAN,
@@ -196,6 +197,7 @@ from app.workers.scheduler import (
     seed_cost_models,
     strategy_backtest_run,
     strategy_observation_retention,
+    strategy_outcome_resolution,
     strategy_paper_cycle,
     strategy_signal_scan,
     thesis_break_scan,
@@ -348,6 +350,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # the frontier watermark rather than by a DAG edge. Own "strategy_scan" lane,
     # resolved from SCHEDULED_JOBS, so no MANUAL_TRIGGER_JOB_SOURCES entry.
     JOB_STRATEGY_SIGNAL_SCAN: _adapt_zero_arg(strategy_signal_scan),
+    JOB_STRATEGY_OUTCOME_RESOLUTION: _adapt_zero_arg(strategy_outcome_resolution),
     JOB_STRATEGY_OBSERVATION_RETENTION: _adapt_zero_arg(strategy_observation_retention),
     JOB_STRATEGY_PAPER_CYCLE: _adapt_zero_arg(strategy_paper_cycle),
     # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY and NOT in
