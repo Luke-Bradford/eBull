@@ -12,6 +12,11 @@ completed NYSE regular-session bars, filters overlap at the durable watermark,
 and records missing interval ranges without imputation. Gap rows expire on the
 same tier horizon as the bars they describe.
 
+Automatic requests are gated to 09:35 ET through ten minutes after the regular
+or early close. This prevents an every-five-minute schedule consuming provider
+budget when no new RTH bar can exist. The operator-triggered path deliberately
+bypasses the scheduling prerequisite so it can repair gaps out of hours.
+
 This is evidence collection, not a promoted strategy. Demo allocation remains
 fail-closed.
 
@@ -27,6 +32,11 @@ fail-closed.
 The price descriptions document the selection contrast; candidate evaluation
 must derive the contemporaneous as-traded band at each decision. It must not
 reuse today's price or venue as a historical fact.
+
+NYSE/Nasdaq above means the current **primary listing market**, not execution
+venue. An NMS stock may execute on another exchange, ATS or broker-dealer
+internaliser. Listing-market cohorts cannot stand in for broker routing,
+spread, slippage or venue-level execution quality.
 
 ## First live provider run
 
@@ -54,6 +64,10 @@ belonged to CENN; one each belonged to QQQ 30m and IWM 5m. They remain gaps.
 An immediate identical end-to-end scheduled rerun fetched 6,571 provider bars,
 wrote zero rows and recorded zero new gaps. Its `job_runs` row was `success`,
 proving overlap idempotence through the real provider/job/database path.
+
+The first in-session V2 pass at 09:35 ET wrote 18 newly completed bars across
+the bounded 12-member slice with zero failures. This confirms the incremental
+path against live-session rather than historical-only responses.
 
 After activating V2 and running two bounded passes, dev held:
 
