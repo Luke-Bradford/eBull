@@ -82,6 +82,9 @@ def _series(rows: list[tuple[Any, ...]], *, arm: QuarantineArm) -> BarSeries:
         dates.append(bar_date)
         bars.append(
             OHLCVRow(
+                # Quarantine intentionally has no open-price verdict axis.
+                # The shared masking contract retains positive opens and
+                # masks non-positive opens by value (#2354).
                 open=(Decimal(open_) if open_ is not None and (admit or open_ > 0) else None),  # type: ignore[typeddict-item]
                 high=Decimal(high) if high is not None and (admit or range_usable) else None,  # type: ignore[typeddict-item]
                 low=Decimal(low) if low is not None and (admit or range_usable) else None,  # type: ignore[typeddict-item]

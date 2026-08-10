@@ -158,8 +158,13 @@ def _resolve(
         if low <= stop and high >= target:
             return "ambiguous", index, entry, target, None
         if low <= stop:
+            # Daily OHLC cannot recover the stop-market execution price after
+            # an intrabar trigger. The frozen development proxy is the stop
+            # level; unobserved adverse slippage remains a promotion refusal.
             return "stop_first", index, entry, target, stop
         if high >= target:
+            # A touched sell limit is valued at its limit, not the unknown
+            # potentially better intrabar price. This is conservative.
             return "target_first", index, entry, target, target
     timeout_close = series.rows[timeout_index].get("close")
     if timeout_close is None or timeout_close <= 0:

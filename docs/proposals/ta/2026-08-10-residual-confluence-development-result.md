@@ -105,6 +105,12 @@ also does not yet produce portfolio drawdown, expected shortfall or capacity
 evidence. Any one of those omissions would independently refuse promotion even
 if the point estimate had looked attractive.
 
+In particular, daily OHLC can identify a single intrabar stop touch but cannot
+recover the eventual stop-market fill. The development result uses the frozen
+stop level plus static spread and therefore does not claim stop-slippage
+precision. A future executable study needs intraday quote/trade observations or
+an adverse slippage sensitivity arm.
+
 Issue #2505 makes those challenger, attribution and integrity outputs mandatory
 for future candidates. The diagnostics above answer why this model failed at
 its own action boundary; they do not establish causal importance for any one
