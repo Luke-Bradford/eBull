@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from threading import Barrier, Event
 from time import sleep
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -35,7 +35,11 @@ from app.services.strategy_control_plane import (
     decide_funding,
     link_strategy_order,
 )
-from app.services.strategy_paper_executor import PaperExecutionResult, execute_fired_paper_signal
+from app.services.strategy_paper_executor import (
+    PaperExecutionResult,
+    _effective_capital_bases,
+    execute_fired_paper_signal,
+)
 from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
@@ -51,7 +55,12 @@ _NOW = datetime(2026, 8, 7, 15, 0, tzinfo=UTC)  # Friday 11:00 New York
 _REQUEST_ID = UUID("1c94300c-90aa-4303-9d00-dec376d74efb")
 
 
-def _seed(conn: psycopg.Connection[Any], *, auto: bool = True) -> int:
+def _seed(
+    conn: psycopg.Connection[Any],
+    *,
+    auto: bool = True,
+    ticket_sizing_mode: str = "percent",
+) -> int:
     if conn.execute("SELECT 1 FROM strategy_paper_pool_events LIMIT 1").fetchone() is None:
         configure_paper_pool(
             conn,
@@ -136,7 +145,9 @@ def _seed(conn: psycopg.Connection[Any], *, auto: bool = True) -> int:
     configure_execution_policy(
         conn,
         deployment_id=deployment.deployment_id,
-        ticket_fraction=Decimal("0.20"),
+        ticket_sizing_mode=cast(Any, ticket_sizing_mode),
+        ticket_fraction=Decimal("0.20") if ticket_sizing_mode == "percent" else None,
+        fixed_ticket_amount=Decimal("125") if ticket_sizing_mode == "fixed" else None,
         max_ticket_amount=Decimal("500"),
         stop_loss_pct=Decimal("5"),
         take_profit_pct=Decimal("10"),
@@ -310,6 +321,73 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
     # Retry is read-only and cannot submit a duplicate.
     assert execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW).order_id == result.order_id
     broker.place_demo_strategy_order.assert_called_once()
+
+
+def test_fixed_ticket_mode_requests_a_currency_amount_before_risk_caps(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_id = _seed(ebull_test_conn, ticket_sizing_mode="fixed")
+    broker = _broker()
+    broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
+        available_cash=Decimal("600"),
+        total_invested=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        equity=Decimal("1000"),
+        instrument_investments=(),
+        observed_at=_NOW,
+        raw_payload={},
+    )
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+
+    result = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.amount == Decimal("125.00")
+    assert ebull_test_conn.execute(
+        """
+        SELECT ticket_sizing_mode,ticket_fraction,fixed_ticket_amount,max_ticket_amount
+        FROM strategy_execution_policy_events
+        ORDER BY strategy_execution_policy_event_id DESC LIMIT 1
+        """
+    ).fetchone() == ("fixed", None, Decimal("125.000000"), Decimal("500.000000"))
+
+
+def test_capital_modes_use_realised_owned_pnl_and_refuse_unknown_pnl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = MagicMock()
+    intent = MagicMock(
+        capital_mode="compound",
+        deployment_limit=Decimal("1000"),
+        pool_limit=Decimal("2000"),
+        strategy_id="S-ALLOC",
+        strategy_version="v1",
+    )
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: {
+            ("S-ALLOC", "v1"): Decimal("100"),
+            ("S-OTHER", "v2"): Decimal("-25"),
+        },
+    )
+    assert _effective_capital_bases(conn, intent) == (Decimal("1100"), Decimal("2075"))
+
+    intent.capital_mode = "fixed"
+    assert _effective_capital_bases(conn, intent) == (Decimal("1000"), Decimal("2000"))
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: {
+            ("S-ALLOC", "v1"): Decimal("-100"),
+            ("S-OTHER", "v2"): Decimal("25"),
+        },
+    )
+    assert _effective_capital_bases(conn, intent) == (Decimal("900"), Decimal("1925"))
+
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: None,
+    )
+    assert _effective_capital_bases(conn, intent) == "realised_pnl_incomplete"
 
 
 def test_disabled_global_switch_keeps_an_unfunded_shadow_arm(

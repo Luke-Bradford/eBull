@@ -44,6 +44,7 @@ from app.services.strategy_control_plane import (
     StrategyControlError,
     StrategyOwnershipError,
     configure_deployment,
+    configure_execution_policy,
     configure_paper_pool,
     current_stage,
     is_risk_reducing_deployment_change,
@@ -68,6 +69,7 @@ from app.services.strategy_monitoring import (
     load_control_state,
     load_entry_block_state,
     load_owned_pnl,
+    realised_pnl_for_keys,
 )
 from app.services.strategy_position_manager import (
     StrategyPositionManagerError,
@@ -236,6 +238,9 @@ class StrategyAllocationView(BaseModel):
     remaining_capital: Decimal
     policy_configured: bool
     max_drawdown_limit_pct: Decimal | None
+    ticket_sizing_mode: Literal["percent", "fixed"] | None
+    ticket_value: Decimal | None
+    max_ticket_amount: Decimal | None
 
 
 class StrategyEntryBlockView(BaseModel):
@@ -251,10 +256,12 @@ class StrategyPaperPoolView(BaseModel):
     configured: bool
     enabled: bool
     capital_limit: Decimal
+    capital_mode: Literal["fixed", "compound"]
+    effective_capital: Decimal | None
     currency: Literal["USD"] = "USD"
     reserved_capital: Decimal
     invested_capital: Decimal | None
-    remaining_capital: Decimal
+    remaining_capital: Decimal | None
 
 
 class EvidenceRefreshView(BaseModel):
@@ -295,6 +302,7 @@ class EvidenceRefreshRequestResponse(BaseModel):
 class StrategyPaperPoolUpdateRequest(BaseModel):
     enabled: bool
     capital_limit: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
+    capital_mode: Literal["fixed", "compound"] = "fixed"
     reason: str = Field(min_length=1, max_length=1000)
 
     @model_validator(mode="after")
@@ -404,6 +412,32 @@ class AllocationUpdateResponse(BaseModel):
     currency: str
     enabled: bool
     revision: int
+
+
+class StrategySizingUpdateRequest(BaseModel):
+    strategy_version: str = Field(min_length=1, max_length=200)
+    ticket_sizing_mode: Literal["percent", "fixed"]
+    ticket_value: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    max_ticket_amount: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def valid_shape(self) -> StrategySizingUpdateRequest:
+        if self.ticket_sizing_mode == "percent" and self.ticket_value > 100:
+            raise ValueError("percent ticket value must be in (0, 100]")
+        if self.ticket_sizing_mode == "fixed" and self.max_ticket_amount < self.ticket_value:
+            raise ValueError("fixed ticket value cannot exceed its hard maximum")
+        return self
+
+
+class StrategySizingUpdateResponse(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    deployment_id: int
+    revision: int
+    ticket_sizing_mode: Literal["percent", "fixed"]
+    ticket_value: Decimal
+    max_ticket_amount: Decimal
 
 
 class LiveGatePolicyRequest(BaseModel):
@@ -753,6 +787,8 @@ def get_strategy_overview(
         latest_corpus_date = None if latest_row is None else latest_row["max"]
         cur.execute(_LATEST_EVIDENCE_REFRESH_SQL, {"job_name": _STRATEGY_BACKTEST_JOB})
         refresh_row = cur.fetchone()
+        cur.execute("SELECT DISTINCT strategy_id,strategy_version FROM strategy_deployments WHERE mode='paper'")
+        paper_deployment_keys = [(str(row["strategy_id"]), str(row["strategy_version"])) for row in cur.fetchall()]
 
     attribution_by_strategy = load_attribution(
         conn,
@@ -760,7 +796,8 @@ def get_strategy_overview(
         outcome_version=OUTCOME_RULE_SET_VERSION,
         input_version=QUARANTINE_RULE_SET_VERSION,
     )
-    pnl_by_strategy = load_owned_pnl(conn, versions=version_values)
+    pnl_versions = sorted({*version_values, *(version for _strategy_id, version in paper_deployment_keys)})
+    pnl_by_strategy = load_owned_pnl(conn, versions=pnl_versions)
     control_by_strategy = load_control_state(conn, versions=version_values)
     entry_block = load_entry_block_state(conn)
     paper_pool = load_paper_pool(conn)
@@ -904,10 +941,18 @@ def get_strategy_overview(
                 stage=control.stage,
                 attribution=StrategyAttributionView(**attribution.__dict__),
                 pnl=StrategyPnlView(
-                    **{
-                        **pnl.__dict__,
-                        "incomplete_reasons": list(pnl.incomplete_reasons),
-                    }
+                    currency="USD",
+                    strategy_trade_count=pnl.strategy_trade_count,
+                    owned_position_count=pnl.owned_position_count,
+                    active_position_count=pnl.active_position_count,
+                    close_event_count=pnl.close_event_count,
+                    invested_capital=pnl.invested_capital,
+                    realised_pnl=pnl.realised_pnl,
+                    unrealised_pnl=pnl.unrealised_pnl,
+                    total_pnl=pnl.total_pnl,
+                    observed_fees=pnl.observed_fees,
+                    complete=pnl.complete,
+                    incomplete_reasons=list(pnl.incomplete_reasons),
                 ),
                 allocation=StrategyAllocationView(
                     deployment_id=control.deployment_id,
@@ -920,6 +965,16 @@ def get_strategy_overview(
                     remaining_capital=remaining,
                     policy_configured=control.policy_configured,
                     max_drawdown_limit_pct=control.max_drawdown_limit_pct,
+                    ticket_sizing_mode=cast(
+                        Literal["percent", "fixed"] | None,
+                        control.ticket_sizing_mode,
+                    ),
+                    ticket_value=(
+                        control.ticket_fraction * Decimal("100")
+                        if control.ticket_sizing_mode == "percent" and control.ticket_fraction is not None
+                        else control.fixed_ticket_amount
+                    ),
+                    max_ticket_amount=control.max_ticket_amount,
                 ),
                 allocation_ready=not allocation_refusals,
                 allocation_refusals=allocation_refusals,
@@ -931,6 +986,13 @@ def get_strategy_overview(
         sum((value for value in invested_values if value is not None), Decimal("0"))
         if all(value is not None for value in invested_values)
         else None
+    )
+    paper_realised = realised_pnl_for_keys(pnl_by_strategy, paper_deployment_keys)
+    realised_delta = None if paper_realised is None else sum(paper_realised.values(), Decimal("0"))
+    if realised_delta is not None and paper_pool.capital_mode == "fixed":
+        realised_delta = min(realised_delta, Decimal("0"))
+    effective_pool_capital = (
+        max(Decimal("0"), paper_pool.capital_limit + realised_delta) if realised_delta is not None else None
     )
     completed_windows, partial_windows = _evidence_window_counts(strategies)
     refresh_status, refresh_error = _evidence_refresh_status(refresh_row)
@@ -951,9 +1013,15 @@ def get_strategy_overview(
             configured=paper_pool.event_id is not None,
             enabled=paper_pool.enabled,
             capital_limit=paper_pool.capital_limit,
+            capital_mode=paper_pool.capital_mode,
+            effective_capital=effective_pool_capital,
             reserved_capital=reserved_total,
             invested_capital=invested_total,
-            remaining_capital=max(paper_pool.capital_limit - reserved_total, Decimal("0")),
+            remaining_capital=(
+                max(effective_pool_capital - reserved_total, Decimal("0"))
+                if effective_pool_capital is not None
+                else None
+            ),
         ),
         evidence_refresh=EvidenceRefreshView(
             frozen_through=max(item.window.end for item in RECENT_EVIDENCE_WINDOWS.values()),
@@ -1372,15 +1440,20 @@ def update_strategy_paper_pool(
             conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
             current_pool = load_paper_pool(conn)
             runtime = get_runtime_config(conn)
-            pool_changed = current_pool.enabled != body.enabled or current_pool.capital_limit != body.capital_limit
+            pool_changed = (
+                current_pool.enabled != body.enabled
+                or current_pool.capital_limit != body.capital_limit
+                or current_pool.capital_mode != body.capital_mode
+            )
             automation_changed = runtime.enable_auto_trading != body.enabled
             if not pool_changed and not automation_changed:
-                raise StrategyControlError("automation change must alter enabled state or capital limit")
+                raise StrategyControlError("automation change must alter enabled state, capital limit, or capital mode")
             if pool_changed:
                 configure_paper_pool(
                     conn,
                     enabled=body.enabled,
                     capital_limit=body.capital_limit,
+                    capital_mode=body.capital_mode,
                     changed_by=session.username,
                     reason=body.reason,
                 )
@@ -1461,6 +1534,72 @@ def update_strategy_allocation(
         currency=row.allocation.currency,
         enabled=deployment.enabled,
         revision=deployment.revision,
+    )
+
+
+@router.put(
+    "/{strategy_id}/sizing",
+    response_model=StrategySizingUpdateResponse,
+)
+def update_strategy_sizing(
+    strategy_id: str,
+    body: StrategySizingUpdateRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategySizingUpdateResponse:
+    """Revise only an existing policy's per-signal sizing semantics."""
+    _require_current_strategy_version(strategy_id, body.strategy_version)
+    try:
+        with conn.transaction():
+            lock_strategy_control(conn, strategy_id, body.strategy_version)
+            overview = get_strategy_overview(conn)
+            strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
+            deployment_id = strategy.allocation.deployment_id
+            current_max = strategy.allocation.max_ticket_amount
+            if deployment_id is None or not strategy.allocation.policy_configured or current_max is None:
+                raise StrategyControlError("an execution policy must exist before sizing can be revised")
+            if not strategy.allocation_ready:
+                raise StrategyControlError("sizing cannot be revised while strategy evidence or controls are invalid")
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM strategy_execution_policies WHERE deployment_id=%s FOR UPDATE",
+                    (deployment_id,),
+                )
+                current = cur.fetchone()
+            if current is None:
+                raise StrategyControlError("execution policy disappeared during sizing update")
+            policy = configure_execution_policy(
+                conn,
+                deployment_id=deployment_id,
+                ticket_sizing_mode=body.ticket_sizing_mode,
+                ticket_fraction=(body.ticket_value / Decimal("100") if body.ticket_sizing_mode == "percent" else None),
+                fixed_ticket_amount=(body.ticket_value if body.ticket_sizing_mode == "fixed" else None),
+                max_ticket_amount=body.max_ticket_amount,
+                stop_loss_pct=Decimal(str(current["stop_loss_pct"])),
+                take_profit_pct=Decimal(str(current["take_profit_pct"])),
+                max_quote_age_seconds=int(current["max_quote_age_seconds"]),
+                max_scan_age_seconds=int(current["max_scan_age_seconds"]),
+                max_halt_feed_age_seconds=int(current["max_halt_feed_age_seconds"]),
+                max_cost_age_seconds=int(current["max_cost_age_seconds"]),
+                max_reconciliation_age_seconds=int(current["max_reconciliation_age_seconds"]),
+                max_instrument_exposure_pct=Decimal(str(current["max_instrument_exposure_pct"])),
+                max_portfolio_exposure_pct=Decimal(str(current["max_portfolio_exposure_pct"])),
+                max_drawdown_pct=Decimal(str(current["max_drawdown_pct"])),
+                min_net_expectancy_pct=Decimal(str(current["min_net_expectancy_pct"])),
+                cost_stress_multiplier=Decimal(str(current["cost_stress_multiplier"])),
+                changed_by=session.username,
+                reason=body.reason,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return StrategySizingUpdateResponse(
+        strategy_id=strategy_id,
+        strategy_version=body.strategy_version,
+        deployment_id=deployment_id,
+        revision=policy.revision,
+        ticket_sizing_mode=body.ticket_sizing_mode,
+        ticket_value=body.ticket_value,
+        max_ticket_amount=body.max_ticket_amount,
     )
 
 

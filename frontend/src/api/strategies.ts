@@ -9,6 +9,7 @@ import type {
   StrategyPaperPool,
   StrategyPnlHistoryResponse,
   StrategyPositionCloseResponse,
+  StrategySizingUpdateResponse,
 } from "@/api/types";
 
 export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
@@ -49,9 +50,26 @@ export function closeStrategyOwnedPosition(
 export function updateStrategyPaperPool(body: {
   enabled: boolean;
   capital_limit: string;
+  capital_mode: "fixed" | "compound";
   reason: string;
 }): Promise<StrategyPaperPool> {
   return apiFetch("/strategies/paper-pool", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateStrategySizing(
+  strategyId: string,
+  body: {
+    strategy_version: string;
+    ticket_sizing_mode: "percent" | "fixed";
+    ticket_value: string;
+    max_ticket_amount: string;
+    reason: string;
+  },
+): Promise<StrategySizingUpdateResponse> {
+  return apiFetch(`/strategies/${encodeURIComponent(strategyId)}/sizing`, {
     method: "PUT",
     body: JSON.stringify(body),
   });

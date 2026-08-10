@@ -26,6 +26,8 @@ Stage = Literal[
     "retired",
 ]
 Mode = Literal["paper", "live"]
+CapitalMode = Literal["fixed", "compound"]
+TicketSizingMode = Literal["percent", "fixed"]
 
 GOVERNANCE_GATE_VERSION = "strategy-governance-v1"
 
@@ -84,12 +86,13 @@ class PaperPool:
     enabled: bool
     capital_limit: Decimal
     currency: str = "USD"
+    capital_mode: CapitalMode = "fixed"
 
 
 def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
     row = conn.execute(
         """
-        SELECT strategy_paper_pool_event_id,enabled,capital_limit,currency
+        SELECT strategy_paper_pool_event_id,enabled,capital_limit,currency,capital_mode
         FROM strategy_paper_pool_events
         ORDER BY strategy_paper_pool_event_id DESC
         LIMIT 1
@@ -97,7 +100,7 @@ def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
     ).fetchone()
     if row is None:
         return PaperPool(None, False, Decimal("0"))
-    return PaperPool(int(row[0]), bool(row[1]), Decimal(str(row[2])), str(row[3]))
+    return PaperPool(int(row[0]), bool(row[1]), Decimal(str(row[2])), str(row[3]), cast(CapitalMode, row[4]))
 
 
 def configure_paper_pool(
@@ -105,6 +108,7 @@ def configure_paper_pool(
     *,
     enabled: bool,
     capital_limit: Decimal,
+    capital_mode: CapitalMode = "fixed",
     changed_by: str,
     reason: str,
 ) -> PaperPool:
@@ -113,29 +117,33 @@ def configure_paper_pool(
     _require_text(reason, "reason")
     if not capital_limit.is_finite() or capital_limit < 0 or (enabled and capital_limit <= 0):
         raise StrategyControlError("enabled paper pool requires a positive finite USD capital limit")
+    if capital_mode not in {"fixed", "compound"}:
+        raise StrategyControlError("capital_mode must be fixed or compound")
     # Conflict with the executor's session lock so a pause/lower cannot race an
     # already-sized order between its authority read and demo broker submit.
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
     current = load_paper_pool(conn)
-    if current.enabled == enabled and current.capital_limit == capital_limit:
-        raise StrategyControlError("paper pool change must alter enabled state or capital limit")
+    if current.enabled == enabled and current.capital_limit == capital_limit and current.capital_mode == capital_mode:
+        raise StrategyControlError("paper pool change must alter enabled state, capital limit, or capital mode")
     row = conn.execute(
         """
-        INSERT INTO strategy_paper_pool_events (enabled,capital_limit,currency,changed_by,reason)
-        VALUES (%s,%s,'USD',%s,%s)
+        INSERT INTO strategy_paper_pool_events (enabled,capital_limit,currency,capital_mode,changed_by,reason)
+        VALUES (%s,%s,'USD',%s,%s,%s)
         RETURNING strategy_paper_pool_event_id
         """,
-        (enabled, capital_limit, changed_by, reason),
+        (enabled, capital_limit, capital_mode, changed_by, reason),
     ).fetchone()
     assert row is not None
-    return PaperPool(int(row[0]), enabled, capital_limit)
+    return PaperPool(int(row[0]), enabled, capital_limit, "USD", capital_mode)
 
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
     deployment_id: int
     revision: int
-    ticket_fraction: Decimal
+    ticket_sizing_mode: TicketSizingMode
+    ticket_fraction: Decimal | None
+    fixed_ticket_amount: Decimal | None
     max_ticket_amount: Decimal
     stop_loss_pct: Decimal
     take_profit_pct: Decimal
@@ -403,8 +411,10 @@ def configure_execution_policy(
     conn: psycopg.Connection[Any],
     *,
     deployment_id: int,
-    ticket_fraction: Decimal,
+    ticket_fraction: Decimal | None,
     max_ticket_amount: Decimal,
+    ticket_sizing_mode: TicketSizingMode = "percent",
+    fixed_ticket_amount: Decimal | None = None,
     stop_loss_pct: Decimal,
     take_profit_pct: Decimal,
     max_quote_age_seconds: int,
@@ -428,8 +438,18 @@ def configure_execution_policy(
     """
     for value, field in ((changed_by, "changed_by"), (reason, "reason")):
         _require_text(value, field)
-    if not (Decimal("0") < ticket_fraction <= Decimal("1")):
-        raise StrategyControlError("ticket_fraction must be in (0, 1]")
+    if ticket_sizing_mode == "percent":
+        if ticket_fraction is None or not (Decimal("0") < ticket_fraction <= Decimal("1")):
+            raise StrategyControlError("percent ticket_fraction must be in (0, 1]")
+        if fixed_ticket_amount is not None:
+            raise StrategyControlError("percent sizing cannot carry fixed_ticket_amount")
+    elif ticket_sizing_mode == "fixed":
+        if ticket_fraction is not None:
+            raise StrategyControlError("fixed sizing cannot carry ticket_fraction")
+        if fixed_ticket_amount is None or not fixed_ticket_amount.is_finite() or fixed_ticket_amount <= 0:
+            raise StrategyControlError("fixed_ticket_amount must be positive and finite")
+    else:
+        raise StrategyControlError("ticket_sizing_mode must be percent or fixed")
     if max_ticket_amount <= 0:
         raise StrategyControlError("max_ticket_amount must be positive")
     if not (Decimal("0") < stop_loss_pct < Decimal("100")) or take_profit_pct <= 0:
@@ -468,7 +488,9 @@ def configure_execution_policy(
     values = (
         deployment_id,
         revision,
+        ticket_sizing_mode,
         ticket_fraction,
+        fixed_ticket_amount,
         max_ticket_amount,
         stop_loss_pct,
         take_profit_pct,
@@ -488,17 +510,19 @@ def configure_execution_policy(
     conn.execute(
         """
         INSERT INTO strategy_execution_policies (
-            deployment_id, revision, ticket_fraction, max_ticket_amount,
+            deployment_id, revision, ticket_sizing_mode, ticket_fraction, fixed_ticket_amount, max_ticket_amount,
             stop_loss_pct, take_profit_pct, max_quote_age_seconds,
             max_scan_age_seconds, max_halt_feed_age_seconds,
             max_cost_age_seconds, max_reconciliation_age_seconds,
             max_instrument_exposure_pct, max_portfolio_exposure_pct,
             max_drawdown_pct, min_net_expectancy_pct,
             cost_stress_multiplier, updated_by, reason
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (deployment_id) DO UPDATE SET
             revision = EXCLUDED.revision,
+            ticket_sizing_mode = EXCLUDED.ticket_sizing_mode,
             ticket_fraction = EXCLUDED.ticket_fraction,
+            fixed_ticket_amount = EXCLUDED.fixed_ticket_amount,
             max_ticket_amount = EXCLUDED.max_ticket_amount,
             stop_loss_pct = EXCLUDED.stop_loss_pct,
             take_profit_pct = EXCLUDED.take_profit_pct,
@@ -520,18 +544,18 @@ def configure_execution_policy(
     conn.execute(
         """
         INSERT INTO strategy_execution_policy_events (
-            deployment_id, revision, ticket_fraction, max_ticket_amount,
+            deployment_id, revision, ticket_sizing_mode, ticket_fraction, fixed_ticket_amount, max_ticket_amount,
             stop_loss_pct, take_profit_pct, max_quote_age_seconds,
             max_scan_age_seconds, max_halt_feed_age_seconds,
             max_cost_age_seconds, max_reconciliation_age_seconds,
             max_instrument_exposure_pct, max_portfolio_exposure_pct,
             max_drawdown_pct, min_net_expectancy_pct,
             cost_stress_multiplier, changed_by, reason
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         values,
     )
-    return ExecutionPolicy(*values[:16])
+    return ExecutionPolicy(*values[:18])
 
 
 def decide_funding(

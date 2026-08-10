@@ -59,6 +59,10 @@ class StrategyPnl:
     observed_fees: Decimal | None = Decimal("0")
     complete: bool = True
     incomplete_reasons: tuple[str, ...] = ()
+    # Completed close events remain usable for bankroll accounting while a
+    # different newly allocated order is awaiting reconciliation. The public
+    # realised_pnl stays conservative and may still be unknown in that state.
+    reconciled_realised_pnl: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -73,6 +77,10 @@ class StrategyControlState:
     reserved_capital: Decimal = Decimal("0")
     policy_configured: bool = False
     max_drawdown_limit_pct: Decimal | None = None
+    ticket_sizing_mode: str | None = None
+    ticket_fraction: Decimal | None = None
+    fixed_ticket_amount: Decimal | None = None
+    max_ticket_amount: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -362,8 +370,46 @@ def load_owned_pnl(conn: psycopg.Connection[Any], *, versions: Sequence[str]) ->
             observed_fees=fees if fees_known else None,
             complete=not reasons,
             incomplete_reasons=tuple(sorted(reasons)),
+            reconciled_realised_pnl=realised,
         )
     return result
+
+
+def realised_pnl_for_keys(
+    pnl_by_strategy: dict[tuple[str, str], StrategyPnl],
+    keys: Sequence[tuple[str, str]],
+) -> dict[tuple[str, str], Decimal] | None:
+    """Project reconciled realised values, failing closed on any unknown."""
+    result: dict[tuple[str, str], Decimal] = {}
+    for key in keys:
+        pnl = pnl_by_strategy.get(key, StrategyPnl())
+        if {
+            "realised_pnl_missing_from_history",
+            "released_position_missing_close_history",
+        }.intersection(pnl.incomplete_reasons):
+            return None
+        result[key] = pnl.reconciled_realised_pnl
+    return result
+
+
+def load_paper_realised_pnl(conn: psycopg.Connection[Any]) -> dict[tuple[str, str], Decimal] | None:
+    """Return exact-owned realised P&L for every paper deployment.
+
+    Old strategy versions remain part of the shared pot after they are retired;
+    limiting this calculation to the current manifest would make realised gains
+    or losses disappear from the capital base. ``None`` is fail-closed whenever
+    any deployed lifecycle cannot be reconciled completely.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT strategy_id,strategy_version
+        FROM strategy_deployments
+        WHERE mode='paper'
+        """
+    ).fetchall()
+    keys = [(str(row[0]), str(row[1])) for row in rows]
+    pnl_by_strategy = load_owned_pnl(conn, versions=sorted({version for _strategy_id, version in keys}))
+    return realised_pnl_for_keys(pnl_by_strategy, keys)
 
 
 _CONTROL_SQL = """
@@ -412,7 +458,9 @@ _CONTROL_SQL = """
            d.deployment_id, d.capital_limit, d.currency, d.enabled, d.revision,
            COALESCE(res.amount, 0) AS reserved_capital,
            (pol.deployment_id IS NOT NULL) AS policy_configured,
-           pol.max_drawdown_pct AS max_drawdown_limit_pct
+           pol.max_drawdown_pct AS max_drawdown_limit_pct,
+           pol.ticket_sizing_mode, pol.ticket_fraction,
+           pol.fixed_ticket_amount, pol.max_ticket_amount
     FROM strategy_keys keys
     LEFT JOIN current_stage cs USING (strategy_id, strategy_version)
     LEFT JOIN pinned pin USING (strategy_id, strategy_version)
@@ -445,6 +493,14 @@ def load_control_state(
             policy_configured=bool(row["policy_configured"]),
             max_drawdown_limit_pct=(
                 Decimal(str(row["max_drawdown_limit_pct"])) if row["max_drawdown_limit_pct"] is not None else None
+            ),
+            ticket_sizing_mode=(str(row["ticket_sizing_mode"]) if row["ticket_sizing_mode"] is not None else None),
+            ticket_fraction=(Decimal(str(row["ticket_fraction"])) if row["ticket_fraction"] is not None else None),
+            fixed_ticket_amount=(
+                Decimal(str(row["fixed_ticket_amount"])) if row["fixed_ticket_amount"] is not None else None
+            ),
+            max_ticket_amount=(
+                Decimal(str(row["max_ticket_amount"])) if row["max_ticket_amount"] is not None else None
             ),
         )
         for row in rows
