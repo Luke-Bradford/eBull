@@ -698,6 +698,31 @@ def _evidence_refresh_status(
     return "idle", None
 
 
+def _evidence_window_counts(strategies: list[StrategyOverview]) -> tuple[int, int]:
+    """Return complete and partial pinned windows across runnable strategies.
+
+    A missing member is missing evidence, never an exception. With no runnable
+    strategies there is no evidence population, so the completed denominator
+    is zero rather than vacuously all eight.
+    """
+    statuses = [
+        {window.window_id: window.status for window in strategy.evidence_windows}
+        for strategy in strategies
+        if strategy.runnable
+    ]
+    if not statuses:
+        return 0, 0
+    completed = sum(
+        all(strategy_windows.get(window_id) == "complete" for strategy_windows in statuses)
+        for window_id in RECENT_EVIDENCE_WINDOWS
+    )
+    partial = sum(
+        any(strategy_windows.get(window_id) == "partial" for strategy_windows in statuses)
+        for window_id in RECENT_EVIDENCE_WINDOWS
+    )
+    return completed, partial
+
+
 @router.get("/overview", response_model=StrategyOverviewResponse)
 def get_strategy_overview(
     conn: psycopg.Connection[object] = Depends(get_conn),
@@ -907,21 +932,7 @@ def get_strategy_overview(
         if all(value is not None for value in invested_values)
         else None
     )
-    runnable_rows = [item for item in strategies if item.runnable]
-    completed_windows = sum(
-        all(
-            next(window for window in item.evidence_windows if window.window_id == window_id).status == "complete"
-            for item in runnable_rows
-        )
-        for window_id in RECENT_EVIDENCE_WINDOWS
-    )
-    partial_windows = sum(
-        any(
-            next(window for window in item.evidence_windows if window.window_id == window_id).status == "partial"
-            for item in runnable_rows
-        )
-        for window_id in RECENT_EVIDENCE_WINDOWS
-    )
+    completed_windows, partial_windows = _evidence_window_counts(strategies)
     refresh_status, refresh_error = _evidence_refresh_status(refresh_row)
     return StrategyOverviewResponse(
         as_of=datetime.now(tz=UTC),

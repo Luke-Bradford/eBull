@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.api.strategies import _evidence_window_counts
 from app.services.processes.param_metadata import MANUAL_TRIGGER_JOB_METADATA
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS, recent_evidence_window
 from app.services.strategy_result import EVALUATION_WINDOW_END, HOLDOUT_BOUNDARY
@@ -130,3 +131,14 @@ def test_refresh_recent_refuses_partial_immutable_window(
                 "holdout_accessed_by": "operator",
             }
         )
+
+
+def test_overview_counts_missing_members_and_empty_runnable_set_without_crashing() -> None:
+    missing_member = SimpleNamespace(
+        runnable=True,
+        evidence_windows=[SimpleNamespace(window_id="primary-2022-plus", status="complete")],
+    )
+    excluded = SimpleNamespace(runnable=False, evidence_windows=[])
+
+    assert _evidence_window_counts([missing_member]) == (1, 0)  # type: ignore[list-item]
+    assert _evidence_window_counts([excluded]) == (0, 0)  # type: ignore[list-item]
