@@ -69,6 +69,13 @@ The first in-session V2 pass at 09:35 ET wrote 18 newly completed bars across
 the bounded 12-member slice with zero failures. This confirms the incremental
 path against live-session rather than historical-only responses.
 
+A second in-session tracked pass at 09:40 ET measured 20,184 WAL bytes for the
+whole job while writing four new bars (5,046 bytes/new bar at this very small
+increment). The total includes fixed `job_runs`, cursor, index and commit WAL,
+so bytes-per-row is intentionally conservative and should not be extrapolated
+linearly. More importantly for operational load, the complete bounded fire was
+about 20 KiB and succeeded with zero gaps or member failures.
+
 After activating V2 and running two bounded passes, dev held:
 
 ```text
@@ -102,7 +109,8 @@ RTH rows under the already-enforced tier horizons and per-day caps:
 Linearising the first real footprint gives a planning envelope below roughly
 60 MiB. Retention still drops whole expired partitions; the collector adds no
 tick, quote-history or derived-indicator heap. This projection must be replaced
-by measured full-window bytes/WAL/latency as the prospective store matures.
+by measured full-window bytes/latency as the prospective store matures; live
+incremental WAL now has the initial bounded-fire measurement above.
 
 ## Refusals and limitations
 
