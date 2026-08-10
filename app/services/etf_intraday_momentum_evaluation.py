@@ -152,8 +152,11 @@ def evaluate_symbol(symbol: str, bars: Sequence[IntradayBar]) -> SymbolEvaluatio
         try:
             signal = opening_signal(symbol=normalised, prior_close_bar=prior, opening_bar=opening)
             outcome = resolve_gross_feasibility(signal, last_half_hour_bar=final)
-        except CandidateRefusal as exc:
-            refusals[f"candidate_refusal:{exc}"] += 1
+        except CandidateRefusal:
+            # Required-point absence has stable codes above. Any remaining
+            # structural refusal is one operational class; exception prose is
+            # deliberately not a dimension because it may contain row detail.
+            refusals["candidate_structural_refusal"] += 1
             continue
 
         last_return = float((final.close / final.open - Decimal(1)) * Decimal(100))
