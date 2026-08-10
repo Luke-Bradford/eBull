@@ -215,7 +215,11 @@ _PENDING = """
       AND s.signal_kind = 'entry'
       AND s.verdict = 'fired'
       AND o.outcome_id IS NULL
-    ORDER BY s.instrument_id, s.signal_bar_date
+      AND s.signal_id > %(after_signal_id)s
+      AND (%(at_or_before_signal_id)s::bigint IS NULL
+           OR s.signal_id <= %(at_or_before_signal_id)s::bigint)
+    ORDER BY s.signal_id
+    LIMIT %(limit)s
 """
 
 
@@ -226,6 +230,9 @@ def select_pending_fills(
     strategy_version: str,
     rule_set_version: str,
     input_rule_set_version: str,
+    limit: int | None = None,
+    after_signal_id: int = 0,
+    at_or_before_signal_id: int | None = None,
 ) -> list[PendingFill]:
     """Every fired entry for one strategy version still unresolved at this version pair.
 
@@ -249,6 +256,15 @@ def select_pending_fills(
     time resolving, that one decides what may be stored. A caller that built its
     own list still cannot write an outcome for an exit.
     """
+    if limit is not None and limit < 1:
+        raise ValueError(f"limit must be positive or None, got {limit}")
+    if after_signal_id < 0:
+        raise ValueError(f"after_signal_id must be non-negative, got {after_signal_id}")
+    if at_or_before_signal_id is not None and at_or_before_signal_id <= after_signal_id:
+        raise ValueError(
+            "at_or_before_signal_id must be greater than after_signal_id when supplied, "
+            f"got {at_or_before_signal_id} <= {after_signal_id}"
+        )
     with conn.cursor() as cur:
         cur.execute(
             _PENDING,
@@ -257,6 +273,9 @@ def select_pending_fills(
                 "strategy_version": strategy_version,
                 "rule_set_version": rule_set_version,
                 "input_rule_set_version": input_rule_set_version,
+                "limit": limit,
+                "after_signal_id": after_signal_id,
+                "at_or_before_signal_id": at_or_before_signal_id,
             },
         )
         rows = cur.fetchall()

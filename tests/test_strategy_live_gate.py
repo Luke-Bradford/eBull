@@ -19,6 +19,8 @@ from app.api.strategies import (
     execute_live_kill_drill,
 )
 from app.security.sessions import SessionRow
+from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.strategy_control_plane import (
     StrategyControlError,
     configure_deployment,
@@ -170,6 +172,18 @@ def test_report_names_every_missing_measured_prerequisite_and_live_writer_block(
         """,
         (_STRATEGY_ID, _VERSION),
     )
+    conn.execute(
+        """
+        INSERT INTO strategy_outcomes (
+          signal_id,rule_set_version,input_rule_set_version,outcome,
+          resolution_method,exit_bar_date,bars_held
+        )
+        SELECT signal_id,%s,%s,'ambiguous','daily_bar',fill_bar_date,0
+        FROM strategy_signals
+        WHERE strategy_id=%s AND strategy_version=%s
+        """,
+        (OUTCOME_RULE_SET_VERSION, QUARANTINE_RULE_SET_VERSION, _STRATEGY_ID, _VERSION),
+    )
 
     report = assess_live_gate(
         conn,
@@ -189,6 +203,8 @@ def test_report_names_every_missing_measured_prerequisite_and_live_writer_block(
         "live_capital_exceeds_preregistered_cap",
         "live_strategy_broker_contract_not_validated",
     }.issubset(report.refusal_codes)
+    # A both-touch daily bar has no known P&L and must not satisfy the resolved
+    # performance sample merely because it has a terminal audit row.
     assert report.facts.forward_resolved_signals == 0
     assert report.facts.paper_closed_trades == 0
     assert report.facts.active_owned_instrument_count == 0

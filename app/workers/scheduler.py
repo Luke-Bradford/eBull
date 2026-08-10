@@ -370,6 +370,9 @@ JOB_PRICE_QUARANTINE_REFRESH = "price_quarantine_refresh"
 # if candles have not moved, the frontier has not moved, and the watermark makes
 # the run a no-op. See app/services/strategy_signal_scan.py.
 JOB_STRATEGY_SIGNAL_SCAN = "strategy_signal_scan"
+# #2474 — bounded forward outcome resolver. Shares ``strategy_scan`` so it
+# cannot race the signal producer or retention while selecting immutable fills.
+JOB_STRATEGY_OUTCOME_RESOLUTION = "strategy_outcome_resolution"
 # #2448 — range-partition retention. Shares ``strategy_scan`` so a partition
 # cannot be dropped while the scanner is inserting into it.
 JOB_STRATEGY_OBSERVATION_RETENTION = "strategy_observation_retention"
@@ -1983,10 +1986,9 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "refusals. Resumes from a per-(strategy_id, "
             "strategy_version) frontier watermark, so a re-run on the "
             "same frontier is a no-op and a market holiday neither "
-            "writes nor wedges. Signals only: outcome resolution is a "
-            "separate job (nothing in app/ builds an ExitLevels, and "
-            "an outcome stored for an immature window would drop the "
-            "signal from select_pending_fills permanently). Spec "
+            "writes nor wedges. Signals only: the 06:55 outcome job "
+            "consumes manifest-owned level brackets and leaves immature "
+            "windows pending rather than storing a false terminal result. Spec "
             "docs/proposals/ta/2026-08-08-strategy-signal-scan.md."
         ),
         # After the 03:00 orchestrator_full_sync has driven candles →
@@ -2003,11 +2005,25 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
+        name=JOB_STRATEGY_OUTCOME_RESOLUTION,
+        display_name="Strategy forward outcome resolution (#2474)",
+        source="strategy_scan",
+        description=(
+            "Daily 06:55 UTC — after the signal scan, resolves mature current-version "
+            "level-based fills against the fail-closed live corpus. Incomplete windows "
+            "remain pending without a database write; terminal outcomes are one immutable "
+            "row per signal and rule-version pair, processed round-robin in a bounded batch."
+        ),
+        cadence=Cadence.daily(hour=6, minute=55),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
         name=JOB_STRATEGY_OBSERVATION_RETENTION,
         display_name="Strategy observation retention (#2448)",
         source="strategy_scan",
         description=(
-            "Daily 07:05 UTC — after the 06:45 signal scan, drops whole expired "
+            "Daily 07:05 UTC — after the 06:45 scan and 06:55 outcome pass, drops whole expired "
             "range partitions: negative signal detail after 90 days, 30m bars "
             "after 24 months, 5m bars after 12 months and 1m bars after 30 days. "
             "Fired signals and daily counts are durable. Never issues a mass DELETE."
@@ -4945,6 +4961,20 @@ def strategy_signal_scan() -> None:
         # run would be recorded green with a strategy silently dark.
         if failed:
             raise RuntimeError(f"strategy_signal_scan: {len(failed)} strategy(ies) failed: {failed}")
+
+
+def strategy_outcome_resolution() -> None:
+    """Resolve mature forward brackets without persisting immature windows."""
+    from app.services.strategy_outcome_resolution import run_outcome_resolution
+
+    with _tracked_job(JOB_STRATEGY_OUTCOME_RESOLUTION) as tracker:
+        with connect_job(autocommit=True) as conn:
+            report = run_outcome_resolution(conn)
+        tracker.row_count = report.written
+        tracker.note = (
+            f"selected={report.selected} written={report.written} "
+            f"immature={report.immature} ambiguous={report.ambiguous}"
+        )
 
 
 def strategy_observation_retention() -> None:

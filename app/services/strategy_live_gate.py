@@ -295,7 +295,7 @@ def assess_live_gate(
         cur.execute(
             """
             SELECT
-              count(*) FILTER (WHERE o.signal_id IS NOT NULL
+              count(*) FILTER (WHERE o.gross_return_pct IS NOT NULL
                                 AND s.created_at >= %(forward_at)s
                                 AND s.created_at < %(paper_at)s
                                 AND s.signal_bar_date >= %(forward_date)s) AS forward_resolved,
