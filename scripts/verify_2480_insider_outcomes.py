@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     _print_segment("2022+ primary", evidence.monthly_returns, BOOTSTRAP_SEED)
     _print_segment("matched random", control.monthly_returns, BOOTSTRAP_SEED + 1)
     for months in (36, 24):
-        start = _subtract_months(last_entry, months)
+        start = _subtract_months(last_entry, months - 1)
         _print_segment(
             f"trailing {months} months",
             [item for item in evidence.monthly_returns if start <= item.entry_date <= last_entry],
