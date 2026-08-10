@@ -87,6 +87,7 @@ def _month(value: float) -> MonthlyPortfolioReturn:
         routine_firms=1,
         unique_firms=2,
         minimum_median_dollar_volume=Decimal("10000000"),
+        maximum_single_firm_weight_pct=50,
     )
 
 
@@ -119,9 +120,10 @@ def test_control_never_uses_a_treated_firm_class_month() -> None:
             _classified("opportunistic", accession="b", month=2),
         ]
     )
-    controls, _ = build_matched_control_signals(signals)
+    controls, counts = build_matched_control_signals(signals)
     assert controls
     assert {item.signal_month for item in controls} == {3}
+    assert counts["matched_control_firm_months"] + counts["control_cell_unmatched_signals"] == len(signals)
 
 
 def test_control_excludes_treated_months_across_both_classes() -> None:
@@ -191,7 +193,8 @@ def test_partial_frontier_month_and_late_acceptance_are_refused() -> None:
 
 
 def test_sql_selects_usable_sessions_and_rejects_partial_frontier_month() -> None:
-    assert _WINDOW_SQL.count("WHERE e.return_usable") == 2
+    assert _WINDOW_SQL.count("WHERE e.return_usable") == 1
+    assert "rn <= 20 AND return_usable" in _WINDOW_SQL
     assert "target_end <= date_trunc('month'" in _WINDOW_SQL
 
 

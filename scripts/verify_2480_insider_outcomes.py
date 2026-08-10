@@ -39,6 +39,7 @@ def _print_segment(label: str, monthly: Sequence[MonthlyPortfolioReturn], seed: 
         cluster_by_date([item.spread_pct for item in monthly], [item.entry_date for item in monthly]), seed=seed
     )
     ci = "unavailable" if bootstrap is None else f"[{bootstrap.ci_low_pct:+.3f},{bootstrap.ci_high_pct:+.3f}]"
+    ess = "—" if bootstrap is None else f"{bootstrap.effective_sample_size:.1f}"
     expectancy = "—" if not monthly else f"{mean(item.spread_pct for item in monthly):+.3f}%"
     wins = "—" if not monthly else f"{sum(item.spread_pct > 0 for item in monthly) / len(monthly) * 100:.1f}%"
     pf = profit_factor(monthly)
@@ -46,12 +47,23 @@ def _print_segment(label: str, monthly: Sequence[MonthlyPortfolioReturn], seed: 
     tail = expected_shortfall_5_pct(monthly)
     eq = "—" if not monthly else f"{mean(item.equal_weight_spread_pct for item in monthly):+.3f}%"
     firms = median_firm_count(monthly)
+    worst = "—" if not monthly else f"{min(item.spread_pct for item in monthly):+.2f}%"
+    market = [item.market_relative_spread_pct for item in monthly if item.market_relative_spread_pct is not None]
+    sector = [item.sector_relative_spread_pct for item in monthly if item.sector_relative_spread_pct is not None]
+    market_text = "—" if not market else f"{mean(market):+.3f}%/{len(market)}"
+    sector_text = "—" if not sector else f"{mean(sector):+.3f}%/{len(sector)}"
+    maximum_firms = max((item.unique_firms for item in monthly), default=0)
+    minimum_liquidity = min((item.minimum_median_dollar_volume for item in monthly), default=None)
+    maximum_weight = max((item.maximum_single_firm_weight_pct for item in monthly), default=None)
     print(
-        f"{label:<22} months={len(monthly):>2} expectancy={expectancy:>9} CI={ci:<18} "
+        f"{label:<22} months={len(monthly):>2} ESS={ess:>5} expectancy={expectancy:>9} CI={ci:<18} "
         f"wins={wins:>6} PF={'—' if pf is None else f'{pf:.3f}':>6} "
         f"MDD={'—' if drawdown is None else f'{drawdown:+.2f}%':>8} "
-        f"ES5={'—' if tail is None else f'{tail:+.2f}%':>8} EW={eq:>9} "
-        f"median firms={'—' if firms is None else f'{firms:.1f}'}"
+        f"ES5={'—' if tail is None else f'{tail:+.2f}%':>8} worst={worst:>8} EW={eq:>9} "
+        f"vsSPY={market_text:>12} vsSector={sector_text:>12} "
+        f"firms median/max={'—' if firms is None else f'{firms:.1f}'}/{maximum_firms} "
+        f"minADV={'—' if minimum_liquidity is None else f'${minimum_liquidity:,.0f}'} "
+        f"maxWeight={'—' if maximum_weight is None else f'{maximum_weight:.1f}%'}"
     )
 
 
@@ -135,7 +147,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {reason:<50} {count:>12,}")
     print("\npromotion refusals: survivor_only, total_return_dividends_absent, live_exact_acceptance_required,")
     print("                    bracket_not_defined, forward_shadow_absent, broker_cost_contract_unproven")
-    return 0
+    primary_effect_pass = evidence.bootstrap is not None and evidence.bootstrap.ci_low_pct > 0
+    matched_control_pass = paired_bootstrap is not None and paired_bootstrap.ci_low_pct > 0
+    full_years = {
+        year: [item for item in evidence.monthly_returns if item.entry_date.year == year]
+        for year in range(2022, last_entry.year)
+    }
+    stability_pass = bool(full_years) and all(
+        len(items) >= 10 and mean(item.spread_pct for item in items) > 0 for items in full_years.values()
+    )
+    print("\nexplicit gates")
+    print(f"  primary positive lower CI:            {'PASS' if primary_effect_pass else 'FAIL'}")
+    print(f"  primary beats matched control by CI:  {'PASS' if matched_control_pass else 'FAIL'}")
+    print(f"  completed-year sign stability:        {'PASS' if stability_pass else 'FAIL'}")
+    print("  tail threshold:                       BLOCKED — no capital-trial bound registered")
+    print("  point-in-time universe:               BLOCKED — survivor-only price corpus")
+    print("  live cost/borrow contract:             BLOCKED — historical estimate only")
+    print("  bracket and forward shadow:            BLOCKED — separate trial not defined")
+    print("  PROMOTION:                             BLOCKED")
+    return 1
 
 
 if __name__ == "__main__":

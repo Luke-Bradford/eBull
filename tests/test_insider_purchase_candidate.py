@@ -9,6 +9,7 @@ import pytest
 from app.services.insider_purchase_candidate import (
     PurchaseObservation,
     classify_purchases,
+    resolve_research_instrument,
     validate_archive_sequence,
 )
 
@@ -73,3 +74,9 @@ def test_archive_sequence_requires_pinned_contiguous_history() -> None:
     validate_archive_sequence(paths, expected_last_quarter="2019q2")
     with pytest.raises(ValueError, match="contiguous"):
         validate_archive_sequence(paths[:1], expected_last_quarter="2019q2")
+
+
+def test_exact_cik_symbol_resolves_a_multi_series_issuer_before_unique_fallback() -> None:
+    exact = {("0000000001", "AAA"): 1, ("0000000001", "AAB"): 2}
+    assert resolve_research_instrument("0000000001", "AAB", exact, {}) == (2, False)
+    assert resolve_research_instrument("0000000002", "OLD", exact, {"0000000002": 3}) == (3, True)

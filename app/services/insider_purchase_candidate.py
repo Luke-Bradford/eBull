@@ -329,6 +329,20 @@ def _load_research_resolution(conn: psycopg.Connection[Any]) -> tuple[dict[tuple
     return exact, unique
 
 
+def resolve_research_instrument(
+    issuer_cik: str,
+    issuer_symbol: str,
+    exact: Mapping[tuple[str, str], int],
+    unique: Mapping[str, int],
+) -> tuple[int | None, bool]:
+    """Resolve exact corpus symbol first; return whether CIK fallback was used."""
+    exact_match = exact.get((issuer_cik, issuer_symbol))
+    if exact_match is not None:
+        return exact_match, False
+    fallback = unique.get(issuer_cik)
+    return fallback, fallback is not None
+
+
 def enrich_point_in_time(
     conn: psycopg.Connection[Any], purchases: Sequence[PurchaseObservation]
 ) -> tuple[tuple[PurchaseObservation, ...], Counter[str]]:
@@ -350,14 +364,13 @@ def enrich_point_in_time(
     counters: Counter[str] = Counter()
     output: list[PurchaseObservation] = []
     for purchase in purchases:
-        # Market-cap weighting cannot use a combined issuer share count with
-        # one arbitrarily selected class price. A CIK with multiple corpus
-        # series is therefore refused even when the current symbol matches.
-        instrument_id = unique.get(purchase.issuer_cik)
+        instrument_id, used_fallback = resolve_research_instrument(
+            purchase.issuer_cik, purchase.issuer_symbol, exact, unique
+        )
         if instrument_id is None:
             counters["unresolved_or_multiclass_research_series"] += 1
             continue
-        if exact.get((purchase.issuer_cik, purchase.issuer_symbol)) != instrument_id:
+        if used_fallback:
             counters["unique_cik_symbol_history_fallback"] += 1
         acceptance = accepted.get(purchase.accession_number)
         if acceptance is None:
@@ -427,5 +440,6 @@ __all__ = [
     "enrich_point_in_time",
     "enrich_classified_point_in_time",
     "load_archive_purchases",
+    "resolve_research_instrument",
     "validate_archive_sequence",
 ]

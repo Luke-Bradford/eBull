@@ -91,6 +91,7 @@ class MonthlyPortfolioReturn:
     routine_firms: int
     unique_firms: int
     minimum_median_dollar_volume: Decimal
+    maximum_single_firm_weight_pct: float
 
 
 @dataclass(frozen=True)
@@ -147,34 +148,37 @@ def build_matched_control_signals(
 ) -> tuple[tuple[FirmMonthSignal, ...], Mapping[str, int]]:
     """Move each firm to another month in the same quarter before prices read."""
     rng = Random(seed)
-    output: dict[tuple[str, InsiderClass, int, int], FirmMonthSignal] = {}
+    output: list[FirmMonthSignal] = []
     counters: Counter[str] = Counter()
     treated = {(signal.issuer_cik, signal.signal_year, signal.signal_month) for signal in signals}
+    cells: dict[tuple[str, InsiderClass, int, int], list[FirmMonthSignal]] = defaultdict(list)
     for signal in signals:
-        quarter_start = ((signal.signal_month - 1) // 3) * 3 + 1
-        alternatives = [
-            month
-            for month in range(quarter_start, quarter_start + 3)
-            if month != signal.signal_month and (signal.issuer_cik, signal.signal_year, month) not in treated
-        ]
-        if not alternatives:
-            counters["control_cell_has_no_untreated_month"] += 1
-            continue
-        control_month = alternatives[rng.randrange(len(alternatives))]
-        control = replace(
-            signal,
-            signal_month=control_month,
-            accession_numbers=tuple(f"control:{item}" for item in signal.accession_numbers),
-            latest_acceptance=None,
+        cells[(signal.issuer_cik, signal.insider_class, signal.signal_year, (signal.signal_month - 1) // 3)].append(
+            signal
         )
-        key = (control.issuer_cik, control.insider_class, control.signal_year, control.signal_month)
-        if key in output:
-            counters["control_firm_month_duplicates_suppressed"] += 1
-            continue
-        output[key] = control
+    for (issuer_cik, _insider_class, year, quarter), cell_signals in sorted(cells.items()):
+        quarter_start = quarter * 3 + 1
+        alternatives = [
+            month for month in range(quarter_start, quarter_start + 3) if (issuer_cik, year, month) not in treated
+        ]
+        rng.shuffle(alternatives)
+        ordered_signals = sorted(cell_signals, key=lambda item: (item.signal_month, item.accession_numbers))
+        matched = min(len(ordered_signals), len(alternatives))
+        counters["control_cell_unmatched_signals"] += len(ordered_signals) - matched
+        for signal, control_month in zip(ordered_signals[:matched], alternatives[:matched], strict=True):
+            output.append(
+                replace(
+                    signal,
+                    signal_month=control_month,
+                    accession_numbers=tuple(f"control:{item}" for item in signal.accession_numbers),
+                    latest_acceptance=None,
+                )
+            )
     counters["matched_control_firm_months"] = len(output)
     counters["input_signal_firm_months"] = len(signals)
-    return tuple(sorted(output.values(), key=lambda item: (item.signal_date, item.issuer_cik))), dict(counters)
+    return tuple(sorted(output, key=lambda item: (item.signal_date, item.issuer_cik, item.insider_class))), dict(
+        counters
+    )
 
 
 _CREATE_TEMP_SIGNALS = """
@@ -245,20 +249,19 @@ _WINDOW_SQL = """
          AND q.bar_date = d.bar_date
          AND q.rule_set_version = %(quarantine_version)s
     ), prior_ranked AS (
-        SELECT event_index, bar_date, close, volume,
+        SELECT event_index, bar_date, close, volume, return_usable,
                row_number() OVER (PARTITION BY e.event_index ORDER BY e.bar_date DESC) AS rn
         FROM prior_raw e
-        WHERE e.return_usable
     ), prior AS (
         SELECT event_index,
                max(close) FILTER (WHERE rn = 1) AS prior_close,
-               TRUE AS prior_close_usable,
+               bool_and(return_usable) FILTER (WHERE rn = 1) AS prior_close_usable,
                count(*) FILTER (WHERE rn <= 20) AS prior_sessions,
                count(*) FILTER (
-                   WHERE rn <= 20 AND close > 0 AND volume IS NOT NULL AND volume > 0
+                   WHERE rn <= 20 AND return_usable AND close > 0 AND volume IS NOT NULL AND volume > 0
                ) AS valid_liquidity_sessions,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY close * volume) FILTER (
-                   WHERE rn <= 20 AND close > 0 AND volume IS NOT NULL AND volume > 0
+                   WHERE rn <= 20 AND return_usable AND close > 0 AND volume IS NOT NULL AND volume > 0
                ) AS median_dollar_volume
         FROM prior_ranked GROUP BY event_index
     )
@@ -381,6 +384,13 @@ def _weighted(values: Sequence[tuple[float, Decimal]]) -> float:
     return sum(value * float(weight / total) for value, weight in values)
 
 
+def _maximum_weight_pct(outcomes: Sequence[FirmMonthOutcome]) -> float:
+    total = sum((item.weight_value for item in outcomes), start=Decimal("0"))
+    if total <= 0:
+        raise ValueError("portfolio weight denominator is not positive")
+    return float(max(item.weight_value for item in outcomes) / total * 100)
+
+
 def _portfolio_months(
     outcomes: Sequence[FirmMonthOutcome], refusals: Counter[str]
 ) -> tuple[MonthlyPortfolioReturn, ...]:
@@ -448,6 +458,10 @@ def _portfolio_months(
                 routine_firms=len(routine),
                 unique_firms=len({item.signal.issuer_cik for item in [*opportunistic, *routine]}),
                 minimum_median_dollar_volume=min(item.median_dollar_volume for item in [*opportunistic, *routine]),
+                maximum_single_firm_weight_pct=max(
+                    _maximum_weight_pct(opportunistic),
+                    _maximum_weight_pct(routine),
+                ),
             )
         )
     return tuple(monthly)
