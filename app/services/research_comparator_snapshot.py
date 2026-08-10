@@ -36,6 +36,7 @@ SESSION_CALENDAR = "eToro OneDay provider calendar; missing sessions remain miss
 SOURCE_TIMEZONE = "UTC fromDate truncated to provider session date"
 OHLC_ADJUSTMENT_BASIS = "split_adjusted"
 DIVIDEND_ADJUSTMENT_BASIS = "none"
+ETORO_ETF_INSTRUMENT_TYPE_ID = 6
 
 MIN_OVERLAP_SESSIONS = 500
 MIN_RETURN_CORRELATION = 0.99
@@ -291,11 +292,14 @@ def load_source_snapshot(conn: psycopg.Connection[Any]) -> ComparatorSnapshot:
         SELECT instrument_id, symbol
         FROM instruments
         WHERE symbol = ANY(%(symbols)s)
-          AND instrument_type_id = 6
+          AND instrument_type_id = %(etf_type_id)s
           AND is_tradable = TRUE
         ORDER BY symbol, instrument_id
         """,
-        {"symbols": list(COMPARATOR_SYMBOLS)},
+        {
+            "symbols": list(COMPARATOR_SYMBOLS),
+            "etf_type_id": ETORO_ETF_INSTRUMENT_TYPE_ID,
+        },
     ).fetchall()
     by_symbol: dict[str, list[int]] = {}
     for instrument_id, symbol in instruments:
