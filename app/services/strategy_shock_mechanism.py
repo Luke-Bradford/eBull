@@ -34,7 +34,8 @@ Mechanism = Literal[
 CoverageStatus = Literal["complete", "known_incomplete"]
 
 RESIDUAL_SHOCK_Z: Final = 2.0
-MAX_HALT_FEED_AGE: Final = timedelta(minutes=5)
+MAX_HALT_FEED_AGE_SECONDS: Final = 300
+MAX_HALT_FEED_AGE: Final = timedelta(seconds=MAX_HALT_FEED_AGE_SECONDS)
 REQUIRED_EVENT_SOURCES: Final = ("sec_filings", "issuer_releases", "market_news")
 _NY = ZoneInfo("America/New_York")
 _MARKET_OPEN = time(9, 30)
@@ -56,6 +57,7 @@ class MechanismDefinition:
         "complete_liquidity_and_halt_context",
     )
     residual_shock_z: float = RESIDUAL_SHOCK_Z
+    max_halt_feed_age_seconds: int = MAX_HALT_FEED_AGE_SECONDS
     required_event_sources: tuple[str, ...] = REQUIRED_EVENT_SOURCES
     missing_sec_acceptance_policy: str = "next-regular-session-open-after-filed-date"
     no_catalyst_semantics: str = "all-required-sources-complete-over-decision-window"
@@ -212,13 +214,15 @@ def _require_aware(name: str, value: datetime) -> None:
 
 def _coverage_missing(coverage: Sequence[EventSourceCoverage], *, start: datetime, end: datetime) -> tuple[str, ...]:
     by_source: Mapping[str, EventSourceCoverage] = {item.source: item for item in coverage}
-    if len(by_source) != len(coverage):
-        raise ValueError("event coverage contains a duplicate source")
-    return tuple(
+    duplicates = tuple(
+        sorted({item.source for item in coverage if sum(row.source == item.source for row in coverage) > 1})
+    )
+    missing = tuple(
         source
         for source in REQUIRED_EVENT_SOURCES
         if source not in by_source or not by_source[source].covers(start, end)
     )
+    return tuple(f"duplicate_event_coverage:{source}" for source in duplicates) + missing
 
 
 def classify_shock_mechanism(

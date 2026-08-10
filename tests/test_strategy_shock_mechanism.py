@@ -67,6 +67,7 @@ def test_definition_is_versioned_and_contains_no_outcome_or_direction() -> None:
     assert CLASSIFIER_VERSION.startswith("shock-mechanism-v1+")
     payload = definition_json()
     assert '"direction_semantics":"none-provenance-only"' in payload
+    assert '"max_halt_feed_age_seconds":300' in payload
     assert "profit" not in payload and "outcome_return" not in payload
 
 
@@ -123,6 +124,21 @@ def test_no_known_catalyst_refuses_incomplete_free_news_coverage() -> None:
     assert result.mechanism == "unknown"
     assert result.reason_code == "event_coverage_incomplete"
     assert result.missing_inputs == ("sec_filings", "issuer_releases", "market_news")
+
+
+def test_duplicate_event_coverage_is_a_typed_unknown_not_an_exception() -> None:
+    coverage = _coverage()
+    result = classify_shock_mechanism(
+        decision_at=_DECISION,
+        event_window_start=_WINDOW,
+        catalysts=(),
+        event_coverage=(*coverage, coverage[0]),
+        factor_context=_factor(-3),
+        liquidity_context=_liquidity(),
+    )
+    assert result.mechanism == "unknown"
+    assert result.reason_code == "event_coverage_incomplete"
+    assert result.missing_inputs == ("duplicate_event_coverage:sec_filings",)
 
 
 def test_complete_residual_context_routes_to_research_candidate_not_trade() -> None:
