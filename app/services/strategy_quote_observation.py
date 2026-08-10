@@ -250,8 +250,14 @@ def capture_active_universe_quotes(
     rows_written = 0
     if observations:
         with conn.transaction(), conn.cursor() as cur:
-            cur.executemany(_UPSERT_OBSERVATION, [asdict(observation) for observation in observations])
-            rows_written = cur.rowcount
+            # The panel is capped at 50. Sum each statement's affected count
+            # explicitly rather than depending on driver-specific executemany
+            # rowcount aggregation; ON CONFLICT no-ops must report zero.
+            for observation in observations:
+                cur.execute(_UPSERT_OBSERVATION, asdict(observation))
+                if cur.rowcount < 0:
+                    raise RuntimeError("strategy quote INSERT did not report an affected-row count")
+                rows_written += cur.rowcount
     status_counts = Counter(observation.observation_status for observation in observations)
     return QuoteCaptureReport(
         universe_version=version,
