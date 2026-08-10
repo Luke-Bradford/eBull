@@ -120,6 +120,25 @@ def test_a_masked_required_field_is_counted_not_silently_dropped() -> None:
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "quarantined_bar", None)
 
 
+def test_precomputed_masked_reasons_are_reused_for_an_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
+    series = _series((Decimal("105"), Decimal("95")), (None, Decimal("95")))
+    monkeypatch.setattr(
+        "app.services.strategy_outcome_resolution._masked_reasons",
+        lambda _rows: pytest.fail("masked reasons were recomputed per fill"),
+    )
+
+    row = _resolve_fill(
+        _entry(),
+        _fill(series),
+        series=series,
+        unresolved_breaks=(),
+        masked_bar_reasons={1: "quarantined_bar"},
+    )
+
+    assert row is not None
+    assert (row.outcome, row.reason) == ("unresolved", "quarantined_bar")
+
+
 def test_round_robin_wraps_after_the_cursor_without_repeating(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[int, int | None, int]] = []
 

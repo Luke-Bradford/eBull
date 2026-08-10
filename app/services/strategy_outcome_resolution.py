@@ -103,6 +103,7 @@ def _resolve_fill(
     *,
     series: BarSeries,
     unresolved_breaks: Sequence[date],
+    masked_bar_reasons: Mapping[int, UnresolvedReason] | None = None,
 ) -> OutcomeRow | None:
     """Return a terminal row, or ``None`` while the forward window is immature."""
     if entry.exit_levels is None:
@@ -114,12 +115,12 @@ def _resolve_fill(
         )
     signal_index = _locate_signal_index(series.dates, fill.signal_bar_date)
     fill_index = locate_fill_index(series, fill.fill_bar_date)
-    signal_segment_end = segment_end_index(
+    signal_scale_segment_end = segment_end_index(
         series,
         fill_index=signal_index,
         unresolved_breaks=unresolved_breaks,
     )
-    if signal_segment_end is not None and fill_index > signal_segment_end:
+    if signal_scale_segment_end is not None and fill_index > signal_scale_segment_end:
         return OutcomeRow.from_outcome(
             fill.signal_id,
             Outcome(
@@ -146,7 +147,7 @@ def _resolve_fill(
         fill_index=fill_index,
         entry_price=fill.fill_price,
         levels=levels,
-        masked_bar_reasons=_masked_reasons(series.rows),
+        masked_bar_reasons=masked_bar_reasons if masked_bar_reasons is not None else _masked_reasons(series.rows),
         segment_end_index=segment_end_index(
             series,
             fill_index=fill_index,
@@ -273,12 +274,14 @@ def run_outcome_resolution(
         immature = 0
         for instrument_id, instrument_fills in sorted(by_instrument.items()):
             series = load_masked_bars(conn, instrument_id).series
+            masked_bar_reasons = _masked_reasons(series.rows)
             for fill in instrument_fills:
                 row = _resolve_fill(
                     entry,
                     fill,
                     series=series,
                     unresolved_breaks=breaks.get(instrument_id, ()),
+                    masked_bar_reasons=masked_bar_reasons,
                 )
                 if row is None:
                     immature += 1
