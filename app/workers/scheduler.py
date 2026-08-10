@@ -378,6 +378,10 @@ JOB_STRATEGY_OUTCOME_RESOLUTION = "strategy_outcome_resolution"
 # #2448 — range-partition retention. Shares ``strategy_scan`` so a partition
 # cannot be dropped while the scanner is inserting into it.
 JOB_STRATEGY_OBSERVATION_RETENTION = "strategy_observation_retention"
+# #2477 -- prospective, bounded eToro intraday research collection.  Shares
+# the provider lane (not strategy_scan): the eToro client's request floor is
+# the rate budget, while the storage writer carries its own tier locks.
+JOB_STRATEGY_INTRADAY_HARVEST = "strategy_intraday_harvest"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
@@ -2017,6 +2021,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
             "row per signal and rule-version pair, processed round-robin in a bounded batch."
         ),
         cadence=Cadence.daily(hour=6, minute=55),
+        catch_up_on_boot=False,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_STRATEGY_INTRADAY_HARVEST,
+        display_name="Strategy intraday evidence harvest (#2477)",
+        source="etoro",
+        description=(
+            "Every five minutes -- fetches at most twelve predeclared eToro research windows, "
+            "retains completed NYSE-RTH bars only, removes watermark overlap and records gaps "
+            "without imputation. The active versioned panel is deliberately small; storage "
+            "remains partitioned and retention-capped. Operator Run now uses the same path."
+        ),
+        cadence=Cadence.every_n_minutes(interval=5),
         catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
@@ -4990,12 +5008,41 @@ def strategy_observation_retention() -> None:
     with _tracked_job(JOB_STRATEGY_OBSERVATION_RETENTION) as tracker:
         with connect_job() as conn:
             plan = drop_expired_partitions(conn, as_of=datetime.now(tz=UTC), dry_run=False)
-            tracker.row_count = len(plan.partitions)
+            tracker.row_count = len(plan.partitions) + plan.intraday_gap_rows
         logger.info(
-            "strategy_observation_retention: dropped %d signal + %d intraday partitions",
+            "strategy_observation_retention: dropped %d signal + %d intraday partitions + %d gap rows",
             len(plan.signal_partitions),
             len(plan.intraday_partitions),
+            plan.intraday_gap_rows,
         )
+
+
+def strategy_intraday_harvest() -> None:
+    """Collect one bounded slice of completed eToro intraday evidence."""
+    from app.services.strategy_intraday_harvest import run_intraday_harvest
+
+    creds = _load_etoro_credentials(JOB_STRATEGY_INTRADAY_HARVEST)
+    if creds is None:
+        _record_prereq_skip(JOB_STRATEGY_INTRADAY_HARVEST, "etoro credentials missing")
+        return
+    api_key, user_key = creds
+    with _tracked_job(JOB_STRATEGY_INTRADAY_HARVEST) as tracker:
+        with (
+            EtoroMarketDataProvider(api_key=api_key, user_key=user_key, env=settings.etoro_env) as provider,
+            # Each instrument is an independent durable unit: a bad/unsupported
+            # member must not roll back bars already collected for its peers.
+            connect_job(autocommit=True) as conn,
+        ):
+            report = run_intraday_harvest(conn, provider, observed_at=datetime.now(tz=UTC))
+        tracker.row_count = report.written
+        tracker.note = (
+            f"universe={report.universe_version} selected={report.selected} fetched={report.fetched} "
+            f"completed_rth={report.completed_rth} written={report.written} "
+            f"gaps={report.gaps_recorded} failures={len(report.failures)}"
+        )
+        if report.failures:
+            detail = "; ".join(f"{failure.timeframe}/{failure.symbol}: {failure.reason}" for failure in report.failures)
+            raise RuntimeError(f"strategy_intraday_harvest: {len(report.failures)} member(s) failed: {detail}")
 
 
 def strategy_paper_cycle() -> None:
