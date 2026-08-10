@@ -103,3 +103,8 @@ def test_quiet_complete_session_can_select_fewer_than_twenty() -> None:
 def test_invalid_census_is_rejected(field: str, value: int) -> None:
     with pytest.raises(ValueError, match=field):
         assess_replication_readiness(_ready(**{field: value}))
+
+
+def test_selected_population_cannot_exceed_prefilter_population() -> None:
+    with pytest.raises(ValueError, match="expected_selected_names"):
+        assess_replication_readiness(_ready(expected_prefilter_names=3))

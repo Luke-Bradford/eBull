@@ -70,6 +70,8 @@ def assess_replication_readiness(value: ReplicationReadiness) -> tuple[Readiness
     for field in ("expected_selected_names", "selected_names", "selected_paths"):
         if not 0 <= getattr(value, field) <= DEFINITION.maximum_daily_rank:
             raise ValueError(f"{field} must be inside 0-{DEFINITION.maximum_daily_rank}")
+    if value.expected_selected_names > value.expected_prefilter_names:
+        raise ValueError("expected_selected_names cannot exceed expected_prefilter_names")
 
     reasons: list[str] = []
     if not value.point_in_time_membership:
