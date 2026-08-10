@@ -310,7 +310,7 @@ def _eligible_window(window: PriceWindow) -> str | None:
         return "incomplete_prior_liquidity_window"
     if window.median_dollar_volume is None or window.median_dollar_volume < MIN_MEDIAN_DOLLAR_VOLUME:
         return "median_dollar_volume_below_floor"
-    if window.entry_open <= 0 or window.exit_62_close <= 0:
+    if window.exit_62_close <= 0:
         return "non_positive_fill_price"
     return None
 
@@ -407,10 +407,13 @@ def evaluate_outcomes(conn: psycopg.Connection[Any], events: Sequence[TriggeredS
         candidates.sort(key=lambda item: (item.median_dollar_volume or Decimal("0"), -item.instrument_id), reverse=True)
         window = candidates[0]
         refusals["share_class_duplicates_suppressed"] += len(candidates) - 1
-        assert window.entry_date is not None
-        assert window.exit_62_date is not None
-        assert window.entry_open is not None
-        assert window.exit_62_close is not None
+        if (
+            window.entry_date is None
+            or window.exit_62_date is None
+            or window.entry_open is None
+            or window.exit_62_close is None
+        ):
+            raise RuntimeError("an ineligible PEAD price window escaped the refusal gate")
         gross, net = _net_return_pct(side, window.entry_open, window.exit_62_close)
         net_5 = _diagnostic_net_return_pct(side, window.entry_open, window.exit_5_close, window.exit_5_return_usable)
         net_20 = _diagnostic_net_return_pct(side, window.entry_open, window.exit_20_close, window.exit_20_return_usable)
