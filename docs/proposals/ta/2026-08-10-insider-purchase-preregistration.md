@@ -103,9 +103,10 @@ opportunistic-minus-routine = value_weighted_net(opportunistic purchases)
 
 Weights use market capitalisation known before formation: the most recently
 filed positive SEC common-shares count known by entry, multiplied by the prior
-usable close. Missing or stale shares and multi-class ambiguity refuse the
-firm-month. Weights are recomputed independently within each portfolio and
-sum to one. Equal-weight results are diagnostic and cannot replace the primary.
+usable close. A share count filed more than 15 months before entry is stale.
+Missing or stale shares and multi-class ambiguity refuse the firm-month.
+Weights are recomputed independently within each portfolio and sum to one.
+Equal-weight results are diagnostic and cannot replace the primary.
 
 ## Prices, liquidity, costs and controls
 

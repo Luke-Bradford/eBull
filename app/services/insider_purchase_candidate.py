@@ -350,12 +350,15 @@ def enrich_point_in_time(
     counters: Counter[str] = Counter()
     output: list[PurchaseObservation] = []
     for purchase in purchases:
-        instrument_id = exact.get((purchase.issuer_cik, purchase.issuer_symbol))
-        if instrument_id is None:
-            instrument_id = unique.get(purchase.issuer_cik)
+        # Market-cap weighting cannot use a combined issuer share count with
+        # one arbitrarily selected class price. A CIK with multiple corpus
+        # series is therefore refused even when the current symbol matches.
+        instrument_id = unique.get(purchase.issuer_cik)
         if instrument_id is None:
             counters["unresolved_or_multiclass_research_series"] += 1
             continue
+        if exact.get((purchase.issuer_cik, purchase.issuer_symbol)) != instrument_id:
+            counters["unique_cik_symbol_history_fallback"] += 1
         acceptance = accepted.get(purchase.accession_number)
         if acceptance is None:
             counters["accepted_at_missing_historical_fallback"] += 1
@@ -368,7 +371,7 @@ def enrich_classified_point_in_time(
     conn: psycopg.Connection[Any], classified: Sequence[ClassifiedPurchase]
 ) -> tuple[tuple[ClassifiedPurchase, ...], Counter[str]]:
     enriched, counters = enrich_point_in_time(conn, [item.observation for item in classified])
-    by_identity = {
+    by_identity: dict[tuple[str, str, int, int], InsiderClass] = {
         (
             item.observation.accession_number,
             item.observation.filer_cik,
