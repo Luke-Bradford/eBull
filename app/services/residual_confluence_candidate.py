@@ -60,6 +60,9 @@ MODEL_FEATURE_NAMES: Final = (
     "shock_x_location_x_volume",
 )
 
+OutcomeClass = Literal["target_first", "stop_first", "timeout"]
+OUTCOME_CLASSES: Final[tuple[OutcomeClass, ...]] = ("target_first", "stop_first", "timeout")
+
 
 class FeatureRefusal(ValueError):
     """The point-in-time input cannot support the frozen feature contract."""
@@ -92,7 +95,9 @@ class CandidateDefinition:
     model_features: tuple[str, ...] = MODEL_FEATURE_NAMES
     feature_standardisation: str = "training-fold-mean-and-sample-std"
     interaction_basis: str = "raw-shock_z*raw-close_location*raw-abnormal_volume"
-    outcome_classes: tuple[str, ...] = ("target_first", "stop_first", "timeout")
+    market_history_alignment: str = "factor-market-is-last-126-of-required-prior-252"
+    liquidity_input: str = "prior-20-close*volume-computed-in-feature-engine"
+    outcome_classes: tuple[str, ...] = OUTCOME_CLASSES
     primary_start: str = "2022-01-01"
 
 
@@ -142,10 +147,6 @@ class ExitBracket:
     target_price: Decimal
     stop_price: Decimal
     max_hold_sessions: int = MAX_HOLD_SESSIONS
-
-
-OutcomeClass = Literal["target_first", "stop_first", "timeout"]
-OUTCOME_CLASSES: Final[tuple[OutcomeClass, ...]] = ("target_first", "stop_first", "timeout")
 
 
 @dataclass(frozen=True)
@@ -200,9 +201,8 @@ def compute_features(
     prior_instrument_returns: Sequence[float],
     prior_market_returns: Sequence[float],
     prior_sector_returns: Sequence[float],
-    prior_market_stress_returns: Sequence[float],
+    prior_closes: Sequence[float],
     prior_volumes: Sequence[float],
-    prior_dollar_volumes: Sequence[float],
     signal_instrument_return: float,
     signal_market_return: float,
     signal_sector_return: float,
@@ -220,16 +220,15 @@ def compute_features(
     this function, making that common leakage route impossible at the API.
     """
     instrument = _finite_vector("prior_instrument_returns", prior_instrument_returns, exact=OLS_LOOKBACK)
-    market = _finite_vector("prior_market_returns", prior_market_returns, exact=OLS_LOOKBACK)
+    market_history = _finite_vector("prior_market_returns", prior_market_returns, exact=MARKET_VOL_LONG_LOOKBACK)
+    market = market_history[-OLS_LOOKBACK:]
     sector = _finite_vector("prior_sector_returns", prior_sector_returns, exact=OLS_LOOKBACK)
-    market_stress_history = _finite_vector(
-        "prior_market_stress_returns", prior_market_stress_returns, exact=MARKET_VOL_LONG_LOOKBACK
-    )
+    closes = _finite_vector("prior_closes", prior_closes, exact=VOLUME_LOOKBACK)
     volumes = _finite_vector("prior_volumes", prior_volumes, exact=VOLUME_LOOKBACK)
-    dollar_volumes = _finite_vector("prior_dollar_volumes", prior_dollar_volumes, exact=VOLUME_LOOKBACK)
 
-    if np.any(volumes <= 0) or np.any(dollar_volumes <= 0):
-        raise FeatureRefusal("prior volume and dollar-volume observations must be positive")
+    if np.any(closes <= 0) or np.any(volumes <= 0):
+        raise FeatureRefusal("prior close and volume observations must be positive")
+    dollar_volumes = closes * volumes
 
     design = np.column_stack((np.ones(OLS_LOOKBACK), market, sector))
     if int(np.linalg.matrix_rank(design)) != design.shape[1]:
@@ -271,8 +270,8 @@ def compute_features(
     log_dollar_liquidity = math.log(median_dollar_volume)
     close_location = (2.0 * close - high - low) / (high - low)
 
-    short_market_vol = float(np.std(market_stress_history[-MARKET_VOL_SHORT_LOOKBACK:], ddof=1))
-    long_market_vol = float(np.std(market_stress_history, ddof=1))
+    short_market_vol = float(np.std(market_history[-MARKET_VOL_SHORT_LOOKBACK:], ddof=1))
+    long_market_vol = float(np.std(market_history, ddof=1))
     if not math.isfinite(short_market_vol) or not math.isfinite(long_market_vol) or long_market_vol <= 0:
         raise FeatureRefusal("market-stress volatility scale is unavailable or non-positive")
     market_stress = short_market_vol / long_market_vol

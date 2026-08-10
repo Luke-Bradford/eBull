@@ -59,6 +59,11 @@ The 252-session market history is mandatory. The earlier issue wording that
 mentioned only 126 sessions was corrected before measurement. Missing exact
 sessions, rank-deficient market/sector regressors, zero residual volatility,
 zero-range candles, non-positive volume or non-finite inputs refuse the row.
+The factor regression consumes the final 126 observations of that same
+252-session market vector; callers cannot supply two inconsistent market
+histories. Dollar volume is computed inside the feature engine from the same 20
+prior closes and volumes rather than accepted as a second, potentially
+inconsistent input.
 
 ## Fixed model
 

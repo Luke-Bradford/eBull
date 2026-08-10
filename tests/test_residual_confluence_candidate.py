@@ -33,11 +33,10 @@ def _inputs() -> dict[str, object]:
     instrument = [0.0001 + 1.2 * m + 0.7 * s + e for m, s, e in zip(market, sector, residual, strict=True)]
     return {
         "prior_instrument_returns": instrument,
-        "prior_market_returns": market,
+        "prior_market_returns": market_stress,
         "prior_sector_returns": sector,
-        "prior_market_stress_returns": market_stress,
+        "prior_closes": [30.0 + i / 10 for i in range(20)],
         "prior_volumes": [1_000_000 + i * 1_000 for i in range(20)],
-        "prior_dollar_volumes": [30_000_000 + i * 100_000 for i in range(20)],
         "signal_instrument_return": -0.025,
         "signal_market_return": -0.004,
         "signal_sector_return": -0.006,
@@ -51,8 +50,8 @@ def _inputs() -> dict[str, object]:
 
 def test_definition_is_complete_stable_and_contains_no_measured_result() -> None:
     payload = definition_json()
-    assert definition_hash() == "a64d0683dd125367150c1a3746094a08cc015bbff524741abe0a909863e97bbd"
-    assert CANDIDATE_VERSION == "residual-confluence-v1+a64d0683dd12"
+    assert definition_hash() == "a5084b66774625c0ff3fec05c238c05dae75b8663ddfd7b269265d134ccca0d8"
+    assert CANDIDATE_VERSION == "residual-confluence-v1+a5084b667746"
     assert DEFINITION.market_vol_long_lookback == 252
     assert DEFINITION.model_features == MODEL_FEATURE_NAMES
     assert "expectancy" not in payload
@@ -97,10 +96,10 @@ def test_appending_future_values_cannot_change_snapshot() -> None:
 @pytest.mark.parametrize(
     ("field", "replacement", "message"),
     [
-        ("prior_market_stress_returns", [0.01] * 251, "exactly 252"),
+        ("prior_market_returns", [0.01] * 251, "exactly 252"),
         ("prior_sector_returns", [0.0] * 126, "rank deficient"),
         ("prior_volumes", [0.0] * 20, "must be positive"),
-        ("prior_dollar_volumes", [1_000_000.0] * 20, "liquidity floor"),
+        ("prior_closes", [0.9] * 20, "liquidity floor"),
         ("signal_high", 24.0, "OHLC envelope"),
         ("signal_volume", float("nan"), "non-finite"),
     ],
@@ -126,7 +125,7 @@ def test_price_floor_is_checked_after_a_valid_ohlc_envelope() -> None:
 
 def test_zero_residual_volatility_is_refused() -> None:
     inputs = _inputs()
-    market = inputs["prior_market_returns"]
+    market = inputs["prior_market_returns"][-126:]  # type: ignore[index]
     sector = inputs["prior_sector_returns"]
     inputs["prior_instrument_returns"] = [
         0.0001 + 1.2 * m + 0.7 * s
@@ -148,7 +147,7 @@ def test_bracket_is_fixed_from_signal_atr_and_refuses_unorderable_stop() -> None
 def test_market_stress_is_sample_std_ratio_not_level_or_future_return() -> None:
     inputs = _inputs()
     features = compute_features(**inputs)  # type: ignore[arg-type]
-    history = np.asarray(inputs["prior_market_stress_returns"], dtype=float)
+    history = np.asarray(inputs["prior_market_returns"], dtype=float)
     expected = float(np.std(history[-20:], ddof=1) / np.std(history, ddof=1))
     assert features.market_stress == pytest.approx(expected)
 
