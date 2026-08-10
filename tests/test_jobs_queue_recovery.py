@@ -96,7 +96,7 @@ def test_manual_job_with_terminal_run_not_replayed(
     _dev_conn: psycopg.Connection[Any],
     _cleanup_requests: list[int],
 ) -> None:
-    """Branch (a): completed manual_job rows stay 'dispatched'."""
+    """Branch (a): completed manual_job rows become terminal queue rows."""
     request_id = publish_manual_job_request("fundamentals_sync")
     _cleanup_requests.append(request_id)
     _force_to_dispatched(_dev_conn, request_id)
@@ -115,14 +115,14 @@ def test_manual_job_with_terminal_run_not_replayed(
         cur.execute("SELECT status FROM pending_job_requests WHERE request_id=%s", (request_id,))
         row = cur.fetchone()
     assert row is not None
-    assert row[0] == "dispatched"
+    assert row[0] == "completed"
 
 
 def test_sync_with_terminal_sync_run_not_replayed(
     _dev_conn: psycopg.Connection[Any],
     _cleanup_requests: list[int],
 ) -> None:
-    """Branch (b): completed sync rows stay 'dispatched'."""
+    """Branch (b): completed sync rows become terminal queue rows."""
     request_id = publish_sync_request(SyncScope.behind(), trigger="manual")
     _cleanup_requests.append(request_id)
     _force_to_dispatched(_dev_conn, request_id)
@@ -141,7 +141,7 @@ def test_sync_with_terminal_sync_run_not_replayed(
         cur.execute("SELECT status FROM pending_job_requests WHERE request_id=%s", (request_id,))
         row = cur.fetchone()
     assert row is not None
-    assert row[0] == "dispatched"
+    assert row[0] == "completed"
 
 
 def test_sync_with_running_sync_run_is_replayed(

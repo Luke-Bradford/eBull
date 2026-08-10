@@ -7,6 +7,7 @@ import {
   fetchStrategyOverview,
   fetchStrategyOwnedPositions,
   fetchStrategyPnlHistory,
+  requestStrategyEvidenceRefresh,
   updateStrategyAllocation,
   updateStrategyPaperPool,
 } from "@/api/strategies";
@@ -700,9 +701,24 @@ export function StrategiesPage() {
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
   const ownedPositions = useAsync(fetchStrategyOwnedPositions, []);
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
+  const [refreshingEvidence, setRefreshingEvidence] = useState(false);
+  const [refreshEvidenceError, setRefreshEvidenceError] = useState<string | null>(null);
   const summary = useMemo(() => overview.data ? aggregate(overview.data) : null, [overview.data]);
   const approvedStrategies = overview.data?.strategies.filter((strategy) => strategy.allocation_ready || strategy.allocation.enabled) ?? [];
   const researchCandidates = overview.data?.strategies.filter((strategy) => !strategy.allocation_ready && !strategy.allocation.enabled) ?? [];
+
+  async function refreshEvidence() {
+    setRefreshingEvidence(true);
+    setRefreshEvidenceError(null);
+    try {
+      await requestStrategyEvidenceRefresh();
+      await overview.refetch();
+    } catch (error) {
+      setRefreshEvidenceError(error instanceof ApiError ? error.message : "Could not queue evidence refresh.");
+    } finally {
+      setRefreshingEvidence(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -797,8 +813,37 @@ export function StrategiesPage() {
                   These rules are measured, not selectable. Current evaluation uses completed daily bars; it does not predict which rule is about to fire.
                 </p>
               </div>
-              <span className="text-xs text-slate-500">{researchCandidates.length} candidates</span>
+              <div className="flex items-center gap-3 text-xs text-slate-500">
+                <span>
+                  Evidence {overview.data.evidence_refresh.completed_windows}/{overview.data.evidence_refresh.total_windows}
+                  {overview.data.evidence_refresh.partial_windows ? ` · ${overview.data.evidence_refresh.partial_windows} partial` : ""}
+                  {` · frozen through ${formatDate(overview.data.evidence_refresh.frozen_through)}`}
+                </span>
+                <button
+                  type="button"
+                  className="border border-slate-300 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-900"
+                  disabled={refreshingEvidence || overview.data.evidence_refresh.status === "queued" || overview.data.evidence_refresh.status === "running" || overview.data.evidence_refresh.partial_windows > 0}
+                  onClick={refreshEvidence}
+                >
+                  {refreshingEvidence || overview.data.evidence_refresh.status === "queued"
+                    ? "Refresh queued"
+                    : overview.data.evidence_refresh.status === "running"
+                      ? "Refreshing…"
+                      : "Refresh evidence"}
+                </button>
+              </div>
             </div>
+            {refreshEvidenceError ? <p className="mb-3 text-xs text-red-600 dark:text-red-400">{refreshEvidenceError}</p> : null}
+            {overview.data.evidence_refresh.status === "failed" ? (
+              <p className="mb-3 text-xs text-red-600 dark:text-red-400">
+                Last refresh failed: {overview.data.evidence_refresh.last_error ?? "See process history."}
+              </p>
+            ) : null}
+            {overview.data.evidence_refresh.partial_windows > 0 ? (
+              <p className="mb-3 text-xs text-amber-700 dark:text-amber-300">
+                A partial immutable window needs operator repair before refresh can resume.
+              </p>
+            ) : null}
             <div className="space-y-2">
               {researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} />)}
             </div>

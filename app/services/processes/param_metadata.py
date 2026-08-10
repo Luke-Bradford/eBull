@@ -317,6 +317,16 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
                 "year-2026-ytd",
             ),
         ),
+        ParamMetadata(
+            name="refresh_recent",
+            label="Complete all recent evidence",
+            help_text=(
+                "Run every missing code-pinned recent window, committing one window at a time so a restart "
+                "can resume safely. Completed evidence is never overwritten and arbitrary dates remain forbidden."
+            ),
+            field_type="bool",
+            default=False,
+        ),
     ),
     "risk_metrics_refresh": (),
     # fair_value_band_refresh — #2009 deterministic fair-value band recompute.

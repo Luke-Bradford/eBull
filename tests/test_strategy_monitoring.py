@@ -21,6 +21,7 @@ from app.api.strategies import (
     get_fired_signals,
     get_strategy_overview,
     get_strategy_owned_positions,
+    request_evidence_refresh,
     update_strategy_allocation,
     update_strategy_paper_pool,
 )
@@ -607,6 +608,32 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
         )
     assert exc_info.value.status_code == 409
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
+
+
+def test_evidence_refresh_queues_one_fixed_pinned_request(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    conn.commit()
+
+    first = request_evidence_refresh(_session("research-operator"), conn)
+    second = request_evidence_refresh(_session("research-operator"), conn)
+
+    assert first.status == "queued"
+    assert not first.already_active
+    assert second.request_id == first.request_id
+    assert second.already_active
+    row = conn.execute(
+        "SELECT requested_by,payload FROM pending_job_requests WHERE request_id=%s",
+        (first.request_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "research-operator"
+    assert row[1]["params"] == {
+        "refresh_recent": True,
+        "holdout_purpose": "complete declared recent-regime evidence denominator",
+        "holdout_accessed_by": "research-operator",
+    }
 
 
 def test_missing_evidence_refuses_new_allocation_without_writing_audit(
