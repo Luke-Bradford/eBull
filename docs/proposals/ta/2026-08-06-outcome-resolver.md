@@ -135,7 +135,8 @@ corpus ends first, see §3.4.
 ### 3.4 `unresolved` — OUR addition, flagged as one
 
 The parent's outcome vocabulary is four classes. None of them describes "we
-entered and the evidence runs out", and there are four ways that happens:
+entered but no defensible exit can be booked"; five terminal reasons make that
+refusal countable:
 
 | reason | when | whose |
 | --- | --- | --- |
@@ -143,6 +144,7 @@ entered and the evidence runs out", and there are four ways that happens:
 | `series_break` | the window would cross out of the fill bar's segment | criterion 10 |
 | `quarantined_bar` | the caller has declared a bar in the window unusable | criterion 8 |
 | `missing_bar_data` | a field we must read is `NULL` and the caller declared no reason | ours |
+| `unorderable_exit_levels` | the strategy's causal formula cannot produce a finite positive broker-orderable bracket | ours |
 
 ⚠ `expired` must NOT absorb `window_truncated`. A trade whose corpus ends on
 bar 10 of a 20-bar window is not a trade that reached expiry — recording it as
@@ -166,6 +168,12 @@ that the quarantine rules never looked at is a data gap, and calling it a
 quarantine verdict would collapse the two. ⚠ Phase 3c widened `no_fill_bar` to
 cover a NULL open and flagged the widening; **this spec does not repeat that
 compromise**, because here the case is not measured-zero.
+
+`unorderable_exit_levels` is also ours. It is terminal for that filled signal:
+no exit price or return is invented, the refusal is counted, and the remaining
+batch continues. In particular, an S-4 stop at or below zero is never clamped
+to a broker minimum. The same versioned vocabulary applies to the historical
+runner and the forward resolver.
 
 **`unresolved` is excluded from the win rate exactly as `ambiguous` is, and
 both counts are reported per criterion 9.** An outcome class that is excluded

@@ -46,6 +46,39 @@ Only compact aggregate results and hold-out access records are retained.
 Indicators, positions and returns are recomputed from the existing research
 bars while the job runs; no additional per-bar metric store is introduced.
 
+### Bounded refresh checkpoints
+
+A running refresh exposes its active pinned window, phase, strategy, quarantine
+arm and series count through transient `job_runs` progress. That heartbeat is
+not evidence: before the result transaction commits it may not advance
+`row_count`, the completed-window count or any result identity. One completed
+window remains the smallest restart/cancellation boundary.
+
+Transient progress uses one bounded, autocommit connection for the refresh,
+separate from the evidence transaction. It is throttled and fail-soft; losing
+telemetry removes operator visibility but cannot abort, commit or reclassify the
+backtest. A post-commit checkpoint may advance the completed count only after
+the immutable arm-pair writers have completed and the evidence connection's
+commit has returned.
+
+The runner may share immutable calculations only where exact arm equivalence is
+proved. In particular, S-4's two daily-OHLC ambiguity arms share series reads,
+signals, fill identifiers, causal ATR brackets and the raw resolver verdict;
+only genuinely ambiguous rows are projected to best/worst exits. Namespace
+books and all mutable counters remain arm-local. S-4's strategy module and
+identity are unchanged: the batch adapter lives outside the hashed strategy
+source and is tested against the scalar factory. Full history, corpus
+membership, dates, parameters, costs, trial membership and result/write order
+are not performance controls.
+
+An S-4 bracket is broker-orderable only when both finite levels are positive,
+the stop is below entry and take profit is above entry. A signal whose causal
+ATR produces any other bracket is recorded as the terminal
+`unorderable_exit_levels` refusal in both ambiguity arms. The runner must not
+clamp or otherwise invent a level, and one refused signal must not abort the
+remaining strategy, window or evidence refresh. The same refusal vocabulary
+and rule-set version apply to historical and forward outcome resolution.
+
 ## What qualifies a strategy
 
 Win rate is descriptive, not a promotion target. A 75% win rate can be created

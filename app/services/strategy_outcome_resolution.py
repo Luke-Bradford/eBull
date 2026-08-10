@@ -142,6 +142,17 @@ def _resolve_fill(
         entry_price=fill.fill_price,
         universe=fill.universe,
     )
+    if isinstance(levels, str):
+        return OutcomeRow.from_outcome(
+            fill.signal_id,
+            Outcome(
+                outcome="unresolved",
+                resolution_method="daily_bar",
+                rule_set_version=OUTCOME_RULE_SET_VERSION,
+                reason=levels,
+            ),
+            input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+        )
     outcome = resolve_outcome(
         series=series,
         fill_index=fill_index,

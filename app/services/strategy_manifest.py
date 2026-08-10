@@ -66,15 +66,15 @@ into per-strategy ``if`` branches — the same defect in a new location.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Set
+from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Literal, Protocol, get_args
 
 from app.services.indicator_series import BarSeries, Universe
-from app.services.outcome_resolver import ExitLevels
+from app.services.outcome_resolver import ExitLevels, UnresolvedReason
 from app.services.position_builder import ExitRegime
 from app.services.strategies.s1_time_series_momentum import S1_STRATEGY_ID, s1_identity, s1_signals
 from app.services.strategies.s2_cross_sectional_momentum import (
@@ -94,6 +94,7 @@ from app.services.strategies.s4_volatility_compression_breakout import (
     s4_identity,
     s4_signals,
 )
+from app.services.strategy_exit_levels_batch import s4_exit_levels_batch
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
     CrossSectionalMember,
@@ -197,7 +198,19 @@ class ExitLevelsFactory(Protocol):
         signal_index: int,
         entry_price: Decimal,
         universe: Universe,
-    ) -> ExitLevels: ...
+    ) -> ExitLevels | UnresolvedReason: ...
+
+
+class ExitLevelsBatchFactory(Protocol):
+    """A level strategy's brackets for several fills in one immutable series."""
+
+    def __call__(
+        self,
+        series: BarSeries,
+        *,
+        requests: Sequence[tuple[int, Decimal]],
+        universe: Universe,
+    ) -> Sequence[ExitLevels | UnresolvedReason]: ...
 
 
 @dataclass(frozen=True)
@@ -230,6 +243,9 @@ class StrategyEntry:
     #: Level-based only. Its absence is a named runner exclusion rather than a
     #: silent max-hold fallback.
     exit_levels: ExitLevelsFactory | None = None
+    #: Optional result-equivalent batch form. It may share immutable indicator
+    #: work, never entry-specific prices or signal indices.
+    exit_levels_batch: ExitLevelsBatchFactory | None = None
 
     def __post_init__(self) -> None:
         if not self.strategy_id.strip():
@@ -272,6 +288,10 @@ class StrategyEntry:
                 )
         if self.min_participants is not None and self.min_participants < 1:
             raise ValueError(f"min_participants must be at least 1, got {self.min_participants}")
+        if self.exit_levels_batch is not None and self.exit_levels is None:
+            raise ValueError(
+                f"{self.strategy_id} declares batch exit levels without the scalar factory used as its oracle"
+            )
 
 
 def _no_decision_calendar(calendar: Iterable[date]) -> frozenset[date] | None:
@@ -372,14 +392,30 @@ def _s4_exit_levels(
     signal_index: int,
     entry_price: Decimal,
     universe: Universe,
-) -> ExitLevels:
+) -> ExitLevels | UnresolvedReason:
     """Adapt S-4's hashed strategy values to the versioned outcome contract."""
-    target, stop, max_hold = s4_exit_bracket(
-        series,
-        signal_index=signal_index,
-        entry_price=entry_price,
-        universe=universe,
-    )
+    if not entry_price.is_finite():
+        raise ValueError(f"entry_price must be finite, got {entry_price}")
+    try:
+        target, stop, max_hold = s4_exit_bracket(
+            series,
+            signal_index=signal_index,
+            entry_price=entry_price,
+            universe=universe,
+        )
+    except InvalidOperation:
+        # A non-finite causal ATR cannot yield a broker-orderable bracket. The
+        # entry itself was validated above, so this is not hiding a bad fill.
+        return "unorderable_exit_levels"
+    except ValueError as exc:
+        # The hashed scalar factory deliberately refuses a non-positive stop.
+        # That is a data-dependent, countable no-order outcome. Invalid indices,
+        # prices and missing ATR remain programmer/data invariants and fatal.
+        if "not broker-orderable" not in str(exc):
+            raise
+        return "unorderable_exit_levels"
+    if not target.is_finite() or not stop.is_finite() or stop >= entry_price or target <= entry_price:
+        return "unorderable_exit_levels"
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
 
@@ -436,6 +472,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             decision_calendar=_no_decision_calendar,
             signals=_s4_signals,
             exit_levels=_s4_exit_levels,
+            exit_levels_batch=s4_exit_levels_batch,
         ),
     }
 )
@@ -446,6 +483,7 @@ __all__ = [
     "STRATEGY_MANIFEST",
     "DecisionCalendar",
     "ExitRegimeFactory",
+    "ExitLevelsBatchFactory",
     "ExitLevelsFactory",
     "IdentityFactory",
     "MemberStager",

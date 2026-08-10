@@ -32,8 +32,10 @@ from pathlib import Path
 import pytest
 
 import app.services.strategies.s4_volatility_compression_breakout as s4_module
+import app.services.strategy_exit_levels_batch as batch_module
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries, IndicatorSeries, atr_series
+from app.services.outcome_resolver import ExitLevels
 from app.services.signal_ledger import resolve_fills
 from app.services.strategies.s4_volatility_compression_breakout import (
     ATR_PERIOD,
@@ -49,6 +51,8 @@ from app.services.strategies.s4_volatility_compression_breakout import (
     s4_identity,
     s4_signals,
 )
+from app.services.strategy_exit_levels_batch import s4_exit_levels_batch
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_registry import StrategySignal
 from app.services.technical_analysis import OHLCVRow
 
@@ -597,6 +601,72 @@ class TestExitLevels:
                 entry_price=Decimal("3"),
                 universe=UNIVERSE,
             )
+
+    def test_manifest_adapter_turns_the_scalar_refusal_into_a_countable_reason(self) -> None:
+        factory = STRATEGY_MANIFEST[S4_STRATEGY_ID].exit_levels
+        assert factory is not None
+
+        actual = factory(
+            _bars(RISING),
+            signal_index=150,
+            entry_price=Decimal("3"),
+            universe=UNIVERSE,
+        )
+
+        assert actual == "unorderable_exit_levels"
+
+    def test_batch_matches_scalar_brackets_and_computes_atr_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        series = _bars(RISING)
+        requests = (
+            (150, Decimal("300")),
+            (175, Decimal("325")),
+            (200, Decimal("350")),
+        )
+        expected = tuple(
+            s4_exit_bracket(
+                series,
+                signal_index=signal_index,
+                entry_price=entry_price,
+                universe=UNIVERSE,
+            )
+            for signal_index, entry_price in requests
+        )
+        calls = 0
+        original = batch_module.atr_series
+
+        def counted_atr(*args: object, **kwargs: object) -> IndicatorSeries:
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(batch_module, "atr_series", counted_atr)
+
+        actual = s4_exit_levels_batch(series, requests=requests, universe=UNIVERSE)
+        assert len(actual) == len(expected)
+        assert (
+            tuple(
+                (item.take_profit, item.stop_loss, item.max_hold_bars)
+                for item in actual
+                if isinstance(item, ExitLevels)
+            )
+            == expected
+        )
+        assert calls == 1
+
+    def test_batch_counts_an_unorderable_stop_without_hiding_other_levels(self) -> None:
+        series = _bars(RISING)
+
+        actual = s4_exit_levels_batch(
+            series,
+            requests=((150, Decimal("3")), (175, Decimal("325"))),
+            universe=UNIVERSE,
+        )
+
+        assert actual[0] == "unorderable_exit_levels"
+        assert isinstance(actual[1], ExitLevels)
 
 
 class TestLastBar:

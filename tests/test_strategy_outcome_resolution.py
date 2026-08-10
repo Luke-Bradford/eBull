@@ -120,6 +120,26 @@ def test_a_masked_required_field_is_counted_not_silently_dropped() -> None:
     assert (row.outcome, row.reason, row.gross_return_pct) == ("unresolved", "quarantined_bar", None)
 
 
+def test_unorderable_exit_levels_are_terminal_without_aborting_the_batch() -> None:
+    series = _series((Decimal("1"), Decimal("0.5")), (Decimal("1"), Decimal("0.5")))
+    entry = cast(
+        StrategyEntry,
+        SimpleNamespace(
+            strategy_id="test-level",
+            exit_levels=lambda _series, *, signal_index, entry_price, universe: "unorderable_exit_levels",
+        ),
+    )
+
+    row = _resolve_fill(entry, _fill(series), series=series, unresolved_breaks=())
+
+    assert row is not None
+    assert (row.outcome, row.reason, row.gross_return_pct) == (
+        "unresolved",
+        "unorderable_exit_levels",
+        None,
+    )
+
+
 def test_precomputed_masked_reasons_are_reused_for_an_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
     series = _series((Decimal("105"), Decimal("95")), (None, Decimal("95")))
     monkeypatch.setattr(
