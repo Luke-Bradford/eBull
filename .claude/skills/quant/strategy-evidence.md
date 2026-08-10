@@ -85,10 +85,14 @@ Why this is well-founded rather than a convention:
 - **It makes reward:risk a stated input** rather than an outcome, which is what
   turns a signal into a trade.
 
-⚠⚠ **And it is the thing currently blocking S-4.** `ExitLevels` exists in
-`outcome_resolver.py`; **nothing in `app/` constructs one.** One small piece of
-arithmetic unblocks a specced strategy, gives every other strategy a principled
-exit instead of none, and supplies the reward:risk filter. **Build this first.**
+✅ **Delivered for the S-4 harness control (#2473).**
+`strategy_manifest._s4_exit_levels` constructs causal ATR-at-signal brackets;
+the backtest and forward resolver consume that same manifest field. Backtests
+convert a same-bar double touch into declared best/worst sensitivity arms;
+forward resolution records the single honest `ambiguous` terminal outcome.
+This validates the exit machinery. It does **not** turn S-4 into a return signal
+or capital candidate: #2478 permanently labels S-1..S-4
+`harness_validation`.
 
 **3. Opportunistic insider purchases — the best-evidenced RETURN signal we can
 actually build.** Cohen/Malloy/Pomorski: routine trades **zero**, opportunistic
@@ -99,10 +103,11 @@ over) before either was even measured. Evidence, mechanism, our data, and the
 right turnover profile. See §3.1 for what the measurement says about population
 size.
 
-**4. The equity risk premium itself.** Our corrected benchmark compounds at
-**6.3-6.6%/yr** over 58 years. ⚠ Two of our three strategies lose to it. That is
-not only a bar — it is a **fallback that works**, and the honest default until
-something clears it. Related: the one effect that survived all four traps in the
+**4. The equity risk premium itself.** Our corrected historical benchmark
+compounded at **6.3-6.6%/yr** over 58 years. The older three-control snapshot
+had only S-2 above that comparator; it is not current promotion evidence. The
+risk premium remains a **fallback that works**, and the honest default until a
+candidate clears it. Related: the one effect that survived all four traps in the
 `market-structure` research pass was the **overnight drift (~4-5 bps/day in
 liquid names, in every decile)** — which is the risk premium accruing while you
 hold, *"captured by holding, not by trading."*
@@ -123,7 +128,7 @@ than a winning chart pattern, and it is the version supported by evidence.
 
 ---
 
-## 1. ⚠⚠ The four filters, and our own three strategies scored against them
+## 1. ⚠⚠ The four filters, and the historical three-control snapshot
 
 Each filter is a published result. The scores are **our own stored numbers**,
 recomputed — never quoted from here without re-running.
@@ -135,7 +140,9 @@ recomputed — never quoted from here without re-running.
 | **responds to vol scaling** | Cederburg et al. | ✓ momentum is the exception that works | ✓ same | ✗ not in the working subset |
 | **construction not microcap-inflated** | Hou/Xue/Zhang | ⚠ indirect (equal-weight pooling) | ⚠ **direct hit** (cross-sectional sort, `MIN_CLOSE=1.0`) | ⚠ indirect |
 
-**Our measured result: s2 is the only one of the three that beats buy-and-hold.**
+**That stored snapshot had S-2 as the only one of the three above buy-and-hold.**
+S-1..S-4 are now permanent harness controls and current evidence must be read
+from their immutable recent-window identities, never copied from this prose.
 
 ⚠⚠ **BUT SEE §2.8 BEFORE LEANING ON THIS TABLE.** Under year-clustered inference
 on our own corpus, **momentum is not statistically established at any horizon**,
@@ -437,7 +444,7 @@ by data-mining would not concentrate itself on precisely the episodes the theory
 names. Reproduce with `scripts/` or the CTE in this section's git history.
 
 > **This is a better-targeted gate than generic volatility conditioning**, and it
-> applies to the two strategies we most want to keep. It is a *two-condition
+> applies to any future candidates in the two momentum families. It is a *two-condition
 > state*, not a threshold, and it fires in under 8% of months — so it costs
 > almost nothing in normal times.
 
@@ -935,7 +942,7 @@ most of which we can compute today:**
 | 4 | downtrend line penetrated | ✅ `detect_swings` + a fitted line |
 | 5 | higher lows | ✅ `detect_swings` |
 | 6 | higher highs | ✅ `detect_swings` |
-| 7 | **stock stronger than the market** | ✅ relative strength vs SPY (#2398) |
+| 7 | **stock stronger than the market** | ⚠ historical relative strength is computable only through the SPY comparator's 2024-09-27 data frontier; later windows wait on #2482 |
 | 8 | base forming (horizontal price line) | ✅ `cluster_levels` |
 | 9 | profit potential >= 3x risk | ✅ a reward:risk filter on the level distance |
 
@@ -1007,11 +1014,13 @@ high-turnover by construction.
 
 ---
 
-## 2.13 ⚠⚠ Opening Range Breakout — the strongest "day trading works" claim, and the arithmetic that kills it FOR US
+## 2.13 ⚠⚠ Opening Range Breakout — a prominent "day trading works" claim and a broker-cost falsification
 
 The operator asked whether anything works on **intraday candles alone** — no
-depth, no order book. There is one serious candidate and it deserves a fair
-hearing rather than a dismissal.
+depth, no order book. ORB is a prominent published claim and deserves a fair
+falsification rather than a dismissal. It is **not** an eBull capital candidate:
+the experiment measures whether the published effect survives this broker and
+whether its Stocks-in-Play filter is useful to a separately specified strategy.
 
 **Zarattini, Barbon & Aziz, "A Profitable Day Trading Strategy For The U.S.
 Equity Market"** (SSRN 4729284). **7,000+ US stocks, 2016-2023**, 5-minute
@@ -1060,11 +1069,12 @@ $100 stock        0.0010%       0.509%    509x
    about our broker, not about the strategy.
 2. ⚠ **This is the single strongest argument for caring about execution cost**
    rather than signal quality. A 500x cost disadvantage cannot be out-thought.
-3. **The testable question it leaves is narrow and worth answering:** does ORB
+3. **The falsifiable question it leaves is narrow:** does the published ORB
    survive at *our* costs on *our* recorded candles, restricted to the widest,
-   most liquid, tightest-spread names? The honest prior is no. ⚠ Measure it
-   before believing either answer — and pre-register it, because it is exactly
-   the kind of famous strategy that invites a favourable reading.
+   most liquid, tightest-spread names? The honest prior is no. ⚠ Pre-register
+   the rejection test because a famous strategy invites a favourable reading.
+   Even a pass does not place ORB on the strategy menu; it only licenses a new,
+   separately specified candidate hypothesis if the selection filter is useful.
 4. **"Stocks in Play" is doing real work** in their result — a relative-volume
    and gap filter. Any replication must include the selection step, not just the
    breakout rule.
@@ -1074,9 +1084,11 @@ $100 stock        0.0010%       0.509%    509x
 | family | evidence | our data | verdict |
 | --- | --- | --- | --- |
 | **insider purchases** | ⚠⚠ **the best-evidenced family we can actually build.** Lakonishok & Lee (2001): heavy insider buying beats the market ~6%/12mo. Jeng, Metrick & Zeckhauser (2003): ~11.2%/yr abnormal on purchases, **sales show no effect**. Cohen, Malloy & Pomorski: **routine trades have ZERO predictive power; opportunistic trades pay 82 bps/month** (~10%/yr) — ~4× the undifferentiated signal | Form 4 tables held | **build** — ⚠ purchases only, and the routine/opportunistic split is the whole edge |
-| cross-sectional momentum | survives costs, scalable, responds to vol scaling | shipped (s2) | keep, re-measure per §2.2 |
-| time-series momentum | family survives, but ⚠ our turnover is 12× the bar | shipped (s1) | ⚠ fix turnover or drop |
-| short-term reversal | ⚠ most cost-constrained family; ours is 6.7× the turnover bar | shipped (s3) | ⚠ hardest case in the catalogue |
+| cross-sectional momentum | family survives costs in published work and responds to vol scaling | S-2 is a permanent harness control | **control only** — any investable formulation needs a new preregistered candidate identity and recent after-cost evidence |
+| time-series momentum | family evidence exists, but the S-1 implementation turns over 12× above the viability bar | S-1 is a permanent harness control | **control only** — do not tune or promote S-1 |
+| short-term reversal | ⚠ most cost-constrained family; S-3 is 6.7× above the turnover bar | S-3 is a permanent daily RSI harness control | **control only** — do not transfer its evidence to a different reversal definition |
+| intraday factor-residual reversal | published long-short construction uses 30-minute midpoints and factor residuals | exact inputs are not yet reproducible | separately preregistered, data-gated replication (#2484); it does not inherit S-3 evidence |
+| volatility-compression breakout | ATR supplies risk scale, not expectancy | S-4 now has causal brackets and forward resolution | **control only** — resolved forward outcomes are pipeline proof, not performance evidence |
 | PEAD | *"largely disappeared in many segments"*, persists only where limits to arbitrage bind | event + XBRL, ⚠ **no analyst estimates** | conditional at best |
 | 13F flow / crowding | ⚠ mixed. Cloning ≈ market returns; the 45-day lag is the design problem, and institutions *deliberately* delay to deter copycats | 7M rows | ⚠ crowding/unwind angle only, not cloning |
 | filing text | — | ⚠ **NOT held** — `filing_documents` is a manifest of URLs, no bodies | needs a fetch pipeline first |
@@ -1205,12 +1217,15 @@ that row as stress/context evidence and require the code-pinned windows in
 must fail closed when any required recent window is absent or loses its net
 expectancy sign. Pre-2000 performance cannot rescue it.
 
-Store only the aggregate result arms. At the current three runnable strategies,
-the complete recent matrix is 96 rows (8 windows x 3 strategies x 2 ambiguity x
-2 quarantine). Reuse the daily corpus during compute; do not persist indicator,
-position or equity-curve time series merely to render the picker. Fired signals
-remain durable; non-fired/not-evaluable detail is a bounded-retention concern and
-must have checked daily aggregates before deletion.
+Store only the aggregate result arms. At the current four runnable controls,
+the complete recent matrix is 128 rows (8 windows x 4 strategies x 2 ambiguity x
+2 quarantine). Only S-4 independently resolves the best/worst ambiguity arms;
+the shared, non-level S-1..S-3 measurement is intentionally written under both
+arm identities so the physical denominator stays complete. Reuse the daily
+corpus during compute; do not persist indicator, position or equity-curve time
+series merely to render the picker. Fired signals remain durable;
+non-fired/not-evaluable detail is a bounded-retention concern and must have
+checked daily aggregates before deletion.
 
 Keep historical backtest, forward observation, paper and live as separate arms.
 All fired signals remain visible when unfunded. Missing broker cost semantics,
