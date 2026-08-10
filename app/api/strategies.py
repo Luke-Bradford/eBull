@@ -1549,25 +1549,40 @@ def update_strategy_sizing(
 ) -> StrategySizingUpdateResponse:
     """Revise only an existing policy's per-signal sizing semantics."""
     _require_current_strategy_version(strategy_id, body.strategy_version)
+    overview = get_strategy_overview(conn)
+    strategy = next((item for item in overview.strategies if item.strategy_id == strategy_id), None)
+    if strategy is None:
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="strategy overview changed; refresh required")
+    if not strategy.allocation_ready:
+        conn.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="sizing cannot be revised while strategy evidence or controls are invalid",
+        )
+    # End the read-only overview transaction before taking the control lock so
+    # the lock is held only for the one policy row revision below.
+    conn.rollback()
     try:
         with conn.transaction():
             lock_strategy_control(conn, strategy_id, body.strategy_version)
-            overview = get_strategy_overview(conn)
-            strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
-            deployment_id = strategy.allocation.deployment_id
-            current_max = strategy.allocation.max_ticket_amount
-            if deployment_id is None or not strategy.allocation.policy_configured or current_max is None:
-                raise StrategyControlError("an execution policy must exist before sizing can be revised")
-            if not strategy.allocation_ready:
-                raise StrategyControlError("sizing cannot be revised while strategy evidence or controls are invalid")
+            if current_stage(conn, strategy_id, body.strategy_version) not in {"paper_enabled", "live_enabled"}:
+                raise StrategyControlError("strategy is no longer approved for sizing")
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
-                    "SELECT * FROM strategy_execution_policies WHERE deployment_id=%s FOR UPDATE",
-                    (deployment_id,),
+                    """
+                    SELECT p.*
+                    FROM strategy_deployments d
+                    JOIN strategy_execution_policies p USING (deployment_id)
+                    WHERE d.strategy_id=%s AND d.strategy_version=%s AND d.mode='paper'
+                    FOR UPDATE OF d,p
+                    """,
+                    (strategy_id, body.strategy_version),
                 )
                 current = cur.fetchone()
             if current is None:
-                raise StrategyControlError("execution policy disappeared during sizing update")
+                raise StrategyControlError("paper execution policy is unavailable")
+            deployment_id = int(current["deployment_id"])
             policy = configure_execution_policy(
                 conn,
                 deployment_id=deployment_id,

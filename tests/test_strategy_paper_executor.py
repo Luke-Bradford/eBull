@@ -347,7 +347,7 @@ def test_fixed_ticket_mode_requests_a_currency_amount_before_risk_caps(
         """
         SELECT ticket_sizing_mode,ticket_fraction,fixed_ticket_amount,max_ticket_amount
         FROM strategy_execution_policy_events
-        ORDER BY strategy_execution_policy_event_id DESC LIMIT 1
+        ORDER BY policy_event_id DESC LIMIT 1
         """
     ).fetchone() == ("fixed", None, Decimal("125.000000"), Decimal("500.000000"))
 
