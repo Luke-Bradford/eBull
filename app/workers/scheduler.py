@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal, cast
+from zoneinfo import ZoneInfo
 
 import psycopg
 import psycopg.rows
@@ -58,6 +59,7 @@ from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.job_progress import JobProgress, degradation_reason
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
+from app.services.market_calendar import us_market_status
 from app.services.market_data import most_recent_trading_day, refresh_market_data, refresh_quotes
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
@@ -652,6 +654,39 @@ def _bootstrap_complete(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
     ):
         return (True, "")
     return (False, "first-install bootstrap not complete; visit /admin to run")
+
+
+_NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _strategy_intraday_collection_window_open(now: datetime) -> bool:
+    """Whether a scheduled harvest can collect a newly completed US bar.
+
+    The provider returns extended-hours candles, but this evidence panel owns
+    NYSE regular-session bars only.  Start at 09:35 ET, after the first 5m bar
+    can have completed, and leave ten minutes after the regular/early close for
+    provider publication lag.  Manual ``Run now`` bypasses prerequisites, so an
+    operator can still repair a gap outside this automatic request window.
+    """
+    if now.tzinfo is None:
+        raise ValueError("intraday collection window requires an aware datetime")
+    local = now.astimezone(_NEW_YORK)
+    status = us_market_status(local.date())
+    if status == "closed":
+        return False
+    minute = local.hour * 60 + local.minute
+    close_minute = 13 * 60 if status == "half_day" else 16 * 60
+    return 9 * 60 + 35 <= minute <= close_minute + 10
+
+
+def _strategy_intraday_collection_due(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
+    """Gate automatic provider calls to bootstrap-complete US sessions."""
+    bootstrap_met, reason = _bootstrap_complete(conn)
+    if not bootstrap_met:
+        return (False, reason)
+    if not _strategy_intraday_collection_window_open(datetime.now(tz=UTC)):
+        return (False, "outside the completed US regular-session bar collection window")
+    return (True, "")
 
 
 def _has_actionable_recommendations(conn: psycopg.Connection[Any]) -> PrerequisiteResult:
@@ -2029,14 +2064,16 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         display_name="Strategy intraday evidence harvest (#2477)",
         source="etoro",
         description=(
-            "Every five minutes -- fetches at most twelve predeclared eToro research windows, "
+            "Every five minutes during the US regular-session collection window -- fetches at "
+            "most twelve predeclared eToro research windows, "
             "retains completed NYSE-RTH bars only, removes watermark overlap and records gaps "
             "without imputation. The active versioned panel is deliberately small; storage "
-            "remains partitioned and retention-capped. Operator Run now uses the same path."
+            "remains partitioned and retention-capped. Operator Run now uses the same collector "
+            "and can repair gaps outside the automatic request window."
         ),
         cadence=Cadence.every_n_minutes(interval=5),
         catch_up_on_boot=False,
-        prerequisite=_bootstrap_complete,
+        prerequisite=_strategy_intraday_collection_due,
     ),
     ScheduledJob(
         name=JOB_STRATEGY_OBSERVATION_RETENTION,
