@@ -112,8 +112,8 @@ the rate — it does not.
 
 * ``init`` — universe-sync only. Pre-everything fence; one job total.
 * ``etoro`` — eToro REST budget. ``execute_approved_orders`` +
-  ``daily_candle_refresh`` + ``etoro_lookups_refresh`` +
-  ``exchanges_metadata_refresh`` serialise.
+  ``daily_candle_refresh`` + ``strategy_intraday_harvest`` +
+  ``etoro_lookups_refresh`` + ``exchanges_metadata_refresh`` serialise.
 * ``sec_rate`` — the SEC discovery/producer jobs (per-accession fetchers +
   per-issuer ingest). They serialise under one ``JobLock`` to bound job
   overlap, NOT request rate (the HTTP floor above bounds rate). #1478
@@ -345,7 +345,9 @@ when one overruns). Scheduled-only, so NOT added to the
   writer of the signal/count/observation relations and scan watermark; the
   outcome resolver stores one terminal row per fired signal/version and never
   stores immature polling state; the retention sibling drops only expired leaf
-  partitions after both producers;
+  partitions after both producers. Intraday harvesting uses the ``etoro`` lane,
+  and both its writer and this retention job take the same per-tier transaction
+  advisory locks before touching intraday partitions;
   reads ``price_daily`` / ``price_bar_quarantine`` MVCC-safe. ⚠ The lane is
   load-bearing for CORRECTNESS here, unlike the two above where it is a
   starvation fix: ``store_signals`` has no ``ON CONFLICT``, so two overlapping

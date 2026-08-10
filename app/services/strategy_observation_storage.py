@@ -127,6 +127,7 @@ class IntradayStorageReport:
 class RetentionPlan:
     signal_partitions: tuple[str, ...]
     intraday_partitions: tuple[str, ...]
+    intraday_gap_rows: int = 0
 
     @property
     def partitions(self) -> tuple[str, ...]:
@@ -635,13 +636,9 @@ def _partition_names(conn: psycopg.Connection[Any]) -> tuple[str, ...]:
     return tuple(str(row[0]) for row in rows)
 
 
-def retention_plan(conn: psycopg.Connection[Any], *, as_of: datetime) -> RetentionPlan:
-    """Return only leaf relations whose entire bound is outside retention."""
-    if as_of.tzinfo is None:
-        raise ValueError("as_of must be timezone-aware")
-    today = as_of.astimezone(UTC).date()
-    signal_cutoff = today - timedelta(days=SIGNAL_DETAIL_RETENTION_DAYS)
-    intraday_cutoffs = {
+def _intraday_retention_cutoffs(today: date) -> dict[Timeframe, date]:
+    """Resolve each tier's day/month policy to one exclusive date cutoff."""
+    return {
         timeframe: (
             today - timedelta(days=tier.retention_days)
             if tier.retention_days is not None
@@ -649,6 +646,15 @@ def retention_plan(conn: psycopg.Connection[Any], *, as_of: datetime) -> Retenti
         )
         for timeframe, tier in INTRADAY_TIERS.items()
     }
+
+
+def retention_plan(conn: psycopg.Connection[Any], *, as_of: datetime) -> RetentionPlan:
+    """Return only leaf relations whose entire bound is outside retention."""
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    today = as_of.astimezone(UTC).date()
+    signal_cutoff = today - timedelta(days=SIGNAL_DETAIL_RETENTION_DAYS)
+    intraday_cutoffs = _intraday_retention_cutoffs(today)
     signal: list[str] = []
     intraday: list[str] = []
     for name in _partition_names(conn):
@@ -667,7 +673,21 @@ def retention_plan(conn: psycopg.Connection[Any], *, as_of: datetime) -> Retenti
             end = date(int(match[1]), int(match[2]), int(match[3])) + timedelta(days=1)
             if end <= intraday_cutoffs["1m"]:
                 intraday.append(name)
-    return RetentionPlan(tuple(signal), tuple(intraday))
+    gap_row = conn.execute(
+        """
+        SELECT count(*)
+        FROM strategy_intraday_gaps
+        WHERE (timeframe = '30m' AND gap_end <= %(cutoff_30m)s)
+           OR (timeframe = '5m'  AND gap_end <= %(cutoff_5m)s)
+           OR (timeframe = '1m'  AND gap_end <= %(cutoff_1m)s)
+        """,
+        {
+            "cutoff_30m": datetime.combine(intraday_cutoffs["30m"], datetime.min.time(), tzinfo=UTC),
+            "cutoff_5m": datetime.combine(intraday_cutoffs["5m"], datetime.min.time(), tzinfo=UTC),
+            "cutoff_1m": datetime.combine(intraday_cutoffs["1m"], datetime.min.time(), tzinfo=UTC),
+        },
+    ).fetchone()
+    return RetentionPlan(tuple(signal), tuple(intraday), int(gap_row[0]) if gap_row else 0)
 
 
 def drop_expired_partitions(conn: psycopg.Connection[Any], *, as_of: datetime, dry_run: bool = True) -> RetentionPlan:
@@ -683,6 +703,23 @@ def drop_expired_partitions(conn: psycopg.Connection[Any], *, as_of: datetime, d
             # patterns in ``retention_plan``; Identifier handles quoting as a
             # second boundary. A caller can never supply a relation name.
             conn.execute(psycopg.sql.SQL("DROP TABLE {}").format(psycopg.sql.Identifier(name)))
+        today = as_of.astimezone(UTC).date()
+        intraday_cutoffs = _intraday_retention_cutoffs(today)
+        deleted_gaps = conn.execute(
+            """
+            DELETE FROM strategy_intraday_gaps
+            WHERE (timeframe = '30m' AND gap_end <= %(cutoff_30m)s)
+               OR (timeframe = '5m'  AND gap_end <= %(cutoff_5m)s)
+               OR (timeframe = '1m'  AND gap_end <= %(cutoff_1m)s)
+            """,
+            {
+                "cutoff_30m": datetime.combine(intraday_cutoffs["30m"], datetime.min.time(), tzinfo=UTC),
+                "cutoff_5m": datetime.combine(intraday_cutoffs["5m"], datetime.min.time(), tzinfo=UTC),
+                "cutoff_1m": datetime.combine(intraday_cutoffs["1m"], datetime.min.time(), tzinfo=UTC),
+            },
+        ).rowcount
+        if deleted_gaps != plan.intraday_gap_rows:
+            raise RuntimeError(f"deleted {deleted_gaps} intraday gap rows against planned {plan.intraday_gap_rows}")
         # Watermarks are bounded control metadata, not observations. Releasing
         # one only after every retained bar for the tier/instrument has expired
         # permits deliberate universe rotation without weakening the cap.

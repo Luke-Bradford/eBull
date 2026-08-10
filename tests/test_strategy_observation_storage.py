@@ -324,12 +324,25 @@ def test_retention_drops_whole_expired_partitions_and_keeps_current(
         """,
         (first,),
     )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_intraday_gaps (
+            universe_version, timeframe, instrument_id, gap_start, gap_end
+        ) VALUES (
+            'ETORO-RTH-V2', '1m', %s,
+            TIMESTAMPTZ '2020-01-01 10:01:00+00',
+            TIMESTAMPTZ '2020-01-01 10:02:00+00'
+        )
+        """,
+        (first,),
+    )
 
     plan = drop_expired_partitions(ebull_test_conn, as_of=as_of)
     assert expired_signal in plan.signal_partitions
     assert expired_intraday in plan.intraday_partitions
     assert current_signal not in plan.partitions
     assert current_intraday not in plan.partitions
+    assert plan.intraday_gap_rows == 1
 
     dropped = drop_expired_partitions(ebull_test_conn, as_of=as_of, dry_run=False)
     assert dropped == plan
@@ -355,5 +368,9 @@ def test_retention_drops_whole_expired_partitions_and_keeps_current(
         )
     assert ebull_test_conn.execute(
         "SELECT count(*) FROM strategy_intraday_watermarks WHERE timeframe = '1m' AND instrument_id = %s",
+        (first,),
+    ).fetchone() == (0,)
+    assert ebull_test_conn.execute(
+        "SELECT count(*) FROM strategy_intraday_gaps WHERE instrument_id = %s",
         (first,),
     ).fetchone() == (0,)
