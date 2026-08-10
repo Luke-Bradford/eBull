@@ -178,6 +178,7 @@ class StrategyOverview(BaseModel):
     description: str
     exit_timing: str
     runnable: bool
+    forward_outcome_supported: bool
     exclusion_reason: str | None
     scan: ScanHealth
     evidence_windows: list[EvidenceWindow]
@@ -941,6 +942,7 @@ def get_strategy_overview(
                 description=_PRESENTATION.get(strategy_id, ("Evidence-backed automated strategy.", "Rule based"))[0],
                 exit_timing=_PRESENTATION.get(strategy_id, ("Evidence-backed automated strategy.", "Rule based"))[1],
                 runnable=strategy_id in runnable,
+                forward_outcome_supported=entry.exit_levels is not None,
                 exclusion_reason=excluded_by_id.get(strategy_id),
                 scan=scan,
                 evidence_windows=windows,

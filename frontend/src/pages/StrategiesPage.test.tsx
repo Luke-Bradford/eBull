@@ -88,6 +88,7 @@ const OVERVIEW: StrategyOverviewResponse = {
     description: "Follows established price trends and exits when the trend turns.",
     exit_timing: "Until the trend turns",
     runnable: true,
+    forward_outcome_supported: false,
     exclusion_reason: null,
     scan: { frontier_date: "2026-08-07", updated_at: "2026-08-08T06:45:00Z", status: "current", fired_entries: 12, fired_exits: 0, not_fired: 100, not_evaluable: 0, exclusions_by_reason: {} },
     evidence_windows: [
@@ -158,6 +159,7 @@ function approvedOverview(): StrategyOverviewResponse {
     paper_pool: { ...OVERVIEW.paper_pool, enabled: true, reserved_capital: "250", invested_capital: "200", remaining_capital: "750" },
     strategies: [{
       ...strategy,
+      forward_outcome_supported: true,
       all_recent_evidence_complete: true,
       stage: "paper_enabled",
       attribution: {
@@ -226,9 +228,38 @@ describe("StrategiesPage", () => {
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     expect(await screen.findByText("Validation controls")).toBeInTheDocument();
-    expect(screen.getByText("Harness evidence only · never eligible for capital")).toBeInTheDocument();
+    expect(screen.getByText("Harness evidence only · never eligible for capital · backtest only")).toBeInTheDocument();
     expect(screen.getByText("No capital candidates yet")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "View evidence" })).not.toBeInTheDocument();
+  });
+
+  it("counts only strategies with a forward outcome resolver as open observations", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [
+        strategy,
+        {
+          ...strategy,
+          strategy_id: "s4-volatility-compression-breakout",
+          title: "Volatility compression breakout",
+          forward_outcome_supported: true,
+          attribution: {
+            ...strategy.attribution,
+            fired_entries: 108,
+            resolved_entries: 2,
+            winning_entries: 1,
+            win_rate: "0.5",
+            shadow_average_return_pct: "0.0509",
+          },
+        },
+      ],
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const validation = (await screen.findByText("Forward signal validation")).closest("section")!;
+    expect(within(validation).getByText("106")).toBeInTheDocument();
+    expect(within(validation).getByText("2")).toBeInTheDocument();
+    expect(within(validation).getAllByText("1", { selector: "dd" })).toHaveLength(2);
   });
 
   it("does not present a legacy enabled harness deployment as approved", async () => {
