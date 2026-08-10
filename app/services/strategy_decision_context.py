@@ -31,6 +31,8 @@ class ContextDefinition:
     price_edges: tuple[str, ...] = ("5", "20", "50", "150")
     dollar_volume_edges: tuple[str, ...] = ("1000000", "10000000", "25000000", "100000000")
     trailing_volume_statistic: str = "causal_median"
+    volume_lookback_sessions: int = 20
+    volume_capacity_statistic: str = "causal_mean"
     listing_semantics: str = "primary_listing_not_execution_venue"
 
 
@@ -86,8 +88,12 @@ class MarketClassification:
 @dataclass(frozen=True)
 class DecisionInputs:
     as_traded_price: Decimal | None
+    trailing_mean_share_volume: Decimal | None
     trailing_median_share_volume: Decimal | None
+    trailing_mean_dollar_volume: Decimal | None
     trailing_median_dollar_volume: Decimal | None
+    zero_volume_frequency: Decimal | None
+    intraday_coverage: Decimal | None
     relative_volume: Decimal | None
     spread_bps: Decimal | None
     realised_volatility: Decimal | None
@@ -113,9 +119,14 @@ class DecisionContext:
     instrument_type_id: int | None
     as_traded_price: Decimal | None
     price_band: PriceBand | None
+    volume_lookback_sessions: int
+    trailing_mean_share_volume: Decimal | None
     trailing_median_share_volume: Decimal | None
+    trailing_mean_dollar_volume: Decimal | None
     trailing_median_dollar_volume: Decimal | None
     dollar_volume_band: DollarVolumeBand | None
+    zero_volume_frequency: Decimal | None
+    intraday_coverage: Decimal | None
     relative_volume: Decimal | None
     spread_bps: Decimal | None
     realised_volatility: Decimal | None
@@ -126,8 +137,12 @@ class DecisionContext:
 
 _REQUIRED_INPUTS: Final = (
     "as_traded_price",
+    "trailing_mean_share_volume",
     "trailing_median_share_volume",
+    "trailing_mean_dollar_volume",
     "trailing_median_dollar_volume",
+    "zero_volume_frequency",
+    "intraday_coverage",
     "relative_volume",
     "spread_bps",
     "realised_volatility",
@@ -189,6 +204,23 @@ def build_decision_context(
         raise ValueError("instrument_id must be positive")
     if decision_at.tzinfo is None:
         raise ValueError("decision_at must be timezone-aware")
+    for name in (
+        "trailing_mean_share_volume",
+        "trailing_median_share_volume",
+        "trailing_mean_dollar_volume",
+        "trailing_median_dollar_volume",
+        "relative_volume",
+        "spread_bps",
+        "realised_volatility",
+        "vix",
+    ):
+        value = getattr(inputs, name)
+        if value is not None and value < 0:
+            raise ValueError(f"{name} must be non-negative")
+    for name in ("zero_volume_frequency", "intraday_coverage"):
+        value = getattr(inputs, name)
+        if value is not None and not 0 <= value <= 1:
+            raise ValueError(f"{name} must be inside 0-1")
 
     missing: list[str] = [name for name in _REQUIRED_INPUTS if getattr(inputs, name) is None]
     if classification is None:
@@ -224,9 +256,14 @@ def build_decision_context(
         instrument_type_id=None if classification is None else classification.instrument_type_id,
         as_traded_price=inputs.as_traded_price,
         price_band=price_band,
+        volume_lookback_sessions=DEFINITION.volume_lookback_sessions,
+        trailing_mean_share_volume=inputs.trailing_mean_share_volume,
         trailing_median_share_volume=inputs.trailing_median_share_volume,
+        trailing_mean_dollar_volume=inputs.trailing_mean_dollar_volume,
         trailing_median_dollar_volume=inputs.trailing_median_dollar_volume,
         dollar_volume_band=dollar_band,
+        zero_volume_frequency=inputs.zero_volume_frequency,
+        intraday_coverage=inputs.intraday_coverage,
         relative_volume=inputs.relative_volume,
         spread_bps=inputs.spread_bps,
         realised_volatility=inputs.realised_volatility,
@@ -242,16 +279,22 @@ _INSERT_CONTEXT = """
         candidate_verdict, refusal_reason, context_version,
         classification_effective_from, security_type, primary_listing_market,
         provider_exchange_id, instrument_type_id, as_traded_price, price_band,
-        trailing_median_share_volume, trailing_median_dollar_volume,
-        dollar_volume_band, relative_volume, spread_bps, realised_volatility,
+        volume_lookback_sessions, trailing_mean_share_volume,
+        trailing_median_share_volume, trailing_mean_dollar_volume,
+        trailing_median_dollar_volume, dollar_volume_band,
+        zero_volume_frequency, intraday_coverage,
+        relative_volume, spread_bps, realised_volatility,
         gap_pct, market_sector_residual_z, vix
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(decision_at)s, %(signal_id)s,
         %(candidate_verdict)s, %(refusal_reason)s, %(context_version)s,
         %(classification_effective_from)s, %(security_type)s, %(primary_listing_market)s,
         %(provider_exchange_id)s, %(instrument_type_id)s, %(as_traded_price)s, %(price_band)s,
-        %(trailing_median_share_volume)s, %(trailing_median_dollar_volume)s,
-        %(dollar_volume_band)s, %(relative_volume)s, %(spread_bps)s, %(realised_volatility)s,
+        %(volume_lookback_sessions)s, %(trailing_mean_share_volume)s,
+        %(trailing_median_share_volume)s, %(trailing_mean_dollar_volume)s,
+        %(trailing_median_dollar_volume)s, %(dollar_volume_band)s,
+        %(zero_volume_frequency)s, %(intraday_coverage)s,
+        %(relative_volume)s, %(spread_bps)s, %(realised_volatility)s,
         %(gap_pct)s, %(market_sector_residual_z)s, %(vix)s
     )
     RETURNING context_id

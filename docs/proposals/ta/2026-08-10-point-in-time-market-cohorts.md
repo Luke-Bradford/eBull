@@ -26,8 +26,9 @@ this table. The row contains:
 - provider security type and normalised common-stock/ETF/other classification;
 - primary listing market (NYSE/Nasdaq/other), explicitly not execution venue;
 - contemporaneous as-traded price and fixed price band;
-- causal trailing median share/dollar volume, relative volume and dollar-volume
-  band;
+- 20 completed causal sessions of mean share/dollar volume (capacity), median
+  share/dollar volume (typical-day robustness), relative volume, zero-volume
+  frequency, intraday coverage and dollar-volume band;
 - spread, realised volatility, gap, market/sector residual z-score and VIX;
 - the version hash of all bucket boundaries and semantics;
 - a named refusal when any required input is absent or unknown.
