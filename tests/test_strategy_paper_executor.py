@@ -35,6 +35,7 @@ from app.services.strategy_control_plane import (
     decide_funding,
     link_strategy_order,
 )
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_paper_executor import (
     PaperExecutionResult,
     _effective_capital_bases,
@@ -223,6 +224,25 @@ def _seed(
     )
     conn.commit()
     return int(signal[0])
+
+
+def test_harness_signal_is_rejected_before_runtime_or_broker_checks(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    signal_id = _seed(ebull_test_conn)
+    harness = next(iter(STRATEGY_MANIFEST.values()))
+    ebull_test_conn.execute(
+        "UPDATE strategy_signals SET strategy_id=%s WHERE signal_id=%s",
+        (harness.strategy_id, signal_id),
+    )
+    ebull_test_conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "harness_validation_only"
+    broker.place_demo_strategy_order.assert_not_called()
 
 
 def _broker(*, undocumented_cost: bool = False) -> MagicMock:

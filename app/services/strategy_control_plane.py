@@ -16,6 +16,8 @@ from typing import Any, Literal, cast
 import psycopg
 import psycopg.rows
 
+from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
+
 Stage = Literal[
     "research_candidate",
     "historical_validated",
@@ -58,6 +60,11 @@ class StrategyControlError(ValueError):
 
 class StrategyOwnershipError(StrategyControlError):
     """The exact broker position is not actively owned by this trade."""
+
+
+def registered_strategy_purpose(strategy_id: str) -> StrategyPurpose | None:
+    entry = STRATEGY_MANIFEST.get(strategy_id)
+    return None if entry is None else entry.purpose
 
 
 @dataclass(frozen=True)
@@ -236,6 +243,8 @@ def promote_strategy(
         _require_text(value, field)
     if to_stage == "live_enabled":
         raise StrategyControlError("live_enabled requires the dedicated measured live-promotion gate")
+    if to_stage in _EXTERNAL_EVIDENCE_STAGES and registered_strategy_purpose(strategy_id) == "harness_validation":
+        raise StrategyControlError("harness-validation strategies are permanent controls and cannot be promoted")
     if evidence_ref is not None:
         _require_text(evidence_ref, "evidence_ref")
     if len(set(result_ids)) != len(result_ids):
@@ -344,6 +353,12 @@ def configure_deployment(
         enabled=enabled,
         currency=currency,
     )
+    if (
+        registered_strategy_purpose(strategy_id) == "harness_validation"
+        and not risk_reducing
+        and (enabled or capital_limit > 0)
+    ):
+        raise StrategyControlError("harness-validation strategies cannot receive capital authority")
     eligible: dict[Mode, frozenset[Stage]] = {
         "paper": frozenset({"paper_enabled", "live_enabled"}),
         "live": frozenset({"live_enabled"}),
@@ -828,6 +843,7 @@ __all__ = [
     "load_paper_pool",
     "lock_strategy_control",
     "promote_strategy",
+    "registered_strategy_purpose",
     "record_order_position_execution",
     "release_exact_position",
 ]

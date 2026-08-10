@@ -237,6 +237,7 @@ AMBIGUITY_ARMS: frozenset[str] = frozenset(get_args(AmbiguityArm))
 #: reason — a refusal that cannot be counted cannot be reported, and an operator
 #: needs to know which of these is the one blocking every strategy at once.
 PromotionRefusal = Literal[
+    "harness_validation_only",
     "universe_basis_absent",
     "universe_basis_not_survivorship_free",
     "carry_unmodelled",
@@ -515,6 +516,7 @@ class StrategyResult:
     """
 
     identity: ResultIdentity
+    purpose: Literal["harness_validation", "capital_candidate"]
     #: ``strategy_statistics.compute_metrics`` output. ⚠ Its own
     #: ``effective_sample_size`` is ``None`` until stage 5e, and the gate below
     #: refuses on that — the metric set being PRESENT is not the same as it
@@ -560,6 +562,10 @@ class StrategyResult:
     synthetic_control: SyntheticControl | None = None
 
     def __post_init__(self) -> None:
+        if self.purpose not in {"harness_validation", "capital_candidate"}:
+            raise ValueError(
+                f"unknown strategy purpose {self.purpose!r}; must be harness_validation or capital_candidate"
+            )
         if self.identity.result_scope not in RESULT_SCOPES:
             raise ValueError(
                 f"unknown result scope {self.identity.result_scope!r}; must be one of {sorted(RESULT_SCOPES)}"
@@ -726,6 +732,9 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
     """
     refusals: list[PromotionRefusal] = []
     result = candidate.result
+
+    if result.purpose == "harness_validation":
+        refusals.append("harness_validation_only")
 
     # §6 clause 2 — basis missing, or survivor_only. #2288: "An unlabelled
     # result is treated as survivor_only, never as validated."

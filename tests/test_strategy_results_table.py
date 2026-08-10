@@ -39,6 +39,7 @@ _BASE: dict[str, object] = {
     "quarantine_arm": "masked",
     "window_start": "1962-01-02",
     "window_end": "2026-07-08",
+    "purpose": "capital_candidate",
     "universe_basis": "survivor_only",
     "corpus_version": "paperswithbacktest/Stocks-Daily-Price@2026-07-08",
     "cost_model_id": "static-p75-insession-v1",
@@ -173,7 +174,7 @@ _BOOTSTRAP: dict[str, object] = {
 _INSERT = """
     INSERT INTO strategy_results_store (
         strategy_id, strategy_version, result_version, result_scope, namespace,
-        ambiguity_arm, quarantine_arm, window_start, window_end, universe_basis, corpus_version,
+        ambiguity_arm, quarantine_arm, window_start, window_end, purpose, universe_basis, corpus_version,
         cost_model_id, carry_unmodelled, sizing_rule, benchmark_rule, position_rule_set_version,
         outcome_rule_set_version, input_rule_set_version,
         evaluated_instrument_count, trial_count, deflated_sharpe,
@@ -193,7 +194,8 @@ _INSERT = """
         synthetic_control_passed
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
-        %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(universe_basis)s, %(corpus_version)s,
+        %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(purpose)s,
+        %(universe_basis)s, %(corpus_version)s,
         %(cost_model_id)s, %(carry_unmodelled)s, %(sizing_rule)s, %(benchmark_rule)s, %(position_rule_set_version)s,
         %(outcome_rule_set_version)s, %(input_rule_set_version)s,
         %(evaluated_instrument_count)s, %(trial_count)s, %(deflated_sharpe)s,
@@ -223,7 +225,7 @@ _INSERT = """
 _INSERT_WITHOUT_BASIS = """
     INSERT INTO strategy_results_store (
         strategy_id, strategy_version, result_version, result_scope, namespace,
-        ambiguity_arm, quarantine_arm, window_start, window_end, corpus_version,
+        ambiguity_arm, quarantine_arm, window_start, window_end, purpose, corpus_version,
         cost_model_id, carry_unmodelled, sizing_rule, benchmark_rule, position_rule_set_version,
         outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
         expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
@@ -232,7 +234,7 @@ _INSERT_WITHOUT_BASIS = """
         unpriced_trade_count, periods_per_year, total_return_pct, buy_and_hold_return_pct, metric_set_id
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
-        %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(corpus_version)s,
+        %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(purpose)s, %(corpus_version)s,
         %(cost_model_id)s, %(carry_unmodelled)s, %(sizing_rule)s, %(benchmark_rule)s, %(position_rule_set_version)s,
         %(outcome_rule_set_version)s, %(input_rule_set_version)s, %(evaluated_instrument_count)s,
         %(expectancy_per_trade_pct)s, %(profit_factor)s, %(cagr_pct)s, %(annualised_volatility_pct)s,
@@ -257,6 +259,7 @@ def _insert(conn: psycopg.Connection[tuple], **overrides: object) -> None:
         # a basis nobody can gate on.
         ("unknown universe basis", {"universe_basis": "probably_fine"}),
         ("blank universe basis", {"universe_basis": ""}),
+        ("unknown strategy purpose", {"purpose": "probably_profitable"}),
         # ⚠ `purged` is §5.2's verdict for a signal that contributes to NO
         # result. Admitting it as a namespace would give it one.
         ("purged as a namespace", {"namespace": "purged"}),

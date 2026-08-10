@@ -9,6 +9,7 @@ import { StrategiesPage } from "@/pages/StrategiesPage";
 
 const ARM: StrategyResultArm = {
   result_version: "result-v1",
+  purpose: "capital_candidate",
   ambiguity_arm: "worst_case",
   quarantine_arm: "masked",
   universe_basis: "survivorship_free",
@@ -82,6 +83,7 @@ const OVERVIEW: StrategyOverviewResponse = {
   strategies: [{
     strategy_id: "s1-time-series-momentum",
     strategy_version: "strategy-registry-v1+abc",
+    purpose: "capital_candidate",
     title: "Time-series momentum",
     description: "Follows established price trends and exits when the trend turns.",
     exit_timing: "Until the trend turns",
@@ -201,11 +203,32 @@ describe("StrategiesPage", () => {
 
   it("separates unapproved research from selectable strategies", async () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
-    expect(await screen.findByText("No strategies are approved for automation.")).toBeInTheDocument();
+    expect(await screen.findByText("No capital candidates are approved for automation.")).toBeInTheDocument();
     expect(screen.getByText("Nothing can trade yet")).toBeInTheDocument();
     expect(screen.getByText("Time-series momentum")).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: /Time-series momentum/ })).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Allow new automated entries" })).toBeDisabled();
+  });
+
+  it("renders harness rules as compact controls without allocation actions", async () => {
+    const strategy = OVERVIEW.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      strategies: [{
+        ...strategy,
+        purpose: "harness_validation",
+        evidence_windows: strategy.evidence_windows.map((window) => ({
+          ...window,
+          arms: window.arms.map((arm) => ({ ...arm, purpose: "harness_validation" })),
+        })),
+        allocation_refusals: ["harness_validation_only"],
+      }],
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    expect(await screen.findByText("Validation controls")).toBeInTheDocument();
+    expect(screen.getByText("Harness evidence only · never eligible for capital")).toBeInTheDocument();
+    expect(screen.getByText("No capital candidates yet")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "View evidence" })).not.toBeInTheDocument();
   });
 
   it("uses a compact capital control while still allowing the limit to be saved", async () => {

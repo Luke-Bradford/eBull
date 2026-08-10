@@ -25,6 +25,7 @@ from app.services.strategy_control_plane import (
     StrategyControlError,
     current_stage,
     lock_strategy_control,
+    registered_strategy_purpose,
 )
 from app.services.strategy_monitoring import load_entry_block_state, load_owned_pnl
 
@@ -479,6 +480,8 @@ def assess_live_gate(
     )
 
     refusals: list[str] = []
+    if registered_strategy_purpose(strategy_id) == "harness_validation":
+        refusals.append("harness_validation_only")
     if policy is None:
         refusals.append("live_gate_policy_missing")
     if facts.stage != "paper_enabled":

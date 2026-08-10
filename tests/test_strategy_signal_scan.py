@@ -323,6 +323,7 @@ class TestCrossSectionalResolution:
         rogue = _Plan(
             entry=type(entry)(
                 strategy_id=entry.strategy_id,
+                purpose=entry.purpose,
                 identity=entry.identity,
                 strategy_class="cross_sectional",
                 signal_kinds=entry.signal_kinds,

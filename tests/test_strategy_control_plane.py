@@ -8,6 +8,8 @@ from typing import Any
 import psycopg
 import pytest
 
+from app.services.backtest_run import BACKTEST_UNIVERSE
+from app.services.cost_model import COST_MODEL_ID
 from app.services.strategy_control_plane import (
     StrategyControlError,
     StrategyOwnershipError,
@@ -22,6 +24,7 @@ from app.services.strategy_control_plane import (
     record_order_position_execution,
     release_exact_position,
 )
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 
 pytestmark = pytest.mark.integration
 
@@ -140,7 +143,6 @@ def test_promotion_is_ordered_explicit_and_evidenced(
     )
     assert first.from_stage is None
     assert current_stage(conn, "S-GOV", "v1") == "research_candidate"
-
     with pytest.raises(StrategyControlError, match="strategy_id must be non-empty"):
         promote_strategy(
             conn,
@@ -174,6 +176,44 @@ def test_promotion_is_ordered_explicit_and_evidenced(
     # Runtime switches are deliberately irrelevant to governance state.
     conn.execute("UPDATE runtime_config SET enable_auto_trading = true, enable_live_trading = true WHERE id = true")
     assert current_stage(conn, "S-GOV", "v1") == "research_candidate"
+
+
+def test_harness_control_cannot_be_promoted_or_funded(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    entry = next(iter(STRATEGY_MANIFEST.values()))
+    version = entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
+    promote_strategy(
+        conn,
+        strategy_id=entry.strategy_id,
+        strategy_version=version,
+        to_stage="research_candidate",
+        promoted_by="operator",
+        reason="register control",
+    )
+    with pytest.raises(StrategyControlError, match="permanent controls"):
+        promote_strategy(
+            conn,
+            strategy_id=entry.strategy_id,
+            strategy_version=version,
+            to_stage="historical_validated",
+            promoted_by="operator",
+            reason="must remain a control",
+            evidence_ref="result:test",
+            result_ids=(1,),
+        )
+    with pytest.raises(StrategyControlError, match="cannot receive capital"):
+        configure_deployment(
+            conn,
+            strategy_id=entry.strategy_id,
+            strategy_version=version,
+            mode="paper",
+            capital_limit=Decimal("100"),
+            enabled=True,
+            changed_by="operator",
+            reason="must remain a control",
+        )
 
 
 def test_deployment_has_one_current_row_and_complete_history(

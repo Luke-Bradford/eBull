@@ -447,6 +447,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
     today = PromotionCandidate(
         result=StrategyResult(
             identity=identity,
+            purpose="capital_candidate",
             metrics=_metrics(effective_sample_size=None),
             universe_basis="survivor_only",
             carry_unmodelled=CARRY_UNMODELLED,
@@ -469,6 +470,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
     clean = PromotionCandidate(
         result=StrategyResult(
             identity=identity,
+            purpose="capital_candidate",
             metrics=_metrics(effective_sample_size=128.5),
             universe_basis="survivorship_free",
             carry_unmodelled=False,

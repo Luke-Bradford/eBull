@@ -67,6 +67,13 @@ function validationState(strategy: StrategyOverview): {
   tone: "ok" | "warn" | "risk" | "neutral";
   explanation: string;
 } {
+  if (strategy.purpose === "harness_validation") {
+    return {
+      label: "Validation control",
+      tone: "neutral",
+      explanation: "Tests the research harness and can never use capital.",
+    };
+  }
   if (strategy.allocation_ready) {
     return { label: "Approved", tone: "ok", explanation: "All automation gates have passed." };
   }
@@ -105,6 +112,7 @@ function validationState(strategy: StrategyOverview): {
 }
 
 const REFUSAL_LABELS: Record<string, string> = {
+  harness_validation_only: "Validation control; permanently barred from capital",
   strategy_not_runnable: "Rule is not runnable end to end",
   recent_evidence_incomplete: "Recent evidence windows are incomplete",
   recent_evidence_gate_refused: "Recent evidence failed its promotion gate",
@@ -784,6 +792,24 @@ function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
   );
 }
 
+function ValidationControl({ strategy }: { strategy: StrategyOverview }) {
+  const arm = representativeArm(strategy);
+  return (
+    <article className="grid gap-3 border-t border-slate-200 py-3 dark:border-slate-800 sm:grid-cols-[minmax(14rem,1.5fr)_repeat(3,minmax(6rem,0.6fr))] sm:items-center">
+      <div>
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-semibold">{strategy.title}</h3>
+          <Badge tone="neutral">Control</Badge>
+        </div>
+        <p className="mt-1 text-xs text-slate-500">Harness evidence only · never eligible for capital</p>
+      </div>
+      <div><span className="text-xs text-slate-500">Expected / trade</span><strong className="block tabular-nums">{pctPoints(arm?.expectancy_per_trade_pct ?? null)}</strong></div>
+      <div><span className="text-xs text-slate-500">Worst drawdown</span><strong className="block tabular-nums">{pctPoints(arm?.max_drawdown_pct ?? null)}</strong></div>
+      <div><span className="text-xs text-slate-500">Evidence windows</span><strong className="block tabular-nums">{completedEvidenceCount(strategy)}/{strategy.evidence_windows.length}</strong></div>
+    </article>
+  );
+}
+
 export function StrategiesPage() {
   const overview = useAsync(fetchStrategyOverview, []);
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
@@ -793,7 +819,8 @@ export function StrategiesPage() {
   const [refreshEvidenceError, setRefreshEvidenceError] = useState<string | null>(null);
   const summary = useMemo(() => overview.data ? aggregate(overview.data) : null, [overview.data]);
   const approvedStrategies = overview.data?.strategies.filter((strategy) => strategy.allocation_ready || strategy.allocation.enabled) ?? [];
-  const researchCandidates = overview.data?.strategies.filter((strategy) => !strategy.allocation_ready && !strategy.allocation.enabled) ?? [];
+  const researchCandidates = overview.data?.strategies.filter((strategy) => strategy.purpose === "capital_candidate" && !strategy.allocation_ready && !strategy.allocation.enabled) ?? [];
+  const validationControls = overview.data?.strategies.filter((strategy) => strategy.purpose === "harness_validation") ?? [];
 
   async function refreshEvidence() {
     setRefreshingEvidence(true);
@@ -824,8 +851,8 @@ export function StrategiesPage() {
         <>
           {summary.approved === 0 ? (
             <div className="flex flex-wrap items-center justify-between gap-2 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
-              <span><strong>No strategies are approved for automation.</strong> Research candidates cannot use capital.</span>
-              <span className="text-xs">0 of {overview.data.strategies.length} ready</span>
+              <span><strong>No capital candidates are approved for automation.</strong> Validation controls cannot use capital.</span>
+              <span className="text-xs">0 ready</span>
             </div>
           ) : null}
           {!overview.data.demo_connection && !overview.data.live_strategy_activation_available ? (
@@ -933,7 +960,21 @@ export function StrategiesPage() {
               </p>
             ) : null}
             <div className="space-y-2">
-              {researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} />)}
+              {researchCandidates.length
+                ? researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} />)
+                : <EmptyState title="No capital candidates yet" description="New candidates appear here only after preregistration and recent, cost-aware validation." />}
+            </div>
+          </section>
+
+          <section>
+            <div className="border-t border-slate-200 pt-5 dark:border-slate-800">
+              <h2 className="text-sm font-semibold">Validation controls</h2>
+              <p className="mt-1 max-w-3xl text-xs text-slate-500">
+                Published baseline rules retained to test the backtester, cost model and outcome pipeline. They are not trading recommendations and cannot be enabled.
+              </p>
+            </div>
+            <div className="mt-3">
+              {validationControls.map((strategy) => <ValidationControl key={strategy.strategy_id} strategy={strategy} />)}
             </div>
           </section>
 

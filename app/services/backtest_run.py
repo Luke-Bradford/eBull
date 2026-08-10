@@ -113,7 +113,7 @@ from app.services.result_ledger import (
 )
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategies.validated_universe import load_validated_universe
-from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry
+from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
 from app.services.strategy_registry import StrategyIdentity, StrategySignal
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
@@ -1537,6 +1537,7 @@ def build_result(
     *,
     strategy_id: str,
     strategy_version: str,
+    purpose: StrategyPurpose,
     ambiguity_arm: AmbiguityArm,
     quarantine_arm: QuarantineArm,
     deflated: DeflatedSharpeResult | None,
@@ -1582,6 +1583,7 @@ def build_result(
             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
         ),
+        purpose=purpose,
         metrics=outcome.metrics,
         universe_basis=BACKTEST_UNIVERSE,
         # ⚠ ``CARRY_UNMODELLED`` AS AT COMPUTE TIME, stamped per row. When carry
@@ -1899,6 +1901,7 @@ def run_backtest(
         holdout_purpose=holdout_purpose,
         holdout_accessed_by=holdout_accessed_by,
         corpus=corpus,
+        strategy_purposes={strategy_id: entry.purpose for strategy_id, entry in manifest.items()},
     )
     report = BacktestRunReport(
         runnable=runnable,
@@ -1989,6 +1992,7 @@ def _write_rows(
     holdout_purpose: str | None,
     holdout_accessed_by: str | None,
     corpus: _Corpus,
+    strategy_purposes: Mapping[str, StrategyPurpose],
 ) -> tuple[WrittenRow, ...]:
     """Criterion 9's arm pairs, ``masked`` and ``admitted`` in one transaction each.
 
@@ -2039,6 +2043,7 @@ def _write_rows(
                     masked_arm.namespaces[namespace],
                     strategy_id=strategy_id,
                     strategy_version=masked_arm.strategy_version,
+                    purpose=strategy_purposes[strategy_id],
                     ambiguity_arm=ambiguity,
                     quarantine_arm="masked",
                     deflated=_deflated_for(
@@ -2051,6 +2056,7 @@ def _write_rows(
                     admitted_arm.namespaces[namespace],
                     strategy_id=strategy_id,
                     strategy_version=admitted_arm.strategy_version,
+                    purpose=strategy_purposes[strategy_id],
                     ambiguity_arm=ambiguity,
                     quarantine_arm="admitted",
                     deflated=_deflated_for(

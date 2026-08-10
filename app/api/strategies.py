@@ -129,6 +129,7 @@ class ScanHealth(BaseModel):
 
 class ResultArm(BaseModel):
     result_version: str
+    purpose: Literal["harness_validation", "capital_candidate"]
     ambiguity_arm: str
     quarantine_arm: str
     universe_basis: str
@@ -172,6 +173,7 @@ class EvidenceWindow(BaseModel):
 class StrategyOverview(BaseModel):
     strategy_id: str
     strategy_version: str
+    purpose: Literal["harness_validation", "capital_candidate"]
     title: str
     description: str
     exit_timing: str
@@ -594,6 +596,8 @@ def _promotion_refusals(
     refused independently by survivorship, carry and synthetic-control gaps.
     """
     refusals: list[str] = []
+    if row["purpose"] == "harness_validation":
+        refusals.append("harness_validation_only")
     if not row["universe_basis"]:
         refusals.append("universe_basis_absent")
     elif row["universe_basis"] != "survivorship_free":
@@ -815,6 +819,7 @@ def get_strategy_overview(
     excluded_by_id = {item.strategy_id: item.reason for item in excluded}
     strategies: list[StrategyOverview] = []
     for strategy_id in sorted(STRATEGY_MANIFEST):
+        entry = STRATEGY_MANIFEST[strategy_id]
         strategy_rows = results_by_strategy[strategy_id]
         exact = defaultdict(list)
         declared_pairs = {(item.window.start, item.window.end): item for item in RECENT_EVIDENCE_WINDOWS.values()}
@@ -906,6 +911,8 @@ def get_strategy_overview(
         pnl = pnl_by_strategy.get(key, StrategyPnl())
         control = control_by_strategy.get(key, StrategyControlState())
         allocation_refusals: list[str] = []
+        if entry.purpose == "harness_validation":
+            allocation_refusals.append("harness_validation_only")
         if strategy_id not in runnable:
             allocation_refusals.append("strategy_not_runnable")
         if not all_complete:
@@ -929,6 +936,7 @@ def get_strategy_overview(
             StrategyOverview(
                 strategy_id=strategy_id,
                 strategy_version=versions[strategy_id],
+                purpose=entry.purpose,
                 title=_TITLES.get(strategy_id, strategy_id),
                 description=_PRESENTATION.get(strategy_id, ("Evidence-backed automated strategy.", "Rule based"))[0],
                 exit_timing=_PRESENTATION.get(strategy_id, ("Evidence-backed automated strategy.", "Rule based"))[1],

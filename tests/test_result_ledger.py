@@ -204,6 +204,7 @@ def build_result(**overrides: object) -> StrategyResult:
     identity_base.update(identity_overrides)
     result_base: dict[str, object] = {
         "identity": ResultIdentity(**identity_base),  # type: ignore[arg-type]
+        "purpose": "capital_candidate",
         "metrics": build_metrics(),
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,

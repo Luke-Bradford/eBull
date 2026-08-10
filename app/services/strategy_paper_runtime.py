@@ -309,6 +309,7 @@ def run_strategy_paper_cycle(
         else [
             entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID).version
             for entry in STRATEGY_MANIFEST.values()
+            if entry.purpose == "capital_candidate"
         ]
     )
     candidates = conn.execute(

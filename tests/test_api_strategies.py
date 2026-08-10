@@ -29,6 +29,7 @@ def test_current_versions_cover_the_manifest_including_s4() -> None:
 
 def test_result_refusals_fail_closed_without_expanding_the_database() -> None:
     row: dict[str, object] = {
+        "purpose": "capital_candidate",
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
         "evaluated_instrument_count": 5266,
@@ -56,8 +57,32 @@ def test_result_refusals_fail_closed_without_expanding_the_database() -> None:
     ]
 
 
+def test_harness_result_carries_a_permanent_refusal() -> None:
+    row: dict[str, object] = {
+        "purpose": "harness_validation",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "evaluated_instrument_count": 1,
+        "deflated_sharpe": 1,
+        "trial_count": 2,
+        "effective_sample_size": 10,
+        "synthetic_control_model_id": "control-v1",
+        "synthetic_control_mean_return_ci_low_pct": -1,
+        "synthetic_control_mean_return_ci_high_pct": 1,
+        "sharpe": 1,
+        "synthetic_control_sharpe_threshold": 0,
+    }
+    assert _promotion_refusals(
+        row,
+        ambiguity_complete=True,
+        quarantine_complete=True,
+        accesses_complete=True,
+    ) == ["harness_validation_only"]
+
+
 def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
     row: dict[str, object] = {
+        "purpose": "capital_candidate",
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
         "evaluated_instrument_count": 5266,
@@ -84,6 +109,7 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
 
 def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing() -> None:
     row: dict[str, object] = {
+        "purpose": "capital_candidate",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
         "evaluated_instrument_count": 1,
@@ -107,6 +133,7 @@ def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing()
 def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:
     arm = ResultArm(
         result_version="v1",
+        purpose="capital_candidate",
         ambiguity_arm="best_case",
         quarantine_arm="admitted",
         universe_basis="survivor_only",
