@@ -16,6 +16,7 @@ from app.services.insider_purchase_candidate import PRIMARY_START, build_source
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive-dir", type=Path, required=True)
+    parser.add_argument("--last-quarter", required=True, help="pinned latest available archive, YYYYqN")
     args = parser.parse_args(argv)
     archives = sorted(args.archive_dir.glob("*_form345.zip"))
     if not archives:
@@ -23,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with psycopg.connect(settings.database_url) as conn:
         conn.execute("SET TRANSACTION READ ONLY")
-        build = build_source(conn, archives)
+        build = build_source(conn, archives, expected_last_quarter=args.last_quarter)
 
     recent = [item for item in build.classified if item.observation.filed_date >= PRIMARY_START]
     classes = Counter(item.insider_class for item in recent)
@@ -31,8 +32,9 @@ def main(argv: list[str] | None = None) -> int:
     print("#2480 source-only census — no outcome prices read")
     print(f"archives: {archives[0].name} .. {archives[-1].name} ({len(archives)})")
     print(f"archive manifest SHA-256: {build.archive_manifest_sha256}")
-    print(f"eligible resolved purchase observations: {len(build.purchases):,}")
-    print(f"classified observations, all source years: {len(build.classified):,}")
+    print(f"eligible source purchase observations: {len(build.purchases):,}")
+    print(f"classified observations before universe resolution: {len(build.source_classified):,}")
+    print(f"classified observations with research series: {len(build.classified):,}")
     print(f"classified since 2022: {len(recent):,} across {len(months):,} filing months")
     print(f"recent routine={classes['routine']:,} opportunistic={classes['opportunistic']:,}")
     print("\nsource construction counters")

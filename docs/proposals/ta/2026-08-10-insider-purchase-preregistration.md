@@ -47,9 +47,16 @@ insider purchase observation with summed disclosed value. Trade value is audit
 metadata only and never determines inclusion, weights or thresholds.
 
 An issuer is mapped to the frozen research corpus by SEC issuer CIK and exact
-reported trading symbol. A unique-CIK research series is also acceptable. An
+reported trading symbol against the corpus-native vendor symbol. A unique-CIK
+research series is also acceptable. Classification is performed across the
+complete SEC source before this mapping, so a missing current research series
+cannot erase an insider's prior history and alter their class. An
 ambiguous multi-class issuer, unresolved symbol or duplicate archive accession
 is refused rather than assigned to the most favourable listed class.
+
+The price corpus is survivor-only and cannot recover delisted outcomes. That
+limitation is a permanent promotion refusal for this trial even if the effect
+screen is favourable.
 
 ## Published classifier, made causal
 

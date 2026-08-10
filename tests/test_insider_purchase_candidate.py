@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
-from app.services.insider_purchase_candidate import PurchaseObservation, classify_purchases
+import pytest
+
+from app.services.insider_purchase_candidate import (
+    PurchaseObservation,
+    classify_purchases,
+    validate_archive_sequence,
+)
 
 
 def _purchase(year: int, month: int, *, filer: str = "0000000001") -> PurchaseObservation:
@@ -56,3 +63,13 @@ def test_sparse_insider_is_not_mislabelled_opportunistic() -> None:
     classified, counts = classify_purchases([_purchase(2023, 1), _purchase(2025, 2)])
     assert classified == ()
     assert counts["unclassified_missing_prior_purchase_year"] == 2
+
+
+def test_archive_sequence_requires_pinned_contiguous_history() -> None:
+    paths = [
+        Path("2019q1_form345.zip"),
+        Path("2019q2_form345.zip"),
+    ]
+    validate_archive_sequence(paths, expected_last_quarter="2019q2")
+    with pytest.raises(ValueError, match="contiguous"):
+        validate_archive_sequence(paths[:1], expected_last_quarter="2019q2")

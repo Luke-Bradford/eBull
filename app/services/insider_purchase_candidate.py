@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import re
 import zipfile
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -57,6 +58,7 @@ class ClassifiedPurchase:
 @dataclass(frozen=True)
 class InsiderSourceBuild:
     purchases: tuple[PurchaseObservation, ...]
+    source_classified: tuple[ClassifiedPurchase, ...]
     classified: tuple[ClassifiedPurchase, ...]
     refusals: Mapping[str, int]
     archive_manifest_sha256: str
@@ -107,7 +109,36 @@ def _archive_manifest_sha256(paths: Sequence[Path]) -> str:
     return digest.hexdigest()
 
 
-def load_archive_purchases(paths: Sequence[Path]) -> tuple[tuple[PurchaseObservation, ...], Counter[str], str]:
+_ARCHIVE_NAME = re.compile(r"^(?P<year>\d{4})q(?P<quarter>[1-4])_form345\.zip$")
+
+
+def validate_archive_sequence(paths: Sequence[Path], *, expected_last_quarter: str) -> None:
+    """Require one contiguous, explicitly pinned 2019q1..frontier sequence."""
+    labels: list[tuple[int, int]] = []
+    for path in paths:
+        match = _ARCHIVE_NAME.fullmatch(path.name)
+        if match is None:
+            raise ValueError(f"unexpected insider archive filename: {path.name}")
+        labels.append((int(match.group("year")), int(match.group("quarter"))))
+    if len(labels) != len(set(labels)):
+        raise ValueError("duplicate insider archive quarter")
+    labels.sort()
+    expected_match = re.fullmatch(r"(?P<year>\d{4})q(?P<quarter>[1-4])", expected_last_quarter)
+    if expected_match is None:
+        raise ValueError("expected_last_quarter must be YYYYqN")
+    expected_last = (int(expected_match.group("year")), int(expected_match.group("quarter")))
+    expected: list[tuple[int, int]] = []
+    cursor = (2019, 1)
+    while cursor <= expected_last:
+        expected.append(cursor)
+        cursor = (cursor[0] + 1, 1) if cursor[1] == 4 else (cursor[0], cursor[1] + 1)
+    if labels != expected:
+        raise ValueError(f"archives must be the contiguous 2019q1..{expected_last_quarter} sequence")
+
+
+def load_archive_purchases(
+    paths: Sequence[Path], *, expected_last_quarter: str
+) -> tuple[tuple[PurchaseObservation, ...], Counter[str], str]:
     """Load eligible code-P rows from exact SEC quarterly archives.
 
     Exclusion counters are terminal and mutually exclusive over every
@@ -116,13 +147,23 @@ def load_archive_purchases(paths: Sequence[Path]) -> tuple[tuple[PurchaseObserva
     """
     if not paths:
         raise ValueError("at least one insider archive is required")
+    validate_archive_sequence(paths, expected_last_quarter=expected_last_quarter)
     missing = [path for path in paths if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"insider archives missing: {missing}")
 
     counters: Counter[str] = Counter()
-    aggregated: dict[tuple[str, str, str, date, date], PurchaseObservation] = {}
-    seen_accessions: set[str] = set()
+    aggregated: dict[tuple[str, str, str, int, int, date], PurchaseObservation] = {}
+    accession_counts: Counter[str] = Counter()
+    for path in sorted(paths, key=lambda item: item.name):
+        with zipfile.ZipFile(path) as archive:
+            accession_counts.update(
+                row.get("ACCESSION_NUMBER", "").strip()
+                for row in _open_tsv(archive, "SUBMISSION.tsv")
+                if row.get("ACCESSION_NUMBER", "").strip()
+            )
+    duplicate_accessions = {accession for accession, count in accession_counts.items() if count > 1}
+    counters["duplicate_archive_accessions"] = len(duplicate_accessions)
 
     for path in sorted(paths, key=lambda item: item.name):
         with zipfile.ZipFile(path) as archive:
@@ -136,11 +177,6 @@ def load_archive_purchases(paths: Sequence[Path]) -> tuple[tuple[PurchaseObserva
                 accession = row.get("ACCESSION_NUMBER", "").strip()
                 if accession:
                     owners[accession].append(row)
-
-            archive_accessions = set(submissions)
-            duplicate_accessions = archive_accessions & seen_accessions
-            seen_accessions.update(archive_accessions)
-            counters["duplicate_archive_accessions"] += len(duplicate_accessions)
 
             for row in _open_tsv(archive, "NONDERIV_TRANS.tsv", "NON_DERIV_TRANS.tsv"):
                 counters["nonderivative_transaction_rows"] += 1
@@ -201,7 +237,14 @@ def load_archive_purchases(paths: Sequence[Path]) -> tuple[tuple[PurchaseObserva
                     counters["excluded_issuer_identity_missing"] += 1
                     continue
 
-                key = (issuer_cik, accession, filer_cik, transaction_date, filed_date)
+                key = (
+                    issuer_cik,
+                    accession,
+                    filer_cik,
+                    transaction_date.year,
+                    transaction_date.month,
+                    filed_date,
+                )
                 value = shares * price
                 existing = aggregated.get(key)
                 if existing is None:
@@ -215,7 +258,11 @@ def load_archive_purchases(paths: Sequence[Path]) -> tuple[tuple[PurchaseObserva
                         disclosed_value=value,
                     )
                 else:
-                    aggregated[key] = replace(existing, disclosed_value=existing.disclosed_value + value)
+                    aggregated[key] = replace(
+                        existing,
+                        transaction_date=min(existing.transaction_date, transaction_date),
+                        disclosed_value=existing.disclosed_value + value,
+                    )
                 counters["eligible_transaction_rows"] += 1
 
     purchases = tuple(
@@ -261,9 +308,8 @@ def classify_purchases(
 def _load_research_resolution(conn: psycopg.Connection[Any]) -> tuple[dict[tuple[str, str], int], dict[str, int]]:
     rows = conn.execute(
         """
-        SELECT lpad(e.identifier_value, 10, '0'), upper(i.symbol), s.instrument_id
+        SELECT lpad(e.identifier_value, 10, '0'), upper(s.vendor_symbol), s.instrument_id
         FROM research_price_series s
-        JOIN instruments i ON i.instrument_id = s.instrument_id
         JOIN external_identifiers e
           ON e.instrument_id = s.instrument_id
          AND e.provider = 'sec'
@@ -318,13 +364,47 @@ def enrich_point_in_time(
     return tuple(output), counters
 
 
-def build_source(conn: psycopg.Connection[Any], paths: Sequence[Path]) -> InsiderSourceBuild:
-    purchases, load_counts, manifest_digest = load_archive_purchases(paths)
-    enriched, resolution_counts = enrich_point_in_time(conn, purchases)
-    classified, classification_counts = classify_purchases(enriched)
+def enrich_classified_point_in_time(
+    conn: psycopg.Connection[Any], classified: Sequence[ClassifiedPurchase]
+) -> tuple[tuple[ClassifiedPurchase, ...], Counter[str]]:
+    enriched, counters = enrich_point_in_time(conn, [item.observation for item in classified])
+    by_identity = {
+        (
+            item.observation.accession_number,
+            item.observation.filer_cik,
+            item.observation.transaction_date.year,
+            item.observation.transaction_date.month,
+        ): item.insider_class
+        for item in classified
+    }
+    output = tuple(
+        ClassifiedPurchase(
+            observation=observation,
+            insider_class=by_identity[
+                (
+                    observation.accession_number,
+                    observation.filer_cik,
+                    observation.transaction_date.year,
+                    observation.transaction_date.month,
+                )
+            ],
+        )
+        for observation in enriched
+    )
+    return output, counters
+
+
+def build_source(
+    conn: psycopg.Connection[Any], paths: Sequence[Path], *, expected_last_quarter: str
+) -> InsiderSourceBuild:
+    purchases, load_counts, manifest_digest = load_archive_purchases(paths, expected_last_quarter=expected_last_quarter)
+    source_classified, classification_counts = classify_purchases(purchases)
+    classified, resolution_counts = enrich_classified_point_in_time(conn, source_classified)
     counts = load_counts + resolution_counts + classification_counts
+    counts["survivor_only_research_corpus_promotion_refusal"] = 1
     return InsiderSourceBuild(
-        purchases=enriched,
+        purchases=purchases,
+        source_classified=source_classified,
         classified=classified,
         refusals=dict(sorted(counts.items())),
         archive_manifest_sha256=manifest_digest,
@@ -342,5 +422,7 @@ __all__ = [
     "build_source",
     "classify_purchases",
     "enrich_point_in_time",
+    "enrich_classified_point_in_time",
     "load_archive_purchases",
+    "validate_archive_sequence",
 ]
