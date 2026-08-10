@@ -327,3 +327,17 @@ def test_overview_maps_only_exact_current_holdout_provenance(
     assert primary.arms[0].sortino is None
     assert primary.arms[0].profit_factor is None
     assert strategy.legacy_result_count == 2
+
+
+def test_overview_declares_only_level_strategies_forward_resolvable(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    overview = get_strategy_overview(ebull_test_conn)
+    support = {item.strategy_id: item.forward_outcome_supported for item in overview.strategies}
+
+    assert support == {
+        "s1-time-series-momentum": False,
+        "s2-cross-sectional-momentum": False,
+        "s3-mean-reversion-in-trend": False,
+        "s4-volatility-compression-breakout": True,
+    }

@@ -2450,6 +2450,7 @@ export interface StrategyOverview {
   description: string;
   exit_timing: string;
   runnable: boolean;
+  forward_outcome_supported: boolean;
   exclusion_reason: string | null;
   scan: {
     frontier_date: string | null;

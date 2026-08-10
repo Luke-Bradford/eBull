@@ -131,17 +131,18 @@ function refusalLabel(refusal: string): string {
 
 function aggregate(overview: StrategyOverviewResponse) {
   const pnlValues = overview.strategies.map((strategy) => number(strategy.pnl.total_pnl));
-  const resolved = overview.strategies.reduce(
+  const forwardStrategies = overview.strategies.filter((strategy) => strategy.forward_outcome_supported);
+  const resolved = forwardStrategies.reduce(
     (sum, strategy) => sum + strategy.attribution.resolved_entries,
     0,
   );
-  const winners = overview.strategies.reduce(
+  const winners = forwardStrategies.reduce(
     (sum, strategy) => sum + strategy.attribution.winning_entries,
     0,
   );
   let weightedReturn = 0;
   let averageReturnKnown = resolved > 0;
-  for (const strategy of overview.strategies) {
+  for (const strategy of forwardStrategies) {
     if (strategy.attribution.resolved_entries === 0) continue;
     const average = number(strategy.attribution.shadow_average_return_pct);
     if (average === null) {
@@ -150,7 +151,7 @@ function aggregate(overview: StrategyOverviewResponse) {
     }
     weightedReturn += average * strategy.attribution.resolved_entries;
   }
-  const fired = overview.strategies.reduce(
+  const fired = forwardStrategies.reduce(
     (sum, strategy) => sum + strategy.attribution.fired_entries,
     0,
   );
@@ -801,7 +802,10 @@ function ValidationControl({ strategy }: { strategy: StrategyOverview }) {
           <h3 className="text-sm font-semibold">{strategy.title}</h3>
           <Badge tone="neutral">Control</Badge>
         </div>
-        <p className="mt-1 text-xs text-slate-500">Harness evidence only · never eligible for capital</p>
+        <p className="mt-1 text-xs text-slate-500">
+          Harness evidence only · never eligible for capital
+          {strategy.forward_outcome_supported ? " · forward outcomes measured" : " · backtest only"}
+        </p>
       </div>
       <div><span className="text-xs text-slate-500">Expected / trade</span><strong className="block tabular-nums">{pctPoints(arm?.expectancy_per_trade_pct ?? null)}</strong></div>
       <div><span className="text-xs text-slate-500">Worst drawdown</span><strong className="block tabular-nums">{pctPoints(arm?.max_drawdown_pct ?? null)}</strong></div>
