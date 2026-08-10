@@ -74,7 +74,7 @@ from typing import Final
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-07"
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-10"
 
 
 @dataclass(frozen=True)
@@ -212,6 +212,12 @@ TRIAL_REGISTER: Final = TrialRegister(
             trial_id="rsi30-20d-quarantined-research-corpus",
             description="RSI<30 → 20-day hit, causal Wilder, quarantined bars excluded (candidate 4), research corpus.",
             evidence="issue #2260 comment 2026-08-05 (full-population recompute)",
+        ),
+        DeclaredTrial(
+            trial_id="pead-historical-sue-net-income-v1",
+            description="Issuer-deduplicated historical-SUE SEC filing drift; fixed 62-session equal-gross long/short.",
+            evidence="issue #2476 comment 2026-08-10 (sealed outcome); preregistration commit 12dff916; "
+            "implementation commit 1bf78256",
         ),
     ),
 )
