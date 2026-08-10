@@ -147,14 +147,13 @@ def build_matched_control_signals(
     rng = Random(seed)
     output: dict[tuple[str, InsiderClass, int, int], FirmMonthSignal] = {}
     counters: Counter[str] = Counter()
-    treated = {(signal.issuer_cik, signal.insider_class, signal.signal_year, signal.signal_month) for signal in signals}
+    treated = {(signal.issuer_cik, signal.signal_year, signal.signal_month) for signal in signals}
     for signal in signals:
         quarter_start = ((signal.signal_month - 1) // 3) * 3 + 1
         alternatives = [
             month
             for month in range(quarter_start, quarter_start + 3)
-            if month != signal.signal_month
-            and (signal.issuer_cik, signal.insider_class, signal.signal_year, month) not in treated
+            if month != signal.signal_month and (signal.issuer_cik, signal.signal_year, month) not in treated
         ]
         if not alternatives:
             counters["control_cell_has_no_untreated_month"] += 1
@@ -414,7 +413,10 @@ def _portfolio_months(
 ) -> tuple[MonthlyPortfolioReturn, ...]:
     grouped: dict[tuple[date, InsiderClass], list[FirmMonthOutcome]] = defaultdict(list)
     for outcome in outcomes:
-        grouped[(outcome.entry_date, outcome.signal.insider_class)].append(outcome)
+        signal = outcome.signal
+        target_year = signal.signal_year + (1 if signal.signal_month == 12 else 0)
+        target_month = 1 if signal.signal_month == 12 else signal.signal_month + 1
+        grouped[(date(target_year, target_month, 1), signal.insider_class)].append(outcome)
     dates = sorted({entry_date for entry_date, _ in grouped})
     monthly: list[MonthlyPortfolioReturn] = []
     for entry_date in dates:

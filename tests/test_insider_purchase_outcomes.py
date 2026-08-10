@@ -123,6 +123,27 @@ def test_control_never_uses_a_treated_firm_class_month() -> None:
     assert {item.signal_month for item in controls} == {3}
 
 
+def test_control_excludes_treated_months_across_both_classes() -> None:
+    signals = build_firm_month_signals(
+        [
+            _classified("opportunistic", accession="a", month=1),
+            _classified("routine", accession="b", month=2),
+        ]
+    )
+    controls, _ = build_matched_control_signals(signals)
+    assert controls
+    assert {item.signal_month for item in controls} == {3}
+
+
+def test_portfolio_groups_different_usable_entry_days_in_same_target_month() -> None:
+    opportunistic = _outcome("opportunistic", cik="1", long_net=3, short_net=-4, market_cap="1")
+    routine = _outcome("routine", cik="2", long_net=1, short_net=-2, market_cap="1")
+    routine = FirmMonthOutcome(**{**routine.__dict__, "entry_date": date(2024, 2, 2)})
+    monthly = _portfolio_months([opportunistic, routine], Counter())
+    assert len(monthly) == 1
+    assert monthly[0].entry_date == date(2024, 2, 1)
+
+
 def test_primary_weights_by_market_cap_and_charges_short_routine_leg() -> None:
     monthly = _portfolio_months(
         [
