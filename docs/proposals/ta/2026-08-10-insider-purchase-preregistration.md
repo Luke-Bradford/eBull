@@ -94,11 +94,12 @@ included once in that class's monthly portfolio. A firm may appear in both
 portfolios when distinct insiders from both classes buy it; overlap therefore
 cancels rather than being silently reassigned.
 
-The primary monthly return is:
+The primary monthly return is the executable long-opportunistic/short-routine
+spread; both legs pay their own round-trip costs:
 
 ```text
-opportunistic-minus-routine = value_weighted_net(opportunistic purchases)
-                              - value_weighted_net(routine purchases)
+opportunistic-minus-routine = value_weighted_long_net(opportunistic purchases)
+                              + value_weighted_short_net(routine purchases)
 ```
 
 Weights use market capitalisation known before formation: the most recently

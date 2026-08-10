@@ -47,6 +47,7 @@ class FirmMonthSignal:
 class FirmMonthWindow:
     signal: FirmMonthSignal
     series_id: int | None
+    target_month_complete: bool
     entry_date: date | None
     entry_open: Decimal | None
     exit_date: date | None
@@ -68,11 +69,14 @@ class FirmMonthOutcome:
     entry_date: date
     exit_date: date
     net_return_pct: float
+    short_net_return_pct: float
     gross_return_pct: float
     market_cap: Decimal
     median_dollar_volume: Decimal
     market_relative_pct: float | None
+    short_market_relative_pct: float | None
     sector_relative_pct: float | None
+    short_sector_relative_pct: float | None
     sector_symbol: str | None
 
 
@@ -143,9 +147,18 @@ def build_matched_control_signals(
     rng = Random(seed)
     output: dict[tuple[str, InsiderClass, int, int], FirmMonthSignal] = {}
     counters: Counter[str] = Counter()
+    treated = {(signal.issuer_cik, signal.insider_class, signal.signal_year, signal.signal_month) for signal in signals}
     for signal in signals:
         quarter_start = ((signal.signal_month - 1) // 3) * 3 + 1
-        alternatives = [month for month in range(quarter_start, quarter_start + 3) if month != signal.signal_month]
+        alternatives = [
+            month
+            for month in range(quarter_start, quarter_start + 3)
+            if month != signal.signal_month
+            and (signal.issuer_cik, signal.insider_class, signal.signal_year, month) not in treated
+        ]
+        if not alternatives:
+            counters["control_cell_has_no_untreated_month"] += 1
+            continue
         control_month = alternatives[rng.randrange(len(alternatives))]
         control = replace(
             signal,
@@ -182,11 +195,9 @@ _WINDOW_SQL = """
         LEFT JOIN research_price_series s
           ON s.instrument_id = e.instrument_id
          AND s.vendor = %(corpus_vendor)s
-    ), target_rows AS (
+    ), target_raw AS (
         SELECT e.event_index, d.bar_date, d.open, d.close,
-               coalesce(q.return_usable, TRUE) AS return_usable,
-               row_number() OVER (PARTITION BY e.event_index ORDER BY d.bar_date) AS rn_asc,
-               row_number() OVER (PARTITION BY e.event_index ORDER BY d.bar_date DESC) AS rn_desc
+               coalesce(q.return_usable, TRUE) AS return_usable
         FROM event_series e
         JOIN research_price_quarantine_coverage cov
           ON cov.series_id = e.series_id
@@ -201,6 +212,12 @@ _WINDOW_SQL = """
           ON q.series_id = d.series_id
          AND q.bar_date = d.bar_date
          AND q.rule_set_version = %(quarantine_version)s
+    ), target_rows AS (
+        SELECT event_index, bar_date, open, close,
+               row_number() OVER (PARTITION BY e.event_index ORDER BY e.bar_date) AS rn_asc,
+               row_number() OVER (PARTITION BY e.event_index ORDER BY e.bar_date DESC) AS rn_desc
+        FROM target_raw e
+        WHERE e.return_usable
     ), target AS (
         SELECT event_index,
                max(bar_date) FILTER (WHERE rn_asc = 1) AS entry_date,
@@ -208,12 +225,11 @@ _WINDOW_SQL = """
                max(bar_date) FILTER (WHERE rn_desc = 1) AS exit_date,
                max(close) FILTER (WHERE rn_desc = 1) AS exit_close,
                count(*) AS holding_sessions,
-               bool_and(return_usable) AS holding_usable
+               TRUE AS holding_usable
         FROM target_rows GROUP BY event_index
-    ), prior_ranked AS (
+    ), prior_raw AS (
         SELECT e.event_index, d.bar_date, d.close, d.volume,
-               coalesce(q.return_usable, TRUE) AS return_usable,
-               row_number() OVER (PARTITION BY e.event_index ORDER BY d.bar_date DESC) AS rn
+               coalesce(q.return_usable, TRUE) AS return_usable
         FROM event_series e
         JOIN target t USING (event_index)
         JOIN research_price_quarantine_coverage cov
@@ -227,20 +243,27 @@ _WINDOW_SQL = """
           ON q.series_id = d.series_id
          AND q.bar_date = d.bar_date
          AND q.rule_set_version = %(quarantine_version)s
+    ), prior_ranked AS (
+        SELECT event_index, bar_date, close, volume,
+               row_number() OVER (PARTITION BY e.event_index ORDER BY e.bar_date DESC) AS rn
+        FROM prior_raw e
+        WHERE e.return_usable
     ), prior AS (
         SELECT event_index,
                max(close) FILTER (WHERE rn = 1) AS prior_close,
-               bool_and(return_usable) FILTER (WHERE rn = 1) AS prior_close_usable,
+               TRUE AS prior_close_usable,
                count(*) FILTER (WHERE rn <= 20) AS prior_sessions,
                count(*) FILTER (
-                   WHERE rn <= 20 AND return_usable AND close > 0 AND volume IS NOT NULL AND volume > 0
+                   WHERE rn <= 20 AND close > 0 AND volume IS NOT NULL AND volume > 0
                ) AS valid_liquidity_sessions,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY close * volume) FILTER (
-                   WHERE rn <= 20 AND return_usable AND close > 0 AND volume IS NOT NULL AND volume > 0
+                   WHERE rn <= 20 AND close > 0 AND volume IS NOT NULL AND volume > 0
                ) AS median_dollar_volume
         FROM prior_ranked GROUP BY event_index
     )
-    SELECT e.event_index, e.series_id, t.entry_date, t.entry_open, t.exit_date, t.exit_close,
+    SELECT e.event_index, e.series_id,
+           e.target_end <= date_trunc('month', CAST(%(frontier)s AS date))::date AS target_month_complete,
+           t.entry_date, t.entry_open, t.exit_date, t.exit_close,
            coalesce(t.holding_sessions, 0), t.holding_usable,
            p.prior_close, p.prior_close_usable, coalesce(p.prior_sessions, 0),
            coalesce(p.valid_liquidity_sessions, 0), p.median_dollar_volume,
@@ -293,19 +316,20 @@ def load_windows(conn: psycopg.Connection[Any], signals: Sequence[FirmMonthSigna
         FirmMonthWindow(
             signal=signals[int(row[0])],
             series_id=None if row[1] is None else int(row[1]),
-            entry_date=row[2],
-            entry_open=None if row[3] is None else Decimal(row[3]),
-            exit_date=row[4],
-            exit_close=None if row[5] is None else Decimal(row[5]),
-            holding_sessions=int(row[6]),
-            holding_usable=row[7],
-            prior_close=None if row[8] is None else Decimal(row[8]),
-            prior_close_usable=row[9],
-            prior_sessions=int(row[10]),
-            valid_liquidity_sessions=int(row[11]),
-            median_dollar_volume=None if row[12] is None else Decimal(row[12]),
-            shares_outstanding=None if row[13] is None else Decimal(row[13]),
-            shares_filed_date=row[14],
+            target_month_complete=bool(row[2]),
+            entry_date=row[3],
+            entry_open=None if row[4] is None else Decimal(row[4]),
+            exit_date=row[5],
+            exit_close=None if row[6] is None else Decimal(row[6]),
+            holding_sessions=int(row[7]),
+            holding_usable=row[8],
+            prior_close=None if row[9] is None else Decimal(row[9]),
+            prior_close_usable=row[10],
+            prior_sessions=int(row[11]),
+            valid_liquidity_sessions=int(row[12]),
+            median_dollar_volume=None if row[13] is None else Decimal(row[13]),
+            shares_outstanding=None if row[14] is None else Decimal(row[14]),
+            shares_filed_date=row[15],
         )
         for row in rows
     )
@@ -316,6 +340,8 @@ def _month_distance(later: date, earlier: date) -> int:
 
 
 def _eligible_window(window: FirmMonthWindow) -> str | None:
+    if not window.target_month_complete:
+        return "incomplete_target_month_at_corpus_frontier"
     if window.entry_date is None or window.entry_open is None or window.series_id is None:
         return "price_series_or_entry_missing"
     if window.entry_date < PRIMARY_START:
@@ -399,15 +425,18 @@ def _portfolio_months(
             continue
         opp_return = _weighted([(item.net_return_pct, item.market_cap) for item in opportunistic])
         routine_return = _weighted([(item.net_return_pct, item.market_cap) for item in routine])
+        routine_short = _weighted([(item.short_net_return_pct, item.market_cap) for item in routine])
         opp_equal = mean(item.net_return_pct for item in opportunistic)
-        routine_equal = mean(item.net_return_pct for item in routine)
+        routine_short_equal = mean(item.short_net_return_pct for item in routine)
         market_pairs_opp = [
             (item.market_relative_pct, item.market_cap)
             for item in opportunistic
             if item.market_relative_pct is not None
         ]
         market_pairs_routine = [
-            (item.market_relative_pct, item.market_cap) for item in routine if item.market_relative_pct is not None
+            (item.short_market_relative_pct, item.market_cap)
+            for item in routine
+            if item.short_market_relative_pct is not None
         ]
         sector_pairs_opp = [
             (item.sector_relative_pct, item.market_cap)
@@ -415,17 +444,19 @@ def _portfolio_months(
             if item.sector_relative_pct is not None
         ]
         sector_pairs_routine = [
-            (item.sector_relative_pct, item.market_cap) for item in routine if item.sector_relative_pct is not None
+            (item.short_sector_relative_pct, item.market_cap)
+            for item in routine
+            if item.short_sector_relative_pct is not None
         ]
         market_spread = (
             _weighted([(float(value), weight) for value, weight in market_pairs_opp])
-            - _weighted([(float(value), weight) for value, weight in market_pairs_routine])
+            + _weighted([(float(value), weight) for value, weight in market_pairs_routine])
             if len(market_pairs_opp) == len(opportunistic) and len(market_pairs_routine) == len(routine)
             else None
         )
         sector_spread = (
             _weighted([(float(value), weight) for value, weight in sector_pairs_opp])
-            - _weighted([(float(value), weight) for value, weight in sector_pairs_routine])
+            + _weighted([(float(value), weight) for value, weight in sector_pairs_routine])
             if len(sector_pairs_opp) == len(opportunistic) and len(sector_pairs_routine) == len(routine)
             else None
         )
@@ -434,8 +465,8 @@ def _portfolio_months(
                 entry_date=entry_date,
                 opportunistic_pct=opp_return,
                 routine_pct=routine_return,
-                spread_pct=opp_return - routine_return,
-                equal_weight_spread_pct=opp_equal - routine_equal,
+                spread_pct=opp_return + routine_short,
+                equal_weight_spread_pct=opp_equal + routine_short_equal,
                 market_relative_spread_pct=market_spread,
                 sector_relative_spread_pct=sector_spread,
                 opportunistic_firms=len(opportunistic),
@@ -478,16 +509,24 @@ def evaluate_portfolios(conn: psycopg.Connection[Any], signals: Sequence[FirmMon
             )
             * 100
         )
+        entry_proceeds = sell_price(window.entry_open, half_spread=half_spread)
+        short_net = float(
+            (entry_proceeds - buy_price(window.exit_close, half_spread=half_spread)) / entry_proceeds * 100
+        )
         market_cap = window.prior_close * window.shares_outstanding
         spy_entry = comparators.get("SPY", {}).get(window.entry_date)
         spy_exit = comparators.get("SPY", {}).get(window.exit_date)
         market_relative = None
+        short_market_relative = None
         if spy_entry is None or spy_exit is None:
             refusals["market_comparator_session_missing"] += 1
         else:
-            market_relative = net - float((spy_exit[1] / spy_entry[0] - 1) * 100)
+            market_return = float((spy_exit[1] / spy_entry[0] - 1) * 100)
+            market_relative = net - market_return
+            short_market_relative = short_net + market_return
         sector_symbol = sectors.get(window.signal.instrument_id)
         sector_relative = None
+        short_sector_relative = None
         if sector_symbol is None:
             refusals["sector_mapping_missing"] += 1
         else:
@@ -496,18 +535,23 @@ def evaluate_portfolios(conn: psycopg.Connection[Any], signals: Sequence[FirmMon
             if sector_entry is None or sector_exit is None:
                 refusals["sector_comparator_session_missing"] += 1
             else:
-                sector_relative = net - float((sector_exit[1] / sector_entry[0] - 1) * 100)
+                sector_return = float((sector_exit[1] / sector_entry[0] - 1) * 100)
+                sector_relative = net - sector_return
+                short_sector_relative = short_net + sector_return
         outcomes.append(
             FirmMonthOutcome(
                 signal=window.signal,
                 entry_date=window.entry_date,
                 exit_date=window.exit_date,
                 net_return_pct=net,
+                short_net_return_pct=short_net,
                 gross_return_pct=gross,
                 market_cap=market_cap,
                 median_dollar_volume=window.median_dollar_volume,
                 market_relative_pct=market_relative,
+                short_market_relative_pct=short_market_relative,
                 sector_relative_pct=sector_relative,
+                short_sector_relative_pct=short_sector_relative,
                 sector_symbol=sector_symbol,
             )
         )
