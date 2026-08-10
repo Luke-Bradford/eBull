@@ -21,8 +21,8 @@ from app.services.strategy_decision_context import (
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401
 
 
-def _complete_inputs(**overrides: Decimal | None) -> DecisionInputs:
-    values: dict[str, Decimal | None] = {
+def _complete_inputs(**overrides: object) -> DecisionInputs:
+    values: dict[str, object] = {
         "as_traded_price": Decimal("49.99"),
         "trailing_mean_share_volume": Decimal("1200000"),
         "trailing_median_share_volume": Decimal("1000000"),
@@ -36,6 +36,7 @@ def _complete_inputs(**overrides: Decimal | None) -> DecisionInputs:
         "gap_pct": Decimal("-2.1"),
         "market_sector_residual_z": Decimal("-2.7"),
         "vix": Decimal("19.2"),
+        "as_traded_price_basis": "observed_unadjusted",
     }
     values.update(overrides)
     return DecisionInputs(**values)  # type: ignore[arg-type]
@@ -71,6 +72,7 @@ def test_complete_context_is_eligible() -> None:
     assert context.candidate_verdict == "eligible"
     assert context.refusal_reason is None
     assert context.price_band == "20_to_50"
+    assert context.as_traded_price_basis == "observed_unadjusted"
     assert context.dollar_volume_band == "10m_to_25m"
     assert context.volume_lookback_sessions == 20
 
@@ -93,6 +95,39 @@ def test_missing_or_unknown_point_in_time_data_refuses_by_name() -> None:
     )
     assert context.candidate_verdict == "refused"
     assert context.refusal_reason == "missing:primary_listing_market,spread_bps,vix"
+
+
+def test_adjusted_or_unproven_price_basis_refuses_cohort_attribution() -> None:
+    context = build_decision_context(
+        strategy_id="candidate-1",
+        strategy_version="sha256:abc",
+        instrument_id=1,
+        decision_at=datetime(2026, 8, 10, 14, 35, tzinfo=UTC),
+        signal_id=None,
+        classification=MarketClassification(
+            effective_from=date(2026, 8, 10),
+            security_type="common_stock",
+            primary_listing_market="nasdaq",
+            provider_exchange_id="4",
+            instrument_type_id=5,
+        ),
+        inputs=_complete_inputs(as_traded_price_basis="unknown"),
+    )
+    assert context.candidate_verdict == "refused"
+    assert context.refusal_reason == "missing:as_traded_price_basis"
+
+
+def test_unrecognised_price_basis_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown as_traded_price_basis"):
+        build_decision_context(
+            strategy_id="candidate-1",
+            strategy_version="sha256:abc",
+            instrument_id=1,
+            decision_at=datetime(2026, 8, 10, 14, 35, tzinfo=UTC),
+            signal_id=None,
+            classification=None,
+            inputs=_complete_inputs(as_traded_price_basis="split_adjusted"),
+        )
 
 
 def test_volume_coverage_outside_fraction_range_is_rejected() -> None:
@@ -233,6 +268,11 @@ def test_context_round_trip_and_database_completeness_guard(
     )
     context_id = store_decision_context(conn, context)
     assert context_id > 0
+    stored_basis = conn.execute(
+        "SELECT as_traded_price_basis FROM strategy_decision_contexts WHERE context_id = %s",
+        (context_id,),
+    ).fetchone()
+    assert stored_basis == ("observed_unadjusted",)
 
     with pytest.raises(psycopg.errors.CheckViolation):
         with conn.transaction():
