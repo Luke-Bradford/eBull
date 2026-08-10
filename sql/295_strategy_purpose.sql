@@ -39,6 +39,23 @@ ALTER TABLE strategy_results_store
     ADD CONSTRAINT strategy_results_purpose_known
     CHECK (purpose IN ('harness_validation', 'capital_candidate'));
 
+CREATE OR REPLACE FUNCTION enforce_strategy_result_purpose_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.purpose IS DISTINCT FROM OLD.purpose THEN
+        RAISE EXCEPTION 'strategy result purpose is immutable once written'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_strategy_result_purpose_immutable
+BEFORE UPDATE OF purpose ON strategy_results_store
+FOR EACH ROW EXECUTE FUNCTION enforce_strategy_result_purpose_immutable();
+
 COMMENT ON COLUMN strategy_results_store.purpose IS
     'Immutable evaluation purpose. harness_validation results are permanent controls and cannot authorise capital.';
 

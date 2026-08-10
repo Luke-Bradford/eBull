@@ -252,6 +252,22 @@ def _insert(conn: psycopg.Connection[tuple], **overrides: object) -> None:
     conn.execute(_INSERT, row)
 
 
+def test_result_purpose_cannot_be_relabelled_after_write(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    with ebull_test_conn.transaction():
+        _insert(ebull_test_conn, purpose="harness_validation")
+
+    with pytest.raises(psycopg.errors.IntegrityConstraintViolation), ebull_test_conn.transaction():
+        ebull_test_conn.execute(
+            "UPDATE strategy_results_store SET purpose='capital_candidate' WHERE strategy_id='S-TEST'"
+        )
+
+    assert ebull_test_conn.execute(
+        "SELECT purpose FROM strategy_results_store WHERE strategy_id='S-TEST'"
+    ).fetchone() == ("harness_validation",)
+
+
 @pytest.mark.parametrize(
     ("label", "overrides"),
     [
