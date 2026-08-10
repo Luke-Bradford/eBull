@@ -33,6 +33,7 @@ import pytest
 
 import app.services.strategies.s4_volatility_compression_breakout as s4_module
 import app.services.strategy_exit_levels_batch as batch_module
+import app.services.strategy_manifest as manifest_module
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries, IndicatorSeries, atr_series
 from app.services.outcome_resolver import ExitLevels
@@ -615,6 +616,46 @@ class TestExitLevels:
 
         assert actual == "unorderable_exit_levels"
 
+    def test_manifest_adapter_keeps_the_hashed_scalar_factory_as_exact_oracle(self) -> None:
+        factory = STRATEGY_MANIFEST[S4_STRATEGY_ID].exit_levels
+        assert factory is not None
+        series = _bars(RISING)
+
+        actual = factory(
+            series,
+            signal_index=150,
+            entry_price=Decimal("300"),
+            universe=UNIVERSE,
+        )
+        target, stop, max_hold = s4_exit_bracket(
+            series,
+            signal_index=150,
+            entry_price=Decimal("300"),
+            universe=UNIVERSE,
+        )
+
+        assert actual == ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+
+    def test_manifest_adapter_does_not_swallow_an_unrelated_scalar_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        factory = STRATEGY_MANIFEST[S4_STRATEGY_ID].exit_levels
+        assert factory is not None
+
+        def fail_scalar(*args: object, **kwargs: object) -> tuple[Decimal, Decimal, int]:
+            raise ValueError("unrelated scalar defect")
+
+        monkeypatch.setattr(manifest_module, "s4_exit_bracket", fail_scalar)
+
+        with pytest.raises(ValueError, match="unrelated scalar defect"):
+            factory(
+                _bars(RISING),
+                signal_index=150,
+                entry_price=Decimal("300"),
+                universe=UNIVERSE,
+            )
+
     def test_batch_matches_scalar_brackets_and_computes_atr_once(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -667,6 +708,27 @@ class TestExitLevels:
 
         assert actual[0] == "unorderable_exit_levels"
         assert isinstance(actual[1], ExitLevels)
+
+    def test_batch_classifies_a_nonfinite_atr_as_an_unorderable_level(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        series = _bars(RISING)
+        values: list[float | None] = [None] * len(series)
+        values[150] = float("nan")
+        monkeypatch.setattr(
+            batch_module,
+            "atr_series",
+            lambda *args, **kwargs: IndicatorSeries(values=tuple(values), universe=UNIVERSE),
+        )
+
+        actual = s4_exit_levels_batch(
+            series,
+            requests=((150, Decimal("300")),),
+            universe=UNIVERSE,
+        )
+
+        assert actual == ("unorderable_exit_levels",)
 
 
 class TestLastBar:

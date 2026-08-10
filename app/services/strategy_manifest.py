@@ -69,7 +69,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Literal, Protocol, get_args
 
@@ -393,30 +393,31 @@ def _s4_exit_levels(
     entry_price: Decimal,
     universe: Universe,
 ) -> ExitLevels | UnresolvedReason:
-    """Adapt S-4's hashed strategy values to the versioned outcome contract."""
-    if not entry_price.is_finite():
-        raise ValueError(f"entry_price must be finite, got {entry_price}")
-    try:
-        target, stop, max_hold = s4_exit_bracket(
-            series,
-            signal_index=signal_index,
-            entry_price=entry_price,
-            universe=universe,
-        )
-    except InvalidOperation:
-        # A non-finite causal ATR cannot yield a broker-orderable bracket. The
-        # entry itself was validated above, so this is not hiding a bad fill.
-        return "unorderable_exit_levels"
-    except ValueError as exc:
-        # The hashed scalar factory deliberately refuses a non-positive stop.
-        # That is a data-dependent, countable no-order outcome. Invalid indices,
-        # prices and missing ATR remain programmer/data invariants and fatal.
-        if "not broker-orderable" not in str(exc):
-            raise
-        return "unorderable_exit_levels"
-    if not target.is_finite() or not stop.is_finite() or stop >= entry_price or target <= entry_price:
-        return "unorderable_exit_levels"
-    return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+    """Adapt S-4's hashed scalar oracle to the outcome reason contract.
+
+    The batch adapter owns the typed refusal because changing the hashed S-4
+    module merely to add an exception class would mint a new strategy version.
+    For an orderable bracket the original scalar factory is still called and
+    compared exactly, so the optimisation cannot silently become the formula.
+    """
+    (batched,) = s4_exit_levels_batch(
+        series,
+        requests=((signal_index, entry_price),),
+        universe=universe,
+    )
+    if batched == "unorderable_exit_levels":
+        return batched
+
+    target, stop, max_hold = s4_exit_bracket(
+        series,
+        signal_index=signal_index,
+        entry_price=entry_price,
+        universe=universe,
+    )
+    scalar = ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+    if scalar != batched:
+        raise RuntimeError("S-4 scalar and batch exit-level factories disagree")
+    return scalar
 
 
 #: Every strategy in the catalogue, keyed by ``strategy_id``.

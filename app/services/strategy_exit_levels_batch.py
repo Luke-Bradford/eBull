@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from decimal import Decimal
+from math import isfinite
 
 from app.services.indicator_series import BarSeries, Universe, atr_series
 from app.services.outcome_resolver import ExitLevels, UnresolvedReason
@@ -46,6 +47,9 @@ def s4_exit_levels_batch(
         value = atr.values[signal_index]
         if value is None or value <= 0:
             raise ValueError(f"ATR{ATR_PERIOD} is unavailable or non-positive at signal index {signal_index}")
+        if not isfinite(value):
+            levels.append("unorderable_exit_levels")
+            continue
         distance = Decimal(str(value))
         stop = entry_price - Decimal(str(ATR_STOP_MULTIPLE)) * distance
         target = entry_price + Decimal(str(ATR_TARGET_MULTIPLE)) * distance
