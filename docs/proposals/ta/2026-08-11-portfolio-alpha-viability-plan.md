@@ -60,7 +60,7 @@ what deserves a preregistered test; they are not backtest results.
 | --- | --- | --- | --- | --- |
 | **Broad equity beta / core allocation** | Compensation for bearing market risk; own corrected legacy comparator history measured about 6.3-6.6% annualised. This is the hurdle and no-alpha fallback, not a recent claim. | High for exact comparator total return to 2024; recent exact comparator is price return only. The main stock corpus separately has adjusted closes through 2026. | Conditional: the account-specific eligibility response must prove the proposed unleveraged instrument is the underlying product. | **Foundation, not an alpha trial.** Build correct total-return, FX, cash and dividend attribution before judging overlays. |
 | **Low-turnover cross-sectional factors** | Value, profitability/quality, investment, momentum and low-risk have extensive published priors. They can diversify a core but may be risk premia rather than arbitrage. | Medium: daily adjusted prices and SEC fundamentals exist, but point-in-time availability, delisted membership and recent total-return gaps must be closed. | Medium/high for long legs; short legs inherit CFD/borrow problems. | **Admit one simple long-only quality-plus-momentum tilt only after the foundation gate.** Monthly/quarterly turnover; no parameter sweep. Not a day-trade claim. |
-| **Opportunistic insider purchases** | A forced-information mechanism. Cohen, Malloy and Pomorski report routine trades as essentially uninformative and 82 bps/month abnormal return for opportunistic trades. | Medium/high: parser and 48,278 purchase rows exist, but 99% of usable history is 2023 onward and only 10% of purchasing insiders have three purchase-years. Filing acceptance time, not transaction date, must drive entry. | Conditional for liquid unleveraged longs; naturally low turnover. | **Priority alpha investigation because of the independent published prior and data fit, not the own-data point estimate.** Run a bounded historical-coverage pilot before authorising the full backfill, verify the exact classification, then preregister one reproduction. Current own estimates are contaminated development diagnostics and cannot rank or power the trial. |
+| **Opportunistic insider purchases** | A forced-information mechanism. Cohen, Malloy and Pomorski report routine trades as essentially uninformative and 82 bps/month abnormal return for opportunistic trades. | The causal 2019Q1–2026Q1 source and sealed 49-month reproduction are now retained in git. | Conditional for liquid unleveraged longs; naturally low turnover. | **Rejected under C-1.** The recent result was negative, the full-period interval crossed zero, placebo did better, drawdown/tail and single-name concentration failed. Preserve the family as evidence; do not retest neighbouring role/size/lag/weight/horizon/exit variants on the opened interval. |
 | **Extreme price-shock continuation (short)** | A forced-flow/information-shock hypothesis. Own searched result for shorting a >=12% one-day drop for five bars with a 20% stop showed +49 bps/trade after a 30% annual borrow stress, `t=4.83`, but had an -87% worst gap and emerged from about 100 searches. | Medium for OHLCV and event context; historical shortability and exact carry are absent. | **Blocked:** shorts are CFDs; firing names are likely hard-to-borrow and may be unavailable. Demo has no fees. | **Selected searched lead, not evidence or a prior.** Freeze the discovered rule, reconstruct its trial count, simulate portfolio tails, capture point-in-time shortability/cost, and assess only on new prospective data. Never use the searched +49 bps to calculate power or call 2020-2026 an untouched holdout. |
 | **Time-series / cross-sectional momentum** | Persistent prior across assets; crash risk rises after market declines amid high volatility and rebounds. Volatility scaling is evidence-based for this family. | High for daily research; recent total-return and PIT universe remain blockers. | Long implementation feasible; short implementation conditional. | Existing S-1/S-2 remain controls. A **new**, low-turnover factor tilt may be part of the factor trial above; do not tune the controls into candidates. |
 | **Short-term reversal / statistical arbitrage** | Usually compensation for liquidity provision; published strength rises in market stress. Exact residual versions need midpoint/factor inputs and both long/short legs. | Medium for a bounded 30m-4h on-demand spike, low for deep walk-forward and historical spread/shortability. Current daily RSI and residual-confluence implementations failed or are controls. | Low: short/carry plus roughly 50 bps round-trip economics consume the daily edge. | **Defer from the first trial budget, not for lack of any intraday history.** A future fixed replication may bootstrap the latest 1,000 REST bars, but promotion still needs prospective quotes/costs and a deeper untouched interval. No new daily-OHLC reversal variants. |
@@ -90,8 +90,9 @@ insiders. They supply priors and mechanisms, never eBull promotion evidence.
 
 ## 3. The initial research budget
 
-The first programme admits only three alpha/risk-overlay hypotheses. This is a
-budget, not a promise to produce three strategies.
+The first programme originally admitted three alpha/risk-overlay hypotheses. C-1
+has now consumed its one sealed trial and is rejected; only C-2 and C-3 remain open.
+This is a budget, not a promise to produce a strategy.
 
 ### Foundation F-0 — core and no-trade comparator
 
@@ -132,29 +133,20 @@ changes are separately identified as external flows. This is still not total ret
 distribution/cost reconciliation and the identity-safe recent benchmark remain open,
 so both return and benchmark fields continue to refuse availability.
 
-### Candidate C-1 — opportunistic insider purchase reproduction
+### Closed candidate C-1 — opportunistic insider purchase reproduction
 
-One preregistered rule, faithful to the published classification. Before the full
-backfill, sample bounded early/middle/recent accession cohorts and estimate usable
-filing, issuer, insider-identity and three-prior-year classification coverage. Stop if
-the projected recent independent population cannot power the declared minimum effect
-within the evidence horizon. Only then:
+The preregistered trial was opened once and rejected. Across 49 complete months, the
+purchase-value-weighted long-opportunistic/short-routine spread was +1.192%/month,
+but its 95% interval was [-1.452%, +4.215%]. The timing placebo did better; the
+primary-minus-placebo estimate was -0.721%. Trailing 24 and 36 months were negative,
+maximum drawdown was -54.84%, expected shortfall at 5% was -14.29%, equal weight was
+negative, and disclosed-value weights reached 100% in one issuer.
 
-1. Backfill Form 4 ownership XML to 2003 with filing acceptance timestamp, issuer,
-   security class, insider identity, role, transaction code and amendment lineage.
-2. Repair invalid transaction dates and measure parser/issuer coverage by year.
-3. Verify from the paper whether insiders without the required historical pattern
-   are opportunistic or unclassifiable; do not infer it.
-4. Freeze code `P` purchases, role exclusions, aggregation, liquidity floor,
-   next-executable fill, monthly holding/rebalance, benchmark adjustment, costs and
-   missing-data policy.
-5. Compare opportunistic purchases with routine purchases and a point-in-time
-   matched random-entry control. Use 2022 onward as primary relevance, older periods
-   as mechanism and stress evidence—not as a rescue for a recent failure.
-
-This trial is rejected if the recent conservative lower confidence bound on net
-expectancy is not positive, if the classification is not reproducible, or if results
-are concentrated in illiquid/unavailable names.
+Therefore `capital_candidate = false`. The causal source builder, sealed evaluator,
+tests, preregistration and aggregate verdict are retained in git and the trial count.
+No manifest row, strategy picker, bracket, resolver or allocation authority is
+created. The opened interval may not be mined for a rescue variant. See
+`2026-08-10-insider-purchase-result.md` and #2480.
 
 ### Candidate C-2 — frozen extreme-shock short, prospective confirmation
 
@@ -346,12 +338,11 @@ intraday REST is absent.
 
 ### Gate D-3 — bounded evidence sources
 
-1. **SEC Form 4 coverage pilot, then backfill if feasible** is the first source
-   expansion: official EDGAR submission history and stable XML are free, already
-   parsed, and directly unblock C-1. Sample bounded historical cohorts first; estimate
-   classifiable recent population and time-to-power before the full ingest. The
-   [SEC EDGAR APIs](https://www.sec.gov/search-filings/edgar-application-programming-interfaces)
-   provide public submissions and XBRL endpoints.
+1. **Do not expand Form 4 for rejected C-1.** Its 29-quarter transient source was
+   sufficient to reject the frozen reproduction and was deliberately not loaded into
+   application tables. A future Form 4 backfill requires a materially independent,
+   preregistered mechanism and a new storage/coverage case; it cannot be justified as
+   repair of C-1.
 2. **Prospective universe membership** continues. Nasdaq’s current symbol directory
    and daily list can help detect listings, delistings and corporate actions, but
    current files must not be advertised as a historical constituent archive. See the
@@ -408,8 +399,8 @@ The order is deliberately different from “build more strategies.”
    core/cash baseline.
 3. **Broker feasibility:** point-in-time product, shortability and cost preflight;
    prove demo/live semantic differences explicitly.
-4. **C-1 feasibility, data repair and preregistration:** bounded historical coverage
-   pilot; only then Form 4 backfill, classification and one sealed test.
+4. **C-1 closed:** retain its causal source/evaluator and failed aggregate verdict;
+   no backfill, picker entry or neighbouring rescue trial.
 5. **C-2 prospective contract:** portfolio tail simulation plus prospective
    shortability/cost/outcome capture; no further historical threshold search.
 6. **C-3 feasibility/preregistration:** only if point-in-time fundamentals and
@@ -460,12 +451,12 @@ The plan is ready to proceed when:
 - the operator sees the pot, benchmark/real return, risk, open automated positions,
   TP/SL/timeout, attribution and material refusals—not every ticker evaluated.
 
-The current state does **not** meet those conditions. It has enough evidence to choose
-the next bounded work, but not enough to turn on autonomous demo allocation. The most
-defensible sequence is core accounting and research-integrity repair first,
-opportunistic-insider reproduction second, and the frozen short-shock lead as a
-prospective broker-feasibility experiment. More technical-indicator combinations are
-not the next opportunity.
+The current state does **not** meet those conditions. It has enough evidence to close
+C-1 and choose the next bounded work, but not enough to turn on autonomous demo
+allocation. The defensible sequence is core accounting and research-integrity repair,
+then the frozen short-shock lead only as a prospective broker-feasibility experiment,
+with C-3 attempted only if its point-in-time data contract is feasible. More
+technical-indicator combinations are not the next opportunity.
 
 ## 10. External challenge incorporated
 
