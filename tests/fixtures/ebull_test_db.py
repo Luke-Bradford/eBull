@@ -208,6 +208,10 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # event stream. It intentionally has no FK to a deployment, so the inbound
     # FK closure cannot discover it from the strategy roots above.
     "strategy_paper_pool_events",
+    # #2545 — calibration evidence is an immutable standalone root. Forecasts
+    # reference both it and signals, so those children are derived; the parent
+    # itself cannot be discovered from an existing inbound-FK root.
+    "strategy_forecast_calibrations",
     # #2448/#2449 — bounded strategy current-state roots have no FKs. Their
     # signal/deployment children are derived by the planner from roots above.
     "strategy_scan_watermark",

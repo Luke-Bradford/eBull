@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
@@ -30,6 +30,7 @@ from app.providers.broker import (
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
 )
+from app.services.cost_model import COST_MODEL_ID
 from app.services.market_calendar import us_market_status
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 from app.services.strategy_control_plane import (
@@ -41,6 +42,7 @@ from app.services.strategy_control_plane import (
     registered_strategy_purpose,
 )
 from app.services.strategy_monitoring import load_paper_realised_pnl
+from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
 from app.services.strategy_order_reconciliation import (
     enforce_reconciliation_slo,
     ensure_strategy_request_id,
@@ -85,6 +87,7 @@ class _Intent:
     mandate_active_risk_budget_pct: Decimal
     mandate_cash_reserve_pct: Decimal
     mandate_max_concurrent_positions: int
+    forecast_id: int
     policy_revision: int
     ticket_sizing_mode: Literal["percent", "fixed"]
     ticket_fraction: Decimal | None
@@ -221,7 +224,14 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
                          AND (st.strategy_trade_id IS NULL OR st.status NOT IN ('closed', 'failed'))
                    ) AS pool_reserved,
                    evidence.result_count, evidence.qualified_result_count,
-                   evidence.expectancy_ci_low_pct
+                   evidence.expectancy_ci_low_pct,
+                   forecast.forecast_id,forecast.forecast_policy_version,
+                   forecast.decided_at AS forecast_decided_at,
+                   forecast.valid_through AS forecast_valid_through,
+                   forecast.conservative_net_expectancy_pct AS forecast_conservative_expectancy,
+                   forecast.cost_model_id AS forecast_cost_model_id,
+                   calibration.passed AS calibration_passed,
+                   calibration.holdout_end AS calibration_holdout_end
             FROM strategy_signals s
             JOIN instruments i ON i.instrument_id = s.instrument_id
             LEFT JOIN exchanges e ON e.exchange_id = i.exchange
@@ -272,6 +282,9 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
                 WHERE promotion.strategy_id = s.strategy_id
                   AND promotion.strategy_version = s.strategy_version
             ) evidence ON true
+            LEFT JOIN strategy_opportunity_forecasts forecast ON forecast.signal_id=s.signal_id
+            LEFT JOIN strategy_forecast_calibrations calibration
+              ON calibration.calibration_id=forecast.calibration_id
             WHERE s.signal_id = %s AND s.signal_kind = 'entry' AND s.verdict = 'fired'
             """,
             (signal_id,),
@@ -303,6 +316,15 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         (bool(row["enabled"]), "paper_deployment_disabled"),
         (row["currency"] == "USD", "deployment_currency_unsupported"),
         (row["policy_revision"] is not None, "execution_policy_missing"),
+        (row["forecast_id"] is not None, "opportunity_forecast_missing"),
+        (row["forecast_policy_version"] == FORECAST_POLICY_VERSION, "opportunity_forecast_policy_stale"),
+        (bool(row["calibration_passed"]), "opportunity_calibration_not_passed"),
+        (row["forecast_cost_model_id"] == COST_MODEL_ID, "opportunity_forecast_cost_model_stale"),
+        (
+            row["forecast_conservative_expectancy"] is not None
+            and Decimal(str(row["forecast_conservative_expectancy"])) > 0,
+            "opportunity_forecast_expectancy_not_positive",
+        ),
         (not bool(row["execution_blocked"]), "execution_block_active"),
         (row["quoted_at"] is not None and row["ask"] is not None, "quote_missing"),
         (
@@ -332,6 +354,15 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         return None, "scan_stale"
     if not _age_ok(halt_feed_at, now=now, max_seconds=int(row["max_halt_feed_age_seconds"])):
         return None, "halt_feed_stale"
+    forecast_decided_at = cast(datetime, row["forecast_decided_at"])
+    forecast_valid_through = cast(datetime, row["forecast_valid_through"])
+    if forecast_decided_at > now or forecast_valid_through < now:
+        return None, "opportunity_forecast_not_current"
+    if (
+        row["calibration_holdout_end"] is None
+        or cast(date, row["calibration_holdout_end"]) >= forecast_decided_at.date()
+    ):
+        return None, "opportunity_calibration_knowledge_time_invalid"
     if not _session_is_open(now):
         return None, "market_session_closed"
     return _Intent(
@@ -351,6 +382,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         mandate_active_risk_budget_pct=Decimal(str(row["mandate_active_risk_budget_pct"])),
         mandate_cash_reserve_pct=Decimal(str(row["mandate_cash_reserve_pct"])),
         mandate_max_concurrent_positions=int(row["mandate_max_concurrent_positions"]),
+        forecast_id=int(row["forecast_id"]),
         policy_revision=int(row["policy_revision"]),
         ticket_sizing_mode=cast(Literal["percent", "fixed"], row["ticket_sizing_mode"]),
         ticket_fraction=Decimal(str(row["ticket_fraction"])) if row["ticket_fraction"] is not None else None,
@@ -397,16 +429,17 @@ def _persist_rejection(
         conn.execute(
             """
             INSERT INTO strategy_entry_preflights (
-                signal_id, deployment_id, policy_revision, verdict, reason_code,
+                signal_id, deployment_id, policy_revision, forecast_id, verdict, reason_code,
                 evaluated_at, quote_at, scan_at, halt_feed_at,
                 broker_available_cash, account_equity, account_invested,
                 instrument_invested, gross_expectancy_ci_low_pct
-            ) VALUES (%s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 signal_id,
                 intent.deployment_id if intent else None,
                 intent.policy_revision if intent else None,
+                intent.forecast_id if intent else None,
                 reason_code,
                 now,
                 intent.quote_at if intent else None,
@@ -920,7 +953,7 @@ def _execute_fired_paper_signal_locked(
         conn.execute(
             """
             INSERT INTO strategy_entry_preflights (
-                signal_id, deployment_id, policy_revision, verdict, reason_code,
+                signal_id, deployment_id, policy_revision, forecast_id, verdict, reason_code,
                 evaluated_at, quote_at, scan_at, halt_feed_at,
                 eligibility_checked_at, costs_at, broker_available_cash,
                 account_equity, account_invested, instrument_invested,
@@ -928,7 +961,7 @@ def _execute_fired_paper_signal_locked(
                 gross_expectancy_ci_low_pct, stressed_cost_amount,
                 net_expectancy_pct, stop_loss_rate, take_profit_rate
             ) VALUES (
-                %s, %s, %s, 'allocated', 'all_paper_entry_gates_passed',
+                %s, %s, %s, %s, 'allocated', 'all_paper_entry_gates_passed',
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
@@ -936,6 +969,7 @@ def _execute_fired_paper_signal_locked(
                 signal_id,
                 intent.deployment_id,
                 intent.policy_revision,
+                intent.forecast_id,
                 evaluated_at,
                 intent.quote_at,
                 intent.scan_at,
