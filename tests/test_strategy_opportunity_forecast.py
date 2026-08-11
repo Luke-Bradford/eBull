@@ -28,6 +28,8 @@ def _forecast() -> OpportunityForecast:
         decided_at=decided_at,
         valid_through=decided_at + timedelta(days=5),
         horizon_market_days=5,
+        target_barrier_pct=Decimal("4"),
+        stop_barrier_pct=Decimal("2"),
         setup_version="setup-v1",
         exit_policy_version="exit-v1",
         calibration_id="calibration-v1",
@@ -62,6 +64,16 @@ def test_conservative_expectancy_must_reconcile_before_database_access() -> None
     forecast = replace(_forecast(), conservative_net_expectancy_pct=Decimal("1.41"))
 
     with pytest.raises(OpportunityForecastError, match="does not reconcile"):
+        record_opportunity_forecast(conn, forecast)
+
+    conn.execute.assert_not_called()
+
+
+def test_barrier_geometry_is_required_before_database_access() -> None:
+    conn = MagicMock(spec=psycopg.Connection[Any])
+    forecast = replace(_forecast(), stop_barrier_pct=Decimal("0"))
+
+    with pytest.raises(OpportunityForecastError, match="stop_barrier_pct"):
         record_opportunity_forecast(conn, forecast)
 
     conn.execute.assert_not_called()

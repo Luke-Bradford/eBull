@@ -45,6 +45,8 @@ class OpportunityForecast:
     decided_at: datetime
     valid_through: datetime
     horizon_market_days: int
+    target_barrier_pct: Decimal
+    stop_barrier_pct: Decimal
     setup_version: str
     exit_policy_version: str
     calibration_id: str
@@ -139,6 +141,14 @@ def record_opportunity_forecast(conn: psycopg.Connection[Any], forecast: Opportu
         raise OpportunityForecastError("forecast validity must not end before its decision time")
     if not 0 < forecast.horizon_market_days <= 60:
         raise OpportunityForecastError("forecast horizon must be between one and 60 market days")
+    for field, value, upper, inclusive in (
+        ("target_barrier_pct", forecast.target_barrier_pct, Decimal("1000"), True),
+        ("stop_barrier_pct", forecast.stop_barrier_pct, Decimal("100"), False),
+    ):
+        upper_ok = value <= upper if inclusive else value < upper
+        if not value.is_finite() or value <= 0 or not upper_ok:
+            comparator = "at most" if inclusive else "below"
+            raise OpportunityForecastError(f"{field} must be finite, positive and {comparator} {upper}")
     probabilities = (
         forecast.target_probability,
         forecast.stop_probability,
@@ -200,13 +210,14 @@ def record_opportunity_forecast(conn: psycopg.Connection[Any], forecast: Opportu
         """
             INSERT INTO strategy_opportunity_forecasts (
                 signal_id,forecast_policy_version,decided_at,valid_through,side,
-                horizon_market_days,setup_version,exit_policy_version,calibration_id,
+                horizon_market_days,target_barrier_pct,stop_barrier_pct,
+                setup_version,exit_policy_version,calibration_id,
                 target_probability,stop_probability,timeout_probability,
                 target_net_return_pct,stop_net_return_pct,timeout_net_return_pct,
                 expected_duration_hours,uncertainty_penalty_pct,tail_penalty_pct,
                 correlation_penalty_pct,cost_stress_penalty_pct,
                 conservative_net_expectancy_pct,cost_model_id
-            ) VALUES (%s,%s,%s,%s,'long',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,'long',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (signal_id) DO NOTHING
             RETURNING forecast_id
             """,
@@ -216,6 +227,8 @@ def record_opportunity_forecast(conn: psycopg.Connection[Any], forecast: Opportu
             forecast.decided_at,
             forecast.valid_through,
             forecast.horizon_market_days,
+            forecast.target_barrier_pct,
+            forecast.stop_barrier_pct,
             forecast.setup_version,
             forecast.exit_policy_version,
             forecast.calibration_id,

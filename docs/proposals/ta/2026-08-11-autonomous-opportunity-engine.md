@@ -232,6 +232,13 @@ causal volatility/structure. They are not moved until a desired historical win
 rate appears. A 3-session forecast and a 10-session forecast are distinct
 trials and competing uses of capital.
 
+The target/stop barrier percentages are frozen separately from their
+conditional **net** payoffs. #2551 makes those exact barriers part of every new
+forecast and uses them for loss-at-stop sizing and the submitted broker TP/SL.
+A generic deployment default may cap risk but may not silently replace the
+geometry whose probabilities authorised the order. Legacy forecasts without
+barriers fail closed.
+
 Where useful, prediction is staged:
 
 1. market direction and volatility state;
