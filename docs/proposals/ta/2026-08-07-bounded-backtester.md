@@ -674,6 +674,16 @@ return on almost no capital at work"*.
   > position takes 100% of a flat pot, so the second is funded at zero and every
   > subsequent one too. It is not a viable reading of the clause.
 
+  > **2026-08-12 attribution result (#2430):** the frozen v1 identity remains
+  > necessary for reproducibility, but it must not be mistaken for a recommended
+  > production allocation policy. Full-population recent-window A/B showed that
+  > event-driven equalisation materially damages high-turnover S-1/S-3/S-4.
+  > Entry-weight drift and calendar-month-end alternatives reduced that damage,
+  > but none made the controls capital-worthy; drift also starved later signals.
+  > S-2 remained below its passive hurdle under the funded monthly arm. See
+  > `2026-08-12-sizing-rule-attribution-result.md`. Any replacement is a distinct
+  > v2 identity and requires its own validation rather than rewriting v1 results.
+
 ---
 
 ## 6. #2288's remaining clauses land here

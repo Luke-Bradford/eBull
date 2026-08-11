@@ -60,7 +60,9 @@ recomputed fill could be expressed. The caller resolves them from the ledger.
 from __future__ import annotations
 
 from array import array
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Final
 
 import numpy as np
@@ -95,6 +97,18 @@ import numpy.typing as npt
 #:      ``cash >= 0`` hold by construction rather than by tolerance, and the
 #:      under-investment that leaves is exactly the cost charged.
 SIZING_RULE_ID: Final = "equal_weight_concurrent_v1"
+
+#: Research arm for #2430. A new position receives the same causal entry-time
+#: target as v1 (equity divided by the post-entry concurrent count), but every
+#: holding is then left to drift until its ledger exit. It is deliberately not
+#: the production ``SIZING_RULE_ID`` and cannot inherit production evidence.
+ENTRY_WEIGHT_DRIFT_RULE_ID: Final = "entry_weight_drift_v1"
+
+#: #2430's implementable middle arm: positions still enter and exit at their
+#: ledger fills, but the synthetic equalisation trade is allowed only at a
+#: panel-calendar month end. It separates ordinary portfolio maintenance from
+#: v1's accidental coupling of turnover to how often any name opens or closes.
+MONTH_END_REBALANCE_RULE_ID: Final = "calendar_month_end_equal_weight_v1"
 
 #: How criterion 7's buy-and-hold BENCHMARK is composed. ⚠ FROZEN AND HASHED —
 #: it is ``ResultIdentity.benchmark_rule``, and it exists as a separate id for
@@ -273,13 +287,15 @@ class EquityCurve:
                 raise ValueError(f"{name} has {len(other)} entries against {n} dates")
 
 
-def build_equity_curve(
+def _build_strategy_curve(
     book: LegBook,
     *,
     date_count: int,
     starting_equity: float = 1.0,
+    rebalance_events: bool,
+    scheduled_rebalance_indices: frozenset[int] = frozenset(),
 ) -> EquityCurve:
-    """Walk the date axis once, applying ``SIZING_RULE_ID``.
+    """Shared strategy walk; ``rebalance_events`` is the #2430 A/B switch.
 
     ⚠⚠ ORDER WITHIN A DATE IS FIXED AND IS §3.2 RULE 4: **exits, then entries,
     then the mark, then the rebalance.** *"An exit row whose fill bar equals a
@@ -466,7 +482,8 @@ def build_equity_curve(
         #    a target the frozen leg can never move to and force every tradeable
         #    leg to absorb the shortfall, which is a different sizing rule.
         tradeable = [leg for leg in open_legs if leg not in frozen]
-        if event and tradeable:
+        rebalance_now = (rebalance_events and event) or day in scheduled_rebalance_indices
+        if rebalance_now and tradeable:
             held = 0.0
             for leg in tradeable:
                 held += units[leg] * last_price[leg]
@@ -512,6 +529,69 @@ def build_equity_curve(
         short_funded_entries=short_funded,
         stale_marks=stale_marks,
         unrealised_held=len(frozen),
+    )
+
+
+def build_equity_curve(
+    book: LegBook,
+    *,
+    date_count: int,
+    starting_equity: float = 1.0,
+) -> EquityCurve:
+    """Walk the date axis once, applying production ``SIZING_RULE_ID``."""
+    return _build_strategy_curve(
+        book,
+        date_count=date_count,
+        starting_equity=starting_equity,
+        rebalance_events=True,
+    )
+
+
+def build_entry_weight_drift_curve(
+    book: LegBook,
+    *,
+    date_count: int,
+    starting_equity: float = 1.0,
+) -> EquityCurve:
+    """#2430 arm: equal entry-time targets, then no synthetic rebalance trades.
+
+    Entries and exits keep their exact stored net fills and ordering. New
+    positions use the same causal target and cash cap as production v1. The
+    only removed operation is step 4's event-date equalisation, so the result
+    isolates how much return, drawdown and turnover that rule contributes.
+    """
+    return _build_strategy_curve(
+        book,
+        date_count=date_count,
+        starting_equity=starting_equity,
+        rebalance_events=False,
+    )
+
+
+def build_month_end_rebalanced_curve(
+    book: LegBook,
+    *,
+    dates: Sequence[date],
+    starting_equity: float = 1.0,
+) -> EquityCurve:
+    """#2430 arm: restore equal weight only at each panel-calendar month end."""
+    if any(later <= earlier for earlier, later in zip(dates, dates[1:], strict=False)):
+        raise ValueError("dates must be strictly increasing for a causal month-end calendar")
+    # A boundary is observable only when the next panel date belongs to a new
+    # month.  The final date may merely be a truncated evaluation boundary
+    # (for example 8 July), so treating it as a month-end would add a synthetic
+    # trade with no forward holding period and contaminate the comparison.
+    month_ends = frozenset(
+        index
+        for index, when in enumerate(dates[:-1])
+        if (dates[index + 1].year, dates[index + 1].month) != (when.year, when.month)
+    )
+    return _build_strategy_curve(
+        book,
+        date_count=len(dates),
+        starting_equity=starting_equity,
+        rebalance_events=False,
+        scheduled_rebalance_indices=month_ends,
     )
 
 
@@ -687,9 +767,13 @@ def build_buy_and_hold_curve(
 
 __all__ = [
     "BENCHMARK_RULE_ID",
+    "ENTRY_WEIGHT_DRIFT_RULE_ID",
+    "MONTH_END_REBALANCE_RULE_ID",
     "SIZING_RULE_ID",
     "EquityCurve",
     "LegBook",
     "build_buy_and_hold_curve",
+    "build_entry_weight_drift_curve",
     "build_equity_curve",
+    "build_month_end_rebalanced_curve",
 ]
