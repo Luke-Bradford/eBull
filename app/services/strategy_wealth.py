@@ -52,6 +52,12 @@ _WEALTH_SQL = """
           ON pos.snapshot_date=snap.snapshot_date
          AND pos.position_id=own.broker_position_id
         GROUP BY snap.snapshot_date
+    ), owned_broker_positions AS (
+        -- broker_position_id is UNIQUE in the ownership ledger today.  Keep
+        -- the aggregation boundary explicit so a future history-table shape
+        -- cannot multiply one close event before SUM(realized_pnl_usd).
+        SELECT DISTINCT broker_position_id
+        FROM strategy_position_ownership
     ), realised AS (
         SELECT snap.snapshot_date,
                COALESCE(SUM(event.realized_pnl_usd), 0) AS realised_pnl,
@@ -59,14 +65,14 @@ _WEALTH_SQL = """
                    WHERE event.event_id IS NOT NULL AND event.realized_pnl_usd IS NULL
                ) AS missing_realised
         FROM snapshots snap
-        LEFT JOIN strategy_position_ownership own ON TRUE
+        LEFT JOIN owned_broker_positions own ON TRUE
         LEFT JOIN trade_events event
           ON event.position_id=own.broker_position_id
          AND event.event_kind='close'
          AND (event.executed_at AT TIME ZONE 'UTC')::date <= snap.snapshot_date
         GROUP BY snap.snapshot_date
     ), released_without_close AS (
-        SELECT snap.snapshot_date, COUNT(own.ownership_id) AS missing_closes
+        SELECT snap.snapshot_date, COUNT(DISTINCT own.broker_position_id) AS missing_closes
         FROM snapshots snap
         JOIN strategy_position_ownership own
           ON own.status='released'

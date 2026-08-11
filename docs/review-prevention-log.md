@@ -3911,3 +3911,10 @@ Two things S-4 adds to the prevention above:
 - Root cause: the boundary was attached to the feature being added (S-4 level outcomes) instead of to the property it protects (every price-derived state consumer). The result looked fail-closed at the outcome layer while other strategies still admitted cross-scale inputs.
 - Prevention: when adding a structural corpus boundary, enumerate every consumer of the affected series contract, including alternate per-series and cross-sectional paths. A branch-specific test is insufficient; pin at least one consumer on each distinct path and assert both the final pre-boundary bar and post-boundary warm-up behaviour.
 - Enforced in: this log; `app/services/backtest_run.py::_signals_for` and `::_stage_cross_sectional_segments`; `tests/test_backtest_run.py::TestSeriesBreakBoundary` (per-series S-4 and cross-sectional S-2 restart cases).
+
+## Aggregate the entity grain before joining its history (#2531, 2026-08-11)
+
+- Symptom: review flagged strategy realised P&L and committed capital queries whose current joins are one-to-one only because `strategy_position_ownership.broker_position_id` and `strategy_trades.funding_decision_id` are schema-`UNIQUE`.
+- Risk: a later legitimate history-table redesign could turn either relationship one-to-many and silently multiply money inside `SUM`, even though the query itself still looks valid.
+- Prevention: establish the monetary grain explicitly before aggregation. Select distinct exact broker-position IDs before joining close events; use `EXISTS` for lifecycle-state membership when summing one funding decision's amount. Do not rely on a distant uniqueness constraint to make a money aggregation correct.
+- Enforced in: this log; `app/services/strategy_wealth.py` `owned_broker_positions` CTE; `app/services/strategy_control_plane.py::configure_paper_pool` committed-capital `EXISTS` predicates.
