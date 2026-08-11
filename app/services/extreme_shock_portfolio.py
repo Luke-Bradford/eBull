@@ -197,6 +197,7 @@ def simulate_extreme_shock_portfolio(
     funded_notional = 0.0
     terminal_pnl = 0.0
     peak_gross_date: date | None = None
+    peak_gross_ratio = -1.0
     peak_position_notional = 0.0
 
     for current_date in calendar:
@@ -208,14 +209,15 @@ def simulate_extreme_shock_portfolio(
             active[trade.trade_id] = _Position(trade=trade, notional=notional)
             funded += 1
             funded_notional += notional
-            unknown_funded += trade.sector is None
+            unknown_funded += int(trade.sector is None)
 
         gross = sum(position.notional for position in active.values())
         gross_ratio = gross / equity if equity > 0 else float("inf")
         gross_exposures.append(gross_ratio)
         concurrent.append(len(active))
-        if peak_gross_date is None or gross_ratio > max(gross_exposures[:-1], default=-1.0):
+        if gross_ratio > peak_gross_ratio:
             peak_gross_date = current_date
+            peak_gross_ratio = gross_ratio
             peak_position_notional = max((position.notional for position in active.values()), default=0.0)
 
         if max_sector_exposure is not None and equity > 0:
