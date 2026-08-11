@@ -78,6 +78,7 @@ from app.services.strategy_position_manager import (
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import CORPUS_VERSION
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
+from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
 router = APIRouter(
     prefix="/strategies",
@@ -613,6 +614,11 @@ def _promotion_refusals(
         refusals.append("deflated_sharpe_not_computed")
     if row["trial_count"] is None:
         refusals.append("trial_count_undeclared")
+    if row["deflated_sharpe"] is not None and (
+        row.get("trial_register_version") != TRIAL_REGISTER_VERSION
+        or (row.get("trial_count") is not None and row.get("trial_count") != TRIAL_REGISTER.declared_count)
+    ):
+        refusals.append("trial_register_superseded")
     if row["effective_sample_size"] is None:
         refusals.append("effective_sample_size_not_computed")
     # Runnable v1 strategies are non-level regimes: ambiguity is unreachable,

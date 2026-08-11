@@ -17,6 +17,7 @@ from app.services.result_ledger import store_holdout_result, store_in_sample_res
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import CORPUS_VERSION
+from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.test_result_ledger import build_metrics, build_result
 
 
@@ -36,6 +37,7 @@ def test_result_refusals_fail_closed_without_expanding_the_database() -> None:
         "deflated_sharpe": None,
         "trial_count": None,
         "effective_sample_size": None,
+        "trial_register_version": None,
         "synthetic_control_model_id": None,
         "synthetic_control_passed": None,
     }
@@ -64,8 +66,9 @@ def test_harness_result_carries_a_permanent_refusal() -> None:
         "carry_unmodelled": False,
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 1,
-        "trial_count": 2,
+        "trial_count": TRIAL_REGISTER.declared_count,
         "effective_sample_size": 10,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
         "synthetic_control_model_id": "control-v1",
         "synthetic_control_mean_return_ci_low_pct": -1,
         "synthetic_control_mean_return_ci_high_pct": 1,
@@ -87,8 +90,9 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
         "carry_unmodelled": True,
         "evaluated_instrument_count": 5266,
         "deflated_sharpe": 0.8,
-        "trial_count": 12,
+        "trial_count": TRIAL_REGISTER.declared_count,
         "effective_sample_size": 200,
+        "trial_register_version": "trial-register-2026-08-10",
         "synthetic_control_model_id": "random-entry-v1",
         "synthetic_control_passed": True,
         "synthetic_control_mean_return_ci_low_pct": -1,
@@ -104,6 +108,7 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
     ) == [
         "universe_basis_not_survivorship_free",
         "carry_unmodelled",
+        "trial_register_superseded",
     ]
 
 
@@ -114,8 +119,9 @@ def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing()
         "carry_unmodelled": False,
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 0.8,
-        "trial_count": 12,
+        "trial_count": TRIAL_REGISTER.declared_count,
         "effective_sample_size": 200,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
         "synthetic_control_model_id": "random-entry-v1",
         "synthetic_control_mean_return_ci_low_pct": -1,
         "synthetic_control_mean_return_ci_high_pct": 1,
@@ -128,6 +134,56 @@ def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing()
         quarantine_complete=False,
         accesses_complete=True,
     ) == ["quarantine_arms_not_compared"]
+
+
+def test_a_current_register_label_cannot_hide_a_stale_trial_count() -> None:
+    row: dict[str, object] = {
+        "purpose": "capital_candidate",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "evaluated_instrument_count": 1,
+        "deflated_sharpe": 0.8,
+        "trial_count": 12,
+        "effective_sample_size": 200,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+        "synthetic_control_model_id": "random-entry-v1",
+        "synthetic_control_passed": True,
+        "synthetic_control_mean_return_ci_low_pct": -1,
+        "synthetic_control_mean_return_ci_high_pct": 1,
+        "sharpe": 0.8,
+        "synthetic_control_sharpe_threshold": 0.5,
+    }
+    assert _promotion_refusals(
+        row,
+        ambiguity_complete=True,
+        quarantine_complete=True,
+        accesses_complete=True,
+    ) == ["trial_register_superseded"]
+
+
+def test_a_missing_count_is_not_also_described_as_superseded_when_the_version_is_current() -> None:
+    row: dict[str, object] = {
+        "purpose": "capital_candidate",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "evaluated_instrument_count": 1,
+        "deflated_sharpe": 0.8,
+        "trial_count": None,
+        "effective_sample_size": 200,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+        "synthetic_control_model_id": "random-entry-v1",
+        "synthetic_control_passed": True,
+        "synthetic_control_mean_return_ci_low_pct": -1,
+        "synthetic_control_mean_return_ci_high_pct": 1,
+        "sharpe": 0.8,
+        "synthetic_control_sharpe_threshold": 0.5,
+    }
+    assert _promotion_refusals(
+        row,
+        ambiguity_complete=True,
+        quarantine_complete=True,
+        accesses_complete=True,
+    ) == ["trial_count_undeclared"]
 
 
 def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:

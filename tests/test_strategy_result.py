@@ -46,6 +46,7 @@ from app.services.strategy_result import (
     namespace_for_signal,
 )
 from app.services.strategy_statistics import StrategyMetrics
+from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
 # --- transcribed from the spec, never imported -----------------------------
 
@@ -194,13 +195,34 @@ def _passing_control(**overrides: object) -> SyntheticControl:
     return SyntheticControl(**base)  # type: ignore[arg-type]
 
 
+def _deflated_result(**overrides: object) -> DeflatedSharpeResult:
+    """A complete DSR provenance block for promotion-gate tests."""
+    base: dict[str, object] = {
+        "deflated_sharpe": 0.72,
+        "expected_max_sharpe": 0.015,
+        "trade_sharpe": 0.017,
+        "skewness": -0.4,
+        "kurtosis": 8.0,
+        "effective_sample_size": 41.0,
+        "declared_trials": TRIAL_REGISTER.declared_count,
+        "independent_trials": 9.0,
+        "average_trial_correlation": 0.2,
+        "trial_sharpe_variance": 1e-4,
+        "measured_trials": 2,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+    }
+    base.update(overrides)
+    return DeflatedSharpeResult(**base)  # type: ignore[arg-type]
+
+
 #: Everything a clean result needs EXCEPT its synthetic control, so a test can
 #: vary that one field without restating (and drifting from) the other four.
 _CLEAN_RESULT_FIELDS: dict[str, object] = {
     "universe_basis": "survivorship_free",
     "carry_unmodelled": False,
-    "trial_count": 17,
-    "deflated_sharpe": Decimal("0.42"),
+    "trial_count": TRIAL_REGISTER.declared_count,
+    "deflated_sharpe": Decimal("0.72"),
+    "deflated": _deflated_result(),
 }
 
 
@@ -643,6 +665,59 @@ class TestPromotionGateRefusals:
         refusals = check_promotable(candidate)
         assert "trial_count_undeclared" in refusals
         assert "deflated_sharpe_not_computed" not in refusals
+
+    def test_a_dsr_against_a_superseded_trial_register_is_refused(self) -> None:
+        deflated = _deflated_result(trial_register_version="trial-register-superseded")
+        result = _result(
+            **{
+                **_CLEAN_RESULT_FIELDS,
+                "trial_count": deflated.declared_trials,
+                "deflated_sharpe": Decimal(repr(deflated.deflated_sharpe)),
+                "deflated": deflated,
+            },
+            metrics=_metrics(effective_sample_size=deflated.effective_sample_size),
+            synthetic_control=_passing_control(),
+        )
+        assert "trial_register_superseded" in check_promotable(_clean_candidate(result=result))
+
+    def test_a_dsr_without_register_provenance_is_refused(self) -> None:
+        result = _result(
+            universe_basis="survivorship_free",
+            carry_unmodelled=False,
+            trial_count=11,
+            deflated_sharpe=Decimal("0.72"),
+            deflated=None,
+            synthetic_control=_passing_control(),
+        )
+        assert "trial_register_superseded" in check_promotable(_clean_candidate(result=result))
+
+    def test_a_dsr_with_the_current_version_but_a_stale_count_is_refused(self) -> None:
+        deflated = _deflated_result(declared_trials=12, independent_trials=9.0)
+        result = _result(
+            **{
+                **_CLEAN_RESULT_FIELDS,
+                "trial_count": deflated.declared_trials,
+                "deflated_sharpe": Decimal(repr(deflated.deflated_sharpe)),
+                "deflated": deflated,
+            },
+            metrics=_metrics(effective_sample_size=deflated.effective_sample_size),
+            synthetic_control=_passing_control(),
+        )
+        assert "trial_register_superseded" in check_promotable(_clean_candidate(result=result))
+
+    def test_the_current_trial_register_does_not_add_a_refusal(self) -> None:
+        deflated = _deflated_result(trial_register_version=TRIAL_REGISTER_VERSION)
+        result = _result(
+            **{
+                **_CLEAN_RESULT_FIELDS,
+                "trial_count": deflated.declared_trials,
+                "deflated_sharpe": Decimal(repr(deflated.deflated_sharpe)),
+                "deflated": deflated,
+            },
+            metrics=_metrics(effective_sample_size=deflated.effective_sample_size),
+            synthetic_control=_passing_control(),
+        )
+        assert "trial_register_superseded" not in check_promotable(_clean_candidate(result=result))
 
     def test_an_uncompared_ambiguity_pair_is_refused(self) -> None:
         """§3.4. ⚠ "Not measured" and "measured and bad" are different states and
