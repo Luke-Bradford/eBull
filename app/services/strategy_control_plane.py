@@ -141,13 +141,23 @@ def configure_paper_pool(
             """
             SELECT COALESCE(SUM(decision.amount), 0)
             FROM strategy_funding_decisions decision
-            JOIN strategy_deployments deployment
-              ON deployment.deployment_id=decision.deployment_id
-             AND deployment.mode='paper'
-            LEFT JOIN strategy_trades trade
-              ON trade.funding_decision_id=decision.funding_decision_id
             WHERE decision.verdict='allocated'
-              AND (trade.strategy_trade_id IS NULL OR trade.status NOT IN ('closed', 'failed'))
+              AND EXISTS (
+                  SELECT 1 FROM strategy_deployments deployment
+                  WHERE deployment.deployment_id=decision.deployment_id
+                    AND deployment.mode='paper'
+              )
+              AND (
+                  NOT EXISTS (
+                      SELECT 1 FROM strategy_trades trade
+                      WHERE trade.funding_decision_id=decision.funding_decision_id
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM strategy_trades trade
+                      WHERE trade.funding_decision_id=decision.funding_decision_id
+                        AND trade.status NOT IN ('closed', 'failed')
+                  )
+              )
             """
         ).fetchone()
         assert committed_row is not None
