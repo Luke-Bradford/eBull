@@ -23,11 +23,11 @@ measurements were taken on 2026-08-11.
 | proposition | status | evidence and consequence |
 | --- | --- | --- |
 | The four visible strategies are investable candidates | **refuted** | S-1 through S-4 are all `purpose = harness_validation`. The database has 196 result rows and zero `capital_candidate` rows. They test machinery; they must not be funded or presented as choices for capital. |
-| Current stored results can authorise capital | **refuted** | All 196 rows are `survivor_only` and `carry_unmodelled = true`. None is promotion evidence. Recent S-2 rows show positive point estimates but a 0.036-0.041 Deflated Sharpe against the current, already incomplete trial register. |
+| Current stored results can authorise capital | **refuted** | All 196 rows are `survivor_only` and `carry_unmodelled = true`. None is promotion evidence. Recent non-null S-2 Deflated Sharpe values are low (about 0.003-0.041) and are computed against the current, already incomplete trial register. |
 | The declared multiple-testing denominator is complete | **refuted** | `trial_register.py` declares 12 trials. `2026-08-09-plan-of-attack.md` documents roughly 100 searched arms in one session alone, and later residual, event and intraday candidates add further searches. A DSR against 12 is an optimistic upper bound. It must not be used for promotion until the historical experiment ledger is reconstructed conservatively. |
-| Recent intraday and quote evidence is ready for historical validation | **refuted** | `strategy_intraday_bars` has 9,013 rows over eight instruments; one-minute data covers two instruments. `strategy_quote_observations` has 376 observed samples from 2026-08-10 16:00-20:10 UTC. This is a collection/execution pilot, not a return sample. |
+| The retained intraday and quote panel is ready for historical validation | **refuted** | `strategy_intraday_bars` has 9,013 rows over eight instruments; one-minute data covers two instruments. `strategy_quote_observations` has 376 observed samples from 2026-08-10 16:00-20:10 UTC. This retained panel is a collection/execution pilot, not a return sample. Separately, eToro REST can return the latest 1,000 OHLCV bars on demand: roughly two days at one minute, five days at five minutes, one month at 30 minutes, two months at one hour and eight months at four hours. That is usable bounded history, not a deep arbitrary-date corpus. |
 | Historical universe membership is available | **refuted** | All 12,695 `instrument_universe_membership` rows start on 2026-08-10. They provide correct prospective membership, but cannot remove historical survivorship bias. |
-| Storing bounded observations will bloat the database now | **refuted for the current panel** | The database is already 63 GB, but all current intraday leaf partitions together are about 1.96 MB and quote observations are 192 KB. The storage contract is sound if the bounded panel, retention and no-derived-series rules remain enforced. Existing 3.5 GB `research_price_daily` and other historical relations—not this pilot—dominate. |
+| Storing bounded observations will bloat the database now | **refuted for the current panel** | The database is already 63 GB, but current intraday leaf data are about 1.96 MB (about 2.34 MB including parent/leaf indexes) and quote observations are 192 KB. The storage contract is sound if the bounded panel, retention and no-derived-series rules remain enforced. Existing 3.5 GB `research_price_daily` and other historical relations—not this pilot—dominate. |
 | eToro demo fills validate real trading costs | **refuted** | eToro states virtual trades carry no fees even though the virtual account mirrors features and live market conditions. Demo can test integration, timing, state and reconciliation; it cannot validate commissions, CFD spread charges, borrow, overnight financing or live slippage. Those require conservative modelling plus broker cost observations. |
 | A long, unleveraged eToro stock is economically the same as a short | **refuted** | eToro states a non-leveraged long stock normally owns the underlying and receives dividends. Shorts and leveraged positions are CFDs. Current fees can include the market spread, a CFD opening/closing charge and overnight/borrow charges; product classification can vary and must be checked per proposed order. |
 | The recent eToro benchmark is total return | **refuted** | The recent comparator snapshot contains price candles with no dividend-adjusted close. The older research corpus has split-and-dividend-adjusted `adj_close`, but stops in 2024. A 2026 portfolio claim cannot silently splice the two. |
@@ -40,9 +40,11 @@ measurements were taken on 2026-08-11.
 Primary broker references: [eToro fees](https://www.etoro.com/trading/fees/),
 [eToro stocks and ownership](https://www.etoro.com/stocks/),
 [eToro virtual account](https://www.etoro.com/trading/demo-account/), and
-[eToro API rate limits](https://api-portal.etoro.com/getting-started/rate-limits).
-The API currently documents 60 read requests and 20 execution/write requests per
-minute. These are architecture constraints, not alpha.
+[eToro API index](https://api-portal.etoro.com/llms.txt). Verified against that live
+index on 2026-08-11: market-data endpoints share 120 requests per 60 seconds;
+ordinary/default reads use 60; order writes share 20; and the eligibility and cost
+preflights each have a separate dedicated limit of 20. These are architecture
+constraints, not alpha, and must be re-verified before implementation.
 
 ## 2. The bounded opportunity universe
 
@@ -56,20 +58,23 @@ what deserves a preregistered test; they are not backtest results.
 
 | family / return source | mechanism and published prior | current free-data fit | eToro fit | decision |
 | --- | --- | --- | --- | --- |
-| **Broad equity beta / core allocation** | Compensation for bearing market risk; own corrected long history measured about 6.3-6.6% annualised. This is the hurdle and no-alpha fallback. | High for historical total return to 2024; recent price return only. | High for unleveraged long stock/ETF, subject to exact product classification. | **Foundation, not an alpha trial.** Build correct total-return, FX, cash and dividend attribution before judging overlays. |
+| **Broad equity beta / core allocation** | Compensation for bearing market risk; own corrected long history measured about 6.3-6.6% annualised. This is the hurdle and no-alpha fallback. | High for historical total return to 2024; recent price return only. | Conditional: the account-specific eligibility response must prove the proposed unleveraged instrument is the underlying product. | **Foundation, not an alpha trial.** Build correct total-return, FX, cash and dividend attribution before judging overlays. |
 | **Low-turnover cross-sectional factors** | Value, profitability/quality, investment, momentum and low-risk have extensive published priors. They can diversify a core but may be risk premia rather than arbitrage. | Medium: daily adjusted prices and SEC fundamentals exist, but point-in-time availability, delisted membership and recent total-return gaps must be closed. | Medium/high for long legs; short legs inherit CFD/borrow problems. | **Admit one simple long-only quality-plus-momentum tilt only after the foundation gate.** Monthly/quarterly turnover; no parameter sweep. Not a day-trade claim. |
-| **Opportunistic insider purchases** | A forced-information mechanism. Cohen, Malloy and Pomorski report routine trades as essentially uninformative and 82 bps/month abnormal return for opportunistic trades. | Medium/high: parser and 48,278 purchase rows exist, but 99% of usable history is 2023 onward and only 10% of purchasing insiders have three purchase-years. Filing acceptance time, not transaction date, must drive entry. | High for liquid unleveraged longs; naturally low turnover. | **Priority alpha investigation.** Backfill stable Form 4 XML to 2003, verify the exact published classification, then preregister one reproduction. Current positive own estimates are inconclusive and biased upward. |
-| **Extreme price-shock continuation (short)** | A forced-flow/information-shock hypothesis. Own searched result for shorting a >=12% one-day drop for five bars with a 20% stop showed +49 bps/trade after a 30% annual borrow stress, `t=4.83`, but had an -87% worst gap and emerged from about 100 searches. | Medium for OHLCV and event context; historical shortability and exact carry are absent. | **Blocked:** shorts are CFDs; firing names are likely hard-to-borrow and may be unavailable. Demo has no fees. | **Promising lead, not evidence.** Freeze the discovered rule, reconstruct its trial count, simulate portfolio tails, capture point-in-time shortability/cost, and assess only on new prospective data. Never call 2020-2026 an untouched holdout. |
+| **Opportunistic insider purchases** | A forced-information mechanism. Cohen, Malloy and Pomorski report routine trades as essentially uninformative and 82 bps/month abnormal return for opportunistic trades. | Medium/high: parser and 48,278 purchase rows exist, but 99% of usable history is 2023 onward and only 10% of purchasing insiders have three purchase-years. Filing acceptance time, not transaction date, must drive entry. | Conditional for liquid unleveraged longs; naturally low turnover. | **Priority alpha investigation because of the independent published prior and data fit, not the own-data point estimate.** Run a bounded historical-coverage pilot before authorising the full backfill, verify the exact classification, then preregister one reproduction. Current own estimates are contaminated development diagnostics and cannot rank or power the trial. |
+| **Extreme price-shock continuation (short)** | A forced-flow/information-shock hypothesis. Own searched result for shorting a >=12% one-day drop for five bars with a 20% stop showed +49 bps/trade after a 30% annual borrow stress, `t=4.83`, but had an -87% worst gap and emerged from about 100 searches. | Medium for OHLCV and event context; historical shortability and exact carry are absent. | **Blocked:** shorts are CFDs; firing names are likely hard-to-borrow and may be unavailable. Demo has no fees. | **Selected searched lead, not evidence or a prior.** Freeze the discovered rule, reconstruct its trial count, simulate portfolio tails, capture point-in-time shortability/cost, and assess only on new prospective data. Never use the searched +49 bps to calculate power or call 2020-2026 an untouched holdout. |
 | **Time-series / cross-sectional momentum** | Persistent prior across assets; crash risk rises after market declines amid high volatility and rebounds. Volatility scaling is evidence-based for this family. | High for daily research; recent total-return and PIT universe remain blockers. | Long implementation feasible; short implementation conditional. | Existing S-1/S-2 remain controls. A **new**, low-turnover factor tilt may be part of the factor trial above; do not tune the controls into candidates. |
-| **Short-term reversal / statistical arbitrage** | Usually compensation for liquidity provision; published strength rises in market stress. Exact residual versions need midpoint/factor inputs and both long/short legs. | Low for execution-grade history. Current daily RSI and residual-confluence implementations failed or are controls. | Low: short/carry plus roughly 50 bps round-trip economics consume the daily edge. | **Defer.** Prospective quote/intraday collection continues only as bounded evidence. No new daily-OHLC reversal variants in the first trial budget. |
-| **Breakout / opening range / volatility compression** | May exploit delayed institutional flow in “stocks in play”; requires opening-range, relative-volume and gap selection together. ATR is risk scale, not alpha. | Low: prospective intraday panel is tiny; free REST history is shallow and rate-limited. | Low under present costs; published ORB assumptions are orders of magnitude cheaper than the repo’s broker estimate. | **Defer/rejection replication only.** Do not promote S-4 or a bare breakout. Revisit only after sufficient spread observations and exact stock-in-play inputs. |
+| **Short-term reversal / statistical arbitrage** | Usually compensation for liquidity provision; published strength rises in market stress. Exact residual versions need midpoint/factor inputs and both long/short legs. | Medium for a bounded 30m-4h on-demand spike, low for deep walk-forward and historical spread/shortability. Current daily RSI and residual-confluence implementations failed or are controls. | Low: short/carry plus roughly 50 bps round-trip economics consume the daily edge. | **Defer from the first trial budget, not for lack of any intraday history.** A future fixed replication may bootstrap the latest 1,000 REST bars, but promotion still needs prospective quotes/costs and a deeper untouched interval. No new daily-OHLC reversal variants. |
+| **Breakout / opening range / volatility compression** | May exploit delayed institutional flow in “stocks in play”; requires opening-range, relative-volume and gap selection together. ATR is risk scale, not alpha. | Medium for recent 30m-4h context but low for opening-range depth: 1m/5m REST reaches days and the prospective quote panel is tiny. | Low under present costs; published ORB assumptions are orders of magnitude cheaper than the repo’s broker estimate. | **Defer/rejection replication only.** On-demand REST can run a bounded recent falsification, but not a deep promotion backtest. Do not promote S-4 or a bare breakout; require sufficient spread observations and exact stock-in-play inputs. |
 | **Earnings/filing continuation (PEAD)** | Delayed assimilation of genuinely surprising information. Classic PEAD has weakened in recent periods and analyst-expectation data is absent. | Medium for filings/XBRL, low for true surprise and announcement-time execution. The preregistered historical-SUE trial is already in the ledger. | Long/short economics differ. | **Low priority.** Keep the sealed result; do not search alternate surprise definitions. Filing text may justify a future independent trial after bodies and knowledge times exist. |
 | **Pairs / market-neutral relative value** | Temporary divergence from a stable economic relation; portfolio construction, hedge error and borrow matter more than chart similarity. | Medium for daily prices, low for reliable PIT universe/corporate actions and execution costs. | Low because one leg is normally a CFD short. | **Defer** until shortability/carry history exists. Sector-relative context may improve other forecasts but is not itself an edge. |
-| **Macro / sector rotation / defensive allocation** | Changes beta, duration or sector exposure in response to slow-moving public conditions. Useful primarily for risk and drawdown, while factor timing is difficult. | Medium/high: market/sector series exist; free ALFRED can preserve vintage macro observations, subject to licensing review per series. | High through unleveraged ETFs where the account receives the underlying product. | **Risk-context trial only after core accounting.** It must improve the implementable portfolio frontier after turnover, not merely predict a regime label. |
+| **Macro / sector rotation / defensive allocation** | Changes beta, duration or sector exposure in response to slow-moving public conditions. Useful primarily for risk and drawdown, while factor timing is difficult. | Medium/high: market/sector series exist; free ALFRED can preserve vintage macro observations, subject to licensing review per series. | Conditional on account-specific eligibility proving the selected ETF is underlying rather than CFD. | **Risk-context trial only after core accounting.** It must improve the implementable portfolio frontier after turnover, not merely predict a regime label. |
 | **Options volatility/carry** | Variance and skew risk premia; materially different return source. | Blocked: no historical option chain or implied-volatility surface. | Blocked/region-dependent product support. | **Out of scope without a licensable free source and broker contract.** VIX alone cannot reconstruct an option strategy. |
 | **Order-flow, market making and intraday liquidity** | Paid compensation for immediacy and inventory risk; requires trades, depth, side and latency. | Blocked: WebSocket/REST gives best prices but no reliable depth, aggressor side or historical book. | Retail API rate and latency are unsuitable for market making. | **Out of scope.** Do not proxy order-flow imbalance from OHLCV and call it the same signal. |
 | **News, filing text and LLM features** | Convert new unstructured information into a timestamped structured event; an LLM is an extractor, not a price oracle. | Low today: `filing_documents` holds URLs, not bodies; free news is incomplete and licensing-sensitive. | Neutral once a validated low-turnover event exists. | **Future data spike, not a first-round return trial.** Any extracted feature competes with a simple event baseline. |
 | **13F/crowding and FINRA short volume** | Slow ownership/crowding or forced-unwind context. 13F is delayed; daily short volume is flow, not short interest or borrow availability. | High for existing 13F and Reg SHO/FINRA-like data, but semantics limit actionability. | Low/medium as context; cannot prove an instrument can be borrowed. | **Context only.** No cloning strategy. Test only if a separately admitted mechanism requires it. |
+| **Activist ownership (Schedule 13D)** | A new control stake can create a dated catalyst distinct from delayed 13F cloning; passive 13G is not the same hypothesis. | Medium: structured 13D/G ownership exists, but point-in-time filing/class/amendment coverage and recent population need a census. | Conditional long fit. | **Reserved independent event family.** Establish published prior, 13D-versus-13G placebo and coverage before candidate admission. Do not fold it into generic 13F. |
+| **Issuer capital events** | Buybacks, issuance/dilution, dividends and treasury changes alter supply or distribute cash; announcements, accounting realization and mechanical ex-date moves are different events. | Medium: XBRL buyback/treasury/share data and dividend events exist, but announcement knowledge time and completeness vary. | Conditional long fit; dividend capture must clear price adjustment and tax. | **Taxonomy only.** Split into one economically specific preregistration if a coverage census supports it; do not combine all capital events into a vote. |
+| **Listing, index and calendar flows** | Index additions/deletions, Form 25/delistings, IPO lockups, month-end and tax-loss flows can force trading on known schedules. | Low/medium: prospective listing membership and Form 25 exist; historical index membership, lockup terms and a complete event history do not. | Product/side dependent. | **Reserved/data-gated.** Current Nasdaq daily files support prospective detection, not a survivorship-free historical claim. Seasonality requires an explicit mechanism and trial charge. |
 
 The taxonomy intentionally excludes Fibonacci, generic support proximity and chart
 pattern libraries: own placebo tests beat the named levels, so there is no basis for
@@ -105,12 +110,23 @@ the same dates as an overlay. Include:
 
 Until F-0 reconciles to broker statements, no claim to beat the S&P 500, inflation or
 buy-and-hold is valid. Price-only SPY remains useful for market context but not for
-the operator’s wealth comparison.
+the operator’s wealth comparison. This is not an unsourced vendor dependency:
+
+- historical research through the frozen 2024 frontier uses the existing adjusted
+  corpus and keeps its identity separate;
+- prospective account return uses broker cash transactions, distributions, fills and
+  valuations—the exact wealth actually received by this account;
+- a recent external total-return benchmark remains a comparison gap. Until a legal
+  free series passes review, eBull reports prospective account total return beside
+  price-only market context and refuses an external recent excess-return claim.
 
 ### Candidate C-1 — opportunistic insider purchase reproduction
 
-One preregistered rule, faithful to the published classification. Required before
-outcomes:
+One preregistered rule, faithful to the published classification. Before the full
+backfill, sample bounded early/middle/recent accession cohorts and estimate usable
+filing, issuer, insider-identity and three-prior-year classification coverage. Stop if
+the projected recent independent population cannot power the declared minimum effect
+within the evidence horizon. Only then:
 
 1. Backfill Form 4 ownership XML to 2003 with filing acceptance timestamp, issuer,
    security class, insider identity, role, transaction code and amendment lineage.
@@ -146,7 +162,14 @@ Before collecting outcomes:
 4. Record every firing prospectively, including rejected-unborrowable names, bid/ask,
    product type, financing schedule, event/halt state and the hypothetical result.
 5. Judge calibration, capacity and net portfolio contribution only after a powered
-   prospective sample. Demo fills validate workflow but never replace the fee model.
+   prospective sample. The searched +49 bps is forbidden as a planning effect size:
+   use the independently declared minimum worthwhile net effect and prospective pilot
+   variance. Apply the complete historical search count to selection-bias reporting
+   and allocate error across every prospective validation in the new programme. Demo
+   fills validate workflow but never replace the fee model.
+6. After a fixed 60-session feasibility census, project time-to-power from eligible,
+   independently clustered firings. Stop if it exceeds the 24-month detailed quote
+   retention/relevance window; do not collect indefinitely.
 
 If shortability or adverse costs remove the edge, close the family for this broker.
 Do not search a neighbouring threshold to rescue it.
@@ -164,10 +187,18 @@ published families before outcome access:
 - use value/liquidity-aware weights, volatility scaling, turnover and concentration
   constraints;
 - compare the combination with each single-factor arm and the same core benchmark.
+- regress net excess return and attribution against contemporaneous market, size,
+  value, profitability, investment and momentum factors. The free
+  [Kenneth French Data Library](https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/Data_Library.html)
+  is a candidate benchmark source subject to a licence/identity check. Loading a
+  known factor premium is not strategy alpha.
 
 This is one family trial with declared challenger arms, not a grid over lookbacks,
 weights and cut-offs. If point-in-time fundamentals or historical membership cannot
-support it, defer it rather than backfilling today’s universe into history.
+support it, defer it rather than backfilling today’s universe into history. Its
+admission rests on the independent published factor prior and low-turnover portfolio
+role; the existing S-2 result is a contaminated harness observation and cannot select,
+weight or power C-3.
 
 ### Reserved—not yet admitted
 
@@ -201,22 +232,30 @@ failed backtest from being repeatedly sculpted into a winner.
 ## 5. Statistical contract
 
 No universal trade count makes a study valid. Each preregistration computes a sample
-requirement from its economic threshold and clustered variance.
+requirement from an economic threshold fixed independently of the candidate's searched
+point estimate and a variance estimate that matches its dependence and tail shape.
 
 For candidate `j`:
 
 ```text
 gross break-even_j = adverse spread + slippage + commission + carry + FX + tax
 minimum net effect_j = return needed to improve F-0 after the mandate's risk penalty
-required clustered SE <= minimum net effect_j / (z_(1-alpha_j) + z_(power))
+planning SE target <= minimum net effect_j / (critical_value_j + z_(power))
 ```
 
-- Family-wise one-sided alpha is allocated across the admitted budget before
-  measurement. The trial ledger, not the number of shipped strategies, determines
-  the multiple-testing correction.
+- The expression is a planning approximation only for sufficiently regular,
+  light-tailed outcomes. It is never the acceptance test. `critical_value_j` comes
+  from the preregistered multiplicity and sampling model, not automatically a Normal
+  quantile.
+- Two ledgers have different jobs. The reconstructed historical register records the
+  full discovery search and deflates claims carried from it. A separately frozen
+  family-wise one-sided alpha budget covers every new sealed/prospective validation.
+  Fresh data removes outcome reuse; it does not make the selected historical effect
+  estimate unbiased. C-2's +49 bps is therefore never a prior or power input.
 - Power is 80% unless the preregistration justifies higher. If the available recent
-  independent dates cannot reach it, the answer is “inconclusive; collect forward,”
-  not a relaxed confidence interval.
+  independent dates cannot reach it inside the candidate's declared relevance and
+  retention horizon, the answer is `data_infeasible`, not an unbounded “collect
+  forward” or a relaxed interval.
 - Errors cluster by decision date and, where appropriate, issuer. Overlapping holds
   are purged/embargoed or evaluated by a block method. Nominal trade count is never
   substituted for effective sample size.
@@ -227,9 +266,17 @@ required clustered SE <= minimum net effect_j / (z_(1-alpha_j) + z_(power))
 - Nearby-parameter robustness is a falsification test after a fixed candidate, not a
   search for the best neighbour. A narrow isolated optimum rejects the premise.
 - Random-entry, simpler single-input and core/no-trade challengers are mandatory.
-- The candidate passes only if the adverse-execution lower confidence bound on net
-  expectancy is positive **and** the mandate-level portfolio frontier improves. A
-  positive mean alone cannot pass.
+- Admission uses a preregistered date-clustered/block or studentized bootstrap lower
+  bound on the **portfolio** net return distribution, not a z interval on per-trade
+  means. Heavy-tailed candidates additionally require resampled order/cost/missed-fill
+  simulations and explicit jump scenarios. C-2 must survive one-name -100%, correlated
+  gap and unavailable-borrow stresses within the mandate; an -87% historical stopped
+  trade cannot be diluted into safety by its mean.
+- The candidate passes only if the adverse-execution tail-aware lower confidence bound
+  on net expectancy is positive **and** the mandate-level portfolio frontier improves.
+  A positive mean alone cannot pass. A factor tilt must additionally show whether its
+  return is explained by priced factor exposure; expected risk-premium exposure may be
+  allocated deliberately but is never labelled alpha.
 
 [Bailey et al.](https://papers.ssrn.com/sol3/Papers.cfm?abstract_id=2326253)
 show why repeated selection over backtests overfits, and
@@ -243,7 +290,9 @@ repo’s experiment register must therefore include failed and abandoned searche
 
 1. Reconstruct an experiment ledger from scripts, issues, commits and result
    identities. Replace the 12-trial promotion denominator with the conservative full
-   count. Historical uncertainty stays visible.
+   count. Historical uncertainty stays visible. Preserve the immutable old rows, but
+   make the data-layer promotion gate reject their superseded
+   `trial_register_version`; an operator label is not invalidation.
 2. Measure all current source frontiers and retention daily; current documentation
    still contains stale statements that intraday storage is empty.
 3. Add a capability matrix per candidate: required field, source, knowledge time,
@@ -260,9 +309,14 @@ Capture only at a firing/preflight or changed eligibility state:
 - market session, halt and order-size constraints;
 - submitted order, broker fill and reconciliation result.
 
-The eToro API’s 20-write/60-read per-minute limits mean a broad high-frequency scan
-cannot depend on per-symbol polling at decision time. The daily process must narrow
-the universe before intraday observation.
+The live portal verified on 2026-08-11 separates quotas: market data is a shared
+120/minute lane, ordinary/default reads 60/minute, order writes a shared 20/minute
+lane, and cost/eligibility each have a dedicated 20/minute limit. Eligibility accepts
+a batch, so do not spend it one symbol at a time. A 6,700-name candle pull still has a
+theoretical floor of about 56 minutes per interval and competes with other market-data
+work; broad history is a scheduled harvest. The daily process narrows the universe
+before high-frequency observation for cost, latency and storage reasons—not because
+intraday REST is absent.
 
 ### Gate D-2 — return and ownership accounting
 
@@ -272,14 +326,18 @@ the universe before intraday observation.
   trade manually creates a strategy-aware terminal reason, never a replacement
   position.
 - Add causal FX and a recent total-return benchmark. Until a source passes licensing
-  and identity review, report recent eToro price return separately rather than splice.
+  and identity review, calculate the account's own total return from broker cash/fill
+  history, report recent eToro price return separately, and refuse external recent
+  excess-return claims rather than splice.
 - Preserve both fixed-principal and compounding mandates at allocation time; neither
   changes the strategy evidence.
 
 ### Gate D-3 — bounded evidence sources
 
-1. **SEC Form 4 backfill** is the first source expansion: official EDGAR submission
-   history and stable XML are free, already parsed, and directly unblock C-1. The
+1. **SEC Form 4 coverage pilot, then backfill if feasible** is the first source
+   expansion: official EDGAR submission history and stable XML are free, already
+   parsed, and directly unblock C-1. Sample bounded historical cohorts first; estimate
+   classifiable recent population and time-to-power before the full ingest. The
    [SEC EDGAR APIs](https://www.sec.gov/search-filings/edgar-application-programming-interfaces)
    provide public submissions and XBRL endpoints.
 2. **Prospective universe membership** continues. Nasdaq’s current symbol directory
@@ -287,8 +345,10 @@ the universe before intraday observation.
    current files must not be advertised as a historical constituent archive. See the
    [Nasdaq symbol directory](https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs)
    and [daily-list description](https://nasdaqtrader.com/Trader.aspx?id=DailyListPD).
-3. **Prospective quote and intraday panels** retain the existing caps. They serve
-   admitted candidates, not an all-ticker warehouse.
+3. **On-demand intraday plus prospective quote/panels:** use the latest 1,000 REST
+   bars for bounded preregistered spikes, acknowledging the interval-dependent reach
+   and no date anchor. Retained panels keep the existing caps and build a deeper
+   untouched corpus. They serve admitted candidates, not an all-ticker warehouse.
 4. **Macro vintages** may use FRED/ALFRED only after per-series terms and revision
    semantics are recorded. The [official API](https://fred.stlouisfed.org/docs/api/fred/overview.html)
    supports FRED and archival ALFRED queries; it is context, not assumed alpha.
@@ -318,20 +378,26 @@ derived indicator or every “almost signal.”
 Before any new high-volume relation, measure bytes per row and query plan, project
 steady-state size including indexes/WAL, declare retention, and prove partition-drop
 cleanup. The existing 1.5 GB retained intraday budget remains a hard cap unless a
-separate storage review changes it.
+separate storage review changes it; its source contract is
+`docs/proposals/ta/2026-08-09-strategy-observation-storage.md` and the measured
+retained-tier enforcement is recorded in
+`docs/proposals/ta/2026-08-09-strategy-automation-control-plane.md`.
 
 ## 8. Build order and stop conditions
 
 The order is deliberately different from “build more strategies.”
 
-1. **Research-integrity repair:** reconstruct the trial ledger; mark current DSRs and
-   all four controls non-promotable on the operator surface.
+1. **Fail closed and repair research integrity:** keep the existing zero-candidate
+   runtime gate; reject superseded trial-register versions in the data-layer promotion
+   gate; keep all four controls non-promotable in API and UI; and remove
+   arrival-order/newest-signal funding before any candidate can exist. Then reconstruct
+   the historical trial ledger.
 2. **F-0 portfolio truth:** total-return/FX/dividend/cost attribution and a reconciled
    core/cash baseline.
 3. **Broker feasibility:** point-in-time product, shortability and cost preflight;
    prove demo/live semantic differences explicitly.
-4. **C-1 data repair and preregistration:** Form 4 backfill, classification and one
-   sealed test.
+4. **C-1 feasibility, data repair and preregistration:** bounded historical coverage
+   pilot; only then Form 4 backfill, classification and one sealed test.
 5. **C-2 prospective contract:** portfolio tail simulation plus prospective
    shortability/cost/outcome capture; no further historical threshold search.
 6. **C-3 feasibility/preregistration:** only if point-in-time fundamentals and
@@ -339,8 +405,8 @@ The order is deliberately different from “build more strategies.”
 7. **Viability report:** compare every admitted candidate with F-0 and no trade.
    Select all independent passers; select none if none pass.
 8. **Opportunity allocator:** implement #2525 only after at least one candidate passes
-   or to allocate F-0/cash under a mandate. Replace newest-signal-first funding before
-   any candidate can receive demo capital.
+   or to allocate F-0/cash under a mandate. Arrival-order funding was already removed
+   at step 1; prove permutation invariance here.
 9. **Prospective shadow, then demo:** validate lifecycle and distribution. No elapsed
    time automatically promotes a stage.
 
@@ -354,6 +420,8 @@ Stop the programme and return to core/cash if any of these occurs:
 - the portfolio improvement disappears under adverse execution or concentration
   constraints;
 - prospective outcomes fall outside the preregistered calibration/decay bounds;
+- the feasibility census projects time-to-power beyond the candidate's declared
+  relevance/retention horizon (24 months for current quote evidence);
 - broker/internal reconciliation, market data or ownership becomes stale.
 
 Stopping active research is a valid successful outcome: it prevents a false edge from
@@ -402,7 +470,7 @@ the research discipline and lifecycle architecture—not authorisation to implem
 every listed family.
 
 Finally, the base-rate hurdle is severe: S&P’s year-end 2025 scorecard reports that
-79% of active US large-cap funds underperformed the S&P 500 in 2025. That does not
-prove eBull cannot add value; it makes passive core/no trade the required competitor
-for every claim. See [SPIVA US](https://www.spglobal.com/spdji/en/spiva/article/spiva-us/).
-
+79% of active US large-cap funds underperformed the S&P 500 in 2025. Fund fees,
+mandates and closet indexing mean that statistic is **not** an eBull false-positive
+rate. It is evidence that passive core is a serious competitor, not proof that eBull
+cannot add value. See [SPIVA US](https://www.spglobal.com/spdji/en/spiva/article/spiva-us/).
