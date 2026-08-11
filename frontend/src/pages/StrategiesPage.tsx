@@ -256,14 +256,7 @@ function AccountEvidence({ overview }: { overview: StrategyOverviewResponse }) {
             <strong>{formatMoney(Number(evidence.local_eod_value), evidence.local_eod_currency ?? currency)}</strong>
           </div>
         ) : null}
-        {evidence.comparable && evidence.difference !== null ? (
-          <div>
-            <span className="block text-slate-500">Difference</span>
-            <strong>{formatMoney(Number(evidence.difference), currency)}</strong>
-          </div>
-        ) : (
-          <div className="self-end text-amber-700 dark:text-amber-300">Reconciliation collecting</div>
-        )}
+        <div className="self-end text-amber-700 dark:text-amber-300">Reconciliation collecting</div>
       </div>
     </div>
   );

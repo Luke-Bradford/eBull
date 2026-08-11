@@ -20,7 +20,7 @@ class AccountEquityEvidenceError(ValueError):
 
 @dataclass(frozen=True)
 class AccountEquityEvidence:
-    status: Literal["unavailable", "collecting", "comparable"]
+    status: Literal["unavailable", "collecting"]
     days_collected: int
     snapshot_date: date | None
     observed_at: datetime | None
@@ -32,7 +32,7 @@ class AccountEquityEvidence:
     local_eod_currency: str | None
     local_eod_value: Decimal | None
     difference: Decimal | None
-    comparable: bool
+    comparable: Literal[False]
     incomplete_reasons: tuple[str, ...]
 
 
@@ -49,7 +49,9 @@ def _validate_snapshot(snapshot: BrokerAccountRiskSnapshot) -> None:
         raise AccountEquityEvidenceError("account equity values must be finite")
     if snapshot.available_cash < 0 or snapshot.total_invested < 0 or snapshot.equity <= 0:
         raise AccountEquityEvidenceError("account equity values are outside safe bounds")
-    if snapshot.equity != snapshot.available_cash + snapshot.total_invested + snapshot.unrealized_pnl:
+    if abs(snapshot.equity - snapshot.available_cash - snapshot.total_invested - snapshot.unrealized_pnl) > Decimal(
+        "0.000001"
+    ):
         raise AccountEquityEvidenceError("account equity components do not reconcile")
 
 
@@ -109,8 +111,10 @@ def load_account_equity_evidence(
         )
         SELECT latest.days_collected,latest.snapshot_date,latest.observed_at,latest.currency,
                latest.available_cash,latest.total_invested,latest.unrealised_pnl,latest.equity,
-               local.display_currency,local.total_value,local.positions_no_price,
-               local.positions_no_fx,local.cash_no_fx_currencies,local.computed_at
+               local.display_currency,local.total_value,
+               coalesce(local.positions_no_price,0) > 0
+                 OR coalesce(local.positions_no_fx,0) > 0
+                 OR coalesce(local.cash_no_fx_currencies,0) > 0 AS local_valuation_incomplete
         FROM latest
         LEFT JOIN portfolio_eod_snapshots local ON local.snapshot_date=latest.snapshot_date
         """,
@@ -143,15 +147,14 @@ def load_account_equity_evidence(
     else:
         if row[8] != row[3]:
             reasons.append("local_eod_currency_mismatch")
-        if any(int(value or 0) > 0 for value in row[10:13]):
+        if bool(row[10]):
             reasons.append("local_eod_valuation_incomplete")
         # computed_at is when the local job ran, not when its closing prices
         # were effective. Do not call these totals reconciled until the local
         # valuation carries a defensible effective market timestamp.
         reasons.append("local_eod_effective_time_unknown")
-    comparable = not reasons
     return AccountEquityEvidence(
-        status="comparable" if comparable else "collecting",
+        status="collecting",
         days_collected=int(row[0]),
         snapshot_date=row[1],
         observed_at=observed_at,
@@ -163,6 +166,6 @@ def load_account_equity_evidence(
         local_eod_currency=None if row[8] is None else str(row[8]),
         local_eod_value=local_value,
         difference=official_equity - local_value if local_value is not None and row[8] == row[3] else None,
-        comparable=comparable,
+        comparable=False,
         incomplete_reasons=tuple(reasons),
     )

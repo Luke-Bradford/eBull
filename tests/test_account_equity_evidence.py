@@ -72,6 +72,16 @@ def test_historical_observation_is_immutable(ebull_test_conn: psycopg.Connection
     )
 
 
+def test_sub_micro_unit_component_rounding_is_accepted(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    snapshot = replace(
+        _snapshot(observed_at=datetime.now(UTC)),
+        equity=Decimal("1000.000001"),
+    )
+    assert record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=snapshot)
+
+
 @pytest.mark.parametrize(
     "snapshot",
     [

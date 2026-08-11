@@ -355,7 +355,7 @@ class AutomationReadinessView(BaseModel):
 
 
 class AccountEquityEvidenceView(BaseModel):
-    status: Literal["unavailable", "collecting", "comparable"]
+    status: Literal["unavailable", "collecting"]
     days_collected: int
     snapshot_date: date | None
     observed_at: datetime | None
@@ -367,7 +367,7 @@ class AccountEquityEvidenceView(BaseModel):
     local_eod_currency: str | None
     local_eod_value: Decimal | None
     difference: Decimal | None
-    comparable: bool
+    comparable: Literal[False]
     incomplete_reasons: list[str]
 
 

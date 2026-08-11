@@ -327,7 +327,7 @@ describe("StrategiesPage", () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
       ...OVERVIEW,
       account_equity_evidence: {
-        status: "comparable",
+        status: "collecting",
         days_collected: 3,
         snapshot_date: "2026-08-11",
         observed_at: "2026-08-11T19:00:00Z",
@@ -339,15 +339,15 @@ describe("StrategiesPage", () => {
         local_eod_currency: "USD",
         local_eod_value: "1020.00",
         difference: "5.00",
-        comparable: true,
-        incomplete_reasons: [],
+        comparable: false,
+        incomplete_reasons: ["local_eod_effective_time_unknown"],
       },
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("3 daily official snapshots")).toBeInTheDocument();
     expect(within(performance).getByText("US$1,025.00")).toBeInTheDocument();
-    expect(within(performance).getByText("US$5.00")).toBeInTheDocument();
+    expect(within(performance).getByText("Reconciliation collecting")).toBeInTheDocument();
     expect(within(performance).getByText("No automated P&L yet")).toBeInTheDocument();
   });
 

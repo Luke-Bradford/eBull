@@ -2575,7 +2575,7 @@ export interface StrategyOverviewResponse {
     blockers: string[];
   };
   account_equity_evidence: {
-    status: "unavailable" | "collecting" | "comparable";
+    status: "unavailable" | "collecting";
     days_collected: number;
     snapshot_date: string | null;
     observed_at: string | null;
@@ -2587,7 +2587,7 @@ export interface StrategyOverviewResponse {
     local_eod_currency: string | null;
     local_eod_value: string | null;
     difference: string | null;
-    comparable: boolean;
+    comparable: false;
     incomplete_reasons: string[];
   };
   evidence_refresh: {
