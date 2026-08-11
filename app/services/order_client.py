@@ -804,7 +804,9 @@ def _assert_transaction_cost_complete_for_buy_add(
         return
     missing = missing_cost_components(load_instrument_cost(conn, instrument_id))
     if missing:
-        raise TransactionCostUnavailableError(f"BUY/ADD execution aborted: {', '.join(missing)} cost not established")
+        raise TransactionCostUnavailableError(
+            f"BUY/ADD execution aborted: costs not established for {', '.join(missing)}"
+        )
 
 
 def _utcnow() -> datetime:

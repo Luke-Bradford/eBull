@@ -469,7 +469,7 @@ def _check_transaction_cost(
             return RuleResult(
                 rule="transaction_cost_prohibitive",
                 passed=False,
-                detail=f"cost unavailable: {', '.join(unknown)} cost not established",
+                detail=f"cost unavailable: costs not established for {', '.join(unknown)}",
             )
         spread_bps = cost_model_row["spread_bps"]
         overnight_rate = cost_model_row["overnight_rate"]
