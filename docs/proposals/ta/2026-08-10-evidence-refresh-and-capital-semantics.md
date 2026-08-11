@@ -149,15 +149,21 @@ current research programme spans intraday through multi-month horizons:
   filing entries and the compatible market/sector comparator with a positive
   clustered lower confidence bound on net expectancy. Any 5/20/40-session
   diagnostic is a separately declared arm, never a best-horizon search;
-- opportunistic Form 4 code-`P` purchases (#2480) use filing acceptance as
-  knowledge time and the next executable regular-session open as entry. The
+- opportunistic Form 4 code-`P` purchases (#2480) were measured once and
+  **rejected for capital promotion**. The recent 24/36-month spreads were
+  negative, the primary confidence interval crossed zero, the timing placebo
+  did better, and concentration/tail gates failed; the immutable verdict is in
+  `2026-08-10-insider-purchase-result.md`. The frozen trial used exact filing
+  acceptance where available and a conservative end-of-filed-date boundary
+  otherwise. The
   causal adaptation of the published classifier calls an insider routine only
   after purchases in the same calendar month in each of the preceding three
   years; every other sufficiently observed insider is opportunistic, while
   insufficient history is its own refusal/control cohort. The
-  primary test is a purchase-only, monthly rebalanced value-weight portfolio
-  held for one month, against routine purchases, matched random entries and a
-  price-compatible market/sector comparator. Sales never enter the long signal;
+  primary test is a purchase-only, monthly rebalanced disclosed-purchase-value-
+  weighted portfolio held for one month, against routine purchases, matched
+  random entries and a price-compatible market/sector comparator. Sales never
+  enter the long signal;
   observed/estimated spread and slippage are charged on the next-open entry and
   monthly exit. Its primary pass metric is the opportunistic-minus-routine net
   monthly return with a positive clustered lower confidence bound; ATR exits or

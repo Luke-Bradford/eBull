@@ -74,7 +74,7 @@ from typing import Final
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-11"
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-11-r2"
 
 
 @dataclass(frozen=True)
@@ -239,6 +239,12 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             evidence="docs/proposals/ta/2026-08-09-plan-of-attack.md §2b",
             searches=101,
+        ),
+        DeclaredTrial(
+            trial_id="form4-code-p-opportunistic-purchase-v1",
+            description="Purchase-value-weighted long opportunistic Form-4 code-P buys / short routine buys, monthly.",
+            evidence="docs/proposals/ta/2026-08-10-insider-purchase-result.md; "
+            "https://github.com/Luke-Bradford/eBull/issues/2480#issuecomment-5238836691",
         ),
     ),
 )

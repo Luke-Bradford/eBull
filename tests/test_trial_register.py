@@ -52,7 +52,7 @@ class TestTheShippedDeclaration:
             trial for trial in TRIAL_REGISTER.trials if trial.trial_id == "short-horizon-search-session-2026-08-09"
         )
         assert family.searches == 101
-        assert TRIAL_REGISTER.declared_count == 113
+        assert TRIAL_REGISTER.declared_count == 114
 
     def test_the_discarded_arms_are_counted(self) -> None:
         """A rejected result is still a search of the data.
@@ -64,6 +64,9 @@ class TestTheShippedDeclaration:
 
     def test_the_inconclusive_pead_trial_is_counted(self) -> None:
         assert "pead-historical-sue-net-income-v1" in TRIAL_REGISTER.trial_ids
+
+    def test_the_rejected_insider_purchase_trial_is_counted(self) -> None:
+        assert "form4-code-p-opportunistic-purchase-v1" in TRIAL_REGISTER.trial_ids
 
     def test_designed_but_unevaluated_rules_are_absent(self) -> None:
         """⚠ S-5 and S-6 are specified and blocked on #2279, never run.
