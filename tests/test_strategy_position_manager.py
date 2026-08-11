@@ -34,7 +34,7 @@ from app.services.strategy_position_manager import (
 )
 from tests.test_strategy_paper_executor import _NOW, _REQUEST_ID, _broker, _seed
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
 
 _POSITION_ID = 24520001
 _MANUAL_POSITION_ID = 24520999

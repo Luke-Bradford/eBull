@@ -243,8 +243,11 @@ def promote_strategy(
         _require_text(value, field)
     if to_stage == "live_enabled":
         raise StrategyControlError("live_enabled requires the dedicated measured live-promotion gate")
-    if to_stage in _EXTERNAL_EVIDENCE_STAGES and registered_strategy_purpose(strategy_id) == "harness_validation":
+    purpose = registered_strategy_purpose(strategy_id)
+    if to_stage in _EXTERNAL_EVIDENCE_STAGES and purpose == "harness_validation":
         raise StrategyControlError("harness-validation strategies are permanent controls and cannot be promoted")
+    if to_stage in _EXTERNAL_EVIDENCE_STAGES and purpose != "capital_candidate":
+        raise StrategyControlError("unregistered strategies cannot advance to evidence-backed deployment stages")
     if evidence_ref is not None:
         _require_text(evidence_ref, "evidence_ref")
     if len(set(result_ids)) != len(result_ids):
@@ -353,12 +356,11 @@ def configure_deployment(
         enabled=enabled,
         currency=currency,
     )
-    if (
-        registered_strategy_purpose(strategy_id) == "harness_validation"
-        and not risk_reducing
-        and (enabled or capital_limit > 0)
-    ):
+    purpose = registered_strategy_purpose(strategy_id)
+    if purpose == "harness_validation" and not risk_reducing and (enabled or capital_limit > 0):
         raise StrategyControlError("harness-validation strategies cannot receive capital authority")
+    if purpose != "capital_candidate" and not risk_reducing and (enabled or capital_limit > 0):
+        raise StrategyControlError("unregistered strategies cannot receive capital authority")
     eligible: dict[Mode, frozenset[Stage]] = {
         "paper": frozenset({"paper_enabled", "live_enabled"}),
         "live": frozenset({"live_enabled"}),

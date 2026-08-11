@@ -113,6 +113,7 @@ function validationState(strategy: StrategyOverview): {
 
 const REFUSAL_LABELS: Record<string, string> = {
   harness_validation_only: "Validation control; permanently barred from capital",
+  strategy_not_capital_candidate: "Strategy has not been admitted as a capital candidate",
   strategy_not_runnable: "Rule is not runnable end to end",
   recent_evidence_incomplete: "Recent evidence windows are incomplete",
   recent_evidence_gate_refused: "Recent evidence failed its promotion gate",

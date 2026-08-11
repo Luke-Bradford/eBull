@@ -480,8 +480,11 @@ def assess_live_gate(
     )
 
     refusals: list[str] = []
-    if registered_strategy_purpose(strategy_id) == "harness_validation":
+    purpose = registered_strategy_purpose(strategy_id)
+    if purpose == "harness_validation":
         refusals.append("harness_validation_only")
+    elif purpose != "capital_candidate":
+        refusals.append("strategy_not_capital_candidate")
     if policy is None:
         refusals.append("live_gate_policy_missing")
     if facts.stage != "paper_enabled":
