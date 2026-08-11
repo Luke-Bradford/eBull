@@ -61,7 +61,7 @@ what deserves a preregistered test; they are not backtest results.
 | **Broad equity beta / core allocation** | Compensation for bearing market risk; own corrected legacy comparator history measured about 6.3-6.6% annualised. This is the hurdle and no-alpha fallback, not a recent claim. | High for exact comparator total return to 2024; recent exact comparator is price return only. The main stock corpus separately has adjusted closes through 2026. | Conditional: the account-specific eligibility response must prove the proposed unleveraged instrument is the underlying product. | **Foundation, not an alpha trial.** Build correct total-return, FX, cash and dividend attribution before judging overlays. |
 | **Low-turnover cross-sectional factors** | Value, profitability/quality, investment, momentum and low-risk have extensive published priors. They can diversify a core but may be risk premia rather than arbitrage. | Medium: daily adjusted prices and SEC fundamentals exist, but point-in-time availability, delisted membership and recent total-return gaps must be closed. | Medium/high for long legs; short legs inherit CFD/borrow problems. | **Admit one simple long-only quality-plus-momentum tilt only after the foundation gate.** Monthly/quarterly turnover; no parameter sweep. Not a day-trade claim. |
 | **Opportunistic insider purchases** | A forced-information mechanism. Cohen, Malloy and Pomorski report routine trades as essentially uninformative and 82 bps/month abnormal return for opportunistic trades. | The causal 2019Q1–2026Q1 source and sealed 49-month reproduction are now retained in git. | Conditional for liquid unleveraged longs; naturally low turnover. | **Rejected under C-1.** The recent result was negative, the full-period interval crossed zero, placebo did better, drawdown/tail and single-name concentration failed. Preserve the family as evidence; do not retest neighbouring role/size/lag/weight/horizon/exit variants on the opened interval. |
-| **Extreme price-shock continuation (short)** | A forced-flow/information-shock hypothesis. Own searched result for shorting a >=12% one-day drop for five bars with a 20% stop showed +49 bps/trade after a 30% annual borrow stress, `t=4.83`, but had an -87% worst gap and emerged from about 100 searches. | Medium for OHLCV and event context; historical shortability and exact carry are absent. | **Blocked:** shorts are CFDs; firing names are likely hard-to-borrow and may be unavailable. Demo has no fees. | **Selected searched lead, not evidence or a prior.** Freeze the discovered rule, reconstruct its trial count, simulate portfolio tails, capture point-in-time shortability/cost, and assess only on new prospective data. Never use the searched +49 bps to calculate power or call 2020-2026 an untouched holdout. |
+| **Extreme price-shock continuation (short)** | A forced-flow/information-shock hypothesis. The searched event-day result was +49 bps after adverse assumed costs, but had an -87% worst gap and emerged from 101 searches. | Historical OHLCV can reproduce the event stream; historical shortability, exact carry and point-in-time sectors are absent. | **Blocked independently:** measured broker costs remain unusable and shorts are CFDs. | **Rejected under C-2.** All eight frozen capital-allocation arms lost 13.76%–47.72%, with 40.68%–69.05% drawdowns. The event-day mean vanished when finite capital was assigned across as many as 596 same-day signals. Preserve the family and do not rescue it with a threshold, cap, era or sector subset. |
 | **Time-series / cross-sectional momentum** | Persistent prior across assets; crash risk rises after market declines amid high volatility and rebounds. Volatility scaling is evidence-based for this family. | High for daily research; recent total-return and PIT universe remain blockers. | Long implementation feasible; short implementation conditional. | Existing S-1/S-2 remain controls. A **new**, low-turnover factor tilt may be part of the factor trial above; do not tune the controls into candidates. |
 | **Short-term reversal / statistical arbitrage** | Usually compensation for liquidity provision; published strength rises in market stress. Exact residual versions need midpoint/factor inputs and both long/short legs. | Medium for a bounded 30m-4h on-demand spike, low for deep walk-forward and historical spread/shortability. Current daily RSI and residual-confluence implementations failed or are controls. | Low: short/carry plus roughly 50 bps round-trip economics consume the daily edge. | **Defer from the first trial budget, not for lack of any intraday history.** A future fixed replication may bootstrap the latest 1,000 REST bars, but promotion still needs prospective quotes/costs and a deeper untouched interval. No new daily-OHLC reversal variants. |
 | **Breakout / opening range / volatility compression** | May exploit delayed institutional flow in “stocks in play”; requires opening-range, relative-volume and gap selection together. ATR is risk scale, not alpha. | Medium for recent 30m-4h context but low for opening-range depth: 1m/5m REST reaches days and the prospective quote panel is tiny. | Low under present costs; published ORB assumptions are orders of magnitude cheaper than the repo’s broker estimate. | **Defer/rejection replication only.** On-demand REST can run a bounded recent falsification, but not a deep promotion backtest. Do not promote S-4 or a bare breakout; require sufficient spread observations and exact stock-in-play inputs. |
@@ -91,7 +91,7 @@ insiders. They supply priors and mechanisms, never eBull promotion evidence.
 ## 3. The initial research budget
 
 The first programme originally admitted three alpha/risk-overlay hypotheses. C-1
-has now consumed its one sealed trial and is rejected; only C-2 and C-3 remain open.
+and C-2 are now rejected; only C-3 remains open.
 This is a budget, not a promise to produce a strategy.
 
 ### Foundation F-0 — core and no-trade comparator
@@ -148,10 +148,27 @@ No manifest row, strategy picker, bracket, resolver or allocation authority is
 created. The opened interval may not be mined for a rescue variant. See
 `2026-08-10-insider-purchase-result.md` and #2480.
 
-### Candidate C-2 — frozen extreme-shock short, prospective confirmation
+### Closed candidate C-2 — frozen extreme-shock short
 
-Do not tune the >=12% drop, five-session hold or 20% stop. The historical sample has
-already been searched and is development evidence only.
+Do not tune the >=12% drop, five-session hold or 20% stop. The historical sample was
+searched and the frozen portfolio test is now rejected.
+
+The exact 8,049-trade stream reconciled to the earlier +156.81 bps event-day gross
+mean and +49.41 bps after the adverse assumed cost. That statistic was not investable:
+as many as 596 signals fired on one date and 1,210 overlapped. Across four declared
+per-name caps with and without a 25% sector cap, capital-weighted trade return was
+negative, total return ranged from -13.76% to -47.72%, and maximum drawdown ranged
+from -40.68% to -69.05%. See `2026-08-11-extreme-shock-portfolio-result.md`.
+
+The eight allocation arms are charged to the trial register, taking the C-2 family
+floor to 109 and the repository-wide declared floor to 122. Missing broker cost,
+shortability and point-in-time sector evidence can only weaken this result; it cannot
+repair a negative capital-weighted outcome without selecting a new rule. Therefore
+the planned prospective census is cancelled and no candidate/runtime state is
+created.
+
+The pre-result contract below remains as the audit record of what would have been
+required to continue:
 
 Before collecting outcomes:
 
@@ -175,8 +192,8 @@ Before collecting outcomes:
    independently clustered firings. Stop if it exceeds the 24-month detailed quote
    retention/relevance window; do not collect indefinitely.
 
-If shortability or adverse costs remove the edge, close the family for this broker.
-Do not search a neighbouring threshold to rescue it.
+Capital allocation removed the edge before broker feasibility could promote it, so
+the family is closed. Do not search a neighbouring threshold to rescue it.
 
 ### Candidate C-3 — one low-turnover long-only factor tilt
 
@@ -401,8 +418,8 @@ The order is deliberately different from “build more strategies.”
    prove demo/live semantic differences explicitly.
 4. **C-1 closed:** retain its causal source/evaluator and failed aggregate verdict;
    no backfill, picker entry or neighbouring rescue trial.
-5. **C-2 prospective contract:** portfolio tail simulation plus prospective
-   shortability/cost/outcome capture; no further historical threshold search.
+5. **C-2 closed:** retain the frozen event extractor, portfolio simulator, trial
+   charge and failed aggregate verdict; no prospective census or rescue search.
 6. **C-3 feasibility/preregistration:** only if point-in-time fundamentals and
    membership make the factor trial honest.
 7. **Viability report:** compare every admitted candidate with F-0 and no trade.
@@ -452,11 +469,10 @@ The plan is ready to proceed when:
   TP/SL/timeout, attribution and material refusals—not every ticker evaluated.
 
 The current state does **not** meet those conditions. It has enough evidence to close
-C-1 and choose the next bounded work, but not enough to turn on autonomous demo
-allocation. The defensible sequence is core accounting and research-integrity repair,
-then the frozen short-shock lead only as a prospective broker-feasibility experiment,
-with C-3 attempted only if its point-in-time data contract is feasible. More
-technical-indicator combinations are not the next opportunity.
+C-1 and C-2, but not enough to turn on autonomous demo allocation. The defensible
+sequence is core accounting and research-integrity repair, then C-3 only if its
+point-in-time data contract is feasible. More technical-indicator combinations are
+not the next opportunity.
 
 ## 10. External challenge incorporated
 
