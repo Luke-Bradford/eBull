@@ -211,8 +211,12 @@ describe("StrategiesPage", () => {
   it("separates unapproved research from selectable strategies", async () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     expect(await screen.findByText("No capital candidates are approved for automation.")).toBeInTheDocument();
-    expect(screen.getByText("Nothing can trade yet")).toBeInTheDocument();
-    expect(screen.getByText("Time-series momentum")).toBeInTheDocument();
+    expect(screen.queryByText("Approved & managed strategies")).not.toBeInTheDocument();
+    const research = screen.getByText("Research & validation").closest("details")!;
+    expect(research).not.toHaveAttribute("open");
+    expect(screen.getByText("Time-series momentum")).not.toBeVisible();
+    await userEvent.click(within(research).getByText("Research & validation"));
+    expect(screen.getByText("Time-series momentum")).toBeVisible();
     expect(screen.queryByRole("checkbox", { name: /Time-series momentum/ })).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Allow new automated entries" })).toBeDisabled();
   });
@@ -232,9 +236,13 @@ describe("StrategiesPage", () => {
       }],
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
-    expect(await screen.findByText("Validation controls")).toBeInTheDocument();
-    expect(screen.getByText("Harness evidence only · never eligible for capital · backtest only")).toBeInTheDocument();
-    expect(screen.getByText("No capital candidates yet")).toBeInTheDocument();
+    const research = (await screen.findByText("Research & validation")).closest("details")!;
+    expect(screen.getByText("0 candidates · 1 control")).toBeVisible();
+    expect(screen.getByText("Validation controls")).not.toBeVisible();
+    await userEvent.click(within(research).getByText("Research & validation"));
+    expect(screen.getByText("Validation controls")).toBeVisible();
+    expect(screen.getByText("Harness evidence only · never eligible for capital · backtest only")).toBeVisible();
+    expect(screen.getByText("No capital candidates")).toBeVisible();
     expect(screen.queryByRole("button", { name: "View evidence" })).not.toBeInTheDocument();
   });
 
@@ -258,6 +266,21 @@ describe("StrategiesPage", () => {
             shadow_average_return_pct: "0.0509",
           },
         },
+        {
+          ...strategy,
+          strategy_id: "harness-only-control",
+          title: "Harness only control",
+          purpose: "harness_validation",
+          forward_outcome_supported: true,
+          attribution: {
+            ...strategy.attribution,
+            fired_entries: 999,
+            resolved_entries: 999,
+            winning_entries: 999,
+            win_rate: "1",
+            shadow_average_return_pct: "99",
+          },
+        },
       ],
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
@@ -279,8 +302,9 @@ describe("StrategiesPage", () => {
       }],
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
-    expect(await screen.findByText("Validation controls")).toBeInTheDocument();
-    expect(screen.queryByText("Approved strategies")).not.toBeInTheDocument();
+    const research = (await screen.findByText("Research & validation")).closest("details")!;
+    expect(research).not.toHaveAttribute("open");
+    expect(screen.queryByText("Approved & managed strategies")).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: /Time-series momentum/ })).not.toBeInTheDocument();
   });
 
@@ -308,6 +332,7 @@ describe("StrategiesPage", () => {
 
   it("shows stable primary evidence without paging through missing windows", async () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
     await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
     expect(screen.getByText("Primary evidence")).toBeInTheDocument();
     expect(screen.getByText("Evidence windows complete:")).toBeInTheDocument();
@@ -325,16 +350,17 @@ describe("StrategiesPage", () => {
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
 
+    await userEvent.click(await screen.findByText("Research & validation"));
     expect(await screen.findByText(/Evidence 1\/8/)).toHaveTextContent("frozen through 08 Jul 2026");
     await userEvent.click(screen.getByRole("button", { name: "Refresh evidence" }));
 
     await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
   });
 
-  it("summarises fired observations without rendering a ticker activity feed", async () => {
+  it("omits forward activity when no capital candidate has a forward resolver", async () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
-    expect(await screen.findByText("Forward signal validation")).toBeInTheDocument();
-    expect(screen.getByText("There is no “pending strategy” state and no near-trigger forecast in the current daily evaluator.")).toBeInTheDocument();
+    expect(await screen.findByText("Portfolio performance")).toBeInTheDocument();
+    expect(screen.queryByText("Forward signal validation")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Activity" })).not.toBeInTheDocument();
     expect(screen.queryByText("Instrument")).not.toBeInTheDocument();
   });

@@ -551,8 +551,8 @@ function AutomationControl({
   );
 }
 
-function SignalValidation({ overview }: { overview: StrategyOverviewResponse }) {
-  const summary = aggregate(overview);
+function SignalValidation({ overview, strategies }: { overview: StrategyOverviewResponse; strategies: StrategyOverview[] }) {
+  const summary = aggregate({ ...overview, strategies });
   return (
     <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -824,8 +824,10 @@ export function StrategiesPage() {
   const [refreshingEvidence, setRefreshingEvidence] = useState(false);
   const [refreshEvidenceError, setRefreshEvidenceError] = useState<string | null>(null);
   const summary = useMemo(() => overview.data ? aggregate(overview.data) : null, [overview.data]);
-  const approvedStrategies = overview.data?.strategies.filter((strategy) => strategy.purpose === "capital_candidate" && (strategy.allocation_ready || strategy.allocation.enabled)) ?? [];
-  const researchCandidates = overview.data?.strategies.filter((strategy) => strategy.purpose === "capital_candidate" && !strategy.allocation_ready && !strategy.allocation.enabled) ?? [];
+  const capitalCandidates = overview.data?.strategies.filter((strategy) => strategy.purpose === "capital_candidate") ?? [];
+  const approvedStrategies = capitalCandidates.filter((strategy) => strategy.allocation_ready || strategy.allocation.enabled);
+  const researchCandidates = capitalCandidates.filter((strategy) => !strategy.allocation_ready && !strategy.allocation.enabled);
+  const forwardCandidates = capitalCandidates.filter((strategy) => strategy.forward_outcome_supported);
   const validationControls = overview.data?.strategies.filter((strategy) => strategy.purpose === "harness_validation") ?? [];
 
   async function refreshEvidence() {
@@ -913,84 +915,100 @@ export function StrategiesPage() {
             </LiveQuoteProvider>
           ) : null}
 
-          <SignalValidation overview={overview.data} />
+          {forwardCandidates.length ? <SignalValidation overview={overview.data} strategies={forwardCandidates} /> : null}
 
-          <section>
-            <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
-              <div>
-                <h2 className="text-sm font-semibold">Approved &amp; managed strategies</h2>
-                <p className="mt-1 text-xs text-slate-500">Approved strategies may use the shared pot; an invalidated strategy remains visible only while it manages an existing position.</p>
+          {approvedStrategies.length ? (
+            <section>
+              <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold">Approved &amp; managed strategies</h2>
+                  <p className="mt-1 text-xs text-slate-500">Approved strategies may use the shared pot; an invalidated strategy remains visible only while it manages an existing position.</p>
+                </div>
+                <span className="text-xs text-slate-500">{summary.approved} approved</span>
               </div>
-              <span className="text-xs text-slate-500">{summary.approved} approved</span>
-            </div>
-            {approvedStrategies.length ? (
               <div>
                 {approvedStrategies.map((strategy) => (
                   <ApprovedStrategy key={strategy.strategy_id} strategy={strategy} poolLimit={overview.data?.paper_pool.capital_limit ?? "0"} onUpdated={overview.refetch} />
                 ))}
               </div>
-            ) : (
-              <EmptyState title="Nothing can trade yet" description="Candidates move here only after recent evidence, risk, cost and execution checks all pass." />
-            )}
-          </section>
+            </section>
+          ) : null}
 
-          <section>
-            <div className="mb-3 flex flex-wrap items-end justify-between gap-2 border-t border-slate-200 pt-5 dark:border-slate-800">
-              <div>
-                <h2 className="text-sm font-semibold">Research pipeline</h2>
-                <p className="mt-1 max-w-3xl text-xs text-slate-500">
-                  These rules are measured, not selectable. Current evaluation uses completed daily bars; it does not predict which rule is about to fire.
-                </p>
-              </div>
-              <div className="flex items-center gap-3 text-xs text-slate-500">
+          {(researchCandidates.length || validationControls.length) ? (
+            <details className="group border-t border-slate-200 pt-5 dark:border-slate-800">
+              <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-3 marker:hidden">
                 <span>
-                  Evidence {overview.data.evidence_refresh.completed_windows}/{overview.data.evidence_refresh.total_windows}
-                  {overview.data.evidence_refresh.partial_windows ? ` · ${overview.data.evidence_refresh.partial_windows} partial` : ""}
-                  {` · frozen through ${formatDate(overview.data.evidence_refresh.frozen_through)}`}
+                  <span className="block text-sm font-semibold">Research &amp; validation</span>
+                  <span className="mt-1 block text-xs text-slate-500">Supporting evidence and harness controls; none can use capital.</span>
                 </span>
-                <button
-                  type="button"
-                  className="border border-slate-300 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-900"
-                  disabled={refreshingEvidence || overview.data.evidence_refresh.status === "queued" || overview.data.evidence_refresh.status === "running" || overview.data.evidence_refresh.partial_windows > 0}
-                  onClick={refreshEvidence}
-                >
-                  {refreshingEvidence || overview.data.evidence_refresh.status === "queued"
-                    ? "Refresh queued"
-                    : overview.data.evidence_refresh.status === "running"
-                      ? "Refreshing…"
-                      : "Refresh evidence"}
-                </button>
-              </div>
-            </div>
-            {refreshEvidenceError ? <p className="mb-3 text-xs text-red-600 dark:text-red-400">{refreshEvidenceError}</p> : null}
-            {overview.data.evidence_refresh.status === "failed" ? (
-              <p className="mb-3 text-xs text-red-600 dark:text-red-400">
-                Last refresh failed: {overview.data.evidence_refresh.last_error ?? "See process history."}
-              </p>
-            ) : null}
-            {overview.data.evidence_refresh.partial_windows > 0 ? (
-              <p className="mb-3 text-xs text-amber-700 dark:text-amber-300">
-                A partial immutable window needs operator repair before refresh can resume.
-              </p>
-            ) : null}
-            <div className="space-y-2">
-              {researchCandidates.length
-                ? researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} />)
-                : <EmptyState title="No capital candidates yet" description="New candidates appear here only after preregistration and recent, cost-aware validation." />}
-            </div>
-          </section>
+                <span className="flex items-center gap-2 text-xs text-slate-500">
+                  <span>{researchCandidates.length} {researchCandidates.length === 1 ? "candidate" : "candidates"} · {validationControls.length} {validationControls.length === 1 ? "control" : "controls"}</span>
+                  <span aria-hidden="true" className="transition-transform group-open:rotate-90">›</span>
+                </span>
+              </summary>
+              <div className="mt-4 space-y-6">
+                <section>
+                  <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+                    <div>
+                      <h2 className="text-sm font-semibold">Research pipeline</h2>
+                      <p className="mt-1 max-w-3xl text-xs text-slate-500">
+                        These rules are measured, not selectable. Current evaluation uses completed daily bars; it does not predict which rule is about to fire.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-slate-500">
+                      <span>
+                        Evidence {overview.data.evidence_refresh.completed_windows}/{overview.data.evidence_refresh.total_windows}
+                        {overview.data.evidence_refresh.partial_windows ? ` · ${overview.data.evidence_refresh.partial_windows} partial` : ""}
+                        {` · frozen through ${formatDate(overview.data.evidence_refresh.frozen_through)}`}
+                      </span>
+                      <button
+                        type="button"
+                        className="border border-slate-300 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-900"
+                        disabled={refreshingEvidence || overview.data.evidence_refresh.status === "queued" || overview.data.evidence_refresh.status === "running" || overview.data.evidence_refresh.partial_windows > 0}
+                        onClick={refreshEvidence}
+                      >
+                        {refreshingEvidence || overview.data.evidence_refresh.status === "queued"
+                          ? "Refresh queued"
+                          : overview.data.evidence_refresh.status === "running"
+                            ? "Refreshing…"
+                            : "Refresh evidence"}
+                      </button>
+                    </div>
+                  </div>
+                  {refreshEvidenceError ? <p className="mb-3 text-xs text-red-600 dark:text-red-400">{refreshEvidenceError}</p> : null}
+                  {overview.data.evidence_refresh.status === "failed" ? (
+                    <p className="mb-3 text-xs text-red-600 dark:text-red-400">
+                      Last refresh failed: {overview.data.evidence_refresh.last_error ?? "See process history."}
+                    </p>
+                  ) : null}
+                  {overview.data.evidence_refresh.partial_windows > 0 ? (
+                    <p className="mb-3 text-xs text-amber-700 dark:text-amber-300">
+                      A partial immutable window needs operator repair before refresh can resume.
+                    </p>
+                  ) : null}
+                  <div className="space-y-2">
+                    {researchCandidates.length
+                      ? researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} />)
+                      : <EmptyState title="No capital candidates" description="The current bounded research programme produced no strategy safe enough to allocate capital." />}
+                  </div>
+                </section>
 
-          <section>
-            <div className="border-t border-slate-200 pt-5 dark:border-slate-800">
-              <h2 className="text-sm font-semibold">Validation controls</h2>
-              <p className="mt-1 max-w-3xl text-xs text-slate-500">
-                Published baseline rules retained to test the backtester, cost model and outcome pipeline. They are not trading recommendations and cannot be enabled.
-              </p>
-            </div>
-            <div className="mt-3">
-              {validationControls.map((strategy) => <ValidationControl key={strategy.strategy_id} strategy={strategy} />)}
-            </div>
-          </section>
+                {validationControls.length ? (
+                  <section>
+                    <div className="border-t border-slate-200 pt-5 dark:border-slate-800">
+                      <h2 className="text-sm font-semibold">Validation controls</h2>
+                      <p className="mt-1 max-w-3xl text-xs text-slate-500">
+                        Published baseline rules retained to test the backtester, cost model and outcome pipeline. They are not trading recommendations and cannot be enabled.
+                      </p>
+                    </div>
+                    <div className="mt-3">
+                      {validationControls.map((strategy) => <ValidationControl key={strategy.strategy_id} strategy={strategy} />)}
+                    </div>
+                  </section>
+                ) : null}
+              </div>
+            </details>
+          ) : null}
 
           <StrategyCloseModal
             position={closeFor}
