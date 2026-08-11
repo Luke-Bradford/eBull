@@ -84,6 +84,8 @@ def _load_ranked_opportunities(
              AND current_assessment.input_rule_set_version=%(input_rule_set)s
              AND current_assessment.checked_at >= %(observed_at)s
                  - assessment_policy.max_assessment_age_days * interval '1 day'
+             -- Tolerate only scheduler/allocator clock skew inside one cycle;
+             -- this is not permission to consume future assessment evidence.
              AND current_assessment.checked_at <= %(observed_at)s + interval '5 seconds'
             JOIN strategy_forecast_assessments prospective_assessment
               ON prospective_assessment.assessment_id=current_assessment.assessment_id
