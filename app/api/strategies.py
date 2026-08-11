@@ -327,6 +327,7 @@ AutomationReadinessState = Literal[
     "prospective_evidence_missing",
     "prospective_evidence_failed",
     "prospective_evidence_stale",
+    "candidate_evidence_incomplete",
     "ready",
 ]
 
@@ -1204,7 +1205,7 @@ def get_strategy_overview(
         readiness_state = "prospective_evidence_stale"
         readiness_blockers = ["prospective_assessment_stale"]
     elif not prospectively_ready_count:
-        readiness_state = "prospective_evidence_missing"
+        readiness_state = "candidate_evidence_incomplete"
         readiness_blockers = ["no_historically_ready_candidate_has_fresh_prospective_evidence"]
     else:
         readiness_state = "ready"
@@ -1722,7 +1723,6 @@ def update_strategy_paper_pool(
 ) -> StrategyPaperPoolView:
     """Set the shared strategy ceiling and its higher-level automation flag."""
     try:
-        conn.rollback()
         readiness = get_strategy_overview(conn).automation_readiness if body.enabled else None
         conn.rollback()
         with conn.transaction():

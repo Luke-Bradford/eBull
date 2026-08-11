@@ -2555,6 +2555,7 @@ export interface StrategyOverviewResponse {
       | "prospective_evidence_missing"
       | "prospective_evidence_failed"
       | "prospective_evidence_stale"
+      | "candidate_evidence_incomplete"
       | "ready";
     capital_candidate_count: number;
     historically_ready_candidate_count: number;

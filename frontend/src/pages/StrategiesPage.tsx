@@ -200,6 +200,7 @@ const READINESS_COPY: Record<StrategyOverviewResponse["automation_readiness"]["s
   prospective_evidence_missing: "A historically valid candidate is waiting for prospective forecast outcomes.",
   prospective_evidence_failed: "Recent forecast probabilities did not remain accurate enough to receive capital.",
   prospective_evidence_stale: "The last passing prospective assessment is no longer current.",
+  candidate_evidence_incomplete: "No historically valid candidate has a fresh passing forecast assessment yet.",
   ready: "At least one candidate has current historical, execution and prospective forecast authority.",
 };
 
