@@ -2596,6 +2596,9 @@ export interface StrategyPnlHistoryPoint {
 }
 
 export interface StrategyPnlHistoryResponse {
+  basis: "exact_owned_realised_pnl_only";
+  total_return_available: false;
+  benchmark_comparison_available: false;
   points: StrategyPnlHistoryPoint[];
 }
 
