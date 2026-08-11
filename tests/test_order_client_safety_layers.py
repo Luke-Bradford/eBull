@@ -9,7 +9,7 @@ import psycopg
 import pytest
 
 from app.services.layer_enabled import set_layer_enabled
-from app.services.order_client import SafetyLayerDisabledError, execute_order
+from app.services.order_client import SafetyLayerDisabledError, TransactionCostUnavailableError, execute_order
 from tests.fixtures.ebull_test_db import test_database_url as _test_database_url
 
 
@@ -95,6 +95,26 @@ def test_execute_order_aborts_buy_when_portfolio_sync_disabled() -> None:
                 execute_order(conn, rec_id, decision_id, broker=None)
         finally:
             _enable_all(conn)
+
+
+@pytest.mark.integration
+def test_execute_order_aborts_stale_approved_buy_when_costs_are_unknown() -> None:
+    with psycopg.connect(_test_database_url()) as conn:
+        _enable_all(conn)
+        rec_id, decision_id = _seed_approved_buy(conn)
+        conn.execute(
+            """
+            INSERT INTO cost_model (
+                instrument_id, spread_bps, overnight_rate, fx_markup_bps,
+                carry_cost_known, fx_cost_known, source
+            ) VALUES (999002, 20, 0, 0, FALSE, FALSE, 'computed')
+            ON CONFLICT (instrument_id) WHERE valid_to IS NULL
+            DO UPDATE SET carry_cost_known=FALSE, fx_cost_known=FALSE
+            """
+        )
+        conn.commit()
+        with pytest.raises(TransactionCostUnavailableError, match="carry, FX"):
+            execute_order(conn, rec_id, decision_id, broker=None)
 
 
 @pytest.mark.integration

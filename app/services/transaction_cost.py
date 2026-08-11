@@ -51,6 +51,17 @@ class CostEstimate:
     prohibitive_reason: str | None
 
 
+def missing_cost_components(cost_model_row: dict[str, Any] | None) -> tuple[str, ...]:
+    """Return cost components whose applicability/amount is not established."""
+    if cost_model_row is None:
+        return ("carry", "FX")
+    return tuple(
+        name
+        for name, key in (("carry", "carry_cost_known"), ("FX", "fx_cost_known"))
+        if cost_model_row.get(key) is not True
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -255,16 +266,19 @@ def load_instrument_cost(
     """Load the active fee schedule for an instrument.
 
     Returns the most recent cost_model row where valid_to IS NULL.
-    Returns None if no cost_model row exists (caller should fall back
-    to computing spread from live quote data).
+    Returns None if no cost_model row exists. A caller may still derive spread
+    for display or audit, but execution must refuse because quote data cannot
+    establish carry or FX.
 
-    Columns: spread_bps (bps), overnight_rate (bps per day),
-    fx_pair (e.g. 'GBP/USD'), fx_markup_bps (bps, one-way).
+    Columns include explicit carry/FX completeness flags. Numeric zeros are
+    legacy-compatible placeholders and must not be interpreted as known costs
+    unless the corresponding flag is true.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT spread_bps, overnight_rate, fx_pair, fx_markup_bps
+            SELECT spread_bps, overnight_rate, fx_pair, fx_markup_bps,
+                   carry_cost_known, fx_cost_known
             FROM cost_model
             WHERE instrument_id = %(iid)s
               AND valid_to IS NULL
@@ -351,11 +365,11 @@ def seed_cost_models_from_quotes(
     - Close any existing active cost_model row (set valid_to = NOW())
     - Insert a new active row with computed spread
 
-    FX markup is set based on instrument currency:
-    - USD → 0 bps
-    - non-USD → 50 bps (eToro's typical FX markup)
-
-    Overnight rate is 0 for all instruments (real stocks, not CFDs in v1).
+    This seed measures spread only. Carry remains unknown until account-specific
+    broker eligibility proves the product is an unleveraged underlying rather
+    than a CFD. FX also remains unknown: instrument quote currency alone cannot
+    reveal which cash balance funds the order, and a pre-converted balance must
+    not be charged again.
 
     Runs within the caller's implicit transaction (psycopg v3 autocommit-off).
     The SELECT and all per-instrument writes share a single transaction
@@ -369,7 +383,7 @@ def seed_cost_models_from_quotes(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT i.instrument_id, q.spread_pct, i.currency
+            SELECT i.instrument_id, q.spread_pct
             FROM instruments i
             JOIN coverage c USING (instrument_id)
             JOIN quotes q USING (instrument_id)
@@ -387,9 +401,6 @@ def seed_cost_models_from_quotes(
             continue
 
         spread_bps = spread_pct_to_bps(row["spread_pct"])
-        currency = row["currency"] or "USD"
-        fx_markup_bps = Decimal("0") if currency == "USD" else Decimal("50")
-
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
@@ -406,17 +417,16 @@ def seed_cost_models_from_quotes(
                         """
                         INSERT INTO cost_model (
                             instrument_id, spread_bps, overnight_rate,
-                            fx_pair, fx_markup_bps, source
+                            fx_pair, fx_markup_bps, carry_cost_known,
+                            fx_cost_known, source
                         ) VALUES (
                             %(iid)s, %(spread_bps)s, 0,
-                            %(fx_pair)s, %(fx_markup_bps)s, 'computed'
+                            NULL, 0, FALSE, FALSE, 'computed'
                         )
                         """,
                         {
                             "iid": row["instrument_id"],
                             "spread_bps": spread_bps,
-                            "fx_pair": None if currency == "USD" else f"{currency}/USD",
-                            "fx_markup_bps": fx_markup_bps,
                         },
                     )
             processed += 1
