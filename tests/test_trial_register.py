@@ -46,6 +46,14 @@ class TestTheShippedDeclaration:
         assert shipped <= TRIAL_REGISTER.trial_ids
         assert TRIAL_REGISTER.declared_count > len(shipped)
 
+    def test_the_known_2026_08_09_search_floor_is_counted(self) -> None:
+        """The documented 101-arm session must not collapse to one declaration."""
+        family = next(
+            trial for trial in TRIAL_REGISTER.trials if trial.trial_id == "short-horizon-search-session-2026-08-09"
+        )
+        assert family.searches == 101
+        assert TRIAL_REGISTER.declared_count == 113
+
     def test_the_discarded_arms_are_counted(self) -> None:
         """A rejected result is still a search of the data.
 
@@ -108,3 +116,8 @@ class TestRegisterInvariants:
         kwargs = {"trial_id": "a", "description": "d", "evidence": "e", field: ""}
         with pytest.raises(ValueError, match="is blank"):
             DeclaredTrial(**kwargs)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("searches", [0, -1, 1.5, True])
+    def test_an_invalid_search_multiplicity_is_refused(self, searches: object) -> None:
+        with pytest.raises(ValueError, match="searches must be a positive integer"):
+            DeclaredTrial(trial_id="a", description="d", evidence="e", searches=searches)  # type: ignore[arg-type]

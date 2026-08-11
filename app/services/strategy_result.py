@@ -79,6 +79,7 @@ from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.random_entry_cohort import SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
 from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
+from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
 # ---------------------------------------------------------------------------
 # The frozen corpus and window (§5.2)
@@ -247,6 +248,7 @@ PromotionRefusal = Literal[
     "holdout_accesses_unrecorded",
     "deflated_sharpe_not_computed",
     "trial_count_undeclared",
+    "trial_register_superseded",
     #: Criterion 3's overlap-corrected sample size, from stage 5e's block
     #: bootstrap. ⚠ SEPARATE from ``deflated_sharpe_not_computed`` even though
     #: both are null today and both come from 5e: criterion 6's DSR CONSUMES the
@@ -783,6 +785,12 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
         refusals.append("deflated_sharpe_not_computed")
     if result.trial_count is None:
         refusals.append("trial_count_undeclared")
+    if result.deflated_sharpe is not None and (
+        result.deflated is None
+        or result.deflated.trial_register_version != TRIAL_REGISTER_VERSION
+        or result.deflated.declared_trials != TRIAL_REGISTER.declared_count
+    ):
+        refusals.append("trial_register_superseded")
 
     # Criterion 3 — the effective sample size that criterion 6's deflation
     # consumes. ⚠ Checked SEPARATELY from the DSR: a DSR present with no

@@ -74,12 +74,18 @@ from typing import Final
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-10"
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-11"
 
 
 @dataclass(frozen=True)
 class DeclaredTrial:
-    """One variant that was evaluated against price data.
+    """One traceable declaration of variants evaluated against price data.
+
+    ``searches`` is normally one.  It may be greater than one only when a
+    historical research session recorded the size and construction of a search
+    family but did not retain a durable id for every arm.  Collapsing that
+    family to one would under-count ``M`` in the flattering direction; inventing
+    one id per lost arm would imply provenance the repository does not have.
 
     ⚠ ``evidence`` is REQUIRED and non-empty. A trial count is only honest if
     each entry can be checked, and an entry nobody can trace is indistinguishable
@@ -90,11 +96,15 @@ class DeclaredTrial:
     description: str
     #: Where the evaluation is recorded — an issue, a commit, a spec section.
     evidence: str
+    #: Number of price-data searches represented by this traceable declaration.
+    searches: int = 1
 
     def __post_init__(self) -> None:
         for field_name in ("trial_id", "description", "evidence"):
             if not getattr(self, field_name):
                 raise ValueError(f"{field_name} is blank — a present-but-empty declaration declares nothing (#2286)")
+        if type(self.searches) is not int or self.searches < 1:
+            raise ValueError(f"searches must be a positive integer, got {self.searches!r}")
 
 
 @dataclass(frozen=True)
@@ -113,7 +123,7 @@ class TrialRegister:
 
     @property
     def declared_count(self) -> int:
-        return len(self.trials)
+        return sum(trial.searches for trial in self.trials)
 
     @property
     def trial_ids(self) -> frozenset[str]:
@@ -218,6 +228,15 @@ TRIAL_REGISTER: Final = TrialRegister(
             description="Issuer-deduplicated historical-SUE SEC filing drift; fixed 62-session equal-gross long/short.",
             evidence="issue #2476 comment 2026-08-10 (sealed outcome); preregistration commit 12dff916; "
             "implementation commit 1bf78256",
+        ),
+        DeclaredTrial(
+            trial_id="short-horizon-search-session-2026-08-09",
+            description=(
+                "Conservative historical-search floor: 25 gap-fade band/era arms, 15 reversal arms, "
+                "25 breadth cells, 12 confluence buckets, 13 individual conditions, 6 short arms and 5 stop arms."
+            ),
+            evidence="docs/proposals/ta/2026-08-09-plan-of-attack.md §2b",
+            searches=101,
         ),
     ),
 )

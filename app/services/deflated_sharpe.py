@@ -80,10 +80,12 @@ Appendix A.3 offers the average-correlation route to ``N_hat`` (implemented
 here) and then names its own two weaknesses: correlation is *"a limited notion
 of linear dependence"*, and where ``M`` exceeds the sample length the
 correlation estimate is itself overfit. It points at an information-theoretic
-alternative for the number of non-redundant sources. That is NOT implemented,
-and the reason is that our ``M`` is a two-digit declared register rather than a
-machine-generated grid — the ill-conditioning A.3 warns about needs
-``T < M(M-1)/2``, which this register is nowhere near.
+alternative for the number of non-redundant sources. That is NOT implemented.
+The register is now a conservative, hand-declared historical search floor, and
+its growth to three digits makes that published limitation material rather than
+hypothetical. The current DSR is therefore not sufficient promotion evidence
+while the historical experiment ledger and its measurable return series remain
+incomplete; the promotion gate refuses results from superseded populations.
 
 ⚠ Exhibit 3.1 measures the accuracy of (1): the analytic value OVERSTATES the
 empirical expected maximum by under 0.05 for ``N < 50`` at ``V = 1``, falling to
