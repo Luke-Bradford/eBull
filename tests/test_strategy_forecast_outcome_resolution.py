@@ -90,6 +90,7 @@ def test_same_bar_target_and_stop_is_not_scored_in_either_direction() -> None:
         None,
         None,
     )
+    assert row.reason is None
 
 
 def test_timeout_exits_at_the_next_open_after_the_horizon() -> None:
@@ -228,16 +229,21 @@ def test_terminal_forecast_is_selected_and_stored_once(ebull_test_conn: psycopg.
     selected = _select(conn, after_forecast_id=0, limit=10)
     assert [row.forecast_id for row in selected] == [int(forecast_id[0])]
 
-    terminal = ForecastOutcomeRow(
-        forecast_id=int(forecast_id[0]),
-        outcome="target_first",
-        reason=None,
-        exit_bar_date=date(2026, 8, 2),
-        exit_price=Decimal("110"),
-        market_bars_held=0,
-        gross_return_pct=Decimal("0.1"),
+    outcomes = (
+        ForecastOutcomeRow(
+            int(forecast_id[0]), "target_first", None, date(2026, 8, 2), Decimal("110"), 0, Decimal("0.1")
+        ),
+        ForecastOutcomeRow(
+            int(forecast_id[0]), "stop_first", None, date(2026, 8, 2), Decimal("95"), 0, Decimal("-0.05")
+        ),
+        ForecastOutcomeRow(int(forecast_id[0]), "timeout", None, date(2026, 8, 4), Decimal("103"), 2, Decimal("0.03")),
+        ForecastOutcomeRow(int(forecast_id[0]), "ambiguous", None, date(2026, 8, 2), None, 0, None),
+        ForecastOutcomeRow(int(forecast_id[0]), "unresolved", "series_break", None, None, None, None),
     )
-    assert _store(conn, [terminal]) == 1
-    assert _store(conn, [terminal]) == 0
+    for terminal in outcomes:
+        assert _store(conn, [terminal]) == 1
+        assert _store(conn, [terminal]) == 0
+        conn.execute("DELETE FROM strategy_opportunity_forecast_outcomes WHERE forecast_id=%s", (forecast_id[0],))
+    assert _store(conn, [outcomes[0]]) == 1
     assert _select(conn, after_forecast_id=0, limit=10) == []
     assert conn.execute("SELECT count(*) FROM strategy_opportunity_forecast_outcomes").fetchone() == (1,)

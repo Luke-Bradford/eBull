@@ -103,6 +103,19 @@ class ForecastOutcomeRow:
     market_bars_held: int | None
     gross_return_pct: Decimal | None
 
+    def __post_init__(self) -> None:
+        terminal = {"target_first", "stop_first", "timeout", "ambiguous", "unresolved"}
+        if self.outcome not in terminal:
+            raise ValueError(f"unknown forecast outcome {self.outcome!r}")
+        if (self.outcome == "unresolved") != (self.reason is not None):
+            raise ValueError("a reason is required exactly when a forecast outcome is unresolved")
+        located = (self.exit_bar_date is not None) + (self.market_bars_held is not None)
+        if located != (0 if self.outcome == "unresolved" else 2):
+            raise ValueError("unresolved outcomes have no exit location; all other outcomes require one")
+        priced = (self.exit_price is not None) + (self.gross_return_pct is not None)
+        if priced != (2 if self.outcome in {"target_first", "stop_first", "timeout"} else 0):
+            raise ValueError("only target, stop and timeout outcomes carry both an exit price and return")
+
     @classmethod
     def from_outcome(cls, forecast_id: int, outcome: Outcome) -> ForecastOutcomeRow:
         mapped = {
@@ -280,6 +293,10 @@ def run_forecast_outcome_resolution(
     with conn.transaction():
         written = _store(conn, rows)
         if forecasts:
+            # The final ID is deliberately not max(...). After a wrap the last
+            # row is in the lower range; persisting it lets the next run move
+            # through that range. Persisting the maximum would wrap to the same
+            # low rows repeatedly and starve IDs between the two ranges.
             _write_cursor(conn, forecasts[-1].forecast_id)
     outcomes = Counter(row.outcome for row in rows)
     report = ForecastOutcomeResolutionReport(
