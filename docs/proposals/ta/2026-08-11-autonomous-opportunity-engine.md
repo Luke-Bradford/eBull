@@ -155,20 +155,25 @@ decisions add more value than their costs and mistakes. It does not grow because
 the engine is forced to trade daily. If no proven active opportunity exists,
 the mandate-defined core/cash allocation is preferable to inventing one.
 
-## The current architectural gap
+## The original arrival-order gap and its bounded replacement
 
-`strategy_paper_runtime.run_strategy_paper_cycle` currently selects unfunded
-fired signals using:
+Before #2547, `strategy_paper_runtime.run_strategy_paper_cycle` selected
+unfunded fired signals using:
 
 ```sql
 ORDER BY s.signal_id DESC
 LIMIT :signal_limit
 ```
 
-and invokes `execute_fired_paper_signal` for each row. This is newest-first
-processing, not opportunity selection. It does not compare simultaneous signals
-by expected value, uncertainty, loss distribution, capital duration,
-correlation, spread or remaining risk budget.
+and invoked `execute_fired_paper_signal` for each row. #2547 removes that
+arrival-order path: the runtime now loads the complete current, calibrated,
+positive-forecast set, ranks it by conservative after-cost expectancy with an
+economic-key tie break, and only then applies its bounded execution limit.
+
+That is a safety precursor, not the finished allocator. It still does not
+produce one immutable target portfolio or jointly optimise correlation, factor
+exposure, capital duration, core/cash competition and aggregate opportunity
+cost. Those remain blocking requirements below.
 
 This is not presently a capital defect because the strategy manifest contains
 no `capital_candidate`. It becomes a blocking defect before the second candidate
