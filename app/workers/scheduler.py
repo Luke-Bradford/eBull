@@ -3899,6 +3899,7 @@ def daily_portfolio_sync() -> None:
     if credentials are missing.
     """
     from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+    from app.services.account_equity_evidence import record_account_equity_snapshot
 
     creds = _load_etoro_credentials(JOB_DAILY_PORTFOLIO_SYNC)
     if creds is None:
@@ -3921,9 +3922,31 @@ def daily_portfolio_sync() -> None:
             # None on fetch failure — positions still sync; the
             # unmoved watermark re-covers the window next tick.
             trade_history = fetch_trade_history_safely(broker, history_min_date)
+            account_snapshot = None
+            if settings.etoro_env == "demo":
+                try:
+                    account_snapshot = broker.get_account_risk_snapshot()
+                except Exception:
+                    logger.warning(
+                        "Portfolio sync: official account-equity evidence unavailable; portfolio sync will continue",
+                        exc_info=True,
+                    )
 
         with connect_job() as conn:
             result = sync_portfolio(conn, portfolio, trade_history=trade_history)
+            if account_snapshot is not None:
+                try:
+                    # sync_portfolio has already opened the outer transaction;
+                    # this nested context is a savepoint so evidence failure
+                    # cannot roll back the primary portfolio refresh.
+                    with conn.transaction():
+                        record_account_equity_snapshot(conn, environment="demo", snapshot=account_snapshot)
+                except Exception:
+                    logger.warning(
+                        "Portfolio sync: official account-equity evidence could not be stored; "
+                        "portfolio sync will continue",
+                        exc_info=True,
+                    )
 
             # Auto-promote held instruments to Tier 1 so market data,
             # FX rates, and downstream jobs fire for them. Without this,

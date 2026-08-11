@@ -63,6 +63,16 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
   units or FIFO order. The response also supplies opening units, average price,
   execution time and fees; retain these compact facts to prove partial-fill and
   one-to-many cardinality without storing every poll payload.
+- **Historical account balances are documented but unavailable to this demo
+  connection (verified 2026-08-11):** the live portal documents
+  `GET /api/v1/balances/history`, with at most 365 daily snapshots from the last
+  12 months and cash/invested/P&L/total-balance fields. An authenticated,
+  read-only probe using the configured demo credentials returned HTTP 403 with
+  only `errorCode` and `errorMessage`. Do not infer that demo history can be
+  backfilled. eBull instead captures one prospective daily aggregate from the
+  working `/api/v1/trading/info/demo/pnl` response; it stores no raw payload or
+  per-position duplicate. Re-probe the history endpoint before changing that
+  boundary.
 
 ## ⚠⚠ WE HAVE INTRADAY HISTORY. Read this before saying otherwise — MEASURED 2026-08-09
 

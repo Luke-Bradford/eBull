@@ -2574,6 +2574,22 @@ export interface StrategyOverviewResponse {
     worst_classwise_calibration_error: string | null;
     blockers: string[];
   };
+  account_equity_evidence: {
+    status: "unavailable" | "collecting" | "comparable";
+    days_collected: number;
+    snapshot_date: string | null;
+    observed_at: string | null;
+    currency: string | null;
+    official_equity: string | null;
+    official_available_cash: string | null;
+    official_total_invested: string | null;
+    official_unrealised_pnl: string | null;
+    local_eod_currency: string | null;
+    local_eod_value: string | null;
+    difference: string | null;
+    comparable: boolean;
+    incomplete_reasons: string[];
+  };
   evidence_refresh: {
     frozen_through: string;
     completed_windows: number;

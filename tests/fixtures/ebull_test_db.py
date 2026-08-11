@@ -168,6 +168,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #1594 — EOD equity snapshots (child → parent; parent → instruments).
     "portfolio_eod_position_snapshots",
     "portfolio_eod_snapshots",
+    # #2559 — one compact official broker-equity row per environment/day.
+    # Standalone by design: account evidence is not tied to an instrument.
+    "broker_account_equity_snapshots",
     # #1594 — dated FX (standalone, no FK). Listed so DB tests inserting FX
     # rows don't leak across tests (Codex ckpt-3).
     "fx_rates_daily",

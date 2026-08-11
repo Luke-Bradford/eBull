@@ -22,6 +22,7 @@ from app.providers.implementations.etoro_broker import EtoroBrokerProvider
 from app.security.master_key import MasterKeyError, ensure_broker_key_loaded
 from app.security.secrets_crypto import CredentialCryptoConfigError
 from app.security.sessions import SessionRow
+from app.services.account_equity_evidence import load_account_equity_evidence
 from app.services.backtest_run import BACKTEST_UNIVERSE, runnable_strategies
 from app.services.broker_credentials import (
     CredentialDecryptError,
@@ -353,6 +354,23 @@ class AutomationReadinessView(BaseModel):
     blockers: list[str]
 
 
+class AccountEquityEvidenceView(BaseModel):
+    status: Literal["unavailable", "collecting", "comparable"]
+    days_collected: int
+    snapshot_date: date | None
+    observed_at: datetime | None
+    currency: str | None
+    official_equity: Decimal | None
+    official_available_cash: Decimal | None
+    official_total_invested: Decimal | None
+    official_unrealised_pnl: Decimal | None
+    local_eod_currency: str | None
+    local_eod_value: Decimal | None
+    difference: Decimal | None
+    comparable: bool
+    incomplete_reasons: list[str]
+
+
 class StrategyOverviewResponse(BaseModel):
     as_of: datetime
     demo_connection: bool
@@ -366,6 +384,7 @@ class StrategyOverviewResponse(BaseModel):
     entry_block: StrategyEntryBlockView
     paper_pool: StrategyPaperPoolView
     automation_readiness: AutomationReadinessView
+    account_equity_evidence: AccountEquityEvidenceView
     evidence_refresh: EvidenceRefreshView
     strategies: list[StrategyOverview]
 
@@ -949,6 +968,10 @@ def get_strategy_overview(
     control_by_strategy = load_control_state(conn, versions=version_values)
     entry_block = load_entry_block_state(conn)
     paper_pool = load_paper_pool(conn)
+    account_equity = load_account_equity_evidence(
+        conn,
+        environment=cast(Literal["demo", "real"], settings.etoro_env),
+    )
 
     results_by_strategy: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in result_rows:
@@ -1281,6 +1304,22 @@ def get_strategy_overview(
             weakest_brier_skill_score=min(skill_scores, default=None),
             worst_classwise_calibration_error=max(calibration_errors, default=None),
             blockers=readiness_blockers,
+        ),
+        account_equity_evidence=AccountEquityEvidenceView(
+            status=account_equity.status,
+            days_collected=account_equity.days_collected,
+            snapshot_date=account_equity.snapshot_date,
+            observed_at=account_equity.observed_at,
+            currency=account_equity.currency,
+            official_equity=account_equity.official_equity,
+            official_available_cash=account_equity.official_available_cash,
+            official_total_invested=account_equity.official_total_invested,
+            official_unrealised_pnl=account_equity.official_unrealised_pnl,
+            local_eod_currency=account_equity.local_eod_currency,
+            local_eod_value=account_equity.local_eod_value,
+            difference=account_equity.difference,
+            comparable=account_equity.comparable,
+            incomplete_reasons=list(account_equity.incomplete_reasons),
         ),
         evidence_refresh=EvidenceRefreshView(
             frozen_through=max(item.window.end for item in RECENT_EVIDENCE_WINDOWS.values()),
