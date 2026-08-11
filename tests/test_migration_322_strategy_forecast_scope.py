@@ -1,8 +1,10 @@
 """Migration 322 safely attributes or invalidates legacy assessment rows."""
 
 from pathlib import Path
+from typing import LiteralString, cast
 
 import psycopg
+from psycopg import sql
 
 _MIGRATION = Path(__file__).resolve().parents[1] / "sql/322_strategy_forecast_assessment_strategy_scope.sql"
 
@@ -86,7 +88,7 @@ def test_migration_322_handles_populated_legacy_tables(ebull_test_conn: psycopg.
         """
     )
 
-    conn.execute(_MIGRATION.read_text())
+    conn.execute(sql.SQL(cast(LiteralString, _MIGRATION.read_text())))
 
     assert conn.execute(
         "SELECT assessment_id,strategy_id,strategy_version FROM strategy_forecast_assessments"
