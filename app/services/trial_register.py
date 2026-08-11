@@ -88,8 +88,10 @@ class DeclaredTrial:
     one id per lost arm would imply provenance the repository does not have.
 
     ⚠ ``evidence`` is REQUIRED and non-empty. A trial count is only honest if
-    each entry can be checked, and an entry nobody can trace is indistinguishable
-    from one invented to pad the count in the safe direction.
+    each declaration's count and construction can be checked. A grouped legacy
+    declaration does NOT imply individual-arm provenance; an entry nobody can
+    trace is indistinguishable from one invented to pad the count in the safe
+    direction.
     """
 
     trial_id: str

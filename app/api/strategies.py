@@ -616,7 +616,7 @@ def _promotion_refusals(
         refusals.append("trial_count_undeclared")
     if row["deflated_sharpe"] is not None and (
         row.get("trial_register_version") != TRIAL_REGISTER_VERSION
-        or row.get("trial_count") != TRIAL_REGISTER.declared_count
+        or (row.get("trial_count") is not None and row.get("trial_count") != TRIAL_REGISTER.declared_count)
     ):
         refusals.append("trial_register_superseded")
     if row["effective_sample_size"] is None:

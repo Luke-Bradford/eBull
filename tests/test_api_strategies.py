@@ -161,6 +161,31 @@ def test_a_current_register_label_cannot_hide_a_stale_trial_count() -> None:
     ) == ["trial_register_superseded"]
 
 
+def test_a_missing_count_is_not_also_described_as_superseded_when_the_version_is_current() -> None:
+    row: dict[str, object] = {
+        "purpose": "capital_candidate",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "evaluated_instrument_count": 1,
+        "deflated_sharpe": 0.8,
+        "trial_count": None,
+        "effective_sample_size": 200,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+        "synthetic_control_model_id": "random-entry-v1",
+        "synthetic_control_passed": True,
+        "synthetic_control_mean_return_ci_low_pct": -1,
+        "synthetic_control_mean_return_ci_high_pct": 1,
+        "sharpe": 0.8,
+        "synthetic_control_sharpe_threshold": 0.5,
+    }
+    assert _promotion_refusals(
+        row,
+        ambiguity_complete=True,
+        quarantine_complete=True,
+        accesses_complete=True,
+    ) == ["trial_count_undeclared"]
+
+
 def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:
     arm = ResultArm(
         result_version="v1",

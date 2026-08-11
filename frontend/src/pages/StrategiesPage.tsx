@@ -122,7 +122,7 @@ const REFUSAL_LABELS: Record<string, string> = {
   execution_policy_missing: "Execution and risk policy is missing",
   universe_basis_not_survivorship_free: "Point-in-time universe is not complete",
   carry_unmodelled: "Holding and financing costs are not modelled",
-  trial_register_superseded: "Evidence predates the current experiment register",
+  trial_register_superseded: "Evidence does not match the current experiment register",
   synthetic_control_not_run: "Random-entry control has not passed",
 };
 
