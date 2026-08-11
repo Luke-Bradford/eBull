@@ -79,6 +79,12 @@ class _Intent:
     pool_limit: Decimal
     capital_mode: Literal["fixed", "compound"]
     pool_reserved: Decimal
+    mandate_max_drawdown_pct: Decimal
+    mandate_max_loss_per_position_pct: Decimal
+    mandate_max_daily_loss_pct: Decimal
+    mandate_active_risk_budget_pct: Decimal
+    mandate_cash_reserve_pct: Decimal
+    mandate_max_concurrent_positions: int
     policy_revision: int
     ticket_sizing_mode: Literal["percent", "fixed"]
     ticket_fraction: Decimal | None
@@ -179,6 +185,12 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
                    d.deployment_id, d.capital_limit, d.enabled, d.currency,
                    pool.enabled AS pool_enabled, pool.capital_limit AS pool_limit,
                    pool.capital_mode, pool.risk_profile,
+                   pool.max_portfolio_drawdown_pct AS mandate_max_drawdown_pct,
+                   pool.max_loss_per_position_pct AS mandate_max_loss_per_position_pct,
+                   pool.max_daily_loss_pct AS mandate_max_daily_loss_pct,
+                   pool.active_risk_budget_pct AS mandate_active_risk_budget_pct,
+                   pool.cash_reserve_pct AS mandate_cash_reserve_pct,
+                   pool.max_concurrent_positions AS mandate_max_concurrent_positions,
                    p.revision AS policy_revision, p.*,
                    q.quoted_at, q.ask, q.spread_flag,
                    w.updated_at AS scan_at,
@@ -218,7 +230,10 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
              AND d.mode = 'paper'
             LEFT JOIN strategy_execution_policies p ON p.deployment_id = d.deployment_id
             LEFT JOIN LATERAL (
-                SELECT enabled,capital_limit,capital_mode,risk_profile
+                SELECT enabled,capital_limit,capital_mode,risk_profile,
+                       max_portfolio_drawdown_pct,max_loss_per_position_pct,
+                       max_daily_loss_pct,active_risk_budget_pct,cash_reserve_pct,
+                       max_concurrent_positions
                 FROM strategy_paper_pool_events
                 ORDER BY strategy_paper_pool_event_id DESC
                 LIMIT 1
@@ -271,6 +286,20 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         (row["pool_limit"] is not None, "paper_pool_unconfigured"),
         (bool(row["pool_enabled"]), "paper_pool_disabled"),
         (row["risk_profile"] is not None and row["risk_profile"] != "unconfigured", "portfolio_mandate_unconfigured"),
+        (
+            all(
+                row[field] is not None
+                for field in (
+                    "mandate_max_drawdown_pct",
+                    "mandate_max_loss_per_position_pct",
+                    "mandate_max_daily_loss_pct",
+                    "mandate_active_risk_budget_pct",
+                    "mandate_cash_reserve_pct",
+                    "mandate_max_concurrent_positions",
+                )
+            ),
+            "portfolio_mandate_incomplete",
+        ),
         (bool(row["enabled"]), "paper_deployment_disabled"),
         (row["currency"] == "USD", "deployment_currency_unsupported"),
         (row["policy_revision"] is not None, "execution_policy_missing"),
@@ -316,6 +345,12 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         pool_limit=Decimal(str(row["pool_limit"])),
         capital_mode=cast(Literal["fixed", "compound"], row["capital_mode"]),
         pool_reserved=Decimal(str(row["pool_reserved"])),
+        mandate_max_drawdown_pct=Decimal(str(row["mandate_max_drawdown_pct"])),
+        mandate_max_loss_per_position_pct=Decimal(str(row["mandate_max_loss_per_position_pct"])),
+        mandate_max_daily_loss_pct=Decimal(str(row["mandate_max_daily_loss_pct"])),
+        mandate_active_risk_budget_pct=Decimal(str(row["mandate_active_risk_budget_pct"])),
+        mandate_cash_reserve_pct=Decimal(str(row["mandate_cash_reserve_pct"])),
+        mandate_max_concurrent_positions=int(row["mandate_max_concurrent_positions"]),
         policy_revision=int(row["policy_revision"]),
         ticket_sizing_mode=cast(Literal["percent", "fixed"], row["ticket_sizing_mode"]),
         ticket_fraction=Decimal(str(row["ticket_fraction"])) if row["ticket_fraction"] is not None else None,
@@ -441,46 +476,82 @@ def _costs(
     return stressed, net
 
 
-def _risk_and_amount(
+def _observe_local_mandate_risk(
     conn: psycopg.Connection[Any],
     *,
     intent: _Intent,
     risk: BrokerAccountRiskSnapshot,
     now: datetime,
-) -> tuple[Decimal, Decimal, Decimal] | str:
-    if not _age_ok(risk.observed_at, now=now, max_seconds=intent.max_quote_age_seconds):
-        return "account_risk_stale"
-    current_instrument = next(
-        (row.amount for row in risk.instrument_investments if row.instrument_id == intent.instrument_id),
-        Decimal("0"),
-    )
-    # A just-accepted strategy order may not yet be visible in the provider's
-    # account snapshot. Count every unresolved local submission as additional
-    # risk. Once reconciliation is terminal, the provider snapshot is authority.
-    pending_row = conn.execute(
-        """
-        SELECT COALESCE(SUM(d.amount), 0),
-               COALESCE(SUM(d.amount) FILTER (WHERE t.instrument_id=%s), 0)
-        FROM strategy_funding_decisions d
-        JOIN strategy_trades t ON t.funding_decision_id=d.funding_decision_id
-        JOIN strategy_trade_orders sto ON sto.strategy_trade_id=t.strategy_trade_id
-          AND sto.purpose='entry'
-        JOIN orders o ON o.order_id=sto.order_id AND o.execution_origin='strategy'
-        LEFT JOIN strategy_order_reconciliation_state r ON r.order_id=o.order_id
-        WHERE d.verdict='allocated' AND t.status NOT IN ('closed', 'failed')
-          AND (r.state IS NULL OR r.state NOT IN ('resolved', 'rejected'))
-        """,
-        (intent.instrument_id,),
-    ).fetchone()
-    assert pending_row is not None
-    pending_total = Decimal(str(pending_row[0]))
-    pending_instrument = Decimal(str(pending_row[1]))
-    capital_bases = _effective_capital_bases(conn, intent)
-    conn.commit()
-    if isinstance(capital_bases, str):
-        return capital_bases
-    deployment_base, pool_base = capital_bases
+) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | str:
+    """Read local allocation risk and advance the high-water mark atomically."""
     with conn.transaction():
+        pending_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(d.amount), 0),
+                   COALESCE(SUM(d.amount) FILTER (WHERE t.instrument_id=%s), 0)
+            FROM strategy_funding_decisions d
+            JOIN strategy_trades t ON t.funding_decision_id=d.funding_decision_id
+            JOIN strategy_trade_orders sto ON sto.strategy_trade_id=t.strategy_trade_id
+              AND sto.purpose='entry'
+            JOIN orders o ON o.order_id=sto.order_id AND o.execution_origin='strategy'
+            LEFT JOIN strategy_order_reconciliation_state r ON r.order_id=o.order_id
+            WHERE d.verdict='allocated' AND t.status NOT IN ('closed', 'failed')
+              AND (r.state IS NULL OR r.state NOT IN ('resolved', 'rejected'))
+            """,
+            (intent.instrument_id,),
+        ).fetchone()
+        if pending_row is None:  # pragma: no cover - aggregate SELECT always returns one row
+            raise StrategyPaperExecutionError("pending strategy risk observation was unavailable")
+        pending_total = Decimal(str(pending_row[0]))
+        pending_instrument = Decimal(str(pending_row[1]))
+        capital_bases = _effective_capital_bases(conn, intent)
+        if isinstance(capital_bases, str):
+            return capital_bases
+        deployment_base, pool_base = capital_bases
+        market_date = now.astimezone(_NY).date()
+        market_day_start = datetime.combine(market_date, time.min, tzinfo=_NY).astimezone(UTC)
+        market_day_end = (datetime.combine(market_date, time.min, tzinfo=_NY) + timedelta(days=1)).astimezone(UTC)
+        mandate_row = conn.execute(
+            """
+            SELECT
+                (
+                    SELECT count(*)
+                    FROM strategy_trades trade
+                    JOIN strategy_funding_decisions decision
+                      ON decision.funding_decision_id=trade.funding_decision_id
+                    JOIN strategy_deployments deployment
+                      ON deployment.deployment_id=decision.deployment_id
+                     AND deployment.mode='paper'
+                    WHERE decision.verdict='allocated'
+                      AND trade.status NOT IN ('closed','failed')
+                ),
+                (
+                    SELECT COALESCE(SUM(event.realized_pnl_usd),0)
+                    FROM strategy_position_ownership ownership
+                    JOIN strategy_trades trade
+                      ON trade.strategy_trade_id=ownership.strategy_trade_id
+                    JOIN strategy_funding_decisions decision
+                      ON decision.funding_decision_id=trade.funding_decision_id
+                    JOIN strategy_deployments deployment
+                      ON deployment.deployment_id=decision.deployment_id
+                     AND deployment.mode='paper'
+                    JOIN trade_events event
+                      ON event.position_id=ownership.broker_position_id
+                     AND event.event_kind='close'
+                    WHERE event.executed_at >= %s AND event.executed_at < %s
+                )
+            """,
+            (market_day_start, market_day_end),
+        ).fetchone()
+        if mandate_row is None:  # pragma: no cover - scalar SELECT always returns one row
+            raise StrategyPaperExecutionError("portfolio mandate observation was unavailable")
+        open_strategy_lifecycles = int(mandate_row[0])
+        daily_realised_pnl = Decimal(str(mandate_row[1]))
+        if open_strategy_lifecycles >= intent.mandate_max_concurrent_positions:
+            return "portfolio_concurrency_limit"
+        daily_loss_limit = pool_base * intent.mandate_max_daily_loss_pct / Decimal("100")
+        if daily_realised_pnl <= -daily_loss_limit:
+            return "portfolio_daily_loss_limit"
         row = conn.execute(
             "SELECT equity_high_water FROM strategy_paper_account_risk_state WHERE id = true FOR UPDATE"
         ).fetchone()
@@ -499,8 +570,33 @@ def _risk_and_amount(
             """,
             (high_water, risk.equity, drawdown, risk.observed_at),
         )
-    if drawdown > intent.max_drawdown_pct:
+    return deployment_base, pool_base, pending_total, pending_instrument, drawdown
+
+
+def _risk_and_amount(
+    conn: psycopg.Connection[Any],
+    *,
+    intent: _Intent,
+    risk: BrokerAccountRiskSnapshot,
+    now: datetime,
+) -> tuple[Decimal, Decimal, Decimal] | str:
+    if not _age_ok(risk.observed_at, now=now, max_seconds=intent.max_quote_age_seconds):
+        return "account_risk_stale"
+    current_instrument = next(
+        (row.amount for row in risk.instrument_investments if row.instrument_id == intent.instrument_id),
+        Decimal("0"),
+    )
+    # A just-accepted strategy order may not yet be visible in the provider's
+    # account snapshot. The local observation counts every unresolved order and
+    # advances account high-water state in one explicit transaction.
+    observed = _observe_local_mandate_risk(conn, intent=intent, risk=risk, now=now)
+    if isinstance(observed, str):
+        return observed
+    deployment_base, pool_base, pending_total, pending_instrument, drawdown = observed
+    if drawdown >= intent.max_drawdown_pct:
         return "account_drawdown_limit"
+    if drawdown >= intent.mandate_max_drawdown_pct:
+        return "portfolio_drawdown_limit"
     deployment_remaining = max(Decimal("0"), deployment_base - intent.reserved)
     pool_remaining = max(Decimal("0"), pool_base - intent.pool_reserved)
     portfolio_capacity = max(
@@ -511,6 +607,25 @@ def _risk_and_amount(
         Decimal("0"),
         risk.equity * intent.max_instrument_exposure_pct / Decimal("100") - current_instrument - pending_instrument,
     )
+    cash_reserve_capacity = max(
+        Decimal("0"),
+        pool_base * (Decimal("100") - intent.mandate_cash_reserve_pct) / Decimal("100") - intent.pool_reserved,
+    )
+    if cash_reserve_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
+        return "portfolio_cash_reserve_limit"
+    active_risk_capacity = max(
+        Decimal("0"),
+        pool_base * intent.mandate_active_risk_budget_pct / Decimal("100") - intent.pool_reserved,
+    )
+    if active_risk_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
+        return "portfolio_active_risk_limit"
+    if intent.stop_loss_pct <= 0:
+        return "execution_policy_invalid"
+    # Both inputs are percentage points, so their /100 factors cancel when
+    # solving amount * stop_pct/100 <= pool_base * loss_limit_pct/100.
+    loss_at_stop_capacity = pool_base * intent.mandate_max_loss_per_position_pct / intent.stop_loss_pct
+    if loss_at_stop_capacity.quantize(_CENT, rounding=ROUND_DOWN) <= 0:
+        return "portfolio_position_loss_limit"
     if intent.ticket_sizing_mode == "fixed":
         if intent.fixed_ticket_amount is None:
             return "execution_policy_invalid"
@@ -527,6 +642,9 @@ def _risk_and_amount(
         max(Decimal("0"), risk.available_cash - pending_total),
         portfolio_capacity,
         instrument_capacity,
+        active_risk_capacity,
+        cash_reserve_capacity,
+        loss_at_stop_capacity,
     ).quantize(_CENT, rounding=ROUND_DOWN)
     if amount <= 0:
         return "risk_capacity_exhausted"
