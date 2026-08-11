@@ -22,6 +22,8 @@ from psycopg.pq import TransactionStatus
 from app.providers.broker import BrokerProvider
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
+from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
+from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
 from app.services.strategy_opportunity_ranker import (
@@ -66,6 +68,35 @@ def _load_ranked_opportunities(
             JOIN strategy_opportunity_forecasts f ON f.signal_id=s.signal_id
             JOIN strategy_forecast_calibrations c ON c.calibration_id=f.calibration_id
             JOIN LATERAL (
+              SELECT policy_id,max_assessment_age_days
+              FROM strategy_forecast_assessment_policies
+              WHERE effective_from <= %(observed_at)s
+              ORDER BY effective_from DESC LIMIT 1
+            ) assessment_policy ON true
+            JOIN strategy_forecast_assessment_current current_assessment
+             ON current_assessment.policy_id=assessment_policy.policy_id
+             AND current_assessment.forecast_policy_version=f.forecast_policy_version
+             AND current_assessment.model_version=c.model_version
+             AND current_assessment.calibration_id=c.calibration_id
+             AND current_assessment.setup_version=f.setup_version
+             AND current_assessment.exit_policy_version=f.exit_policy_version
+             AND current_assessment.resolver_version=%(outcome_resolver)s
+             AND current_assessment.input_rule_set_version=%(input_rule_set)s
+             AND current_assessment.checked_at >= %(observed_at)s
+                 - assessment_policy.max_assessment_age_days * interval '1 day'
+             AND current_assessment.checked_at <= %(observed_at)s + interval '5 seconds'
+            JOIN strategy_forecast_assessments prospective_assessment
+              ON prospective_assessment.assessment_id=current_assessment.assessment_id
+             AND prospective_assessment.policy_id=current_assessment.policy_id
+             AND prospective_assessment.forecast_policy_version=current_assessment.forecast_policy_version
+             AND prospective_assessment.model_version=current_assessment.model_version
+             AND prospective_assessment.calibration_id=current_assessment.calibration_id
+             AND prospective_assessment.setup_version=current_assessment.setup_version
+             AND prospective_assessment.exit_policy_version=current_assessment.exit_policy_version
+             AND prospective_assessment.resolver_version=current_assessment.resolver_version
+             AND prospective_assessment.input_rule_set_version=current_assessment.input_rule_set_version
+             AND prospective_assessment.passed
+            JOIN LATERAL (
               SELECT max(sp.promoted_at) AS paper_at
               FROM strategy_promotions sp
               WHERE sp.strategy_id=s.strategy_id
@@ -88,6 +119,8 @@ def _load_ranked_opportunities(
                 "forecast_policy": FORECAST_POLICY_VERSION,
                 "cost_model": COST_MODEL_ID,
                 "observed_at": observed_at,
+                "outcome_resolver": FORECAST_OUTCOME_RESOLVER_VERSION,
+                "input_rule_set": QUARANTINE_RULE_SET_VERSION,
             },
         )
         rows = cur.fetchall()

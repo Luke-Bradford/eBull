@@ -28,6 +28,7 @@ from app.providers.broker import (
     BrokerWhatIfCostResponse,
 )
 from app.services.cost_model import COST_MODEL_ID
+from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.result_ledger import store_holdout_result
 from app.services.strategy_control_plane import (
     configure_deployment,
@@ -37,8 +38,10 @@ from app.services.strategy_control_plane import (
     decide_funding,
     link_strategy_order,
 )
+from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_opportunity_forecast import (
+    FORECAST_POLICY_VERSION,
     ForecastCalibration,
     OpportunityForecast,
     OpportunityForecastError,
@@ -64,6 +67,66 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strat
 
 _NOW = datetime(2026, 8, 7, 15, 0, tzinfo=UTC)  # Friday 11:00 New York
 _REQUEST_ID = UUID("1c94300c-90aa-4303-9d00-dec376d74efb")
+
+
+def _authorise_forecast_scope(
+    conn: psycopg.Connection[Any], *, setup_version: str, checked_at: datetime = _NOW
+) -> None:
+    """Explicit synthetic prospective authority for executor plumbing tests."""
+    conn.execute(
+        """
+        INSERT INTO strategy_forecast_assessment_policies (
+            policy_id,effective_from,recent_window_days,minimum_resolved_forecasts,
+            adaptive_calibration_bins,max_normalized_brier_score,
+            min_brier_skill_score,max_classwise_calibration_error,max_ambiguous_rate,max_unresolved_rate,
+            max_pending_rate,max_assessment_age_days,evidence_ref
+        ) VALUES ('test-assessment-policy-v1',%s - interval '1 day',90,30,5,0.2,0.01,0.1,0.05,0.05,0.2,2,
+                  'synthetic executor fixture only')
+        ON CONFLICT (policy_id) DO NOTHING
+        """,
+        (checked_at,),
+    )
+    assessment = conn.execute(
+        """
+        INSERT INTO strategy_forecast_assessments (
+            policy_id,forecast_policy_version,model_version,calibration_id,setup_version,exit_policy_version,
+            resolver_version,input_rule_set_version,window_start,window_end,evidence_hash,
+            total_forecasts,resolved_forecasts,target_first_count,stop_first_count,timeout_count,
+            ambiguous_count,unresolved_count,pending_count,normalized_brier_score,
+            baseline_normalized_brier_score,brier_skill_score,max_classwise_calibration_error,
+            ambiguous_rate,unresolved_rate,pending_rate,passed,reason_codes
+        ) VALUES (
+            'test-assessment-policy-v1',%s,'test-model-v1','test-calibration-v1',%s,'test-exit-v1',%s,%s,
+            %s::date-89,%s::date,'synthetic-' || %s,30,30,10,10,10,0,0,0,0,0.33333333,1,0,0,0,0,true,'[]'::jsonb
+        ) RETURNING assessment_id
+        """,
+        (
+            FORECAST_POLICY_VERSION,
+            setup_version,
+            FORECAST_OUTCOME_RESOLVER_VERSION,
+            QUARANTINE_RULE_SET_VERSION,
+            checked_at,
+            checked_at,
+            setup_version,
+        ),
+    ).fetchone()
+    assert assessment is not None
+    conn.execute(
+        """
+        INSERT INTO strategy_forecast_assessment_current (
+            policy_id,forecast_policy_version,model_version,calibration_id,setup_version,exit_policy_version,
+            resolver_version,input_rule_set_version,assessment_id,checked_at
+        ) VALUES ('test-assessment-policy-v1',%s,'test-model-v1','test-calibration-v1',%s,'test-exit-v1',%s,%s,%s,%s)
+        """,
+        (
+            FORECAST_POLICY_VERSION,
+            setup_version,
+            FORECAST_OUTCOME_RESOLVER_VERSION,
+            QUARANTINE_RULE_SET_VERSION,
+            int(assessment[0]),
+            checked_at,
+        ),
+    )
 
 
 def _seed(
@@ -230,6 +293,7 @@ def _seed(
             cost_model_id=COST_MODEL_ID,
         ),
     )
+    _authorise_forecast_scope(conn, setup_version="test-setup-v1")
     persist_ranking_batch(
         conn,
         opportunities=[
@@ -599,6 +663,51 @@ def test_invalid_opportunity_evidence_refuses_before_broker_access(
     decision_time = _NOW + timedelta(seconds=1) if reason_code == "opportunity_forecast_not_current" else _NOW
 
     result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=decision_time)
+
+    assert result.reason_code == reason_code
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("invalidity", "reason_code"),
+    [
+        ("policy", "opportunity_assessment_policy_missing"),
+        ("missing", "opportunity_assessment_missing"),
+        ("calibration_scope", "opportunity_assessment_missing"),
+        ("failed", "opportunity_assessment_not_passed"),
+        ("stale", "opportunity_assessment_stale"),
+    ],
+)
+def test_prospective_assessment_refuses_before_broker_access(
+    ebull_test_conn: psycopg.Connection[Any],
+    invalidity: str,
+    reason_code: str,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    if invalidity == "policy":
+        conn.execute("UPDATE strategy_forecast_assessment_policies SET effective_from=%s + interval '1 day'", (_NOW,))
+    elif invalidity == "missing":
+        conn.execute("DELETE FROM strategy_forecast_assessment_current")
+    elif invalidity == "calibration_scope":
+        conn.execute(
+            """
+            INSERT INTO strategy_forecast_calibrations (
+                calibration_id,model_version,holdout_start,holdout_end,sample_size,
+                brier_score,calibration_error,passed,evidence_ref
+            ) VALUES ('other-calibration','test-model-v1','2026-01-01','2026-07-31',500,0.18,0.04,true,'test')
+            """
+        )
+        conn.execute("UPDATE strategy_forecast_assessment_current SET calibration_id='other-calibration'")
+    elif invalidity == "failed":
+        conn.execute("UPDATE strategy_forecast_assessments SET passed=false")
+    else:
+        conn.execute("UPDATE strategy_forecast_assessment_current SET checked_at=%s - interval '3 days'", (_NOW,))
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
 
     assert result.reason_code == reason_code
     broker.get_account_risk_snapshot.assert_not_called()

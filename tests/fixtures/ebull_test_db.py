@@ -212,6 +212,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # reference both it and signals, so those children are derived; the parent
     # itself cannot be discovered from an existing inbound-FK root.
     "strategy_forecast_calibrations",
+    # #2555 — immutable prospective-assessment policy is a standalone root;
+    # assessment evidence and bounded current pointers are FK descendants.
+    "strategy_forecast_assessment_policies",
     # #2553 — the forecast outcome round-robin cursor is standalone. Outcome
     # rows are discovered through their FK to forecasts/signals.
     "strategy_forecast_outcome_cursor",

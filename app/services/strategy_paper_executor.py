@@ -32,6 +32,7 @@ from app.providers.broker import (
 )
 from app.services.cost_model import COST_MODEL_ID
 from app.services.market_calendar import us_market_status
+from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
@@ -41,6 +42,7 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
     registered_strategy_purpose,
 )
+from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
 from app.services.strategy_monitoring import load_paper_realised_pnl
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
 from app.services.strategy_opportunity_ranker import RANKING_POLICY_VERSION
@@ -242,7 +244,13 @@ def _load_intent(
                    forecast.conservative_net_expectancy_pct AS forecast_conservative_expectancy,
                    forecast.cost_model_id AS forecast_cost_model_id,
                    calibration.passed AS calibration_passed,
+                   calibration.model_version AS calibration_model_version,
                    calibration.holdout_end AS calibration_holdout_end,
+                   assessment_policy.policy_id AS assessment_policy_id,
+                   assessment_policy.max_assessment_age_days,
+                   current_assessment.checked_at AS prospective_assessment_checked_at,
+                   prospective_assessment.assessment_id AS prospective_assessment_id,
+                   prospective_assessment.passed AS prospective_assessment_passed,
                    ranking.ranking_member_id,ranking.selected AS ranking_selected,
                    ranking_batch.ranking_policy_version,
                    ranking_batch.strategy_paper_pool_event_id AS ranking_pool_event_id
@@ -299,13 +307,38 @@ def _load_intent(
             LEFT JOIN strategy_opportunity_forecasts forecast ON forecast.signal_id=s.signal_id
             LEFT JOIN strategy_forecast_calibrations calibration
               ON calibration.calibration_id=forecast.calibration_id
+            LEFT JOIN LATERAL (
+                SELECT policy_id,max_assessment_age_days
+                FROM strategy_forecast_assessment_policies
+                WHERE effective_from <= %s
+                ORDER BY effective_from DESC LIMIT 1
+            ) assessment_policy ON true
+            LEFT JOIN strategy_forecast_assessment_current current_assessment
+             ON current_assessment.policy_id=assessment_policy.policy_id
+             AND current_assessment.forecast_policy_version=forecast.forecast_policy_version
+             AND current_assessment.model_version=calibration.model_version
+             AND current_assessment.calibration_id=calibration.calibration_id
+             AND current_assessment.setup_version=forecast.setup_version
+             AND current_assessment.exit_policy_version=forecast.exit_policy_version
+             AND current_assessment.resolver_version=%s
+             AND current_assessment.input_rule_set_version=%s
+            LEFT JOIN strategy_forecast_assessments prospective_assessment
+              ON prospective_assessment.assessment_id=current_assessment.assessment_id
+             AND prospective_assessment.policy_id=current_assessment.policy_id
+             AND prospective_assessment.forecast_policy_version=current_assessment.forecast_policy_version
+             AND prospective_assessment.model_version=current_assessment.model_version
+             AND prospective_assessment.calibration_id=current_assessment.calibration_id
+             AND prospective_assessment.setup_version=current_assessment.setup_version
+             AND prospective_assessment.exit_policy_version=current_assessment.exit_policy_version
+             AND prospective_assessment.resolver_version=current_assessment.resolver_version
+             AND prospective_assessment.input_rule_set_version=current_assessment.input_rule_set_version
             LEFT JOIN strategy_opportunity_ranking_members ranking
               ON ranking.ranking_member_id=%s AND ranking.forecast_id=forecast.forecast_id
             LEFT JOIN strategy_opportunity_ranking_batches ranking_batch
               ON ranking_batch.ranking_batch_id=ranking.ranking_batch_id
             WHERE s.signal_id = %s AND s.signal_kind = 'entry' AND s.verdict = 'fired'
             """,
-            (ranking_member_id, signal_id),
+            (now, FORECAST_OUTCOME_RESOLVER_VERSION, QUARANTINE_RULE_SET_VERSION, ranking_member_id, signal_id),
         )
         row = cur.fetchone()
     if row is None:
@@ -337,6 +370,9 @@ def _load_intent(
         (row["forecast_id"] is not None, "opportunity_forecast_missing"),
         (row["forecast_policy_version"] == FORECAST_POLICY_VERSION, "opportunity_forecast_policy_stale"),
         (bool(row["calibration_passed"]), "opportunity_calibration_not_passed"),
+        (row["assessment_policy_id"] is not None, "opportunity_assessment_policy_missing"),
+        (row["prospective_assessment_id"] is not None, "opportunity_assessment_missing"),
+        (bool(row["prospective_assessment_passed"]), "opportunity_assessment_not_passed"),
         (row["forecast_cost_model_id"] == COST_MODEL_ID, "opportunity_forecast_cost_model_stale"),
         (
             row["forecast_target_barrier_pct"] is not None
@@ -403,6 +439,12 @@ def _load_intent(
         or cast(date, row["calibration_holdout_end"]) >= forecast_decided_at.date()
     ):
         return None, "opportunity_calibration_knowledge_time_invalid"
+    if row["prospective_assessment_checked_at"] is None or not _age_ok(
+        cast(datetime, row["prospective_assessment_checked_at"]),
+        now=now,
+        max_seconds=int(row["max_assessment_age_days"]) * 86_400,
+    ):
+        return None, "opportunity_assessment_stale"
     if not _session_is_open(now):
         return None, "market_session_closed"
     return _Intent(

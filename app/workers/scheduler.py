@@ -5070,6 +5070,7 @@ def strategy_signal_scan() -> None:
 
 def strategy_outcome_resolution() -> None:
     """Resolve mature forward brackets without persisting immature windows."""
+    from app.services.strategy_forecast_assessment import run_forecast_assessments
     from app.services.strategy_forecast_outcome_resolution import run_forecast_outcome_resolution
     from app.services.strategy_outcome_resolution import run_outcome_resolution
 
@@ -5077,14 +5078,18 @@ def strategy_outcome_resolution() -> None:
         with connect_job(autocommit=True) as conn:
             report = run_outcome_resolution(conn)
             forecast_report = run_forecast_outcome_resolution(conn)
-        tracker.row_count = report.written + forecast_report.written
+            assessment_report = run_forecast_assessments(conn)
+        tracker.row_count = report.written + forecast_report.written + assessment_report.evidence_rows_written
         tracker.note = (
             f"selected={report.selected} written={report.written} "
             f"immature={report.immature} ambiguous={report.ambiguous}; "
             f"forecasts_selected={forecast_report.selected} "
             f"forecasts_written={forecast_report.written} "
             f"forecasts_immature={forecast_report.immature} "
-            f"forecasts_ambiguous={forecast_report.ambiguous}"
+            f"forecasts_ambiguous={forecast_report.ambiguous}; "
+            f"assessment_policy={assessment_report.policy_id or 'missing'} "
+            f"assessment_scopes={assessment_report.scopes_selected} "
+            f"assessment_passed={assessment_report.passed_scopes}"
         )
 
 
