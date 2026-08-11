@@ -4,6 +4,11 @@ Date: 2026-08-11
 Status: research map; no strategy below is promoted or authorised for capital  
 Parent: #2469; evidence gates: #2505; mechanism classification: #2507
 
+Capital selection is governed by the later
+`2026-08-11-autonomous-opportunity-engine.md` correction. Candidate families
+nominate observations; they do not receive funds independently or in database
+arrival order.
+
 ## Decision
 
 eBull does **not** currently have four plausible alternatives for short-horizon
