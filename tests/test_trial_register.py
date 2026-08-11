@@ -52,7 +52,13 @@ class TestTheShippedDeclaration:
             trial for trial in TRIAL_REGISTER.trials if trial.trial_id == "short-horizon-search-session-2026-08-09"
         )
         assert family.searches == 101
-        assert TRIAL_REGISTER.declared_count == 114
+        assert TRIAL_REGISTER.declared_count == 122
+
+    def test_the_rejected_extreme_shock_sizing_arms_are_counted(self) -> None:
+        family = next(
+            trial for trial in TRIAL_REGISTER.trials if trial.trial_id == "extreme-shock-portfolio-sizing-stress-v1"
+        )
+        assert family.searches == 8
 
     def test_the_discarded_arms_are_counted(self) -> None:
         """A rejected result is still a search of the data.

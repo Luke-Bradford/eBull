@@ -74,7 +74,7 @@ from typing import Final
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-11-r2"
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-11-r3"
 
 
 @dataclass(frozen=True)
@@ -238,6 +238,15 @@ TRIAL_REGISTER: Final = TrialRegister(
             ),
             evidence="docs/proposals/ta/2026-08-09-plan-of-attack.md §2b",
             searches=101,
+        ),
+        DeclaredTrial(
+            trial_id="extreme-shock-portfolio-sizing-stress-v1",
+            description=(
+                "Frozen extreme-shock event stream under four per-name caps, each with and without the "
+                "declared 25% sector cap; all eight capital-weighted arms were rejected."
+            ),
+            evidence="docs/proposals/ta/2026-08-11-extreme-shock-portfolio-result.md; issue #2481",
+            searches=8,
         ),
         DeclaredTrial(
             trial_id="form4-code-p-opportunistic-purchase-v1",
