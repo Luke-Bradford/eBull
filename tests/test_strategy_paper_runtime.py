@@ -57,6 +57,8 @@ def _add_weaker_newer_forecast(conn: psycopg.Connection[tuple]) -> int:
             decided_at=_NOW,
             valid_through=_NOW + timedelta(days=7),
             horizon_market_days=5,
+            target_barrier_pct=Decimal("10"),
+            stop_barrier_pct=Decimal("5"),
             setup_version="weaker-setup-v1",
             exit_policy_version="test-exit-v1",
             calibration_id="test-calibration-v1",

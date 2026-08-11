@@ -237,6 +237,8 @@ def _load_intent(
                    forecast.forecast_id,forecast.forecast_policy_version,
                    forecast.decided_at AS forecast_decided_at,
                    forecast.valid_through AS forecast_valid_through,
+                   forecast.target_barrier_pct AS forecast_target_barrier_pct,
+                   forecast.stop_barrier_pct AS forecast_stop_barrier_pct,
                    forecast.conservative_net_expectancy_pct AS forecast_conservative_expectancy,
                    forecast.cost_model_id AS forecast_cost_model_id,
                    calibration.passed AS calibration_passed,
@@ -337,6 +339,24 @@ def _load_intent(
         (bool(row["calibration_passed"]), "opportunity_calibration_not_passed"),
         (row["forecast_cost_model_id"] == COST_MODEL_ID, "opportunity_forecast_cost_model_stale"),
         (
+            row["forecast_target_barrier_pct"] is not None
+            and Decimal(str(row["forecast_target_barrier_pct"])).is_finite()
+            and Decimal(str(row["forecast_target_barrier_pct"])) > 0,
+            "opportunity_forecast_barriers_missing",
+        ),
+        (
+            row["forecast_stop_barrier_pct"] is not None
+            and Decimal(str(row["forecast_stop_barrier_pct"])).is_finite()
+            and Decimal(str(row["forecast_stop_barrier_pct"])) > 0,
+            "opportunity_forecast_barriers_missing",
+        ),
+        (
+            row["forecast_stop_barrier_pct"] is not None
+            and row["stop_loss_pct"] is not None
+            and Decimal(str(row["forecast_stop_barrier_pct"])) <= Decimal(str(row["stop_loss_pct"])),
+            "opportunity_forecast_stop_exceeds_policy",
+        ),
+        (
             row["forecast_conservative_expectancy"] is not None
             and Decimal(str(row["forecast_conservative_expectancy"])) > 0,
             "opportunity_forecast_expectancy_not_positive",
@@ -411,8 +431,8 @@ def _load_intent(
             Decimal(str(row["fixed_ticket_amount"])) if row["fixed_ticket_amount"] is not None else None
         ),
         max_ticket_amount=Decimal(str(row["max_ticket_amount"])),
-        stop_loss_pct=Decimal(str(row["stop_loss_pct"])),
-        take_profit_pct=Decimal(str(row["take_profit_pct"])),
+        stop_loss_pct=Decimal(str(row["forecast_stop_barrier_pct"])),
+        take_profit_pct=Decimal(str(row["forecast_target_barrier_pct"])),
         max_quote_age_seconds=int(row["max_quote_age_seconds"]),
         max_scan_age_seconds=int(row["max_scan_age_seconds"]),
         max_halt_feed_age_seconds=int(row["max_halt_feed_age_seconds"]),

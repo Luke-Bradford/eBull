@@ -210,6 +210,8 @@ def _seed(
             decided_at=_NOW,
             valid_through=_NOW + timedelta(days=7),
             horizon_market_days=5,
+            target_barrier_pct=Decimal("10"),
+            stop_barrier_pct=Decimal("5"),
             setup_version="test-setup-v1",
             exit_policy_version="test-exit-v1",
             calibration_id="test-calibration-v1",
@@ -622,6 +624,8 @@ def test_immutable_forecast_duplicate_does_not_abort_the_callers_transaction(
                 decided_at=_NOW,
                 valid_through=_NOW + timedelta(days=7),
                 horizon_market_days=5,
+                target_barrier_pct=Decimal("10"),
+                stop_barrier_pct=Decimal("5"),
                 setup_version="test-setup-v1",
                 exit_policy_version="test-exit-v1",
                 calibration_id="test-calibration-v1",
@@ -783,6 +787,69 @@ def test_mandate_loss_at_stop_reduces_position_size(
 
     assert result.verdict == "submitted"
     assert result.amount == Decimal("100.00")
+
+
+def test_forecast_barriers_drive_loss_sizing_and_submitted_tp_sl(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("UPDATE strategy_opportunity_forecasts SET target_barrier_pct=4,stop_barrier_pct=2")
+    conn.execute("UPDATE strategy_paper_pool_events SET max_loss_per_position_pct=0.1")
+    conn.commit()
+    broker = _broker()
+    broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
+        available_cash=Decimal("2000"),
+        total_invested=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        equity=Decimal("2000"),
+        instrument_investments=(),
+        observed_at=_NOW,
+        raw_payload={},
+    )
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.amount == Decimal("100.00")
+    order = broker.place_demo_strategy_order.call_args.args[0]
+    assert order.stop_loss_rate == Decimal("98.000000")
+    assert order.take_profit_rate == Decimal("104.000000")
+    assert conn.execute(
+        "SELECT stop_loss_rate,take_profit_rate FROM strategy_entry_preflights WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone() == (Decimal("98.000000"), Decimal("104.000000"))
+
+
+@pytest.mark.parametrize(
+    ("target_barrier", "stop_barrier", "reason_code"),
+    [
+        (None, None, "opportunity_forecast_barriers_missing"),
+        (Decimal("10"), Decimal("6"), "opportunity_forecast_stop_exceeds_policy"),
+    ],
+)
+def test_invalid_forecast_barrier_geometry_refuses_before_broker_access(
+    ebull_test_conn: psycopg.Connection[Any],
+    target_barrier: Decimal | None,
+    stop_barrier: Decimal | None,
+    reason_code: str,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute(
+        """
+        UPDATE strategy_opportunity_forecasts
+        SET target_barrier_pct=%s,stop_barrier_pct=%s
+        """,
+        (target_barrier, stop_barrier),
+    )
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == reason_code
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
 
 
 def test_mandate_position_loss_below_broker_minimum_refuses_without_submission(
