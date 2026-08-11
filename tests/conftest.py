@@ -25,6 +25,8 @@ import pathlib
 import shutil
 import tempfile
 from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any, cast
 
 # Skip lifespan catch-up in every TestClient(app) enter/exit cycle.
 # Without this, each test that enters the FastAPI lifespan fires real
@@ -62,6 +64,22 @@ from tests.fixtures.ebull_test_db import (
 from tests.fixtures.ebull_test_db import (
     ebull_test_conn as ebull_test_conn,
 )
+
+
+@pytest.fixture
+def registered_strategy_test_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Register synthetic strategy IDs used by execution integration tests.
+
+    Production has no capital candidates today.  Tests that exercise the
+    post-admission lifecycle need explicit test-only candidates; treating an
+    unknown ID as one would hide the fail-closed boundary those tests protect.
+    """
+    from app.services import strategy_control_plane
+
+    manifest = dict(strategy_control_plane.STRATEGY_MANIFEST)
+    for strategy_id in ("S-ALLOC", "S-GOV", "S-LIVE-GATE", "S-OWN"):
+        manifest[strategy_id] = cast(Any, SimpleNamespace(purpose="capital_candidate"))
+    monkeypatch.setattr(strategy_control_plane, "STRATEGY_MANIFEST", manifest)
 
 
 @pytest.fixture

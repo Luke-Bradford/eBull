@@ -35,7 +35,7 @@ from app.services.strategy_live_gate import (
 )
 from tests.test_strategy_position_manager import _opened_trade
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
 
 _STRATEGY_ID = "S-LIVE-GATE"
 _VERSION = "live-gate-v1"

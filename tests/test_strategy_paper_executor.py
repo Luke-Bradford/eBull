@@ -51,7 +51,7 @@ from tests.test_result_ledger import (
     build_result,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
 
 _NOW = datetime(2026, 8, 7, 15, 0, tzinfo=UTC)  # Friday 11:00 New York
 _REQUEST_ID = UUID("1c94300c-90aa-4303-9d00-dec376d74efb")
@@ -243,6 +243,24 @@ def test_harness_signal_is_rejected_before_runtime_or_broker_checks(
 
     assert result.verdict == "rejected"
     assert result.reason_code == "harness_validation_only"
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_unregistered_signal_is_rejected_before_runtime_or_broker_checks(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    signal_id = _seed(ebull_test_conn)
+    ebull_test_conn.execute(
+        "UPDATE strategy_signals SET strategy_id='S-UNREGISTERED' WHERE signal_id=%s",
+        (signal_id,),
+    )
+    ebull_test_conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(ebull_test_conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "strategy_not_capital_candidate"
     broker.place_demo_strategy_order.assert_not_called()
 
 

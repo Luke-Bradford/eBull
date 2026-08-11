@@ -26,7 +26,7 @@ from app.services.strategy_control_plane import (
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
 
 
 def _instrument(conn: psycopg.Connection[Any], instrument_id: int = 2454001) -> None:
@@ -213,6 +213,42 @@ def test_harness_control_cannot_be_promoted_or_funded(
             enabled=True,
             changed_by="operator",
             reason="must remain a control",
+        )
+
+
+def test_unregistered_strategy_cannot_cross_the_evidence_or_capital_boundary(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    promote_strategy(
+        conn,
+        strategy_id="S-UNREGISTERED",
+        strategy_version="v1",
+        to_stage="research_candidate",
+        promoted_by="operator",
+        reason="research registration alone is not capital admission",
+    )
+    with pytest.raises(StrategyControlError, match="unregistered strategies cannot advance"):
+        promote_strategy(
+            conn,
+            strategy_id="S-UNREGISTERED",
+            strategy_version="v1",
+            to_stage="historical_validated",
+            promoted_by="operator",
+            reason="must be refused before evidence lookup",
+            evidence_ref="result:test",
+            result_ids=(1,),
+        )
+    with pytest.raises(StrategyControlError, match="unregistered strategies cannot receive capital"):
+        configure_deployment(
+            conn,
+            strategy_id="S-UNREGISTERED",
+            strategy_version="v1",
+            mode="paper",
+            capital_limit=Decimal("100"),
+            enabled=True,
+            changed_by="operator",
+            reason="must not gain authority",
         )
 
 

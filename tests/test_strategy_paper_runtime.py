@@ -15,7 +15,7 @@ from app.services.strategy_paper_runtime import refresh_strategy_health, run_str
 from tests.test_strategy_paper_executor import _NOW, _REQUEST_ID, _broker, _seed
 from tests.test_strategy_position_manager import _opened_trade
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
 
 
 def test_cycle_refreshes_health_then_executes_one_current_paper_candidate(
