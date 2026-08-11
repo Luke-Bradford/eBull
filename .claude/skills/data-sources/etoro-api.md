@@ -20,10 +20,10 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
 4. **Tooling:** use WebFetch (or the running app's HTTP client). **`curl` from CLI gets Cloudflare-blocked (403 "Attention Required")** — the portal allows browser-agent fetches only.
 5. When our code disagrees with the live doc but works (e.g. close body: doc says `InstrumentID` required, `close_position()` omits it), note the discrepancy where you found it and verify empirically on demo before relying on either.
 
-## Stable facts (re-verify anything load-bearing; market/trading index re-verified 2026-08-09)
+## Stable facts (re-verify anything load-bearing; market/trading index re-verified 2026-08-11)
 
 - Base URL `https://public-api.etoro.com`; auth headers `x-api-key` + `x-user-key` + `x-request-id` (UUID); demo endpoints carry `/demo/` in the path.
-- Rate limits have DRIFTED. The live portal index on 2026-08-09 documents the
+- Rate limits have DRIFTED. The live portal index on 2026-08-11 documents the
   market-data family at **120 GET/min shared**, ordinary trading reads at 60/min
   shared, order writes at 20/min shared, and eligibility/what-if-cost endpoints
   at 20/min dedicated. Do not retain the older blanket 60-GET/min assumption.
