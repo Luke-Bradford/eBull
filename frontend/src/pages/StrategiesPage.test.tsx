@@ -184,7 +184,12 @@ describe("StrategiesPage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(strategiesApi, "fetchStrategyOverview").mockResolvedValue(OVERVIEW);
-    vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({ points: [] });
+    vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({
+      basis: "exact_owned_realised_pnl_only",
+      total_return_available: false,
+      benchmark_comparison_available: false,
+      points: [],
+    });
     vi.spyOn(strategiesApi, "fetchStrategyOwnedPositions").mockResolvedValue({
       positions: [],
       live_quote_instrument_ids: [],
@@ -336,12 +341,18 @@ describe("StrategiesPage", () => {
 
   it("shows observed portfolio measures and controls for an approved strategy", async () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
-    vi.mocked(strategiesApi.fetchStrategyPnlHistory).mockResolvedValue({ points: [{ date: "2026-08-09", total_pnl: "50", strategy_pnl: { "s1-time-series-momentum": "50" } }] });
+    vi.mocked(strategiesApi.fetchStrategyPnlHistory).mockResolvedValue({
+      basis: "exact_owned_realised_pnl_only",
+      total_return_available: false,
+      benchmark_comparison_available: false,
+      points: [{ date: "2026-08-09", total_pnl: "50", strategy_pnl: { "s1-time-series-momentum": "50" } }],
+    });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("US$50.00")).toBeInTheDocument();
     expect(within(performance).getByText("+1.25%")).toBeInTheDocument();
     expect(within(performance).getByText("+60.00%")).toBeInTheDocument();
+    expect(within(performance).getByText(/Cumulative realised P&L from exact automated positions/)).toBeInTheDocument();
     expect(screen.getByText("1 approved")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Enabled" })).toBeEnabled();
   });

@@ -21,6 +21,7 @@ from app.api.strategies import (
     get_fired_signals,
     get_strategy_overview,
     get_strategy_owned_positions,
+    get_strategy_pnl_history,
     request_evidence_refresh,
     update_strategy_allocation,
     update_strategy_paper_pool,
@@ -181,6 +182,54 @@ def test_owned_pnl_excludes_manual_same_instrument_lifecycle(
     assert pnl.invested_capital == Decimal("100")
     assert pnl.owned_position_count == 1
     assert pnl.complete
+
+
+def test_realised_history_keeps_retired_versions_and_excludes_manual_positions(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "retired-strategy"
+    strategy_version = "retired-strategy-v1"
+    instrument_id = 2453091
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id) VALUES (%s, 7453091)",
+        (trade_id,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id, etoro_instrument_id, instrument_id, event_kind, side,
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+        ) VALUES
+          (7453091, %s, %s, 'close', 'sell', 1, 17, now(), 1, 7, 'etoro_history', '{}'::jsonb),
+          (7453092, %s, %s, 'close', 'sell', 1, 900, now(), 1, 890, 'etoro_history', '{}'::jsonb)
+        """,
+        (instrument_id, instrument_id, instrument_id, instrument_id),
+    )
+
+    response = get_strategy_pnl_history(days=365, conn=ebull_test_conn)
+
+    assert response.basis == "exact_owned_realised_pnl_only"
+    assert response.total_return_available is False
+    assert response.benchmark_comparison_available is False
+    assert len(response.points) == 1
+    assert response.points[0].total_pnl == Decimal("7")
+    assert response.points[0].strategy_pnl == {strategy_id: Decimal("7")}
 
 
 def test_strategy_positions_show_only_exact_owned_trade_with_portfolio_valuation(
@@ -754,8 +803,13 @@ def test_disabled_automatic_trading_is_visible_as_an_entry_block(
 def test_operator_allocation_uses_session_identity_and_immutable_event(
     ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from app.services import strategy_control_plane
+
     strategy_id = "s1-time-series-momentum"
     version = _current_versions()[strategy_id]
+    admitted_manifest: dict[str, Any] = dict(strategy_control_plane.STRATEGY_MANIFEST)
+    admitted_manifest[strategy_id] = SimpleNamespace(purpose="capital_candidate")
+    monkeypatch.setattr(strategy_control_plane, "STRATEGY_MANIFEST", admitted_manifest)
     ebull_test_conn.execute(
         """
         INSERT INTO strategy_promotions (

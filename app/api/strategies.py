@@ -323,6 +323,9 @@ class StrategyPnlHistoryPoint(BaseModel):
 
 
 class StrategyPnlHistoryResponse(BaseModel):
+    basis: Literal["exact_owned_realised_pnl_only"] = "exact_owned_realised_pnl_only"
+    total_return_available: Literal[False] = False
+    benchmark_comparison_available: Literal[False] = False
     points: list[StrategyPnlHistoryPoint]
 
 
@@ -1404,7 +1407,13 @@ def get_strategy_pnl_history(
     days: int = Query(default=365, ge=30, le=1825),
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> StrategyPnlHistoryResponse:
-    """Return a bounded, read-time cumulative curve from exact close events."""
+    """Return bounded cumulative realised P&L for every exact-owned lifecycle.
+
+    This is not portfolio return: capital revisions are external flows and open
+    positions need historical marks.  Old/retired strategy versions remain in
+    the shared pot, so history is deliberately not filtered to the manifest's
+    current versions.
+    """
     rows = cast(
         list[tuple[date, str, Decimal]],
         conn.execute(
@@ -1418,11 +1427,10 @@ def get_strategy_pnl_history(
         JOIN trade_events event ON event.position_id=ownership.broker_position_id
         WHERE event.event_kind='close' AND event.realized_pnl_usd IS NOT NULL
           AND event.executed_at >= now() - make_interval(days => %s)
-          AND signal.strategy_version=ANY(%s)
         GROUP BY pnl_date,signal.strategy_id
         ORDER BY pnl_date,signal.strategy_id
         """,
-            (days, list(_current_versions().values())),
+            (days,),
         ).fetchall(),
     )
     daily: dict[date, dict[str, Decimal]] = defaultdict(dict)

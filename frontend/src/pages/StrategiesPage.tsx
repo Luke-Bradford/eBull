@@ -887,7 +887,14 @@ export function StrategiesPage() {
               ) : pnlHistory.error ? (
                 <div className="mt-6 border-t border-slate-200 pt-4 dark:border-slate-800"><SectionError onRetry={pnlHistory.refetch} /></div>
               ) : pnlHistory.data?.points.length ? (
-                <PnlChart history={pnlHistory.data.points} />
+                <>
+                  <PnlChart history={pnlHistory.data.points} />
+                  <p className="mt-2 text-xs text-slate-500">
+                    Cumulative realised P&amp;L from exact automated positions. Open-position marks are included in
+                    the headline only; total return and benchmark comparison remain unavailable until capital-flow,
+                    FX and distribution accounting reconcile.
+                  </p>
+                </>
               ) : (
                 <EmptyPnlChart />
               )}
