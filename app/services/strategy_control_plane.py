@@ -132,6 +132,40 @@ def configure_paper_pool(
     current = load_paper_pool(conn)
     if current.enabled == enabled and current.capital_limit == capital_limit and current.capital_mode == capital_mode:
         raise StrategyControlError("paper pool change must alter enabled state, capital limit, or capital mode")
+    if current.event_id is not None and capital_limit < current.capital_limit:
+        # A lower principal is an external withdrawal from the virtual sleeve,
+        # not merely a cosmetic limit edit.  It cannot remove money already
+        # committed to an allocated lifecycle.  Realised losses reduce the
+        # withdrawable balance; known profits count only in compound mode.
+        committed_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(decision.amount), 0)
+            FROM strategy_funding_decisions decision
+            JOIN strategy_deployments deployment
+              ON deployment.deployment_id=decision.deployment_id
+             AND deployment.mode='paper'
+            LEFT JOIN strategy_trades trade
+              ON trade.funding_decision_id=decision.funding_decision_id
+            WHERE decision.verdict='allocated'
+              AND (trade.strategy_trade_id IS NULL OR trade.status NOT IN ('closed', 'failed'))
+            """
+        ).fetchone()
+        assert committed_row is not None
+        committed = Decimal(str(committed_row[0]))
+        if committed:
+            # Local import keeps the governance module independent at import
+            # time while reusing the exact-owned, fail-closed reconciliation.
+            from app.services.strategy_monitoring import load_paper_realised_pnl
+
+            realised = load_paper_realised_pnl(conn)
+            if realised is None:
+                raise StrategyControlError("paper principal cannot be withdrawn while realised P&L is incomplete")
+            realised_delta = sum(realised.values(), Decimal("0"))
+            if capital_mode == "fixed":
+                realised_delta = min(realised_delta, Decimal("0"))
+            effective_after = max(Decimal("0"), capital_limit + realised_delta)
+            if effective_after < committed:
+                raise StrategyControlError("paper principal cannot be withdrawn below committed strategy capital")
     row = conn.execute(
         """
         INSERT INTO strategy_paper_pool_events (enabled,capital_limit,currency,capital_mode,changed_by,reason)

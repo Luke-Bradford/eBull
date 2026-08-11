@@ -16,6 +16,7 @@ from app.services.strategy_control_plane import (
     assert_exact_position_owned,
     claim_exact_position,
     configure_deployment,
+    configure_paper_pool,
     create_strategy_trade,
     current_stage,
     decide_funding,
@@ -285,6 +286,34 @@ def test_deployment_has_one_current_row_and_complete_history(
     assert conn.execute(
         "SELECT revision, capital_limit, enabled FROM strategy_deployment_events ORDER BY revision"
     ).fetchall() == [(1, Decimal("1000.000000"), True), (2, Decimal("750.000000"), False)]
+
+
+def test_paper_principal_cannot_be_withdrawn_below_committed_capital(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    _instrument(conn)
+    signal_id = _signal(conn)
+    _paper_stage(conn)
+    _deployment_and_trade(conn, signal_id)
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("1000"),
+        changed_by="operator",
+        reason="fund virtual sleeve",
+    )
+
+    with pytest.raises(StrategyControlError, match="below committed strategy capital"):
+        configure_paper_pool(
+            conn,
+            enabled=False,
+            capital_limit=Decimal("99"),
+            changed_by="operator",
+            reason="invalid withdrawal",
+        )
+
+    assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
 
 
 def test_same_instrument_manual_position_is_never_inferred_as_owned(

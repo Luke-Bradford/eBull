@@ -48,6 +48,10 @@ class PositionInput:
     amount: Decimal
     open_rate: Decimal
     is_buy: bool
+    # Native-currency P&L -> broker USD conversion fixed by the broker at
+    # entry.  Kept separate from display FX: strategy accounting is USD even
+    # when the operator views the main portfolio in GBP/EUR.
+    open_conversion_rate: Decimal = Decimal("1")
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,7 @@ class PositionResult:
     close: Decimal | None
     value_display: Decimal | None
     price_status: PriceStatus
+    unrealised_pnl_usd: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -112,13 +117,25 @@ def compute_eod_equity(
         # but stays correct if a leveraged/short row ever appears.
         if p.is_buy:
             value_native = p.amount + p.units * (p.close - p.open_rate)
+            pnl_native = p.units * (p.close - p.open_rate)
         else:
             value_native = p.amount + p.units * (p.open_rate - p.close)
+            pnl_native = p.units * (p.open_rate - p.close)
+        unrealised_pnl_usd = pnl_native * p.open_conversion_rate
         if p.native_ccy is None:
             # No currency to convert from → cannot price into display ccy.
             no_fx += 1
             results.append(
-                PositionResult(p.position_id, p.instrument_id, p.units, p.native_ccy, p.close, None, "no_fx")
+                PositionResult(
+                    p.position_id,
+                    p.instrument_id,
+                    p.units,
+                    p.native_ccy,
+                    p.close,
+                    None,
+                    "no_fx",
+                    unrealised_pnl_usd,
+                )
             )
             continue
         try:
@@ -128,13 +145,31 @@ def compute_eod_equity(
         except FxRateNotFound:
             no_fx += 1
             results.append(
-                PositionResult(p.position_id, p.instrument_id, p.units, p.native_ccy, p.close, None, "no_fx")
+                PositionResult(
+                    p.position_id,
+                    p.instrument_id,
+                    p.units,
+                    p.native_ccy,
+                    p.close,
+                    None,
+                    "no_fx",
+                    unrealised_pnl_usd,
+                )
             )
             continue
         positions_value += value_display
         priced += 1
         results.append(
-            PositionResult(p.position_id, p.instrument_id, p.units, p.native_ccy, p.close, value_display, "priced")
+            PositionResult(
+                p.position_id,
+                p.instrument_id,
+                p.units,
+                p.native_ccy,
+                p.close,
+                value_display,
+                "priced",
+                unrealised_pnl_usd,
+            )
         )
 
     cash_value = Decimal("0")
@@ -196,6 +231,7 @@ def _read_positions(conn: psycopg.Connection[Any], snapshot_date: date) -> list[
                 b.units,
                 b.amount,
                 b.open_rate,
+                b.open_conversion_rate,
                 b.is_buy,
                 i.currency AS native_ccy,
                 (
@@ -223,6 +259,7 @@ def _read_positions(conn: psycopg.Connection[Any], snapshot_date: date) -> list[
             amount=Decimal(str(r["amount"])),
             open_rate=Decimal(str(r["open_rate"])),
             is_buy=bool(r["is_buy"]),
+            open_conversion_rate=Decimal(str(r["open_conversion_rate"])),
         )
         for r in rows
     ]
@@ -343,8 +380,9 @@ def _write_snapshot(
                 """
                 INSERT INTO portfolio_eod_position_snapshots (
                     snapshot_date, position_id, instrument_id, units,
-                    close_price, native_currency, value_display, price_status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    close_price, native_currency, value_display, price_status,
+                    unrealised_pnl_usd
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     (
@@ -356,6 +394,7 @@ def _write_snapshot(
                         r.native_ccy,
                         r.value_display,
                         r.price_status,
+                        r.unrealised_pnl_usd,
                     )
                     for r in equity.position_results
                 ],

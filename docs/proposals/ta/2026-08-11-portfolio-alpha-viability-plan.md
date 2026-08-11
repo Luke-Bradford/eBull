@@ -122,13 +122,15 @@ the operator’s wealth comparison. This is not an unsourced vendor dependency:
   free series passes review, eBull reports prospective account total return beside
   price-only market context and refuses an external recent excess-return claim.
 
-Current implementation boundary, made explicit rather than inferred: the Strategies
-chart is a bounded cumulative sum of exact-owned realised broker P&L. It is not total
-return and has no benchmark comparison. Retired strategy versions remain in that
-shared-pot history; manual positions remain excluded by exact ownership. Open marks
-appear only in the current headline. A time-weighted return needs capital revisions as
-external flows plus reconciled historical open-position marks, distributions, FX and
-costs before either return field may become available.
+Current implementation boundary, made explicit rather than inferred: the legacy
+realised series remains available for audit, while the Strategies chart reads the
+main portfolio's compact EOD position evidence and joins it to exact automated
+ownership. It therefore shows daily realised plus historical open P&L without a
+second quote, feature or per-position strategy store. Manual positions are excluded
+structurally; missing marks/closes create a gap rather than zero. Pool-principal
+changes are separately identified as external flows. This is still not total return:
+distribution/cost reconciliation and the identity-safe recent benchmark remain open,
+so both return and benchmark fields continue to refuse availability.
 
 ### Candidate C-1 — opportunistic insider purchase reproduction
 

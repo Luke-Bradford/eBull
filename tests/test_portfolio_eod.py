@@ -24,6 +24,7 @@ def _pos(
     amount: str = "0",
     open_rate: str = "0",
     is_buy: bool = True,
+    open_conversion_rate: str = "1",
 ) -> PositionInput:
     # Defaults amount=open_rate=0 reduce MTM (amount + units*(close-open_rate))
     # to units*close — the unleveraged-long identity the FX/counter tests assert.
@@ -37,6 +38,7 @@ def _pos(
         amount=Decimal(amount),
         open_rate=Decimal(open_rate),
         is_buy=is_buy,
+        open_conversion_rate=Decimal(open_conversion_rate),
     )
 
 
@@ -76,6 +78,35 @@ class TestComputeEodEquity:
             [_pos(1, "5", "GBP", "8", amount="100", open_rate="10", is_buy=False)], [], "GBP", RATES
         )
         assert eq.positions_value == Decimal("110")
+
+    def test_preserves_strategy_unrealised_pnl_in_broker_usd(self) -> None:
+        eq = compute_eod_equity(
+            [
+                _pos(
+                    1,
+                    "5",
+                    "GBP",
+                    "12",
+                    amount="100",
+                    open_rate="10",
+                    open_conversion_rate="1.25",
+                )
+            ],
+            [],
+            "GBP",
+            RATES,
+        )
+        assert eq.position_results[0].unrealised_pnl_usd == Decimal("12.50")
+
+    def test_missing_display_fx_does_not_discard_known_usd_pnl(self) -> None:
+        eq = compute_eod_equity(
+            [_pos(1, "5", "EUR", "12", amount="100", open_rate="10", open_conversion_rate="1.10")],
+            [],
+            "GBP",
+            RATES,
+        )
+        assert eq.position_results[0].price_status == "no_fx"
+        assert eq.position_results[0].unrealised_pnl_usd == Decimal("11.00")
 
     def test_mtm_equals_units_close_for_unleveraged_long(self) -> None:
         # amount == units*open_rate → MTM collapses to units*mark (the v1 case).

@@ -2591,12 +2591,18 @@ export interface StrategySizingUpdateResponse {
 
 export interface StrategyPnlHistoryPoint {
   date: string;
-  total_pnl: string;
-  strategy_pnl: Record<string, string>;
+  principal: string;
+  external_flow: string;
+  realised_pnl: string | null;
+  unrealised_pnl: string | null;
+  total_pnl: string | null;
+  pot_value: string | null;
+  complete: boolean;
+  incomplete_reasons: string[];
 }
 
 export interface StrategyPnlHistoryResponse {
-  basis: "exact_owned_realised_pnl_only";
+  basis: "exact_owned_mark_to_market_nav";
   total_return_available: false;
   benchmark_comparison_available: false;
   points: StrategyPnlHistoryPoint[];

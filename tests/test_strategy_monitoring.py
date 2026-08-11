@@ -232,6 +232,85 @@ def test_realised_history_keeps_retired_versions_and_excludes_manual_positions(
     assert response.points[0].strategy_pnl == {strategy_id: Decimal("7")}
 
 
+def test_wealth_history_combines_principal_realised_and_eod_open_marks_without_manual_positions(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    from app.api.strategies import get_strategy_wealth_history
+
+    strategy_id = "wealth-strategy"
+    strategy_version = "wealth-strategy-v1"
+    instrument_id = 2453093
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-01",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id) VALUES (%s, 7453093)",
+        (trade_id,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_paper_pool_events
+            (enabled, capital_limit, currency, capital_mode, changed_by, reason)
+        VALUES (true, 1000, 'USD', 'fixed', 'test', 'fund sleeve')
+        """
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id, etoro_instrument_id, instrument_id, event_kind, side,
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+        ) VALUES (7453093, %s, %s, 'close', 'sell', 1, 17, now(), 1, 7, 'etoro_history', '{}'::jsonb)
+        """,
+        (instrument_id, instrument_id),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO portfolio_eod_snapshots (
+            snapshot_date, display_currency, total_value, positions_value, cash_value,
+            positions_total, positions_priced, computed_at
+        ) VALUES (CURRENT_DATE, 'GBP', 9999, 9999, 0, 2, 2, now())
+        """
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO portfolio_eod_position_snapshots (
+            snapshot_date, position_id, instrument_id, units, close_price,
+            native_currency, value_display, price_status, unrealised_pnl_usd
+        ) VALUES
+          (CURRENT_DATE, 7453093, %s, 1, 20, 'USD', 20, 'priced', 10),
+          (CURRENT_DATE, 7453094, %s, 1, 999, 'USD', 999, 'priced', 999)
+        """,
+        (instrument_id, instrument_id),
+    )
+
+    response = get_strategy_wealth_history(days=365, conn=ebull_test_conn)
+
+    assert response.basis == "exact_owned_mark_to_market_nav"
+    assert response.total_return_available is False
+    assert len(response.points) == 1
+    point = response.points[0]
+    assert point.principal == Decimal("1000")
+    assert point.external_flow == Decimal("1000")
+    assert point.realised_pnl == Decimal("7")
+    assert point.unrealised_pnl == Decimal("10")
+    assert point.total_pnl == Decimal("17")
+    assert point.pot_value == Decimal("1017")
+    assert point.complete
+
+
 def test_strategy_positions_show_only_exact_owned_trade_with_portfolio_valuation(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

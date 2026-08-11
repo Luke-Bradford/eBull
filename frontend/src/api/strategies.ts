@@ -30,7 +30,7 @@ export function fetchFiredSignals(cursor: number | null, strategyId?: string): P
 }
 
 export function fetchStrategyPnlHistory(): Promise<StrategyPnlHistoryResponse> {
-  return apiFetch("/strategies/pnl-history");
+  return apiFetch("/strategies/wealth-history");
 }
 
 export function fetchStrategyOwnedPositions(): Promise<StrategyOwnedPositionsResponse> {

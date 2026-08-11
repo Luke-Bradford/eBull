@@ -207,7 +207,7 @@ function PnlTooltip({
   );
 }
 
-function PnlChart({ history }: { history: Array<{ date: string; total_pnl: string }> }) {
+function PnlChart({ history }: { history: Array<{ date: string; total_pnl: string | null }> }) {
   const theme = useChartTheme();
   const data = history.map((point) => ({ date: point.date, pnl: number(point.total_pnl) }));
   return (
@@ -230,7 +230,7 @@ function EmptyPnlChart() {
       <div className="bg-white/90 px-5 py-3 dark:bg-slate-900/90">
         <p className="text-sm font-medium text-slate-700 dark:text-slate-200">No automated P&amp;L yet</p>
         <p className="mt-1 max-w-sm text-xs text-slate-500">
-          The performance line begins when an automated position records a result.
+          The performance line begins after the first end-of-day strategy-pot snapshot.
         </p>
       </div>
     </div>
@@ -890,9 +890,10 @@ export function StrategiesPage() {
                 <>
                   <PnlChart history={pnlHistory.data.points} />
                   <p className="mt-2 text-xs text-slate-500">
-                    Cumulative realised P&amp;L from exact automated positions. Open-position marks are included in
-                    the headline only; total return and benchmark comparison remain unavailable until capital-flow,
-                    FX and distribution accounting reconcile.
+                    Daily realised plus open P&amp;L from exact automated positions; manual positions are excluded.
+                    Gaps mean an owned mark or close could not reconcile. Capital changes are recorded separately
+                    from performance; total return and benchmark comparison remain unavailable until distribution
+                    and benchmark accounting reconcile.
                   </p>
                 </>
               ) : (
