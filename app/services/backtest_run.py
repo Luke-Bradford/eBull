@@ -74,10 +74,14 @@ from app.services.deflated_sharpe import (
 )
 from app.services.equity_curve import (
     BENCHMARK_RULE_ID,
+    ENTRY_WEIGHT_DRIFT_RULE_ID,
+    MONTH_END_REBALANCE_RULE_ID,
     SIZING_RULE_ID,
     LegBook,
     build_buy_and_hold_curve,
+    build_entry_weight_drift_curve,
     build_equity_curve,
+    build_month_end_rebalanced_curve,
 )
 from app.services.indicator_series import BarSeries, Universe
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
@@ -386,6 +390,12 @@ class NamespaceMeasurement:
     #: guarantee, which is why the bound is stated as ``<=``.
     label_starts: array[int] = field(default_factory=lambda: array("i"))
     label_ends: array[int] = field(default_factory=lambda: array("i"))
+    #: Sizing-path diagnostics retained for rule attribution (#2430). These are
+    #: not promotion metrics; they explain whether a return changed because a
+    #: rule traded more or could not fund otherwise-identical entries.
+    rebalance_costs: float = 0.0
+    short_funded_entries: int = 0
+    traded_notional_total: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1233,6 +1243,7 @@ def _measure_namespace(
     corpus: _Corpus,
     raw_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
     wealth_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
+    sizing_rule: str = SIZING_RULE_ID,
 ) -> NamespaceMeasurement | None:
     """Build this namespace's curve on its own axis and compute criterion 7's set.
 
@@ -1273,7 +1284,15 @@ def _measure_namespace(
         )
 
     dates = corpus.axis[lo : hi + 1]
-    curve = build_equity_curve(_shifted(book.book, lo), date_count=len(dates))
+    shifted = _shifted(book.book, lo)
+    if sizing_rule == SIZING_RULE_ID:
+        curve = build_equity_curve(shifted, date_count=len(dates))
+    elif sizing_rule == ENTRY_WEIGHT_DRIFT_RULE_ID:
+        curve = build_entry_weight_drift_curve(shifted, date_count=len(dates))
+    elif sizing_rule == MONTH_END_REBALANCE_RULE_ID:
+        curve = build_month_end_rebalanced_curve(shifted, dates=dates)
+    else:
+        raise ValueError(f"unknown sizing rule {sizing_rule!r}")
     instruments = frozenset(book.instruments)
     # ⚠⚠ NOT ``build_equity_curve`` — #2426. The benchmark shares this engine's
     # cost model and fill contract deliberately, but NOT its sizing rule:
@@ -1329,6 +1348,9 @@ def _measure_namespace(
         axis_last=dates[-1],
         label_starts=book.label_starts,
         label_ends=book.label_ends,
+        rebalance_costs=curve.rebalance_costs,
+        short_funded_entries=curve.short_funded_entries,
+        traded_notional_total=float(curve.traded_notional.sum()),
     )
 
 
@@ -1343,6 +1365,7 @@ def evaluate_arm(
     namespaces: Sequence[ResultNamespace],
     progress: ProgressCallback | None = None,
     return_basis: str = TOTAL_RETURN_BASIS,
+    sizing_rule: str = SIZING_RULE_ID,
 ) -> ArmMeasurement:
     """One ``(strategy, quarantine arm)`` corpus pass, end to end.
 
@@ -1360,6 +1383,8 @@ def evaluate_arm(
     started = time.monotonic()
     if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
         raise ValueError(f"unknown return basis {return_basis!r}")
+    if sizing_rule not in {SIZING_RULE_ID, ENTRY_WEIGHT_DRIFT_RULE_ID, MONTH_END_REBALANCE_RULE_ID}:
+        raise ValueError(f"unknown sizing rule {sizing_rule!r}")
     regime = _regime_for(entry, corpus.axis)
     if regime.level_based != (ambiguity_arm is not None):
         raise ValueError(
@@ -1495,6 +1520,7 @@ def evaluate_arm(
             corpus=corpus,
             raw_closes_by_instrument=raw_closes_by_instrument,
             wealth_closes_by_instrument=wealth_closes_by_instrument,
+            sizing_rule=sizing_rule,
         )
         if outcome is not None:
             measured[name] = outcome
@@ -1521,6 +1547,7 @@ def evaluate_level_arms(
     namespaces: Sequence[ResultNamespace],
     progress: ProgressCallback | None = None,
     return_basis: str = TOTAL_RETURN_BASIS,
+    sizing_rule: str = SIZING_RULE_ID,
 ) -> tuple[ArmMeasurement, ...]:
     """Evaluate both daily-OHLC ambiguity projections from one corpus pass.
 
@@ -1533,6 +1560,8 @@ def evaluate_level_arms(
     started = time.monotonic()
     if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
         raise ValueError(f"unknown return basis {return_basis!r}")
+    if sizing_rule not in {SIZING_RULE_ID, ENTRY_WEIGHT_DRIFT_RULE_ID, MONTH_END_REBALANCE_RULE_ID}:
+        raise ValueError(f"unknown sizing rule {sizing_rule!r}")
     regime = _regime_for(entry, corpus.axis)
     if not regime.level_based:
         raise ValueError(f"{entry.strategy_id} is not level-based and has no ambiguity arms to share")
@@ -1666,6 +1695,7 @@ def evaluate_level_arms(
                 corpus=corpus,
                 raw_closes_by_instrument=raw_closes_by_instrument,
                 wealth_closes_by_instrument=wealth_closes_by_instrument,
+                sizing_rule=sizing_rule,
             )
             if outcome is not None:
                 measured[name] = outcome

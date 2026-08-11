@@ -12,20 +12,29 @@ test asserts the module agrees with them.
 from __future__ import annotations
 
 import math
+from datetime import date
 
 import pytest
 
 from app.services.equity_curve import (
     BENCHMARK_RULE_ID,
+    ENTRY_WEIGHT_DRIFT_RULE_ID,
+    MONTH_END_REBALANCE_RULE_ID,
     SIZING_RULE_ID,
     LegBook,
     build_buy_and_hold_curve,
+    build_entry_weight_drift_curve,
     build_equity_curve,
+    build_month_end_rebalanced_curve,
 )
 
 #: §5.4's declared v1 rule, transcribed from
 #: ``docs/proposals/ta/2026-08-07-bounded-backtester.md``.
 SPEC_SIZING_RULE = "equal_weight_concurrent_v1"
+
+#: #2430's frozen research arm. It is deliberately not production evidence.
+SPEC_ENTRY_WEIGHT_DRIFT_RULE = "entry_weight_drift_v1"
+SPEC_MONTH_END_REBALANCE_RULE = "calendar_month_end_equal_weight_v1"
 
 #: #2426's benchmark rule, transcribed from
 #: ``docs/proposals/ta/2026-08-08-buy-and-hold-benchmark.md`` §2.4.
@@ -69,6 +78,14 @@ def _leg(
 class TestSpecConstants:
     def test_the_sizing_rule_id_is_the_declared_one(self) -> None:
         assert SIZING_RULE_ID == SPEC_SIZING_RULE
+
+    def test_the_drift_arm_has_a_distinct_declared_identity(self) -> None:
+        assert ENTRY_WEIGHT_DRIFT_RULE_ID == SPEC_ENTRY_WEIGHT_DRIFT_RULE
+        assert ENTRY_WEIGHT_DRIFT_RULE_ID != SIZING_RULE_ID
+
+    def test_the_month_end_arm_has_a_distinct_declared_identity(self) -> None:
+        assert MONTH_END_REBALANCE_RULE_ID == SPEC_MONTH_END_REBALANCE_RULE
+        assert MONTH_END_REBALANCE_RULE_ID not in {SIZING_RULE_ID, ENTRY_WEIGHT_DRIFT_RULE_ID}
 
 
 class TestLegBookRefuses:
@@ -320,6 +337,69 @@ class TestRebalance:
         curve = build_equity_curve(book, date_count=10)
         cash = curve.equity - curve.invested
         assert min(cash) >= -1e-12, f"cash went to {min(cash)} — the rebalance borrowed"
+
+
+class TestEntryWeightDriftArm:
+    def test_simultaneous_entries_start_with_the_same_weights_as_production(self) -> None:
+        book = LegBook()
+        _leg(book, entry=0, exit_=2, entry_price=100.0, exit_price=100.0, marks=[100.0] * 3)
+        _leg(book, entry=0, exit_=2, entry_price=50.0, exit_price=50.0, marks=[50.0] * 3)
+        production = build_equity_curve(book, date_count=3)
+        drift = build_entry_weight_drift_curve(book, date_count=3)
+        assert drift.equity.tolist() == pytest.approx(production.equity.tolist())
+        assert drift.short_funded_entries == 0
+
+    def test_a_later_entry_cannot_be_funded_by_selling_an_existing_winner(self) -> None:
+        """The exact #2430 discriminator: production trims A at B's entry event;
+        the drift arm cannot spend that synthetic sale and reports B as short
+        funded. Signals, fills, marks and exit prices are otherwise identical."""
+        book = LegBook()
+        _leg(book, entry=0, exit_=3, entry_price=100.0, exit_price=200.0, marks=[100.0, 200.0, 200.0, 200.0])
+        _leg(book, entry=1, exit_=3, entry_price=100.0, exit_price=200.0, marks=[100.0, 150.0, 200.0])
+        production = build_equity_curve(book, date_count=4)
+        drift = build_entry_weight_drift_curve(book, date_count=4)
+        assert drift.rebalance_costs == 0.0
+        assert drift.short_funded_entries == 1
+        assert drift.traded_notional.sum() < production.traded_notional.sum()
+        assert drift.equity[-1] < production.equity[-1]
+
+
+class TestMonthEndRebalanceArm:
+    def test_it_defers_equalisation_from_an_entry_event_to_month_end(self) -> None:
+        dates = (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 31), date(2024, 2, 1))
+        book = LegBook()
+        _leg(book, entry=0, exit_=3, entry_price=100.0, exit_price=100.0, marks=[100.0] * 4, half_spread=0.01)
+        _leg(book, entry=1, exit_=3, entry_price=100.0, exit_price=100.0, marks=[100.0] * 3, half_spread=0.01)
+        production = build_equity_curve(book, date_count=len(dates))
+        monthly = build_month_end_rebalanced_curve(book, dates=dates)
+        assert production.traded_notional[1] > 0.0
+        assert monthly.traded_notional[1] == 0.0
+        assert monthly.traded_notional[2] > 0.0
+        assert monthly.rebalance_costs > 0.0
+
+    def test_it_does_not_invent_a_month_end_at_a_truncated_window_boundary(self) -> None:
+        dates = (date(2024, 7, 1), date(2024, 7, 8))
+        book = LegBook()
+        _leg(
+            book,
+            entry=0,
+            exit_=1,
+            entry_price=100.0,
+            exit_price=100.0,
+            marks=[100.0] * 2,
+            realised=False,
+        )
+        _leg(book, entry=1, exit_=1, entry_price=100.0, exit_price=100.0, marks=[100.0])
+        monthly = build_month_end_rebalanced_curve(book, dates=dates)
+        assert monthly.rebalance_costs == 0.0
+        assert monthly.short_funded_entries == 1
+
+    def test_it_refuses_an_unordered_calendar(self) -> None:
+        with pytest.raises(ValueError, match="strictly increasing"):
+            build_month_end_rebalanced_curve(
+                LegBook(),
+                dates=(date(2024, 1, 3), date(2024, 1, 2)),
+            )
 
 
 class TestHalts:
