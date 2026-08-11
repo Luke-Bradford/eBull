@@ -228,8 +228,7 @@ TRIAL_REGISTER: Final = TrialRegister(
         DeclaredTrial(
             trial_id="pead-historical-sue-net-income-v1",
             description="Issuer-deduplicated historical-SUE SEC filing drift; fixed 62-session equal-gross long/short.",
-            evidence="issue #2476 comment 2026-08-10 (sealed outcome); preregistration commit 12dff916; "
-            "implementation commit 1bf78256",
+            evidence="docs/proposals/ta/2026-08-10-pead-result.md; issue #2476 comment 2026-08-10 (sealed outcome)",
         ),
         DeclaredTrial(
             trial_id="short-horizon-search-session-2026-08-09",

@@ -63,7 +63,8 @@ class TestTheShippedDeclaration:
         assert any(trial.startswith("rsi30") for trial in TRIAL_REGISTER.trial_ids)
 
     def test_the_inconclusive_pead_trial_is_counted(self) -> None:
-        assert "pead-historical-sue-net-income-v1" in TRIAL_REGISTER.trial_ids
+        trial = next(trial for trial in TRIAL_REGISTER.trials if trial.trial_id == "pead-historical-sue-net-income-v1")
+        assert trial.evidence.startswith("docs/proposals/ta/2026-08-10-pead-result.md")
 
     def test_the_rejected_insider_purchase_trial_is_counted(self) -> None:
         assert "form4-code-p-opportunistic-purchase-v1" in TRIAL_REGISTER.trial_ids
