@@ -443,11 +443,20 @@ comparative selection are the system's purpose.
 
 ## Acceptance before hands-off demo trading
 
+Implementation status (2026-08-11): the portfolio mandate and its pre-trade
+risk ceilings are enforced. #2545 adds the compact immutable forecast contract
+and makes a current, passed calibration plus positive conservative after-cost
+expectancy mandatory before broker access. It does **not** manufacture a
+forecast from the four research harnesses: no production candidate currently
+has a calibrated forecast generator, and the batch allocator and prospective
+outcome monitor below remain required. The safe current behaviour is therefore
+to place no autonomous trades.
+
 - [ ] Every funded order points to one reproducible forecast, policy and batch
   allocation decision.
 - [ ] Total portfolio return reconciles into benchmark, active, hedge/cash, FX
   and cost attribution; S&P comparison uses total return in base currency.
-- [ ] Risk-profile labels resolve to immutable measurable mandate limits.
+- [x] Risk-profile labels resolve to immutable measurable mandate limits.
 - [ ] All simultaneous opportunities are compared; database arrival order has
   no effect, proved by permutation tests.
 - [ ] Predictions are calibrated on later data and monitored prospectively.

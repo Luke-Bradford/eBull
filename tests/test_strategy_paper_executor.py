@@ -27,6 +27,7 @@ from app.providers.broker import (
     BrokerProvider,
     BrokerWhatIfCostResponse,
 )
+from app.services.cost_model import COST_MODEL_ID
 from app.services.result_ledger import store_holdout_result
 from app.services.strategy_control_plane import (
     configure_deployment,
@@ -37,6 +38,13 @@ from app.services.strategy_control_plane import (
     link_strategy_order,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_opportunity_forecast import (
+    ForecastCalibration,
+    OpportunityForecast,
+    OpportunityForecastError,
+    record_opportunity_forecast,
+    register_forecast_calibration,
+)
 from app.services.strategy_paper_executor import (
     PaperExecutionResult,
     _effective_capital_bases,
@@ -180,6 +188,45 @@ def _seed(
         """
     ).fetchone()
     assert signal is not None
+    register_forecast_calibration(
+        conn,
+        ForecastCalibration(
+            calibration_id="test-calibration-v1",
+            model_version="test-model-v1",
+            holdout_start=date(2026, 1, 1),
+            holdout_end=date(2026, 7, 31),
+            sample_size=500,
+            brier_score=Decimal("0.18"),
+            calibration_error=Decimal("0.04"),
+            passed=True,
+            evidence_ref="synthetic executor fixture only",
+        ),
+    )
+    record_opportunity_forecast(
+        conn,
+        OpportunityForecast(
+            signal_id=int(signal[0]),
+            decided_at=_NOW,
+            valid_through=_NOW + timedelta(days=7),
+            horizon_market_days=5,
+            setup_version="test-setup-v1",
+            exit_policy_version="test-exit-v1",
+            calibration_id="test-calibration-v1",
+            target_probability=Decimal("0.6"),
+            stop_probability=Decimal("0.2"),
+            timeout_probability=Decimal("0.2"),
+            target_net_return_pct=Decimal("4"),
+            stop_net_return_pct=Decimal("-2"),
+            timeout_net_return_pct=Decimal("0"),
+            expected_duration_hours=Decimal("24"),
+            uncertainty_penalty_pct=Decimal("0.2"),
+            tail_penalty_pct=Decimal("0.1"),
+            correlation_penalty_pct=Decimal("0.1"),
+            cost_stress_penalty_pct=Decimal("0.1"),
+            conservative_net_expectancy_pct=Decimal("1.5"),
+            cost_model_id=COST_MODEL_ID,
+        ),
+    )
     conn.execute(
         "INSERT INTO quotes (instrument_id, quoted_at, bid, ask, last, spread_pct, spread_flag) "
         "VALUES (2449001, %s, 99, 100, 99.5, 1, false)",
@@ -398,15 +445,114 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
         "SELECT strategy_request_id, execution_origin, broker_order_ref FROM orders WHERE order_id=%s",
         (result.order_id,),
     ).fetchone() == (_REQUEST_ID, "strategy", "13902598")
-    assert conn.execute(
-        "SELECT verdict, allocated_amount, net_expectancy_pct FROM strategy_entry_preflights WHERE signal_id=%s",
+    forecast_id = conn.execute(
+        "SELECT forecast_id FROM strategy_opportunity_forecasts WHERE signal_id=%s",
         (signal_id,),
-    ).fetchone() == ("allocated", Decimal("50.000000"), Decimal("3.00000000"))
+    ).fetchone()
+    assert forecast_id is not None
+    assert conn.execute(
+        "SELECT verdict, allocated_amount, net_expectancy_pct, forecast_id "
+        "FROM strategy_entry_preflights WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone() == ("allocated", Decimal("50.000000"), Decimal("3.00000000"), forecast_id[0])
     conn.commit()
 
     # Retry is read-only and cannot submit a duplicate.
     assert execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW).order_id == result.order_id
     broker.place_demo_strategy_order.assert_called_once()
+
+
+def test_missing_opportunity_forecast_refuses_before_broker_access(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("DELETE FROM strategy_opportunity_forecasts WHERE signal_id=%s", (signal_id,))
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "opportunity_forecast_missing"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+    assert conn.execute(
+        "SELECT forecast_id FROM strategy_entry_preflights WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone() == (None,)
+
+
+@pytest.mark.parametrize(
+    ("invalidity", "reason_code"),
+    [
+        ("calibration", "opportunity_calibration_not_passed"),
+        ("cost", "opportunity_forecast_cost_model_stale"),
+        ("expiry", "opportunity_forecast_not_current"),
+    ],
+)
+def test_invalid_opportunity_evidence_refuses_before_broker_access(
+    ebull_test_conn: psycopg.Connection[Any],
+    invalidity: str,
+    reason_code: str,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    if invalidity == "calibration":
+        conn.execute("UPDATE strategy_forecast_calibrations SET passed=false")
+    elif invalidity == "cost":
+        conn.execute("UPDATE strategy_opportunity_forecasts SET cost_model_id='obsolete-cost-model'")
+    else:
+        conn.execute("UPDATE strategy_opportunity_forecasts SET valid_through=decided_at")
+    conn.commit()
+    broker = _broker()
+    decision_time = _NOW + timedelta(seconds=1) if reason_code == "opportunity_forecast_not_current" else _NOW
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=decision_time)
+
+    assert result.reason_code == reason_code
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_immutable_forecast_duplicate_does_not_abort_the_callers_transaction(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    existing = conn.execute(
+        "SELECT forecast_id FROM strategy_opportunity_forecasts WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone()
+    assert existing is not None
+
+    with pytest.raises(OpportunityForecastError, match="immutable opportunity forecast"):
+        record_opportunity_forecast(
+            conn,
+            OpportunityForecast(
+                signal_id=signal_id,
+                decided_at=_NOW,
+                valid_through=_NOW + timedelta(days=7),
+                horizon_market_days=5,
+                setup_version="test-setup-v1",
+                exit_policy_version="test-exit-v1",
+                calibration_id="test-calibration-v1",
+                target_probability=Decimal("0.6"),
+                stop_probability=Decimal("0.2"),
+                timeout_probability=Decimal("0.2"),
+                target_net_return_pct=Decimal("4"),
+                stop_net_return_pct=Decimal("-2"),
+                timeout_net_return_pct=Decimal("0"),
+                expected_duration_hours=Decimal("24"),
+                uncertainty_penalty_pct=Decimal("0.2"),
+                tail_penalty_pct=Decimal("0.1"),
+                correlation_penalty_pct=Decimal("0.1"),
+                cost_stress_penalty_pct=Decimal("0.1"),
+                conservative_net_expectancy_pct=Decimal("1.5"),
+                cost_model_id=COST_MODEL_ID,
+            ),
+        )
+
+    assert conn.execute("SELECT count(*) FROM strategy_opportunity_forecasts").fetchone() == (1,)
 
 
 def test_fixed_ticket_mode_requests_a_currency_amount_before_risk_caps(
