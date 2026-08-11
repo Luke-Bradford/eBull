@@ -9,6 +9,13 @@ Capital selection is governed by the later
 nominate observations; they do not receive funds independently or in database
 arrival order.
 
+Candidate admission, trial budget and build order are governed by
+`2026-08-11-portfolio-alpha-viability-plan.md`. This map is a taxonomy and
+diagnostic backlog, not authority to test every row. In particular, the
+3/5/10-session sector-residual work remains reserved until it establishes a
+mechanism independent of the rejected residual-confluence candidate and an
+uncontaminated evaluation interval.
+
 ## Decision
 
 eBull does **not** currently have four plausible alternatives for short-horizon

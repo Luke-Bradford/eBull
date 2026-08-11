@@ -4,6 +4,11 @@ Date: 2026-08-11
 Status: architecture correction; required before any capital-backed paper run
 Parent: #2469; implementation: #2525; candidate evidence: #2505; context: #2523
 
+Research admission and build order are governed by
+`docs/proposals/ta/2026-08-11-portfolio-alpha-viability-plan.md`. In particular,
+the allocator must not turn the four harness controls or any survivor-only,
+carry-unmodelled result into capital merely because this architecture exists.
+
 ## Decision
 
 The capital-facing product must not be a picker of independent named
