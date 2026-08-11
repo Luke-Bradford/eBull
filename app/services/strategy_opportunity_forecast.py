@@ -3,6 +3,10 @@
 Forecasts may be negative or uncalibrated so they can remain in shadow.  The
 executor separately requires current, passed calibration and positive
 conservative expectancy before any capital authority is considered.
+
+Version 1 is deliberately long-only.  Persisting the side makes that execution
+boundary auditable and leaves a versioned migration path for future short
+support without implying that borrow and carry evidence exists today.
 """
 
 from __future__ import annotations
@@ -175,14 +179,18 @@ def record_opportunity_forecast(conn: psycopg.Connection[Any], forecast: Opportu
         raise OpportunityForecastError("conservative expectancy does not reconcile")
     knowledge = conn.execute(
         """
-        SELECT s.signal_kind,s.verdict,c.holdout_end
+        SELECT s.signal_kind,s.verdict,
+               (
+                   SELECT c.holdout_end
+                   FROM strategy_forecast_calibrations c
+                   WHERE c.calibration_id=%s
+               ) AS calibration_holdout_end
         FROM strategy_signals s
-        JOIN strategy_forecast_calibrations c ON c.calibration_id=%s
         WHERE s.signal_id=%s
         """,
         (forecast.calibration_id, forecast.signal_id),
     ).fetchone()
-    if knowledge is None:
+    if knowledge is None or knowledge[2] is None:
         raise OpportunityForecastError("signal or calibration evidence is missing")
     if knowledge[0] != "entry" or knowledge[1] != "fired":
         raise OpportunityForecastError("only fired entry signals may have opportunity forecasts")
