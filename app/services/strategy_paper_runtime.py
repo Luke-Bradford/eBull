@@ -87,6 +87,10 @@ def _load_ranked_opportunities(
             },
         )
         rows = cur.fetchall()
+    # End the read transaction before pure validation/ranking can fail. A
+    # duplicate economic identity must fail closed without leaving this pooled
+    # connection in a transaction or touching already-committed health state.
+    conn.commit()
     return rank_positive_opportunities(
         [
             RankableOpportunity(
@@ -382,7 +386,6 @@ def run_strategy_paper_cycle(
         ]
     )
     candidates = _load_ranked_opportunities(conn, strategy_versions=versions, observed_at=observed_at)
-    conn.commit()
     selected = candidates[:signal_limit]
     for opportunity in selected:
         execute_fired_paper_signal(conn, broker=broker, signal_id=opportunity.signal_id, now=observed_at)

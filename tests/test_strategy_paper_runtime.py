@@ -153,6 +153,7 @@ def test_stale_forecast_cannot_consume_the_bounded_ranked_set(
     ranked = _load_ranked_opportunities(conn, strategy_versions=["v1"], observed_at=_NOW)
 
     assert [opportunity.signal_id for opportunity in ranked] == [current_signal]
+    assert conn.info.transaction_status == TransactionStatus.IDLE
 
 
 def test_broker_outage_and_drawdown_unknown_block_entries_without_row_growth(

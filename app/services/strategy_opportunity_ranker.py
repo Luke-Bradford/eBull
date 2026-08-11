@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-RANKING_POLICY_VERSION = "conservative-opportunity-rank-v1"
-
 
 class OpportunityRankingError(ValueError):
     """The proposed opportunity set cannot be ranked safely."""
@@ -73,7 +71,6 @@ def rank_positive_opportunities(opportunities: list[RankableOpportunity]) -> lis
 
 
 __all__ = [
-    "RANKING_POLICY_VERSION",
     "OpportunityRankingError",
     "RankableOpportunity",
     "rank_positive_opportunities",
