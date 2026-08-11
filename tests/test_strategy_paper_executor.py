@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier, Event
 from time import sleep
@@ -226,6 +226,52 @@ def _seed(
     )
     conn.commit()
     return int(signal[0])
+
+
+def _existing_allocated_trade(
+    conn: psycopg.Connection[Any],
+    *,
+    index: int,
+    amount: Decimal,
+    status: str = "open",
+) -> int:
+    deployment = conn.execute(
+        "SELECT deployment_id FROM strategy_deployments WHERE strategy_id='S-ALLOC' AND strategy_version='v1'"
+    ).fetchone()
+    assert deployment is not None
+    signal_date = date(2026, 6, 1) + timedelta(days=index)
+    signal = conn.execute(
+        """
+        INSERT INTO strategy_signals (
+            strategy_id,strategy_version,instrument_id,signal_bar_date,
+            signal_kind,verdict,fill_bar_date,fill_price,universe,input_rule_set_versions
+        ) VALUES ('S-ALLOC','v1',2449001,%s,'entry','fired',%s,100,
+                  'survivor_only','{"indicator_series":"rules-v1"}'::jsonb)
+        RETURNING signal_id
+        """,
+        (signal_date, signal_date + timedelta(days=1)),
+    ).fetchone()
+    assert signal is not None
+    decision = conn.execute(
+        """
+        INSERT INTO strategy_funding_decisions (
+            signal_id,deployment_id,verdict,amount,reason_code
+        ) VALUES (%s,%s,'allocated',%s,'existing_allocation')
+        RETURNING funding_decision_id
+        """,
+        (signal[0], deployment[0], amount),
+    ).fetchone()
+    assert decision is not None
+    trade = conn.execute(
+        """
+        INSERT INTO strategy_trades (funding_decision_id,instrument_id,status)
+        VALUES (%s,2449001,%s)
+        RETURNING strategy_trade_id
+        """,
+        (decision[0], status),
+    ).fetchone()
+    assert trade is not None
+    return int(trade[0])
 
 
 def test_harness_signal_is_rejected_before_runtime_or_broker_checks(
@@ -456,18 +502,214 @@ def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
     configure_paper_pool(
         conn,
         enabled=True,
-        capital_limit=Decimal("25"),
+        capital_limit=Decimal("400"),
         risk_profile="balanced",
         changed_by="operator",
         reason="bounded shared pot",
     )
     conn.commit()
     broker = _broker()
+    broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
+        available_cash=Decimal("2000"),
+        total_invested=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        equity=Decimal("2000"),
+        instrument_investments=(),
+        observed_at=_NOW,
+        raw_payload={},
+    )
 
     result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
 
     assert result.verdict == "submitted"
-    assert result.amount == Decimal("25.00")
+    assert result.amount == Decimal("60.00")
+
+
+def test_mandate_loss_at_stop_reduces_position_size(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("UPDATE strategy_paper_pool_events SET max_loss_per_position_pct=0.25")
+    conn.commit()
+    broker = _broker()
+    broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
+        available_cash=Decimal("2000"),
+        total_invested=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        equity=Decimal("2000"),
+        instrument_investments=(),
+        observed_at=_NOW,
+        raw_payload={},
+    )
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "submitted"
+    assert result.amount == Decimal("100.00")
+
+
+def test_mandate_position_loss_below_broker_minimum_refuses_without_submission(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("UPDATE strategy_paper_pool_events SET max_loss_per_position_pct=0.0001")
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "below_broker_minimum"
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_mandate_active_risk_budget_reduces_position_size(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("UPDATE strategy_paper_pool_events SET active_risk_budget_pct=5")
+    conn.commit()
+    broker = _broker()
+    broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
+        available_cash=Decimal("2000"),
+        total_invested=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        equity=Decimal("2000"),
+        instrument_investments=(),
+        observed_at=_NOW,
+        raw_payload={},
+    )
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "submitted"
+    assert result.amount == Decimal("100.00")
+
+
+def test_mandate_concurrency_refuses_before_order_submission(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    for index in range(8):
+        _existing_allocated_trade(conn, index=index, amount=Decimal("1"))
+    conn.commit()
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: {("S-ALLOC", "v1"): Decimal("0")},
+    )
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "portfolio_concurrency_limit"
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_mandate_cash_reserve_refuses_when_allocated_capital_reaches_boundary(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("UPDATE strategy_paper_pool_events SET active_risk_budget_pct=50,cash_reserve_pct=50")
+    _existing_allocated_trade(conn, index=0, amount=Decimal("1000"))
+    conn.commit()
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: {("S-ALLOC", "v1"): Decimal("0")},
+    )
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "portfolio_cash_reserve_limit"
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("mandate_drawdown_pct", "equity", "reason_code"),
+    [
+        (Decimal("15"), Decimal("900"), "account_drawdown_limit"),
+        (Decimal("5"), Decimal("950"), "portfolio_drawdown_limit"),
+    ],
+)
+def test_stricter_drawdown_limit_refuses_at_the_exact_boundary(
+    ebull_test_conn: psycopg.Connection[Any],
+    mandate_drawdown_pct: Decimal,
+    equity: Decimal,
+    reason_code: str,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute(
+        "UPDATE strategy_paper_pool_events SET max_portfolio_drawdown_pct=%s",
+        (mandate_drawdown_pct,),
+    )
+    conn.execute(
+        """
+        INSERT INTO strategy_paper_account_risk_state (
+            id,equity_high_water,last_equity,last_drawdown_pct,observed_at
+        ) VALUES (true,1000,1000,0,%s)
+        """,
+        (_NOW,),
+    )
+    conn.commit()
+    broker = _broker()
+    broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
+        available_cash=equity,
+        total_invested=Decimal("0"),
+        unrealized_pnl=equity - Decimal("1000"),
+        equity=equity,
+        instrument_investments=(),
+        observed_at=_NOW,
+        raw_payload={},
+    )
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == reason_code
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_mandate_daily_loss_refuses_at_the_exact_market_day_boundary(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    trade_id = _existing_allocated_trade(conn, index=0, amount=Decimal("100"), status="closed")
+    conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (
+            strategy_trade_id,broker_position_id,status,released_at,release_reason
+        ) VALUES (%s,7443001,'released',%s,'closed')
+        """,
+        (trade_id, _NOW),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id,etoro_instrument_id,instrument_id,event_kind,side,units,
+            price,executed_at,fees_usd,realized_pnl_usd,investment_usd,source,raw_payload
+        ) VALUES (7443001,2449001,2449001,'close','sell',1,100,%s,0,-30,100,'etoro_history','{}')
+        """,
+        (_NOW,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.load_paper_realised_pnl",
+        lambda _conn: {("S-ALLOC", "v1"): Decimal("0")},
+    )
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "portfolio_daily_loss_limit"
+    broker.place_demo_strategy_order.assert_not_called()
 
 
 def test_legacy_enabled_pool_without_mandate_cannot_authorise_an_order(
@@ -524,7 +766,7 @@ def test_shared_paper_pool_excludes_future_live_reservations(
     configure_paper_pool(
         conn,
         enabled=True,
-        capital_limit=Decimal("26"),
+        capital_limit=Decimal("400"),
         risk_profile="balanced",
         changed_by="operator",
         reason="paper-only shared pot",
@@ -558,12 +800,22 @@ def test_shared_paper_pool_excludes_future_live_reservations(
     )
     conn.commit()
 
-    result = execute_fired_paper_signal(conn, broker=_broker(), signal_id=signal_id, now=_NOW)
+    broker = _broker()
+    broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
+        available_cash=Decimal("2000"),
+        total_invested=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        equity=Decimal("2000"),
+        instrument_investments=(),
+        observed_at=_NOW,
+        raw_payload={},
+    )
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
 
     assert (result.verdict, result.reason_code, result.amount) == (
         "submitted",
         "broker_accepted",
-        Decimal("26.00"),
+        Decimal("60.00"),
     )
 
 
