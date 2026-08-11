@@ -155,25 +155,27 @@ FIXTURE_WHAT_IF_COST_RESPONSE = {
 }
 
 FIXTURE_ACCOUNT_PNL_RESPONSE = {
-    "credits": 1000,
-    "positions": [
-        {"instrumentId": 1001, "amount": 200, "unrealizedPnL": {"pnL": 20}},
-        {"instrumentId": 1002, "amount": 100, "unrealizedPnL": {"pnL": -5}},
-    ],
-    "mirrors": [
-        {
-            "availableAmount": 50,
-            "closedPositionsNetProfit": 10,
-            "positions": [
-                {"instrumentId": 1001, "amount": 25, "unrealizedPnL": {"pnL": 2}},
-            ],
-        }
-    ],
-    "ordersForOpen": [
-        {"instrumentId": 1001, "mirrorID": 0, "amount": 40, "totalExternalCosts": 1},
-        {"instrumentId": 1002, "mirrorID": 99, "amount": 999, "totalExternalCosts": 999},
-    ],
-    "orders": [{"instrumentId": 1002, "amount": 30}],
+    "clientPortfolio": {
+        "credit": 1000,
+        "positions": [
+            {"instrumentID": 1001, "amount": 200, "unrealizedPnL": {"pnL": 20}},
+            {"instrumentID": 1002, "amount": 100, "unrealizedPnL": {"pnL": -5}},
+        ],
+        "mirrors": [
+            {
+                "availableAmount": 50,
+                "closedPositionsNetProfit": 10,
+                "positions": [
+                    {"instrumentID": 1001, "amount": 25, "unrealizedPnL": {"pnL": 2}},
+                ],
+            }
+        ],
+        "ordersForOpen": [
+            {"instrumentID": 1001, "mirrorID": 0, "amount": 40, "totalExternalCosts": 1},
+            {"instrumentID": 1002, "mirrorID": 99, "amount": 999, "totalExternalCosts": 999},
+        ],
+        "orders": [{"instrumentID": 1002, "amount": 30}],
+    }
 }
 
 
@@ -327,7 +329,12 @@ class TestStrategyAccountRisk:
 
     def test_account_risk_fails_closed_on_partial_pnl_shape(self) -> None:
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {**FIXTURE_ACCOUNT_PNL_RESPONSE, "orders": None}
+        mock_resp.json.return_value = {
+            "clientPortfolio": {
+                **FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"],
+                "orders": None,
+            }
+        }
         with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
             broker._http_read = MagicMock()
             broker._http_read.get.return_value = mock_resp
@@ -337,6 +344,19 @@ class TestStrategyAccountRisk:
                 assert "orders" in str(exc)
             else:  # pragma: no cover
                 raise AssertionError("partial P&L response must fail closed")
+
+    def test_account_risk_fails_closed_without_live_envelope(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"]
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            try:
+                broker.get_account_risk_snapshot()
+            except TradingPreflightParseError as exc:
+                assert "clientPortfolio" in str(exc)
+            else:  # pragma: no cover
+                raise AssertionError("unwrapped P&L response must fail closed")
 
 
 class TestDemoStrategyOrder:
