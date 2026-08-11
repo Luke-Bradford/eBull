@@ -91,7 +91,9 @@ insiders. They supply priors and mechanisms, never eBull promotion evidence.
 ## 3. The initial research budget
 
 The first programme originally admitted three alpha/risk-overlay hypotheses. C-1
-and C-2 are now rejected; only C-3 remains open.
+and C-2 are now rejected. C-3 has now failed its point-in-time source gate, so
+the first bounded candidate budget is closed with zero promotable alpha
+candidates. See `2026-08-11-quality-momentum-feasibility-result.md`.
 This is a budget, not a promise to produce a strategy.
 
 ### Foundation F-0 — core and no-trade comparator
@@ -196,6 +198,17 @@ Capital allocation removed the edge before broker feasibility could promote it, 
 the family is closed. Do not search a neighbouring threshold to rescue it.
 
 ### Candidate C-3 — one low-turnover long-only factor tilt
+
+**Disposition (2026-08-11): deferred before outcome access.** The #2537
+full-population census found 7,709 archive series but only 5,269 identity maps,
+zero archive CIKs, and point-in-time membership beginning only on 2026-08-10.
+The operational SEC table's three-annual-accession retention leaves the
+optimistic quality-input upper bound at 0.0%, 0.0%, 0.0%, 0.3%, 28.6%, 33.4%
+and 31.3% of active archive series on the 2020–2026 June decision dates. The
+free SEC bulk archive can repair retained accounting depth for identified
+issuers; it cannot restore the absent dead-name price and historical membership
+population. No factor return was inspected. Do not backtest C-3 on mapped
+survivors or current membership and do not add it to the runtime catalogue.
 
 The purpose is to ask whether a simple monthly or quarterly cross-sectional overlay
 improves F-0, not to discover a daily entry trick. Freeze one specification from the
@@ -420,8 +433,10 @@ The order is deliberately different from “build more strategies.”
    no backfill, picker entry or neighbouring rescue trial.
 5. **C-2 closed:** retain the frozen event extractor, portfolio simulator, trial
    charge and failed aggregate verdict; no prospective census or rescue search.
-6. **C-3 feasibility/preregistration:** only if point-in-time fundamentals and
-   membership make the factor trial honest.
+6. **C-3 deferred:** #2537 measured that point-in-time fundamentals, dead-name
+   prices and historical membership do not make the factor trial honest. Retain
+   prospective collection; do not preregister or backtest until the independent
+   source contract in its result is met.
 7. **Viability report:** compare every admitted candidate with F-0 and no trade.
    Select all independent passers; select none if none pass.
 8. **Opportunity allocator:** implement #2525 only after at least one candidate passes
@@ -469,10 +484,11 @@ The plan is ready to proceed when:
   TP/SL/timeout, attribution and material refusals—not every ticker evaluated.
 
 The current state does **not** meet those conditions. It has enough evidence to close
-C-1 and C-2, but not enough to turn on autonomous demo allocation. The defensible
-sequence is core accounting and research-integrity repair, then C-3 only if its
-point-in-time data contract is feasible. More technical-indicator combinations are
-not the next opportunity.
+C-1 and C-2 and defer C-3 before outcome access, but not enough to turn on autonomous
+demo allocation. The first bounded candidate budget therefore ends at zero promotable
+alpha candidates. The defensible sequence is core accounting, research-integrity and
+prospective-source work while the mandate remains in F-0/cash; more technical-indicator
+combinations are not the next opportunity.
 
 ## 10. External challenge incorporated
 
