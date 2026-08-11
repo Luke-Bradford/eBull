@@ -29,9 +29,12 @@ Stage = Literal[
 ]
 Mode = Literal["paper", "live"]
 CapitalMode = Literal["fixed", "compound"]
+RiskProfile = Literal["unconfigured", "cautious", "balanced", "growth"]
 TicketSizingMode = Literal["percent", "fixed"]
 
 GOVERNANCE_GATE_VERSION = "strategy-governance-v1"
+MANDATE_POLICY_VERSION = "portfolio-mandate-v1"
+UNCONFIGURED_MANDATE_POLICY_VERSION = "portfolio-mandate-unconfigured"
 
 # Two-key Postgres advisory-lock namespace.  2454 is this issue's stable,
 # documented namespace; hashtext(strategy identity) supplies the per-version
@@ -88,18 +91,105 @@ class Deployment:
 
 
 @dataclass(frozen=True)
+class PortfolioMandate:
+    policy_version: str
+    risk_profile: RiskProfile
+    target_volatility_pct: Decimal | None
+    max_portfolio_drawdown_pct: Decimal | None
+    max_loss_per_position_pct: Decimal | None
+    max_daily_loss_pct: Decimal | None
+    active_risk_budget_pct: Decimal | None
+    cash_reserve_pct: Decimal | None
+    max_concurrent_positions: int | None
+    shorts_allowed: bool = False
+    leverage_allowed: bool = False
+
+    @property
+    def configured(self) -> bool:
+        return self.risk_profile != "unconfigured"
+
+
+UNCONFIGURED_MANDATE = PortfolioMandate(
+    policy_version=UNCONFIGURED_MANDATE_POLICY_VERSION,
+    risk_profile="unconfigured",
+    target_volatility_pct=None,
+    max_portfolio_drawdown_pct=None,
+    max_loss_per_position_pct=None,
+    max_daily_loss_pct=None,
+    active_risk_budget_pct=None,
+    cash_reserve_pct=None,
+    max_concurrent_positions=None,
+)
+
+_MANDATE_PROFILES: dict[RiskProfile, PortfolioMandate] = {
+    "unconfigured": UNCONFIGURED_MANDATE,
+    "cautious": PortfolioMandate(
+        MANDATE_POLICY_VERSION,
+        "cautious",
+        Decimal("8"),
+        Decimal("10"),
+        Decimal("0.5"),
+        Decimal("1"),
+        Decimal("10"),
+        Decimal("25"),
+        4,
+    ),
+    "balanced": PortfolioMandate(
+        MANDATE_POLICY_VERSION,
+        "balanced",
+        Decimal("12"),
+        Decimal("15"),
+        Decimal("0.75"),
+        Decimal("1.5"),
+        Decimal("20"),
+        Decimal("15"),
+        8,
+    ),
+    "growth": PortfolioMandate(
+        MANDATE_POLICY_VERSION,
+        "growth",
+        Decimal("18"),
+        Decimal("25"),
+        Decimal("1"),
+        Decimal("2.5"),
+        Decimal("30"),
+        Decimal("10"),
+        12,
+    ),
+}
+
+
+def mandate_for_profile(risk_profile: RiskProfile) -> PortfolioMandate:
+    """Resolve a presentation label to the exact immutable v1 limits.
+
+    These are operator risk ceilings, not estimated returns or fitted strategy
+    parameters.  A later policy changes ``MANDATE_POLICY_VERSION`` and writes
+    its exact limits; it never mutates the meaning of an existing event.
+    """
+    try:
+        return _MANDATE_PROFILES[risk_profile]
+    except KeyError as exc:  # pragma: no cover - guarded by Literal/Pydantic at typed boundaries
+        raise StrategyControlError(f"unknown risk profile: {risk_profile}") from exc
+
+
+@dataclass(frozen=True)
 class PaperPool:
     event_id: int | None
     enabled: bool
     capital_limit: Decimal
     currency: str = "USD"
     capital_mode: CapitalMode = "fixed"
+    mandate: PortfolioMandate = UNCONFIGURED_MANDATE
 
 
 def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
     row = conn.execute(
         """
-        SELECT strategy_paper_pool_event_id,enabled,capital_limit,currency,capital_mode
+        SELECT strategy_paper_pool_event_id,enabled,capital_limit,currency,capital_mode,
+               mandate_policy_version,risk_profile,target_volatility_pct,
+               max_portfolio_drawdown_pct,max_loss_per_position_pct,max_daily_loss_pct,
+               active_risk_budget_pct,cash_reserve_pct,max_concurrent_positions,
+               shorts_allowed,leverage_allowed
         FROM strategy_paper_pool_events
         ORDER BY strategy_paper_pool_event_id DESC
         LIMIT 1
@@ -107,7 +197,27 @@ def load_paper_pool(conn: psycopg.Connection[Any]) -> PaperPool:
     ).fetchone()
     if row is None:
         return PaperPool(None, False, Decimal("0"))
-    return PaperPool(int(row[0]), bool(row[1]), Decimal(str(row[2])), str(row[3]), cast(CapitalMode, row[4]))
+    mandate = PortfolioMandate(
+        policy_version=str(row[5]),
+        risk_profile=cast(RiskProfile, row[6]),
+        target_volatility_pct=None if row[7] is None else Decimal(str(row[7])),
+        max_portfolio_drawdown_pct=None if row[8] is None else Decimal(str(row[8])),
+        max_loss_per_position_pct=None if row[9] is None else Decimal(str(row[9])),
+        max_daily_loss_pct=None if row[10] is None else Decimal(str(row[10])),
+        active_risk_budget_pct=None if row[11] is None else Decimal(str(row[11])),
+        cash_reserve_pct=None if row[12] is None else Decimal(str(row[12])),
+        max_concurrent_positions=None if row[13] is None else int(row[13]),
+        shorts_allowed=bool(row[14]),
+        leverage_allowed=bool(row[15]),
+    )
+    return PaperPool(
+        int(row[0]),
+        bool(row[1]),
+        Decimal(str(row[2])),
+        str(row[3]),
+        cast(CapitalMode, row[4]),
+        mandate,
+    )
 
 
 def configure_paper_pool(
@@ -116,6 +226,7 @@ def configure_paper_pool(
     enabled: bool,
     capital_limit: Decimal,
     capital_mode: CapitalMode = "fixed",
+    risk_profile: RiskProfile,
     changed_by: str,
     reason: str,
 ) -> PaperPool:
@@ -126,12 +237,22 @@ def configure_paper_pool(
         raise StrategyControlError("enabled paper pool requires a positive finite USD capital limit")
     if capital_mode not in {"fixed", "compound"}:
         raise StrategyControlError("capital_mode must be fixed or compound")
+    mandate = mandate_for_profile(risk_profile)
+    if enabled and not mandate.configured:
+        raise StrategyControlError("enabled paper pool requires a configured portfolio risk mandate")
     # Conflict with the executor's session lock so a pause/lower cannot race an
     # already-sized order between its authority read and demo broker submit.
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
     current = load_paper_pool(conn)
-    if current.enabled == enabled and current.capital_limit == capital_limit and current.capital_mode == capital_mode:
-        raise StrategyControlError("paper pool change must alter enabled state, capital limit, or capital mode")
+    if (
+        current.enabled == enabled
+        and current.capital_limit == capital_limit
+        and current.capital_mode == capital_mode
+        and current.mandate == mandate
+    ):
+        raise StrategyControlError(
+            "paper pool change must alter enabled state, capital limit, capital mode, or mandate"
+        )
     if current.event_id is not None and capital_limit < current.capital_limit:
         # A lower principal is an external withdrawal from the virtual sleeve,
         # not merely a cosmetic limit edit.  It cannot remove money already
@@ -178,14 +299,37 @@ def configure_paper_pool(
                 raise StrategyControlError("paper principal cannot be withdrawn below committed strategy capital")
     row = conn.execute(
         """
-        INSERT INTO strategy_paper_pool_events (enabled,capital_limit,currency,capital_mode,changed_by,reason)
-        VALUES (%s,%s,'USD',%s,%s,%s)
+        INSERT INTO strategy_paper_pool_events (
+            enabled,capital_limit,currency,capital_mode,changed_by,reason,
+            mandate_policy_version,risk_profile,target_volatility_pct,
+            max_portfolio_drawdown_pct,max_loss_per_position_pct,max_daily_loss_pct,
+            active_risk_budget_pct,cash_reserve_pct,max_concurrent_positions,
+            shorts_allowed,leverage_allowed
+        )
+        VALUES (%s,%s,'USD',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING strategy_paper_pool_event_id
         """,
-        (enabled, capital_limit, capital_mode, changed_by, reason),
+        (
+            enabled,
+            capital_limit,
+            capital_mode,
+            changed_by,
+            reason,
+            mandate.policy_version,
+            mandate.risk_profile,
+            mandate.target_volatility_pct,
+            mandate.max_portfolio_drawdown_pct,
+            mandate.max_loss_per_position_pct,
+            mandate.max_daily_loss_pct,
+            mandate.active_risk_budget_pct,
+            mandate.cash_reserve_pct,
+            mandate.max_concurrent_positions,
+            mandate.shorts_allowed,
+            mandate.leverage_allowed,
+        ),
     ).fetchone()
     assert row is not None
-    return PaperPool(int(row[0]), enabled, capital_limit, "USD", capital_mode)
+    return PaperPool(int(row[0]), enabled, capital_limit, "USD", capital_mode, mandate)
 
 
 @dataclass(frozen=True)

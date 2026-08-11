@@ -50,6 +50,7 @@ from app.services.strategy_control_plane import (
     is_risk_reducing_deployment_change,
     load_paper_pool,
     lock_strategy_control,
+    mandate_for_profile,
     promote_strategy,
 )
 from app.services.strategy_live_gate import (
@@ -257,6 +258,21 @@ class StrategyEntryBlockView(BaseModel):
     execution_block_reasons: list[str]
 
 
+class StrategyPortfolioMandateView(BaseModel):
+    configured: bool
+    policy_version: str
+    risk_profile: Literal["unconfigured", "cautious", "balanced", "growth"]
+    target_volatility_pct: Decimal | None
+    max_portfolio_drawdown_pct: Decimal | None
+    max_loss_per_position_pct: Decimal | None
+    max_daily_loss_pct: Decimal | None
+    active_risk_budget_pct: Decimal | None
+    cash_reserve_pct: Decimal | None
+    max_concurrent_positions: int | None
+    shorts_allowed: bool
+    leverage_allowed: bool
+
+
 class StrategyPaperPoolView(BaseModel):
     configured: bool
     enabled: bool
@@ -267,6 +283,28 @@ class StrategyPaperPoolView(BaseModel):
     reserved_capital: Decimal
     invested_capital: Decimal | None
     remaining_capital: Decimal | None
+    mandate: StrategyPortfolioMandateView
+    available_mandates: list[StrategyPortfolioMandateView]
+
+
+def _mandate_view(
+    risk_profile: Literal["unconfigured", "cautious", "balanced", "growth"],
+) -> StrategyPortfolioMandateView:
+    mandate = mandate_for_profile(risk_profile)
+    return StrategyPortfolioMandateView(
+        configured=mandate.configured,
+        policy_version=mandate.policy_version,
+        risk_profile=mandate.risk_profile,
+        target_volatility_pct=mandate.target_volatility_pct,
+        max_portfolio_drawdown_pct=mandate.max_portfolio_drawdown_pct,
+        max_loss_per_position_pct=mandate.max_loss_per_position_pct,
+        max_daily_loss_pct=mandate.max_daily_loss_pct,
+        active_risk_budget_pct=mandate.active_risk_budget_pct,
+        cash_reserve_pct=mandate.cash_reserve_pct,
+        max_concurrent_positions=mandate.max_concurrent_positions,
+        shorts_allowed=mandate.shorts_allowed,
+        leverage_allowed=mandate.leverage_allowed,
+    )
 
 
 class EvidenceRefreshView(BaseModel):
@@ -308,12 +346,15 @@ class StrategyPaperPoolUpdateRequest(BaseModel):
     enabled: bool
     capital_limit: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
     capital_mode: Literal["fixed", "compound"] = "fixed"
+    risk_profile: Literal["unconfigured", "cautious", "balanced", "growth"]
     reason: str = Field(min_length=1, max_length=1000)
 
     @model_validator(mode="after")
     def enabled_requires_capital(self) -> StrategyPaperPoolUpdateRequest:
         if self.enabled and self.capital_limit <= 0:
             raise ValueError("enabled paper pool requires positive capital")
+        if self.enabled and self.risk_profile == "unconfigured":
+            raise ValueError("enabled paper pool requires a configured portfolio risk mandate")
         return self
 
 
@@ -1061,6 +1102,21 @@ def get_strategy_overview(
                 if effective_pool_capital is not None
                 else None
             ),
+            mandate=StrategyPortfolioMandateView(
+                configured=paper_pool.mandate.configured,
+                policy_version=paper_pool.mandate.policy_version,
+                risk_profile=paper_pool.mandate.risk_profile,
+                target_volatility_pct=paper_pool.mandate.target_volatility_pct,
+                max_portfolio_drawdown_pct=paper_pool.mandate.max_portfolio_drawdown_pct,
+                max_loss_per_position_pct=paper_pool.mandate.max_loss_per_position_pct,
+                max_daily_loss_pct=paper_pool.mandate.max_daily_loss_pct,
+                active_risk_budget_pct=paper_pool.mandate.active_risk_budget_pct,
+                cash_reserve_pct=paper_pool.mandate.cash_reserve_pct,
+                max_concurrent_positions=paper_pool.mandate.max_concurrent_positions,
+                shorts_allowed=paper_pool.mandate.shorts_allowed,
+                leverage_allowed=paper_pool.mandate.leverage_allowed,
+            ),
+            available_mandates=[_mandate_view(profile) for profile in ("cautious", "balanced", "growth")],
         ),
         evidence_refresh=EvidenceRefreshView(
             frozen_through=max(item.window.end for item in RECENT_EVIDENCE_WINDOWS.values()),
@@ -1512,16 +1568,20 @@ def update_strategy_paper_pool(
                 current_pool.enabled != body.enabled
                 or current_pool.capital_limit != body.capital_limit
                 or current_pool.capital_mode != body.capital_mode
+                or current_pool.mandate.risk_profile != body.risk_profile
             )
             automation_changed = runtime.enable_auto_trading != body.enabled
             if not pool_changed and not automation_changed:
-                raise StrategyControlError("automation change must alter enabled state, capital limit, or capital mode")
+                raise StrategyControlError(
+                    "automation change must alter enabled state, capital limit, capital mode, or mandate"
+                )
             if pool_changed:
                 configure_paper_pool(
                     conn,
                     enabled=body.enabled,
                     capital_limit=body.capital_limit,
                     capital_mode=body.capital_mode,
+                    risk_profile=body.risk_profile,
                     changed_by=session.username,
                     reason=body.reason,
                 )

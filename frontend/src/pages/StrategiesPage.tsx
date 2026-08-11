@@ -446,18 +446,26 @@ function AutomationControl({
   const [enabled, setEnabled] = useState(pool.enabled && overview.execution_enabled);
   const [limit, setLimit] = useState(pool.capital_limit);
   const [capitalMode, setCapitalMode] = useState(pool.capital_mode);
+  const [riskProfile, setRiskProfile] = useState(pool.mandate.risk_profile);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     setEnabled(pool.enabled && overview.execution_enabled);
     setLimit(pool.capital_limit);
     setCapitalMode(pool.capital_mode);
-  }, [pool.enabled, pool.capital_limit, pool.capital_mode, overview.execution_enabled]);
+    setRiskProfile(pool.mandate.risk_profile);
+  }, [pool.enabled, pool.capital_limit, pool.capital_mode, pool.mandate.risk_profile, overview.execution_enabled]);
   const parsed = Number(limit);
   const valid = Number.isFinite(parsed) && parsed >= 0 && (!enabled || parsed > 0);
   const effectiveEnabled = pool.enabled && overview.execution_enabled;
-  const dirty = enabled !== effectiveEnabled || parsed !== Number(pool.capital_limit) || capitalMode !== pool.capital_mode;
-  const canEnable = approvedCount > 0 && overview.execution_enabled;
+  const dirty = enabled !== effectiveEnabled
+    || parsed !== Number(pool.capital_limit)
+    || capitalMode !== pool.capital_mode
+    || riskProfile !== pool.mandate.risk_profile;
+  const canEnable = approvedCount > 0 && overview.execution_enabled && riskProfile !== "unconfigured";
+  const selectedMandate = riskProfile === pool.mandate.risk_profile && pool.mandate.configured
+    ? pool.mandate
+    : pool.available_mandates.find((mandate) => mandate.risk_profile === riskProfile) ?? null;
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -469,6 +477,7 @@ function AutomationControl({
         enabled,
         capital_limit: parsed.toFixed(6),
         capital_mode: capitalMode,
+        risk_profile: riskProfile,
         reason: "Automated strategy workspace update",
       });
       onUpdated();
@@ -523,11 +532,39 @@ function AutomationControl({
               <option value="compound">Reinvest realised P&amp;L</option>
             </select>
           </label>
+          <label className="w-48 text-xs font-medium text-slate-600 dark:text-slate-300">
+            Risk profile
+            <select
+              value={riskProfile}
+              onChange={(event) => setRiskProfile(event.target.value as "unconfigured" | "cautious" | "balanced" | "growth")}
+              className="mt-1 min-h-11 w-full border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+            >
+              <option value="unconfigured">Choose risk profile</option>
+              <option value="cautious">Cautious</option>
+              <option value="balanced">Balanced</option>
+              <option value="growth">Growth</option>
+            </select>
+          </label>
           <button type="submit" disabled={!valid || !dirty || saving || (enabled && !canEnable)} className="min-h-11 cursor-pointer border border-blue-700 bg-blue-700 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
             {saving ? "Saving…" : "Save"}
           </button>
         </div>
       </form>
+      {selectedMandate ? (
+        <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+          <p className="text-xs text-slate-500">Policy ceilings, not return forecasts. Long-only and unleveraged in this version.</p>
+          <dl className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+            <div><dt className="text-slate-500">Target volatility</dt><dd className="font-semibold">{pctPoints(selectedMandate.target_volatility_pct)}</dd></div>
+            <div><dt className="text-slate-500">Max drawdown</dt><dd className="font-semibold">{pctPoints(selectedMandate.max_portfolio_drawdown_pct)}</dd></div>
+            <div><dt className="text-slate-500">Max loss / position</dt><dd className="font-semibold">{pctPoints(selectedMandate.max_loss_per_position_pct)}</dd></div>
+            <div><dt className="text-slate-500">Max daily loss</dt><dd className="font-semibold">{pctPoints(selectedMandate.max_daily_loss_pct)}</dd></div>
+            <div><dt className="text-slate-500">Active risk budget</dt><dd className="font-semibold">{pctPoints(selectedMandate.active_risk_budget_pct)}</dd></div>
+            <div><dt className="text-slate-500">Cash reserve</dt><dd className="font-semibold">{pctPoints(selectedMandate.cash_reserve_pct)}</dd></div>
+            <div><dt className="text-slate-500">Concurrent positions</dt><dd className="font-semibold">{selectedMandate.max_concurrent_positions}</dd></div>
+            <div><dt className="text-slate-500">Authority</dt><dd className="font-semibold">Long only · No leverage</dd></div>
+          </dl>
+        </div>
+      ) : null}
       <dl className="mt-5 grid grid-cols-2 gap-3 border-t border-slate-200 pt-4 text-xs sm:grid-cols-4 dark:border-slate-800">
         <div><dt className="text-slate-500">Risk base</dt><dd className="font-semibold tabular-nums">{money(pool.effective_capital)}</dd></div>
         <div><dt className="text-slate-500">Working</dt><dd className="font-semibold tabular-nums">{money(pool.invested_capital)}</dd></div>
@@ -538,6 +575,8 @@ function AutomationControl({
         <p className="mt-4 text-xs text-amber-700 dark:text-amber-300">
           {!overview.execution_enabled
             ? "System-wide automatic trading is off. Enable that safety control before allowing new entries."
+            : riskProfile === "unconfigured"
+              ? "Choose a risk profile before allowing new entries."
             : "Automation stays off until at least one strategy passes validation."}
         </p>
       ) : null}

@@ -68,6 +68,7 @@ def _seed(
             conn,
             enabled=True,
             capital_limit=Decimal("2000"),
+            risk_profile="balanced",
             changed_by="test",
             reason="shared paper pool fixture",
         )
@@ -456,6 +457,7 @@ def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
         conn,
         enabled=True,
         capital_limit=Decimal("25"),
+        risk_profile="balanced",
         changed_by="operator",
         reason="bounded shared pot",
     )
@@ -468,6 +470,52 @@ def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
     assert result.amount == Decimal("25.00")
 
 
+def test_legacy_enabled_pool_without_mandate_cannot_authorise_an_order(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute(
+        """
+        INSERT INTO strategy_paper_pool_events (
+            enabled,capital_limit,currency,capital_mode,changed_by,reason
+        ) VALUES (true,2000,'USD','fixed','legacy','pre-mandate authority')
+        """
+    )
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "portfolio_mandate_unconfigured"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_disabled_pool_reason_precedes_unconfigured_mandate_reason(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute(
+        """
+        INSERT INTO strategy_paper_pool_events (
+            enabled,capital_limit,currency,capital_mode,changed_by,reason
+        ) VALUES (false,2000,'USD','fixed','legacy','disabled pre-mandate authority')
+        """
+    )
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "paper_pool_disabled"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+
+
 def test_shared_paper_pool_excludes_future_live_reservations(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
@@ -477,6 +525,7 @@ def test_shared_paper_pool_excludes_future_live_reservations(
         conn,
         enabled=True,
         capital_limit=Decimal("26"),
+        risk_profile="balanced",
         changed_by="operator",
         reason="paper-only shared pot",
     )

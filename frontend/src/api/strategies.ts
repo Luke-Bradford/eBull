@@ -51,6 +51,7 @@ export function updateStrategyPaperPool(body: {
   enabled: boolean;
   capital_limit: string;
   capital_mode: "fixed" | "compound";
+  risk_profile: "unconfigured" | "cautious" | "balanced" | "growth";
   reason: string;
 }): Promise<StrategyPaperPool> {
   return apiFetch("/strategies/paper-pool", {
