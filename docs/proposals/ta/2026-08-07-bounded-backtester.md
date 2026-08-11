@@ -1282,8 +1282,10 @@ only; nothing here introduces a magnitude.
 
 **C10 — corporate actions declared.** `price_series_break` segments are **never
 spanned** by a position — asserted, since C3's block bootstrap would otherwise
-average across a discontinuity. The dividend/split treatment is stated per
-strategy, including that eToro candles are price-not-total-return.
+average across a discontinuity. eToro candles remain price-only execution data;
+the research harness uses split-adjusted raw OHLC for signals, fills and levels,
+and split-and-dividend-adjusted `adj_close` for wealth returns and buy-and-hold
+(#2429). `return_basis` is part of the immutable result identity.
 
 **C11 — strategy identity.** The identity hash covers code, params, universe,
 cost model, **ranking tie-break** and **execution assumption**. Asserted by

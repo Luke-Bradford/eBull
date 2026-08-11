@@ -191,7 +191,7 @@ _RECORD_ACCESS = """
 _RESULT_COLUMNS = """
     strategy_id, strategy_version, result_version, result_scope, namespace,
     ambiguity_arm, quarantine_arm, window_start, window_end, purpose, universe_basis, corpus_version,
-    cost_model_id, carry_unmodelled, sizing_rule, benchmark_rule, position_rule_set_version,
+    cost_model_id, carry_unmodelled, sizing_rule, benchmark_rule, return_basis, position_rule_set_version,
     outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
     trial_count, deflated_sharpe,
     expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
@@ -214,7 +214,8 @@ _RESULT_VALUES = """
     %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
     %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(purpose)s,
     %(universe_basis)s, %(corpus_version)s,
-    %(cost_model_id)s, %(carry_unmodelled)s, %(sizing_rule)s, %(benchmark_rule)s, %(position_rule_set_version)s,
+    %(cost_model_id)s, %(carry_unmodelled)s, %(sizing_rule)s, %(benchmark_rule)s, %(return_basis)s,
+    %(position_rule_set_version)s,
     %(outcome_rule_set_version)s, %(input_rule_set_version)s, %(evaluated_instrument_count)s,
     %(trial_count)s, %(deflated_sharpe)s,
     %(expectancy_per_trade_pct)s, %(profit_factor)s, %(cagr_pct)s, %(annualised_volatility_pct)s,
@@ -329,6 +330,7 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         "carry_unmodelled": result.carry_unmodelled,
         "sizing_rule": identity.sizing_rule,
         "benchmark_rule": identity.benchmark_rule,
+        "return_basis": identity.return_basis,
         "position_rule_set_version": identity.position_rule_set_version,
         "outcome_rule_set_version": identity.outcome_rule_set_version,
         "input_rule_set_version": identity.input_rule_set_version,
@@ -477,6 +479,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         carry_unmodelled,
         sizing_rule,
         benchmark_rule,
+        return_basis,
         position_rule_set_version,
         outcome_rule_set_version,
         input_rule_set_version,
@@ -542,6 +545,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         quarantine_arm=quarantine_arm,  # type: ignore[arg-type]
         sizing_rule=str(sizing_rule),
         benchmark_rule=str(benchmark_rule),
+        return_basis=str(return_basis),
         cost_model_id=str(cost_model_id),
         corpus_version=str(corpus_version),
         window_start=window_start,  # type: ignore[arg-type]

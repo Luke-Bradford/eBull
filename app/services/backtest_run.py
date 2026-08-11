@@ -121,6 +121,8 @@ from app.services.strategy_result import (
     EVALUATION_WINDOW_END,
     EVALUATION_WINDOW_START,
     HOLDOUT_BOUNDARY,
+    LEGACY_RETURN_BASIS,
+    TOTAL_RETURN_BASIS,
     AmbiguityArm,
     PromotionCandidate,
     PromotionRefusal,
@@ -955,7 +957,8 @@ def _shifted(book: LegBook, offset: int) -> LegBook:
 def _benchmark_book(
     *,
     instruments: frozenset[int],
-    closes_by_instrument: Mapping[int, tuple[int, array[float]]],
+    raw_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
+    wealth_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
     lo: int,
     hi: int,
 ) -> LegBook:
@@ -985,33 +988,51 @@ def _benchmark_book(
     book = LegBook()
     one = Decimal(1)
     for instrument_id in sorted(instruments):
-        located = closes_by_instrument.get(instrument_id)
-        if located is None:  # pragma: no cover - every evaluated instrument was loaded
+        located = raw_closes_by_instrument.get(instrument_id)
+        wealth_located = wealth_closes_by_instrument.get(instrument_id)
+        if located is None or wealth_located is None:  # pragma: no cover - every evaluated instrument was loaded
             continue
         first_axis_index, closes = located
+        wealth_first_axis_index, wealth_closes = wealth_located
+        if wealth_first_axis_index != first_axis_index or len(wealth_closes) != len(closes):
+            raise RuntimeError(f"raw and wealth price axes disagree for instrument {instrument_id}")
         start = max(lo, first_axis_index)
         end = min(hi, first_axis_index + len(closes) - 1)
         if end <= start:
             continue
         window = np.frombuffer(closes, dtype=np.float64)[start - first_axis_index : end - first_axis_index + 1]
-        usable = np.flatnonzero(~np.isnan(window))
+        wealth_window = np.frombuffer(wealth_closes, dtype=np.float64)[
+            start - first_axis_index : end - first_axis_index + 1
+        ]
+        usable = np.flatnonzero(
+            np.isfinite(window) & np.isfinite(wealth_window) & (window > 0.0) & (wealth_window > 0.0)
+        )
         if usable.size < 2:
             continue
         entry_offset = int(usable[0])
         exit_offset = int(usable[-1])
+        raw_span = window[entry_offset : exit_offset + 1]
+        wealth_span = wealth_window[entry_offset : exit_offset + 1]
+        raw_observed = ~np.isnan(raw_span)
+        if np.any(
+            raw_observed
+            & ((~np.isfinite(raw_span)) | (~np.isfinite(wealth_span)) | (raw_span <= 0.0) | (wealth_span <= 0.0))
+        ):
+            continue
         entry_close = float(window[entry_offset])
-        exit_close = float(window[exit_offset])
-        if entry_close <= 0.0 or exit_close <= 0.0:
+        entry_wealth = float(wealth_window[entry_offset])
+        exit_wealth = float(wealth_window[exit_offset])
+        if entry_close <= 0.0 or entry_wealth <= 0.0 or exit_wealth <= 0.0:
             continue
         half = half_spread_for(Decimal(repr(entry_close)))
         book.add(
             entry_index=start + entry_offset - lo,
             exit_index=start + exit_offset - lo,
-            entry_price=float(Decimal(repr(entry_close)) * (one + half)),
-            exit_price=float(Decimal(repr(exit_close)) * (one - half)),
+            entry_price=float(Decimal(repr(entry_wealth)) * (one + half)),
+            exit_price=float(Decimal(repr(exit_wealth)) * (one - half)),
             half_spread=float(half),
             realised=True,
-            marks=[float(value) for value in window[entry_offset : exit_offset + 1]],
+            marks=[float(value) for value in wealth_span],
         )
     return book
 
@@ -1022,7 +1043,8 @@ def _absorb(
     series: BarSeries,
     window: Window,
     axis_pos: Mapping[date, int],
-    closes: Sequence[float],
+    raw_closes: Sequence[float],
+    wealth_closes: Sequence[float],
     first_axis_index: int,
     instrument_id: int,
     books: Mapping[ResultNamespace, _NamespaceBook],
@@ -1076,17 +1098,38 @@ def _absorb(
             continue
 
         span_from = entry_index - first_axis_index
+        exit_slot = exit_index - first_axis_index
+        raw_span = raw_closes[span_from : exit_slot + 1]
+        wealth_span = wealth_closes[span_from : exit_slot + 1]
+        if any(
+            math.isfinite(raw_value) and (not math.isfinite(wealth_value) or wealth_value <= 0.0)
+            for raw_value, wealth_value in zip(raw_span, wealth_span, strict=True)
+        ):
+            book.excluded["total_return_price_missing"] += 1
+            continue
+        entry_raw = raw_closes[span_from]
+        exit_raw = raw_closes[exit_slot]
+        entry_wealth_mark = wealth_closes[span_from]
+        exit_wealth_mark = wealth_closes[exit_slot]
+        if any(
+            not math.isfinite(value) or value <= 0.0
+            for value in (entry_raw, exit_raw, entry_wealth_mark, exit_wealth_mark)
+        ):
+            book.excluded["total_return_price_missing"] += 1
+            continue
+        entry_price = float(row.entry_price_net) * entry_wealth_mark / entry_raw
+        exit_price = float(row.exit_price_net) * exit_wealth_mark / exit_raw
         book.add_leg(
             entry_index=entry_index,
             exit_index=exit_index,
-            entry_price=float(row.entry_price_net),
-            exit_price=float(row.exit_price_net),
+            entry_price=entry_price,
+            exit_price=exit_price,
             half_spread=float(row.half_spread),
             realised=realised,
-            marks=list(closes[span_from : exit_index - first_axis_index + 1]),
+            marks=list(wealth_span),
         )
         if realised:
-            book.returns.append(float(row.net_return_pct))
+            book.returns.append((exit_price - entry_price) / entry_price * 100.0)
             book.entry_dates.append(position.entry_fill_bar_date)
 
 
@@ -1188,7 +1231,8 @@ def _measure_namespace(
     book: _NamespaceBook,
     *,
     corpus: _Corpus,
-    closes_by_instrument: Mapping[int, tuple[int, array[float]]],
+    raw_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
+    wealth_closes_by_instrument: Mapping[int, tuple[int, array[float]]],
 ) -> NamespaceMeasurement | None:
     """Build this namespace's curve on its own axis and compute criterion 7's set.
 
@@ -1240,7 +1284,8 @@ def _measure_namespace(
     benchmark = build_buy_and_hold_curve(
         _benchmark_book(
             instruments=instruments,
-            closes_by_instrument=closes_by_instrument,
+            raw_closes_by_instrument=raw_closes_by_instrument,
+            wealth_closes_by_instrument=wealth_closes_by_instrument,
             lo=lo,
             hi=hi,
         ),
@@ -1297,6 +1342,7 @@ def evaluate_arm(
     identity: StrategyIdentity,
     namespaces: Sequence[ResultNamespace],
     progress: ProgressCallback | None = None,
+    return_basis: str = TOTAL_RETURN_BASIS,
 ) -> ArmMeasurement:
     """One ``(strategy, quarantine arm)`` corpus pass, end to end.
 
@@ -1312,6 +1358,8 @@ def evaluate_arm(
     already refused.
     """
     started = time.monotonic()
+    if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
+        raise ValueError(f"unknown return basis {return_basis!r}")
     regime = _regime_for(entry, corpus.axis)
     if regime.level_based != (ambiguity_arm is not None):
         raise ValueError(
@@ -1322,7 +1370,8 @@ def evaluate_arm(
     }
     close_sources: Counter[str] = Counter()
     discarded: Counter[str] = Counter()
-    closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
+    raw_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
+    wealth_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     ranking: _CrossSection | None = None
 
     if entry.strategy_class == "cross_sectional":
@@ -1368,13 +1417,20 @@ def evaluate_arm(
         # axis index with `nan` in between. That is what makes a leg's mark slice
         # O(1) to cut, and it is ~25M floats over the corpus rather than the 85M
         # a full dense panel would need.
-        closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
-        for when, row in zip(series.dates, series.rows, strict=True):
+        if len(masked.wealth_closes) != len(series):
+            raise RuntimeError(f"series {series_id} has misaligned raw and wealth observations")
+        raw_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
+        wealth_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
+        for when, row, wealth_close in zip(series.dates, series.rows, masked.wealth_closes, strict=True):
             slot = corpus.axis_pos.get(when)
             close = row.get("close")
             if slot is not None and close is not None:
-                closes[slot - first_axis_index] = float(close)
-        closes_by_instrument[instrument_id] = (first_axis_index, array("d", closes))
+                raw_closes[slot - first_axis_index] = float(close)
+            selected_wealth_close = close if return_basis == LEGACY_RETURN_BASIS else wealth_close
+            if slot is not None and selected_wealth_close is not None:
+                wealth_closes[slot - first_axis_index] = float(selected_wealth_close)
+        raw_closes_by_instrument[instrument_id] = (first_axis_index, array("d", raw_closes))
+        wealth_closes_by_instrument[instrument_id] = (first_axis_index, array("d", wealth_closes))
 
         signals = _signals_for(
             entry,
@@ -1413,7 +1469,8 @@ def evaluate_arm(
             series=series,
             window=corpus.window,
             axis_pos=corpus.axis_pos,
-            closes=closes,
+            raw_closes=raw_closes,
+            wealth_closes=wealth_closes,
             first_axis_index=first_axis_index,
             instrument_id=instrument_id,
             books=books,
@@ -1436,7 +1493,8 @@ def evaluate_arm(
             name,
             books[name],
             corpus=corpus,
-            closes_by_instrument=closes_by_instrument,
+            raw_closes_by_instrument=raw_closes_by_instrument,
+            wealth_closes_by_instrument=wealth_closes_by_instrument,
         )
         if outcome is not None:
             measured[name] = outcome
@@ -1462,6 +1520,7 @@ def evaluate_level_arms(
     identity: StrategyIdentity,
     namespaces: Sequence[ResultNamespace],
     progress: ProgressCallback | None = None,
+    return_basis: str = TOTAL_RETURN_BASIS,
 ) -> tuple[ArmMeasurement, ...]:
     """Evaluate both daily-OHLC ambiguity projections from one corpus pass.
 
@@ -1472,6 +1531,8 @@ def evaluate_level_arms(
     measurements cannot influence one another after that common evidence.
     """
     started = time.monotonic()
+    if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
+        raise ValueError(f"unknown return basis {return_basis!r}")
     regime = _regime_for(entry, corpus.axis)
     if not regime.level_based:
         raise ValueError(f"{entry.strategy_id} is not level-based and has no ambiguity arms to share")
@@ -1481,7 +1542,8 @@ def evaluate_level_arms(
     }
     close_sources: dict[AmbiguityArm, Counter[str]] = {ambiguity: Counter() for ambiguity in AMBIGUITY_ARM_ORDER}
     discarded: dict[AmbiguityArm, Counter[str]] = {ambiguity: Counter() for ambiguity in AMBIGUITY_ARM_ORDER}
-    closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
+    raw_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
+    wealth_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     ranking = (
         _rank_cross_section(
             conn,
@@ -1524,15 +1586,22 @@ def evaluate_level_arms(
             continue
         evaluated += 1
         first_axis_index, last_axis_index = indices[0], indices[-1]
-        closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
-        for when, row in zip(series.dates, series.rows, strict=True):
+        if len(masked.wealth_closes) != len(series):
+            raise RuntimeError(f"series {series_id} has misaligned raw and wealth observations")
+        raw_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
+        wealth_closes = [float("nan")] * (last_axis_index - first_axis_index + 1)
+        for when, row, wealth_close in zip(series.dates, series.rows, masked.wealth_closes, strict=True):
             slot = corpus.axis_pos.get(when)
             close = row.get("close")
             if slot is not None and close is not None:
-                closes[slot - first_axis_index] = float(close)
+                raw_closes[slot - first_axis_index] = float(close)
+            selected_wealth_close = close if return_basis == LEGACY_RETURN_BASIS else wealth_close
+            if slot is not None and selected_wealth_close is not None:
+                wealth_closes[slot - first_axis_index] = float(selected_wealth_close)
         # Read-only after construction. Both namespace measurements must mark
         # against the same observations; no arm mutates this array.
-        closes_by_instrument[instrument_id] = (first_axis_index, array("d", closes))
+        raw_closes_by_instrument[instrument_id] = (first_axis_index, array("d", raw_closes))
+        wealth_closes_by_instrument[instrument_id] = (first_axis_index, array("d", wealth_closes))
 
         signals = _signals_for(
             entry,
@@ -1568,7 +1637,8 @@ def evaluate_level_arms(
                 series=series,
                 window=corpus.window,
                 axis_pos=corpus.axis_pos,
-                closes=closes,
+                raw_closes=raw_closes,
+                wealth_closes=wealth_closes,
                 first_axis_index=first_axis_index,
                 instrument_id=instrument_id,
                 books=books[ambiguity],
@@ -1594,7 +1664,8 @@ def evaluate_level_arms(
                 name,
                 books[ambiguity][name],
                 corpus=corpus,
-                closes_by_instrument=closes_by_instrument,
+                raw_closes_by_instrument=raw_closes_by_instrument,
+                wealth_closes_by_instrument=wealth_closes_by_instrument,
             )
             if outcome is not None:
                 measured[name] = outcome
@@ -1953,6 +2024,7 @@ def build_result(
             position_rule_set_version=POSITION_RULE_SET_VERSION,
             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+            return_basis=TOTAL_RETURN_BASIS,
         ),
         purpose=purpose,
         metrics=outcome.metrics,
@@ -2199,6 +2271,7 @@ def run_backtest(
             position_rule_set_version=POSITION_RULE_SET_VERSION,
             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+            return_basis=TOTAL_RETURN_BASIS,
         )
         for entry_id in runnable
         for namespace in namespaces

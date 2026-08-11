@@ -432,10 +432,12 @@ specifically, because it is 5,266 predominantly small and delisted US names.
    our corpus does not carry.
 5. ⚠ **SPY cannot be the primary bar.** #2398 loaded it from **1993-01-29**; the
    in-sample axis starts **1962-01-02**. Secondary comparator on hold-out only.
-6. ⚠ **The engine is price-return, not total-return.** `load_masked_series`
-   selects `close`, never `adj_close`, so the buy-and-hold bar is understated by
-   the dividend yield — on *both* legs. Correcting only the benchmark would be a
-   worse error than the gap; see the gaps table above.
+6. **The engine's wealth accounting is total-return since #2429.**
+   `load_masked_series` carries raw OHLC and an aligned `adj_close` wealth
+   series. Raw prices remain authoritative for signals, fills, spread bands and
+   TP/SL; both strategy and benchmark returns use the wealth series. Existing
+   price-return rows retain their v1 identity and cannot satisfy a current v2
+   evidence query.
 
 ⚠ **And the diagnostic lesson**: #2426 was filed as *"per-instrument returns are
 being summed"*, from `33,706,844 / 3,541 ≈ 9,519`. Numerically plausible,

@@ -70,7 +70,8 @@ def _raw_holdout_insert(conn: psycopg.Connection[tuple], table: str) -> None:
 _RAW_TAIL = """
         'sleeve', 'hold_out', 'worst_case', 'masked', '1962-01-02', '2026-07-08', 'capital_candidate', 'survivor_only',
         'paperswithbacktest/Stocks-Daily-Price@2026-07-08', 'static-p75-insession-v1', true,
-        'equal_weight_concurrent_v1', 'equal_weight_buy_and_hold_v1', 'p1', 'o1', 'i1', 10,
+        'equal_weight_concurrent_v1', 'equal_weight_buy_and_hold_v1', 'raw-close-price-return-v1',
+        'p1', 'o1', 'i1', 10,
         0.5, 1.18, 3.9, 14.2, 0.27, 0.39, -31.4, 62.1, 3.05, 100, -2.4, 50, 20, 4, 0, 251.67, 418.0, 420.4,
         'criterion7-v1'
 """
@@ -78,7 +79,7 @@ _RAW_TAIL = """
 _RAW_COLUMNS = """
         strategy_id, strategy_version, result_version, result_scope, namespace,
         ambiguity_arm, quarantine_arm, window_start, window_end, purpose, universe_basis, corpus_version,
-        cost_model_id, carry_unmodelled, sizing_rule, benchmark_rule, position_rule_set_version,
+        cost_model_id, carry_unmodelled, sizing_rule, benchmark_rule, return_basis, position_rule_set_version,
         outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
         expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
         max_drawdown_pct, exposure_time_pct, turnover_annualised, trade_count,

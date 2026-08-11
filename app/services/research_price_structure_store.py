@@ -46,6 +46,7 @@ counted separately by the census instead (``quarantine_sensitivity``).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Final, Literal, get_args
 
 import psycopg
@@ -62,6 +63,7 @@ _LOAD_SQL = """
            d.high,
            d.low,
            d.close,
+           d.adj_close,
            d.volume,
            COALESCE(q.range_usable, TRUE)  AS range_usable,
            COALESCE(q.return_usable, TRUE) AS return_usable
@@ -108,6 +110,10 @@ class MaskedSeries:
 
     series_id: int
     bars: tuple[StructureBar, ...]
+    #: Split-and-dividend-adjusted closes aligned one-for-one with ``bars``.
+    #: These are portfolio WEALTH observations, never candle levels: signals,
+    #: fills, TP/SL and spread bands continue to read raw ``bars`` OHLC.
+    wealth_closes: tuple[Decimal | None, ...]
     range_masked: int
     return_masked: int
     #: The quarantine's verdict counts, independent of the arm. ⚠ NO DEFAULT:
@@ -129,6 +135,10 @@ class MaskedSeries:
         # looks plausible at any magnitude.
         if self.arm not in QUARANTINE_ARMS:
             raise ValueError(f"unknown quarantine arm {self.arm!r}; must be one of {sorted(QUARANTINE_ARMS)}")
+        if len(self.wealth_closes) != len(self.bars):
+            raise ValueError(
+                f"wealth closes ({len(self.wealth_closes)}) do not align one-for-one with bars ({len(self.bars)})"
+            )
         if self.range_masked > self.range_flagged or self.return_masked > self.return_flagged:
             raise ValueError(
                 f"masked ({self.range_masked}, {self.return_masked}) exceeds flagged "
@@ -216,7 +226,8 @@ def _apply_arm(
     range_flagged = 0
     return_flagged = 0
     bars_flagged = 0
-    for bar_date, open_, high, low, close, volume, range_usable, return_usable in rows:
+    wealth_closes: list[Decimal | None] = []
+    for bar_date, open_, high, low, close, adj_close, volume, range_usable, return_usable in rows:
         if not range_usable:
             range_flagged += 1
         if not return_usable:
@@ -239,10 +250,12 @@ def _apply_arm(
                 volume=volume,
             )
         )
+        wealth_closes.append(adj_close if (return_usable or admit) else None)
 
     return MaskedSeries(
         series_id=series_id,
         bars=tuple(bars),
+        wealth_closes=tuple(wealth_closes),
         range_masked=0 if admit else range_flagged,
         return_masked=0 if admit else return_flagged,
         range_flagged=range_flagged,

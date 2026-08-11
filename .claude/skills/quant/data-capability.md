@@ -169,10 +169,12 @@ minimum** — that is the specific thing a data purchase must buy.
 
 ## 5. ⚠ Traps in the data we DO have
 
-- **`close` vs `adj_close`** — the backtester reads `close`, so **the whole engine
-  is price-return, not total-return** (#2429). `adj_close` is split **and**
-  dividend adjusted and is what returns should use. Both legs are affected, so
-  the *relative* comparison is less wrong than either absolute figure.
+- **`close` vs `adj_close`** — corrected by #2429. Raw split-adjusted OHLC owns
+  signals, fills, spread bands and TP/SL. Strategy and benchmark wealth use the
+  split-and-dividend-adjusted `adj_close` scale. Historical result rows remain
+  labelled `raw-close-price-return-v1`; current rows are distinct v2 identities
+  labelled `split-dividend-adjusted-wealth-v1`. Do not move an indicator to
+  `adj_close` without registering a new strategy trial.
 - **Comparator identity is basis-bearing.** The legacy total-return-capable
   series ends 2024-09-27; the recent eToro series reaches 2026-07-08 but is
   price-return only. Never splice them, substitute one silently, or carry a

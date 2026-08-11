@@ -5553,7 +5553,13 @@ def _recent_evidence_completion(
     )
     from app.services.strategy_manifest import STRATEGY_MANIFEST
     from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
-    from app.services.strategy_result import AMBIGUITY_ARMS, CORPUS_VERSION, AmbiguityArm, ResultIdentity
+    from app.services.strategy_result import (
+        AMBIGUITY_ARMS,
+        CORPUS_VERSION,
+        TOTAL_RETURN_BASIS,
+        AmbiguityArm,
+        ResultIdentity,
+    )
 
     runnable, _excluded = runnable_strategies()
     expected: dict[str, set[str]] = {}
@@ -5581,6 +5587,7 @@ def _recent_evidence_completion(
                             position_rule_set_version=POSITION_RULE_SET_VERSION,
                             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
                             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+                            return_basis=TOTAL_RETURN_BASIS,
                         ).version
                     )
         expected[window_id] = versions

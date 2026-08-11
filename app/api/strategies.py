@@ -78,7 +78,7 @@ from app.services.strategy_position_manager import (
     manage_owned_position,
 )
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
-from app.services.strategy_result import CORPUS_VERSION
+from app.services.strategy_result import CORPUS_VERSION, TOTAL_RETURN_BASIS
 from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -141,6 +141,7 @@ class ResultArm(BaseModel):
     cost_model_id: str
     sizing_rule: str
     benchmark_rule: str
+    return_basis: str
     position_rule_set_version: str
     outcome_rule_set_version: str
     input_rule_set_version: str
@@ -777,6 +778,7 @@ _RESULTS_SQL = """
       AND r.cost_model_id = %(cost_model_id)s
       AND r.sizing_rule = %(sizing_rule)s
       AND r.benchmark_rule = %(benchmark_rule)s
+      AND r.return_basis = %(return_basis)s
       AND r.position_rule_set_version = %(position_version)s
       AND r.outcome_rule_set_version = %(outcome_version)s
       AND r.input_rule_set_version = %(input_version)s
@@ -924,6 +926,7 @@ def get_strategy_overview(
         "cost_model_id": COST_MODEL_ID,
         "sizing_rule": SIZING_RULE_ID,
         "benchmark_rule": BENCHMARK_RULE_ID,
+        "return_basis": TOTAL_RETURN_BASIS,
         "position_version": POSITION_RULE_SET_VERSION,
         "outcome_version": OUTCOME_RULE_SET_VERSION,
         "input_version": QUARANTINE_RULE_SET_VERSION,

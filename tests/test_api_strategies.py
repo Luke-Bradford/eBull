@@ -16,7 +16,7 @@ from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERS
 from app.services.result_ledger import store_holdout_result, store_in_sample_result
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
-from app.services.strategy_result import CORPUS_VERSION
+from app.services.strategy_result import CORPUS_VERSION, LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.test_result_ledger import build_metrics, build_result
 
@@ -197,6 +197,7 @@ def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:
         cost_model_id="cost-v1",
         sizing_rule="equal-weight",
         benchmark_rule="buy-and-hold",
+        return_basis=TOTAL_RETURN_BASIS,
         position_rule_set_version="position-v1",
         outcome_rule_set_version="outcome-v1",
         input_rule_set_version="input-v1",
@@ -342,6 +343,7 @@ def test_overview_maps_only_exact_current_holdout_provenance(
         "cost_model_id": COST_MODEL_ID,
         "sizing_rule": SIZING_RULE_ID,
         "benchmark_rule": BENCHMARK_RULE_ID,
+        "return_basis": TOTAL_RETURN_BASIS,
         "position_rule_set_version": POSITION_RULE_SET_VERSION,
         "outcome_rule_set_version": OUTCOME_RULE_SET_VERSION,
         "input_rule_set_version": QUARANTINE_RULE_SET_VERSION,
@@ -369,6 +371,16 @@ def test_overview_maps_only_exact_current_holdout_provenance(
         accessed_by="tests/test_api_strategies.py",
         purpose="prove stale provenance is excluded",
     )
+    store_holdout_result(
+        ebull_test_conn,
+        build_result(
+            **{**identity, "return_basis": LEGACY_RETURN_BASIS},
+            ambiguity_arm="worst_case",
+            quarantine_arm="masked",
+        ),
+        accessed_by="tests/test_api_strategies.py",
+        purpose="prove legacy price-return evidence is excluded",
+    )
     store_in_sample_result(
         ebull_test_conn,
         build_result(
@@ -388,7 +400,7 @@ def test_overview_maps_only_exact_current_holdout_provenance(
     assert primary.arms[0].result_version == exact.identity.version
     assert primary.arms[0].sortino is None
     assert primary.arms[0].profit_factor is None
-    assert strategy.legacy_result_count == 2
+    assert strategy.legacy_result_count == 3
 
 
 def test_overview_declares_only_level_strategies_forward_resolvable(
