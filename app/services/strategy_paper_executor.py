@@ -342,13 +342,13 @@ def _load_intent(
             row["forecast_target_barrier_pct"] is not None
             and Decimal(str(row["forecast_target_barrier_pct"])).is_finite()
             and Decimal(str(row["forecast_target_barrier_pct"])) > 0,
-            "opportunity_forecast_barriers_missing",
+            "opportunity_forecast_target_barrier_missing",
         ),
         (
             row["forecast_stop_barrier_pct"] is not None
             and Decimal(str(row["forecast_stop_barrier_pct"])).is_finite()
             and Decimal(str(row["forecast_stop_barrier_pct"])) > 0,
-            "opportunity_forecast_barriers_missing",
+            "opportunity_forecast_stop_barrier_missing",
         ),
         (
             row["forecast_stop_barrier_pct"] is not None

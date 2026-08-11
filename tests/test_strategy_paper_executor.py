@@ -823,7 +823,7 @@ def test_forecast_barriers_drive_loss_sizing_and_submitted_tp_sl(
 @pytest.mark.parametrize(
     ("target_barrier", "stop_barrier", "reason_code"),
     [
-        (None, None, "opportunity_forecast_barriers_missing"),
+        (None, None, "opportunity_forecast_target_barrier_missing"),
         (Decimal("10"), Decimal("6"), "opportunity_forecast_stop_exceeds_policy"),
     ],
 )
