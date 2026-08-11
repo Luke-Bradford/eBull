@@ -170,10 +170,13 @@ arrival-order path: the runtime now loads the complete current, calibrated,
 positive-forecast set, ranks it by conservative after-cost expectancy with an
 economic-key tie break, and only then applies its bounded execution limit.
 
-That is a safety precursor, not the finished allocator. It still does not
-produce one immutable target portfolio or jointly optimise correlation, factor
-exposure, capital duration, core/cash competition and aggregate opportunity
-cost. Those remain blocking requirements below.
+That is a safety precursor, not the finished allocator. #2549 makes each
+opportunity-bearing ranking set compact and immutable, records selected and
+declined reasons, deduplicates unchanged polling cycles, and links execution
+preflight to the exact selected member. It still does not produce a target
+portfolio or jointly optimise correlation, factor exposure, capital duration,
+core/cash competition and aggregate opportunity cost. Those remain blocking
+requirements below.
 
 This is not presently a capital defect because the strategy manifest contains
 no `capital_candidate`. It becomes a blocking defect before the second candidate
@@ -453,9 +456,10 @@ risk ceilings are enforced. #2545 adds the compact immutable forecast contract
 and makes a current, passed calibration plus positive conservative after-cost
 expectancy mandatory before broker access. It does **not** manufacture a
 forecast from the four research harnesses: no production candidate currently
-has a calibrated forecast generator, and the batch allocator and prospective
-outcome monitor below remain required. The safe current behaviour is therefore
-to place no autonomous trades.
+has a calibrated forecast generator. The ranking batch is now auditable, but
+target-portfolio optimisation and the prospective outcome monitor below remain
+required. The safe current behaviour is therefore to place no autonomous
+trades.
 
 - [ ] Every funded order points to one reproducible forecast, policy and batch
   allocation decision.

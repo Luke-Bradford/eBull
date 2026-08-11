@@ -43,6 +43,7 @@ from app.services.strategy_control_plane import (
 )
 from app.services.strategy_monitoring import load_paper_realised_pnl
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
+from app.services.strategy_opportunity_ranker import RANKING_POLICY_VERSION
 from app.services.strategy_order_reconciliation import (
     enforce_reconciliation_slo,
     ensure_strategy_request_id,
@@ -88,6 +89,7 @@ class _Intent:
     mandate_cash_reserve_pct: Decimal
     mandate_max_concurrent_positions: int
     forecast_id: int
+    ranking_member_id: int
     policy_revision: int
     ticket_sizing_mode: Literal["percent", "fixed"]
     ticket_fraction: Decimal | None
@@ -178,7 +180,13 @@ def _existing_result(conn: psycopg.Connection[Any], signal_id: int) -> PaperExec
     )
 
 
-def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime) -> tuple[_Intent | None, str | None]:
+def _load_intent(
+    conn: psycopg.Connection[Any],
+    *,
+    signal_id: int,
+    ranking_member_id: int | None,
+    now: datetime,
+) -> tuple[_Intent | None, str | None]:
     """Load DB gates as one observation; return a closed reason on absence."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -186,6 +194,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
             SELECT s.signal_id, s.strategy_id, s.strategy_version, s.instrument_id,
                    i.symbol, i.is_tradable, e.asset_class,
                    d.deployment_id, d.capital_limit, d.enabled, d.currency,
+                   pool.strategy_paper_pool_event_id AS current_pool_event_id,
                    pool.enabled AS pool_enabled, pool.capital_limit AS pool_limit,
                    pool.capital_mode, pool.risk_profile,
                    pool.max_portfolio_drawdown_pct AS mandate_max_drawdown_pct,
@@ -231,7 +240,10 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
                    forecast.conservative_net_expectancy_pct AS forecast_conservative_expectancy,
                    forecast.cost_model_id AS forecast_cost_model_id,
                    calibration.passed AS calibration_passed,
-                   calibration.holdout_end AS calibration_holdout_end
+                   calibration.holdout_end AS calibration_holdout_end,
+                   ranking.ranking_member_id,ranking.selected AS ranking_selected,
+                   ranking_batch.ranking_policy_version,
+                   ranking_batch.strategy_paper_pool_event_id AS ranking_pool_event_id
             FROM strategy_signals s
             JOIN instruments i ON i.instrument_id = s.instrument_id
             LEFT JOIN exchanges e ON e.exchange_id = i.exchange
@@ -240,7 +252,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
              AND d.mode = 'paper'
             LEFT JOIN strategy_execution_policies p ON p.deployment_id = d.deployment_id
             LEFT JOIN LATERAL (
-                SELECT enabled,capital_limit,capital_mode,risk_profile,
+                SELECT strategy_paper_pool_event_id,enabled,capital_limit,capital_mode,risk_profile,
                        max_portfolio_drawdown_pct,max_loss_per_position_pct,
                        max_daily_loss_pct,active_risk_budget_pct,cash_reserve_pct,
                        max_concurrent_positions
@@ -285,9 +297,13 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
             LEFT JOIN strategy_opportunity_forecasts forecast ON forecast.signal_id=s.signal_id
             LEFT JOIN strategy_forecast_calibrations calibration
               ON calibration.calibration_id=forecast.calibration_id
+            LEFT JOIN strategy_opportunity_ranking_members ranking
+              ON ranking.ranking_member_id=%s AND ranking.forecast_id=forecast.forecast_id
+            LEFT JOIN strategy_opportunity_ranking_batches ranking_batch
+              ON ranking_batch.ranking_batch_id=ranking.ranking_batch_id
             WHERE s.signal_id = %s AND s.signal_kind = 'entry' AND s.verdict = 'fired'
             """,
-            (signal_id,),
+            (ranking_member_id, signal_id),
         )
         row = cur.fetchone()
     if row is None:
@@ -325,6 +341,10 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
             and Decimal(str(row["forecast_conservative_expectancy"])) > 0,
             "opportunity_forecast_expectancy_not_positive",
         ),
+        (row["ranking_member_id"] is not None, "opportunity_ranking_member_missing"),
+        (bool(row["ranking_selected"]), "opportunity_ranking_member_not_selected"),
+        (row["ranking_policy_version"] == RANKING_POLICY_VERSION, "opportunity_ranking_policy_stale"),
+        (row["ranking_pool_event_id"] == row["current_pool_event_id"], "opportunity_ranking_mandate_stale"),
         (not bool(row["execution_blocked"]), "execution_block_active"),
         (row["quoted_at"] is not None and row["ask"] is not None, "quote_missing"),
         (
@@ -383,6 +403,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         mandate_cash_reserve_pct=Decimal(str(row["mandate_cash_reserve_pct"])),
         mandate_max_concurrent_positions=int(row["mandate_max_concurrent_positions"]),
         forecast_id=int(row["forecast_id"]),
+        ranking_member_id=int(row["ranking_member_id"]),
         policy_revision=int(row["policy_revision"]),
         ticket_sizing_mode=cast(Literal["percent", "fixed"], row["ticket_sizing_mode"]),
         ticket_fraction=Decimal(str(row["ticket_fraction"])) if row["ticket_fraction"] is not None else None,
@@ -429,17 +450,19 @@ def _persist_rejection(
         conn.execute(
             """
             INSERT INTO strategy_entry_preflights (
-                signal_id, deployment_id, policy_revision, forecast_id, verdict, reason_code,
+                signal_id, deployment_id, policy_revision, forecast_id, ranking_member_id,
+                verdict, reason_code,
                 evaluated_at, quote_at, scan_at, halt_feed_at,
                 broker_available_cash, account_equity, account_invested,
                 instrument_invested, gross_expectancy_ci_low_pct
-            ) VALUES (%s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 signal_id,
                 intent.deployment_id if intent else None,
                 intent.policy_revision if intent else None,
                 intent.forecast_id if intent else None,
+                intent.ranking_member_id if intent else None,
                 reason_code,
                 now,
                 intent.quote_at if intent else None,
@@ -796,6 +819,7 @@ def _execute_fired_paper_signal_locked(
     *,
     broker: BrokerProvider,
     signal_id: int,
+    ranking_member_id: int | None,
     now: datetime | None = None,
 ) -> PaperExecutionResult:
     """Evaluate and, only if every gate aligns, submit one demo order."""
@@ -855,7 +879,12 @@ def _execute_fired_paper_signal_locked(
         if health.active_block:
             return _persist_rejection(conn, signal_id=signal_id, reason_code="reconciliation_overdue", now=evaluated_at)
 
-    intent, reason = _load_intent(conn, signal_id=signal_id, now=evaluated_at)
+    intent, reason = _load_intent(
+        conn,
+        signal_id=signal_id,
+        ranking_member_id=ranking_member_id,
+        now=evaluated_at,
+    )
     conn.commit()
     if intent is None:
         return _persist_rejection(
@@ -953,7 +982,8 @@ def _execute_fired_paper_signal_locked(
         conn.execute(
             """
             INSERT INTO strategy_entry_preflights (
-                signal_id, deployment_id, policy_revision, forecast_id, verdict, reason_code,
+                signal_id, deployment_id, policy_revision, forecast_id, ranking_member_id,
+                verdict, reason_code,
                 evaluated_at, quote_at, scan_at, halt_feed_at,
                 eligibility_checked_at, costs_at, broker_available_cash,
                 account_equity, account_invested, instrument_invested,
@@ -961,7 +991,7 @@ def _execute_fired_paper_signal_locked(
                 gross_expectancy_ci_low_pct, stressed_cost_amount,
                 net_expectancy_pct, stop_loss_rate, take_profit_rate
             ) VALUES (
-                %s, %s, %s, %s, 'allocated', 'all_paper_entry_gates_passed',
+                %s, %s, %s, %s, %s, 'allocated', 'all_paper_entry_gates_passed',
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
@@ -970,6 +1000,7 @@ def _execute_fired_paper_signal_locked(
                 intent.deployment_id,
                 intent.policy_revision,
                 intent.forecast_id,
+                intent.ranking_member_id,
                 evaluated_at,
                 intent.quote_at,
                 intent.scan_at,
@@ -1060,13 +1091,35 @@ def execute_fired_paper_signal(
     *,
     broker: BrokerProvider,
     signal_id: int,
+    ranking_member_id: int | None = None,
     now: datetime | None = None,
 ) -> PaperExecutionResult:
     """Serialize and evaluate one fired signal against whole-account demo risk."""
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPaperExecutionError("paper execution requires an idle connection")
+    if ranking_member_id is None:
+        row = conn.execute(
+            """
+            SELECT member.ranking_member_id
+            FROM strategy_opportunity_ranking_members member
+            JOIN strategy_opportunity_forecasts forecast
+              ON forecast.forecast_id=member.forecast_id
+            WHERE forecast.signal_id=%s AND member.selected
+            ORDER BY member.ranking_batch_id DESC
+            LIMIT 1
+            """,
+            (signal_id,),
+        ).fetchone()
+        conn.commit()
+        ranking_member_id = int(row[0]) if row is not None else None
     with _allocator_lock(conn):
-        return _execute_fired_paper_signal_locked(conn, broker=broker, signal_id=signal_id, now=now)
+        return _execute_fired_paper_signal_locked(
+            conn,
+            broker=broker,
+            signal_id=signal_id,
+            ranking_member_id=ranking_member_id,
+            now=now,
+        )
 
 
 __all__ = ["PaperExecutionResult", "StrategyPaperExecutionError", "execute_fired_paper_signal"]
