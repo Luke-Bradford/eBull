@@ -228,6 +228,10 @@ Automated paper entry uses the fixed path
 `/api/v2/trading/execution/demo/orders`; it is intentionally not formed from a
 real/demo environment prefix. Demo account risk uses
 `/api/v1/trading/info/demo/pnl` and applies the published formulas below.
+The live response shape was verified on 2026-08-11: formula inputs are nested
+under the required `clientPortfolio` object and available cash starts from its
+singular `credit` field. The provider rejects an absent/malformed envelope or
+missing component array; it does not interpret response drift as a zero balance.
 
 ### Account-balance history — documented, demo access refused
 

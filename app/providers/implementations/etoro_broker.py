@@ -1151,7 +1151,12 @@ def _parse_account_risk_snapshot(
     *,
     observed_at: datetime,
 ) -> BrokerAccountRiskSnapshot:
-    """Apply eToro's published cash/invested/equity formulas exactly."""
+    """Apply eToro's published cash/invested/equity formulas exactly.
+
+    The live v1 endpoint wraps the formula inputs in ``clientPortfolio``.
+    Keep that envelope strict so an HTTP-200 error or a future response-shape
+    change cannot be mistaken for a zero/healthy account.
+    """
 
     def _array(parent: dict[str, Any], key: str) -> list[Any]:
         value = parent.get(key)
@@ -1188,11 +1193,14 @@ def _parse_account_risk_snapshot(
         return value
 
     try:
-        credit = _money(raw, "credits")
-        positions = _array(raw, "positions")
-        mirrors = _array(raw, "mirrors")
-        open_orders = _array(raw, "ordersForOpen")
-        orders = _array(raw, "orders")
+        portfolio = raw.get("clientPortfolio")
+        if not isinstance(portfolio, dict):
+            raise TradingPreflightParseError("account P&L clientPortfolio must be an object")
+        credit = _money(portfolio, "credit")
+        positions = _array(portfolio, "positions")
+        mirrors = _array(portfolio, "mirrors")
+        open_orders = _array(portfolio, "ordersForOpen")
+        orders = _array(portfolio, "orders")
         investments: dict[int, Decimal] = {}
         total_invested = Decimal("0")
         unrealized = Decimal("0")
