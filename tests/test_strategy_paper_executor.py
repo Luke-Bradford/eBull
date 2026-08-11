@@ -45,6 +45,7 @@ from app.services.strategy_opportunity_forecast import (
     record_opportunity_forecast,
     register_forecast_calibration,
 )
+from app.services.strategy_opportunity_ranker import RankableOpportunity, persist_ranking_batch
 from app.services.strategy_paper_executor import (
     PaperExecutionResult,
     _effective_capital_bases,
@@ -202,7 +203,7 @@ def _seed(
             evidence_ref="synthetic executor fixture only",
         ),
     )
-    record_opportunity_forecast(
+    forecast_id = record_opportunity_forecast(
         conn,
         OpportunityForecast(
             signal_id=int(signal[0]),
@@ -226,6 +227,27 @@ def _seed(
             conservative_net_expectancy_pct=Decimal("1.5"),
             cost_model_id=COST_MODEL_ID,
         ),
+    )
+    persist_ranking_batch(
+        conn,
+        opportunities=[
+            RankableOpportunity(
+                signal_id=int(signal[0]),
+                forecast_id=forecast_id,
+                strategy_id="S-ALLOC",
+                strategy_version="v1",
+                instrument_id=2449001,
+                signal_bar_date=date(2026, 8, 5),
+                side="long",
+                horizon_market_days=5,
+                setup_version="test-setup-v1",
+                exit_policy_version="test-exit-v1",
+                decided_at=_NOW,
+                conservative_net_expectancy_pct=Decimal("1.5"),
+            )
+        ],
+        selection_limit=5,
+        decided_at=_NOW,
     )
     conn.execute(
         "INSERT INTO quotes (instrument_id, quoted_at, bid, ask, last, spread_pct, spread_flag) "
@@ -273,6 +295,43 @@ def _seed(
     )
     conn.commit()
     return int(signal[0])
+
+
+def _rerank_signal(conn: psycopg.Connection[Any], signal_id: int) -> None:
+    row = conn.execute(
+        """
+        SELECT f.forecast_id,s.strategy_id,s.strategy_version,s.instrument_id,
+               s.signal_bar_date,f.side,f.horizon_market_days,f.setup_version,
+               f.exit_policy_version,f.decided_at,f.conservative_net_expectancy_pct
+        FROM strategy_signals s
+        JOIN strategy_opportunity_forecasts f ON f.signal_id=s.signal_id
+        WHERE s.signal_id=%s
+        """,
+        (signal_id,),
+    ).fetchone()
+    assert row is not None
+    persist_ranking_batch(
+        conn,
+        opportunities=[
+            RankableOpportunity(
+                signal_id=signal_id,
+                forecast_id=int(row[0]),
+                strategy_id=str(row[1]),
+                strategy_version=str(row[2]),
+                instrument_id=int(row[3]),
+                signal_bar_date=row[4],
+                side=str(row[5]),
+                horizon_market_days=int(row[6]),
+                setup_version=str(row[7]),
+                exit_policy_version=str(row[8]),
+                decided_at=row[9],
+                conservative_net_expectancy_pct=Decimal(str(row[10])),
+            )
+        ],
+        selection_limit=5,
+        decided_at=_NOW,
+    )
+    conn.commit()
 
 
 def _existing_allocated_trade(
@@ -446,15 +505,26 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
         (result.order_id,),
     ).fetchone() == (_REQUEST_ID, "strategy", "13902598")
     forecast_id = conn.execute(
-        "SELECT forecast_id FROM strategy_opportunity_forecasts WHERE signal_id=%s",
+        """
+        SELECT f.forecast_id,m.ranking_member_id
+        FROM strategy_opportunity_forecasts f
+        JOIN strategy_opportunity_ranking_members m ON m.forecast_id=f.forecast_id
+        WHERE f.signal_id=%s AND m.selected
+        """,
         (signal_id,),
     ).fetchone()
     assert forecast_id is not None
     assert conn.execute(
-        "SELECT verdict, allocated_amount, net_expectancy_pct, forecast_id "
+        "SELECT verdict, allocated_amount, net_expectancy_pct, forecast_id, ranking_member_id "
         "FROM strategy_entry_preflights WHERE signal_id=%s",
         (signal_id,),
-    ).fetchone() == ("allocated", Decimal("50.000000"), Decimal("3.00000000"), forecast_id[0])
+    ).fetchone() == (
+        "allocated",
+        Decimal("50.000000"),
+        Decimal("3.00000000"),
+        forecast_id[0],
+        forecast_id[1],
+    )
     conn.commit()
 
     # Retry is read-only and cannot submit a duplicate.
@@ -467,6 +537,8 @@ def test_missing_opportunity_forecast_refuses_before_broker_access(
 ) -> None:
     conn = ebull_test_conn
     signal_id = _seed(conn)
+    conn.execute("DELETE FROM strategy_opportunity_ranking_members")
+    conn.execute("DELETE FROM strategy_opportunity_ranking_batches")
     conn.execute("DELETE FROM strategy_opportunity_forecasts WHERE signal_id=%s", (signal_id,))
     conn.commit()
     broker = _broker()
@@ -480,6 +552,23 @@ def test_missing_opportunity_forecast_refuses_before_broker_access(
         "SELECT forecast_id FROM strategy_entry_preflights WHERE signal_id=%s",
         (signal_id,),
     ).fetchone() == (None,)
+
+
+def test_unbatched_opportunity_refuses_before_broker_access(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute("DELETE FROM strategy_opportunity_ranking_members")
+    conn.execute("DELETE FROM strategy_opportunity_ranking_batches")
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "opportunity_ranking_member_missing"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -653,6 +742,7 @@ def test_shared_paper_pool_is_a_master_switch_and_hard_cap(
         changed_by="operator",
         reason="bounded shared pot",
     )
+    _rerank_signal(conn, signal_id)
     conn.commit()
     broker = _broker()
     broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
@@ -917,6 +1007,7 @@ def test_shared_paper_pool_excludes_future_live_reservations(
         changed_by="operator",
         reason="paper-only shared pot",
     )
+    _rerank_signal(conn, signal_id)
     live_signal = conn.execute(
         """
         INSERT INTO strategy_signals (

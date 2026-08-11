@@ -18,6 +18,7 @@ from app.services.strategy_opportunity_ranker import (
 def _opportunity(*, signal_id: int, instrument_id: int, expectancy: str) -> RankableOpportunity:
     return RankableOpportunity(
         signal_id=signal_id,
+        forecast_id=signal_id + 1000,
         strategy_id="candidate-a",
         strategy_version="v1",
         instrument_id=instrument_id,

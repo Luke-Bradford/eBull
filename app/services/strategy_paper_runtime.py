@@ -24,7 +24,11 @@ from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
-from app.services.strategy_opportunity_ranker import RankableOpportunity, rank_positive_opportunities
+from app.services.strategy_opportunity_ranker import (
+    RankableOpportunity,
+    persist_ranking_batch,
+    rank_positive_opportunities,
+)
 from app.services.strategy_order_reconciliation import enforce_reconciliation_slo, reconcile_backlog
 from app.services.strategy_paper_executor import execute_fired_paper_signal
 from app.services.strategy_position_manager import manage_owned_position
@@ -50,7 +54,7 @@ def _load_ranked_opportunities(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT s.signal_id,s.strategy_id,s.strategy_version,s.instrument_id,
+            SELECT s.signal_id,f.forecast_id,s.strategy_id,s.strategy_version,s.instrument_id,
                    s.signal_bar_date,f.side,f.horizon_market_days,f.setup_version,
                    f.exit_policy_version,f.decided_at,
                    f.conservative_net_expectancy_pct
@@ -95,6 +99,7 @@ def _load_ranked_opportunities(
         [
             RankableOpportunity(
                 signal_id=int(row["signal_id"]),
+                forecast_id=int(row["forecast_id"]),
                 strategy_id=str(row["strategy_id"]),
                 strategy_version=str(row["strategy_version"]),
                 instrument_id=int(row["instrument_id"]),
@@ -386,10 +391,21 @@ def run_strategy_paper_cycle(
         ]
     )
     candidates = _load_ranked_opportunities(conn, strategy_versions=versions, observed_at=observed_at)
-    selected = candidates[:signal_limit]
-    for opportunity in selected:
-        execute_fired_paper_signal(conn, broker=broker, signal_id=opportunity.signal_id, now=observed_at)
-    return StrategyPaperCycleResult(len(reconciled), managed, len(selected), active_blocks)
+    members = persist_ranking_batch(
+        conn,
+        opportunities=candidates,
+        selection_limit=signal_limit,
+        decided_at=observed_at,
+    )
+    for member in members:
+        execute_fired_paper_signal(
+            conn,
+            broker=broker,
+            signal_id=member.opportunity.signal_id,
+            ranking_member_id=member.ranking_member_id,
+            now=observed_at,
+        )
+    return StrategyPaperCycleResult(len(reconciled), managed, len(members), active_blocks)
 
 
 __all__ = ["StrategyPaperCycleResult", "refresh_strategy_health", "run_strategy_paper_cycle"]

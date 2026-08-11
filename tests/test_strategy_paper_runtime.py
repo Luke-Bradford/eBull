@@ -13,6 +13,8 @@ from psycopg.pq import TransactionStatus
 from app.services.cost_model import COST_MODEL_ID
 from app.services.strategy_live_gate import assess_live_gate
 from app.services.strategy_opportunity_forecast import OpportunityForecast, record_opportunity_forecast
+from app.services.strategy_opportunity_ranker import persist_ranking_batch
+from app.services.strategy_paper_executor import execute_fired_paper_signal
 from app.services.strategy_paper_runtime import (
     _load_ranked_opportunities,
     refresh_strategy_health,
@@ -118,7 +120,7 @@ def test_runtime_ranks_the_complete_set_before_applying_its_execution_limit(
     executed: list[int] = []
     monkeypatch.setattr(
         "app.services.strategy_paper_runtime.execute_fired_paper_signal",
-        lambda _conn, *, broker, signal_id, now: executed.append(signal_id),
+        lambda _conn, *, broker, signal_id, ranking_member_id, now: executed.append(signal_id),
     )
 
     result = run_strategy_paper_cycle(
@@ -130,8 +132,69 @@ def test_runtime_ranks_the_complete_set_before_applying_its_execution_limit(
         strategy_versions=["v1"],
     )
 
-    assert result.evaluated_signals == 1
-    assert executed == [stronger_older]
+    assert result.evaluated_signals == 2
+    assert executed == [stronger_older, weaker_newer]
+    assert conn.execute("SELECT count(*) FROM strategy_opportunity_ranking_batches").fetchone() == (2,)
+    assert conn.execute(
+        """
+        SELECT s.signal_id,m.rank,m.selected,m.reason_code
+        FROM strategy_opportunity_ranking_members m
+        JOIN strategy_opportunity_forecasts f ON f.forecast_id=m.forecast_id
+        JOIN strategy_signals s ON s.signal_id=f.signal_id
+        WHERE m.ranking_batch_id=(
+          SELECT max(ranking_batch_id) FROM strategy_opportunity_ranking_batches
+        ) ORDER BY m.rank
+        """
+    ).fetchall() == [
+        (stronger_older, 1, True, "selected_for_execution"),
+        (weaker_newer, 2, False, "below_execution_batch_limit"),
+    ]
+    conn.commit()
+
+    run_strategy_paper_cycle(
+        conn,
+        broker=_broker(),
+        signal_limit=1,
+        position_limit=1,
+        now=_NOW,
+        strategy_versions=["v1"],
+    )
+    assert conn.execute("SELECT count(*) FROM strategy_opportunity_ranking_batches").fetchone() == (2,)
+    assert conn.execute("SELECT count(*) FROM strategy_opportunity_ranking_members").fetchone() == (3,)
+
+
+def test_declined_ranking_member_cannot_reach_broker_access(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    weaker_signal = _add_weaker_newer_forecast(conn)
+    ranked = _load_ranked_opportunities(conn, strategy_versions=["v1"], observed_at=_NOW)
+    persist_ranking_batch(conn, opportunities=ranked, selection_limit=1, decided_at=_NOW)
+    declined = conn.execute(
+        """
+        SELECT m.ranking_member_id
+        FROM strategy_opportunity_ranking_members m
+        JOIN strategy_opportunity_forecasts f ON f.forecast_id=m.forecast_id
+        WHERE f.signal_id=%s AND NOT m.selected
+        """,
+        (weaker_signal,),
+    ).fetchone()
+    assert declined is not None
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(
+        conn,
+        broker=broker,
+        signal_id=weaker_signal,
+        ranking_member_id=int(declined[0]),
+        now=_NOW,
+    )
+
+    assert result.reason_code == "opportunity_ranking_member_not_selected"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
 
 
 def test_stale_forecast_cannot_consume_the_bounded_ranked_set(
