@@ -212,6 +212,9 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # reference both it and signals, so those children are derived; the parent
     # itself cannot be discovered from an existing inbound-FK root.
     "strategy_forecast_calibrations",
+    # #2553 — the forecast outcome round-robin cursor is standalone. Outcome
+    # rows are discovered through their FK to forecasts/signals.
+    "strategy_forecast_outcome_cursor",
     # #2448/#2449 — bounded strategy current-state roots have no FKs. Their
     # signal/deployment children are derived by the planner from roots above.
     "strategy_scan_watermark",

@@ -2080,9 +2080,10 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         source="strategy_scan",
         description=(
             "Daily 06:55 UTC — after the signal scan, resolves mature current-version "
-            "level-based fills against the fail-closed live corpus. Incomplete windows "
-            "remain pending without a database write; terminal outcomes are one immutable "
-            "row per signal and rule-version pair, processed round-robin in a bounded batch."
+            "level-based fills and immutable opportunity forecasts against the fail-closed "
+            "live corpus. Incomplete windows remain pending without a database write; "
+            "terminal outcomes are one immutable row per decision and rule-version pair, "
+            "processed round-robin in bounded batches."
         ),
         cadence=Cadence.daily(hour=6, minute=55),
         catch_up_on_boot=False,
@@ -5069,15 +5070,21 @@ def strategy_signal_scan() -> None:
 
 def strategy_outcome_resolution() -> None:
     """Resolve mature forward brackets without persisting immature windows."""
+    from app.services.strategy_forecast_outcome_resolution import run_forecast_outcome_resolution
     from app.services.strategy_outcome_resolution import run_outcome_resolution
 
     with _tracked_job(JOB_STRATEGY_OUTCOME_RESOLUTION) as tracker:
         with connect_job(autocommit=True) as conn:
             report = run_outcome_resolution(conn)
-        tracker.row_count = report.written
+            forecast_report = run_forecast_outcome_resolution(conn)
+        tracker.row_count = report.written + forecast_report.written
         tracker.note = (
             f"selected={report.selected} written={report.written} "
-            f"immature={report.immature} ambiguous={report.ambiguous}"
+            f"immature={report.immature} ambiguous={report.ambiguous}; "
+            f"forecasts_selected={forecast_report.selected} "
+            f"forecasts_written={forecast_report.written} "
+            f"forecasts_immature={forecast_report.immature} "
+            f"forecasts_ambiguous={forecast_report.ambiguous}"
         )
 
 
