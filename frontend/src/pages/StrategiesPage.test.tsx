@@ -185,7 +185,7 @@ describe("StrategiesPage", () => {
     vi.restoreAllMocks();
     vi.spyOn(strategiesApi, "fetchStrategyOverview").mockResolvedValue(OVERVIEW);
     vi.spyOn(strategiesApi, "fetchStrategyPnlHistory").mockResolvedValue({
-      basis: "exact_owned_realised_pnl_only",
+      basis: "exact_owned_mark_to_market_nav",
       total_return_available: false,
       benchmark_comparison_available: false,
       points: [],
@@ -342,17 +342,27 @@ describe("StrategiesPage", () => {
   it("shows observed portfolio measures and controls for an approved strategy", async () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
     vi.mocked(strategiesApi.fetchStrategyPnlHistory).mockResolvedValue({
-      basis: "exact_owned_realised_pnl_only",
+      basis: "exact_owned_mark_to_market_nav",
       total_return_available: false,
       benchmark_comparison_available: false,
-      points: [{ date: "2026-08-09", total_pnl: "50", strategy_pnl: { "s1-time-series-momentum": "50" } }],
+      points: [{
+        date: "2026-08-09",
+        principal: "1000",
+        external_flow: "1000",
+        realised_pnl: "40",
+        unrealised_pnl: "10",
+        total_pnl: "50",
+        pot_value: "1050",
+        complete: true,
+        incomplete_reasons: [],
+      }],
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
     expect(within(performance).getByText("US$50.00")).toBeInTheDocument();
     expect(within(performance).getByText("+1.25%")).toBeInTheDocument();
     expect(within(performance).getByText("+60.00%")).toBeInTheDocument();
-    expect(within(performance).getByText(/Cumulative realised P&L from exact automated positions/)).toBeInTheDocument();
+    expect(within(performance).getByText(/Daily realised plus open P&L from exact automated positions/)).toBeInTheDocument();
     expect(screen.getByText("1 approved")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Enabled" })).toBeEnabled();
   });

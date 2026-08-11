@@ -83,6 +83,7 @@ def test_read_positions_carries_close_forward(ebull_test_conn: psycopg.Connectio
     assert rows[0].close == Decimal("20")
     assert rows[0].native_ccy == "USD"
     assert rows[0].units == Decimal("3")
+    assert rows[0].open_conversion_rate == Decimal("1")
 
 
 def test_read_positions_excludes_synthetic_ids(ebull_test_conn: psycopg.Connection[Any]) -> None:  # noqa: F811
@@ -233,9 +234,11 @@ def test_write_snapshot_is_idempotent(ebull_test_conn: psycopg.Connection[Any]) 
         "SELECT COUNT(*), MAX(total_value) FROM portfolio_eod_snapshots WHERE snapshot_date = %s", (d,)
     ).fetchone()
     pos_row = conn.execute(
-        "SELECT COUNT(*) FROM portfolio_eod_position_snapshots WHERE snapshot_date = %s", (d,)
+        "SELECT COUNT(*), MAX(unrealised_pnl_usd) FROM portfolio_eod_position_snapshots WHERE snapshot_date = %s",
+        (d,),
     ).fetchone()
     assert snap_row is not None and pos_row is not None
     assert snap_row[0] == 1
     assert pos_row[0] == 1
+    assert pos_row[1] is None
     assert snap_row[1] == Decimal("18.00")

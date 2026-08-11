@@ -77,6 +77,7 @@ from app.services.strategy_position_manager import (
 )
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import CORPUS_VERSION
+from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
@@ -327,6 +328,25 @@ class StrategyPnlHistoryResponse(BaseModel):
     total_return_available: Literal[False] = False
     benchmark_comparison_available: Literal[False] = False
     points: list[StrategyPnlHistoryPoint]
+
+
+class StrategyWealthHistoryPoint(BaseModel):
+    date: date
+    principal: Decimal
+    external_flow: Decimal
+    realised_pnl: Decimal | None
+    unrealised_pnl: Decimal | None
+    total_pnl: Decimal | None
+    pot_value: Decimal | None
+    complete: bool
+    incomplete_reasons: list[str]
+
+
+class StrategyWealthHistoryResponse(BaseModel):
+    basis: Literal["exact_owned_mark_to_market_nav"] = "exact_owned_mark_to_market_nav"
+    total_return_available: Literal[False] = False
+    benchmark_comparison_available: Literal[False] = False
+    points: list[StrategyWealthHistoryPoint]
 
 
 class StrategyOwnedPosition(BaseModel):
@@ -1449,6 +1469,30 @@ def get_strategy_pnl_history(
             )
         )
     return StrategyPnlHistoryResponse(points=points)
+
+
+@router.get("/wealth-history", response_model=StrategyWealthHistoryResponse)
+def get_strategy_wealth_history(
+    days: int = Query(default=365, ge=30, le=1825),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyWealthHistoryResponse:
+    """Return principal plus realised and historical open marks for the sleeve."""
+    return StrategyWealthHistoryResponse(
+        points=[
+            StrategyWealthHistoryPoint(
+                date=point.date,
+                principal=point.principal,
+                external_flow=point.external_flow,
+                realised_pnl=point.realised_pnl,
+                unrealised_pnl=point.unrealised_pnl,
+                total_pnl=point.total_pnl,
+                pot_value=point.pot_value,
+                complete=point.complete,
+                incomplete_reasons=list(point.incomplete_reasons),
+            )
+            for point in load_strategy_wealth_history(conn, days=days)
+        ]
+    )
 
 
 @router.put("/paper-pool", response_model=StrategyPaperPoolView)
