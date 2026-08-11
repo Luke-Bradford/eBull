@@ -125,6 +125,10 @@ const REFUSAL_LABELS: Record<string, string> = {
   carry_unmodelled: "Holding and financing costs are not modelled",
   trial_register_superseded: "Evidence does not match the current experiment register",
   synthetic_control_not_run: "Random-entry control has not passed",
+  prospective_assessment_policy_missing: "Prospective forecast acceptance limits are missing",
+  prospective_assessment_missing: "No current prospective forecast assessment exists",
+  prospective_assessment_not_passed: "Recent forecast probabilities failed validation",
+  prospective_assessment_stale: "Prospective forecast validation is stale",
 };
 
 function refusalLabel(refusal: string): string {
@@ -186,6 +190,38 @@ function Metric({ label, value, hint }: { label: string; value: string; hint?: s
       </strong>
       {hint ? <span className="mt-0.5 block text-xs text-slate-500">{hint}</span> : null}
     </div>
+  );
+}
+
+const READINESS_COPY: Record<StrategyOverviewResponse["automation_readiness"]["state"], string> = {
+  no_capital_candidates: "No validated capital candidate exists. Research controls are measuring the machinery only.",
+  historical_validation_incomplete: "Candidate research has not cleared the recent after-cost validation gates.",
+  assessment_policy_missing: "Prospective forecast acceptance limits have not been registered.",
+  prospective_evidence_missing: "A historically valid candidate is waiting for prospective forecast outcomes.",
+  prospective_evidence_failed: "Recent forecast probabilities did not remain accurate enough to receive capital.",
+  prospective_evidence_stale: "The last passing prospective assessment is no longer current.",
+  ready: "At least one candidate has current historical, execution and prospective forecast authority.",
+};
+
+function AutomationReadiness({ overview }: { overview: StrategyOverviewResponse }) {
+  const readiness = overview.automation_readiness;
+  return (
+    <section className={`border px-5 py-4 ${readiness.ready ? "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30" : "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold">{readiness.ready ? "Automation evidence is current" : "Automation is not ready"}</h2>
+            <Badge tone={readiness.ready ? "ok" : "warn"}>{readiness.prospectively_ready_candidate_count} ready</Badge>
+          </div>
+          <p className="mt-1 max-w-3xl text-xs text-slate-600 dark:text-slate-300">{READINESS_COPY[readiness.state]}</p>
+        </div>
+        <div className="grid grid-cols-3 gap-5 text-right text-xs">
+          <div><span className="block text-slate-500">Candidates</span><strong className="tabular-nums">{readiness.capital_candidate_count}</strong></div>
+          <div><span className="block text-slate-500">Outcomes scored</span><strong className="tabular-nums">{readiness.resolved_forecasts}</strong></div>
+          <div><span className="block text-slate-500">Fresh passing scopes</span><strong className="tabular-nums">{readiness.fresh_passed_scope_count}</strong></div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -435,11 +471,9 @@ function StrategyCloseModal({
 
 function AutomationControl({
   overview,
-  approvedCount,
   onUpdated,
 }: {
   overview: StrategyOverviewResponse;
-  approvedCount: number;
   onUpdated: () => void;
 }) {
   const pool = overview.paper_pool;
@@ -462,7 +496,7 @@ function AutomationControl({
     || parsed !== Number(pool.capital_limit)
     || capitalMode !== pool.capital_mode
     || riskProfile !== pool.mandate.risk_profile;
-  const canEnable = approvedCount > 0 && overview.execution_enabled && riskProfile !== "unconfigured";
+  const canEnable = overview.automation_readiness.ready && overview.execution_enabled && riskProfile !== "unconfigured";
   const selectedMandate = riskProfile === pool.mandate.risk_profile && pool.mandate.configured
     ? pool.mandate
     : pool.available_mandates.find((mandate) => mandate.risk_profile === riskProfile) ?? null;
@@ -896,12 +930,7 @@ export function StrategiesPage() {
         <SectionError onRetry={overview.refetch} />
       ) : overview.data && summary ? (
         <>
-          {summary.approved === 0 ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
-              <span><strong>No capital candidates are approved for automation.</strong> Validation controls cannot use capital.</span>
-              <span className="text-xs">0 ready</span>
-            </div>
-          ) : null}
+          <AutomationReadiness overview={overview.data} />
           {!overview.data.demo_connection && !overview.data.live_strategy_activation_available ? (
             <div className="border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
               <strong>Real-money strategy activation is unavailable.</strong>
@@ -941,7 +970,7 @@ export function StrategiesPage() {
                 <EmptyPnlChart />
               )}
             </section>
-            <AutomationControl overview={overview.data} approvedCount={summary.approved} onUpdated={overview.refetch} />
+            <AutomationControl overview={overview.data} onUpdated={overview.refetch} />
           </div>
 
           {ownedPositions.loading ? (

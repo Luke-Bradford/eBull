@@ -233,6 +233,10 @@ def test_empty_ledgers_still_return_all_manifest_strategies(
     assert all(item.scan.status == "never_run" for item in overview.strategies)
     assert all(not item.all_recent_evidence_complete for item in overview.strategies)
     assert all(len(item.evidence_windows) == 8 for item in overview.strategies)
+    assert not overview.automation_readiness.ready
+    assert overview.automation_readiness.state == "no_capital_candidates"
+    assert overview.automation_readiness.capital_candidate_count == 0
+    assert overview.automation_readiness.resolved_forecasts == 0
     s4 = next(item for item in overview.strategies if item.strategy_id == "s4-volatility-compression-breakout")
     assert s4.runnable
     assert s4.exclusion_reason is None

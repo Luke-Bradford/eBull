@@ -21,7 +21,15 @@ from app.services.strategy_forecast_assessment import (
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION
 from tests.fixtures.ebull_test_db import test_database_url
 
-_SCOPE = ForecastScope("opportunity-forecast-v1", "model-v1", "calibration-v1", "setup-v1", "exit-v1")
+_SCOPE = ForecastScope(
+    "S-ASSESS",
+    "strategy-v1",
+    "opportunity-forecast-v1",
+    "model-v1",
+    "calibration-v1",
+    "setup-v1",
+    "exit-v1",
+)
 
 
 def _policy(**overrides: object) -> ForecastAssessmentPolicy:
@@ -110,6 +118,18 @@ def test_normalized_multiclass_brier_penalises_confident_wrong_forecasts() -> No
     assert "normalized_brier_score_high" in assessment.reason_codes
     assert "classwise_calibration_error_high" in assessment.reason_codes
     assert not assessment.passed
+
+
+def test_brier_skill_preserves_large_negative_evidence_without_clipping() -> None:
+    observations = [
+        _observation(index, probabilities=("0", "1", "0"), outcome="target_first") for index in range(1, 20_001)
+    ]
+    observations.append(_observation(20_001, probabilities=("1", "0", "0"), outcome="stop_first"))
+
+    assessment = _calculate(observations)
+
+    assert assessment.brier_skill_score is not None
+    assert assessment.brier_skill_score < Decimal("-10000")
 
 
 def test_small_apparently_perfect_sample_has_no_authority() -> None:

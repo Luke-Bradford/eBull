@@ -694,8 +694,19 @@ def _session(username: str = "allocation-operator") -> SessionRow:
 
 def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = ebull_test_conn
+    actual_overview = get_strategy_overview
+
+    def ready_overview(connection: psycopg.Connection[object]):
+        overview = actual_overview(connection)
+        overview.automation_readiness = overview.automation_readiness.model_copy(
+            update={"ready": True, "state": "ready", "blockers": []}
+        )
+        return overview
+
+    monkeypatch.setattr("app.api.strategies.get_strategy_overview", ready_overview)
     # runtime_config is a deliberately persistent singleton, unlike the
     # per-test pool event stream. Establish the transition this test asserts
     # when an earlier executor test enabled automation.
@@ -765,6 +776,37 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
         )
     assert exc_info.value.status_code == 409
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
+
+
+def test_shared_paper_pool_refuses_activation_without_a_ready_candidate(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    if get_runtime_config(conn).enable_auto_trading:
+        update_runtime_config(
+            conn,
+            updated_by="test-precondition",
+            reason="establish disabled automation precondition",
+            enable_auto_trading=False,
+        )
+    conn.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_strategy_paper_pool(
+            StrategyPaperPoolUpdateRequest(
+                enabled=True,
+                capital_limit=Decimal("750"),
+                capital_mode="fixed",
+                risk_profile="balanced",
+                reason="must fail without capital authority",
+            ),
+            _session(),
+            conn,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "no_capital_candidates" in str(exc_info.value.detail)
+    assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (0,)
 
 
 def test_evidence_refresh_queues_one_fixed_pinned_request(
