@@ -72,6 +72,7 @@ from app.services.strategy_result import (
     EVALUATION_WINDOW_START,
     HOLDOUT_BOUNDARY,
     SIZING_RULE,
+    TOTAL_RETURN_BASIS,
     PromotionCandidate,
     ResultIdentity,
     StrategyResult,
@@ -440,6 +441,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
         position_rule_set_version="position-builder-v1+unmeasured",
         outcome_rule_set_version="outcome-resolver-v1+unmeasured",
         input_rule_set_version="price-quarantine-v1+unmeasured",
+        return_basis=TOTAL_RETURN_BASIS,
     )
     # ⚠ `carry_unmodelled` is read from `cost_model` HERE — this is the WRITER's
     # position, which is the one place it is correct to. The gate reads the

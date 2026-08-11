@@ -2409,6 +2409,7 @@ export interface StrategyResultArm {
   cost_model_id: string;
   sizing_rule: string;
   benchmark_rule: string;
+  return_basis: string;
   position_rule_set_version: string;
   outcome_rule_set_version: string;
   input_rule_set_version: string;

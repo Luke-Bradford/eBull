@@ -150,18 +150,15 @@ it is asserted rather than assumed.
   name has listed, and near 0% at the axis start. That is the truthful shape of
   this construction, not a defect.
 
-### 2.5 Price basis — a known understatement, stated not fixed
+### 2.5 Price basis — corrected by #2429
 
-`research_price_structure_store._LOAD_SQL` selects `close`, never `adj_close`.
-The skill records that `adj_close` is split **and dividend** adjusted and is what
-returns should be measured on. **The whole engine — strategy and benchmark alike
-— is therefore price-return, not total-return**, and the buy-and-hold bar is
-understated by the dividend yield of the evaluated names.
-
-Not changed here, deliberately: moving only the benchmark to `adj_close` would
-credit dividends to the bar and deny them to the strategy, which is a larger
-error than the one it fixes. Moving both is an engine-wide change to every stored
-figure. **Filed separately.**
+This document originally left the whole engine on raw `close`, because moving
+only the benchmark would credit dividends to one arm and deny them to the
+strategy. #2429 completes the engine-wide correction: raw OHLC still governs
+signals, fills, spread bands and TP/SL, while strategy and benchmark wealth use
+`adj_close`. Historical rows remain explicitly labelled price-return v1; new
+rows carry a distinct total-return v2 identity. See
+`2026-08-11-total-return-accounting-result.md` for the consumer matrix and A/B.
 
 ---
 

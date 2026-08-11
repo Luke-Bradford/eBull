@@ -57,6 +57,7 @@ def _row(
     range_usable: bool = True,
     return_usable: bool = True,
     close: Decimal | None = Decimal("10"),
+    adj_close: Decimal | None = Decimal("10"),
     open_: Decimal | None = Decimal("9"),
 ) -> tuple[object, ...]:
     """One ``_LOAD_SQL`` row, in the order the loader unpacks it."""
@@ -66,6 +67,7 @@ def _row(
         Decimal("11"),
         Decimal("8"),
         close,
+        adj_close,
         1000,
         range_usable,
         return_usable,
@@ -148,6 +150,22 @@ class TestTheTwoArms:
         bar = loaded.bars[0]
         assert (bar.high, bar.low, bar.close) == (Decimal("11"), Decimal("8"), Decimal("10"))
 
+    def test_the_wealth_close_follows_the_return_mask_without_replacing_raw_ohlc(self) -> None:
+        masked = _apply_arm(
+            1,
+            [_row(2, close=Decimal("10"), adj_close=Decimal("12"), return_usable=False)],
+            arm="masked",
+        )
+        admitted = _apply_arm(
+            1,
+            [_row(2, close=Decimal("10"), adj_close=Decimal("12"), return_usable=False)],
+            arm="admitted",
+        )
+        assert masked.bars[0].close is None
+        assert masked.wealth_closes == (None,)
+        assert admitted.bars[0].close == Decimal("10")
+        assert admitted.wealth_closes == (Decimal("12"),)
+
 
 class TestTheOpenIsMaskedOnItsValue:
     """#2354. The open is the one OHLC field the two axes do not cover, and the
@@ -224,6 +242,7 @@ class TestTheOpenIsMaskedOnItsValue:
             MaskedSeries(
                 series_id=1,
                 bars=_one_bar(),
+                wealth_closes=(Decimal("10"),),
                 range_masked=3,
                 return_masked=0,
                 range_flagged=1,
@@ -232,11 +251,26 @@ class TestTheOpenIsMaskedOnItsValue:
                 arm="masked",
             )
 
+    def test_wealth_closes_must_align_with_raw_bars(self) -> None:
+        with pytest.raises(ValueError, match="one-for-one"):
+            MaskedSeries(
+                series_id=1,
+                bars=_one_bar(),
+                wealth_closes=(),
+                range_masked=0,
+                return_masked=0,
+                range_flagged=0,
+                return_flagged=0,
+                bars_flagged=0,
+                arm="masked",
+            )
+
     def test_the_admitted_arm_may_not_claim_to_have_masked_anything(self) -> None:
         with pytest.raises(ValueError, match="the admitted arm masks none"):
             MaskedSeries(
                 series_id=1,
                 bars=_one_bar(),
+                wealth_closes=(Decimal("10"),),
                 range_masked=1,
                 return_masked=0,
                 range_flagged=1,

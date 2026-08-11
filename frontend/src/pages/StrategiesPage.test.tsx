@@ -17,6 +17,7 @@ const ARM: StrategyResultArm = {
   cost_model_id: "cost-v1",
   sizing_rule: "size-v1",
   benchmark_rule: "benchmark-v1",
+  return_basis: "split-dividend-adjusted-wealth-v1",
   position_rule_set_version: "position-v1",
   outcome_rule_set_version: "outcome-v1",
   input_rule_set_version: "input-v1",

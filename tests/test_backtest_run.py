@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from array import array
+from collections import Counter
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
@@ -29,6 +30,7 @@ from app.services.backtest_run import (
     ExcludedStrategy,
     NamespaceMeasurement,
     WrittenRow,
+    _absorb,
     _ambiguity_material_for,
     _assert_ambiguity_contract,
     _assert_every_runnable_produced_rows,
@@ -55,7 +57,8 @@ from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
-from app.services.position_builder import Window
+from app.services.position_builder import Position, Window
+from app.services.position_costing import cost_position
 from app.services.price_structure import StructureBar
 from app.services.research_price_structure_store import (
     QUARANTINE_ARMS,
@@ -70,6 +73,7 @@ from app.services.strategy_result import (
     EVALUATION_WINDOW_END,
     EVALUATION_WINDOW_START,
     HOLDOUT_BOUNDARY,
+    TOTAL_RETURN_BASIS,
     ResultIdentity,
     StrategyResult,
 )
@@ -231,6 +235,7 @@ class TestLevelArmSharedPass:
         return corpus, MaskedSeries(
             series_id=10,
             bars=bars,
+            wealth_closes=tuple(bar.close for bar in bars),
             range_masked=0,
             return_masked=0,
             range_flagged=0,
@@ -641,6 +646,7 @@ class TestPlannedIdentities:
             position_rule_set_version=POSITION_RULE_SET_VERSION,
             outcome_rule_set_version="outcome-v1",
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
+            return_basis=TOTAL_RETURN_BASIS,
         )
         # ⚠ ``conn`` is never reached: the duplicate check runs before the
         # query, which is what makes this a pure test of the planning step.
@@ -685,7 +691,8 @@ class TestBenchmarkBook:
     def test_only_the_namespaces_own_instruments_get_a_leg(self) -> None:
         book = _benchmark_book(
             instruments=frozenset({1}),
-            closes_by_instrument=self._closes(),
+            raw_closes_by_instrument=self._closes(),
+            wealth_closes_by_instrument=self._closes(),
             lo=0,
             hi=9,
         )
@@ -694,7 +701,8 @@ class TestBenchmarkBook:
     def test_a_leg_is_clipped_to_the_axis_rather_than_dropped(self) -> None:
         book = _benchmark_book(
             instruments=frozenset({1, 2}),
-            closes_by_instrument=self._closes(),
+            raw_closes_by_instrument=self._closes(),
+            wealth_closes_by_instrument=self._closes(),
             lo=3,
             hi=6,
         )
@@ -710,7 +718,8 @@ class TestBenchmarkBook:
     def test_an_instrument_wholly_outside_the_axis_contributes_nothing(self) -> None:
         book = _benchmark_book(
             instruments=frozenset({1, 2}),
-            closes_by_instrument=self._closes(),
+            raw_closes_by_instrument=self._closes(),
+            wealth_closes_by_instrument=self._closes(),
             lo=7,
             hi=9,
         )
@@ -719,7 +728,8 @@ class TestBenchmarkBook:
     def test_a_single_usable_bar_is_not_a_round_trip(self) -> None:
         book = _benchmark_book(
             instruments=frozenset({1}),
-            closes_by_instrument={1: (0, array("d", [10.0, math.nan, math.nan]))},
+            raw_closes_by_instrument={1: (0, array("d", [10.0, math.nan, math.nan]))},
+            wealth_closes_by_instrument={1: (0, array("d", [10.0, math.nan, math.nan]))},
             lo=0,
             hi=2,
         )
@@ -730,13 +740,93 @@ class TestBenchmarkBook:
         the amount the cost model charges — a comparison of cost models."""
         book = _benchmark_book(
             instruments=frozenset({1}),
-            closes_by_instrument=self._closes(),
+            raw_closes_by_instrument=self._closes(),
+            wealth_closes_by_instrument=self._closes(),
             lo=0,
             hi=5,
         )
         assert book.entry_price[0] > 10.0
         assert book.exit_price[0] < 15.0
         assert book.half_spread[0] > 0.0
+
+    def test_raw_close_selects_the_spread_but_adjusted_close_measures_wealth(self) -> None:
+        book = _benchmark_book(
+            instruments=frozenset({1}),
+            raw_closes_by_instrument={1: (0, array("d", [10.0, 11.0]))},
+            wealth_closes_by_instrument={1: (0, array("d", [100.0, 120.0]))},
+            lo=0,
+            hi=1,
+        )
+        assert book.entry_price[0] > 100.0
+        assert book.exit_price[0] < 120.0
+        assert book.marks.tolist() == [100.0, 120.0]
+
+    def test_non_finite_wealth_observation_excludes_the_benchmark_leg(self) -> None:
+        book = _benchmark_book(
+            instruments=frozenset({1}),
+            raw_closes_by_instrument={1: (0, array("d", [10.0, 11.0, 12.0]))},
+            wealth_closes_by_instrument={1: (0, array("d", [100.0, math.inf, 120.0]))},
+            lo=0,
+            hi=2,
+        )
+        assert book.entry_index == []
+
+
+class TestTotalReturnStrategyLeg:
+    def test_a_raw_loss_can_be_a_total_return_gain_without_changing_the_fill(self) -> None:
+        entry_day, exit_day = date(2024, 1, 2), date(2024, 1, 3)
+        position = Position(
+            strategy_id="s1",
+            strategy_version="v1",
+            instrument_id=1,
+            entry_signal_id=1,
+            entry_signal_bar_date=date(2024, 1, 1),
+            entry_fill_bar_date=entry_day,
+            entry_fill_price=Decimal("100"),
+            close_source="signal_pair",
+            close_bar_date=exit_day,
+            close_price=Decimal("90"),
+            bars_held=1,
+            open_reason=None,
+            mark_price=None,
+        )
+        series = BarSeries(
+            dates=(entry_day, exit_day),
+            rows=(
+                {
+                    "open": Decimal("100"),
+                    "high": Decimal("101"),
+                    "low": Decimal("99"),
+                    "close": Decimal("100"),
+                    "volume": 1000,
+                },
+                {
+                    "open": Decimal("90"),
+                    "high": Decimal("91"),
+                    "low": Decimal("89"),
+                    "close": Decimal("90"),
+                    "volume": 1000,
+                },
+            ),
+        )
+        books = {"hold_out": _NamespaceBook()}
+        _absorb(
+            [cost_position(position)],
+            series=series,
+            window=Window(entry_day, exit_day),
+            axis_pos={entry_day: 0, exit_day: 1},
+            raw_closes=[100.0, 90.0],
+            wealth_closes=[80.0, 90.0],
+            first_axis_index=0,
+            instrument_id=1,
+            books=books,  # type: ignore[arg-type]
+            close_sources=Counter(),
+            discarded=Counter(),
+        )
+        book = books["hold_out"]
+        assert book.returns[0] > 0.0
+        assert book.book.entry_price[0] < float(position.entry_fill_price)
+        assert book.book.marks.tolist() == [80.0, 90.0]
 
 
 class TestNamespaceAxis:
@@ -771,7 +861,8 @@ class TestNamespaceAxis:
                 "in_sample",
                 book,
                 corpus=self._corpus(axis),
-                closes_by_instrument={},
+                raw_closes_by_instrument={},
+                wealth_closes_by_instrument={},
             )
 
     def test_an_in_sample_namespace_holding_an_open_position_raises(self) -> None:
@@ -795,12 +886,24 @@ class TestNamespaceAxis:
         )
         book.open_at_end = 1
         with pytest.raises(RuntimeError, match="open at the window end"):
-            _measure_namespace("in_sample", book, corpus=self._corpus(axis), closes_by_instrument={})
+            _measure_namespace(
+                "in_sample",
+                book,
+                corpus=self._corpus(axis),
+                raw_closes_by_instrument={},
+                wealth_closes_by_instrument={},
+            )
 
     def test_a_namespace_with_no_positions_measures_nothing(self) -> None:
         axis = (date(2021, 6, 25), date(2021, 6, 28))
         assert (
-            _measure_namespace("in_sample", _NamespaceBook(), corpus=self._corpus(axis), closes_by_instrument={})
+            _measure_namespace(
+                "in_sample",
+                _NamespaceBook(),
+                corpus=self._corpus(axis),
+                raw_closes_by_instrument={},
+                wealth_closes_by_instrument={},
+            )
             is None
         )
 
@@ -827,7 +930,8 @@ class TestNamespaceAxis:
             "in_sample",
             book,
             corpus=self._corpus(axis),
-            closes_by_instrument={1: (3, array("d", [1.0, 1.1, 1.15, 1.2]))},
+            raw_closes_by_instrument={1: (3, array("d", [1.0, 1.1, 1.15, 1.2]))},
+            wealth_closes_by_instrument={1: (3, array("d", [1.0, 1.1, 1.15, 1.2]))},
         )
         assert outcome is not None
         # ⚠ NOT the corpus start. A strategy's warm-up means its first position
@@ -864,7 +968,8 @@ class TestNamespaceAxis:
                 "in_sample",
                 book,
                 corpus=self._corpus(axis),
-                closes_by_instrument={1: (3, array("d", [1.0, 1.1, 1.15, 1.2]))},
+                raw_closes_by_instrument={1: (3, array("d", [1.0, 1.1, 1.15, 1.2]))},
+                wealth_closes_by_instrument={1: (3, array("d", [1.0, 1.1, 1.15, 1.2]))},
             )
 
 

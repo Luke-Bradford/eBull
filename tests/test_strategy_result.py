@@ -31,10 +31,13 @@ from app.services.strategy_result import (
     EVALUATION_WINDOW_START,
     HOLDOUT_BOUNDARY,
     HOLDOUT_WEIGHTING,
+    LEGACY_RETURN_BASIS,
     PROMOTABLE_UNIVERSE_BASES,
     PROMOTION_REFUSALS,
     RESULT_SET_ID,
     SIZING_RULE,
+    TOTAL_RETURN_BASIS,
+    TOTAL_RETURN_RESULT_SET_ID,
     UNIVERSE_BASES,
     PromotionCandidate,
     ResultIdentity,
@@ -82,6 +85,7 @@ def _identity(**overrides: object) -> ResultIdentity:
         "position_rule_set_version": "position-builder-v1+bbbbbbbbbbbb",
         "outcome_rule_set_version": "outcome-resolver-v1+cccccccccccc",
         "input_rule_set_version": "price-quarantine-v1+dddddddddddd",
+        "return_basis": LEGACY_RETURN_BASIS,
     }
     base.update(overrides)
     return ResultIdentity(**base)  # type: ignore[arg-type]
@@ -392,6 +396,9 @@ class TestResultIdentity:
     def test_the_version_is_stable_across_calls(self) -> None:
         assert _identity().version == _identity().version
 
+    def test_the_legacy_basis_keeps_the_pre_2429_hash(self) -> None:
+        assert _identity(return_basis=LEGACY_RETURN_BASIS).version == "strategy-result-v1+cbea07eb9d2d"
+
     @pytest.mark.parametrize(
         ("field", "changed"),
         [
@@ -409,6 +416,7 @@ class TestResultIdentity:
             ("position_rule_set_version", "position-builder-v1+zzzzzzzzzzzz"),
             ("outcome_rule_set_version", "outcome-resolver-v1+zzzzzzzzzzzz"),
             ("input_rule_set_version", "price-quarantine-v1+zzzzzzzzzzzz"),
+            ("return_basis", TOTAL_RETURN_BASIS),
         ],
     )
     def test_every_member_moves_the_version(self, field: str, changed: object) -> None:
@@ -419,6 +427,9 @@ class TestResultIdentity:
         calls out: "a sizing change that did not move the version would let a
         different strategy inherit a track record"."""
         assert _identity().version != _identity(sizing_rule="fixed_fraction_v1").version
+
+    def test_total_return_results_use_a_new_identity_generation(self) -> None:
+        assert _identity(return_basis=TOTAL_RETURN_BASIS).version.startswith(f"{TOTAL_RETURN_RESULT_SET_ID}+")
 
     def test_the_ambiguity_arm_moves_it(self) -> None:
         """§3.4's two arms are two results, not two views of one."""
@@ -445,6 +456,10 @@ class TestStrategyResultValidation:
         with pytest.raises(ValueError, match="ambiguity arm"):
             _result(identity=_identity(ambiguity_arm="conservative"))
 
+    def test_an_unknown_return_basis_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="unknown return basis"):
+            _result(identity=_identity(return_basis="adjusted-sometimes"))
+
     @pytest.mark.parametrize(
         "field",
         [
@@ -452,6 +467,7 @@ class TestStrategyResultValidation:
             "strategy_version",
             "sizing_rule",
             "benchmark_rule",
+            "return_basis",
             "cost_model_id",
             "corpus_version",
             "position_rule_set_version",

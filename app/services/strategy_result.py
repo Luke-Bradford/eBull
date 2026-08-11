@@ -71,7 +71,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Literal, get_args
+from typing import Final, Literal, get_args
 
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DeflatedSharpeResult
@@ -382,10 +382,15 @@ def namespace_for_position(entry_fill_bar_date: date, close_bar_date: date | Non
 # Result identity (criterion 11, §5.4)
 # ---------------------------------------------------------------------------
 
-#: Prefix on every ``ResultIdentity.version``. Same construction as
+#: Prefix on legacy ``ResultIdentity.version`` values. Corrected total-return
+#: rows use ``TOTAL_RETURN_RESULT_SET_ID`` below. Same construction as
 #: ``STRATEGY_SET_ID`` / ``RULE_SET_ID`` elsewhere in the epic: a readable id so
 #: a stored hash says what KIND of thing produced it, plus 12 hex of payload.
 RESULT_SET_ID = "strategy-result-v1"
+TOTAL_RETURN_RESULT_SET_ID = "strategy-result-v2"
+LEGACY_RETURN_BASIS = "raw-close-price-return-v1"
+TOTAL_RETURN_BASIS = "split-dividend-adjusted-wealth-v1"
+RETURN_BASES: Final[frozenset[str]] = frozenset({LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS})
 
 
 @dataclass(frozen=True)
@@ -460,38 +465,48 @@ class ResultIdentity:
     #: re-run the quarantine under a changed rule set and the same signal
     #: resolves differently with the resolver byte-identical.
     input_rule_set_version: str
+    #: Accounting basis for returns and equity marks. The legacy value keeps
+    #: the historical v1 hash byte-identical; any corrected total-return result
+    #: is a v2 identity. Raw OHLC execution remains an independent invariant.
+    return_basis: str
 
     @property
     def version(self) -> str:
-        """A stable hash over every field above.
+        """A stable hash over every current field, preserving legacy hashes.
 
         ⚠ ``sort_keys=True`` and explicit separators, matching
         ``StrategyIdentity.version``: the hash must not move because a field was
         reordered in the source or because a Python version changed dict
-        iteration.
+        iteration. The sole compatibility branch is the explicit legacy return
+        basis: those rows predate the column and retain their already-stored v1
+        hash; every corrected basis includes the field and uses the v2 prefix.
         """
+        fields = {
+            "strategy_id": self.strategy_id,
+            "strategy_version": self.strategy_version,
+            "result_scope": self.result_scope,
+            "namespace": self.namespace,
+            "ambiguity_arm": self.ambiguity_arm,
+            "quarantine_arm": self.quarantine_arm,
+            "sizing_rule": self.sizing_rule,
+            "benchmark_rule": self.benchmark_rule,
+            "cost_model_id": self.cost_model_id,
+            "corpus_version": self.corpus_version,
+            "window_start": self.window_start.isoformat(),
+            "window_end": self.window_end.isoformat(),
+            "position_rule_set_version": self.position_rule_set_version,
+            "outcome_rule_set_version": self.outcome_rule_set_version,
+            "input_rule_set_version": self.input_rule_set_version,
+        }
+        if self.return_basis != LEGACY_RETURN_BASIS:
+            fields["return_basis"] = self.return_basis
         payload = json.dumps(
-            {
-                "strategy_id": self.strategy_id,
-                "strategy_version": self.strategy_version,
-                "result_scope": self.result_scope,
-                "namespace": self.namespace,
-                "ambiguity_arm": self.ambiguity_arm,
-                "quarantine_arm": self.quarantine_arm,
-                "sizing_rule": self.sizing_rule,
-                "benchmark_rule": self.benchmark_rule,
-                "cost_model_id": self.cost_model_id,
-                "corpus_version": self.corpus_version,
-                "window_start": self.window_start.isoformat(),
-                "window_end": self.window_end.isoformat(),
-                "position_rule_set_version": self.position_rule_set_version,
-                "outcome_rule_set_version": self.outcome_rule_set_version,
-                "input_rule_set_version": self.input_rule_set_version,
-            },
+            fields,
             sort_keys=True,
             separators=(",", ":"),
         )
-        return f"{RESULT_SET_ID}+{hashlib.sha256(payload.encode()).hexdigest()[:12]}"
+        prefix = RESULT_SET_ID if self.return_basis == LEGACY_RETURN_BASIS else TOTAL_RETURN_RESULT_SET_ID
+        return f"{prefix}+{hashlib.sha256(payload.encode()).hexdigest()[:12]}"
 
 
 # ---------------------------------------------------------------------------
@@ -600,9 +615,14 @@ class StrategyResult:
             "position_rule_set_version",
             "outcome_rule_set_version",
             "input_rule_set_version",
+            "return_basis",
         ):
             if not getattr(self.identity, field_name):
                 raise ValueError(f"{field_name} is blank — a present-but-empty identity field merges two results")
+        if self.identity.return_basis not in RETURN_BASES:
+            raise ValueError(
+                f"unknown return basis {self.identity.return_basis!r}; must be one of {sorted(RETURN_BASES)}"
+            )
         if self.identity.window_end < self.identity.window_start:
             raise ValueError(f"window {self.identity.window_start} → {self.identity.window_end} ends before it starts")
         if self.evaluated_instrument_count < 0:
@@ -856,6 +876,7 @@ CURRENT_RESULT_PROVENANCE: Mapping[str, object] = {
     "metric_set_id": METRIC_SET_ID,
     "sizing_rule": SIZING_RULE,
     "benchmark_rule": BENCHMARK_RULE,
+    "return_basis": TOTAL_RETURN_BASIS,
     "window_start": EVALUATION_WINDOW_START,
     "window_end": EVALUATION_WINDOW_END,
 }
@@ -867,6 +888,10 @@ __all__ = [
     "CORPUS_FROZEN_LAST_BAR",
     "CORPUS_VENDORS",
     "CORPUS_VERSION",
+    "LEGACY_RETURN_BASIS",
+    "RETURN_BASES",
+    "TOTAL_RETURN_BASIS",
+    "TOTAL_RETURN_RESULT_SET_ID",
     "CURRENT_RESULT_PROVENANCE",
     "EVALUATION_WINDOW_END",
     "EVALUATION_WINDOW_START",

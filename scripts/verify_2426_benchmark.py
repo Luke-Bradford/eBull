@@ -137,7 +137,8 @@ def compositions() -> int:
     lo, hi = 0, len(corpus.axis) - 1
     book = _benchmark_book(
         instruments=frozenset(closes_by_instrument),
-        closes_by_instrument=closes_by_instrument,
+        raw_closes_by_instrument=closes_by_instrument,
+        wealth_closes_by_instrument=closes_by_instrument,
         lo=lo,
         hi=hi,
     )

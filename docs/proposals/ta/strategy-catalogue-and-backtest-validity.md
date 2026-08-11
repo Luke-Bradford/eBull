@@ -681,9 +681,11 @@ count in 2022 was smaller again — the backtest must use the historical count,
 not today's and not the global one.
 ⚠ Rank within one asset class and one currency, or a currency move ranks
 against an equity move. Settled by §4.0 (§9 Q1 is resolved): US stocks, USD.
-⚠ Returns are **price returns, not total returns** — eToro candles carry no
-dividend adjustment (`price_adjustments` is empty; see §5 criterion 10). This
-systematically understates high-yield names over a 12-month lookback.
+⚠ The **ranking signal** uses price returns, not total returns. That preserves
+the registered S-2 rule and the executable OHLC geometry. Since #2429, realised
+strategy wealth and the buy-and-hold hurdle are separately measured on the
+research corpus's split-and-dividend-adjusted `adj_close`; changing the ranking
+input itself would be a new strategy trial, not an accounting correction.
 
 ✅ **IMPLEMENTED 2026-08-06** — `app/services/strategies/s2_cross_sectional_momentum.py`,
 against a CROSS-SECTIONAL extension of the phase-3a contract
@@ -975,12 +977,12 @@ Issue #2260 exists because a plausible number met none of these and was believed
    Report the count and share of bars/trades excluded per strategy, and run one
    sensitivity arm with conservative handling, so exclusion is visible rather
    than assumed harmless. (Narrowing-gate rule: measure what you reject.)
-10. **Corporate actions are declared, not assumed.** Splits appear to be
-    provider-back-adjusted (S7: 320/330), but `price_adjustments` is **empty
-    (0 rows)** and eToro candles are **price, not total return** — no dividend
-    adjustment. So: momentum lookbacks understate high-yield names, and any
-    unadjusted split would fabricate a signal. State the treatment per strategy;
-    `price_series_break` segments (402 rows) are `not_evaluable`, never spanned.
+10. **Corporate actions are declared, not assumed.** eToro candles remain
+    price-only execution observations. The research corpus supplies separate
+    split-adjusted OHLC and split-and-dividend-adjusted `adj_close`: OHLC governs
+    signals/fills/levels while `adj_close` governs strategy wealth and the
+    buy-and-hold hurdle (#2429). `price_series_break` segments (402 rows) are
+    `not_evaluable`, never spanned.
 11. **Strategy identity = code + config + data contract.** ⚠ Hashing parameters
     alone does not prevent overfitting: the same parameters with changed filter
     logic, universe definition, cost model, ranking tie-break or execution

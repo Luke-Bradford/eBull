@@ -35,6 +35,7 @@ from app.services.strategy_result import (
     CORPUS_VERSION,
     EVALUATION_WINDOW_END,
     EVALUATION_WINDOW_START,
+    LEGACY_RETURN_BASIS,
     SIZING_RULE,
     ResultIdentity,
     StrategyResult,
@@ -200,6 +201,7 @@ def build_result(**overrides: object) -> StrategyResult:
         "position_rule_set_version": "position-builder-v1+bbbbbbbbbbbb",
         "outcome_rule_set_version": "outcome-resolver-v1+cccccccccccc",
         "input_rule_set_version": "price-quarantine-v1+dddddddddddd",
+        "return_basis": LEGACY_RETURN_BASIS,
     }
     identity_base.update(identity_overrides)
     result_base: dict[str, object] = {
