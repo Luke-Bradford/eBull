@@ -229,6 +229,26 @@ Automated paper entry uses the fixed path
 real/demo environment prefix. Demo account risk uses
 `/api/v1/trading/info/demo/pnl` and applies the published formulas below.
 
+### Account-balance history — documented, demo access refused
+
+The live portal documented `GET /api/v1/balances/history` on 2026-08-11. It
+returns no more than 365 daily observations from the preceding 12 months, with
+cash, invested, profit/loss and total-balance fields in the requested display
+currency. A read-only authenticated probe with eBull's configured demo
+credentials returned HTTP 403 and only the standard error keys. Consequently,
+eBull does not claim or synthesize a historical broker-equity backfill.
+
+Foundation F-0 starts a compact prospective ledger from the working
+`/api/v1/trading/info/demo/pnl` endpoint instead: one observation per UTC day
+and environment, aggregate monetary fields only, with no raw response or
+per-position duplication. The newest observation wins within the current UTC
+day. The local EOD row currently records its computation time, not the effective
+time of every closing price, so a same-date difference remains diagnostic and
+must not be labelled reconciled. A collection failure must not block the
+existing portfolio sync.
+
+Primary page: `balances/get-historical-balance-snapshots`.
+
 ### Agent portfolios (copy-trading management)
 
 | Method | Path | Description | eBull status |

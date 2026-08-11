@@ -226,6 +226,42 @@ function AutomationReadiness({ overview }: { overview: StrategyOverviewResponse 
   );
 }
 
+function AccountEvidence({ overview }: { overview: StrategyOverviewResponse }) {
+  const evidence = overview.account_equity_evidence;
+  const currency = evidence.currency ?? "USD";
+  if (evidence.status === "unavailable") {
+    return (
+      <div className="mt-5 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
+        <span className="font-medium text-slate-700 dark:text-slate-300">Account evidence</span>
+        <span className="ml-2">Official account equity starts collecting with the next portfolio sync.</span>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-5 flex flex-wrap items-end justify-between gap-3 border-t border-slate-200 pt-3 text-xs dark:border-slate-800">
+      <div>
+        <span className="font-medium text-slate-700 dark:text-slate-300">Account evidence</span>
+        <span className="ml-2 text-slate-500">
+          {evidence.days_collected} daily official {evidence.days_collected === 1 ? "snapshot" : "snapshots"}
+        </span>
+      </div>
+      <div className="flex gap-5 text-right">
+        <div>
+          <span className="block text-slate-500">Broker equity</span>
+          <strong>{formatMoney(evidence.official_equity === null ? null : Number(evidence.official_equity), currency)}</strong>
+        </div>
+        {evidence.local_eod_value !== null ? (
+          <div>
+            <span className="block text-slate-500">Local valuation</span>
+            <strong>{formatMoney(Number(evidence.local_eod_value), evidence.local_eod_currency ?? currency)}</strong>
+          </div>
+        ) : null}
+        <div className="self-end text-amber-700 dark:text-amber-300">Reconciliation collecting</div>
+      </div>
+    </div>
+  );
+}
+
 function PnlTooltip({
   active,
   payload,
@@ -970,6 +1006,7 @@ export function StrategiesPage() {
               ) : (
                 <EmptyPnlChart />
               )}
+              <AccountEvidence overview={overview.data} />
             </section>
             <AutomationControl overview={overview.data} onUpdated={overview.refetch} />
           </div>

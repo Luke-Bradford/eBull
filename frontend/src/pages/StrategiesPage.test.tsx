@@ -77,6 +77,22 @@ const OVERVIEW: StrategyOverviewResponse = {
     worst_classwise_calibration_error: null,
     blockers: ["historical_validation_incomplete"],
   },
+  account_equity_evidence: {
+    status: "unavailable",
+    days_collected: 0,
+    snapshot_date: null,
+    observed_at: null,
+    currency: null,
+    official_equity: null,
+    official_available_cash: null,
+    official_total_invested: null,
+    official_unrealised_pnl: null,
+    local_eod_currency: null,
+    local_eod_value: null,
+    difference: null,
+    comparable: false,
+    incomplete_reasons: ["official_account_equity_missing"],
+  },
   paper_pool: {
     configured: true,
     enabled: false,
@@ -304,6 +320,35 @@ describe("StrategiesPage", () => {
     expect(screen.getByText("No automated P&L yet")).toBeInTheDocument();
     expect(screen.getAllByText("+1.50%")).toHaveLength(2);
     expect(screen.getByText("Not proven")).toBeInTheDocument();
+    expect(screen.getByText("Official account equity starts collecting with the next portfolio sync.")).toBeInTheDocument();
+  });
+
+  it("shows broker account evidence without presenting it as automated return", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      account_equity_evidence: {
+        status: "collecting",
+        days_collected: 3,
+        snapshot_date: "2026-08-11",
+        observed_at: "2026-08-11T19:00:00Z",
+        currency: "USD",
+        official_equity: "1025.00",
+        official_available_cash: "525.00",
+        official_total_invested: "400.00",
+        official_unrealised_pnl: "100.00",
+        local_eod_currency: "USD",
+        local_eod_value: "1020.00",
+        difference: "5.00",
+        comparable: false,
+        incomplete_reasons: ["local_eod_effective_time_unknown"],
+      },
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
+    expect(within(performance).getByText("3 daily official snapshots")).toBeInTheDocument();
+    expect(within(performance).getByText("US$1,025.00")).toBeInTheDocument();
+    expect(within(performance).getByText("Reconciliation collecting")).toBeInTheDocument();
+    expect(within(performance).getByText("No automated P&L yet")).toBeInTheDocument();
   });
 
   it("separates unapproved research from selectable strategies", async () => {

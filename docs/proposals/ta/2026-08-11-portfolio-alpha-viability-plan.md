@@ -115,6 +115,12 @@ Until F-0 reconciles to broker statements, no claim to beat the S&P 500, inflati
 buy-and-hold is valid. Price-only SPY remains useful for market context but not for
 the operator’s wealth comparison. This is not an unsourced vendor dependency:
 
+- issue #2559 begins prospective reconciliation with one official aggregate
+  account-equity observation per UTC day. The documented 12-month eToro balance
+  history endpoint returned 403 for the configured demo account on 2026-08-11,
+  so no historical broker NAV is invented; the working demo P&L endpoint seeds
+  the ledger from the next portfolio sync;
+
 - historical benchmark comparison through the frozen 2024 frontier uses the exact
   legacy comparator's adjusted close and keeps its identity separate; the main stock
   corpus's adjusted closes continue through 2026 but cannot be silently substituted
