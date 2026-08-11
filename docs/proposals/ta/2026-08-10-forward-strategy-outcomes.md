@@ -72,6 +72,35 @@ The production path was also exercised against the development database with
 the current manifest. With no signals at the new S-4 strategy version it
 correctly reported a zero-write success rather than inventing a backfill.
 
+## Opportunity-forecast outcomes (#2553)
+
+The same scheduled job also resolves every immutable opportunity forecast
+against the forecast's own `target_barrier_pct`, `stop_barrier_pct`, and
+`horizon_market_days`. This is deliberately separate from the generic
+strategy outcome: the bracket that ranked and sized a possible order is the
+bracket whose probability claim must be tested. Reconstructing a later bracket
+from a mutable strategy manifest would test a different decision.
+
+Forecast outcomes use the shared causal OHLC rules (including gap-through,
+daily both-touch ambiguity, quarantine masking, next-open timeout, and price
+scale boundaries) and map them to `target_first`, `stop_first`, `timeout`,
+`ambiguous`, or counted `unresolved`. One row is stored per exact
+forecast/resolver/input-version identity. Immature forecasts have no row and a
+single round-robin cursor prevents them starving later mature forecasts.
+
+This adds no feature snapshots and copies no bars. Storage grows by at most one
+terminal row per fired forecast/version, with one mutable cursor for the whole
+resolver. `gross_return_pct` is observed gross price return in the existing
+outcome-resolver convention (for example `0.10` means 10%); it is not net P&L
+and cannot replace reconciled broker costs. The duplicate lookup index found in
+review is dropped by migration 316 because the unique constraint already owns
+the same index shape.
+
+These rows are prospective calibration evidence, not capital authority. A
+subsequent assessment must compare stated class probabilities with observed
+classes over a recent, preregistered window and fail closed on insufficient
+sample, calibration drift, or unresolved/ambiguous evidence.
+
 ## Explicit non-goals
 
 This closes measurement plumbing; it does not make an unproven strategy safe to
