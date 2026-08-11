@@ -1,9 +1,9 @@
 """Bounded recurring paper-strategy operating loop (#2450).
 
 The cycle reconciles uncertain orders, refreshes five current health blocks,
-repairs/manages exact owned positions, then evaluates a small newest-first batch
-of funded candidates.  Health rows are updated in place and unchanged position
-polls add no rows.
+repairs/manages exact owned positions, then evaluates the strongest bounded
+slice of the complete current positive-forecast set. Health rows are updated in
+place and unchanged position polls add no rows.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from app.providers.broker import BrokerProvider
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
+from app.services.strategy_opportunity_ranker import RankableOpportunity, rank_positive_opportunities
 from app.services.strategy_order_reconciliation import enforce_reconciliation_slo, reconcile_backlog
 from app.services.strategy_paper_executor import execute_fired_paper_signal
 from app.services.strategy_position_manager import manage_owned_position
@@ -36,6 +38,77 @@ class StrategyPaperCycleResult:
     managed_positions: int
     evaluated_signals: int
     active_health_blocks: int
+
+
+def _load_ranked_opportunities(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_versions: Sequence[str],
+    observed_at: datetime,
+) -> list[RankableOpportunity]:
+    """Load the complete current set, then rank without surrogate identities."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT s.signal_id,s.strategy_id,s.strategy_version,s.instrument_id,
+                   s.signal_bar_date,f.side,f.horizon_market_days,f.setup_version,
+                   f.exit_policy_version,f.decided_at,
+                   f.conservative_net_expectancy_pct
+            FROM strategy_signals s
+            JOIN strategy_deployments d
+              ON d.strategy_id=s.strategy_id AND d.strategy_version=s.strategy_version
+             AND d.mode='paper' AND d.enabled
+            JOIN strategy_execution_policies p ON p.deployment_id=d.deployment_id
+            JOIN strategy_opportunity_forecasts f ON f.signal_id=s.signal_id
+            JOIN strategy_forecast_calibrations c ON c.calibration_id=f.calibration_id
+            JOIN LATERAL (
+              SELECT max(sp.promoted_at) AS paper_at
+              FROM strategy_promotions sp
+              WHERE sp.strategy_id=s.strategy_id
+                AND sp.strategy_version=s.strategy_version
+                AND sp.to_stage='paper_enabled'
+            ) promotion ON s.created_at >= promotion.paper_at
+            LEFT JOIN strategy_funding_decisions fd ON fd.signal_id=s.signal_id
+            WHERE s.signal_kind='entry' AND s.verdict='fired'
+              AND s.strategy_version=ANY(%(versions)s) AND fd.signal_id IS NULL
+              AND f.forecast_policy_version=%(forecast_policy)s
+              AND f.cost_model_id=%(cost_model)s
+              AND c.passed
+              AND c.holdout_end < f.decided_at::date
+              AND f.decided_at <= %(observed_at)s
+              AND f.valid_through >= %(observed_at)s
+              AND f.conservative_net_expectancy_pct > 0
+            """,
+            {
+                "versions": list(strategy_versions),
+                "forecast_policy": FORECAST_POLICY_VERSION,
+                "cost_model": COST_MODEL_ID,
+                "observed_at": observed_at,
+            },
+        )
+        rows = cur.fetchall()
+    # End the read transaction before pure validation/ranking can fail. A
+    # duplicate economic identity must fail closed without leaving this pooled
+    # connection in a transaction or touching already-committed health state.
+    conn.commit()
+    return rank_positive_opportunities(
+        [
+            RankableOpportunity(
+                signal_id=int(row["signal_id"]),
+                strategy_id=str(row["strategy_id"]),
+                strategy_version=str(row["strategy_version"]),
+                instrument_id=int(row["instrument_id"]),
+                signal_bar_date=row["signal_bar_date"],
+                side=str(row["side"]),
+                horizon_market_days=int(row["horizon_market_days"]),
+                setup_version=str(row["setup_version"]),
+                exit_policy_version=str(row["exit_policy_version"]),
+                decided_at=row["decided_at"],
+                conservative_net_expectancy_pct=Decimal(str(row["conservative_net_expectancy_pct"])),
+            )
+            for row in rows
+        ]
+    )
 
 
 def _set_block(conn: psycopg.Connection[Any], *, source: str, active: bool, reason: str) -> None:
@@ -312,33 +385,11 @@ def run_strategy_paper_cycle(
             if entry.purpose == "capital_candidate"
         ]
     )
-    candidates = conn.execute(
-        """
-        SELECT s.signal_id
-        FROM strategy_signals s
-        JOIN strategy_deployments d
-          ON d.strategy_id=s.strategy_id AND d.strategy_version=s.strategy_version
-         AND d.mode='paper' AND d.enabled
-        JOIN strategy_execution_policies p ON p.deployment_id=d.deployment_id
-        JOIN LATERAL (
-          SELECT max(sp.promoted_at) AS paper_at
-          FROM strategy_promotions sp
-          WHERE sp.strategy_id=s.strategy_id
-            AND sp.strategy_version=s.strategy_version
-            AND sp.to_stage='paper_enabled'
-        ) promotion ON s.created_at >= promotion.paper_at
-        LEFT JOIN strategy_funding_decisions fd ON fd.signal_id=s.signal_id
-        WHERE s.signal_kind='entry' AND s.verdict='fired'
-          AND s.strategy_version=ANY(%s) AND fd.signal_id IS NULL
-        ORDER BY s.signal_id DESC
-        LIMIT %s
-        """,
-        (versions, signal_limit),
-    ).fetchall()
-    conn.commit()
-    for (signal_id,) in candidates:
-        execute_fired_paper_signal(conn, broker=broker, signal_id=int(signal_id), now=observed_at)
-    return StrategyPaperCycleResult(len(reconciled), managed, len(candidates), active_blocks)
+    candidates = _load_ranked_opportunities(conn, strategy_versions=versions, observed_at=observed_at)
+    selected = candidates[:signal_limit]
+    for opportunity in selected:
+        execute_fired_paper_signal(conn, broker=broker, signal_id=opportunity.signal_id, now=observed_at)
+    return StrategyPaperCycleResult(len(reconciled), managed, len(selected), active_blocks)
 
 
 __all__ = ["StrategyPaperCycleResult", "refresh_strategy_health", "run_strategy_paper_cycle"]

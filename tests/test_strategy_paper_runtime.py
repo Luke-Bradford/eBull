@@ -10,12 +10,71 @@ import psycopg
 import pytest
 from psycopg.pq import TransactionStatus
 
+from app.services.cost_model import COST_MODEL_ID
 from app.services.strategy_live_gate import assess_live_gate
-from app.services.strategy_paper_runtime import refresh_strategy_health, run_strategy_paper_cycle
+from app.services.strategy_opportunity_forecast import OpportunityForecast, record_opportunity_forecast
+from app.services.strategy_paper_runtime import (
+    _load_ranked_opportunities,
+    refresh_strategy_health,
+    run_strategy_paper_cycle,
+)
 from tests.test_strategy_paper_executor import _NOW, _REQUEST_ID, _broker, _seed
 from tests.test_strategy_position_manager import _opened_trade
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
+
+
+def _add_weaker_newer_forecast(conn: psycopg.Connection[tuple]) -> int:
+    conn.execute(
+        """
+        INSERT INTO instruments (
+            instrument_id,symbol,company_name,exchange,currency,is_tradable
+        ) VALUES (2449002,'TWEAK','Weaker newer test','2','USD',true)
+        """
+    )
+    signal = conn.execute(
+        """
+        INSERT INTO strategy_signals (
+            strategy_id,strategy_version,instrument_id,signal_bar_date,
+            signal_kind,verdict,fill_bar_date,fill_price,universe,
+            input_rule_set_versions,created_at
+        ) VALUES (
+            'S-ALLOC','v1',2449002,'2026-08-05','entry','fired',
+            '2026-08-06',100,'survivor_only','{"indicator_series":"rules-v1"}'::jsonb,
+            (SELECT max(promoted_at)+interval '1 second' FROM strategy_promotions
+             WHERE strategy_id='S-ALLOC' AND strategy_version='v1'
+               AND to_stage='paper_enabled')
+        ) RETURNING signal_id
+        """
+    ).fetchone()
+    assert signal is not None
+    record_opportunity_forecast(
+        conn,
+        OpportunityForecast(
+            signal_id=int(signal[0]),
+            decided_at=_NOW,
+            valid_through=_NOW + timedelta(days=7),
+            horizon_market_days=5,
+            setup_version="weaker-setup-v1",
+            exit_policy_version="test-exit-v1",
+            calibration_id="test-calibration-v1",
+            target_probability=Decimal("0.4"),
+            stop_probability=Decimal("0.3"),
+            timeout_probability=Decimal("0.3"),
+            target_net_return_pct=Decimal("4"),
+            stop_net_return_pct=Decimal("-2"),
+            timeout_net_return_pct=Decimal("0"),
+            expected_duration_hours=Decimal("24"),
+            uncertainty_penalty_pct=Decimal("0.2"),
+            tail_penalty_pct=Decimal("0.1"),
+            correlation_penalty_pct=Decimal("0.1"),
+            cost_stress_penalty_pct=Decimal("0.1"),
+            conservative_net_expectancy_pct=Decimal("0.5"),
+            cost_model_id=COST_MODEL_ID,
+        ),
+    )
+    conn.commit()
+    return int(signal[0])
 
 
 def test_cycle_refreshes_health_then_executes_one_current_paper_candidate(
@@ -47,6 +106,54 @@ def test_cycle_refreshes_health_then_executes_one_current_paper_candidate(
         ("quote_freshness", False),
         ("scan_freshness", False),
     ]
+
+
+def test_runtime_ranks_the_complete_set_before_applying_its_execution_limit(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    stronger_older = _seed(conn)
+    weaker_newer = _add_weaker_newer_forecast(conn)
+    assert weaker_newer > stronger_older
+    executed: list[int] = []
+    monkeypatch.setattr(
+        "app.services.strategy_paper_runtime.execute_fired_paper_signal",
+        lambda _conn, *, broker, signal_id, now: executed.append(signal_id),
+    )
+
+    result = run_strategy_paper_cycle(
+        conn,
+        broker=_broker(),
+        signal_limit=1,
+        position_limit=1,
+        now=_NOW,
+        strategy_versions=["v1"],
+    )
+
+    assert result.evaluated_signals == 1
+    assert executed == [stronger_older]
+
+
+def test_stale_forecast_cannot_consume_the_bounded_ranked_set(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    current_signal = _seed(conn)
+    stale_signal = _add_weaker_newer_forecast(conn)
+    conn.execute(
+        """
+        UPDATE strategy_opportunity_forecasts
+        SET decided_at=%s,valid_through=%s
+        WHERE signal_id=%s
+        """,
+        (_NOW - timedelta(days=2), _NOW - timedelta(days=1), stale_signal),
+    )
+    conn.commit()
+
+    ranked = _load_ranked_opportunities(conn, strategy_versions=["v1"], observed_at=_NOW)
+
+    assert [opportunity.signal_id for opportunity in ranked] == [current_signal]
+    assert conn.info.transaction_status == TransactionStatus.IDLE
 
 
 def test_broker_outage_and_drawdown_unknown_block_entries_without_row_growth(
