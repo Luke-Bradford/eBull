@@ -20,7 +20,7 @@ from app.services.strategy_paper_runtime import (
     refresh_strategy_health,
     run_strategy_paper_cycle,
 )
-from tests.test_strategy_paper_executor import _NOW, _REQUEST_ID, _broker, _seed
+from tests.test_strategy_paper_executor import _NOW, _REQUEST_ID, _authorise_forecast_scope, _broker, _seed
 from tests.test_strategy_position_manager import _opened_trade
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
@@ -77,6 +77,7 @@ def _add_weaker_newer_forecast(conn: psycopg.Connection[tuple]) -> int:
             cost_model_id=COST_MODEL_ID,
         ),
     )
+    _authorise_forecast_scope(conn, setup_version="weaker-setup-v1")
     conn.commit()
     return int(signal[0])
 
