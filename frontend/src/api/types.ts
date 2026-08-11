@@ -2546,6 +2546,34 @@ export interface StrategyOverviewResponse {
   storage_policy: "fired_signals_and_material_mutations_only";
   entry_block: StrategyEntryBlock;
   paper_pool: StrategyPaperPool;
+  automation_readiness: {
+    ready: boolean;
+    state:
+      | "no_capital_candidates"
+      | "historical_validation_incomplete"
+      | "assessment_policy_missing"
+      | "prospective_evidence_missing"
+      | "prospective_evidence_failed"
+      | "prospective_evidence_stale"
+      | "candidate_evidence_incomplete"
+      | "ready";
+    capital_candidate_count: number;
+    historically_ready_candidate_count: number;
+    prospectively_ready_candidate_count: number;
+    assessment_policy_id: string | null;
+    assessed_scope_count: number;
+    passed_scope_count: number;
+    fresh_passed_scope_count: number;
+    resolved_forecasts: number;
+    target_first_count: number;
+    stop_first_count: number;
+    timeout_count: number;
+    latest_checked_at: string | null;
+    worst_normalized_brier_score: string | null;
+    weakest_brier_skill_score: string | null;
+    worst_classwise_calibration_error: string | null;
+    blockers: string[];
+  };
   evidence_refresh: {
     frozen_through: string;
     completed_windows: number;

@@ -57,6 +57,26 @@ const OVERVIEW: StrategyOverviewResponse = {
     global_kill_activated_by: null,
     execution_block_reasons: [],
   },
+  automation_readiness: {
+    ready: false,
+    state: "historical_validation_incomplete",
+    capital_candidate_count: 1,
+    historically_ready_candidate_count: 0,
+    prospectively_ready_candidate_count: 0,
+    assessment_policy_id: null,
+    assessed_scope_count: 0,
+    passed_scope_count: 0,
+    fresh_passed_scope_count: 0,
+    resolved_forecasts: 0,
+    target_first_count: 0,
+    stop_first_count: 0,
+    timeout_count: 0,
+    latest_checked_at: null,
+    worst_normalized_brier_score: null,
+    weakest_brier_skill_score: null,
+    worst_classwise_calibration_error: null,
+    blockers: ["historical_validation_incomplete"],
+  },
   paper_pool: {
     configured: true,
     enabled: false,
@@ -214,6 +234,26 @@ function approvedOverview(): StrategyOverviewResponse {
   const strategy = OVERVIEW.strategies[0]!;
   return {
     ...OVERVIEW,
+    automation_readiness: {
+      ...OVERVIEW.automation_readiness,
+      ready: true,
+      state: "ready",
+      historically_ready_candidate_count: 1,
+      prospectively_ready_candidate_count: 1,
+      assessment_policy_id: "assessment-policy-v1",
+      assessed_scope_count: 1,
+      passed_scope_count: 1,
+      fresh_passed_scope_count: 1,
+      resolved_forecasts: 30,
+      target_first_count: 18,
+      stop_first_count: 7,
+      timeout_count: 5,
+      latest_checked_at: "2026-08-09T11:00:00Z",
+      worst_normalized_brier_score: "0.12",
+      weakest_brier_skill_score: "0.18",
+      worst_classwise_calibration_error: "0.06",
+      blockers: [],
+    },
     paper_pool: { ...OVERVIEW.paper_pool, enabled: true, reserved_capital: "250", invested_capital: "200", remaining_capital: "750" },
     strategies: [{
       ...strategy,
@@ -268,7 +308,8 @@ describe("StrategiesPage", () => {
 
   it("separates unapproved research from selectable strategies", async () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
-    expect(await screen.findByText("No capital candidates are approved for automation.")).toBeInTheDocument();
+    expect(await screen.findByText("Automation is not ready")).toBeInTheDocument();
+    expect(screen.getByText("Candidate research has not cleared the recent after-cost validation gates.")).toBeInTheDocument();
     expect(screen.queryByText("Approved & managed strategies")).not.toBeInTheDocument();
     const research = screen.getByText("Research & validation").closest("details")!;
     expect(research).not.toHaveAttribute("open");
@@ -402,6 +443,16 @@ describe("StrategiesPage", () => {
     expect(master).not.toBeChecked();
     expect(master).toBeDisabled();
     expect(screen.getByText("System-wide automatic trading is off. Enable that safety control before allowing new entries.")).toBeInTheDocument();
+  });
+
+  it("shows compact prospective evidence when automation is ready", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+
+    const readiness = (await screen.findByText("Automation evidence is current")).closest("section")!;
+    expect(within(readiness).getByText("30")).toBeInTheDocument();
+    expect(within(readiness).getAllByText("1")).toHaveLength(2);
+    expect(screen.getByRole("checkbox", { name: "Allow new automated entries" })).not.toBeDisabled();
   });
 
   it("shows stable primary evidence without paging through missing windows", async () => {

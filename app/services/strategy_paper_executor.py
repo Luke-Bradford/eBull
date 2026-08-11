@@ -315,6 +315,8 @@ def _load_intent(
             ) assessment_policy ON true
             LEFT JOIN strategy_forecast_assessment_current current_assessment
              ON current_assessment.policy_id=assessment_policy.policy_id
+             AND current_assessment.strategy_id=s.strategy_id
+             AND current_assessment.strategy_version=s.strategy_version
              AND current_assessment.forecast_policy_version=forecast.forecast_policy_version
              AND current_assessment.model_version=calibration.model_version
              AND current_assessment.calibration_id=calibration.calibration_id
@@ -325,6 +327,8 @@ def _load_intent(
             LEFT JOIN strategy_forecast_assessments prospective_assessment
               ON prospective_assessment.assessment_id=current_assessment.assessment_id
              AND prospective_assessment.policy_id=current_assessment.policy_id
+             AND prospective_assessment.strategy_id=current_assessment.strategy_id
+             AND prospective_assessment.strategy_version=current_assessment.strategy_version
              AND prospective_assessment.forecast_policy_version=current_assessment.forecast_policy_version
              AND prospective_assessment.model_version=current_assessment.model_version
              AND prospective_assessment.calibration_id=current_assessment.calibration_id

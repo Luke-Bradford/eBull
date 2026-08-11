@@ -75,6 +75,8 @@ def _load_ranked_opportunities(
             ) assessment_policy ON true
             JOIN strategy_forecast_assessment_current current_assessment
              ON current_assessment.policy_id=assessment_policy.policy_id
+             AND current_assessment.strategy_id=s.strategy_id
+             AND current_assessment.strategy_version=s.strategy_version
              AND current_assessment.forecast_policy_version=f.forecast_policy_version
              AND current_assessment.model_version=c.model_version
              AND current_assessment.calibration_id=c.calibration_id
@@ -88,8 +90,10 @@ def _load_ranked_opportunities(
              -- this is not permission to consume future assessment evidence.
              AND current_assessment.checked_at <= %(observed_at)s + interval '5 seconds'
             JOIN strategy_forecast_assessments prospective_assessment
-              ON prospective_assessment.assessment_id=current_assessment.assessment_id
+             ON prospective_assessment.assessment_id=current_assessment.assessment_id
              AND prospective_assessment.policy_id=current_assessment.policy_id
+             AND prospective_assessment.strategy_id=current_assessment.strategy_id
+             AND prospective_assessment.strategy_version=current_assessment.strategy_version
              AND prospective_assessment.forecast_policy_version=current_assessment.forecast_policy_version
              AND prospective_assessment.model_version=current_assessment.model_version
              AND prospective_assessment.calibration_id=current_assessment.calibration_id

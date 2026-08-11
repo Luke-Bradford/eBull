@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
 
@@ -320,6 +320,39 @@ class EvidenceRefreshView(BaseModel):
     progress: dict[str, object] | None
 
 
+AutomationReadinessState = Literal[
+    "no_capital_candidates",
+    "historical_validation_incomplete",
+    "assessment_policy_missing",
+    "prospective_evidence_missing",
+    "prospective_evidence_failed",
+    "prospective_evidence_stale",
+    "candidate_evidence_incomplete",
+    "ready",
+]
+
+
+class AutomationReadinessView(BaseModel):
+    ready: bool
+    state: AutomationReadinessState
+    capital_candidate_count: int
+    historically_ready_candidate_count: int
+    prospectively_ready_candidate_count: int
+    assessment_policy_id: str | None
+    assessed_scope_count: int
+    passed_scope_count: int
+    fresh_passed_scope_count: int
+    resolved_forecasts: int
+    target_first_count: int
+    stop_first_count: int
+    timeout_count: int
+    latest_checked_at: datetime | None
+    worst_normalized_brier_score: Decimal | None
+    weakest_brier_skill_score: Decimal | None
+    worst_classwise_calibration_error: Decimal | None
+    blockers: list[str]
+
+
 class StrategyOverviewResponse(BaseModel):
     as_of: datetime
     demo_connection: bool
@@ -332,6 +365,7 @@ class StrategyOverviewResponse(BaseModel):
     storage_policy: Literal["fired_signals_and_material_mutations_only"] = "fired_signals_and_material_mutations_only"
     entry_block: StrategyEntryBlockView
     paper_pool: StrategyPaperPoolView
+    automation_readiness: AutomationReadinessView
     evidence_refresh: EvidenceRefreshView
     strategies: list[StrategyOverview]
 
@@ -788,6 +822,32 @@ _LATEST_EVIDENCE_REFRESH_SQL = """
     LIMIT 1
 """
 
+_CURRENT_FORECAST_ASSESSMENTS_SQL = """
+    SELECT p.policy_id,p.max_assessment_age_days,
+           c.strategy_id,c.strategy_version,c.checked_at,
+           a.passed,a.resolved_forecasts,a.target_first_count,a.stop_first_count,a.timeout_count,
+           a.normalized_brier_score,a.brier_skill_score,a.max_classwise_calibration_error
+    FROM strategy_forecast_assessment_policies p
+    JOIN strategy_forecast_assessment_current c ON c.policy_id=p.policy_id
+    JOIN strategy_forecast_assessments a
+      ON a.assessment_id=c.assessment_id
+     AND a.policy_id=c.policy_id
+     AND a.strategy_id=c.strategy_id
+     AND a.strategy_version=c.strategy_version
+     AND a.forecast_policy_version=c.forecast_policy_version
+     AND a.model_version=c.model_version
+     AND a.calibration_id=c.calibration_id
+     AND a.setup_version=c.setup_version
+     AND a.exit_policy_version=c.exit_policy_version
+     AND a.resolver_version=c.resolver_version
+     AND a.input_rule_set_version=c.input_rule_set_version
+    WHERE p.policy_id = (
+        SELECT policy_id FROM strategy_forecast_assessment_policies
+        WHERE effective_from <= %(as_of)s
+        ORDER BY effective_from DESC LIMIT 1
+    )
+"""
+
 
 def _evidence_refresh_status(
     row: dict[str, object] | None,
@@ -836,6 +896,7 @@ def _evidence_window_counts(strategies: list[StrategyOverview]) -> tuple[int, in
 def get_strategy_overview(
     conn: psycopg.Connection[object] = Depends(get_conn),
 ) -> StrategyOverviewResponse:
+    as_of = datetime.now(tz=UTC)
     versions = _current_versions()
     version_values = list(versions.values())
     params = {
@@ -862,6 +923,18 @@ def get_strategy_overview(
         latest_corpus_date = None if latest_row is None else latest_row["max"]
         cur.execute(_LATEST_EVIDENCE_REFRESH_SQL, {"job_name": _STRATEGY_BACKTEST_JOB})
         refresh_row = cur.fetchone()
+        cur.execute(
+            """
+            SELECT policy_id,max_assessment_age_days
+            FROM strategy_forecast_assessment_policies
+            WHERE effective_from <= %s
+            ORDER BY effective_from DESC LIMIT 1
+            """,
+            (as_of,),
+        )
+        assessment_policy_row = cur.fetchone()
+        cur.execute(_CURRENT_FORECAST_ASSESSMENTS_SQL, {"as_of": as_of})
+        assessment_rows = list(cur.fetchall())
         cur.execute("SELECT DISTINCT strategy_id,strategy_version FROM strategy_deployments WHERE mode='paper'")
         paper_deployment_keys = [(str(row["strategy_id"]), str(row["strategy_version"])) for row in cur.fetchall()]
 
@@ -888,6 +961,11 @@ def get_strategy_overview(
 
     runnable, excluded = runnable_strategies()
     excluded_by_id = {item.strategy_id: item.reason for item in excluded}
+    assessments_by_strategy: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in assessment_rows:
+        assessments_by_strategy[(str(row["strategy_id"]), str(row["strategy_version"]))].append(row)
+    assessment_policy_id = None if assessment_policy_row is None else str(assessment_policy_row["policy_id"])
+    historically_ready_keys: set[tuple[str, str]] = set()
     strategies: list[StrategyOverview] = []
     for strategy_id in sorted(STRATEGY_MANIFEST):
         entry = STRATEGY_MANIFEST[strategy_id]
@@ -1002,6 +1080,25 @@ def get_strategy_overview(
             allocation_refusals.append("scan_not_current")
         if control.currency != "USD":
             allocation_refusals.append("deployment_currency_unsupported")
+        if entry.purpose == "capital_candidate" and not allocation_refusals:
+            historically_ready_keys.add(key)
+        if entry.purpose == "capital_candidate":
+            current_assessments = assessments_by_strategy[key]
+            if assessment_policy_row is None:
+                allocation_refusals.append("prospective_assessment_policy_missing")
+            elif not current_assessments:
+                allocation_refusals.append("prospective_assessment_missing")
+            else:
+                passed_assessments = [row for row in current_assessments if bool(row["passed"])]
+                if not passed_assessments:
+                    allocation_refusals.append("prospective_assessment_not_passed")
+                elif not any(
+                    cast(datetime, row["checked_at"])
+                    >= as_of - timedelta(days=cast(int, row["max_assessment_age_days"]))
+                    and cast(datetime, row["checked_at"]) <= as_of + timedelta(seconds=5)
+                    for row in passed_assessments
+                ):
+                    allocation_refusals.append("prospective_assessment_stale")
         remaining = max(control.capital_limit - control.reserved_capital, Decimal("0"))
         strategies.append(
             StrategyOverview(
@@ -1076,8 +1173,52 @@ def get_strategy_overview(
     )
     completed_windows, partial_windows = _evidence_window_counts(strategies)
     refresh_status, refresh_error = _evidence_refresh_status(refresh_row)
+    capital_candidates = [item for item in strategies if item.purpose == "capital_candidate"]
+    capital_candidate_keys = {(item.strategy_id, item.strategy_version) for item in capital_candidates}
+    candidate_assessments = [
+        row for key, rows in assessments_by_strategy.items() if key in capital_candidate_keys for row in rows
+    ]
+    passed_assessments = [row for row in candidate_assessments if bool(row["passed"])]
+    fresh_passed_assessments = [
+        row
+        for row in passed_assessments
+        if cast(datetime, row["checked_at"]) >= as_of - timedelta(days=cast(int, row["max_assessment_age_days"]))
+        and cast(datetime, row["checked_at"]) <= as_of + timedelta(seconds=5)
+    ]
+    prospectively_ready_count = sum(item.allocation_ready for item in capital_candidates)
+    if not capital_candidates:
+        readiness_state: AutomationReadinessState = "no_capital_candidates"
+        readiness_blockers = ["no_capital_candidates"]
+    elif not historically_ready_keys:
+        readiness_state = "historical_validation_incomplete"
+        readiness_blockers = ["historical_validation_incomplete"]
+    elif assessment_policy_row is None:
+        readiness_state = "assessment_policy_missing"
+        readiness_blockers = ["prospective_assessment_policy_missing"]
+    elif not candidate_assessments:
+        readiness_state = "prospective_evidence_missing"
+        readiness_blockers = ["prospective_assessment_missing"]
+    elif not passed_assessments:
+        readiness_state = "prospective_evidence_failed"
+        readiness_blockers = ["prospective_assessment_not_passed"]
+    elif not fresh_passed_assessments:
+        readiness_state = "prospective_evidence_stale"
+        readiness_blockers = ["prospective_assessment_stale"]
+    elif not prospectively_ready_count:
+        readiness_state = "candidate_evidence_incomplete"
+        readiness_blockers = ["no_historically_ready_candidate_has_fresh_prospective_evidence"]
+    else:
+        readiness_state = "ready"
+        readiness_blockers = []
+
+    def _metric_values(field: str) -> list[Decimal]:
+        return [Decimal(str(row[field])) for row in candidate_assessments if row[field] is not None]
+
+    brier_scores = _metric_values("normalized_brier_score")
+    skill_scores = _metric_values("brier_skill_score")
+    calibration_errors = _metric_values("max_classwise_calibration_error")
     return StrategyOverviewResponse(
-        as_of=datetime.now(tz=UTC),
+        as_of=as_of,
         demo_connection=settings.etoro_env == "demo",
         execution_enabled=entry_block.auto_trading_enabled,
         live_execution_enabled=entry_block.live_trading_enabled,
@@ -1117,6 +1258,29 @@ def get_strategy_overview(
                 leverage_allowed=paper_pool.mandate.leverage_allowed,
             ),
             available_mandates=[_mandate_view(profile) for profile in ("cautious", "balanced", "growth")],
+        ),
+        automation_readiness=AutomationReadinessView(
+            ready=readiness_state == "ready",
+            state=readiness_state,
+            capital_candidate_count=len(capital_candidates),
+            historically_ready_candidate_count=len(historically_ready_keys),
+            prospectively_ready_candidate_count=prospectively_ready_count,
+            assessment_policy_id=assessment_policy_id,
+            assessed_scope_count=len(candidate_assessments),
+            passed_scope_count=len(passed_assessments),
+            fresh_passed_scope_count=len(fresh_passed_assessments),
+            resolved_forecasts=sum(cast(int, row["resolved_forecasts"]) for row in candidate_assessments),
+            target_first_count=sum(cast(int, row["target_first_count"]) for row in candidate_assessments),
+            stop_first_count=sum(cast(int, row["stop_first_count"]) for row in candidate_assessments),
+            timeout_count=sum(cast(int, row["timeout_count"]) for row in candidate_assessments),
+            latest_checked_at=max(
+                (cast(datetime, row["checked_at"]) for row in candidate_assessments),
+                default=None,
+            ),
+            worst_normalized_brier_score=max(brier_scores, default=None),
+            weakest_brier_skill_score=min(skill_scores, default=None),
+            worst_classwise_calibration_error=max(calibration_errors, default=None),
+            blockers=readiness_blockers,
         ),
         evidence_refresh=EvidenceRefreshView(
             frozen_through=max(item.window.end for item in RECENT_EVIDENCE_WINDOWS.values()),
@@ -1559,10 +1723,13 @@ def update_strategy_paper_pool(
 ) -> StrategyPaperPoolView:
     """Set the shared strategy ceiling and its higher-level automation flag."""
     try:
+        readiness = get_strategy_overview(conn).automation_readiness if body.enabled else None
         conn.rollback()
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", PAPER_ALLOCATOR_ADVISORY_LOCK)
             current_pool = load_paper_pool(conn)
+            if body.enabled and not current_pool.enabled and readiness is not None and not readiness.ready:
+                raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
             runtime = get_runtime_config(conn)
             pool_changed = (
                 current_pool.enabled != body.enabled

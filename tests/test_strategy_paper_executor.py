@@ -89,14 +89,15 @@ def _authorise_forecast_scope(
     assessment = conn.execute(
         """
         INSERT INTO strategy_forecast_assessments (
-            policy_id,forecast_policy_version,model_version,calibration_id,setup_version,exit_policy_version,
+            policy_id,strategy_id,strategy_version,forecast_policy_version,model_version,
+            calibration_id,setup_version,exit_policy_version,
             resolver_version,input_rule_set_version,window_start,window_end,evidence_hash,
             total_forecasts,resolved_forecasts,target_first_count,stop_first_count,timeout_count,
             ambiguous_count,unresolved_count,pending_count,normalized_brier_score,
             baseline_normalized_brier_score,brier_skill_score,max_classwise_calibration_error,
             ambiguous_rate,unresolved_rate,pending_rate,passed,reason_codes
         ) VALUES (
-            'test-assessment-policy-v1',%s,'test-model-v1','test-calibration-v1',%s,'test-exit-v1',%s,%s,
+            'test-assessment-policy-v1','S-ALLOC','v1',%s,'test-model-v1','test-calibration-v1',%s,'test-exit-v1',%s,%s,
             %s::date-89,%s::date,'synthetic-' || %s,30,30,10,10,10,0,0,0,0,0.33333333,1,0,0,0,0,true,'[]'::jsonb
         ) RETURNING assessment_id
         """,
@@ -114,9 +115,13 @@ def _authorise_forecast_scope(
     conn.execute(
         """
         INSERT INTO strategy_forecast_assessment_current (
-            policy_id,forecast_policy_version,model_version,calibration_id,setup_version,exit_policy_version,
+            policy_id,strategy_id,strategy_version,forecast_policy_version,model_version,
+            calibration_id,setup_version,exit_policy_version,
             resolver_version,input_rule_set_version,assessment_id,checked_at
-        ) VALUES ('test-assessment-policy-v1',%s,'test-model-v1','test-calibration-v1',%s,'test-exit-v1',%s,%s,%s,%s)
+        ) VALUES (
+            'test-assessment-policy-v1','S-ALLOC','v1',%s,'test-model-v1',
+            'test-calibration-v1',%s,'test-exit-v1',%s,%s,%s,%s
+        )
         """,
         (
             FORECAST_POLICY_VERSION,
@@ -674,6 +679,7 @@ def test_invalid_opportunity_evidence_refuses_before_broker_access(
     [
         ("policy", "opportunity_assessment_policy_missing"),
         ("missing", "opportunity_assessment_missing"),
+        ("strategy_scope", "opportunity_assessment_missing"),
         ("calibration_scope", "opportunity_assessment_missing"),
         ("failed", "opportunity_assessment_not_passed"),
         ("stale", "opportunity_assessment_stale"),
@@ -690,6 +696,8 @@ def test_prospective_assessment_refuses_before_broker_access(
         conn.execute("UPDATE strategy_forecast_assessment_policies SET effective_from=%s + interval '1 day'", (_NOW,))
     elif invalidity == "missing":
         conn.execute("DELETE FROM strategy_forecast_assessment_current")
+    elif invalidity == "strategy_scope":
+        conn.execute("UPDATE strategy_forecast_assessment_current SET strategy_id='S-OTHER'")
     elif invalidity == "calibration_scope":
         conn.execute(
             """

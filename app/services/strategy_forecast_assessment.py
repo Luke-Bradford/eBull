@@ -77,6 +77,8 @@ class ForecastObservation:
 
 @dataclass(frozen=True)
 class ForecastScope:
+    strategy_id: str
+    strategy_version: str
     forecast_policy_version: str
     model_version: str
     calibration_id: str
@@ -335,10 +337,12 @@ def _load_scopes(
 ) -> Mapping[ForecastScope, tuple[ForecastObservation, ...]]:
     rows = conn.execute(
         """
-        SELECT f.forecast_id,f.forecast_policy_version,c.model_version,c.calibration_id,f.setup_version,
+        SELECT f.forecast_id,s.strategy_id,s.strategy_version,f.forecast_policy_version,
+               c.model_version,c.calibration_id,f.setup_version,
                f.exit_policy_version,f.target_probability,f.stop_probability,
                f.timeout_probability,o.forecast_outcome_id,o.outcome
         FROM strategy_opportunity_forecasts f
+        JOIN strategy_signals s ON s.signal_id=f.signal_id
         JOIN strategy_forecast_calibrations c ON c.calibration_id=f.calibration_id
         LEFT JOIN strategy_opportunity_forecast_outcomes o
           ON o.forecast_id=f.forecast_id
@@ -351,8 +355,8 @@ def _load_scopes(
     ).fetchall()
     grouped: dict[ForecastScope, list[ForecastObservation]] = {}
     for row in rows:
-        scope = ForecastScope(str(row[1]), str(row[2]), str(row[3]), str(row[4]), str(row[5]))
-        stored_outcome = row[10]
+        scope = ForecastScope(*(str(row[index]) for index in range(1, 8)))
+        stored_outcome = row[12]
         if stored_outcome in _CLASSES:
             terminal_state: Literal["resolved", "ambiguous", "unresolved", "pending"] = "resolved"
             outcome: OutcomeClass | None = stored_outcome
@@ -365,10 +369,10 @@ def _load_scopes(
         grouped.setdefault(scope, []).append(
             ForecastObservation(
                 forecast_id=int(row[0]),
-                target_probability=Decimal(row[6]),
-                stop_probability=Decimal(row[7]),
-                timeout_probability=Decimal(row[8]),
-                outcome_id=int(row[9]) if row[9] is not None else None,
+                target_probability=Decimal(row[8]),
+                stop_probability=Decimal(row[9]),
+                timeout_probability=Decimal(row[10]),
+                outcome_id=int(row[11]) if row[11] is not None else None,
                 outcome=outcome,
                 terminal_state=terminal_state,
             )
@@ -386,6 +390,8 @@ def _store_assessment(
     scope = assessment.scope
     params = (
         policy.policy_id,
+        scope.strategy_id,
+        scope.strategy_version,
         scope.forecast_policy_version,
         scope.model_version,
         scope.calibration_id,
@@ -417,15 +423,17 @@ def _store_assessment(
     row = conn.execute(
         """
         INSERT INTO strategy_forecast_assessments (
-            policy_id,forecast_policy_version,model_version,calibration_id,setup_version,exit_policy_version,
+            policy_id,strategy_id,strategy_version,forecast_policy_version,model_version,
+            calibration_id,setup_version,exit_policy_version,
             resolver_version,input_rule_set_version,window_start,window_end,evidence_hash,
             total_forecasts,resolved_forecasts,target_first_count,stop_first_count,timeout_count,
             ambiguous_count,unresolved_count,pending_count,normalized_brier_score,
             baseline_normalized_brier_score,brier_skill_score,
             max_classwise_calibration_error,ambiguous_rate,unresolved_rate,pending_rate,passed,reason_codes
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
         ON CONFLICT (
-            policy_id,forecast_policy_version,model_version,calibration_id,setup_version,exit_policy_version,
+            policy_id,strategy_id,strategy_version,forecast_policy_version,model_version,
+            calibration_id,setup_version,exit_policy_version,
             resolver_version,input_rule_set_version,evidence_hash
         ) DO NOTHING RETURNING assessment_id
         """,
@@ -436,12 +444,15 @@ def _store_assessment(
         row = conn.execute(
             """
             SELECT assessment_id FROM strategy_forecast_assessments
-            WHERE policy_id=%s AND forecast_policy_version=%s AND model_version=%s AND calibration_id=%s
+            WHERE policy_id=%s AND strategy_id=%s AND strategy_version=%s
+              AND forecast_policy_version=%s AND model_version=%s AND calibration_id=%s
               AND setup_version=%s AND exit_policy_version=%s AND resolver_version=%s
               AND input_rule_set_version=%s AND evidence_hash=%s
             """,
             (
                 policy.policy_id,
+                scope.strategy_id,
+                scope.strategy_version,
                 scope.forecast_policy_version,
                 scope.model_version,
                 scope.calibration_id,
@@ -457,16 +468,20 @@ def _store_assessment(
     conn.execute(
         """
         INSERT INTO strategy_forecast_assessment_current (
-            policy_id,forecast_policy_version,model_version,calibration_id,setup_version,exit_policy_version,
+            policy_id,strategy_id,strategy_version,forecast_policy_version,model_version,
+            calibration_id,setup_version,exit_policy_version,
             resolver_version,input_rule_set_version,assessment_id,checked_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (
-            policy_id,forecast_policy_version,model_version,calibration_id,setup_version,exit_policy_version,
+            policy_id,strategy_id,strategy_version,forecast_policy_version,model_version,
+            calibration_id,setup_version,exit_policy_version,
             resolver_version,input_rule_set_version
         ) DO UPDATE SET assessment_id=EXCLUDED.assessment_id,checked_at=EXCLUDED.checked_at
         """,
         (
             policy.policy_id,
+            scope.strategy_id,
+            scope.strategy_version,
             scope.forecast_policy_version,
             scope.model_version,
             scope.calibration_id,
@@ -501,6 +516,8 @@ def run_forecast_assessments(
         for scope, observations in sorted(
             grouped.items(),
             key=lambda item: (
+                item[0].strategy_id,
+                item[0].strategy_version,
                 item[0].model_version,
                 item[0].calibration_id,
                 item[0].setup_version,
