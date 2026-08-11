@@ -335,8 +335,8 @@ class TestSeedCostModels:
         conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         cursor.fetchall.return_value = [
-            {"instrument_id": 1, "spread_pct": Decimal("0.30"), "currency": "USD"},
-            {"instrument_id": 2, "spread_pct": Decimal("0.50"), "currency": "GBP"},
+            {"instrument_id": 1, "spread_pct": Decimal("0.30")},
+            {"instrument_id": 2, "spread_pct": Decimal("0.50")},
         ]
         result = seed_cost_models_from_quotes(conn)
         assert result["processed"] == 2
@@ -349,7 +349,7 @@ class TestSeedCostModels:
         conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         cursor.fetchall.return_value = [
-            {"instrument_id": 1, "spread_pct": None, "currency": "USD"},
+            {"instrument_id": 1, "spread_pct": None},
         ]
         result = seed_cost_models_from_quotes(conn)
         assert result["processed"] == 0
@@ -366,38 +366,35 @@ class TestSeedCostModels:
         assert result["processed"] == 0
         assert result["skipped"] == 0
 
-    def test_usd_instrument_gets_zero_fx_markup(self) -> None:
-        """USD instruments should have fx_markup_bps=0 and no fx_pair."""
+    def test_seeded_spread_does_not_claim_other_costs_are_known(self) -> None:
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         cursor.fetchall.return_value = [
-            {"instrument_id": 1, "spread_pct": Decimal("0.30"), "currency": "USD"},
+            {"instrument_id": 1, "spread_pct": Decimal("0.30")},
         ]
         seed_cost_models_from_quotes(conn)
         # Find the INSERT call (second execute call on the cursor)
         insert_calls = [c for c in cursor.execute.call_args_list if "INSERT INTO cost_model" in str(c)]
         assert len(insert_calls) == 1
-        params = insert_calls[0][0][1]
-        assert params["fx_markup_bps"] == Decimal("0")
-        assert params["fx_pair"] is None
+        query = str(insert_calls[0][0][0])
+        assert "NULL, 0, FALSE, FALSE, 'computed'" in query
 
-    def test_non_usd_instrument_gets_fx_markup(self) -> None:
-        """Non-USD instruments should have fx_markup_bps=50 and fx_pair set."""
+    def test_seed_does_not_invent_an_fx_pair_or_markup(self) -> None:
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
         conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         cursor.fetchall.return_value = [
-            {"instrument_id": 2, "spread_pct": Decimal("0.50"), "currency": "GBP"},
+            {"instrument_id": 2, "spread_pct": Decimal("0.50")},
         ]
         seed_cost_models_from_quotes(conn)
         insert_calls = [c for c in cursor.execute.call_args_list if "INSERT INTO cost_model" in str(c)]
         assert len(insert_calls) == 1
         params = insert_calls[0][0][1]
-        assert params["fx_markup_bps"] == Decimal("50")
-        assert params["fx_pair"] == "GBP/USD"
+        assert "fx_markup_bps" not in params
+        assert "fx_pair" not in params
 
 
 class TestCostConfigAPI:

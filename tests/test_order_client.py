@@ -120,6 +120,10 @@ def _patch_runtime_config(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.services.order_client.get_runtime_config",
         lambda _conn: _RUNTIME_DEMO,
     )
+    monkeypatch.setattr(
+        "app.services.order_client._assert_transaction_cost_complete_for_buy_add",
+        lambda _conn, _action, _instrument_id: None,
+    )
 
 
 @pytest.fixture(autouse=True)
