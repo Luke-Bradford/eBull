@@ -2577,6 +2577,23 @@ export interface StrategyPaperPool {
   reserved_capital: string;
   invested_capital: string | null;
   remaining_capital: string | null;
+  mandate: StrategyPortfolioMandate;
+  available_mandates: StrategyPortfolioMandate[];
+}
+
+export interface StrategyPortfolioMandate {
+  configured: boolean;
+  policy_version: string;
+  risk_profile: "unconfigured" | "cautious" | "balanced" | "growth";
+  target_volatility_pct: string | null;
+  max_portfolio_drawdown_pct: string | null;
+  max_loss_per_position_pct: string | null;
+  max_daily_loss_pct: string | null;
+  active_risk_budget_pct: string | null;
+  cash_reserve_pct: string | null;
+  max_concurrent_positions: number | null;
+  shorts_allowed: boolean;
+  leverage_allowed: boolean;
 }
 
 export interface StrategySizingUpdateResponse {

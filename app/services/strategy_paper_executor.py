@@ -178,7 +178,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
                    i.symbol, i.is_tradable, e.asset_class,
                    d.deployment_id, d.capital_limit, d.enabled, d.currency,
                    pool.enabled AS pool_enabled, pool.capital_limit AS pool_limit,
-                   pool.capital_mode,
+                   pool.capital_mode, pool.risk_profile,
                    p.revision AS policy_revision, p.*,
                    q.quoted_at, q.ask, q.spread_flag,
                    w.updated_at AS scan_at,
@@ -218,7 +218,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
              AND d.mode = 'paper'
             LEFT JOIN strategy_execution_policies p ON p.deployment_id = d.deployment_id
             LEFT JOIN LATERAL (
-                SELECT enabled,capital_limit,capital_mode
+                SELECT enabled,capital_limit,capital_mode,risk_profile
                 FROM strategy_paper_pool_events
                 ORDER BY strategy_paper_pool_event_id DESC
                 LIMIT 1
@@ -270,6 +270,7 @@ def _load_intent(conn: psycopg.Connection[Any], *, signal_id: int, now: datetime
         (row["deployment_id"] is not None, "paper_deployment_missing"),
         (row["pool_limit"] is not None, "paper_pool_unconfigured"),
         (bool(row["pool_enabled"]), "paper_pool_disabled"),
+        (row["risk_profile"] is not None and row["risk_profile"] != "unconfigured", "portfolio_mandate_unconfigured"),
         (bool(row["enabled"]), "paper_deployment_disabled"),
         (row["currency"] == "USD", "deployment_currency_unsupported"),
         (row["policy_revision"] is not None, "execution_policy_missing"),

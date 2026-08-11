@@ -712,6 +712,7 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
             enabled=True,
             capital_limit=Decimal("750"),
             capital_mode="compound",
+            risk_profile="balanced",
             reason="bounded paper workspace",
         ),
         _session(),
@@ -721,6 +722,18 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     assert response.enabled
     assert response.capital_limit == Decimal("750")
     assert response.capital_mode == "compound"
+    assert response.mandate.configured
+    assert response.mandate.policy_version == "portfolio-mandate-v1"
+    assert response.mandate.risk_profile == "balanced"
+    assert response.mandate.target_volatility_pct == Decimal("12")
+    assert response.mandate.max_portfolio_drawdown_pct == Decimal("15")
+    assert response.mandate.max_loss_per_position_pct == Decimal("0.75")
+    assert response.mandate.max_daily_loss_pct == Decimal("1.5")
+    assert response.mandate.active_risk_budget_pct == Decimal("20")
+    assert response.mandate.cash_reserve_pct == Decimal("15")
+    assert response.mandate.max_concurrent_positions == 8
+    assert not response.mandate.shorts_allowed
+    assert not response.mandate.leverage_allowed
     assert response.effective_capital == Decimal("750")
     assert response.remaining_capital == Decimal("750")
     assert conn.execute(
@@ -744,6 +757,7 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
                 enabled=True,
                 capital_limit=Decimal("750"),
                 capital_mode="compound",
+                risk_profile="balanced",
                 reason="no-op must not add audit noise",
             ),
             _session(),

@@ -300,6 +300,7 @@ def test_paper_principal_cannot_be_withdrawn_below_committed_capital(
         conn,
         enabled=True,
         capital_limit=Decimal("1000"),
+        risk_profile="balanced",
         changed_by="operator",
         reason="fund virtual sleeve",
     )
@@ -309,11 +310,48 @@ def test_paper_principal_cannot_be_withdrawn_below_committed_capital(
             conn,
             enabled=False,
             capital_limit=Decimal("99"),
+            risk_profile="balanced",
             changed_by="operator",
             reason="invalid withdrawal",
         )
 
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
+
+
+def test_enabled_paper_pool_requires_and_persists_exact_versioned_mandate(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    with pytest.raises(StrategyControlError, match="configured portfolio risk mandate"):
+        configure_paper_pool(
+            conn,
+            enabled=True,
+            capital_limit=Decimal("1000"),
+            risk_profile="unconfigured",
+            changed_by="operator",
+            reason="missing mandate",
+        )
+
+    pool = configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("1000"),
+        risk_profile="balanced",
+        changed_by="operator",
+        reason="balanced mandate",
+    )
+
+    assert pool.mandate.policy_version == "portfolio-mandate-v1"
+    assert pool.mandate.risk_profile == "balanced"
+    assert pool.mandate.target_volatility_pct == Decimal("12")
+    assert pool.mandate.max_portfolio_drawdown_pct == Decimal("15")
+    assert pool.mandate.max_loss_per_position_pct == Decimal("0.75")
+    assert pool.mandate.max_daily_loss_pct == Decimal("1.5")
+    assert pool.mandate.active_risk_budget_pct == Decimal("20")
+    assert pool.mandate.cash_reserve_pct == Decimal("15")
+    assert pool.mandate.max_concurrent_positions == 8
+    assert not pool.mandate.shorts_allowed
+    assert not pool.mandate.leverage_allowed
 
 
 def test_same_instrument_manual_position_is_never_inferred_as_owned(

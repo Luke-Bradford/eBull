@@ -67,6 +67,64 @@ const OVERVIEW: StrategyOverviewResponse = {
     reserved_capital: "0.000000",
     invested_capital: "0.000000",
     remaining_capital: "1000.000000",
+    mandate: {
+      configured: true,
+      policy_version: "portfolio-mandate-v1",
+      risk_profile: "balanced",
+      target_volatility_pct: "12.0000",
+      max_portfolio_drawdown_pct: "15.0000",
+      max_loss_per_position_pct: "0.7500",
+      max_daily_loss_pct: "1.5000",
+      active_risk_budget_pct: "20.0000",
+      cash_reserve_pct: "15.0000",
+      max_concurrent_positions: 8,
+      shorts_allowed: false,
+      leverage_allowed: false,
+    },
+    available_mandates: [
+      {
+        configured: true,
+        policy_version: "portfolio-mandate-v1",
+        risk_profile: "cautious",
+        target_volatility_pct: "8.0000",
+        max_portfolio_drawdown_pct: "10.0000",
+        max_loss_per_position_pct: "0.5000",
+        max_daily_loss_pct: "1.0000",
+        active_risk_budget_pct: "10.0000",
+        cash_reserve_pct: "25.0000",
+        max_concurrent_positions: 4,
+        shorts_allowed: false,
+        leverage_allowed: false,
+      },
+      {
+        configured: true,
+        policy_version: "portfolio-mandate-v1",
+        risk_profile: "balanced",
+        target_volatility_pct: "12.0000",
+        max_portfolio_drawdown_pct: "15.0000",
+        max_loss_per_position_pct: "0.7500",
+        max_daily_loss_pct: "1.5000",
+        active_risk_budget_pct: "20.0000",
+        cash_reserve_pct: "15.0000",
+        max_concurrent_positions: 8,
+        shorts_allowed: false,
+        leverage_allowed: false,
+      },
+      {
+        configured: true,
+        policy_version: "portfolio-mandate-v1",
+        risk_profile: "growth",
+        target_volatility_pct: "18.0000",
+        max_portfolio_drawdown_pct: "25.0000",
+        max_loss_per_position_pct: "1.0000",
+        max_daily_loss_pct: "2.5000",
+        active_risk_budget_pct: "30.0000",
+        cash_reserve_pct: "10.0000",
+        max_concurrent_positions: 12,
+        shorts_allowed: false,
+        leverage_allowed: false,
+      },
+    ],
   },
   evidence_refresh: {
     frozen_through: "2026-07-08",
@@ -204,7 +262,7 @@ describe("StrategiesPage", () => {
     expect(within(performance).getAllByText("—")).toHaveLength(2);
     expect(within(performance).queryByText("+1.50%")).not.toBeInTheDocument();
     expect(screen.getByText("No automated P&L yet")).toBeInTheDocument();
-    expect(screen.getByText("+1.50%")).toBeInTheDocument();
+    expect(screen.getAllByText("+1.50%")).toHaveLength(2);
     expect(screen.getByText("Not proven")).toBeInTheDocument();
   });
 
@@ -315,7 +373,23 @@ describe("StrategiesPage", () => {
     expect(input.parentElement).toHaveClass("w-48");
     fireEvent.change(input, { target: { value: "1500" } });
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", capital_mode: "fixed", reason: "Automated strategy workspace update" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith({ enabled: false, capital_limit: "1500.000000", capital_mode: "fixed", risk_profile: "balanced", reason: "Automated strategy workspace update" }));
+  });
+
+  it("shows exact mandate limits and submits a changed risk profile", async () => {
+    const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({
+      ...OVERVIEW.paper_pool,
+      mandate: { ...OVERVIEW.paper_pool.mandate, risk_profile: "growth" },
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    expect(await screen.findByText("Policy ceilings, not return forecasts. Long-only and unleveraged in this version.")).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Risk profile"), "growth");
+    expect(screen.getByText("+18.00%")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      risk_profile: "growth",
+    })));
   });
 
   it("does not present automation as enabled while the system-wide guard is off", async () => {
