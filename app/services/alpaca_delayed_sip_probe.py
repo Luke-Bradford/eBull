@@ -236,8 +236,8 @@ def _require_tsla_forward_split(body: object) -> dict[str, object]:
     row = matching[0]
     new_rate = _decimal(row.get("new_rate"), field="new_rate")
     old_rate = _decimal(row.get("old_rate"), field="old_rate")
-    if new_rate <= 0 or old_rate <= 0 or new_rate == old_rate:
-        raise ProbeRefusal("TSLA forward split has invalid or unchanged rates")
+    if new_rate <= old_rate or old_rate <= 0:
+        raise ProbeRefusal("TSLA forward split does not increase shares")
     return {
         "name": "corporate_actions",
         "forward_splits": len(forward_splits),

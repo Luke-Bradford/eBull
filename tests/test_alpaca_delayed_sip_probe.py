@@ -201,7 +201,11 @@ def test_complete_probe_is_bounded_and_returns_only_compact_evidence() -> None:
         ),
         (
             {"corporate_actions": {"forward_splits": [{"symbol": "TSLA", "new_rate": 1, "old_rate": 1}]}},
-            "invalid or unchanged rates",
+            "does not increase shares",
+        ),
+        (
+            {"corporate_actions": {"forward_splits": [{"symbol": "TSLA", "new_rate": 1, "old_rate": 3}]}},
+            "does not increase shares",
         ),
     ],
 )
