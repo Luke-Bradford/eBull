@@ -1,9 +1,9 @@
 # Opening-range / Stocks-in-Play replication contract
 
 Date: 2026-08-10  
-Status: published rule transcribed; measurement refused until the selection
-universe and execution observations below exist  
-Issues: #2485, #2477, #2508
+Status: delayed research measurement remains blocked on #2520; live execution
+is refused after the no-subscription source audit in #2521
+Issues: #2485, #2477, #2508, #2520, #2521
 
 ## Decision
 
@@ -85,11 +85,22 @@ Missing for an honest ORB test:
 - a confirmed all-stock ATR implementation and an as-traded corporate-action
   bridge for nominal price/ATR/volume comparability.
 
-The current collector cannot close the cross-sectional gap. eToro's candle API
-is one instrument per request and the client is deliberately limited to about
-55 reads/minute. Scanning even the currently classified 6,083 NYSE/Nasdaq common
-stocks would take about 111 minutes before retries, far beyond a 09:35 decision.
-The rates endpoint batches quotes but does not provide opening volume.
+The current collector cannot close the cross-sectional gap. eToro's official
+candle contract is one instrument per request. Its current documented
+market-data quota is 120 requests per 60 seconds, shared by candles, rates,
+instrument metadata and search. Scanning even the currently classified 6,083
+NYSE/Nasdaq common stocks therefore has a theoretical lower bound of about 51
+minutes before latency, other market-data calls, retries and validation, far
+beyond a 09:35 decision. The rates endpoint batches up to 100 instruments but
+provides bid, ask, last execution and margin/conversion fields, not volume. The
+WebSocket instrument topic carries the same price family and no volume.
+
+The separate #2521 audit found no documented bulk candle, opening-volume,
+screener or market-mover endpoint. Personalized market recommendations return
+only a list of instrument IDs and publish neither a complete cross-section nor
+a reproducible volume ranking. They are not a Stocks-in-Play input. See
+`2026-08-12-free-live-opening-volume-source-result.md` for the evidence and
+refusal.
 
 ## Free-data feasibility and its boundary
 
@@ -100,8 +111,10 @@ past, with history since 2016 and a 200-request/minute limit. SIP combines the
 CTA/NYSE and UTP/Nasdaq feeds; raw minute bars include OHLCV. This makes a
 **delayed historical replication feed** worth a separate credentialed spike. It
 does not solve live 09:35 discovery: free real-time equities are IEX-only, a
-small and non-comparable slice of consolidated US volume, while current SIP is
-delayed.
+single-exchange and non-comparable slice of consolidated US volume, while
+current SIP is delayed. Alpaca's current official pages are inconsistent about
+the free historical entitlement, so #2520 must prove the exact account response
+with credentials before any implementation assumes access.
 
 Accordingly:
 
@@ -110,6 +123,11 @@ Accordingly:
 - Alpaca volume must never be mixed with eToro volume under one source label;
 - a delayed research result cannot be described as a real-time executable path;
 - no subscription will be purchased or assumed.
+
+No demo order may be emitted from this candidate until a later version proves a
+complete decision-time discovery source. A positive delayed backtest would
+justify continued prospective observation; it would not clear this execution
+refusal.
 
 ## Bounded storage design
 
