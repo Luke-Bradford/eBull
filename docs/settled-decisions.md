@@ -830,6 +830,84 @@ break_fired → price_move → band_exit → news_spike → cadence):
 
 ---
 
+## v1 strategy capital universe is US-only (#2605, settled 2026-08-12)
+
+**A v1 strategy capital candidate is validated on, and eligible to hold capital
+only in, the §4.0 validated universe: US listing venue + eToro `Stocks` type +
+tradable.** Not issuer domicile, not quote currency — ADRs and US-listed foreign
+private issuers are IN, a UK-listed issuer is OUT.
+
+Already measured reality, recorded here because it was leaking implicitly: the
+implicit version already produced one wrong "exhaustively tested" claim (#2597).
+
+⚠ **"Eligible to hold capital" is a policy statement, not a live pre-trade
+rule.** No order gate enforces it —
+`app/services/strategies/validated_universe.py` says so itself (*"NO ORDER GATE
+LIVES HERE"*; §4.0 puts the hard pre-trade rule in `execution_guard`, which is
+phase 7 and unbuilt). What is enforced today is the evidence side, below.
+
+**Where it binds — and where it does not.** ⚠ The two halves are different
+paths and only the first is enforced today:
+
+- **Result production — enforced.** `check_promotable`
+  (`app/services/strategy_result.py:850`) refuses
+  `instrument_outside_validated_universe` when
+  `evaluated_instrument_ids - validated_universe_ids` is non-empty, and the sole
+  writer of `strategy_results_store` fills that set from
+  `load_validated_universe` (`app/services/backtest_run.py:1204` →
+  `_Corpus.universe` → the candidate at `:2837`). The scope definition itself is
+  `app/services/strategies/validated_universe.py`, pinned by
+  `tests/test_validated_universe.py`.
+- **The promotion transition — NOT enforced (#2621).**
+  `strategy_control_plane.promote_strategy` never calls `check_promotable`, and
+  structurally cannot re-derive it: the refusal is returned in
+  `WrittenRow.refusals` and never persisted, and `strategy_results_store` stores
+  `evaluated_instrument_count` but not the ids. Not fail-open today only because
+  `run_backtest` is the sole writer. #2621 owns closing it.
+
+**Why the restriction exists.** Every survivorship-free price source found *so
+far* is US-only, and Form 25 delisting evidence is US-only
+(`.claude/skills/data-sources/research-price-corpus.md`, whose measured landscape
+is dated #2284 2026-08-05 / #2346 2026-08-07). Non-US tradable instruments
+therefore cannot currently be validated survivorship-free at all. ⚠ That is a
+claim about the *searched set* on those dates, not about the world — which is
+why lifting the restriction is a data event, below, and not a re-argument.
+
+⚠ The venue axis is eToro's `exchanges.asset_class`, a provider-maintained
+classification with no foreign key behind it — §4.0's "necessary, not
+sufficient" warning applies to the venue half as much as the type half.
+
+**Reproduce the population — do not quote a figure from this file.** These move
+with every `sync_universe` run, and `us_equity` tradable is a WIDER set than the
+validated universe (the script prints the type split that accounts for the
+difference; conflating the two sets is the prevention-log entry on §5.1's M23).
+The script also ASSERTS, and exits non-zero on, the two properties this decision
+leans on — that the venue axis is coherent, and that the validated universe is
+uniformly USD-quoted:
+
+```bash
+PYTHONPATH=. uv run python scripts/measure_2605_universe_scope.py
+```
+
+Out of scope for the restriction:
+
+- **core allocation (#2603)** — the core instrument is a mandate/eligibility
+  question, not a strategy-validation one. A non-US-listed core instrument is
+  permitted if its eligibility proof passes.
+- **advisory/manual surfaces** (v1.5 scoring → thesis → portfolio manager) —
+  unchanged, because the strategy/mandate path is the sole autonomous executor
+  (#2437's 2026-08-12 requirements comment, decision 1). That requirement is
+  cited here, not established here.
+
+**Lifting requires ALL of** a survivorship-free non-US source, its licence
+review, and broker eligibility/FX/tax review for the venue. A data event AND a
+review event, not either alone.
+
+**Spec:** `docs/proposals/ta/strategy-catalogue-and-backtest-validity.md` §4.0
+(#2289). Refs #2437, #2597, #2363.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

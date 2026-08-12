@@ -111,6 +111,60 @@ should remain close to the representative shape.
 - No evidence endpoint or Strategies-page panel is added. Failed controls and
   research candidates remain out of the money-first product surface.
 
+## Validated universe scope (#2605)
+
+Everything above judges a candidate's evidence. This section fixes the
+population that evidence is allowed to describe.
+
+A v1 capital candidate's evaluated instruments must all lie inside the §4.0
+validated universe — US listing venue, eToro `Stocks` type, tradable. The axis
+is the listing venue, not issuer domicile and not quote currency, so a US-listed
+ADR is in and a UK-listed issuer is out. Settled at
+`docs/settled-decisions.md` → "v1 strategy capital universe is US-only".
+
+The pure result gate enforces this at RESULT-PRODUCTION time: `check_promotable`
+refuses `instrument_outside_validated_universe` when
+`evaluated_instrument_ids - validated_universe_ids` is non-empty
+(`app/services/strategy_result.py:850`), and `run_backtest` — the sole writer of
+`strategy_results_store` — fills that set from `load_validated_universe`
+(`app/services/backtest_run.py:1204`, reaching the candidate at `:2837`). The
+scope definition lives in one place,
+`app/services/strategies/validated_universe.py`, pinned by
+`tests/test_validated_universe.py`.
+
+⚠ **An empty evaluated set is refused separately** (`no_instruments_evaluated`).
+`set() - anything` is empty, so a result over no instruments would otherwise
+satisfy the subset test while being no evidence at all.
+
+⚠⚠ **THE PROMOTION TRANSITION DOES NOT RE-CHECK THIS (#2621).**
+`promote_strategy` never calls `check_promotable`; it validates result-id
+ownership and then the compact evidence record above. It cannot re-derive the
+universe check either — the refusal is returned in `WrittenRow.refusals` and
+never persisted, and the result store carries `evaluated_instrument_count` but
+not the ids. This is the section's own scope boundary below, instantiated: an
+input the transition cannot independently replay. Not fail-open today only
+because `run_backtest` is the sole writer, which is the same "would become
+fail-open as soon as a candidate is registered" shape #2505 closed for viability
+evidence. #2621 owns closing it for the universe input.
+
+**What this bounds for #2363, and what it does not.** Every instrument in the
+validated universe is quoted in USD — asserted, not merely displayed, on the
+full population by `scripts/measure_2605_universe_scope.py`, which exits
+non-zero if that stops being true. So on the strategy path the **venue
+quote-conversion** component of FX is closed by construction.
+
+⚠ That is one component, not the FX question. It says nothing about account /
+settlement currency, dividend and corporate-action currency, withholding, ADR
+depositary conversion and fees, or the issuer's own currency exposure — and it
+is a corpus census, not a schema constraint, so an exchange reclassification or
+a newly admitted `us_equity` venue can invalidate it while every test stays
+green. #2363's other half — the live execution path, which is not restricted to
+this universe — is out of scope here and stays #2363's to bound.
+
+**Not restricted by this section:** core allocation (#2603), whose instrument is
+a mandate/eligibility question rather than a strategy-validation one, and the
+advisory surfaces, which never place trades autonomously.
+
 ## Scope boundary
 
 This contract closes #2505's viability/attribution gap. It does not create
