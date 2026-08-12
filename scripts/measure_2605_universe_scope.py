@@ -17,6 +17,7 @@ import sys
 import psycopg
 
 from app.config import settings
+from app.db.snapshot import snapshot_read
 from app.services.strategies.validated_universe import (
     US_EQUITY_ASSET_CLASS,
     load_validated_universe,
@@ -129,9 +130,17 @@ def main() -> int:
     ``sync_universe`` run, an exchange reclassification or a newly admitted
     ``us_equity`` venue can break while every test stays green. That is exactly
     why they are re-measured here rather than written down anywhere.
+
+    ⚠ ONE SNAPSHOT FOR THE WHOLE REPORT (``snapshot_read``, review NITPICK on
+    PR #2622). Ten statements against ``instruments``/``exchanges`` under READ
+    COMMITTED would each see a different `sync_universe` state, so the currency
+    census could describe a population the size line above it never counted —
+    and the assertions would then be over a set that never existed. A report
+    that asserts has to read one snapshot; a report that only printed could
+    have got away with this.
     """
     violations: list[str] = []
-    with psycopg.connect(settings.database_url) as conn:
+    with psycopg.connect(settings.database_url) as conn, snapshot_read(conn):
         tradable = conn.execute(_TRADABLE_SQL).fetchone()
         assert tradable is not None
         print(f"tradable instruments: {tradable[0]:,}")
