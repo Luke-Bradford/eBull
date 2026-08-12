@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 
 from app.services.trial_register import (
     TRIAL_REGISTER,
+    TRIAL_REGISTER_CUTOFF,
     TRIAL_REGISTER_VERSION,
     DeclaredTrial,
+    TrialExactness,
     TrialRegister,
 )
 
 
-def _trial(trial_id: str) -> DeclaredTrial:
-    return DeclaredTrial(trial_id=trial_id, description="d", evidence="e")
+def _trial(trial_id: str, exactness: TrialExactness = TrialExactness.EXACT) -> DeclaredTrial:
+    return DeclaredTrial(trial_id=trial_id, description="d", evidence="e", exactness=exactness)
 
 
 class TestTheShippedDeclaration:
@@ -52,13 +56,30 @@ class TestTheShippedDeclaration:
             trial for trial in TRIAL_REGISTER.trials if trial.trial_id == "short-horizon-search-session-2026-08-09"
         )
         assert family.searches == 101
-        assert TRIAL_REGISTER.declared_count == 122
+        assert family.exactness is TrialExactness.FLOOR
+
+    def test_the_reconstructed_total_is_the_sum_of_the_declared_families(self) -> None:
+        """⚠ Gate D-0.1's whole deliverable is this number.
+
+        Pinned as an explicit literal AND re-derived from the entries, because
+        the two fail differently: a dropped entry moves both together and only
+        the literal catches it, while a typo'd `searches` that happens to keep
+        the total is caught by neither and is why every family below is pinned
+        individually as well.
+        """
+        assert TRIAL_REGISTER.declared_count == 259
+        assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
 
     def test_the_rejected_extreme_shock_sizing_arms_are_counted(self) -> None:
+        """⚠ 8 charged by the result page + 7 calendar-year cuts it never charged.
+
+        #2600: an era cut is a search, and the page's own warning ("do not rescue
+        it by selecting a cap, threshold, hold, stop, era, sector") is the reason.
+        """
         family = next(
             trial for trial in TRIAL_REGISTER.trials if trial.trial_id == "extreme-shock-portfolio-sizing-stress-v1"
         )
-        assert family.searches == 8
+        assert family.searches == 15
 
     def test_the_discarded_arms_are_counted(self) -> None:
         """A rejected result is still a search of the data.
@@ -123,11 +144,119 @@ class TestRegisterInvariants:
 
     @pytest.mark.parametrize("field", ["trial_id", "description", "evidence"])
     def test_a_blank_field_is_refused(self, field: str) -> None:
-        kwargs = {"trial_id": "a", "description": "d", "evidence": "e", field: ""}
+        kwargs = {
+            "trial_id": "a",
+            "description": "d",
+            "evidence": "e",
+            "exactness": TrialExactness.EXACT,
+            field: "",
+        }
         with pytest.raises(ValueError, match="is blank"):
             DeclaredTrial(**kwargs)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("searches", [0, -1, 1.5, True])
     def test_an_invalid_search_multiplicity_is_refused(self, searches: object) -> None:
         with pytest.raises(ValueError, match="searches must be a positive integer"):
-            DeclaredTrial(trial_id="a", description="d", evidence="e", searches=searches)  # type: ignore[arg-type]
+            DeclaredTrial(
+                trial_id="a",
+                description="d",
+                evidence="e",
+                exactness=TrialExactness.EXACT,
+                searches=searches,  # type: ignore[arg-type]
+            )
+
+
+class TestExactness:
+    """#2600 Gate D-0.1 — `searches` is meaningless without saying what it is."""
+
+    def test_a_raw_string_exactness_is_refused(self) -> None:
+        """⚠⚠ THE FAILURE MODE THAT WOULD BE SILENT.
+
+        A bare "floor" satisfies every `== "floor"` comparison a reader writes
+        and fails every `is TrialExactness.FLOOR` one, so `floored_searches`
+        would under-report on an entry that looks correct in the source. Refused
+        at construction rather than coerced.
+        """
+        with pytest.raises(ValueError, match="exactness must be a TrialExactness"):
+            DeclaredTrial(trial_id="a", description="d", evidence="e", exactness="floor")  # type: ignore[arg-type]
+
+    def test_every_shipped_entry_declares_its_exactness(self) -> None:
+        for trial in TRIAL_REGISTER.trials:
+            assert isinstance(trial.exactness, TrialExactness)
+
+    def test_floored_searches_counts_only_floored_families(self) -> None:
+        register = TrialRegister(
+            version="v",
+            trials=(
+                DeclaredTrial(
+                    trial_id="exact-family",
+                    description="d",
+                    evidence="e",
+                    exactness=TrialExactness.EXACT,
+                    searches=5,
+                ),
+                DeclaredTrial(
+                    trial_id="floored-family",
+                    description="d",
+                    evidence="e",
+                    exactness=TrialExactness.FLOOR,
+                    searches=7,
+                ),
+            ),
+        )
+        assert register.declared_count == 12
+        assert register.floored_searches == 7
+
+    def test_floored_searches_are_reported_not_subtracted(self) -> None:
+        """⚠ A floored family's searches HAPPENED. The flag says only that more
+        of them happened than the register can name, so removing them would move
+        M in the flattering direction."""
+        assert TRIAL_REGISTER.floored_searches < TRIAL_REGISTER.declared_count
+        assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
+
+    @pytest.mark.parametrize(
+        ("trial_id", "searches", "exactness"),
+        [
+            # The hold-out access ledger: evaluate/4 + in_sample rows/4 + 1 read.
+            ("s1-time-series-momentum", 19, TrialExactness.FLOOR),
+            ("s2-cross-sectional-momentum", 19, TrialExactness.FLOOR),
+            ("s3-mean-reversion-in-trend", 19, TrialExactness.FLOOR),
+            ("s4-volatility-compression-breakout", 8, TrialExactness.FLOOR),
+            # Result pages that enumerate their own arms.
+            ("pead-historical-sue-net-income-v1", 8, TrialExactness.EXACT),
+            ("form4-code-p-opportunistic-purchase-v1", 7, TrialExactness.EXACT),
+            # Code grids read at commit 61fb17da.
+            ("autocorrelation-term-structure-2026-08-09", 28, TrialExactness.FLOOR),
+            ("roll-bounce-spread-recovery-2026-08-09", 4, TrialExactness.EXACT),
+            ("insider-purchase-forward-returns-first-look-2026-08-09", 4, TrialExactness.EXACT),
+            # Floors that admit only evidenced arms.
+            ("residual-confluence-v1-development-arms", 7, TrialExactness.FLOOR),
+            ("etf-intraday-momentum-v1-retained-census", 4, TrialExactness.FLOOR),
+            ("sizing-rule-attribution-2026-08-12", 9, TrialExactness.FLOOR),
+        ],
+    )
+    def test_each_reconstructed_family_carries_its_derived_count(
+        self, trial_id: str, searches: int, exactness: TrialExactness
+    ) -> None:
+        """⚠ Pinned family-by-family, not just in the total.
+
+        Two counts moving in opposite directions leave `declared_count`
+        unchanged, and a register whose total is right for the wrong reasons is
+        exactly what Gate D-0.1 was opened to replace.
+        """
+        trial = next(t for t in TRIAL_REGISTER.trials if t.trial_id == trial_id)
+        assert trial.searches == searches
+        assert trial.exactness is exactness
+
+
+class TestReconstructionCutoff:
+    def test_the_cutoff_is_utc_aware(self) -> None:
+        """⚠ A naive datetime here explodes on comparison with a timestamptz.
+
+        The cutoff's only job is to be compared against
+        `strategy_results_store.created_at` / `strategy_holdout_accesses.accessed_at`,
+        both of which are `timestamp with time zone`. A naive value raises
+        `TypeError` at exactly the moment #2599 tries to enforce the boundary.
+        """
+        assert TRIAL_REGISTER_CUTOFF.tzinfo is not None
+        assert TRIAL_REGISTER_CUTOFF.utcoffset() == UTC.utcoffset(None)
