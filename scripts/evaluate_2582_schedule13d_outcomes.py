@@ -12,8 +12,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -24,7 +25,7 @@ import psycopg
 from app.services.market_calendar import us_market_status
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.trial_register import TRIAL_REGISTER
-from scripts.schedule13d_challengers import RULE_13G, MatchFeatures
+from scripts.schedule13d_challengers import RULE_13G, MatchFeatures, select_random_time_sessions
 from scripts.schedule13d_statistics import EventOutcome
 from scripts.verify_2582_schedule13d_preregistration import EXPECTED_SHA256, load_and_verify
 
@@ -395,33 +396,44 @@ def _verify_market_series(conn: psycopg.Connection[Any]) -> None:
         raise OutcomeGateRefusal("frozen SPY market-series identity moved")
 
 
-def _load_selected_price_windows(
-    conn: psycopg.Connection[Any], gate: OutcomeGate, selected: Sequence[SourceEvent | Initial13GSourceEvent]
+@dataclass(frozen=True)
+class WindowRequest:
+    event: SourceEvent | Initial13GSourceEvent
+    sessions: tuple[date, ...]
+    population: Literal["primary", "unfiltered", "13g", "random"]
+
+
+def _load_requested_price_windows(
+    conn: psycopg.Connection[Any], gate: OutcomeGate, requests: Sequence[WindowRequest]
 ) -> tuple[PriceWindow, ...]:
     _validate_gate(gate)
     _verify_market_series(conn)
+    if len(requests) > 32_767:
+        raise OutcomeGateRefusal("price-window request exceeds frozen SMALLINT event bound")
     conn.execute("DROP TABLE IF EXISTS schedule13d_trial_sessions")
     conn.execute(_CREATE_TEMP_SESSIONS)
     with conn.cursor() as cursor:
         with cursor.copy(
             "COPY schedule13d_trial_sessions (event_index, session_ordinal, series_id, bar_date) FROM STDIN"
         ) as copy:
-            for event_index, event in enumerate(selected):
-                for ordinal, session_date in enumerate(required_event_sessions(event), start=1):
-                    copy.write_row((event_index, ordinal, event.series_ids[0], session_date))
+            for event_index, request in enumerate(requests):
+                if len(request.sessions) != 70:
+                    raise OutcomeGateRefusal("every price-window request must contain exactly 70 sessions")
+                for ordinal, session_date in enumerate(request.sessions, start=1):
+                    copy.write_row((event_index, ordinal, request.event.series_ids[0], session_date))
     rows = conn.execute(
         _PRICE_WINDOWS_SQL,
         {"quarantine_version": QUARANTINE_RULE_SET_VERSION},
     ).fetchall()
     by_index = {int(row[0]): row for row in rows}
     windows: list[PriceWindow] = []
-    for event_index, event in enumerate(selected):
+    for event_index, request in enumerate(requests):
         row = by_index[event_index]
-        sessions = required_event_sessions(event)
+        sessions = request.sessions
         decimal_values = [None if value is None else Decimal(value) for value in row[7:16]]
         windows.append(
             PriceWindow(
-                event=event,
+                event=request.event,
                 entry_date=sessions[60],
                 exit_date=sessions[69],
                 stock_bars_present=int(row[1]),
@@ -439,7 +451,7 @@ def _load_selected_price_windows(
                 prior_20_stock_return_pct=decimal_values[6],
                 prior_20_market_return_pct=decimal_values[7],
                 holding_market_return_pct=decimal_values[8],
-                population="13g" if isinstance(event, Initial13GSourceEvent) else "primary",
+                population=request.population,
             )
         )
     return tuple(windows)
@@ -460,10 +472,8 @@ def load_price_windows(
         selected = [event for event in events if event.unfiltered_source_refusal is None]
     else:
         raise ValueError("unsupported Schedule 13D population")
-    windows = _load_selected_price_windows(conn, gate, selected)
-    if population == "unfiltered":
-        return tuple(replace(window, population="unfiltered") for window in windows)
-    return windows
+    requests = tuple(WindowRequest(event, required_event_sessions(event), population) for event in selected)
+    return _load_requested_price_windows(conn, gate, requests)
 
 
 def load_initial_13g_price_windows(
@@ -472,7 +482,8 @@ def load_initial_13g_price_windows(
     """Read eligible 13G challenger windows through the shared evaluator."""
 
     selected = [event for event in events if event.source_refusal is None]
-    return _load_selected_price_windows(conn, gate, selected)
+    requests = tuple(WindowRequest(event, required_event_sessions(event), "13g") for event in selected)
+    return _load_requested_price_windows(conn, gate, requests)
 
 
 class OutcomeGateRefusal(RuntimeError):
@@ -506,7 +517,7 @@ class PriceWindow:
     prior_20_stock_return_pct: Decimal | None
     prior_20_market_return_pct: Decimal | None
     holding_market_return_pct: Decimal | None
-    population: Literal["primary", "unfiltered", "13g"] = "primary"
+    population: Literal["primary", "unfiltered", "13g", "random"] = "primary"
 
     @property
     def outcome_refusal(self) -> str | None:
@@ -661,6 +672,14 @@ def required_event_sessions(event: SourceEvent | Initial13GSourceEvent) -> tuple
     """Sixty formation sessions followed by the exact ten-session position."""
 
     entry = next_regular_session_strictly_after(event.public_filing_date)
+    return required_sessions_for_entry(entry)
+
+
+def required_sessions_for_entry(entry: date) -> tuple[date, ...]:
+    """Sixty prior sessions and ten holding sessions for an exact entry."""
+
+    if us_market_status(entry) == "closed":
+        raise ValueError("entry must be a regular trading session")
     prior = regular_sessions_ending_before(entry, 60)
     holding: list[date] = []
     candidate = entry
@@ -669,6 +688,84 @@ def required_event_sessions(event: SourceEvent | Initial13GSourceEvent) -> tuple
             holding.append(candidate)
         candidate += timedelta(days=1)
     return prior + tuple(holding)
+
+
+_ALL_13D_PUBLIC_DATES_SQL: LiteralString = """
+SELECT max(b.instrument_id) FILTER (WHERE b.instrument_id IS NOT NULL) AS instrument_id,
+       m.filed_at::date AS public_filing_date
+FROM blockholder_filings b
+JOIN sec_filing_manifest m USING (accession_number)
+WHERE b.submission_type IN ('SCHEDULE 13D', 'SCHEDULE 13D/A')
+GROUP BY b.accession_number, m.filed_at::date
+HAVING max(b.instrument_id) FILTER (WHERE b.instrument_id IS NOT NULL) IS NOT NULL
+ORDER BY instrument_id, public_filing_date
+"""
+
+
+def load_all_13d_public_dates(conn: psycopg.Connection[Any]) -> dict[int, tuple[date, ...]]:
+    """Load outcome-free event dates used only to construct exclusion halos."""
+
+    grouped: defaultdict[int, list[date]] = defaultdict(list)
+    for instrument_id, filing_date in conn.execute(_ALL_13D_PUBLIC_DATES_SQL).fetchall():
+        grouped[int(instrument_id)].append(filing_date)
+    return {instrument_id: tuple(values) for instrument_id, values in grouped.items()}
+
+
+def _regular_sessions_in_month(year: int, month: int) -> tuple[date, ...]:
+    sessions: list[date] = []
+    candidate = date(year, month, 1)
+    while candidate.month == month:
+        if us_market_status(candidate) != "closed":
+            sessions.append(candidate)
+        candidate += timedelta(days=1)
+    return tuple(sessions)
+
+
+def _event_entry_halo(public_filing_date: date) -> set[date]:
+    entry = next_regular_session_strictly_after(public_filing_date)
+    before = regular_sessions_ending_before(entry, 10)
+    after = required_sessions_for_entry(entry)[60:]
+    final = nth_regular_session(entry, 11)
+    return set(before) | set(after) | {final}
+
+
+def build_random_time_requests(
+    treatments: Sequence[SourceEvent],
+    all_13d_dates: Mapping[int, Sequence[date]],
+) -> tuple[WindowRequest, ...]:
+    """Build same-month candidates outside every same-instrument 13D halo."""
+
+    requests: list[WindowRequest] = []
+    for treatment in treatments:
+        if treatment.primary_source_refusal is not None or treatment.instrument_id is None:
+            continue
+        treatment_entry = next_regular_session_strictly_after(treatment.public_filing_date)
+        prohibited: set[date] = set()
+        for filing_date in all_13d_dates.get(treatment.instrument_id, ()):
+            prohibited.update(_event_entry_halo(filing_date))
+        for candidate in _regular_sessions_in_month(treatment_entry.year, treatment_entry.month):
+            if candidate not in prohibited:
+                requests.append(WindowRequest(treatment, required_sessions_for_entry(candidate), "random"))
+    return tuple(requests)
+
+
+def load_random_time_price_windows(
+    conn: psycopg.Connection[Any], gate: OutcomeGate, treatments: Sequence[SourceEvent]
+) -> tuple[PriceWindow, ...]:
+    """Return one seeded eligible same-month non-event window per treatment."""
+
+    _validate_gate(gate)
+    requests = build_random_time_requests(treatments, load_all_13d_public_dates(conn))
+    evaluated = _load_requested_price_windows(conn, gate, requests)
+    accepted_by_treatment: defaultdict[str, list[date]] = defaultdict(list)
+    by_identity: dict[tuple[str, date], PriceWindow] = {}
+    for window in evaluated:
+        if window.outcome_refusal is None:
+            accession = window.event.accession_number
+            accepted_by_treatment[accession].append(window.entry_date)
+            by_identity[(accession, window.entry_date)] = window
+    selected = select_random_time_sessions(accepted_by_treatment, {})
+    return tuple(by_identity[(accession, selected[accession])] for accession in sorted(selected))
 
 
 def total_return_pct(
