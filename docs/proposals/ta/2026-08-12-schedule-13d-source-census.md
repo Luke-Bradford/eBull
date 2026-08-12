@@ -4,6 +4,11 @@ Date: 2026-08-12
 Issue: #2582
 Status: source-feasible for preregistration; outcomes unopened
 
+The exact follow-on contract is now frozen in
+`2026-08-12-schedule-13d-preregistration.md` and
+`contracts/schedule13d-public-catalyst-v1.json`. This census remains source
+evidence and does not inherit any return result.
+
 ## Decision
 
 An initial Schedule 13D is the first untested short-horizon event family in the

@@ -72,7 +72,7 @@ what deserves a preregistered test; they are not backtest results.
 | **Order-flow, market making and intraday liquidity** | Paid compensation for immediacy and inventory risk; requires trades, depth, side and latency. | Blocked: WebSocket/REST gives best prices but no reliable depth, aggressor side or historical book. | Retail API rate and latency are unsuitable for market making. | **Out of scope.** Do not proxy order-flow imbalance from OHLCV and call it the same signal. |
 | **News, filing text and LLM features** | Convert new unstructured information into a timestamped structured event; an LLM is an extractor, not a price oracle. | Low today: `filing_documents` holds URLs, not bodies; free news is incomplete and licensing-sensitive. | Neutral once a validated low-turnover event exists. | **Future data spike, not a first-round return trial.** Any extracted feature competes with a simple event baseline. |
 | **13F/crowding and FINRA short volume** | Slow ownership/crowding or forced-unwind context. 13F is delayed; daily short volume is flow, not short interest or borrow availability. | High for existing 13F and Reg SHO/FINRA-like data, but semantics limit actionability. | Low/medium as context; cannot prove an instrument can be borrowed. | **Context only.** No cloning strategy. Test only if a separately admitted mechanism requires it. |
-| **Activist ownership (Schedule 13D)** | A new control stake can create a dated catalyst distinct from delayed 13F cloning; passive 13G is not the same hypothesis. | Medium: structured 13D/G ownership exists, but point-in-time filing/class/amendment coverage and recent population need a census. | Conditional long fit. | **Reserved independent event family.** Establish published prior, 13D-versus-13G placebo and coverage before candidate admission. Do not fold it into generic 13F. |
+| **Activist ownership (Schedule 13D)** | A new control stake can create a dated catalyst distinct from delayed 13F cloning; passive 13G is not the same hypothesis. | Medium: the outcome-free census found 895 modern initial 13Ds with basic 60-prior/20-later coverage, but historical security identity remains survivor-biased and filing times are mostly date-only. | Conditional long fit. | **C-4 historical falsification preregistered; no capital candidate.** One clean-chain, next-session-open, ten-session test is frozen. A pass only permits prospective shadowing; a failure is not tuned. |
 | **Issuer capital events** | Buybacks, issuance/dilution, dividends and treasury changes alter supply or distribute cash; announcements, accounting realization and mechanical ex-date moves are different events. | Medium: XBRL buyback/treasury/share data and dividend events exist, but announcement knowledge time and completeness vary. | Conditional long fit; dividend capture must clear price adjustment and tax. | **Taxonomy only.** Split into one economically specific preregistration if a coverage census supports it; do not combine all capital events into a vote. |
 | **Listing, index and calendar flows** | Index additions/deletions, Form 25/delistings, IPO lockups, month-end and tax-loss flows can force trading on known schedules. | Low/medium: prospective listing membership and Form 25 exist; historical index membership, lockup terms and a complete event history do not. | Product/side dependent. | **Reserved/data-gated.** Current Nasdaq daily files support prospective detection, not a survivorship-free historical claim. Seasonality requires an explicit mechanism and trial charge. |
 
@@ -240,13 +240,13 @@ admission rests on the independent published factor prior and low-turnover portf
 role; the existing S-2 result is a contaminated harness observation and cannot select,
 weight or power C-3.
 
-### Conditional candidate C-4 — initial Schedule 13D catalyst
+### Preregistered falsification C-4 — initial Schedule 13D catalyst
 
 The read-only #2582 census found 1,285 structured initial-13D accessions from
 2024-12-18 through 2026-08-12, 1,160 mapped research-price series and 895 events
 with 60 prior plus 20 later calendar days. All raw documents already contain Item 4;
-no outcome was opened and no new raw store is required. This is enough to write an
-exact preregistration, not enough to call the candidate viable.
+no outcome was opened and no new raw store is required. This was enough to freeze
+one exact historical falsification, not enough to call the candidate viable.
 
 The family has an independent forced-participant mechanism: an active/control stake
 becomes public. It also has an unusually strong falsifier. The SEC's 2023 rule
@@ -255,11 +255,24 @@ the filing. eBull may trade only after dissemination. Moreover, 1,162 of the 1,2
 current rows are date-only, so their causal historical fill is no earlier than the
 next regular-session open.
 
-Before outcomes, #2582 must freeze campaign/conversion/repeat identity, Item 4
-purpose handling, decision clock, one comparison horizon, 13G/random challengers,
-cost arms, trial denominator and untouched terminal interval. A capital TP/SL rule
-is a separately identified executable adaptation and cannot be selected from the
-same opened outcomes. See `2026-08-12-schedule-13d-source-census.md`.
+The frozen C-4 primary population is a clean first active chain with no earlier
+active or passive filing and no same-timestamp ambiguity. It enters at the first
+regular-session open strictly after the filing date, exits at the tenth session
+close and charges 50 bps round trip. There is deliberately no historical TP/SL:
+a capital bracket is a separately identified executable adaptation and cannot be
+selected from the same opened outcomes. The contract also pins unfiltered 13D,
+seeded same-instrument random-time and rule-stratified initial-13G challengers,
+plus attribution fields that cannot gate the result.
+
+The 895-event source ceiling exists before chain and liquidity refusals. Against
+the declared 1% minimum worthwhile effect and 10% planning standard deviation,
+the independent-observation requirement is 785 before clustering. The result may
+therefore be inconclusive even if its mean is positive; that is not permission to
+relax the population. Historical data can only falsify or justify prospective
+shadow collection and can never promote capital because its universe is
+survivor-biased and it lacks historical broker economics. See
+`2026-08-12-schedule-13d-source-census.md` and
+`2026-08-12-schedule-13d-preregistration.md`.
 
 The exact sector-residual replication in #2522 remains source-blocked. It does not
 become C-4 by substituting current classifications, survivor projection or fixed
