@@ -204,7 +204,14 @@ def require_outcome_gate(
     # ⚠ Rule 4 — a register entry charges exactly one committed look. Checked
     # against the audit ledger, not in-process state, so a crashed-then-retried
     # run and a second deliberate run are refused identically.
+    #
+    # ⚠ SERIALIZED PER ENTRY with a transaction-scoped advisory lock (Codex
+    # checkpoint 2, round 2): without it, two concurrent invocations could both
+    # see no row below, both insert, and both commit — one charged entry, two
+    # looks. The lock releases at commit, by which time the winner's access row
+    # is visible to the loser's re-read.
     purpose = rerun_purpose(identity, trial_id)
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%(purpose)s, 0))", {"purpose": purpose})
     spent = conn.execute(
         _SPENT_ENTRY_SQL,
         {"strategy_id": identity.strategy_id, "strategy_version": identity.strategy_version, "purpose": purpose},
