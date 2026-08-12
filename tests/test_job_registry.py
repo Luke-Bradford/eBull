@@ -87,6 +87,7 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # one shared throttle).
         "finra",
         "nasdaq",
+        "cboe",
         # #1526 — jobs_liveness_watchdog + jobs_retry_sweeper extracted from the
         # catch-all ``db`` lane into their own single-job lanes. On ``db`` they
         # lost the ``job_source:db`` advisory-lock race to

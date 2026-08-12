@@ -391,6 +391,8 @@ JOB_STRATEGY_INTRADAY_HARVEST = "strategy_intraday_harvest"
 # #2507 — primary-source Nasdaq halt state. Safety input only: a fresh
 # snapshot can refuse an order but can never create trading authority.
 JOB_STRATEGY_HALT_FEED_REFRESH = "strategy_halt_feed_refresh"
+# #2574 — one bounded official daily Cboe VIX context refresh.
+JOB_CBOE_VIX_REFRESH = "cboe_vix_refresh"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2394 §3.2 — the backtest run. MANUAL-TRIGGER-ONLY, and NOT because it is
@@ -2135,6 +2137,20 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.every_n_minutes(interval=5),
         catch_up_on_boot=False,
         prerequisite=_strategy_halt_collection_due,
+    ),
+    ScheduledJob(
+        name=JOB_CBOE_VIX_REFRESH,
+        display_name="Cboe VIX daily context (#2574)",
+        source="cboe",
+        description=(
+            "Daily 02:12 UTC — fetches Cboe official VIX daily OHLC history once, "
+            "retains only 2021 onward as an internal non-tradable research series, "
+            "and records source hash/freshness. Historical decisions may use only "
+            "a close from an earlier New York date; no rolling indicators are stored."
+        ),
+        cadence=Cadence.daily(hour=2, minute=12),
+        catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
         name=JOB_STRATEGY_PAPER_CYCLE,
@@ -5276,6 +5292,25 @@ def strategy_halt_feed_refresh() -> None:
         snapshot = _refresh_strategy_halt_feed()
         tracker.row_count = len(snapshot.halts)
         tracker.note = f"source_pub_at={snapshot.source_pub_at.isoformat()} items={len(snapshot.halts)}"
+
+
+def cboe_vix_refresh() -> None:
+    """Refresh the bounded primary-source VIX regime series (#2574)."""
+    import httpx
+
+    from app.services.cboe_vix import refresh_cboe_vix
+
+    with _tracked_job(JOB_CBOE_VIX_REFRESH) as tracker:
+        with (
+            httpx.Client(timeout=20.0, follow_redirects=True) as client,
+            connect_job(autocommit=True) as conn,
+        ):
+            report = refresh_cboe_vix(conn, client=client)
+        tracker.row_count = report.retained_bars
+        tracker.note = (
+            f"status={report.status} retained={report.retained_bars} "
+            f"range={report.first_bar or '-'}..{report.last_bar or '-'}"
+        )
 
 
 def strategy_paper_cycle() -> None:

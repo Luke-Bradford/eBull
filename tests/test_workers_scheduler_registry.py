@@ -121,6 +121,20 @@ class TestStrategyIntradayHarvestRegistration:
         assert job.prerequisite is scheduler._strategy_intraday_collection_due
 
 
+class TestCboeVixRegistration:
+    def test_daily_bounded_refresh_is_registered_before_strategy_scan(self) -> None:
+        job = next(item for item in SCHEDULED_JOBS if item.name == scheduler.JOB_CBOE_VIX_REFRESH)
+        assert job.source == "cboe"
+        assert job.cadence == Cadence.daily(hour=2, minute=12)
+        assert job.catch_up_on_boot is True
+        assert job.prerequisite is scheduler._bootstrap_complete
+
+    def test_manual_invoker_is_registered(self) -> None:
+        from app.jobs.runtime import _INVOKERS
+
+        assert scheduler.JOB_CBOE_VIX_REFRESH in _INVOKERS
+
+
 # ---------------------------------------------------------------------------
 # Daily candle job registration
 # ---------------------------------------------------------------------------

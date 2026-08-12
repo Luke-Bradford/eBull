@@ -98,6 +98,7 @@ Lane = Literal[
     "bootstrap",
     "finra",
     "nasdaq",
+    "cboe",
     "openfigi",
 ]
 """Source-level concurrency bucket. Operator-locked decision (#1064): same-source
@@ -118,6 +119,8 @@ the rate — it does not.
 * ``nasdaq`` — Nasdaq Trader public safety feeds. The strategy halt poll has
   its own lane so a delayed public-feed request cannot starve either broker
   execution or unrelated SEC/FINRA collection.
+* ``cboe`` — one official daily VIX history request. It is separate from the
+  broker and Nasdaq lanes because those vendors share no overlap budget.
 * ``sec_rate`` — the SEC discovery/producer jobs (per-accession fetchers +
   per-issuer ingest). They serialise under one ``JobLock`` to bound job
   overlap, NOT request rate (the HTTP floor above bounds rate). #1478
