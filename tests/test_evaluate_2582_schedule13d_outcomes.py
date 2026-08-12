@@ -14,6 +14,7 @@ from scripts.evaluate_2582_schedule13d_outcomes import (
     OutcomeGateRefusal,
     PriceWindow,
     SourceEvent,
+    accepted_window_return_pct,
     bucket,
     match_tie_break,
     next_regular_session_strictly_after,
@@ -22,6 +23,8 @@ from scripts.evaluate_2582_schedule13d_outcomes import (
     require_outcome_gate,
     required_event_sessions,
     total_return_pct,
+    treatment_event_outcome,
+    window_match_features,
 )
 
 
@@ -199,3 +202,35 @@ def test_price_window_refuses_missing_exact_bar_before_assessing_return() -> Non
         _price_window(positive_adjustment_bars=69).outcome_refusal
         == "corporate_action_adjustment_missing_or_nonpositive"
     )
+
+
+def test_shared_price_window_preserves_population_specific_source_gate() -> None:
+    repeated = _source_event(prior_active=True)
+    assert _price_window(event=repeated).outcome_refusal == "prior_active_chain"
+    assert _price_window(event=repeated, population="unfiltered").outcome_refusal is None
+    assert _price_window(event=_13g_source(), population="13g").outcome_refusal is None
+    assert (
+        _price_window(event=_13g_source(raw_document_count=0), population="13g").outcome_refusal
+        == "canonical_raw_document_missing_or_ambiguous"
+    )
+
+
+def test_accepted_window_has_one_return_and_matching_conversion_path() -> None:
+    window = _price_window()
+    assert accepted_window_return_pct(window) == Decimal("9.500")
+    features = window_match_features(window)
+    assert features.entry_price == Decimal("10")
+    assert features.rule is None
+    outcome = treatment_event_outcome(window, sector="technology")
+    assert outcome.net_return_pct == pytest.approx(9.5)
+    assert outcome.maximum_percent_of_class == 7.5
+    assert outcome.sector == "technology"
+
+
+def test_return_and_primary_conversion_refuse_wrong_population() -> None:
+    with pytest.raises(ValueError, match="price window refused"):
+        accepted_window_return_pct(_price_window(stock_bars_present=69))
+    challenger = _price_window(event=_13g_source(), population="13g")
+    assert window_match_features(challenger).rule == "1b"
+    with pytest.raises(ValueError, match="clean primary"):
+        treatment_event_outcome(challenger)
