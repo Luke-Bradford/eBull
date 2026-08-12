@@ -43,7 +43,7 @@ There is no `_current` table and no stored rolling indicator. The series row car
 
 ## 10. Operator-visible endpoint
 
-None. VIX is machine decision context, not a raw-data product. Strategy evidence may expose the source version, as-known bar date, close, derived regime feature, and refusal reason; it must not expose or redistribute the complete raw Cboe history.
+None. VIX is machine decision context, not a raw-data product. `load_decision_vix` resolves the exact prior-NYSE-session close into `DecisionVix`; eligible fired/refused context rows snapshot only `vix`, `vix_bar_date` and `vix_source_version`. Missing or stale coverage produces a typed refusal. Strategy evidence may expose those provenance fields and the refusal reason; it must not expose or redistribute the complete raw Cboe history.
 
 ## 11. Verification queries
 
@@ -67,6 +67,8 @@ WHERE source = 'cboe.vix-history' AND key = 'VIX';
 Cross-check the latest row against Cboe's linked CSV. A decision on New York date D must resolve at most D-1 (or the preceding trading date), never D.
 
 Live acceptance on 2026-08-12 loaded 1,439 rows from 2021-01-04 through 2026-08-11. The retained row payload measured 92,002 bytes; the indexed as-known lookup executed in 0.417 ms on the development database. Initial-load WAL was 4,587,384 bytes, while an immediate conditional repeat returned HTTP 304 and generated 3,744 bytes of watermark WAL. The as-known resolver returned 2026-08-10 for a 2026-08-11 New York decision and 2026-08-11 for a 2026-08-12 decision.
+
+Decision-context acceptance on 2026-08-12 resolved close 15.28 / bar 2026-08-11 / source `cboe-vix-daily-close-v1` from the live store. The two added provenance scalars measure 28 bytes over an all-null composite fixture (52 versus 24 bytes), are written only on fired/refused decisions, add no index, and left the empty context table at 49,152 bytes. The follow-up constraint migration generated 12,096 WAL bytes; the live lookup measured 1.44 ms on that run.
 
 ## 12. Smoke test
 

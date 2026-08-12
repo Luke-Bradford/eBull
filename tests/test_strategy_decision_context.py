@@ -11,9 +11,11 @@ from app.services.instrument_market_classification import reconcile_instrument_m
 from app.services.strategy_decision_context import (
     CONTEXT_VERSION,
     DecisionInputs,
+    DecisionVix,
     MarketClassification,
     build_decision_context,
     dollar_volume_band_for,
+    load_decision_vix,
     load_market_classification,
     price_band_for,
     store_decision_context,
@@ -35,7 +37,11 @@ def _complete_inputs(**overrides: object) -> DecisionInputs:
         "realised_volatility": Decimal("0.32"),
         "gap_pct": Decimal("-2.1"),
         "market_sector_residual_z": Decimal("-2.7"),
-        "vix": Decimal("19.2"),
+        "vix": DecisionVix(
+            Decimal("19.2"),
+            date(2026, 8, 7),
+            "cboe-vix-daily-close-v1",
+        ),
         "as_traded_price_basis": "observed_unadjusted",
     }
     values.update(overrides)
@@ -50,7 +56,7 @@ def test_boundaries_are_explicit_and_stable() -> None:
     assert price_band_for(Decimal("150")) == "150_plus"
     assert dollar_volume_band_for(Decimal("9999999")) == "1m_to_10m"
     assert dollar_volume_band_for(Decimal("10000000")) == "10m_to_25m"
-    assert CONTEXT_VERSION.startswith("decision-context-v2:")
+    assert CONTEXT_VERSION.startswith("decision-context-v3:")
 
 
 def test_complete_context_is_eligible() -> None:
@@ -76,6 +82,9 @@ def test_complete_context_is_eligible() -> None:
     assert context.as_traded_price_basis == "observed_unadjusted"
     assert context.dollar_volume_band == "10m_to_25m"
     assert context.volume_lookback_sessions == 20
+    assert context.vix == Decimal("19.2")
+    assert context.vix_bar_date == date(2026, 8, 7)
+    assert context.vix_source_version == "cboe-vix-daily-close-v1"
 
 
 def test_missing_or_unknown_point_in_time_data_refuses_by_name() -> None:
@@ -118,6 +127,33 @@ def test_missing_point_in_time_sector_refuses_instead_of_using_current_metadata(
     )
     assert context.candidate_verdict == "refused"
     assert context.refusal_reason == "missing:provider_industry_id"
+
+
+def test_stale_vix_refuses_by_provenance_reason() -> None:
+    context = build_decision_context(
+        strategy_id="candidate-1",
+        strategy_version="sha256:abc",
+        instrument_id=1,
+        decision_at=datetime(2026, 8, 11, 14, 35, tzinfo=UTC),
+        signal_id=None,
+        classification=MarketClassification(
+            effective_from=date(2026, 8, 10),
+            security_type="common_stock",
+            primary_listing_market="nasdaq",
+            provider_exchange_id="4",
+            instrument_type_id=5,
+            provider_industry_id=8,
+        ),
+        inputs=_complete_inputs(vix=DecisionVix(None, None, None, "stale_source:2026-08-07<expected:2026-08-10")),
+    )
+    assert context.candidate_verdict == "refused"
+    assert context.refusal_reason == "missing:vix_stale_source:2026-08-07<expected:2026-08-10"
+    assert context.vix is None and context.vix_bar_date is None
+
+
+def test_partial_vix_provenance_is_invalid() -> None:
+    with pytest.raises(ValueError, match="either complete"):
+        DecisionVix(Decimal("19"), None, "cboe-vix-daily-close-v1")
 
 
 def test_adjusted_or_unproven_price_basis_refuses_cohort_attribution() -> None:
@@ -177,6 +213,61 @@ def _seed_instrument(conn: psycopg.Connection[tuple[Any, ...]], iid: int) -> Non
         """,
         (iid, f"CTX{iid}"),
     )
+
+
+def _seed_vix(conn: psycopg.Connection[tuple[Any, ...]], *bars: tuple[date, Decimal]) -> None:
+    row = conn.execute(
+        """
+        INSERT INTO research_price_series (
+            vendor, vendor_symbol, upstream_source, licence, adjustment_basis,
+            first_bar, last_bar, bar_count
+        ) VALUES ('cboe', 'VIX', 'other', 'fixture', 'unadjusted', %s, %s, %s)
+        RETURNING series_id
+        """,
+        (bars[0][0], bars[-1][0], len(bars)),
+    ).fetchone()
+    assert row is not None
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO research_price_daily (series_id, bar_date, open, high, low, close)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            [(row[0], when, close, close, close, close) for when, close in bars],
+        )
+
+
+@pytest.mark.integration
+def test_vix_loader_requires_exact_prior_nyse_session_and_ignores_same_day(
+    ebull_test_conn: psycopg.Connection[tuple[Any, ...]],  # noqa: F811
+) -> None:
+    conn = ebull_test_conn
+    _seed_vix(
+        conn,
+        (date(2026, 8, 7), Decimal("17")),
+        (date(2026, 8, 10), Decimal("18")),
+    )
+
+    # Monday resolves Friday, both before and after Monday's close. The
+    # same-date Monday source row cannot leak into either decision.
+    before_close = load_decision_vix(conn, decision_at=datetime(2026, 8, 10, 15, tzinfo=UTC))
+    after_close = load_decision_vix(conn, decision_at=datetime(2026, 8, 10, 22, tzinfo=UTC))
+    assert before_close == after_close == DecisionVix(Decimal("17"), date(2026, 8, 7), "cboe-vix-daily-close-v1")
+
+    tuesday = load_decision_vix(conn, decision_at=datetime(2026, 8, 11, 15, tzinfo=UTC))
+    assert tuesday == DecisionVix(Decimal("18"), date(2026, 8, 10), "cboe-vix-daily-close-v1")
+
+
+@pytest.mark.integration
+def test_vix_loader_returns_typed_stale_refusal(
+    ebull_test_conn: psycopg.Connection[tuple[Any, ...]],  # noqa: F811
+) -> None:
+    _seed_vix(ebull_test_conn, (date(2026, 8, 7), Decimal("17")))
+    result = load_decision_vix(
+        ebull_test_conn,
+        decision_at=datetime(2026, 8, 11, 15, tzinfo=UTC),
+    )
+    assert result == DecisionVix(None, None, None, "stale_source:2026-08-07<expected:2026-08-10")
 
 
 @pytest.mark.integration
@@ -303,15 +394,42 @@ def test_context_round_trip_and_database_completeness_guard(
     context_id = store_decision_context(conn, context)
     assert context_id > 0
     stored_basis = conn.execute(
-        "SELECT as_traded_price_basis FROM strategy_decision_contexts WHERE context_id = %s",
+        """
+        SELECT as_traded_price_basis, vix, vix_bar_date, vix_source_version
+        FROM strategy_decision_contexts WHERE context_id = %s
+        """,
         (context_id,),
     ).fetchone()
-    assert stored_basis == ("observed_unadjusted",)
+    assert stored_basis == (
+        "observed_unadjusted",
+        Decimal("19.2"),
+        date(2026, 8, 7),
+        "cboe-vix-daily-close-v1",
+    )
 
     with pytest.raises(psycopg.errors.CheckViolation):
         with conn.transaction():
             conn.execute(
                 "UPDATE strategy_decision_contexts SET provider_industry_id = NULL WHERE context_id = %s",
+                (context_id,),
+            )
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with conn.transaction():
+            conn.execute(
+                "UPDATE strategy_decision_contexts SET vix_bar_date = NULL WHERE context_id = %s",
+                (context_id,),
+            )
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with conn.transaction():
+            conn.execute(
+                """
+                UPDATE strategy_decision_contexts
+                   SET candidate_verdict = 'refused', refusal_reason = 'fixture',
+                       vix_bar_date = NULL
+                 WHERE context_id = %s
+                """,
                 (context_id,),
             )
 

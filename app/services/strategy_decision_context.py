@@ -11,13 +11,17 @@ from __future__ import annotations
 import hashlib
 import inspect
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo
 
 import psycopg
 import psycopg.rows
+
+from app.services.cboe_vix import SOURCE_VERSION as CBOE_VIX_SOURCE_VERSION
+from app.services.cboe_vix import load_vix_close_as_known
+from app.services.market_calendar import us_market_status
 
 SecurityType = Literal["common_stock", "etf", "other", "unknown"]
 ListingMarket = Literal["nyse", "nasdaq", "other", "unknown"]
@@ -39,6 +43,8 @@ class ContextDefinition:
     sector_semantics: str = "provider_stocks_industry_not_gics"
     sector_source: str = "prospective_instrument_market_classification_history"
     eligible_price_bases: tuple[str, ...] = ("observed_unadjusted", "reconstructed_unadjusted")
+    vix_source_version: str = CBOE_VIX_SOURCE_VERSION
+    vix_availability: str = "prior_new_york_session_only"
 
 
 DEFINITION: Final = ContextDefinition()
@@ -46,7 +52,7 @@ DEFINITION: Final = ContextDefinition()
 
 def _version() -> str:
     payload = repr(DEFINITION) + inspect.getsource(price_band_for) + inspect.getsource(dollar_volume_band_for)
-    return "decision-context-v2:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return "decision-context-v3:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def price_band_for(price: Decimal) -> PriceBand:
@@ -92,6 +98,21 @@ class MarketClassification:
 
 
 @dataclass(frozen=True)
+class DecisionVix:
+    close: Decimal | None
+    bar_date: date | None
+    source_version: str | None
+    refusal_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        complete = self.close is not None and self.bar_date is not None and bool(self.source_version)
+        if complete == (self.refusal_reason is not None):
+            raise ValueError("VIX context must be either complete or carry one refusal reason")
+        if self.close is not None and (not self.close.is_finite() or self.close <= 0):
+            raise ValueError("VIX close must be finite and positive")
+
+
+@dataclass(frozen=True)
 class DecisionInputs:
     as_traded_price: Decimal | None
     as_traded_price_basis: AsTradedPriceBasis | None
@@ -106,7 +127,7 @@ class DecisionInputs:
     realised_volatility: Decimal | None
     gap_pct: Decimal | None
     market_sector_residual_z: Decimal | None
-    vix: Decimal | None
+    vix: DecisionVix | None
 
 
 @dataclass(frozen=True)
@@ -142,6 +163,8 @@ class DecisionContext:
     gap_pct: Decimal | None
     market_sector_residual_z: Decimal | None
     vix: Decimal | None
+    vix_bar_date: date | None
+    vix_source_version: str | None
 
 
 _REQUIRED_INPUTS: Final = (
@@ -158,8 +181,27 @@ _REQUIRED_INPUTS: Final = (
     "realised_volatility",
     "gap_pct",
     "market_sector_residual_z",
-    "vix",
 )
+
+
+def _prior_us_session(decision_at: datetime) -> date:
+    candidate = decision_at.astimezone(_NEW_YORK).date() - timedelta(days=1)
+    while us_market_status(candidate) == "closed":
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def load_decision_vix(conn: psycopg.Connection[Any], *, decision_at: datetime) -> DecisionVix:
+    """Resolve the exact prior-session Cboe close or a typed refusal."""
+    if decision_at.tzinfo is None or decision_at.utcoffset() is None:
+        raise ValueError("decision_at must be timezone-aware")
+    expected = _prior_us_session(decision_at)
+    bar = load_vix_close_as_known(conn, decision_at=decision_at)
+    if bar is None:
+        return DecisionVix(None, None, None, "missing_source")
+    if bar.bar_date != expected:
+        return DecisionVix(None, None, None, f"stale_source:{bar.bar_date.isoformat()}<expected:{expected.isoformat()}")
+    return DecisionVix(bar.close, bar.bar_date, CBOE_VIX_SOURCE_VERSION)
 
 
 def load_market_classification(
@@ -226,7 +268,6 @@ def build_decision_context(
         "relative_volume",
         "spread_bps",
         "realised_volatility",
-        "vix",
     ):
         value = getattr(inputs, name)
         if value is not None and value < 0:
@@ -237,6 +278,10 @@ def build_decision_context(
             raise ValueError(f"{name} must be inside 0-1")
 
     missing: list[str] = [name for name in _REQUIRED_INPUTS if getattr(inputs, name) is None]
+    if inputs.vix is None:
+        missing.append("vix")
+    elif inputs.vix.refusal_reason is not None:
+        missing.append(f"vix_{inputs.vix.refusal_reason}")
     if inputs.as_traded_price_basis == "unknown":
         missing.append("as_traded_price_basis")
     if classification is None:
@@ -289,7 +334,9 @@ def build_decision_context(
         realised_volatility=inputs.realised_volatility,
         gap_pct=inputs.gap_pct,
         market_sector_residual_z=inputs.market_sector_residual_z,
-        vix=inputs.vix,
+        vix=None if inputs.vix is None else inputs.vix.close,
+        vix_bar_date=None if inputs.vix is None else inputs.vix.bar_date,
+        vix_source_version=None if inputs.vix is None else inputs.vix.source_version,
     )
 
 
@@ -306,7 +353,8 @@ _INSERT_CONTEXT = """
         trailing_median_dollar_volume, dollar_volume_band,
         zero_volume_frequency, intraday_coverage,
         relative_volume, spread_bps, realised_volatility,
-        gap_pct, market_sector_residual_z, vix
+        gap_pct, market_sector_residual_z, vix, vix_bar_date,
+        vix_source_version
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(decision_at)s, %(signal_id)s,
         %(candidate_verdict)s, %(refusal_reason)s, %(context_version)s,
@@ -319,7 +367,8 @@ _INSERT_CONTEXT = """
         %(trailing_median_dollar_volume)s, %(dollar_volume_band)s,
         %(zero_volume_frequency)s, %(intraday_coverage)s,
         %(relative_volume)s, %(spread_bps)s, %(realised_volatility)s,
-        %(gap_pct)s, %(market_sector_residual_z)s, %(vix)s
+        %(gap_pct)s, %(market_sector_residual_z)s, %(vix)s, %(vix_bar_date)s,
+        %(vix_source_version)s
     )
     RETURNING context_id
 """
@@ -338,10 +387,12 @@ __all__ = [
     "CONTEXT_VERSION",
     "DecisionContext",
     "DecisionInputs",
+    "DecisionVix",
     "MarketClassification",
     "build_decision_context",
     "dollar_volume_band_for",
     "load_market_classification",
+    "load_decision_vix",
     "price_band_for",
     "store_decision_context",
 ]
