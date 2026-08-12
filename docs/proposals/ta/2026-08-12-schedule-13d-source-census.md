@@ -4,6 +4,11 @@ Date: 2026-08-12
 Issue: #2582
 Status: source-feasible for preregistration; outcomes unopened
 
+The exact follow-on contract is now frozen in
+`2026-08-12-schedule-13d-preregistration.md` and
+`contracts/schedule13d-public-catalyst-v1.json`. This census remains source
+evidence and does not inherit any return result.
+
 ## Decision
 
 An initial Schedule 13D is the first untested short-horizon event family in the
@@ -91,6 +96,24 @@ more precise decision without rewriting this trial identity.
 No typed `date_of_event` is present for these initial rows. That field is the
 private ownership-trigger date, not the public action time in any case; it may
 measure disclosure lag but can never authorise a pre-filing trade.
+
+## Initial 13G challenger feasibility
+
+The same outcome-free coverage join and structured-document rule labels found
+the following initial-13G challenger ceiling. `Both` and `unknown` remain
+separate; they are never pooled into a known regulatory rule.
+
+| filing year | Rule 13d-1(b) | Rule 13d-1(c) | both | unknown | total with 60 prior + 20 later days |
+|---|---:|---:|---:|---:|---:|
+| 2024 from 18 December | 3 | 49 | 1 | 4 | 57 |
+| 2025 | 3,350 | 1,418 | 21 | 486 | 5,275 |
+| 2026 through complete coverage | 4,076 | 795 | 11 | 205 | 5,087 |
+| **total** | **7,429** | **2,262** | **33** | **695** | **10,419** |
+
+Initial 13Gs cluster heavily in February and at quarter/annual reporting waves.
+That source shape is why the frozen challenger matches within filing month and
+reports Rule 13d-1(b) and Rule 13d-1(c) separately. It does not establish that a
+matched passive filing is an economically perfect counterfactual.
 
 ## Storage impact
 
