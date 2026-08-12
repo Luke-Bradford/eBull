@@ -20,7 +20,9 @@ import psycopg.rows
 from psycopg.pq import TransactionStatus
 
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration, declaration_refusals
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
+from app.services.result_ledger import load_preregistration
 from app.services.strategy_control_plane import (
     StrategyControlError,
     current_stage,
@@ -68,12 +70,26 @@ class LiveGatePolicy:
     currency: str
     leverage: int
     registered_at: datetime
+    #: #2599's frozen preregistration declaration, whose forward-shadow floor
+    #: binds this policy. ⚠ NULLABLE, and NULL is the fail-closed default: a
+    #: policy registered before #2599 carries no floor, and the gate refuses
+    #: with `forward_shadow_floor_missing` rather than treating "unset" as
+    #: "unbounded". Making the column NOT NULL would have needed a backfill
+    #: whose safety rested on one dev database being empty on one day.
+    declaration_id: int | None
 
 
 @dataclass(frozen=True)
 class LiveGateFacts:
     stage: str | None
     forward_resolved_signals: int
+    #: ⚠ DISTINCT DECISION DATES, NOT SIGNALS. Twenty signals fired on one day
+    #: are one decision date; `forward_resolved_signals` cannot tell that from
+    #: twenty days of evidence. The narrow claim is that a distinct-date count
+    #: cannot be inflated by same-day fan-out — NOT that the dates are
+    #: statistically independent, which they are not, and which is what stage
+    #: 5e-2's block bootstrap exists to handle.
+    forward_decision_dates: int
     forward_days: int
     paper_closed_trades: int
     paper_days: int
@@ -107,6 +123,7 @@ class LiveGateReport:
     requested_capital: Decimal
     facts: LiveGateFacts
     refusal_codes: tuple[str, ...]
+    forward_shadow_floor: ForwardShadowFloor | None = None
 
     @property
     def passed(self) -> bool:
@@ -143,6 +160,7 @@ def _policy_from_row(row: dict[str, Any]) -> LiveGatePolicy:
         currency=str(row["currency"]),
         leverage=int(row["leverage"]),
         registered_at=row["registered_at"],
+        declaration_id=None if row.get("declaration_id") is None else int(row["declaration_id"]),
     )
 
 
@@ -179,7 +197,46 @@ def register_live_gate_policy(
     registered_by: str,
     reason: str,
 ) -> LiveGatePolicy:
-    """Preregister immutable live thresholds before paper observation begins."""
+    """Preregister immutable live thresholds before paper observation begins.
+
+    ⚠ #2599 — THE FORWARD-SHADOW FLOOR IS NOT A PARAMETER HERE. It is read off
+    the trial's frozen preregistration declaration and stored by reference, so
+    there is no number to type differently. An operator who wants a different
+    floor has to freeze a different declaration, which is a new strategy_version
+    and a visible act.
+
+    Three registration refusals, all fail-closed:
+
+    - nothing frozen for this trial → there is no floor to bind to;
+    - the frozen declaration is incoherent → it authorises nothing;
+    - it declares `falsification_only` → a trial that said it cannot promote
+      capital has no live gate to register, and registering one would be the
+      declaration being quietly walked back.
+    """
+    frozen = load_preregistration(conn, strategy_id, strategy_version)
+    if frozen is None:
+        raise StrategyControlError(
+            "no frozen preregistration declaration for this strategy version; live thresholds cannot bind a "
+            "forward-shadow floor that was never declared (#2599)"
+        )
+    # ⚠ THE DIGEST, NOT ONLY THE COHERENCE. A declaration edited around the
+    # immutability trigger (a superuser can disable one) can still satisfy every
+    # coherence rule while carrying a different floor from the one that was
+    # frozen. `record_holdout_access` already refuses on this; the asymmetry was
+    # the live-gate path silently accepting what the research path rejects.
+    if not frozen.digest_intact:
+        raise StrategyControlError(
+            "the frozen preregistration declaration no longer matches its own digest; it has been rewritten (#2599)"
+        )
+    declaration_problems = declaration_refusals(frozen.declaration)
+    if declaration_problems:
+        raise StrategyControlError(
+            f"frozen preregistration declaration is not coherent: {', '.join(declaration_problems)}"
+        )
+    if frozen.declaration.prereg_purpose != "capital_candidate":
+        raise StrategyControlError(
+            "this trial declared itself falsification_only; it has no live gate to register (#2599)"
+        )
     for value, field in (
         (strategy_id, "strategy_id"),
         (strategy_version, "strategy_version"),
@@ -231,8 +288,8 @@ def register_live_gate_policy(
                 max_cost_drift_pct, max_average_slippage_pct, max_drawdown_pct,
                 max_scan_age_seconds, max_quote_age_seconds,
                 max_broker_health_age_seconds, max_live_capital, currency,
-                leverage, registered_by, reason
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'USD',1,%s,%s)
+                leverage, registered_by, reason, declaration_id
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'USD',1,%s,%s,%s)
             RETURNING *
             """,
             (
@@ -253,6 +310,7 @@ def register_live_gate_policy(
                 max_live_capital,
                 registered_by,
                 reason,
+                frozen.declaration_id,
             ),
         )
         row = cur.fetchone()
@@ -300,6 +358,15 @@ def assess_live_gate(
                                 AND s.created_at >= %(forward_at)s
                                 AND s.created_at < %(paper_at)s
                                 AND s.signal_bar_date >= %(forward_date)s) AS forward_resolved,
+              -- #2599 — the SAME predicate, counted by distinct decision date.
+              -- ⚠ Deliberately not a looser population: an unresolved signal is
+              -- not evidence, so it is not a decision date either, and counting
+              -- one would let a strategy clear a forward floor on looks that
+              -- never produced an outcome.
+              count(DISTINCT s.signal_bar_date) FILTER (WHERE o.gross_return_pct IS NOT NULL
+                                AND s.created_at >= %(forward_at)s
+                                AND s.created_at < %(paper_at)s
+                                AND s.signal_bar_date >= %(forward_date)s) AS forward_decision_dates,
               count(*) FILTER (WHERE d.mode='paper' AND t.status='closed'
                                 AND s.created_at >= %(paper_at)s) AS paper_closed,
               avg(o.gross_return_pct) FILTER (WHERE d.mode='paper' AND fd.verdict='allocated'
@@ -454,6 +521,7 @@ def assess_live_gate(
     facts = LiveGateFacts(
         stage=current_stage(conn, strategy_id, strategy_version),
         forward_resolved_signals=int(evidence["forward_resolved"] or 0),
+        forward_decision_dates=int(evidence["forward_decision_dates"] or 0),
         forward_days=max(((paper_at or observed_at) - forward_at).days, 0) if forward_at else 0,
         paper_closed_trades=int(evidence["paper_closed"] or 0),
         paper_days=max((observed_at - paper_at).days, 0) if paper_at else 0,
@@ -479,8 +547,69 @@ def assess_live_gate(
         active_execution_block_count=active_blocks,
     )
 
+    # ⚠ THE FLOOR IS READ OFF THE DECLARATION THE *POLICY* POINTS AT, never off
+    # whatever declaration currently exists for the trial. A policy registered
+    # against one declaration must keep answering to that one — otherwise
+    # freezing a second, laxer declaration would retro-loosen a policy that is
+    # supposed to be immutable.
+    frozen = load_preregistration(conn, strategy_id, strategy_version)
+    declaration: PreregDeclaration | None = None
+    digest_intact = True
+    coherent = True
+    if frozen is not None and policy is not None and policy.declaration_id == frozen.declaration_id:
+        declaration = frozen.declaration
+        digest_intact = frozen.digest_intact
+        # ⚠ RE-CHECKED ON EVERY ASSESSMENT, not only at registration. The policy
+        # is immutable but the structural-refusal POLICY VERSION is not, and a
+        # declaration frozen under a superseded one stops authorising anything
+        # the moment it moves — which is exactly what `record_holdout_access`
+        # does on the research side. Checking only the digest here left the two
+        # enforcement points disagreeing on the one case the "no
+        # re-interpretation" rule exists for.
+        coherent = not declaration_refusals(declaration)
+
+    return LiveGateReport(
+        strategy_id,
+        strategy_version,
+        policy,
+        requested_capital,
+        facts,
+        live_gate_refusals(
+            purpose=registered_strategy_purpose(strategy_id),
+            policy=policy,
+            declaration=declaration,
+            declaration_digest_intact=digest_intact,
+            declaration_coherent=coherent,
+            facts=facts,
+            requested_capital=requested_capital,
+        ),
+        None if declaration is None or not digest_intact or not coherent else declaration.forward_shadow,
+    )
+
+
+def live_gate_refusals(
+    *,
+    purpose: str | None,
+    policy: LiveGatePolicy | None,
+    declaration: PreregDeclaration | None,
+    facts: LiveGateFacts,
+    requested_capital: Decimal,
+    declaration_digest_intact: bool = True,
+    declaration_coherent: bool = True,
+) -> tuple[str, ...]:
+    """Every reason this strategy may not take live capital. Empty means none.
+
+    Pure — reads no database — so the whole table is exercisable without
+    Postgres. Extracted from ``assess_live_gate`` by #2599, which needed the
+    three forward-shadow codes covered by pure-logic tests and found the
+    assembly welded to five cursors.
+
+    ⚠ ORDER IS PRESERVED FROM THE ORIGINAL and the de-duplication at the end is
+    kept: `assess_live_gate` returned `dict.fromkeys(refusals)`, and a caller
+    reading `refusal_codes[0]` as "the main reason" would see a different code
+    if this reordered.
+    """
     refusals: list[str] = []
-    purpose = registered_strategy_purpose(strategy_id)
     if purpose == "harness_validation":
         refusals.append("harness_validation_only")
     elif purpose != "capital_candidate":
@@ -491,6 +620,29 @@ def assess_live_gate(
         refusals.append("paper_stage_required")
     if requested_capital <= 0:
         refusals.append("live_capital_must_be_positive")
+    # #2599's forward-shadow floor. ⚠ DUAL ENFORCEMENT, NOT REPLACEMENT: the
+    # operator-registered `min_forward_*` below still bind, and these two are
+    # the contract-frozen floor from the candidate's own power calculation.
+    # Both must pass.
+    if declaration is None:
+        refusals.append("forward_shadow_floor_missing")
+    elif not declaration_digest_intact:
+        # ⚠ THREE DISTINCT CODES, not one. "No floor was frozen", "the frozen
+        # floor has been rewritten" and "the frozen floor was computed under a
+        # policy that has since moved" are three different operator
+        # emergencies, and collapsing them would hide two of them.
+        refusals.append("declaration_digest_mismatch")
+    elif not declaration_coherent:
+        refusals.append("declaration_no_longer_coherent")
+    else:
+        floor = declaration.forward_shadow
+        if facts.forward_decision_dates < floor.min_independent_decision_dates:
+            refusals.append("forward_decision_dates_insufficient")
+        # ⚠ `forward_days` comes from `timedelta.days`, which TRUNCATES, so this
+        # requires 7M fully elapsed days. Truncation makes the bound stricter,
+        # which is the fail-closed direction.
+        if facts.forward_days < 7 * floor.min_calendar_weeks:
+            refusals.append("forward_calendar_weeks_insufficient")
     if policy is not None:
         checks = (
             (facts.forward_resolved_signals >= policy.min_forward_resolved_signals, "forward_sample_insufficient"),
@@ -560,14 +712,7 @@ def assess_live_gate(
     # Keep this explicit: every evidence gate can turn green without silently
     # making real broker I/O reachable.
     refusals.append("live_strategy_broker_contract_not_validated")
-    return LiveGateReport(
-        strategy_id,
-        strategy_version,
-        policy,
-        requested_capital,
-        facts,
-        tuple(dict.fromkeys(refusals)),
-    )
+    return tuple(dict.fromkeys(refusals))
 
 
 def _jsonable(value: Any) -> Any:
@@ -750,6 +895,7 @@ __all__ = [
     "assess_live_gate",
     "load_live_gate_policy",
     "record_live_promotion_attempt",
+    "live_gate_refusals",
     "register_live_gate_policy",
     "run_kill_drill",
 ]

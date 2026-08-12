@@ -19,8 +19,11 @@ from app.api.strategies import (
     execute_live_kill_drill,
 )
 from app.security.sessions import SessionRow
+from app.services import prereg_contract
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
+from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
+from app.services.result_ledger import freeze_preregistration, load_preregistration
 from app.services.strategy_control_plane import (
     StrategyControlError,
     configure_deployment,
@@ -33,6 +36,7 @@ from app.services.strategy_live_gate import (
     register_live_gate_policy,
     run_kill_drill,
 )
+from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION
 from tests.test_strategy_position_manager import _opened_trade
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
@@ -63,7 +67,42 @@ def _forward_stage(conn: psycopg.Connection[Any]) -> None:
     )
 
 
+def _freeze_declaration(conn: psycopg.Connection[Any]) -> int:
+    """#2599 — a live-gate policy binds a frozen forward-shadow floor.
+
+    ⚠ The declaration must be `capital_candidate` AND structurally clean, so it
+    declares survivorship-free, carry-modelled stamps. A falsification-only
+    trial has no live gate to register, which is its own test below.
+    """
+    # ⚠ Idempotent: two tests call `_policy` twice to assert the POLICY is
+    # immutable, and a second freeze would fail on sql/333's UNIQUE first —
+    # masking the refusal they are actually asserting.
+    existing = load_preregistration(conn, _STRATEGY_ID, _VERSION)
+    if existing is not None:
+        return existing.declaration_id
+    return freeze_preregistration(
+        conn,
+        PreregDeclaration(
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_VERSION,
+            contract_version="live-gate-test-contract-v1",
+            prereg_purpose="capital_candidate",
+            structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
+            declared_universe_basis="survivorship_free",
+            declared_carry_unmodelled=False,
+            expected_structural_refusals=(),
+            forward_shadow=ForwardShadowFloor(
+                min_independent_decision_dates=2,
+                min_calendar_weeks=1,
+                derivation="live-gate test fixture",
+            ),
+            declared_by="operator",
+        ),
+    )
+
+
 def _policy(conn: psycopg.Connection[Any]) -> int:
+    _freeze_declaration(conn)
     policy = register_live_gate_policy(
         conn,
         strategy_id=_STRATEGY_ID,
@@ -449,3 +488,132 @@ def test_pause_disables_allocations_and_retirement_is_separately_audited(
         "SELECT to_stage FROM strategy_promotions WHERE strategy_id=%s ORDER BY promotion_id DESC LIMIT 2",
         (_STRATEGY_ID,),
     ).fetchall() == [("retired",), ("paused",)]
+
+
+def test_registration_refuses_a_trial_that_never_froze_a_declaration(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2599 — there is no forward-shadow floor to bind, so there is no policy.
+
+    ⚠ This is the reason the floor is NOT a parameter of
+    ``register_live_gate_policy``: a caller who could type the numbers could
+    type different ones from the frozen contract, and the declaration would be
+    decorative.
+    """
+    _forward_stage(ebull_test_conn)
+    with pytest.raises(StrategyControlError, match="no frozen preregistration declaration"):
+        register_live_gate_policy(
+            ebull_test_conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_VERSION,
+            min_forward_resolved_signals=2,
+            min_forward_days=10,
+            min_paper_closed_trades=2,
+            min_paper_days=10,
+            max_reconciliation_age_seconds=60,
+            min_shadow_alpha_pct=Decimal("0"),
+            max_cost_drift_pct=Decimal("0.25"),
+            max_average_slippage_pct=Decimal("0.50"),
+            max_drawdown_pct=Decimal("5"),
+            max_scan_age_seconds=300,
+            max_quote_age_seconds=60,
+            max_broker_health_age_seconds=60,
+            max_live_capital=Decimal("250"),
+            registered_by="operator",
+            reason="preregister before paper",
+        )
+
+
+def test_registration_refuses_a_falsification_only_trial(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """A trial that declared it cannot promote capital has no live gate.
+
+    ⚠ Registering one would be the declaration being quietly walked back — the
+    exact move #2599 exists to make impossible.
+    """
+    _forward_stage(ebull_test_conn)
+    freeze_preregistration(
+        ebull_test_conn,
+        PreregDeclaration(
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_VERSION,
+            contract_version="live-gate-test-contract-v1",
+            prereg_purpose="falsification_only",
+            structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
+            declared_universe_basis="survivor_only",
+            declared_carry_unmodelled=True,
+            expected_structural_refusals=("universe_basis_not_survivorship_free", "carry_unmodelled"),
+            forward_shadow=ForwardShadowFloor(2, 1, "live-gate test fixture"),
+            declared_by="operator",
+        ),
+    )
+    with pytest.raises(StrategyControlError, match="falsification_only"):
+        register_live_gate_policy(
+            ebull_test_conn,
+            strategy_id=_STRATEGY_ID,
+            strategy_version=_VERSION,
+            min_forward_resolved_signals=2,
+            min_forward_days=10,
+            min_paper_closed_trades=2,
+            min_paper_days=10,
+            max_reconciliation_age_seconds=60,
+            min_shadow_alpha_pct=Decimal("0"),
+            max_cost_drift_pct=Decimal("0.25"),
+            max_average_slippage_pct=Decimal("0.50"),
+            max_drawdown_pct=Decimal("5"),
+            max_scan_age_seconds=300,
+            max_quote_age_seconds=60,
+            max_broker_health_age_seconds=60,
+            max_live_capital=Decimal("250"),
+            registered_by="operator",
+            reason="preregister before paper",
+        )
+
+
+def test_assessment_stops_honouring_a_declaration_whose_policy_was_superseded(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⚠ THE WIRING, not the rule — the pure function is covered elsewhere.
+
+    A revert-probe that removed the `declaration_refusals` call from
+    `assess_live_gate` passed every DB test in this file, which is exactly the
+    divergence the review bot named: the research side refuses a superseded
+    declaration on every look while the capital side kept honouring its frozen
+    floor. The policy row is immutable; the POLICY VERSION is not.
+
+    ⚠ SUPERSESSION IS SIMULATED BY MOVING THE CONSTANT, not by editing the row.
+    Editing the row changes its digest, so `declaration_digest_mismatch` fires
+    first and the coherence branch is never reached — the first draft of this
+    test asserted the wrong code for that reason. In production the row never
+    changes; `STRUCTURAL_REFUSAL_POLICY_VERSION` does.
+    """
+    _forward_stage(ebull_test_conn)
+    _policy(ebull_test_conn)
+
+    before = assess_live_gate(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        requested_capital=Decimal("100"),
+    )
+    assert before.forward_shadow_floor is not None
+    assert "declaration_no_longer_coherent" not in before.refusal_codes
+
+    monkeypatch.setattr(
+        prereg_contract,
+        "STRUCTURAL_REFUSAL_POLICY_VERSION",
+        "structural-refusal-policy-2099-01-01-v9",
+    )
+
+    after = assess_live_gate(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        requested_capital=Decimal("100"),
+    )
+    assert "declaration_no_longer_coherent" in after.refusal_codes
+    assert "declaration_digest_mismatch" not in after.refusal_codes
+    assert after.forward_shadow_floor is None
+    assert not after.passed

@@ -50,11 +50,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Final, Literal, get_args
+from typing import Final, Literal, cast, get_args
 
 import psycopg
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
+from app.services.prereg_contract import (
+    ForwardShadowFloor,
+    PreregDeclaration,
+    PreregPurpose,
+    declaration_refusals,
+)
 from app.services.random_entry_cohort import SyntheticControl
 from app.services.strategy_result import (
     ResultIdentity,
@@ -75,6 +81,46 @@ from app.services.walk_forward import (
 #: more than once"* is about the second.
 HoldoutAccessKind = Literal["evaluate", "read"]
 HOLDOUT_ACCESS_KINDS: Final[frozenset[str]] = frozenset(get_args(HoldoutAccessKind))
+
+
+class PreregDeclarationRefused(RuntimeError):
+    """#2599 refused a preregistration freeze or an outcome look.
+
+    ⚠ AN EXCEPTION AND NOT A RETURN VALUE, which is the opposite of
+    ``check_promotable``'s shape, and the asymmetry is deliberate. The promotion
+    gate's caller is phase 7, which must WRITE a decision row either way. This
+    gate's job is to stop a look from happening at all — and a caller that can
+    ignore the answer by not reading it is not a gate.
+
+    ⚠ Carries the codes, never a bare message: "refused" with no code tells an
+    operator nothing about which of the five rules fired.
+    """
+
+    def __init__(self, strategy_id: str, strategy_version: str, refusals: tuple[str, ...]) -> None:
+        self.strategy_id = strategy_id
+        self.strategy_version = strategy_version
+        self.refusals = refusals
+        super().__init__(
+            f"preregistration declaration for {strategy_id}/{strategy_version} refused: {', '.join(refusals)}"
+        )
+
+
+@dataclass(frozen=True)
+class FrozenPreregistration:
+    """A declaration as it was stored, with the identity the row carries.
+
+    ⚠ The ``declaration_sha256`` is the STORED digest, kept separate from
+    ``declaration.sha256`` (which recomputes it) precisely so the two can be
+    compared. Equal means the row still says what it said when it was frozen.
+    """
+
+    declaration_id: int
+    declaration: PreregDeclaration
+    declaration_sha256: str
+
+    @property
+    def digest_intact(self) -> bool:
+        return self.declaration_sha256 == self.declaration.sha256
 
 
 @dataclass(frozen=True)
@@ -186,6 +232,30 @@ _RECORD_ACCESS = """
         %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(access_kind)s, %(accessed_by)s, %(purpose)s
     )
     RETURNING access_id
+"""
+
+_FREEZE_DECLARATION = """
+    INSERT INTO strategy_preregistration_declarations (
+        strategy_id, strategy_version, contract_version, prereg_purpose,
+        structural_refusal_policy_version, declared_universe_basis, declared_carry_unmodelled,
+        expected_structural_refusals, min_forward_decision_dates, min_forward_calendar_weeks,
+        forward_shadow_derivation, declared_by, declaration_sha256
+    ) VALUES (
+        %(strategy_id)s, %(strategy_version)s, %(contract_version)s, %(prereg_purpose)s,
+        %(structural_refusal_policy_version)s, %(declared_universe_basis)s, %(declared_carry_unmodelled)s,
+        %(expected_structural_refusals)s, %(min_forward_decision_dates)s, %(min_forward_calendar_weeks)s,
+        %(forward_shadow_derivation)s, %(declared_by)s, %(declaration_sha256)s
+    )
+    RETURNING declaration_id
+"""
+
+_SELECT_DECLARATION = """
+    SELECT declaration_id, strategy_id, strategy_version, contract_version, prereg_purpose,
+           structural_refusal_policy_version, declared_universe_basis, declared_carry_unmodelled,
+           expected_structural_refusals, min_forward_decision_dates, min_forward_calendar_weeks,
+           forward_shadow_derivation, declared_by, declaration_sha256
+    FROM strategy_preregistration_declarations
+    WHERE strategy_id = %(strategy_id)s AND strategy_version = %(strategy_version)s
 """
 
 _RESULT_COLUMNS = """
@@ -674,6 +744,109 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
 # ---------------------------------------------------------------------------
 
 
+def _refuse_incoherent_declaration(
+    conn: psycopg.Connection[tuple], strategy_id: str, strategy_version: str
+) -> FrozenPreregistration | None:
+    """Re-check a frozen declaration, or pass when the trial froze none.
+
+    ⚠ RE-CHECKED ON EVERY LOOK, not only at freeze time. A declaration frozen
+    under a structural-refusal policy that has since been superseded stops
+    authorising looks the moment the policy moves — which is the point of
+    versioning it, and the same shape ``trial_register_superseded`` already has.
+
+    ⚠ The stored digest is verified too. A row edited around the immutability
+    trigger (a superuser can disable one) no longer matches the bytes it was
+    frozen over, and a declaration that has been rewritten is not a declaration.
+    """
+    frozen = load_preregistration(conn, strategy_id, strategy_version)
+    if frozen is None:
+        return None
+    refusals = [str(code) for code in declaration_refusals(frozen.declaration)]
+    if not frozen.digest_intact:
+        refusals.append("declaration_digest_mismatch")
+    if refusals:
+        raise PreregDeclarationRefused(strategy_id, strategy_version, tuple(refusals))
+    return frozen
+
+
+def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregDeclaration) -> int:
+    """Freeze one #2599 declaration. Returns its ``declaration_id``.
+
+    ⚠ REFUSES AN INCOHERENT DECLARATION AT FREEZE TIME, which is the only time
+    refusing it is cheap. After this returns, the row is immutable (``sql/333``
+    barred UPDATE *and* DELETE — "unfreeze, look, re-freeze" is the same
+    fabrication with an extra step) and the trial's terms are settled.
+
+    ⚠ A ``falsification_only`` declaration over survivor-only stamps is COHERENT
+    and is accepted. It still charges the trial register, as any look must; what
+    it cannot do is happen silently.
+    """
+    refusals = declaration_refusals(declaration)
+    if refusals:
+        raise PreregDeclarationRefused(
+            declaration.strategy_id, declaration.strategy_version, tuple(str(code) for code in refusals)
+        )
+    row = conn.execute(
+        _FREEZE_DECLARATION,
+        {
+            "strategy_id": declaration.strategy_id,
+            "strategy_version": declaration.strategy_version,
+            "contract_version": declaration.contract_version,
+            "prereg_purpose": declaration.prereg_purpose,
+            "structural_refusal_policy_version": declaration.structural_refusal_policy_version,
+            "declared_universe_basis": declaration.declared_universe_basis,
+            "declared_carry_unmodelled": declaration.declared_carry_unmodelled,
+            "expected_structural_refusals": list(declaration.expected_structural_refusals),
+            "min_forward_decision_dates": declaration.forward_shadow.min_independent_decision_dates,
+            "min_forward_calendar_weeks": declaration.forward_shadow.min_calendar_weeks,
+            "forward_shadow_derivation": declaration.forward_shadow.derivation,
+            "declared_by": declaration.declared_by,
+            "declaration_sha256": declaration.sha256,
+        },
+    ).fetchone()
+    if row is None:  # pragma: no cover - RETURNING on a successful INSERT always yields a row
+        raise RuntimeError("preregistration declaration INSERT returned no declaration_id")
+    return int(row[0])
+
+
+def load_preregistration(
+    conn: psycopg.Connection[tuple], strategy_id: str, strategy_version: str
+) -> FrozenPreregistration | None:
+    """The frozen declaration for one trial, or ``None`` if nothing is frozen.
+
+    ⚠ ``None`` is NOT a refusal here. A trial that never froze one behaves as it
+    did before #2599 — no retroactive invalidation, which is what keeps the 224
+    existing access rows and every current evaluator working. The paths that
+    REQUIRE a declaration say so themselves (``require_outcome_access``).
+    """
+    row = conn.execute(
+        _SELECT_DECLARATION,
+        {"strategy_id": strategy_id, "strategy_version": strategy_version},
+    ).fetchone()
+    if row is None:
+        return None
+    return FrozenPreregistration(
+        declaration_id=int(row[0]),
+        declaration=PreregDeclaration(
+            strategy_id=str(row[1]),
+            strategy_version=str(row[2]),
+            contract_version=str(row[3]),
+            prereg_purpose=cast(PreregPurpose, str(row[4])),
+            structural_refusal_policy_version=str(row[5]),
+            declared_universe_basis=str(row[6]),
+            declared_carry_unmodelled=bool(row[7]),
+            expected_structural_refusals=tuple(row[8] or ()),
+            forward_shadow=ForwardShadowFloor(
+                min_independent_decision_dates=int(row[9]),
+                min_calendar_weeks=int(row[10]),
+                derivation=str(row[11]),
+            ),
+            declared_by=str(row[12]),
+        ),
+        declaration_sha256=str(row[13]),
+    )
+
+
 def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess) -> int:
     """Write one criterion-5 access record. Returns its ``access_id``.
 
@@ -683,7 +856,15 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
     transaction, and the alternative — a second connection — would record an
     access for work that never happened and would break the trigger, which needs
     to SEE the record in the same transaction as the row it authorises.
+
+    ⚠⚠ #2599's GATE SITS HERE, AND THE PLACEMENT IS THE DESIGN. All three paved
+    doors to the withheld side — ``store_holdout_result``,
+    ``read_holdout_results`` and ``store_walk_forward_folds`` — already funnel
+    through this function, so one check covers every one of them and no future
+    door has to remember a convention. A trial with no frozen declaration is
+    unaffected; a trial that HAS frozen one cannot escape through the old door.
     """
+    _refuse_incoherent_declaration(conn, access.strategy_id, access.strategy_version)
     row = conn.execute(
         _RECORD_ACCESS,
         {
@@ -698,6 +879,50 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
     if row is None:  # pragma: no cover - RETURNING on a successful INSERT always yields a row
         raise RuntimeError("access record INSERT returned no access_id")
     return int(row[0])
+
+
+def _refuse_declared_stamp_substitution(conn: psycopg.Connection[tuple], result: StrategyResult) -> None:
+    """Refuse a hold-out row whose stamps disagree with the frozen declaration.
+
+    ⚠ TWO CODES, NOT ONE, because they are different substitutions with
+    different operator actions: a universe-basis swap means the corpus the run
+    used is not the corpus that was declared, and a carry swap means the cost
+    model is not the one that was declared.
+    """
+    frozen = load_preregistration(conn, result.identity.strategy_id, result.identity.strategy_version)
+    if frozen is None:
+        return
+    declared = frozen.declaration
+    refusals: list[str] = []
+    if result.universe_basis != declared.declared_universe_basis:
+        refusals.append("declared_universe_basis_substituted")
+    if result.carry_unmodelled != declared.declared_carry_unmodelled:
+        refusals.append("declared_carry_unmodelled_substituted")
+    if refusals:
+        raise PreregDeclarationRefused(result.identity.strategy_id, result.identity.strategy_version, tuple(refusals))
+
+
+def require_outcome_access(conn: psycopg.Connection[tuple], access: HoldoutAccess) -> int:
+    """#2599's paved door: a look that REQUIRES a frozen declaration first.
+
+    ⚠ THE DIFFERENCE FROM ``record_holdout_access`` IS THE MISSING CASE. That
+    one leaves a trial with no declaration alone, because #2599 does not
+    retroactively invalidate the trials that predate it. This one refuses it
+    (``preregistration_not_frozen``) — so a NEW evaluator cannot open outcomes
+    on a trial that never declared its purpose.
+
+    New evaluator scripts call this. Existing ones keep their current door and
+    are enforced the moment their trial freezes a declaration.
+
+    ⚠ Stated limit, not papered over: a direct ``SELECT`` against
+    ``strategy_results_store`` remains physically possible — ``sql/264``'s
+    header measured that RLS does not bind this app's superuser connection.
+    This closes every path that goes through the ledger, which is every path we
+    have written, and it is not the same claim as "no path exists".
+    """
+    if load_preregistration(conn, access.strategy_id, access.strategy_version) is None:
+        raise PreregDeclarationRefused(access.strategy_id, access.strategy_version, ("preregistration_not_frozen",))
+    return record_holdout_access(conn, access)
 
 
 def store_in_sample_result(conn: psycopg.Connection[tuple], result: StrategyResult) -> int:
@@ -741,6 +966,12 @@ def store_holdout_result(
             f"store_holdout_result got a {result.identity.namespace!r} result — recording a hold-out access for an "
             "in-sample write would inflate the very count criterion 5 audits"
         )
+    # ⚠ #2599 — the row's ACTUAL stamps must match what the trial declared. The
+    # declaration's whole force comes from being made before the run; a trial
+    # that declares `survivorship_free` and then stores `survivor_only` has
+    # substituted the thing that was checked, and only this comparison catches
+    # it. Runs BEFORE the check, so the substituted row is never written.
+    _refuse_declared_stamp_substitution(conn, result)
     record_holdout_access(
         conn,
         HoldoutAccess(
@@ -1109,14 +1340,19 @@ def _fold_from_row(row: Sequence[object]) -> FoldRecord:
 
 __all__ = [
     "HOLDOUT_ACCESS_KINDS",
+    "FrozenPreregistration",
     "HoldoutAccess",
     "HoldoutAccessCounts",
     "HoldoutAccessKind",
+    "PreregDeclarationRefused",
+    "freeze_preregistration",
     "holdout_access_counts",
+    "load_preregistration",
     "quarantine_arms_compared",
     "read_holdout_results",
     "read_walk_forward_folds",
     "record_holdout_access",
+    "require_outcome_access",
     "store_holdout_arm_pair",
     "store_holdout_result",
     "store_in_sample_arm_pair",
