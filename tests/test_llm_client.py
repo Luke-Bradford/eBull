@@ -17,6 +17,7 @@ import pytest
 import respx
 
 from app.services.llm_client import (
+    _CHARS_PER_TOKEN,
     LOCAL_CONTEXT_WINDOW,
     AnthropicProvider,
     LLMProviderNotConfigured,
@@ -195,6 +196,19 @@ class TestOllamaNativeProvider:
         near_limit = "x" * ((LOCAL_CONTEXT_WINDOW - 1000) * 4)
         with pytest.raises(ValueError, match="reserved for output"):
             provider.complete(system="", user=near_limit, max_tokens=2048)
+
+    def test_exactly_at_the_ceiling_is_refused(self) -> None:
+        """Review NITPICK on #2618: ``>=``, not ``>``.
+
+        Zero headroom is not a fit, and ``_CHARS_PER_TOKEN`` under-estimates
+        tokens by design — a prompt that merely REACHES the limit on this
+        arithmetic is over it on the server's.
+        """
+        provider = OllamaNativeProvider(base_url=_BASE_URL, model="qwen3:14b")
+        max_tokens = 2048
+        exact = "x" * ((LOCAL_CONTEXT_WINDOW - max_tokens) * _CHARS_PER_TOKEN)
+        with pytest.raises(ValueError, match="does not fit the local context window"):
+            provider.complete(system="", user=exact, max_tokens=max_tokens)
 
     @respx.mock
     def test_truncation_at_the_ceiling_is_refused_not_returned(self) -> None:

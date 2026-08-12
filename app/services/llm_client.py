@@ -327,6 +327,10 @@ def _endpoint_is_ollama(base_url: str) -> bool:
     if not is_local_llm_endpoint(base_url):
         return False
     try:
+        # ⚠ ``rstrip('/')`` HERE and not in ``complete()`` — deliberate, not an
+        # oversight (review NITPICK on #2618). This takes the RAW configured
+        # ``llm_base_url``, which may carry a trailing slash; the provider works
+        # off ``self._base_url``, already normalised by ``__init__``.
         response = httpx.get(
             f"{base_url.rstrip('/').removesuffix('/v1')}/api/version",
             timeout=LLM_RELEASE_TIMEOUT,
@@ -364,8 +368,12 @@ class OllamaNativeProvider(OpenAICompatProvider):
         # truncate it silently — the defect this whole class exists to end.
         # Deliberately BEFORE the request: a 7-minute generation that was
         # doomed at byte zero should never be started.
+        # ⚠ ``>=``, not ``>``. Exactly-at-the-ceiling leaves zero headroom, and
+        # ``_CHARS_PER_TOKEN`` is a deliberate UNDER-estimate of tokens — so a
+        # prompt that merely reaches the limit on this arithmetic is over it in
+        # reality. Review NITPICK on #2618.
         estimated = (len(system) + len(user)) // _CHARS_PER_TOKEN
-        if estimated + max_tokens > LOCAL_CONTEXT_WINDOW:
+        if estimated + max_tokens >= LOCAL_CONTEXT_WINDOW:
             raise ValueError(
                 f"prompt does not fit the local context window: ~{estimated} estimated prompt tokens "
                 f"+ {max_tokens} reserved for output exceeds num_ctx={LOCAL_CONTEXT_WINDOW} "
