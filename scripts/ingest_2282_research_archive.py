@@ -83,14 +83,14 @@ def load(conn: psycopg.Connection[tuple], cache: Path) -> int:
         return 1
 
     started = time.time()
-    census = ingest.load_archive(conn, paths)
+    census = ingest.load_archive(conn, ingest.ParquetArchive(paths), provenance=ingest.HF_ARCHIVE)
     drift = ingest.census_drift(conn)
 
     print("\n=== stage 2b load census ===")
-    print(f"  vendor                : {ingest.VENDOR}")
-    print(f"  upstream_source       : {ingest.UPSTREAM_SOURCE}")
-    print(f"  licence               : {ingest.LICENCE}")
-    print(f"  adjustment_basis      : {ingest.ADJUSTMENT_BASIS}  (OHLC; adj_close is split+div)")
+    print(f"  vendor                : {ingest.HF_ARCHIVE.vendor}")
+    print(f"  upstream_source       : {ingest.HF_ARCHIVE.upstream_source}")
+    print(f"  licence               : {ingest.HF_ARCHIVE.licence}")
+    print(f"  adjustment_basis      : {ingest.HF_ARCHIVE.adjustment_basis}  (OHLC; adj_close is split+div)")
     print(f"  symbols seen          : {census.symbols_seen:,}")
     print(f"  series upserted       : {census.series_upserted:,}")
     print(f"    resolved            : {census.resolved_series:,}")

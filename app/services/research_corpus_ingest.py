@@ -1,7 +1,17 @@
-"""#2282 stage 2b — load the Hugging Face daily-price archive into the research corpus.
+"""Load a frozen third-party daily-price archive into the research corpus.
+
+#2282 stage 2b built this for ONE archive; #2597 generalised it to any archive
+that can yield ``(symbol, bar)`` rows, because the survivorship question turns
+on having more than one capture date.
 
 ``paperswithbacktest/Stocks-Daily-Price``: 4 Parquet shards, ~525 MB,
 25.8M rows, 7,693 symbols, 1962→2026, ~30 s to download.
+
+``icyDenev/Intrader`` (#2597): a mirrored GitHub repo of headerless daily CSVs,
+one per symbol. Its OHLC are **unadjusted** and its ``adjclose`` carries the
+split AND dividend adjustment — the opposite split from the HF archive, whose
+OHLC are already split-adjusted (sql/251). That is why ``adjustment_basis``
+travels with the archive rather than living as a module constant.
 
 WHY THIS ARCHIVE AND NOT yfinance
 ---------------------------------
@@ -44,14 +54,15 @@ enforces is followed here regardless; only the registration is inapplicable.
 
 from __future__ import annotations
 
+import csv
 import logging
 import math
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import psycopg
 
@@ -102,6 +113,49 @@ _VENUE_VARIANT_SUFFIXES = (".RTH", ".24-7")
 #: eToro suffixes some US primary listings ``.US`` where no bare symbol exists
 #: (``ABT.US`` is Abbott; there is no ``ABT`` row). Stripped for matching.
 _PRIMARY_LISTING_SUFFIX = ".US"
+
+
+@dataclass(frozen=True)
+class ArchiveProvenance:
+    """Who published this archive and what its stored prices actually mean.
+
+    Travels with the load rather than living as module constants, because the
+    two archives we hold disagree on the one field a reader cannot afford to
+    get wrong. ``adjustment_basis`` describes the OHLC columns ONLY; a separate
+    ``adj_close`` is stored where the archive supplies one (sql/251).
+    """
+
+    vendor: str
+    upstream_source: str
+    licence: str
+    adjustment_basis: str
+
+
+#: ⚠ ``split_adjusted`` is VERIFIED for this archive, not assumed. sql/251's
+#: header carries the evidence: AAPL 2020-08-27 close = 125.01 against an
+#: unadjusted ~$500 and a 4:1 split settling 2020-08-31.
+HF_ARCHIVE = ArchiveProvenance(
+    vendor=VENDOR,
+    upstream_source=UPSTREAM_SOURCE,
+    licence=LICENCE,
+    adjustment_basis=ADJUSTMENT_BASIS,
+)
+
+#: ⚠ ``unadjusted`` is MEASURED, and it is the opposite of what #2398 recorded
+#: for the same vendor. The same AAPL bar that reads 125.01 in the HF archive
+#: reads **500.04** here (2020-08-27, pre-split), and the 1980-12-12 IPO bar
+#: reads 28.75 against Yahoo's split-adjusted 0.1283. So this archive's OHLC
+#: carry NEITHER the split nor the dividend adjustment, and its ninth CSV
+#: column — stored as ``adj_close`` — carries both. Consumers computing returns
+#: must read ``adj_close`` (#2400); ``close`` here is the raw traded level.
+INTRADER_ARCHIVE = ArchiveProvenance(
+    vendor="icyDenev/Intrader",
+    # A Yahoo redistribution like the HF archive, so the two are ONE
+    # observation and agreement between them is circular, never corroborating.
+    upstream_source="yahoo_derivative",
+    licence="other/unspecified",
+    adjustment_basis="unadjusted",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +239,55 @@ def normalise_vendor_symbol(symbol: str) -> str:
     substitution is unambiguous.
     """
     return symbol.strip().upper().replace("-", ".")
+
+
+def archive_symbol_candidates(filing_symbol: str) -> list[str]:
+    """A Form 25 cover-page symbol → the archive spellings to try, in priority order.
+
+    SOURCE RULE, not convenience. A Chapter 11 filing moves the issuer to OTC
+    under a ``Q``-suffixed ticker, and the Form 25 that removes the security
+    from the exchange carries that POST-bankruptcy symbol. Price archives are
+    keyed on whatever the scraper saw, which for most of the series' life was
+    the pre-bankruptcy symbol. Resolving without the strip loses precisely the
+    **bankruptcies** and keeps the acquisitions — a bias along the exact axis a
+    survivorship-free corpus exists to protect
+    (``.claude/skills/data-sources/research-price-corpus.md``).
+
+    Exact match takes priority over the strip, and that ordering is
+    load-bearing rather than tidy: ``NHIQ`` is present in both archives under
+    its own name, so a blind strip would silently rebind it to a different
+    security. Measured on the 15 ``Q``-suffixed symbols in
+    ``sec_form25_register``: the Intrader mirror carries 11 under both
+    spellings, 2 under the ``Q`` form only and 2 under the stripped form only,
+    so the strip is what takes that archive from 13/15 to 15/15.
+
+    Separator variants are tried too — the archives spell a share class with a
+    hyphen where our register carries a dot.
+    """
+    base = filing_symbol.strip().upper()
+    if not base:
+        return []
+    spellings = [base]
+    if base.endswith("Q") and len(base) > 1:
+        spellings.append(base[:-1])
+
+    out: list[str] = []
+    for spelling in spellings:
+        for variant in (spelling, spelling.replace(".", "-"), spelling.replace("-", ".")):
+            if variant not in out:
+                out.append(variant)
+    return out
+
+
+def resolve_archive_symbol(filing_symbol: str, available: set[str]) -> str | None:
+    """First candidate spelling present in ``available``, else ``None``.
+
+    Pure so the ``Q``-strip precedence is table-testable without a corpus.
+    """
+    for candidate in archive_symbol_candidates(filing_symbol):
+        if candidate in available:
+            return candidate
+    return None
 
 
 def index_instruments(
@@ -321,6 +424,106 @@ def iter_archive_rows(paths: Sequence[Path]) -> Iterator[_Row]:
                 )
 
 
+class ArchiveReader(Protocol):
+    """Two passes over one archive: symbols first, then bars.
+
+    Two rather than one because a bar cannot be staged without a ``series_id``,
+    and no archive we hold guarantees symbol-sorted rows.
+    """
+
+    def symbols(self) -> Iterator[str]: ...
+
+    def rows(self) -> Iterator[_Row]: ...
+
+
+@dataclass(frozen=True)
+class ParquetArchive:
+    """The HF archive: 4 Parquet shards with a ``symbol`` column."""
+
+    paths: Sequence[Path]
+
+    def symbols(self) -> Iterator[str]:
+        return iter_archive_symbols(self.paths)
+
+    def rows(self) -> Iterator[_Row]:
+        return iter_archive_rows(self.paths)
+
+
+#: Column order of an ``icyDenev/Intrader`` daily CSV. Headerless, so the order
+#: is the only contract there is — it was verified in #2398 against the
+#: Deamoner mirror on a shared bar (SPY 1993-01-29) and against the last bar,
+#: where ``adjclose == close`` because the back-adjustment factor is 1.0.
+_INTRADER_COLUMNS = ("date", "open", "high", "low", "close", "volume", "split_factor", "dividend", "adjclose")
+
+
+def _csv_decimal(value: str) -> Decimal | None:
+    """CSV field → Decimal, with unparseable and non-finite read as absent."""
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation, ValueError:
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def parse_intrader_rows(symbol: str, lines: Iterator[str]) -> Iterator[_Row]:
+    """Parse one Intrader CSV into bars.
+
+    ⚠ NO price filter, deliberately. #2398's reader drops any row with
+    ``close <= 0`` because a benchmark has no business at zero; this one must
+    not, because a failed company's last bar at $0.0004 is the exact signal the
+    survivorship corpus is being built to keep. A floor here would be a
+    survivorship filter wearing a data-quality hat — the same sentence
+    ``run_quarantine`` carries. Only an unusable ``close`` (absent, unparseable
+    or non-finite) drops a row, and ``LoadCensus.rows_without_close`` counts it.
+    """
+    for line in lines:
+        fields = next(csv.reader([line]), None)
+        if fields is None or len(fields) < len(_INTRADER_COLUMNS):
+            continue
+        try:
+            bar_date = date.fromisoformat(fields[0].strip())
+        except ValueError:
+            continue
+        volume = _csv_decimal(fields[5])
+        yield _Row(
+            symbol=symbol,
+            bar_date=bar_date,
+            open=_csv_decimal(fields[1]),
+            high=_csv_decimal(fields[2]),
+            low=_csv_decimal(fields[3]),
+            close=_csv_decimal(fields[4]),
+            # Shares, not the millions-scaled figure the Stonks mirror stores.
+            volume=int(volume) if volume is not None else None,
+            adj_close=_csv_decimal(fields[8]),
+        )
+
+
+@dataclass(frozen=True)
+class IntraderCsvArchive:
+    """The mirrored ``icyDenev/Intrader`` daily directory, one CSV per symbol.
+
+    ⚠ Consumes the LOCAL MIRROR and never fetches. None of the three archives
+    carries a licence and none owes us uptime, so the skill's rule is to mirror
+    once and read the copy; re-fetching at ingest would also make the capture
+    date — the single property that makes an archive survivorship-free — drift
+    silently under us.
+    """
+
+    directory: Path
+
+    def _files(self) -> list[Path]:
+        return sorted(self.directory.glob("*.csv"))
+
+    def symbols(self) -> Iterator[str]:
+        for path in self._files():
+            yield path.stem.strip().upper()
+
+    def rows(self) -> Iterator[_Row]:
+        for path in self._files():
+            with path.open(newline="") as handle:
+                yield from parse_intrader_rows(path.stem.strip().upper(), handle)
+
+
 # ---------------------------------------------------------------------------
 # Phase 1 — load
 # ---------------------------------------------------------------------------
@@ -378,6 +581,7 @@ def upsert_series(
     index: dict[str, int],
     ambiguous: set[str],
     census: LoadCensus,
+    provenance: ArchiveProvenance = HF_ARCHIVE,
 ) -> None:
     """Create one series row per vendor symbol, resolved where we can resolve it.
 
@@ -414,11 +618,11 @@ def upsert_series(
             taken.add(instrument_id)
         payload.append(
             (
-                VENDOR,
+                provenance.vendor,
                 symbol,
-                UPSTREAM_SOURCE,
-                LICENCE,
-                ADJUSTMENT_BASIS,
+                provenance.upstream_source,
+                provenance.licence,
+                provenance.adjustment_basis,
                 instrument_id,
                 "symbol_exact" if instrument_id is not None else None,
             )
@@ -451,20 +655,22 @@ def upsert_series(
 
 def load_archive(
     conn: psycopg.Connection[Any],
-    paths: Sequence[Path],
+    archive: ArchiveReader,
     *,
+    provenance: ArchiveProvenance = HF_ARCHIVE,
     batch_rows: int = 500_000,
 ) -> LoadCensus:
     """Two passes over the archive: symbols, then bars.
 
     The first pass is needed because a bar cannot be staged without a
-    ``series_id``, and the archive is not guaranteed sorted by symbol. It reads
-    one column, so it is cheap.
+    ``series_id``, and no archive is guaranteed sorted by symbol. On Parquet it
+    reads one column; on a CSV directory it reads only filenames. Either way it
+    is cheap relative to the bar pass.
     """
     census = LoadCensus()
 
-    logger.info("pass 1/2: collecting symbols from %d shard(s)", len(paths))
-    symbols = sorted(set(iter_archive_symbols(paths)))
+    logger.info("pass 1/2: collecting symbols from %s", provenance.vendor)
+    symbols = sorted(set(archive.symbols()))
     census.symbols_seen = len(symbols)
 
     index, ambiguous = build_symbol_index(conn)
@@ -474,7 +680,7 @@ def load_archive(
         len(index),
         len(ambiguous),
     )
-    upsert_series(conn, symbols, index, ambiguous, census)
+    upsert_series(conn, symbols, index, ambiguous, census, provenance)
     conn.commit()
 
     logger.info("pass 2/2: loading bars")
@@ -507,11 +713,11 @@ def load_archive(
             with cur.copy(copy_sql) as copy:
                 for record in batch:
                     copy.write_row(record)
-            cur.execute(_DRAIN_SQL, {"vendor": VENDOR})
+            cur.execute(_DRAIN_SQL, {"vendor": provenance.vendor})
         conn.commit()  # ON COMMIT DROP releases the TEMP table
         batch.clear()
 
-    for row in iter_archive_rows(paths):
+    for row in archive.rows():
         if row.close is None:
             census.rows_without_close += 1
             continue
@@ -543,14 +749,15 @@ def load_archive(
             logger.info("  %s bars loaded", f"{census.bars_copied:,}")
     flush()
 
-    _write_census(conn, stats)
-    census.duplicate_bar_rows = reconcile_census(conn, VENDOR)
+    _write_census(conn, stats, provenance.vendor)
+    census.duplicate_bar_rows = reconcile_census(conn, provenance.vendor)
     return census
 
 
 def _write_census(
     conn: psycopg.Connection[Any],
     stats: dict[str, tuple[date, date, int]],
+    vendor: str = VENDOR,
 ) -> None:
     """Set the denormalised census columns from the load accumulator.
 
@@ -584,7 +791,7 @@ def _write_census(
              WHERE s.vendor = %(vendor)s
                AND s.vendor_symbol = g.vendor_symbol
             """,
-            {"vendor": VENDOR},
+            {"vendor": vendor},
         )
     conn.commit()
     logger.info("census written for %d series", len(stats))
@@ -651,15 +858,26 @@ def reconcile_census(conn: psycopg.Connection[Any], vendor: str) -> int:
     return duplicates
 
 
-def census_drift(conn: psycopg.Connection[Any]) -> int:
+def census_drift(conn: psycopg.Connection[Any], vendor: str | None = None) -> int:
     """Rows in ``research_series_census_drift``. MUST be 0 after a load.
 
     The denormalised census columns are derived state with no trigger behind
     them (a per-row trigger on a 25.8M-row COPY is the wrong trade), so this is
     the only thing standing between "the ingest maintained them" and "the
     ingest was believed to have maintained them".
+
+    ``vendor`` scopes it to one archive. Unscoped is the stricter reading and
+    stays the default, but a per-vendor load wants a gate it can actually own:
+    the corpus now holds four vendors, and failing a fresh load because a
+    DIFFERENT vendor drifted points the operator at the wrong archive.
     """
-    row = conn.execute("SELECT count(*) FROM research_series_census_drift").fetchone()
+    if vendor is None:
+        row = conn.execute("SELECT count(*) FROM research_series_census_drift").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT count(*) FROM research_series_census_drift WHERE vendor = %s",
+            (vendor,),
+        ).fetchone()
     assert row is not None
     return int(row[0])
 
@@ -970,29 +1188,68 @@ def link_form25_delistings(
     # per-SECURITY, so `sec_form25_register` contains bond and warrant
     # delistings whose issuer is very much alive (§2.6 traps 2, 3 and 6 —
     # Berkshire filed two in 2023 and both were notes).
-    rows = conn.execute(
+    # ⚠ Resolution is NOT a SQL join on ``c.symbol = s.vendor_symbol``, which
+    # is what this did before #2597. A Form 25 cover page carries the
+    # POST-bankruptcy ``Q``-suffixed ticker while the archive is keyed on the
+    # pre-bankruptcy one, so an exact join drops precisely the bankruptcies
+    # and keeps the acquisitions — see ``archive_symbol_candidates``. The
+    # candidate ladder needs exact-before-strip precedence, which as SQL is a
+    # correlated NOT EXISTS nobody can test; in Python it is a pure function.
+    series_by_symbol = {
+        str(sym): (int(series_id), first_bar, last_bar)
+        for series_id, sym, first_bar, last_bar in conn.execute(
+            "SELECT series_id, vendor_symbol, first_bar, last_bar FROM research_price_series WHERE vendor = %s",
+            (vendor,),
+        ).fetchall()
+    }
+    available = set(series_by_symbol)
+
+    # One filing per row, NOT pre-aggregated by ``resolved_symbol``. The
+    # aggregation has to happen AFTER resolution, because the ``Q`` strip can
+    # land two filing symbols (``RVLP`` and ``RVLPQ``) on ONE archive series —
+    # and those are two delisting events against one price history, which is
+    # the ambiguity ``classify_form25_match`` refuses to write. Aggregating in
+    # SQL first would hide the collision and let the second filing silently
+    # overwrite the first's date.
+    filings = conn.execute(
         """
-        WITH cohort AS (
-            SELECT d.resolved_symbol                     AS symbol,
-                   min(d.filed_date)                     AS earliest_filed,
-                   count(DISTINCT d.rule_provision)      AS provision_variants,
-                   min(d.rule_provision)                 AS provision,
-                   count(DISTINCT d.suspension_date)     AS suspension_variants,
-                   min(d.suspension_date)                AS suspension_date
-              FROM sec_form25_common_equity_delistings d
-             WHERE d.resolved_symbol IS NOT NULL
-             GROUP BY d.resolved_symbol
-        )
-        SELECT s.series_id, s.vendor_symbol, s.first_bar, s.last_bar,
-               c.earliest_filed, c.provision_variants, c.provision,
-               c.suspension_variants, c.suspension_date
-          FROM research_price_series s
-          JOIN cohort c ON c.symbol = s.vendor_symbol
-         WHERE s.vendor = %s
-         ORDER BY s.vendor_symbol
-        """,
-        (vendor,),
+        SELECT d.resolved_symbol, d.filed_date, d.rule_provision, d.suspension_date
+          FROM sec_form25_common_equity_delistings d
+         WHERE d.resolved_symbol IS NOT NULL
+         ORDER BY d.resolved_symbol, d.filed_date
+        """
     ).fetchall()
+
+    by_series: dict[str, list[tuple[date, str | None, date | None]]] = {}
+    for filing_symbol, filed_date, provision, suspension_date in filings:
+        matched = resolve_archive_symbol(str(filing_symbol), available)
+        if matched is None:
+            continue
+        by_series.setdefault(matched, []).append((filed_date, provision, suspension_date))
+
+    rows = []
+    for matched in sorted(by_series):
+        events = by_series[matched]
+        series_id, first_bar, last_bar = series_by_symbol[matched]
+        # NULL-excluding, matching the `count(DISTINCT ...)` this replaced —
+        # SQL's DISTINCT count ignores NULLs and a Python set does not, and the
+        # difference would turn "one provision plus an unparsed one" into a
+        # fabricated conflict.
+        provisions = {p for _f, p, _s in events if p is not None}
+        suspensions = {s for _f, _p, s in events if s is not None}
+        rows.append(
+            (
+                series_id,
+                matched,
+                first_bar,
+                last_bar,
+                min(f for f, _p, _s in events),
+                len(provisions),
+                min(provisions, default=None),
+                len(suspensions),
+                min(suspensions, default=None),
+            )
+        )
 
     conn.execute(
         """
