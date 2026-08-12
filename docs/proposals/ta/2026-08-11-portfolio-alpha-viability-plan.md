@@ -240,13 +240,30 @@ admission rests on the independent published factor prior and low-turnover portf
 role; the existing S-2 result is a contaminated harness observation and cannot select,
 weight or power C-3.
 
-### Reserved—not yet admitted
+### Conditional candidate C-4 — initial Schedule 13D catalyst
 
-The recent 3/5/10-session sector-residual work in #2522 is a diagnostic opportunity
-map, not automatically C-4. It may be admitted only if it states a forced-participant
-mechanism independent of the rejected daily residual-confluence model and can be
-tested without reusing its contaminated 2024-2026 decisions. Otherwise the first
-budget ends at C-3.
+The read-only #2582 census found 1,285 structured initial-13D accessions from
+2024-12-18 through 2026-08-12, 1,160 mapped research-price series and 895 events
+with 60 prior plus 20 later calendar days. All raw documents already contain Item 4;
+no outcome was opened and no new raw store is required. This is enough to write an
+exact preregistration, not enough to call the candidate viable.
+
+The family has an independent forced-participant mechanism: an active/control stake
+becomes public. It also has an unusually strong falsifier. The SEC's 2023 rule
+analysis found that, for one corporate-action subset, much of the reaction preceded
+the filing. eBull may trade only after dissemination. Moreover, 1,162 of the 1,285
+current rows are date-only, so their causal historical fill is no earlier than the
+next regular-session open.
+
+Before outcomes, #2582 must freeze campaign/conversion/repeat identity, Item 4
+purpose handling, decision clock, one comparison horizon, 13G/random challengers,
+cost arms, trial denominator and untouched terminal interval. A capital TP/SL rule
+is a separately identified executable adaptation and cannot be selected from the
+same opened outcomes. See `2026-08-12-schedule-13d-source-census.md`.
+
+The exact sector-residual replication in #2522 remains source-blocked. It does not
+become C-4 by substituting current classifications, survivor projection or fixed
+3/5/10-session exits for the published rule.
 
 ## 4. Research loops that cannot become parameter mining
 
