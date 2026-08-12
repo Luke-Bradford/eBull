@@ -23,11 +23,12 @@
 -- `DEFAULT TRUE` would ordinarily be a fail-closed guess. Here it is provable:
 -- `git log -S"CARRY_BPS" -- app/services/cost_model.py` returns exactly one
 -- commit (c3ee15f0, the phase-5b introduction), so no version of that module
--- has ever held a non-NULL carry or FX. Every stored row — across both
--- cost_model_ids present, static-p75-insession-v1 (196) and
--- static-p75-insession-v2+split-adjusted-max (80), measured 2026-08-12 — was
--- therefore computed with BOTH components missing, and `fx_unmodelled = true`
--- is the fact rather than the safe assumption. Reproduce with:
+-- has ever held a non-NULL carry or FX. Every stored row — across every
+-- cost_model_id present — was therefore computed with BOTH components missing,
+-- and `fx_unmodelled = true` is the fact rather than the safe assumption. No
+-- row count is written here on purpose: `strategy_backtest_run` is a live job,
+-- so any figure would be stale by the time it is read. Run this instead — the
+-- claim holds when `carry_unmodelled` is TRUE for every group:
 --
 --     select cost_model_id, carry_unmodelled, count(*)
 --       from strategy_results_store group by 1,2;
@@ -52,8 +53,10 @@
 -- `strategy_preregistration_declarations`, which carries an immutability
 -- trigger on UPDATE — this migration is population-independent and would
 -- behave identically against an environment that already holds declarations.
--- The index recreate takes a brief ACCESS EXCLUSIVE lock; the relation is 276
--- rows and this is a single-node stack, so it is not run CONCURRENTLY.
+-- The index recreate takes a brief ACCESS EXCLUSIVE lock; the relation is small
+-- (`select count(*) from strategy_results_store` — low hundreds, and it grows
+-- only as backtests run) and this is a single-node stack, so it is not run
+-- CONCURRENTLY.
 
 BEGIN;
 

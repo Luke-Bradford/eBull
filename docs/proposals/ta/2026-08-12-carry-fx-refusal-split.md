@@ -46,7 +46,10 @@ select universe_basis, carry_unmodelled, count(*) from strategy_results_store gr
 select carry_cost_known, fx_cost_known, count(*) from cost_model where valid_to is null group by 1,2;
 ```
 
-| query | result |
+Results as measured 2026-08-12, before the migration. `strategy_backtest_run` is a live
+job, so the counts move — re-run the block above rather than reading these as current.
+
+| query | result (2026-08-12) |
 | --- | --- |
 | declarations | **0** |
 | `strategy_results_store` by basis/carry | `survivor_only, t, 276` |
@@ -123,8 +126,10 @@ DEFAULT TRUE` does the same on the declarations table. All in one transaction.
 an assumption. It is not: `git log -S"CARRY_BPS" -- app/services/cost_model.py` returns
 exactly one commit (`c3ee15f0`, the phase-5b introduction), so no version of that module has
 ever held a non-NULL value for either. Both `cost_model_id`s present on the store —
-`static-p75-insession-v1` (196) and `static-p75-insession-v2+split-adjusted-max` (80) —
-therefore charged neither component.
+`static-p75-insession-v1` and `static-p75-insession-v2+split-adjusted-max` — therefore
+charged neither component. The argument is over the SET of ids, not their row counts, so
+no count is written here; `select cost_model_id, carry_unmodelled, count(*) from
+strategy_results_store group by 1,2` is the check.
 
 ⚠⚠ **The defaults are KEPT, departing from every other stamp column here.** The first draft
 dropped them so a writer had to state the stamp. Measured before committing to that:
