@@ -249,8 +249,11 @@ promoted candidates.
 
 1. Keep S-1..S-4 as controls and label their true horizons; do not tune them
    into short-horizon candidates.
-2. Complete #2507's point-in-time mechanism state and add the missing compact
-   breadth/dispersion/multi-horizon context inputs under #2523.
+2. Complete #2507's point-in-time mechanism state and finish #2523's production
+   path. Broad snapshot breadth, prospective provider-industry identity and
+   pure completed-session multi-horizon/dispersion/common-movement mathematics
+   are now implemented; candidate-owned loading, compact persistence and exact
+   intraday coverage remain.
 3. Preregister a recent sector-ETF residual relative-value replication at
    separate 3/5/10-session horizons under #2522, research-only until side/carry
    contracts exist.
