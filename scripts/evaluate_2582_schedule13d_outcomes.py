@@ -29,6 +29,8 @@ from scripts.verify_2582_schedule13d_preregistration import EXPECTED_SHA256, loa
 TRIAL_ID: Final = "c4-schedule13d-public-catalyst-v1"
 ACKNOWLEDGEMENT: Final = "OPEN-2582-SEALED-OUTCOMES"
 RESEARCH_VENDOR: Final = "paperswithbacktest/Stocks-Daily-Price"
+FIRST_SOURCE_DATE: Final = date(2024, 12, 18)
+LAST_COMPLETE_FILING_DATE: Final = date(2026, 6, 18)
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,7 @@ WITH reporter_events AS (
     FROM blockholder_filings b
     JOIN sec_filing_manifest m USING (accession_number)
     WHERE b.submission_type = 'SCHEDULE 13D'
+      AND m.filed_at::date BETWEEN %(first_source_date)s AND %(last_complete_filing_date)s
     GROUP BY b.accession_number, m.filed_at::date
 ), classified AS (
     SELECT a.*,
@@ -149,7 +152,14 @@ ORDER BY c.public_filing_date, c.accession_number
 def load_source_events(conn: psycopg.Connection[Any]) -> tuple[SourceEvent, ...]:
     """Build the public-information population without loading a price bar."""
 
-    rows = conn.execute(_SOURCE_EVENTS_SQL, {"research_vendor": RESEARCH_VENDOR}).fetchall()
+    rows = conn.execute(
+        _SOURCE_EVENTS_SQL,
+        {
+            "research_vendor": RESEARCH_VENDOR,
+            "first_source_date": FIRST_SOURCE_DATE,
+            "last_complete_filing_date": LAST_COMPLETE_FILING_DATE,
+        },
+    ).fetchall()
     return tuple(
         SourceEvent(
             accession_number=str(row[0]),

@@ -37,6 +37,7 @@ def test_source_population_uses_public_manifest_clock_and_cannot_read_prices() -
     assert "m.filed_at::date" in lowered
     assert "research_price_daily" not in lowered
     assert "b.filed_at" not in lowered
+    assert "between %(first_source_date)s and %(last_complete_filing_date)s" in lowered
 
 
 def test_gate_refuses_even_with_ack_until_trial_is_declared() -> None:
