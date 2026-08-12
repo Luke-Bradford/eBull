@@ -93,6 +93,24 @@ Three challengers use the same eligible observations and timing:
    accessions and seed 2582 resolves ties; unmatched treatments remain in the
    primary result but not that paired comparison.
 
+Random-time candidates are price-covered entry sessions on the same instrument
+and in the treatment entry year-month. Any session within ten NYSE sessions on
+either side of any 13D entry for that instrument is excluded; an empty set is
+reported as unmatched. Initial-13G matching processes treatments in accession
+order within each separate rule population. Paired differences are treatment
+return minus challenger return and retain the treatment issuer and entry-session
+clusters.
+
+For each paired comparison, the evaluator reports the two-sided 95% linear
+percentile interval and a one-sided null-centred bootstrap p-value with the
+finite-resample plus-one correction. Holm's step-down procedure adjusts the
+three predeclared p-values (random time, Rule 13d-1(b), Rule 13d-1(c)); both and
+unknown 13G rules remain separately reported attribution only. Passage requires
+both a positive paired lower bound and adjusted p-value at most 0.05 for every
+gating comparison. This wording replaces the underspecified phrase
+"Holm-adjusted confidence bound": Holm defines a multiple-test procedure, not
+a unique adjusted interval construction.
+
 The initial-13G challenger is source-feasible: an outcome-free raw-document
 census found 10,419 filings with the same basic coverage (7,429 Rule 13d-1(b),
 2,262 Rule 13d-1(c), 33 carrying both and 695 unknown). Its strong February and
@@ -117,6 +135,17 @@ not claim a pristine terminal holdout: the genuinely untouched interval begins
 with filings arriving after this contract. That prospective interval is
 required because the price archive is survivor-biased and lacks historical
 broker eligibility and observed spreads.
+
+The crossed-cluster bootstrap follows the product-weight construction studied
+by Owen and Eckles; their result supports conservative variance estimation for
+multi-factor crossed effects rather than treating filings as independent rows.
+Holm's original sequentially rejective procedure supplies strong family-wise
+error control without assuming independent p-values.
+
+Method sources:
+
+- [Owen and Eckles, *Bootstrapping Data Arrays of Arbitrary Order*](https://doi.org/10.1214/12-AOAS547)
+- [Holm, *A Simple Sequentially Rejective Multiple Test Procedure*](https://doi.org/10.2307/4615733)
 
 ## Power and admission
 

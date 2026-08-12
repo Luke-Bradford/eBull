@@ -4,7 +4,14 @@ from datetime import date, timedelta
 
 import pytest
 
-from scripts.schedule13d_statistics import EventOutcome, summarise_outcomes, two_way_pigeonhole_bootstrap
+from scripts.schedule13d_statistics import (
+    EventOutcome,
+    PairedDifference,
+    holm_adjust,
+    paired_clustered_difference_test,
+    summarise_outcomes,
+    two_way_pigeonhole_bootstrap,
+)
 
 
 def _outcome(index: int, value: float, *, issuer: str | None = None, entry: date | None = None) -> EventOutcome:
@@ -50,3 +57,24 @@ def test_nonpositive_book_fails_concentration_safely() -> None:
     summary = summarise_outcomes((_outcome(0, -1), _outcome(1, -2)), resamples=100)
     assert summary.maximum_issuer_positive_concentration_pct == 100
     assert summary.maximum_entry_session_positive_concentration_pct == 100
+
+
+def test_paired_clustered_difference_is_deterministic_and_one_sided() -> None:
+    differences = tuple(
+        PairedDifference(f"a-{index}", f"issuer-{index}", date(2026, 1, index + 2), value)
+        for index, value in enumerate((1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
+    )
+    first = paired_clustered_difference_test(differences, resamples=500)
+    second = paired_clustered_difference_test(differences, resamples=500)
+    assert first == second
+    assert first.mean_difference_pct == 2.25
+    assert first.lower_95_pct > 0
+    assert first.one_sided_p_value < 0.05
+
+
+def test_holm_adjust_is_monotone_in_sorted_p_values_and_restores_order() -> None:
+    adjusted = holm_adjust((0.03, 0.001, 0.02, 0.5))
+    assert adjusted == pytest.approx((0.06, 0.004, 0.06, 0.5))
+    assert holm_adjust((0.01,)) == (0.01,)
+    with pytest.raises(ValueError):
+        holm_adjust((float("nan"),))
