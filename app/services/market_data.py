@@ -387,6 +387,7 @@ def refresh_market_data(
     skip_quotes: bool = False,
     force_backfill: bool = False,
     consecutive_failure_limit: int = _CANDLE_BATCH_ABORT_LIMIT,
+    fresh_through: date | None = None,
 ) -> MarketRefreshSummary:
     """
     For each instrument: fetch candles, upsert to price_daily, compute
@@ -414,6 +415,11 @@ def refresh_market_data(
     counts attempted fetches — a freshness-skipped instrument is neutral; a
     reachable response (clean fetch or a 404) resets the counter. Pass
     ``<= 0`` to disable the breaker (walk every instrument regardless).
+
+    ``fresh_through`` is the caller's completed provider-session boundary.
+    When omitted, the legacy weekday/date boundary remains in force. Long
+    scheduled sweeps must pass it explicitly so a pre-open retry does not
+    fetch and retain a forming same-day candle merely because UTC advanced.
 
     Raw provider responses are persisted by the provider before being returned.
 
@@ -444,6 +450,7 @@ def refresh_market_data(
     spread_flags_set = 0
 
     today = date.today()
+    freshness_target = fresh_through or most_recent_trading_day(today)
     candles_skipped = 0
     candles_failed = 0
 
@@ -469,14 +476,14 @@ def refresh_market_data(
     consecutive_systemic_failures = 0
     adjustment_refetches = 0
     for idx, (instrument_id, symbol) in enumerate(instruments, start=1):
-        if not force_backfill and _candles_are_fresh(conn, instrument_id, today):
+        if not force_backfill and _candles_are_fresh(conn, instrument_id, today, fresh_through=freshness_target):
             candles_skipped += 1
             report_progress(idx, total)
             continue
         if force_backfill:
             fetch_count = lookback_days
         else:
-            fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=today)
+            fetch_count = _candles_fetch_count(conn, instrument_id, default=lookback_days, today=freshness_target)
         upserted = 0
         computed = 0
         adjustment_detected = False
@@ -491,6 +498,13 @@ def refresh_market_data(
             last_bar_before = _last_bar(conn, instrument_id)
             with conn.transaction():
                 bars = provider.get_daily_candles(instrument_id, fetch_count)
+                if fresh_through is not None:
+                    # A pre-open/manual retry can receive a forming candle for
+                    # a civil date beyond the declared completed-session
+                    # boundary. Keep the provider response in its bounded raw
+                    # audit store, but never publish that forming value as a
+                    # daily close in price_daily (#2572).
+                    bars = [bar for bar in bars if bar.price_date <= fresh_through]
                 # #2066 split-cliff guard: provider history is back-adjusted
                 # at fetch time, so a future split re-bases every bar — but an
                 # incremental fetch only rewrites the overlap window, leaving
@@ -512,6 +526,8 @@ def refresh_market_data(
                             lookback_days,
                         )
                         bars = provider.get_daily_candles(instrument_id, lookback_days)
+                        if fresh_through is not None:
+                            bars = [bar for bar in bars if bar.price_date <= fresh_through]
                         # An empty heal re-fetch wrote nothing — a heal is
                         # only a heal if the series was actually rewritten.
                         adjustment_detected = bool(bars)
@@ -662,6 +678,8 @@ def _candles_are_fresh(
     conn: psycopg.Connection,  # type: ignore[type-arg]
     instrument_id: int,
     today: date,
+    *,
+    fresh_through: date | None = None,
 ) -> bool:
     """Return True if price_daily already has the most recent trading day's candle."""
     row = conn.execute(
@@ -675,7 +693,7 @@ def _candles_are_fresh(
     if row is None or row[0] is None:
         return False
     latest_date: date = row[0]
-    return latest_date >= most_recent_trading_day(today)
+    return latest_date >= (fresh_through or most_recent_trading_day(today))
 
 
 # Incremental fetch window in bars — yesterday + today + one

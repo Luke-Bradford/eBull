@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import psycopg
@@ -270,22 +270,45 @@ def _resolve_universe_sync_epoch(
 def _resolve_candle_offset(
     conn: psycopg.Connection[Any],
 ) -> ProcessWatermark | None:
-    """Candle refresh watermark: global MAX(price_date) FROM price_daily.
+    """Candle refresh watermark: declared completed provider session.
 
-    Spec lists ``instrument_market_data_refresh.last_synced_at`` as the
-    source, but that table does not exist in this repo — the daily
-    candle refresh writes directly to ``price_daily``. The operator
-    surface still wants a single "resume from" cursor; use the global
-    MAX so a stale sweep is visible at a glance. Per-instrument cursor
-    fan-out (which would let the resolver report "12 of 1547
-    instruments awaiting next poll") is deferred to a follow-up.
+    New candle runs checkpoint their aggregate scope/session in the existing
+    ``job_runs.progress_json`` before fetching. Prefer that declared boundary:
+    raw ``MAX(price_date)`` can be a forming or partial newest date after an
+    orphaned per-instrument-commit sweep (#2572). Legacy runs fall back to MAX.
 
-    Cursor is the ISO date string. ``last_advanced_at`` is the
-    ``price_date`` coerced to a UTC midnight so the ProcessWatermark
-    contract (TIMESTAMPTZ field) holds — ``price_daily`` does not
-    carry a writer-side updated_at.
+    Cursor is the ISO date string. New checkpoints use the run start as
+    ``last_advanced_at``; the legacy fallback coerces ``price_date`` to UTC
+    midnight because ``price_daily`` has no writer timestamp.
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT started_at,
+                   progress_json #>> '{context,provider_session}' AS provider_session,
+                   progress_json #>> '{context,population_status}' AS population_status,
+                   progress_json #>> '{outcomes,usable}' AS usable,
+                   progress_json #>> '{candidates_seen}' AS declared
+            FROM job_runs
+            WHERE job_name = 'daily_candle_refresh'
+              AND progress_json #>> '{context,contract_version}' = 'candle-population-watermark-v1'
+            ORDER BY started_at DESC, run_id DESC
+            LIMIT 1
+            """
+        )
+        checkpoint = cur.fetchone()
+        if checkpoint is not None and checkpoint["provider_session"] is not None:
+            provider_session = date.fromisoformat(str(checkpoint["provider_session"]))
+            status = str(checkpoint["population_status"] or "unknown")
+            usable = str(checkpoint["usable"] or "0")
+            declared = str(checkpoint["declared"] or "0")
+            return ProcessWatermark(
+                cursor_kind="instrument_offset",
+                cursor_value=provider_session.isoformat(),
+                human=f"Candles {status} for {provider_session.isoformat()} ({usable}/{declared} usable)",
+                last_advanced_at=checkpoint["started_at"],
+            )
+
         cur.execute("SELECT MAX(price_date) AS max_date FROM price_daily")
         row = cur.fetchone()
     if row is None or row["max_date"] is None:

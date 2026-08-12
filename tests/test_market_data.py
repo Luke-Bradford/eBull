@@ -1223,6 +1223,44 @@ class TestRefreshMarketDataForceBackfill:
         assert summary.candles_failed == 0
         assert summary.candle_rows_upserted == 0
 
+    def test_completed_session_boundary_excludes_forming_future_candle(self) -> None:
+        """#2572: a retry may fetch today's forming bar; it is not a close."""
+        from unittest.mock import patch
+
+        from app.services.market_data import refresh_market_data
+
+        completed = date(2026, 8, 10)
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = [
+            OHLCVBar(completed, Decimal("10"), Decimal("11"), Decimal("9"), Decimal("10.5"), 1000),
+            OHLCVBar(date(2026, 8, 11), Decimal("10.5"), Decimal("12"), Decimal("10"), Decimal("11"), 500),
+        ]
+        conn = MagicMock(autocommit=True)
+        transaction = MagicMock()
+        transaction.__enter__ = MagicMock(return_value=transaction)
+        transaction.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = transaction
+
+        with (
+            patch("app.services.market_data._candles_are_fresh", return_value=False),
+            patch("app.services.market_data._candles_fetch_count", return_value=3),
+            patch("app.services.market_data._last_bar", return_value=None),
+            patch("app.services.market_data._upsert_candles", return_value=1) as upsert,
+            patch("app.services.market_data._compute_and_store_features", return_value=0),
+            patch("app.services.market_data._record_supply_outcome"),
+        ):
+            summary = refresh_market_data(
+                provider,
+                conn,
+                instruments=[(42, "AAPL")],
+                skip_quotes=True,
+                fresh_through=completed,
+            )
+
+        written_bars = upsert.call_args.args[2]
+        assert [bar.price_date for bar in written_bars] == [completed]
+        assert summary.candle_rows_upserted == 1
+
     def test_fetch_exception_counted_in_candles_failed(self) -> None:
         """#1293: a candle fetch that raises increments candles_failed (the
         silent-failure signal — eToro session lapse / API outage)."""

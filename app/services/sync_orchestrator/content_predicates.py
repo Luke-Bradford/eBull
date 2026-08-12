@@ -9,17 +9,17 @@ chunk 7 retires that module these are the surviving content checks.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
 
 
 def candles_content_ok(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    """Every Tier 1/2 instrument must have a candle for the most recent trading day."""
-    from app.services.market_data import most_recent_trading_day
+    """Every Tier 1/2 instrument must reach the last completed US session."""
+    from app.services.market_calendar import latest_completed_us_session
 
-    trading_day = most_recent_trading_day(date.today())
+    trading_day = latest_completed_us_session(datetime.now(UTC))
     # `i.is_tradable = TRUE` matches the filter in `daily_candle_refresh`
     # (app/workers/scheduler.py). Without it, a delisted instrument that
     # still carries tier 1/2 coverage would permanently fail this
