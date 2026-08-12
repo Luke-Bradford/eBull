@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Any, Literal, cast
 
@@ -17,6 +18,8 @@ import psycopg
 import psycopg.rows
 
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
+from app.services.strategy_promotion_evidence import evidence_refusals
+from app.services.strategy_promotion_evidence_store import load_promotion_evidence
 
 Stage = Literal[
     "research_candidate",
@@ -32,7 +35,7 @@ CapitalMode = Literal["fixed", "compound"]
 RiskProfile = Literal["unconfigured", "cautious", "balanced", "growth"]
 TicketSizingMode = Literal["percent", "fixed"]
 
-GOVERNANCE_GATE_VERSION = "strategy-governance-v1"
+GOVERNANCE_GATE_VERSION = "strategy-governance-v2+edge-evidence"
 MANDATE_POLICY_VERSION = "portfolio-mandate-v1"
 UNCONFIGURED_MANDATE_POLICY_VERSION = "portfolio-mandate-unconfigured"
 
@@ -454,7 +457,7 @@ def promote_strategy(
     if result_ids:
         rows = conn.execute(
             """
-            SELECT result_id
+            SELECT result_id, profit_factor
             FROM strategy_results_store
             WHERE strategy_id = %s AND strategy_version = %s
               AND result_id = ANY(%s)
@@ -467,6 +470,21 @@ def promote_strategy(
             raise StrategyControlError(
                 f"result_ids do not belong to {strategy_id}@{strategy_version}: {sorted(missing)}"
             )
+        if to_stage in _RESULT_EVIDENCE_STAGES:
+            profit_factor_by_result = {int(row[0]): None if row[1] is None else Decimal(str(row[1])) for row in rows}
+            for result_id in result_ids:
+                evidence = load_promotion_evidence(conn, result_id)
+                if evidence is None:
+                    raise StrategyControlError(
+                        f"result {result_id} fails promotion evidence: promotion_evidence_missing"
+                    )
+                refusals = evidence_refusals(
+                    evidence,
+                    profit_factor=profit_factor_by_result[result_id],
+                    as_of=date.today(),
+                )
+                if refusals:
+                    raise StrategyControlError(f"result {result_id} fails promotion evidence: {', '.join(refusals)}")
 
     row = conn.execute(
         """

@@ -24,6 +24,17 @@ import pytest
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.random_entry_cohort import SyntheticControl
+from app.services.strategy_promotion_evidence import (
+    EVIDENCE_VERSION,
+    REQUIRED_CHALLENGERS,
+    REQUIRED_CONTRASTS,
+    REQUIRED_COST_INPUTS,
+    ChallengerEvidence,
+    ExpectedValueBucket,
+    OutcomeContrast,
+    PromotionEvidence,
+    RecentYearEvidence,
+)
 from app.services.strategy_result import (
     BENCHMARK_RULE,
     CORPUS_VERSION,
@@ -230,6 +241,77 @@ _CLEAN_RESULT_FIELDS: dict[str, object] = {
 }
 
 
+def _passing_promotion_evidence(**overrides: object) -> PromotionEvidence:
+    base: dict[str, object] = {
+        "evidence_version": EVIDENCE_VERSION,
+        "causal_observation_rule_version": "causal-v1",
+        "fill_rule_version": "fills-v1",
+        "overlap_rule_version": "overlap-v1",
+        "after_cost_expectancy_ci_low_pct": Decimal("0.1"),
+        "max_drawdown_pct": Decimal("-8"),
+        "expected_shortfall_5_pct": Decimal("-3"),
+        "worst_gap_pct": Decimal("-5"),
+        "excluding_best_1_expectancy_pct": Decimal("0.2"),
+        "recent_year_stable": True,
+        "recent_years_evaluated": 3,
+        "recent_year_evidence": (
+            RecentYearEvidence(2024, 34, Decimal("0.2"), Decimal("-0.1"), True),
+            RecentYearEvidence(2025, 33, Decimal("0.3"), Decimal("0.0"), True),
+            RecentYearEvidence(2026, 33, Decimal("0.4"), Decimal("0.1"), True),
+        ),
+        "max_date_contribution_pct": Decimal("8"),
+        "max_name_contribution_pct": Decimal("7"),
+        "max_sector_contribution_pct": Decimal("20"),
+        "max_concurrency": 12,
+        "capacity_usd": Decimal("100000"),
+        "risk_limits_version": "test-risk-v1",
+        "risk_limits_passed": True,
+        "probability_calibration_passed": True,
+        "path_diagnostics_complete": True,
+        "outcome_count": 100,
+        "profitable_outcome_count": 60,
+        "losing_outcome_count": 40,
+        "flat_outcome_count": 0,
+        "target_first_count": 40,
+        "stop_first_count": 30,
+        "timeout_count": 30,
+        "ambiguous_path_count": 2,
+        "observed_cost_inputs": REQUIRED_COST_INPUTS,
+        "cost_observed_on": date(2026, 7, 8),
+        "cost_valid_through": date(2026, 8, 13),
+        "cost_source_version": "etoro-quote-v1",
+        "spread_bps": Decimal("8"),
+        "slippage_bps": Decimal("5"),
+        "financing_bps_per_day": Decimal("1"),
+        "fx_bps": Decimal("2"),
+        "broker_eligible": True,
+        "challengers": tuple(
+            ChallengerEvidence(
+                role=role,
+                observation_count=100,
+                expectancy_pct=Decimal("0.1"),
+                candidate_minus_challenger_pct=Decimal("0.2"),
+                same_observations_and_fills=True,
+                causal_observation_rule_version="causal-v1",
+                fill_rule_version="fills-v1",
+                overlap_rule_version="overlap-v1",
+            )
+            for role in sorted(REQUIRED_CHALLENGERS)
+        ),
+        "ev_buckets": (
+            ExpectedValueBucket(1, 34, Decimal("-0.2"), Decimal("-0.1")),
+            ExpectedValueBucket(2, 33, Decimal("0.1"), Decimal("0.2")),
+            ExpectedValueBucket(3, 33, Decimal("0.4"), Decimal("0.5")),
+        ),
+        "outcome_contrasts": tuple(
+            OutcomeContrast(role, 60, 40, Decimal("1"), Decimal("0"), Decimal("1"))
+            for role in sorted(REQUIRED_CONTRASTS)
+        ),
+    }
+    base.update(overrides)
+    return PromotionEvidence(**base)  # type: ignore[arg-type]
+
+
 def _clean_candidate(**overrides: object) -> PromotionCandidate:
     """A candidate that passes EVERY check — the only shape ``check_promotable`` clears.
 
@@ -246,6 +328,7 @@ def _clean_candidate(**overrides: object) -> PromotionCandidate:
         "recorded_accesses": 1,
         "ambiguity_material": False,
         "quarantine_arms_compared": True,
+        "promotion_evidence": _passing_promotion_evidence(),
     }
     base.update(overrides)
     return PromotionCandidate(**base)  # type: ignore[arg-type]
@@ -789,6 +872,15 @@ class TestPromotionGateRefusals:
         candidate = _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=control))
         assert set(check_promotable(candidate)) == {"synthetic_control_sharpe_below_cohort"}
 
+    def test_missing_edge_attribution_evidence_refuses_an_otherwise_clean_candidate(self) -> None:
+        assert check_promotable(_clean_candidate(promotion_evidence=None)) == ("promotion_evidence_missing",)
+
+    def test_edge_attribution_failures_are_returned_by_the_shared_gate(self) -> None:
+        evidence = _passing_promotion_evidence(after_cost_expectancy_ci_low_pct=Decimal("0"))
+        assert check_promotable(_clean_candidate(promotion_evidence=evidence)) == (
+            "expectancy_lower_bound_not_positive",
+        )
+
     def test_both_synthetic_failures_are_reported_together(self) -> None:
         """⚠ NOT the first one. An operator seeing only the strategy-level code
         would tune the strategy against a cohort that invalidates every result
@@ -912,6 +1004,7 @@ class TestPromotionGateReportsEverything:
             "ambiguity_arms_not_compared",
             "quarantine_arms_not_compared",
             "synthetic_control_not_run",
+            "promotion_evidence_missing",
         }
 
     def test_todays_real_pipeline_state_is_refused(self) -> None:
@@ -933,6 +1026,7 @@ class TestPromotionGateReportsEverything:
             "ambiguity_arms_not_compared",
             "quarantine_arms_not_compared",
             "synthetic_control_not_run",
+            "promotion_evidence_missing",
         }
         assert is_promotable(candidate) is False
 

@@ -227,7 +227,7 @@ RESULT_SCOPE: Final = "sleeve"
 #: input.
 BACKTEST_BOOTSTRAP_SEED: Final = 20260808
 
-#: §9 — the three refusals no invocation of this job can close, whatever it
+#: §9/#2505 — the four refusals no invocation of this job can close, whatever it
 #: measures. ``universe_basis_not_survivorship_free`` is blocked on #2284's
 #: corpus purchase, ``carry_unmodelled`` on #2277's carry measurement, and
 #: ``synthetic_control_not_run`` on a stage this cut does not contain (§9: the
@@ -237,12 +237,13 @@ BACKTEST_BOOTSTRAP_SEED: Final = 20260808
 #: ⚠ The job cannot make anything promotable, and that is correct rather than a
 #: shortfall — §6 of the bounded-backtester spec states the intended initial
 #: state in those words. What it changes is that the refusals become SPECIFIC
-#: AND FEW instead of eight-of-eight.
+#: AND FEW instead of a generic failure.
 STANDING_REFUSALS: Final[frozenset[PromotionRefusal]] = frozenset(
     {
         "universe_basis_not_survivorship_free",
         "carry_unmodelled",
         "synthetic_control_not_run",
+        "promotion_evidence_missing",
     }
 )
 
