@@ -68,7 +68,11 @@ did not materially improve this horizon and does not present its backtest.
 ## Published universe, portfolio and fill assumptions
 
 - Universe membership and the USD 1 billion minimum market capitalisation are
-  evaluated at the historical trade date, not using today's survivors.
+  evaluated at the historical trade date, not using today's survivors. This is
+  the paper's explicit anti-survivorship rule (section 1, page 4: it contrasts
+  capitalisation "at the trade date" with capitalisation when the paper was
+  written); Table 3's January 2007 cross-section is an illustrative snapshot,
+  not a fixed-universe definition.
 - Each stock belongs to one of the paper's 15 sector buckets and is regressed
   against exactly one ETF: `HHH`, `IYR`, `IYT`, `OIH`, `RKH`, `RTH`, `SMH`,
   `UTH`, `XLE`, `XLF`, `XLI`, `XLK`, `XLP`, `XLV` or `XLY`.
