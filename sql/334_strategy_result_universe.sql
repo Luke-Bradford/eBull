@@ -24,12 +24,14 @@ CREATE TABLE IF NOT EXISTS strategy_result_universe (
     result_id                BIGINT PRIMARY KEY
         REFERENCES strategy_results_store(result_id) ON DELETE RESTRICT,
     universe_rule_version    TEXT NOT NULL CHECK (universe_rule_version <> ''),
-    evaluated_instrument_ids BIGINT[] NOT NULL
-        CHECK (cardinality(evaluated_instrument_ids) <= 20000),
-    validated_universe_ids   BIGINT[] NOT NULL
-        CHECK (cardinality(validated_universe_ids) <= 20000),
+    evaluated_instrument_ids BIGINT[] NOT NULL,
+    validated_universe_ids   BIGINT[] NOT NULL,
     payload_sha256           TEXT NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
-    created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- One bound for both arrays so the two cannot drift independently.
+    CONSTRAINT strategy_result_universe_size_backstop CHECK (
+        GREATEST(cardinality(evaluated_instrument_ids), cardinality(validated_universe_ids)) <= 20000
+    )
 );
 
 COMMENT ON TABLE strategy_result_universe IS
