@@ -17,8 +17,10 @@ import pytest
 import respx
 
 from app.services.llm_client import (
+    LOCAL_CONTEXT_WINDOW,
     AnthropicProvider,
     LLMProviderNotConfigured,
+    OllamaNativeProvider,
     OpenAICompatProvider,
     make_llm_clients,
     normalize_completion_text,
@@ -28,6 +30,20 @@ from app.services.llm_client import (
 )
 
 _BASE_URL = "http://localhost:11434/v1"
+
+
+def _mock_ollama_probe(*, is_ollama: bool = True) -> None:
+    """Pin the #2431 transport probe so tests never depend on a live Ollama.
+
+    ``make_llm_clients`` asks ``/api/version`` whether a LOCAL endpoint is
+    actually Ollama (llama.cpp and vLLM serve the OpenAI surface but not that
+    route). Left unmocked these tests pass or fail depending on whether the
+    operator's Ollama happens to be running, which is not a property of the
+    code under test.
+    """
+    respx.get("http://localhost:11434/api/version").mock(
+        return_value=httpx.Response(200 if is_ollama else 404, json={"version": "0.31.1"})
+    )
 
 
 def _chat_response(
@@ -112,6 +128,98 @@ class TestNormalizeCompletionText:
 # ---------------------------------------------------------------------------
 # OpenAICompatProvider
 # ---------------------------------------------------------------------------
+
+
+def _native_response(
+    content: str,
+    *,
+    done_reason: str = "stop",
+    model: str = "qwen3:14b",
+    prompt_eval_count: int = 6421,
+    eval_count: int = 812,
+) -> dict[str, Any]:
+    """Ollama's ``/api/chat`` shape — deliberately NOT the OpenAI one."""
+    return {
+        "model": model,
+        "message": {"role": "assistant", "content": content},
+        "done": True,
+        "done_reason": done_reason,
+        "prompt_eval_count": prompt_eval_count,
+        "eval_count": eval_count,
+    }
+
+
+class TestOllamaNativeProvider:
+    """#2431 — the provider that exists because ``/v1`` ignores ``num_ctx``."""
+
+    @respx.mock
+    def test_sends_num_ctx_on_the_native_route(self) -> None:
+        route = respx.post("http://localhost:11434/api/chat").mock(
+            return_value=httpx.Response(200, json=_native_response('{"stance": "buy"}'))
+        )
+        provider = OllamaNativeProvider(base_url=_BASE_URL, model="qwen3:14b")
+        completion = provider.complete(system="sys", user="usr", max_tokens=100)
+
+        payload = json.loads(route.calls.last.request.content)
+        # The whole point: without this the server truncates at its 4096 default.
+        assert payload["options"]["num_ctx"] == LOCAL_CONTEXT_WINDOW
+        assert payload["options"]["num_predict"] == 100
+        # Ollama's JSON mode, not OpenAI's response_format spelling.
+        assert payload["format"] == "json"
+        assert "response_format" not in payload
+        assert payload["messages"][0]["content"].endswith("/no_think")
+        # The /v1 suffix is stripped — the native route is off the server root.
+        assert str(route.calls.last.request.url).endswith("/api/chat")
+
+        assert completion.text == '{"stance": "buy"}'
+        assert completion.finish_reason == "stop"
+        assert completion.prompt_tokens == 6421
+        assert completion.completion_tokens == 812
+
+    def test_refuses_a_prompt_that_cannot_fit_before_sending(self) -> None:
+        """The pre-send guard. A doomed 7-minute generation must never start."""
+        provider = OllamaNativeProvider(base_url=_BASE_URL, model="qwen3:14b")
+        oversized = "x" * (LOCAL_CONTEXT_WINDOW * 4)  # ~LOCAL_CONTEXT_WINDOW tokens on its own
+        with pytest.raises(ValueError, match="does not fit the local context window"):
+            provider.complete(system="sys", user=oversized, max_tokens=2048)
+
+    def test_output_reservation_counts_against_the_window(self) -> None:
+        """``num_ctx`` covers input AND output, so ``max_tokens`` is not free.
+
+        A prompt that fits on its own must still be refused when the reservation
+        pushes it over — the arithmetic that made 8192 too small for a 7,081
+        token prompt with a 2,048 token writer budget.
+        """
+        provider = OllamaNativeProvider(base_url=_BASE_URL, model="qwen3:14b")
+        # Comfortably under the window alone; over it once output is reserved.
+        near_limit = "x" * ((LOCAL_CONTEXT_WINDOW - 1000) * 4)
+        with pytest.raises(ValueError, match="reserved for output"):
+            provider.complete(system="", user=near_limit, max_tokens=2048)
+
+    @respx.mock
+    def test_truncation_at_the_ceiling_is_refused_not_returned(self) -> None:
+        """Post-send detector: the estimate can be wrong, the server's count is not.
+
+        ⚠ It must RAISE. Returning a completion known to be truncated would
+        persist a memo written without part of its instructions — detect,
+        report success, carry on, which is this bug's whole signature.
+        """
+        respx.post("http://localhost:11434/api/chat").mock(
+            return_value=httpx.Response(200, json=_native_response("{}", prompt_eval_count=LOCAL_CONTEXT_WINDOW))
+        )
+        provider = OllamaNativeProvider(base_url=_BASE_URL, model="qwen3:14b")
+        with pytest.raises(ValueError, match="truncated by the server"):
+            provider.complete(system="sys", user="usr", max_tokens=100)
+
+    @respx.mock
+    def test_normal_prompt_count_is_not_flagged(self) -> None:
+        """The detector must not cry wolf on a prompt that fitted."""
+        respx.post("http://localhost:11434/api/chat").mock(
+            return_value=httpx.Response(200, json=_native_response("{}", prompt_eval_count=6421))
+        )
+        provider = OllamaNativeProvider(base_url=_BASE_URL, model="qwen3:14b")
+        completion = provider.complete(system="sys", user="usr", max_tokens=100)
+        assert completion.prompt_tokens == 6421
 
 
 class TestOpenAICompatProvider:
@@ -237,6 +345,7 @@ class TestReleaseModel:
         route = respx.post(f"{_OLLAMA_ROOT}/api/generate").mock(
             return_value=httpx.Response(200, json={"done_reason": "unload"})
         )
+        _mock_ollama_probe()
         release_local_models(make_llm_clients(_config_conn(provider="openai_compatible")))
         assert route.call_count == 1
 
@@ -245,6 +354,7 @@ class TestReleaseModel:
         route = respx.post(f"{_OLLAMA_ROOT}/api/generate").mock(
             return_value=httpx.Response(200, json={"done_reason": "unload"})
         )
+        _mock_ollama_probe()
         clients = make_llm_clients(
             _config_conn(
                 provider="openai_compatible",
@@ -341,13 +451,28 @@ def _config_conn(
 
 
 class TestMakeLLMClients:
-    def test_openai_compatible_default_path(self) -> None:
+    def test_local_endpoint_resolves_to_the_native_provider(self) -> None:
+        """#2431 — a LOCAL endpoint is Ollama, and only its native route honours
+        ``num_ctx``. The default config points at localhost, so the default path
+        must be the native provider; picking the OpenAI one here is the bug that
+        truncated every thesis for two prompt revisions.
+        """
+        _mock_ollama_probe()
         clients = make_llm_clients(_config_conn(provider="openai_compatible"))
-        assert isinstance(clients.writer, OpenAICompatProvider)
-        assert isinstance(clients.critic, OpenAICompatProvider)
-        assert clients.writer.provider_name == "openai_compatible"
+        assert isinstance(clients.writer, OllamaNativeProvider)
+        assert isinstance(clients.critic, OllamaNativeProvider)
+        assert clients.writer.provider_name == "ollama_native"
         assert clients.writer.model == "qwen3:14b"
         assert clients.critic.model == "qwen3:14b"
+
+    def test_remote_endpoint_keeps_the_openai_contract(self) -> None:
+        """The converse, so the selection is pinned from both sides: a remote
+        endpoint speaks OpenAI and must NOT be handed Ollama-native fields.
+        """
+        clients = make_llm_clients(_config_conn(provider="openai_compatible", base_url="https://api.example.com/v1"))
+        assert isinstance(clients.writer, OpenAICompatProvider)
+        assert not isinstance(clients.writer, OllamaNativeProvider)
+        assert clients.writer.provider_name == "openai_compatible"
 
     def test_split_models_resolve_per_role(self) -> None:
         clients = make_llm_clients(

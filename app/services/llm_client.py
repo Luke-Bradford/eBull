@@ -39,7 +39,7 @@ import logging
 import re
 import threading
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 import anthropic
 import httpx
@@ -79,6 +79,39 @@ LLM_REQUEST_TIMEOUT: httpx.Timeout = httpx.Timeout(
 # work: it is not an OpenAI field and Ollama ignores it there. That is
 # why release is a separate call rather than a request parameter.
 _OLLAMA_UNLOAD_PATH = "/api/generate"
+
+# ⚠⚠ #2431 — THE SAME LESSON AS ``keep_alive`` ABOVE, AND IT COST 2,165 MEMOS.
+# ``options.num_ctx`` is not an OpenAI field either, so ``/v1/chat/completions``
+# accepts it with HTTP 200 and ignores it. Verified on this box 2026-08-12:
+# POSTing ``{"options": {"num_ctx": 12288}}`` to ``/v1`` left ``ollama ps`` at
+# ``CONTEXT 4096``. A fix written against ``/v1`` would look correct, return
+# success, and change nothing — which is exactly how this defect survived two
+# prompt revisions. The context window can only be set on the NATIVE route.
+_OLLAMA_CHAT_PATH = "/api/chat"
+
+# What the local path asks Ollama to load the model with.
+#
+# ⚠ Ollama's default is 4,096 and it TRUNCATES SILENTLY above it — no error, no
+# warning, HTTP 200. Measured 2026-08-12 across 60 instruments, the thesis
+# writer sends system+user of 5,387 / 6,352 / 7,081 tokens (min / median / max),
+# so EVERY generation overflowed. The truncated region is the front of the
+# prompt, which is where prompt v6 had just moved the subject-identity rule and
+# the ``SUBJECT:`` line — so the memo stopped naming its own company and v6
+# scored 0 of 127 where v1-v4 scored 487 of 487.
+#
+# 12,288 = the 7,081 observed maximum + the 2,048 ``max_tokens`` reservation
+# (num_ctx covers input AND output) + ~33% headroom. qwen3:14b supports 40,960;
+# the rest is left unclaimed deliberately. This box is 24 GB unified with
+# ``OLLAMA_KV_CACHE_TYPE=q8_0``, so the KV cache is ~80 KiB/token: ~0.94 GiB
+# here against ~0.31 GiB at 4,096. Raising it further costs real memory on a
+# machine that pages, and buys nothing measured.
+LOCAL_CONTEXT_WINDOW: Final = 12288
+
+# Chars per token, for the PRE-SEND check only. Deliberately crude and
+# deliberately an UNDER-estimate of tokens (real English JSON runs ~3.5-4.0
+# chars/token), because this guard exists to catch an order-of-magnitude
+# mistake, not to bill anyone.
+_CHARS_PER_TOKEN = 4
 
 # Release is best-effort housekeeping, not a generation — it must never
 # hold a job open the way a 600s decode window legitimately can.
@@ -279,6 +312,113 @@ class OpenAICompatProvider:
             logger.info("llm: released local model %s", self.model)
 
 
+def _endpoint_is_ollama(base_url: str) -> bool:
+    """Is this endpoint actually Ollama? Probed, never assumed (#2431).
+
+    ``/api/version`` is Ollama's own route: llama.cpp and vLLM serve the OpenAI
+    surface but not this one, so a 200 here is positive evidence rather than a
+    guess off the hostname.
+
+    ⚠ FAILS TO THE OPENAI TRANSPORT, deliberately. An unreachable or
+    non-Ollama endpoint keeps the contract it had before this change, so the
+    worst case of a wrong answer is the status quo rather than a broken one.
+    Remote endpoints are never probed — the question only arises locally.
+    """
+    if not is_local_llm_endpoint(base_url):
+        return False
+    try:
+        response = httpx.get(
+            f"{base_url.rstrip('/').removesuffix('/v1')}/api/version",
+            timeout=LLM_RELEASE_TIMEOUT,
+        )
+    except httpx.HTTPError:
+        return False
+    return response.status_code == 200
+
+
+class OllamaNativeProvider(OpenAICompatProvider):
+    """Ollama's own ``/api/chat`` — the only route that honours ``num_ctx``.
+
+    ⚠⚠ #2431 — THIS CLASS EXISTS FOR ONE REASON: ``/v1/chat/completions``
+    silently ignores the context window. It is a SEPARATE TYPE rather than a
+    branch inside ``OpenAICompatProvider`` because a class named for the OpenAI
+    contract must not quietly stop speaking it depending on the URL — the
+    factory chooses the transport, which is where a provider choice belongs.
+
+    Inherits the constructor and ``release_model`` (both already Ollama-aware)
+    and overrides only ``complete``. The response shape is Ollama's, so every
+    field is mapped explicitly rather than assumed:
+
+    ``message.content`` → text · ``done_reason`` → finish_reason ·
+    ``prompt_eval_count`` → prompt_tokens · ``eval_count`` → completion_tokens
+
+    ⚠ ``format: "json"`` is Ollama's own JSON mode. The OpenAI path's
+    ``response_format: {"type": "json_object"}`` is a different spelling of the
+    same requirement and is NOT accepted here.
+    """
+
+    provider_name = "ollama_native"
+
+    def complete(self, *, system: str, user: str, max_tokens: int) -> LLMCompletion:
+        # ⚠ Refuse a prompt that cannot fit rather than letting the server
+        # truncate it silently — the defect this whole class exists to end.
+        # Deliberately BEFORE the request: a 7-minute generation that was
+        # doomed at byte zero should never be started.
+        estimated = (len(system) + len(user)) // _CHARS_PER_TOKEN
+        if estimated + max_tokens > LOCAL_CONTEXT_WINDOW:
+            raise ValueError(
+                f"prompt does not fit the local context window: ~{estimated} estimated prompt tokens "
+                f"+ {max_tokens} reserved for output exceeds num_ctx={LOCAL_CONTEXT_WINDOW} "
+                f"(model={self.model}). Ollama would truncate this silently and the memo would be "
+                f"written without its instructions — see #2431."
+            )
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system + _NO_THINK_SUFFIX},
+                {"role": "user", "content": user},
+            ],
+            "stream": False,
+            "format": "json",
+            "options": {"num_ctx": LOCAL_CONTEXT_WINDOW, "num_predict": max_tokens},
+        }
+        with _LLM_CALL_SEMAPHORE:
+            response = httpx.post(
+                f"{self._base_url.removesuffix('/v1')}{_OLLAMA_CHAT_PATH}",
+                json=payload,
+                timeout=LLM_REQUEST_TIMEOUT,
+            )
+        response.raise_for_status()
+        body = response.json()
+        prompt_tokens = body.get("prompt_eval_count")
+
+        # ⚠⚠ POST-SEND confirmation, because the guard above only checks an
+        # ESTIMATE and ``_CHARS_PER_TOKEN`` can undercount. ``prompt_eval_count``
+        # is what the server actually consumed: at the window ceiling the prompt
+        # WAS truncated and this memo was written without part of its
+        # instructions.
+        #
+        # ⚠⚠ RAISES, does not log-and-return. Returning it would persist a memo
+        # known to be corrupt — which is this bug's entire signature (detect,
+        # report success, carry on). The caller's retry-once machinery gets a
+        # second attempt; a genuinely oversized prompt fails twice and lands on
+        # a ``thesis_runs`` row instead of in ``theses``.
+        if isinstance(prompt_tokens, int) and prompt_tokens >= LOCAL_CONTEXT_WINDOW:
+            raise ValueError(
+                f"prompt was truncated by the server: prompt_eval_count {prompt_tokens} reached "
+                f"num_ctx {LOCAL_CONTEXT_WINDOW} (model={self.model}). The completion was written "
+                f"without part of its instructions and must not be stored — see #2431."
+            )
+        return LLMCompletion(
+            text=normalize_completion_text((body.get("message") or {}).get("content") or ""),
+            finish_reason=body.get("done_reason") or "unknown",
+            model=body.get("model") or self.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=body.get("eval_count"),
+        )
+
+
 class AnthropicProvider:
     """Wraps the existing bounded-timeout Anthropic SDK client (#1479).
 
@@ -380,13 +520,20 @@ def make_llm_clients(conn: psycopg.Connection[Any]) -> LLMClientPair:
         )
         if violation is not None:
             raise LLMProviderNotConfigured(violation)
+    # ⚠ #2431 — the transport is chosen HERE, explicitly, and ONLY for an
+    # endpoint PROVED to be Ollama. Ollama's native route is the only one that
+    # honours ``num_ctx`` (``/v1`` accepts the option and ignores it), which is
+    # how the writer spent two prompt revisions being silently truncated.
+    #
+    # ⚠⚠ LOCALITY IS NOT OLLAMA. ``docs/wiki/byo-llm.md`` documents BYO-LLM as
+    # any OpenAI-compatible base URL, and llama.cpp / vLLM are both commonly
+    # run on loopback. Selecting the native transport off ``is_local_llm_endpoint``
+    # alone would send Ollama-shaped requests to those servers and break a
+    # supported configuration. The probe answers the question the URL cannot.
+    provider = OllamaNativeProvider if _endpoint_is_ollama(cfg.llm_base_url) else OpenAICompatProvider
     return LLMClientPair(
-        writer=OpenAICompatProvider(
-            base_url=cfg.llm_base_url, model=cfg.llm_model_writer, api_key=settings.llm_api_key
-        ),
-        critic=OpenAICompatProvider(
-            base_url=cfg.llm_base_url, model=cfg.llm_model_critic, api_key=settings.llm_api_key
-        ),
+        writer=provider(base_url=cfg.llm_base_url, model=cfg.llm_model_writer, api_key=settings.llm_api_key),
+        critic=provider(base_url=cfg.llm_base_url, model=cfg.llm_model_critic, api_key=settings.llm_api_key),
     )
 
 

@@ -236,7 +236,20 @@ _MAX_TOKENS_CRITIC = 2048
 # placeholder-leakage (46 memos containing "[Company] operates in the
 # [sector]") — an explicit no-placeholder rule now closes that. Context shape
 # and _validate_writer_output are unchanged.
-_PROMPT_VERSION = "v6"
+# v7 (#2431): the CONTEXT SHAPE changes and the delivery is fixed. v5 and v6
+# were never the whole story — the prompt had outgrown Ollama's default 4,096
+# window (measured 5,387/6,352/7,081 tokens min/median/max across 60
+# instruments) and was being truncated from the front, silently, on every
+# call. v6's subject anchor and no-placeholder rule were both placed in the
+# truncated region, which is why v6 scored 0 of 127 where v1-v4 scored 487 of
+# 487. ``llm_client.LOCAL_CONTEXT_WINDOW`` now sets num_ctx over the native
+# route (``/v1`` accepts the option and ignores it), with a pre-send refusal
+# and a post-send truncation check. Separately, ``prior_thesis`` no longer
+# carries ``memo_markdown``: it was the largest block AND the propagation
+# vector, feeding a wrong-company memo back in as the instrument's own prior
+# so the writer continued it. Bumped because the context shape changed —
+# memos from v6 and v7 are not comparable.
+_PROMPT_VERSION = "v7"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -1088,11 +1101,23 @@ def _assemble_context(
     ]
 
     # Prior thesis: latest 1
+    #
+    # ⚠⚠ #2431 — ``memo_markdown`` IS DELIBERATELY NOT SELECTED. It was the
+    # single largest context block (~1,005 tokens measured) AND the propagation
+    # vector for the wrong-company defect: once one memo named the wrong
+    # company, that prose was fed back in as this instrument's own prior thesis
+    # and the writer continued it. GME v12-v17 are all about Tesla for exactly
+    # this reason — each generation inherited the last. Feeding a model its own
+    # unvalidated prose back as evidence makes any writer error self-sustaining,
+    # and the bigger prior then crowds the real evidence out of the window.
+    #
+    # The structured fields below carry the continuity this block exists for
+    # (what the last thesis CONCLUDED); the prose carried only how it said it.
     prior_row = conn.execute(
         """
         SELECT thesis_version, thesis_type, stance, confidence_score,
                buy_zone_low, buy_zone_high, base_value, bull_value, bear_value,
-               break_conditions_json, memo_markdown, created_at
+               break_conditions_json, created_at
         FROM theses
         WHERE instrument_id = %(id)s
         ORDER BY thesis_version DESC
@@ -1113,8 +1138,7 @@ def _assemble_context(
             "bull_value": _to_float(prior_row[7]),
             "bear_value": _to_float(prior_row[8]),
             "break_conditions": prior_row[9],
-            "memo_markdown": prior_row[10],
-            "created_at": prior_row[11].isoformat() if prior_row[11] else None,
+            "created_at": prior_row[10].isoformat() if prior_row[10] else None,
         }
 
     # Instrument metadata
