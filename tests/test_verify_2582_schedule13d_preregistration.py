@@ -15,6 +15,7 @@ def test_contract_is_fail_closed_and_outcome_free() -> None:
     assert contract["event_identity"]["prior_history_order"] == "strictly_earlier_filed_at_only"
     assert contract["eligibility"]["unknown_security_type"] == "refuse"
     assert contract["challengers"]["unknown_13g_rule"] == "never_pool_with_known_rule"
+    assert contract["challengers"]["matching"]["tie_break"].startswith("sha256_")
     assert contract["acceptance"]["next_stage_if_failed"].startswith("retain_rejection")
 
 

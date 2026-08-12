@@ -262,7 +262,9 @@ close and charges 50 bps round trip. There is deliberately no historical TP/SL:
 a capital bracket is a separately identified executable adaptation and cannot be
 selected from the same opened outcomes. The contract also pins unfiltered 13D,
 seeded same-instrument random-time and rule-stratified initial-13G challengers,
-plus attribution fields that cannot gate the result.
+plus attribution fields that cannot gate the result. Exact matching buckets,
+tie-breaking, challenger multiplicity and recent stability are part of the
+machine contract. Item 4 is hashed but deliberately not classified in v1.
 
 The 895-event source ceiling exists before chain and liquidity refusals. Against
 the declared 1% minimum worthwhile effect and 10% planning standard deviation,

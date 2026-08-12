@@ -53,10 +53,24 @@
   },
   "challengers": {
     "unfiltered_eligible_13d": "same_fill_exit_cost_and_coverage",
-    "matched_random_time": "one_seeded_non_event_date_per_treatment_same_instrument_calendar_month",
+    "matched_random_time": "one_seeded_eligible_non_event_date_per_treatment_same_instrument_calendar_month_excluding_any_13d_plus_or_minus_10_sessions",
     "random_seed": 2582,
-    "initial_13g": "report_separately_by_13d_1b_13d_1c_or_unknown_rule_then_match_without_replacement_on_filing_month_price_dollar_volume_and_market_return_buckets",
-    "unknown_13g_rule": "never_pool_with_known_rule"
+    "initial_13g": "match_without_replacement_and_report_separately_by_13d_1b_13d_1c_both_or_unknown_rule",
+    "matching": {
+      "exact_fields": [
+        "filing_year_month",
+        "entry_price_bucket",
+        "trailing_dollar_volume_bucket",
+        "prior_20_session_market_return_bucket"
+      ],
+      "entry_price_bucket_usd_edges": [5, 10, 25, 50, 100],
+      "trailing_dollar_volume_bucket_usd_edges": [10000000, 25000000, 100000000, 500000000],
+      "prior_20_session_market_return_pct_edges": [-5, 0, 5],
+      "tie_break": "sha256_treatment_accession_challenger_accession_seed_ascending",
+      "unmatched_treatment": "retain_primary_but_refuse_that_challenger_pair"
+    },
+    "unknown_13g_rule": "never_pool_with_known_rule",
+    "multiplicity": "holm_adjust_random_13d_1b_and_13d_1c_differences_at_family_alpha_0_05"
   },
   "context": {
     "predeclared_attribution_only": [
@@ -68,14 +82,15 @@
       "prior_20_session_stock_return",
       "prior_20_session_market_return",
       "market_return_over_holding_window",
-      "item4_purpose_category"
+      "maximum_percent_of_class_across_accession_reporters"
     ],
     "context_may_gate_primary_result": false,
-    "subgroup_selection_after_outcome": "forbidden"
+    "subgroup_selection_after_outcome": "forbidden",
+    "item4_policy": "not_used_in_v1_beyond_required_source_presence_and_document_hash"
   },
   "statistics": {
     "primary_estimand": "mean_net_total_return_pct",
-    "confidence_interval": "two_way_issuer_and_entry_session_cluster_bootstrap_95pct",
+    "confidence_interval": "two_way_pigeonhole_bootstrap_by_issuer_and_entry_session_95pct_percentile",
     "bootstrap_seed": 2582,
     "bootstrap_resamples": 10000,
     "minimum_worthwhile_net_effect_pct": 1.0,
@@ -93,9 +108,7 @@
       "profit_factor",
       "expected_shortfall_5pct",
       "worst_gap",
-      "maximum_drawdown",
       "concurrency",
-      "turnover",
       "sector_and_issuer_concentration",
       "result_excluding_best_1pct",
       "rolling_6_month_result",
@@ -106,11 +119,16 @@
   },
   "acceptance": {
     "historical_pass_requires": [
+      "effective_sample_size_gte_785",
       "adverse_cost_clustered_lower_bound_gt_zero",
+      "holm_adjusted_lower_bound_vs_random_gt_zero",
+      "holm_adjusted_lower_bound_vs_matched_13d_1b_gt_zero",
+      "holm_adjusted_lower_bound_vs_matched_13d_1c_gt_zero",
       "profit_factor_gt_one",
       "positive_result_excluding_best_1pct",
-      "no_single_issuer_or_session_drives_result",
-      "no_material_challenger_or_regime_contradiction"
+      "no_issuer_or_entry_session_supplies_20pct_or_more_of_gross_positive_return",
+      "latest_nonoverlapping_6_month_mean_positive",
+      "at_least_two_of_three_nonoverlapping_6_month_means_positive"
     ],
     "historical_archive_can_promote_capital": false,
     "next_stage_if_passed": "freeze_bracket_and_sizing_then_collect_untouched_prospective_shadow",

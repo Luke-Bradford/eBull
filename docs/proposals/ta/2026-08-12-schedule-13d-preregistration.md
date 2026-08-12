@@ -78,14 +78,25 @@ Three challengers use the same eligible observations and timing:
 1. all otherwise eligible 13Ds, showing whether chain cleaning creates the
    claim;
 2. one seeded non-event date on the same instrument and calendar month;
-3. initial 13Gs, kept separate by Rule 13d-1(b), Rule 13d-1(c), or unknown and
-   matched without replacement on pre-event properties.
+3. initial 13Gs, kept separate by Rule 13d-1(b), Rule 13d-1(c), both, or
+   unknown and matched without replacement within filing month, fixed price,
+   dollar-volume and prior-market-return buckets. A SHA-256 ordering over both
+   accessions and seed 2582 resolves ties; unmatched treatments remain in the
+   primary result but not that paired comparison.
+
+The initial-13G challenger is source-feasible: an outcome-free raw-document
+census found 10,419 filings with the same basic coverage (7,429 Rule 13d-1(b),
+2,262 Rule 13d-1(c), 33 carrying both and 695 unknown). Its strong February and
+quarterly filing waves are why filing month and rule are exact strata rather
+than an undifferentiated placebo.
 
 Market, volatility, exchange, liquidity, price, purpose and prior-return fields
 are attribution. They may explain a failure or define prospective risk, but
 cannot rescue a failed primary result by selecting a winning slice. Signal
-strength monotonicity is reported only for predeclared continuous source fields;
-it does not authorise a threshold search.
+strength monotonicity is reported only for the accession's maximum disclosed
+percent of class; it does not authorise a threshold search. Item 4 text is not
+classified in v1: its presence and document hash are audited, but a subjective
+post-outcome purpose taxonomy cannot enter this trial.
 
 The complete modern archive is one historical falsification interval. It does
 not claim a pristine terminal holdout: the genuinely untouched interval begins
@@ -103,12 +114,17 @@ trial is likely underpowered for that target after clustering. This limitation
 is declared before returns: a wide interval is `inconclusive`, not evidence of
 no effect and not permission to relax filters.
 
-Historical passage requires all of the following: adverse-cost clustered lower
-bound above zero, profit factor above one, positive return after removing the
-best 1%, no issuer/session concentration dependency and no material challenger
-or regime contradiction. Even a pass cannot authorise capital. It only permits
-a separate bracket/sizing contract and prospective shadow collection. A failure
-is retained without a purpose, threshold, horizon or regime rescue.
+Historical passage requires effective sample size of at least 785, an
+adverse-cost clustered lower bound above zero, Holm-adjusted positive
+differences versus random time and the separately matched Rule 13d-1(b) and
+13d-1(c) challengers, profit factor above one, positive return after removing
+the best 1%, no issuer or entry session supplying 20% of gross positive return,
+and positive recent stability (the latest and at least two of three
+non-overlapping six-month means). Even a pass cannot authorise capital. This
+event study reports concurrency but not portfolio drawdown or turnover: those
+numbers require a capital-allocation rule that does not yet exist. A pass only
+permits a separate bracket/sizing contract and prospective shadow collection.
+A failure is retained without a purpose, threshold, horizon or regime rescue.
 
 ## Storage and product boundary
 

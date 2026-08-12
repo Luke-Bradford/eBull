@@ -22,9 +22,13 @@ def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
     assert contract["position"]["round_trip_adverse_cost_bps"] == 50
     assert contract["decision_clock"]["same_close_fill"] == "forbidden"
     assert contract["context"]["context_may_gate_primary_result"] is False
+    assert contract["context"]["item4_policy"].startswith("not_used_in_v1")
+    assert contract["challengers"]["matching"]["entry_price_bucket_usd_edges"] == [5, 10, 25, 50, 100]
+    assert contract["challengers"]["multiplicity"].startswith("holm_adjust")
     assert contract["acceptance"]["historical_archive_can_promote_capital"] is False
     assert contract["storage"]["duplicate_raw_document"] is False
     assert contract["storage"]["persist_non_firing_poll_rows"] is False
+    assert "maximum_drawdown" not in contract["statistics"]["required_reports"]
 
     stats = contract["statistics"]
     effect = float(stats["minimum_worthwhile_net_effect_pct"]) / 100
