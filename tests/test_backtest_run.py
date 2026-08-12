@@ -60,6 +60,13 @@ from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_
 from app.services.position_builder import Position, Window
 from app.services.position_costing import cost_position
 from app.services.price_structure import StructureBar
+from app.services.random_entry_cohort import (
+    COHORT_MODEL_ID,
+    COHORT_ROOT_SEED,
+    SPEC_COHORT_SIZE,
+    SPEC_SHARPE_PERCENTILE,
+    SyntheticControl,
+)
 from app.services.research_price_structure_store import (
     QUARANTINE_ARMS,
     QUARANTINE_RULE_SET_VERSION,
@@ -120,6 +127,29 @@ def _metrics(*, sharpe: float = 0.5, ess: float | None = 100.0) -> StrategyMetri
         bootstrap_seed=BACKTEST_BOOTSTRAP_SEED if present else None,
         bootstrap_design_effect=2.0 if present else None,
         bootstrap_model_id="c3-block-bootstrap-v1" if present else None,
+    )
+
+
+def _control(
+    *,
+    ci_low: float,
+    ci_high: float,
+    cohort_sharpe: float,
+    strategy_sharpe: float,
+) -> SyntheticControl:
+    """§9's control with only the four numbers its two thresholds read varied."""
+    return SyntheticControl(
+        model_id=COHORT_MODEL_ID,
+        cohort_size=SPEC_COHORT_SIZE,
+        root_seed=COHORT_ROOT_SEED,
+        mean_return_pct=(ci_low + ci_high) / 2,
+        mean_return_ci_low_pct=ci_low,
+        mean_return_ci_high_pct=ci_high,
+        sharpe_percentile=SPEC_SHARPE_PERCENTILE,
+        cohort_sharpe_threshold=cohort_sharpe,
+        strategy_sharpe=strategy_sharpe,
+        cohort_return_threshold_pct=1.0,
+        strategy_return_pct=2.0,
     )
 
 
@@ -328,18 +358,21 @@ class TestExpectedRefusals:
     """§9's table, as the projection the run gates on."""
 
     def test_full_holdout_run_with_a_dsr_leaves_only_the_standing_refusals(self) -> None:
-        assert _expected_refusals(holdout_requested=True, deflated=True) == STANDING_REFUSALS
+        assert _expected_refusals(holdout_requested=True, deflated=True) == STANDING_REFUSALS | {
+            "synthetic_control_not_run"
+        }
 
     def test_harness_validation_purpose_is_predicted_before_the_write(self) -> None:
         assert _expected_refusals(
             holdout_requested=True,
             deflated=True,
             purpose="harness_validation",
-        ) == STANDING_REFUSALS | {"harness_validation_only"}
+        ) == STANDING_REFUSALS | {"harness_validation_only", "synthetic_control_not_run"}
 
     def test_in_sample_run_adds_holdout_never_evaluated(self) -> None:
         assert _expected_refusals(holdout_requested=False, deflated=True) == STANDING_REFUSALS | {
-            "holdout_never_evaluated"
+            "holdout_never_evaluated",
+            "synthetic_control_not_run",
         }
 
     @pytest.mark.parametrize(
@@ -370,7 +403,11 @@ class TestExpectedRefusals:
     def test_a_prior_evaluation_does_not_disturb_the_other_refusals(self) -> None:
         assert _expected_refusals(
             holdout_requested=False, deflated=False, prior_holdout_evaluations=12
-        ) == STANDING_REFUSALS | {"deflated_sharpe_not_computed", "trial_count_undeclared"}
+        ) == STANDING_REFUSALS | {
+            "deflated_sharpe_not_computed",
+            "trial_count_undeclared",
+            "synthetic_control_not_run",
+        }
 
     def test_no_dsr_adds_both_criterion_6_refusals(self) -> None:
         """⚠ TWO codes, not one. A DSR with no trial count is as refused as no
@@ -379,15 +416,57 @@ class TestExpectedRefusals:
         assert _expected_refusals(holdout_requested=True, deflated=False) == STANDING_REFUSALS | {
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
+            "synthetic_control_not_run",
         }
 
     def test_the_standing_refusals_are_the_ones_this_cut_cannot_close(self) -> None:
+        """⚠ THREE, not four. ``synthetic_control_not_run`` left this set in #2601:
+        the run can now build the cohort off its own corpus pass, so the refusal
+        is conditional on the invocation asking for it — see the tests below."""
         assert STANDING_REFUSALS == {
             "universe_basis_not_survivorship_free",
             "carry_unmodelled",
-            "synthetic_control_not_run",
             "promotion_evidence_missing",
         }
+        assert "synthetic_control_not_run" not in STANDING_REFUSALS
+
+    def test_a_run_without_the_control_still_declares_it_unrun(self) -> None:
+        assert "synthetic_control_not_run" in _expected_refusals(holdout_requested=True, deflated=True)
+
+    @pytest.mark.parametrize(
+        ("ci_low", "ci_high", "cohort_sharpe", "strategy_sharpe", "expected"),
+        [
+            # The cohort's mean return brackets zero and the strategy clears the
+            # cohort's 95th percentile — §9's conjunction, both halves passed.
+            (-0.4, 0.4, 0.10, 0.90, set()),
+            # The null itself makes money: the cohort is measuring something
+            # other than the strategy's edge, so no strategy number is readable.
+            (0.2, 0.9, 0.10, 0.90, {"synthetic_control_cohort_shows_edge"}),
+            # A strategy that does not beat random entry.
+            (-0.4, 0.4, 0.95, 0.90, {"synthetic_control_sharpe_below_cohort"}),
+            # ⚠ BOTH, together. Reporting one would leave the operator repairing
+            # half a failure and re-running for the other half.
+            (0.2, 0.9, 0.95, 0.90, {"synthetic_control_cohort_shows_edge", "synthetic_control_sharpe_below_cohort"}),
+        ],
+    )
+    def test_the_control_decides_which_of_its_two_codes_apply(
+        self, ci_low: float, ci_high: float, cohort_sharpe: float, strategy_sharpe: float, expected: set[str]
+    ) -> None:
+        """⚠ §9's two thresholds predicted INDEPENDENTLY of ``check_promotable``.
+        The equality between the two is criterion 8's check; a shared helper
+        would make it agree with itself."""
+        refusals = _expected_refusals(
+            holdout_requested=True,
+            deflated=True,
+            synthetic_control=_control(
+                ci_low=ci_low,
+                ci_high=ci_high,
+                cohort_sharpe=cohort_sharpe,
+                strategy_sharpe=strategy_sharpe,
+            ),
+        )
+        assert refusals - STANDING_REFUSALS == expected
+        assert "synthetic_control_not_run" not in refusals
 
 
 class TestDeflateGroup:

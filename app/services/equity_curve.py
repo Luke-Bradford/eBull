@@ -236,6 +236,32 @@ class LegBook:
     def __len__(self) -> int:
         return len(self.entry_index)
 
+    def rebased(self, offset: int) -> LegBook:
+        """The same legs, re-based onto an axis starting ``offset`` bars later.
+
+        ⚠ Every caller of ``build_equity_curve`` measures on a TRUNCATED axis —
+        §5's rule that an equity axis is the evaluation axis cut to the closed
+        span of its own positions — so re-basing is part of the curve contract
+        and not one caller's private step. It lives here because two now need
+        it: ``backtest_run`` for a namespace book, ``synthetic_control_run`` for
+        each cohort member's own span.
+
+        ⚠ The price, spread, ``realised`` and ``marks`` arrays are SHARED rather
+        than copied. They are read-only from here on and the marks array is the
+        large one (hundreds of MB on a full-corpus arm); copying it to change
+        two integer columns would double the peak for nothing.
+        """
+        return LegBook(
+            entry_index=[index - offset for index in self.entry_index],
+            exit_index=[index - offset for index in self.exit_index],
+            entry_price=self.entry_price,
+            exit_price=self.exit_price,
+            half_spread=self.half_spread,
+            realised=self.realised,
+            mark_offset=self.mark_offset,
+            marks=self.marks,
+        )
+
 
 @dataclass(frozen=True)
 class EquityCurve:

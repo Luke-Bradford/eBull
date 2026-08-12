@@ -45,6 +45,28 @@ ACKNOWLEDGEMENT: Final = "OPEN-2582-SEALED-OUTCOMES"
 #: asserts they still match the contract bytes the digest protects.
 STRATEGY_ID: Final = "c4-schedule13d-public-catalyst"
 STRATEGY_VERSION: Final = "schedule13d-public-catalyst-v1"
+#: #2601 — §9's random-entry synthetic control, DECLARED rather than absent.
+#:
+#: ⚠⚠ IT IS NOT MERELY UNRUN HERE, IT DOES NOT APPLY. ``random_entry_cohort``
+#: permutes *"the entries this strategy actually made"* inside each series'
+#: eligible fill bars, holding the universe, the date axis and the exit-side
+#: accounting fixed. C-4 has no such placement space: its entry is a FILING
+#: EVENT, not a bar this evaluator chose among others, and its own contract
+#: already carries three matched-control arms of the right shape for that design
+#: (``paired_..._vs_random``, ``vs_matched_13g_1b``, ``vs_matched_13g_1c``).
+#: Redrawing an entry bar would test a null nothing about C-4 is exposed to.
+#:
+#: ⚠ THE DECLARATION LIVES HERE AND NOT IN THE CONTRACT JSON, because that file
+#: is digest-protected (``EXPECTED_SHA256``) and a preregistration whose bytes
+#: move is not a preregistration. ``tests/test_synthetic_control_run.py`` walks
+#: every ``scripts/evaluate_*.py`` and requires this pair, so the rule is a test
+#: rather than a convention — #2614's own lesson, one ticket on.
+SYNTHETIC_CONTROL: Final = "not_applicable"
+SYNTHETIC_CONTROL_REASON: Final = (
+    "the entry is a filing event, not a bar selected from an eligible placement space, so a permuted-entry null "
+    "has nothing to permute; the contract's three matched-control arms are this design's equivalent"
+)
+
 RESEARCH_VENDOR: Final = "paperswithbacktest/Stocks-Daily-Price"
 FIRST_SOURCE_DATE: Final = date(2024, 12, 18)
 LAST_COMPLETE_FILING_DATE: Final = date(2026, 6, 18)
