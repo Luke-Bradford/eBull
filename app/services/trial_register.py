@@ -519,8 +519,10 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "across the four controls (8 arms), plus the first monthly pass stopped on the month-end "
                 "boundary defect. S-4's best/worst rows are the ambiguity fan, not separate arms."
             ),
-            evidence="docs/proposals/ta/2026-08-12-sizing-rule-attribution-result.md; issue #2430; "
-            "scripts/verify_2430_sizing_rule_ab.py --window primary-2022-plus",
+            evidence="docs/proposals/ta/2026-08-12-sizing-rule-attribution-result.md — §'Entry-weight drift' and "
+            "§'Calendar-month-end equal weight' each tabulate 5 rows for 4 strategies because S-4 is split into "
+            "best/worst, which is why 8 arms and not 10; §'Boundary correction' records the stopped first monthly "
+            "pass. Issue #2430; scripts/verify_2430_sizing_rule_ab.py --window primary-2022-plus",
             exactness=TrialExactness.FLOOR,
             searches=9,
         ),
