@@ -182,6 +182,7 @@ def _carrier(strategy_id: str, *, namespace: str, quarantine_arm: str, trade_cou
         metrics=_carrier_metrics(trade_count),
         universe_basis="survivor_only",
         carry_unmodelled=True,
+        fx_unmodelled=True,
         evaluated_instrument_count=1,
         trial_count=None,
         deflated_sharpe=None,

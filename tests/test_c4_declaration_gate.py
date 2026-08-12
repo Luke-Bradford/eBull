@@ -44,9 +44,11 @@ def test_the_declared_stamps_produce_both_structural_refusals() -> None:
     declaration = build_declaration()
     assert declaration.declared_universe_basis == "survivor_only"
     assert declaration.declared_carry_unmodelled is True
+    assert declaration.declared_fx_unmodelled is True
     assert set(declaration.expected_structural_refusals) == {
         "universe_basis_not_survivorship_free",
         "carry_unmodelled",
+        "fx_unmodelled",
     }
     assert set(declaration.recomputed_structural_refusals) == set(declaration.expected_structural_refusals)
 

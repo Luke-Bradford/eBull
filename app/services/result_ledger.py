@@ -238,11 +238,13 @@ _FREEZE_DECLARATION = """
     INSERT INTO strategy_preregistration_declarations (
         strategy_id, strategy_version, contract_version, prereg_purpose,
         structural_refusal_policy_version, declared_universe_basis, declared_carry_unmodelled,
+        declared_fx_unmodelled,
         expected_structural_refusals, min_forward_decision_dates, min_forward_calendar_weeks,
         forward_shadow_derivation, declared_by, declaration_sha256
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(contract_version)s, %(prereg_purpose)s,
         %(structural_refusal_policy_version)s, %(declared_universe_basis)s, %(declared_carry_unmodelled)s,
+        %(declared_fx_unmodelled)s,
         %(expected_structural_refusals)s, %(min_forward_decision_dates)s, %(min_forward_calendar_weeks)s,
         %(forward_shadow_derivation)s, %(declared_by)s, %(declaration_sha256)s
     )
@@ -252,6 +254,7 @@ _FREEZE_DECLARATION = """
 _SELECT_DECLARATION = """
     SELECT declaration_id, strategy_id, strategy_version, contract_version, prereg_purpose,
            structural_refusal_policy_version, declared_universe_basis, declared_carry_unmodelled,
+           declared_fx_unmodelled,
            expected_structural_refusals, min_forward_decision_dates, min_forward_calendar_weeks,
            forward_shadow_derivation, declared_by, declaration_sha256
     FROM strategy_preregistration_declarations
@@ -283,7 +286,8 @@ _SELECT_ACCESS_PROVENANCE = """
 _RESULT_COLUMNS = """
     strategy_id, strategy_version, result_version, result_scope, namespace,
     ambiguity_arm, quarantine_arm, window_start, window_end, purpose, universe_basis, corpus_version,
-    cost_model_id, carry_unmodelled, sizing_rule, benchmark_rule, return_basis, position_rule_set_version,
+    cost_model_id, carry_unmodelled, fx_unmodelled, sizing_rule, benchmark_rule, return_basis,
+    position_rule_set_version,
     outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
     trial_count, deflated_sharpe,
     expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
@@ -306,7 +310,8 @@ _RESULT_VALUES = """
     %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(result_scope)s, %(namespace)s,
     %(ambiguity_arm)s, %(quarantine_arm)s, %(window_start)s, %(window_end)s, %(purpose)s,
     %(universe_basis)s, %(corpus_version)s,
-    %(cost_model_id)s, %(carry_unmodelled)s, %(sizing_rule)s, %(benchmark_rule)s, %(return_basis)s,
+    %(cost_model_id)s, %(carry_unmodelled)s, %(fx_unmodelled)s, %(sizing_rule)s, %(benchmark_rule)s,
+    %(return_basis)s,
     %(position_rule_set_version)s,
     %(outcome_rule_set_version)s, %(input_rule_set_version)s, %(evaluated_instrument_count)s,
     %(trial_count)s, %(deflated_sharpe)s,
@@ -420,6 +425,7 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         "corpus_version": identity.corpus_version,
         "cost_model_id": identity.cost_model_id,
         "carry_unmodelled": result.carry_unmodelled,
+        "fx_unmodelled": result.fx_unmodelled,
         "sizing_rule": identity.sizing_rule,
         "benchmark_rule": identity.benchmark_rule,
         "return_basis": identity.return_basis,
@@ -569,6 +575,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         corpus_version,
         cost_model_id,
         carry_unmodelled,
+        fx_unmodelled,
         sizing_rule,
         benchmark_rule,
         return_basis,
@@ -753,6 +760,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         metrics=metrics,
         universe_basis=str(universe_basis),
         carry_unmodelled=bool(carry_unmodelled),
+        fx_unmodelled=bool(fx_unmodelled),
         evaluated_instrument_count=int(evaluated_instrument_count),  # type: ignore[arg-type]
         trial_count=None if trial_count is None else int(trial_count),  # type: ignore[arg-type]
         deflated_sharpe=deflated_sharpe,  # type: ignore[arg-type]
@@ -818,6 +826,7 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
             "structural_refusal_policy_version": declaration.structural_refusal_policy_version,
             "declared_universe_basis": declaration.declared_universe_basis,
             "declared_carry_unmodelled": declaration.declared_carry_unmodelled,
+            "declared_fx_unmodelled": declaration.declared_fx_unmodelled,
             "expected_structural_refusals": list(declaration.expected_structural_refusals),
             "min_forward_decision_dates": declaration.forward_shadow.min_independent_decision_dates,
             "min_forward_calendar_weeks": declaration.forward_shadow.min_calendar_weeks,
@@ -857,15 +866,16 @@ def load_preregistration(
             structural_refusal_policy_version=str(row[5]),
             declared_universe_basis=str(row[6]),
             declared_carry_unmodelled=bool(row[7]),
-            expected_structural_refusals=tuple(row[8] or ()),
+            declared_fx_unmodelled=bool(row[8]),
+            expected_structural_refusals=tuple(row[9] or ()),
             forward_shadow=ForwardShadowFloor(
-                min_independent_decision_dates=int(row[9]),
-                min_calendar_weeks=int(row[10]),
-                derivation=str(row[11]),
+                min_independent_decision_dates=int(row[10]),
+                min_calendar_weeks=int(row[11]),
+                derivation=str(row[12]),
             ),
-            declared_by=str(row[12]),
+            declared_by=str(row[13]),
         ),
-        declaration_sha256=str(row[13]),
+        declaration_sha256=str(row[14]),
     )
 
 
@@ -906,10 +916,12 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
 def _refuse_declared_stamp_substitution(conn: psycopg.Connection[tuple], result: StrategyResult) -> None:
     """Refuse a hold-out row whose stamps disagree with the frozen declaration.
 
-    ⚠ TWO CODES, NOT ONE, because they are different substitutions with
+    ⚠ THREE CODES, NOT ONE, because they are different substitutions with
     different operator actions: a universe-basis swap means the corpus the run
-    used is not the corpus that was declared, and a carry swap means the cost
-    model is not the one that was declared.
+    used is not the corpus that was declared, and a carry or FX swap means the
+    cost model is not the one that was declared. ⚠ #2363 split the cost pair —
+    each is checked on its own, so a run that substituted BOTH reports both
+    rather than one standing in for the other.
     """
     frozen = load_preregistration(conn, result.identity.strategy_id, result.identity.strategy_version)
     if frozen is None:
@@ -920,6 +932,8 @@ def _refuse_declared_stamp_substitution(conn: psycopg.Connection[tuple], result:
         refusals.append("declared_universe_basis_substituted")
     if result.carry_unmodelled != declared.declared_carry_unmodelled:
         refusals.append("declared_carry_unmodelled_substituted")
+    if result.fx_unmodelled != declared.declared_fx_unmodelled:
+        refusals.append("declared_fx_unmodelled_substituted")
     if refusals:
         raise PreregDeclarationRefused(result.identity.strategy_id, result.identity.strategy_version, tuple(refusals))
 

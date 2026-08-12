@@ -74,6 +74,7 @@ from app.services.cost_model import (
     CARRY_UNMODELLED,
     COST_MODEL_ID,
     FX_BPS,
+    FX_UNMODELLED,
     SESSION_RULE,
     UNKNOWN_NOMINAL_PRICE_BAND,
     _check_bands_are_total,
@@ -229,7 +230,10 @@ def calibrate() -> int:
             f"{band.half_spread_pct:>11}   {verdict}"
         )
 
-    print(f"\n  carry_bps {CARRY_BPS}   fx_bps {FX_BPS}   carry_unmodelled {CARRY_UNMODELLED}")
+    print(
+        f"\n  carry_bps {CARRY_BPS}   fx_bps {FX_BPS}   "
+        f"carry_unmodelled {CARRY_UNMODELLED}   fx_unmodelled {FX_UNMODELLED}"
+    )
     print(f"  problems: {len(problems)}")
     for problem in problems:
         print(f"    {problem}")
@@ -365,7 +369,10 @@ def positions(*, limit: int | None) -> int:
     print(f"\n[positions] {S1_STRATEGY_ID} {s1_version}", flush=True)
     print(f"            {S3_STRATEGY_ID} {s3_version}", flush=True)
     print(f"            builder {builder_version}", flush=True)
-    print(f"            cost model {COST_MODEL_ID}   carry_unmodelled {CARRY_UNMODELLED}", flush=True)
+    print(
+        f"            cost model {COST_MODEL_ID}   carry_unmodelled {CARRY_UNMODELLED}   fx_unmodelled {FX_UNMODELLED}",
+        flush=True,
+    )
     window = Window(start=date(1900, 1, 1), end=EVALUATION_END)
     print(f"            window {window.start} … {window.end}   (the whole corpus; nothing purged)", flush=True)
 

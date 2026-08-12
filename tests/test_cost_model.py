@@ -12,15 +12,18 @@ four functions over it.
 from __future__ import annotations
 
 from decimal import Decimal
+from unittest import mock
 
 import pytest
 
+from app.services import cost_model
 from app.services.cost_model import (
     BANDS,
     CARRY_BPS,
     CARRY_UNMODELLED,
     COST_MODEL_ID,
     FX_BPS,
+    FX_UNMODELLED,
     PRICE_BASES,
     UNKNOWN_NOMINAL_PRICE_BAND,
     PriceBand,
@@ -257,3 +260,60 @@ class TestCarryIsNullNotZero:
         DERIVED from the two constants above, so measuring carry flips it
         without anybody remembering to."""
         assert CARRY_UNMODELLED is True
+
+    def test_the_fx_marker_is_set_and_is_its_own_flag(self) -> None:
+        """#2363 — FX has its own marker rather than riding on carry's.
+
+        ⚠ Both are asserted TRUE here and that is the current state, not the
+        invariant. The invariant is that they are INDEPENDENT, which this file
+        cannot show because both are derived at import; it is shown by
+        ``test_prereg_declaration_gate``'s four-state parametrisation over
+        ``structural_promotion_refusals``, which is the function the gate and
+        the preregistration freeze both call.
+        """
+        assert FX_UNMODELLED is True
+
+    @pytest.mark.parametrize(
+        "carry_bps,fx_bps,expected",
+        [
+            (None, None, (True, True)),
+            (Decimal("1.5"), None, (False, True)),
+            (None, Decimal("2.5"), (True, False)),
+            (Decimal("1.5"), Decimal("2.5"), (False, False)),
+        ],
+    )
+    def test_each_marker_reads_only_its_own_amount(
+        self, carry_bps: Decimal | None, fx_bps: Decimal | None, expected: tuple[bool, bool]
+    ) -> None:
+        """⚠⚠ THE DE-COUPLING ITSELF, which was unguarded until a revert-probe
+        said so: restoring the pre-#2363 ``CARRY_BPS is None or FX_BPS is None``
+        broke no test, because both amounts are ``None`` today and the two
+        expressions cannot be told apart while that holds. The two mixed rows
+        below are the ones that matter — under the coupled rule each would
+        return ``(True, ...)``.
+        """
+        assert cost_model.unmodelled_markers(carry_bps, fx_bps) == expected
+
+    def test_a_component_may_not_carry_an_amount_that_nothing_charges(self) -> None:
+        """⚠⚠ THE FALSE-PROMOTION TRIPWIRE (#2363, found by Codex checkpoint 1).
+
+        ``CARRY_BPS`` and ``FX_BPS`` are added to no price anywhere — verified
+        by grep, not assumed — so setting one to a measured number would clear
+        its promotion refusal WITHOUT charging the cost, making every result
+        under this model promotable while modelling exactly what it modelled
+        before. The guard runs at import; this asserts it actually refuses,
+        because a guard nobody has seen fail is a comment.
+        """
+        with pytest.raises(ValueError, match="nothing in this module adds it to a price"):
+            with mock.patch.object(cost_model, "CARRY_BPS", Decimal("0.5")):
+                cost_model._check_unmodelled_components_are_not_charged()
+
+    def test_the_tripwire_names_every_component_that_is_set(self) -> None:
+        """Both, not just the first — an operator fixing one must see the other."""
+        with pytest.raises(ValueError, match="CARRY_BPS, FX_BPS") as excinfo:
+            with (
+                mock.patch.object(cost_model, "CARRY_BPS", Decimal("0.5")),
+                mock.patch.object(cost_model, "FX_BPS", Decimal("0.25")),
+            ):
+                cost_model._check_unmodelled_components_are_not_charged()
+        assert "new COST_MODEL_ID" in str(excinfo.value)

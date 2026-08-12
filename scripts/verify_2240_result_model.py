@@ -61,7 +61,7 @@ from decimal import Decimal
 import psycopg
 
 from app.config import settings
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID
+from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELLED
 from app.services.strategies.validated_universe import load_validated_universe
 from app.services.strategy_result import (
     BENCHMARK_RULE,
@@ -453,6 +453,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
             metrics=_metrics(effective_sample_size=None),
             universe_basis="survivor_only",
             carry_unmodelled=CARRY_UNMODELLED,
+            fx_unmodelled=FX_UNMODELLED,
             evaluated_instrument_count=len(evaluated),
         ),
         evaluated_instrument_ids=evaluated,
@@ -476,6 +477,7 @@ def gate(conn: psycopg.Connection[tuple]) -> int:
             metrics=_metrics(effective_sample_size=128.5),
             universe_basis="survivorship_free",
             carry_unmodelled=False,
+            fx_unmodelled=False,
             evaluated_instrument_count=len(evaluated),
             trial_count=41,
             deflated_sharpe=Decimal("0.31"),

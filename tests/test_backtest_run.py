@@ -426,6 +426,7 @@ class TestExpectedRefusals:
         assert STANDING_REFUSALS == {
             "universe_basis_not_survivorship_free",
             "carry_unmodelled",
+            "fx_unmodelled",
             "promotion_evidence_missing",
         }
         assert "synthetic_control_not_run" not in STANDING_REFUSALS

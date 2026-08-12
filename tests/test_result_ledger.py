@@ -210,6 +210,7 @@ def build_result(**overrides: object) -> StrategyResult:
         "metrics": build_metrics(),
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
+        "fx_unmodelled": True,
         "evaluated_instrument_count": 5266,
         "trial_count": None,
         "deflated_sharpe": None,

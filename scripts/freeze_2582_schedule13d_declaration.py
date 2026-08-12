@@ -121,6 +121,8 @@ def build_declaration() -> PreregDeclaration:
 
     universe_basis = "survivor_only"
     carry_unmodelled = True
+    # #2363 split the cost refusal; FX is unmodelled on the same stamp.
+    fx_unmodelled = True
     return PreregDeclaration(
         strategy_id=STRATEGY_ID,
         strategy_version=STRATEGY_VERSION,
@@ -129,12 +131,13 @@ def build_declaration() -> PreregDeclaration:
         structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
         declared_universe_basis=universe_basis,
         declared_carry_unmodelled=carry_unmodelled,
+        declared_fx_unmodelled=fx_unmodelled,
         # ⚠ COMPUTED, never written out. A hand-typed list is a second copy of
         # the refusal policy that drifts the first time the policy moves — and
         # `declaration_refusals` would then refuse this row with
         # `expected_structural_refusals_mismatch`, which is the check working.
         expected_structural_refusals=structural_promotion_refusals(
-            universe_basis=universe_basis, carry_unmodelled=carry_unmodelled
+            universe_basis=universe_basis, carry_unmodelled=carry_unmodelled, fx_unmodelled=fx_unmodelled
         ),
         forward_shadow=ForwardShadowFloor(
             min_independent_decision_dates=MIN_FORWARD_DECISION_DATES,

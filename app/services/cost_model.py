@@ -90,8 +90,10 @@ SESSION_RULE = "NYSE regular session 09:30–16:00 ET (13:00 ET on a half day), 
 CALIBRATION_POPULATION = "§4.0 validated universe (app.services.strategies.validated_universe)"
 CALIBRATION_QUOTES_IN_SESSION = 1_159
 
-#: ⚠ FOUR LIMITS INHERITED FROM §5.1, EVERY ONE STILL LIVE. They are constants
-#: rather than prose so stage 5c can put them on the result row.
+#: ⚠ FIVE LIMITS, EVERY ONE STILL LIVE — §5.1's four, with its fourth split in
+#: two by #2363 because carry and FX close on different evidence and one of them
+#: will be live while the other is not. They are constants rather than prose so
+#: stage 5c can put them on the result row.
 #:
 #: 1. The sample is one hour of the day — 1,149 of the 1,159 in-session captures
 #:    sit at UTC hour 19 (15:00–15:59 ET), the session's final and most liquid
@@ -100,7 +102,10 @@ CALIBRATION_QUOTES_IN_SESSION = 1_159
 #:    universe, and the ``<$5`` band rests on 76 of them.
 #: 3. Those captures land on 9 distinct NY dates in one summer. Nothing here
 #:    observes a volatile regime.
-#: 4. Carry and FX are NULL, not zero.
+#: 4. Carry is NULL, not zero.
+#: 5. FX is NULL, not zero — and it is a SEPARATE limit, not a clause of 4:
+#:    carry closes on a per-order product eligibility proving underlying-at-x1,
+#:    FX on the funding account's currency and a measured conversion markup.
 #:
 #: ⚠ Every figure in this tuple is printed by ``--calibrate``. It is written
 #: down because 5c has to put it on a result row, and a hand-written statistic
@@ -111,7 +116,8 @@ CALIBRATION_LIMITS: tuple[str, ...] = (
     "one hour of the day — 1,149 of 1,159 in-session captures are at UTC hour 19 (15:00-15:59 ET)",
     "a sample — 1,159 in-session quotes against a 6,735-instrument universe; the <$5 band rests on 76",
     "9 distinct NY capture dates in one summer; no volatile regime is observed",
-    "carry and FX are unmodelled (CARRY_BPS / FX_BPS are None, not zero)",
+    "carry is unmodelled (CARRY_BPS is None, not zero)",
+    "FX is unmodelled (FX_BPS is None, not zero)",
 )
 
 #: ⚠⚠ NULL, NOT ZERO, AND THE DIFFERENCE IS THE #2286 SHAPE — *"a value that is
@@ -129,12 +135,73 @@ CALIBRATION_LIMITS: tuple[str, ...] = (
 CARRY_BPS: Decimal | None = None
 FX_BPS: Decimal | None = None
 
+
 #: ⚠ DERIVED, never hand-written. When carry is finally measured, setting
 #: ``CARRY_BPS`` flips this by itself — a hand-written ``True`` would have to be
 #: remembered, and §5.1 makes this marker the thing the promotion gate refuses
 #: on: *"statistics are computed and published with an explicit
 #: ``carry_unmodelled`` marker; they are not promotable"*.
-CARRY_UNMODELLED: bool = CARRY_BPS is None or FX_BPS is None
+#:
+#: ⚠⚠ #2363 NARROWED THIS. It used to be ``CARRY_BPS is None or FX_BPS is
+#: None`` — one flag for two components, so a stored ``True`` could not say
+#: which was missing and neither half could be banked when its evidence
+#: arrived. Promotion still requires BOTH clear; the split is diagnostic, not a
+#: relaxation.
+def unmodelled_markers(carry_bps: Decimal | None, fx_bps: Decimal | None) -> tuple[bool, bool]:
+    """``(carry_unmodelled, fx_unmodelled)`` — EACH FROM ITS OWN AMOUNT ONLY.
+
+    ⚠⚠ A FUNCTION RATHER THAN TWO INLINE EXPRESSIONS, AND THE REASON IS A FAILED
+    REVERT-PROBE. Re-coupling the carry marker to FX — restoring the pre-#2363
+    ``CARRY_BPS is None or FX_BPS is None`` — changed the value of no test,
+    because both amounts are ``None`` today and the coupled and uncoupled
+    expressions are indistinguishable while that holds. The de-coupling this
+    ticket exists to deliver was therefore unguarded at the point it lives.
+
+    Taking the amounts as ARGUMENTS is what makes it observable: the test drives
+    all four combinations, so a marker that consults the other component's
+    amount fails immediately rather than in whichever quarter one of them is
+    finally measured.
+    """
+    return carry_bps is None, fx_bps is None
+
+
+#: The FX half is separate evidence, a separate owner and a separate arrival
+#: date — see the module docstring and #2363.
+CARRY_UNMODELLED, FX_UNMODELLED = unmodelled_markers(CARRY_BPS, FX_BPS)
+
+
+def _check_unmodelled_components_are_not_charged() -> None:
+    """Neither component may carry an amount until something CHARGES it.
+
+    ⚠⚠ THIS IS THE HOLE #2363's CODEX PASS FOUND, AND IT IS NOT HYPOTHETICAL.
+    ``CARRY_BPS`` and ``FX_BPS`` are referenced nowhere except the two flags
+    above, ``__all__``, and a test asserting they are ``None`` — no price, no
+    return and no equity mark has ever added either of them. So setting one to a
+    measured number would clear its promotion refusal *without charging the
+    cost*, and every result under that model would become promotable while
+    modelling exactly what it modelled the day before. That is #2286's shape
+    ("a value that is present and wrong beats a value that is absent and
+    refused") aimed straight at the gate.
+
+    The guard is at IMPORT for the reason ``_check_bands_are_total`` is: this is
+    an edit somebody makes to the literal above, so the check belongs beside the
+    literal rather than in a test file they may not run.
+
+    ⚠ Removing this guard is part of the work of charging a component, not a
+    prerequisite to be waived: charge it in the position arithmetic, ship a new
+    ``COST_MODEL_ID`` (the module rule — a change to what is charged is a new
+    model, not a silent improvement), then delete the clause that names it here.
+    """
+    charged_nowhere = [name for name, value in (("CARRY_BPS", CARRY_BPS), ("FX_BPS", FX_BPS)) if value is not None]
+    if charged_nowhere:
+        raise ValueError(
+            f"{', '.join(charged_nowhere)} is set but nothing in this module adds it to a price — clearing the "
+            "promotion refusal without charging the cost would promote every result under this model while "
+            "modelling nothing new. Charge it in the position arithmetic and ship a new COST_MODEL_ID first."
+        )
+
+
+_check_unmodelled_components_are_not_charged()
 
 
 @dataclass(frozen=True)
@@ -342,6 +409,7 @@ __all__ = [
     "CARRY_UNMODELLED",
     "COST_MODEL_ID",
     "FX_BPS",
+    "FX_UNMODELLED",
     "PRICE_BASES",
     "SESSION_RULE",
     "PriceBand",
@@ -352,4 +420,5 @@ __all__ = [
     "cost_band_for",
     "half_spread_for",
     "sell_price",
+    "unmodelled_markers",
 ]

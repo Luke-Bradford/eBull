@@ -90,6 +90,7 @@ def _freeze_declaration(conn: psycopg.Connection[Any]) -> int:
             structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
             declared_universe_basis="survivorship_free",
             declared_carry_unmodelled=False,
+            declared_fx_unmodelled=False,
             expected_structural_refusals=(),
             forward_shadow=ForwardShadowFloor(
                 min_independent_decision_dates=2,
@@ -543,7 +544,12 @@ def test_registration_refuses_a_falsification_only_trial(
             structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
             declared_universe_basis="survivor_only",
             declared_carry_unmodelled=True,
-            expected_structural_refusals=("universe_basis_not_survivorship_free", "carry_unmodelled"),
+            declared_fx_unmodelled=True,
+            expected_structural_refusals=(
+                "universe_basis_not_survivorship_free",
+                "carry_unmodelled",
+                "fx_unmodelled",
+            ),
             forward_shadow=ForwardShadowFloor(2, 1, "live-gate test fixture"),
             declared_by="operator",
         ),

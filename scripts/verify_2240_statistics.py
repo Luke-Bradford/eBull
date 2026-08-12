@@ -91,7 +91,12 @@ import numpy as np
 import psycopg
 
 from app.config import settings
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
+from app.services.cost_model import (
+    CARRY_UNMODELLED,
+    COST_MODEL_ID,
+    FX_UNMODELLED,
+    UNKNOWN_NOMINAL_PRICE_BAND,
+)
 from app.services.deflated_sharpe import (
     MIN_MEASURED_TRIALS,
     TradeMoments,
@@ -660,7 +665,10 @@ def curve(*, limit: int | None) -> int:
     print(f"\n[curve] {S1_STRATEGY_ID} {s1_version}", flush=True)
     print(f"        {S3_STRATEGY_ID} {s3_version}", flush=True)
     print(f"        builder {builder_version}", flush=True)
-    print(f"        cost model {COST_MODEL_ID}   carry_unmodelled {CARRY_UNMODELLED}", flush=True)
+    print(
+        f"        cost model {COST_MODEL_ID}   carry_unmodelled {CARRY_UNMODELLED}   fx_unmodelled {FX_UNMODELLED}",
+        flush=True,
+    )
     print(f"        sizing rule {SIZING_RULE_ID}   metric set {METRIC_SET_ID}", flush=True)
     window = Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
     print(f"        window {window.start} … {window.end}", flush=True)

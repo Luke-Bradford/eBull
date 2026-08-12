@@ -73,7 +73,7 @@ from datetime import date
 import psycopg
 
 from app.config import settings
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID
+from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELLED
 from app.services.equity_curve import SIZING_RULE_ID, LegBook, build_equity_curve
 from app.services.position_builder import Window, build_positions
 from app.services.position_costing import cost_positions
@@ -215,7 +215,7 @@ def arms(*, limit: int | None) -> int:
     print(f"\n[arms] {S1_STRATEGY_ID} {s1_version}", flush=True)
     print(f"       {S3_STRATEGY_ID} {s3_version}", flush=True)
     print(f"       builder {builder_version}   cost model {COST_MODEL_ID}", flush=True)
-    print(f"       carry_unmodelled {CARRY_UNMODELLED}", flush=True)
+    print(f"       carry_unmodelled {CARRY_UNMODELLED}   fx_unmodelled {FX_UNMODELLED}", flush=True)
     print(f"       sizing {SIZING_RULE_ID}   metrics {METRIC_SET_ID}   sensitivity {SENSITIVITY_MODEL_ID}", flush=True)
     window = Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
     print(f"       window {window.start} … {window.end}", flush=True)

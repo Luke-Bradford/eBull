@@ -495,6 +495,7 @@ def test_the_counts_move_the_promotion_gate_off_holdout_never_evaluated(
         assert set(refusals) == {
             "universe_basis_not_survivorship_free",
             "carry_unmodelled",
+            "fx_unmodelled",
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "effective_sample_size_not_computed",
@@ -871,7 +872,12 @@ def _declaration(**overrides: object) -> PreregDeclaration:
         "structural_refusal_policy_version": STRUCTURAL_REFUSAL_POLICY_VERSION,
         "declared_universe_basis": "survivor_only",
         "declared_carry_unmodelled": True,
-        "expected_structural_refusals": ("universe_basis_not_survivorship_free", "carry_unmodelled"),
+        "declared_fx_unmodelled": True,
+        "expected_structural_refusals": (
+            "universe_basis_not_survivorship_free",
+            "carry_unmodelled",
+            "fx_unmodelled",
+        ),
         "forward_shadow": ForwardShadowFloor(40, 12, "candidate power calculation"),
         "declared_by": _ACTOR,
     }
@@ -974,6 +980,7 @@ def test_storing_a_result_whose_stamps_contradict_the_declaration_is_refused(
                 prereg_purpose="capital_candidate",
                 declared_universe_basis="survivorship_free",
                 declared_carry_unmodelled=False,
+                declared_fx_unmodelled=False,
                 expected_structural_refusals=(),
             ),
         )
@@ -984,10 +991,83 @@ def test_storing_a_result_whose_stamps_contradict_the_declaration_is_refused(
                 accessed_by=_ACTOR,
                 purpose=_PURPOSE,
             )
+        # ⚠ THREE, not two (#2363): the FX twin is asserted here rather than in
+        # a test of its own, because the point is that each stamp is compared
+        # SEPARATELY — a single coupled comparison would report one code for
+        # what are three distinct substitutions.
         assert set(excinfo.value.refusals) == {
             "declared_universe_basis_substituted",
             "declared_carry_unmodelled_substituted",
+            "declared_fx_unmodelled_substituted",
         }
+
+
+@pytest.mark.parametrize(
+    "declared_carry,declared_fx,actual_carry,actual_fx,expected",
+    [
+        # Declared carry ≠ declared FX in BOTH rows. That is the load-bearing
+        # part: it is what makes the two declaration fields distinguishable, so
+        # a comparison reading the wrong one changes the outcome.
+        (True, False, True, True, "declared_fx_unmodelled_substituted"),
+        (False, True, True, True, "declared_carry_unmodelled_substituted"),
+    ],
+)
+def test_each_cost_stamp_is_compared_against_its_own_declaration(
+    ebull_test_conn: psycopg.Connection[tuple],
+    declared_carry: bool,
+    declared_fx: bool,
+    actual_carry: bool,
+    actual_fx: bool,
+    expected: str,
+) -> None:
+    """⚠⚠ THE TWO DECLARED VALUES MUST DIFFER, OR THIS PROVES NOTHING.
+
+    The test above moves all three stamps together, so every declared value it
+    compares against is ``True``. Under that fixture ``declared_fx_unmodelled``
+    and ``declared_carry_unmodelled`` are indistinguishable, and a comparison
+    reading the wrong one still fires — verified by revert-probe, not assumed:
+    re-pointing the FX comparison at ``declared.declared_carry_unmodelled``
+    passed the entire module.
+
+    ⚠ A first attempt at this test varied only the ACTUAL stamps and the probe
+    STILL passed, because the cross-wire is on the DECLARED side. The operand
+    that has to differ is the one being substituted. Each row here therefore
+    declares the two halves differently and moves exactly one of them out of
+    agreement, so exactly one code may fire.
+
+    #2363's own lesson applied one function over: when two operands coincide, an
+    assertion over the RESULT cannot tell the rules apart.
+    """
+    with ebull_test_conn.transaction(force_rollback=True):
+        freeze_preregistration(
+            ebull_test_conn,
+            _declaration(
+                declared_carry_unmodelled=declared_carry,
+                declared_fx_unmodelled=declared_fx,
+                # Kept coherent with the declared stamps, so the declaration is
+                # refused for the SUBSTITUTION and not for an incoherent freeze.
+                expected_structural_refusals=(
+                    ("universe_basis_not_survivorship_free",)
+                    + (("carry_unmodelled",) if declared_carry else ())
+                    + (("fx_unmodelled",) if declared_fx else ())
+                ),
+            ),
+        )
+        with pytest.raises(PreregDeclarationRefused) as excinfo:
+            store_holdout_result(
+                ebull_test_conn,
+                # ⚠ The basis AGREES with the declaration, so the universe code
+                # cannot stand in for the cost code being asserted.
+                build_result(
+                    namespace="hold_out",
+                    universe_basis="survivor_only",
+                    carry_unmodelled=actual_carry,
+                    fx_unmodelled=actual_fx,
+                ),
+                accessed_by=_ACTOR,
+                purpose=_PURPOSE,
+            )
+        assert set(excinfo.value.refusals) == {expected}
 
 
 _DECLARATION_UPDATE = """

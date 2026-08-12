@@ -282,6 +282,7 @@ def _load_intent(
                            AND r.window_start >= DATE '2022-01-01'
                            AND r.universe_basis = 'survivorship_free'
                            AND r.carry_unmodelled = false
+                           AND r.fx_unmodelled = false
                            AND r.trial_count IS NOT NULL
                            AND r.deflated_sharpe IS NOT NULL
                            AND r.effective_sample_size IS NOT NULL
@@ -293,6 +294,7 @@ def _load_intent(
                            AND r.window_start >= DATE '2022-01-01'
                            AND r.universe_basis = 'survivorship_free'
                            AND r.carry_unmodelled = false
+                           AND r.fx_unmodelled = false
                            AND r.trial_count IS NOT NULL
                            AND r.deflated_sharpe IS NOT NULL
                            AND r.effective_sample_size IS NOT NULL

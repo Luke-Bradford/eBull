@@ -85,7 +85,12 @@ import numpy.typing as npt
 import psycopg
 
 from app.config import settings
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
+from app.services.cost_model import (
+    CARRY_UNMODELLED,
+    COST_MODEL_ID,
+    FX_UNMODELLED,
+    UNKNOWN_NOMINAL_PRICE_BAND,
+)
 from app.services.equity_curve import SIZING_RULE_ID, EquityCurve, LegBook, build_equity_curve
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import Window, build_positions
@@ -370,6 +375,7 @@ def prepare(*, cache_root: Path, limit: int | None) -> int:
             "cohort_size": SPEC_COHORT_SIZE,
             "cost_model_id": COST_MODEL_ID,
             "carry_unmodelled": CARRY_UNMODELLED,
+            "fx_unmodelled": FX_UNMODELLED,
             "sizing_rule": SIZING_RULE_ID,
             "metric_set_id": METRIC_SET_ID,
             "quarantine_rule_set_version": QUARANTINE_RULE_SET_VERSION,
