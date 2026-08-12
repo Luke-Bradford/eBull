@@ -47,6 +47,7 @@ from app.services.scoring import (
     compute_rankings,
     compute_score,
 )
+from app.services.thesis_subject_identity import QUARANTINE_REASON
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -936,13 +937,23 @@ def _thesis_row(
     bear_value: float | None,
     created_at: datetime,
     stance: str = "buy",
+    subject_identity_ok: bool | None = True,
 ) -> dict[str, object]:
+    """A latest-thesis row as ``_load_instrument_data`` selects it.
+
+    ⚠ ``subject_identity_ok`` is not optional decoration (#2436). The scoring
+    read is FAIL-CLOSED — anything but ``True`` drops the thesis — so a fixture
+    that omits the column silently exercises the REFUSED path while looking
+    like an ordinary thesis. Defaulting to True keeps these cases testing what
+    their names say; pass False/None deliberately to test the quarantine.
+    """
     return {
         "confidence_score": confidence_score,
         "base_value": base_value,
         "bear_value": bear_value,
         "stance": stance,
         "created_at": created_at,
+        "subject_identity_ok": subject_identity_ok,
     }
 
 
@@ -1095,6 +1106,40 @@ class TestComputeScore:
         # Missing thesis is no longer penalised (per #169 — T3→T2
         # promotion relies on deterministic signals, not thesis).
         assert "stale_thesis" not in penalty_names
+
+    # ----- #2436 subject-identity quarantine -------------------------------
+    # Co-located here rather than in tests/test_thesis_subject_identity_quarantine.py
+    # because they need this class's autouse analytics stub: the fake conn is a
+    # POSITIONAL response iterator and compute_score's IAR reads are not in it.
+
+    def _quarantine_conn(self, subject_identity_ok: bool | None) -> MagicMock:
+        return _make_fake_conn(
+            fund_rows=[_fund_row(0.18, 0.55, 200_000.0, -50_000.0, 100_000.0, 1_100_000.0, 10_000_000.0)],
+            price_row=_price_row(0.05, 0.20, 0.35, 120.0),
+            quote_row=_quote_row(False, 120.0, 119.5, 120.5),
+            thesis_row=_thesis_row(0.80, 200.0, 90.0, _RECENT, subject_identity_ok=subject_identity_ok),
+            news_rows=[],
+            avg_red_flag=0.0,
+        )
+
+    def test_quarantined_thesis_is_named_in_the_value_explanation(self) -> None:
+        """#2436 — without this the explanation reads "value: base_value
+        missing", which is true of the arithmetic and false about the world: a
+        base_value exists and we refused it. The fundamentals fallback that
+        produced the score is a legitimate independent computation, but the
+        operator must be able to see which path ran and why."""
+        result = compute_score(1, self._quarantine_conn(False), "v1-balanced")
+        assert f"thesis {QUARANTINE_REASON}" in result.explanation
+
+    def test_unchecked_thesis_is_refused_like_a_failed_one(self) -> None:
+        """NULL verdict = nobody decided, which is not evidence of
+        correctness. Fail closed, same as a False verdict."""
+        result = compute_score(1, self._quarantine_conn(None), "v1-balanced")
+        assert f"thesis {QUARANTINE_REASON}" in result.explanation
+
+    def test_usable_thesis_is_not_flagged_as_quarantined(self) -> None:
+        result = compute_score(1, self._quarantine_conn(True), "v1-balanced")
+        assert QUARANTINE_REASON not in result.explanation
 
     def test_thesis_without_targets_notes_stance_not_absence(self) -> None:
         # #2005: an avoid thesis with null targets must not be reported

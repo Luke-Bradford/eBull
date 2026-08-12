@@ -25,6 +25,7 @@ from psycopg.types.json import Jsonb
 from app.services.budget import FxRateUnavailable, compute_budget_state
 from app.services.fx import FxRateNotFound, convert
 from app.services.sector_classification import resolve_sector_spdr
+from app.services.thesis_subject_identity import is_thesis_usable
 from app.services.valuation import PortfolioValuation, compute_portfolio_valuation
 
 logger = logging.getLogger(__name__)
@@ -609,16 +610,19 @@ def _thesis_accuracy(
                    t.bear_value,
                    t.stance,
                    t.confidence_score,
+                   t.thesis_id,
+                   t.subject_identity_ok,
                    f_exit.price AS exit_price
             FROM attribution a
             JOIN instruments i USING (instrument_id)
             LEFT JOIN LATERAL (
-                SELECT base_value, bull_value, bear_value, stance, confidence_score
+                SELECT thesis_id, base_value, bull_value, bear_value, stance, confidence_score,
+                       subject_identity_ok
                 FROM theses
                 WHERE instrument_id = a.instrument_id
                   AND a.entry_anchor IS NOT NULL
                   AND created_at <= a.entry_anchor
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, thesis_version DESC
                 LIMIT 1
             ) t ON true
             LEFT JOIN fills f_exit ON f_exit.fill_id = a.exit_fill_id
@@ -630,9 +634,22 @@ def _thesis_accuracy(
     results: list[dict[str, Any]] = []
     for r in rows:
         exit_price = r["exit_price"]
-        bull_value = r["bull_value"]
-        base_value = r["base_value"]
-        bear_value = r["bear_value"]
+        # #2436 — attribution says WHICH target a realised exit hit. Judged
+        # against a band written about a different company it does not produce
+        # a weak label, it produces a confident wrong one, which is worse:
+        # `target_hit` is read as a statement about the thesis's accuracy.
+        #
+        # ⚠ The WHOLE thesis contribution goes, not just the three bands. The
+        # stance and the confidence are that same memo's, and a row carrying an
+        # authoritative-looking stance beside a null band is a mixed record.
+        # thesis_id separates "no thesis existed at entry" from "one existed
+        # and was refused" — the LEFT JOIN LATERAL nulls every column in both
+        # cases, so the verdict column alone cannot tell them apart.
+        thesis_present = r["thesis_id"] is not None
+        thesis_usable = is_thesis_usable(r)
+        bull_value = r["bull_value"] if thesis_usable else None
+        base_value = r["base_value"] if thesis_usable else None
+        bear_value = r["bear_value"] if thesis_usable else None
 
         target_hit: str | None
         if exit_price is None or bull_value is None or base_value is None or bear_value is None:
@@ -651,8 +668,9 @@ def _thesis_accuracy(
                 "instrument_id": r["instrument_id"],
                 "symbol": r["symbol"],
                 "gross_return_pct": _dec(r["gross_return_pct"]),
-                "stance": r["stance"],
-                "confidence_score": _dec(r["confidence_score"]),
+                "stance": r["stance"] if thesis_usable else None,
+                "confidence_score": _dec(r["confidence_score"]) if thesis_usable else None,
+                "thesis_quarantined": thesis_present and not thesis_usable,
                 "exit_price": _dec(exit_price),
                 "base_value": _dec(base_value),
                 "bull_value": _dec(bull_value),
@@ -1722,6 +1740,13 @@ def _thesis_summary(thesis_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "hits": len(hits),
         "misses": len(misses),
         "not_evaluable": not_evaluable,
+        # #2436 — a refused thesis and an absent one both land in
+        # not_evaluable, and the summary is exactly where that conflation does
+        # damage: a rising not_evaluable count reads as "we lack data" when the
+        # truth is "we hold data we refuse to score against"
+        # (docs/review-prevention-log.md:2820). Published as its own number, a
+        # subset of not_evaluable, never instead of it.
+        "quarantined": sum(1 for r in thesis_rows if r.get("thesis_quarantined")),
         "buy": _rate("buy"),
         "avoid": _rate("avoid"),
     }

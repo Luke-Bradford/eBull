@@ -38,6 +38,7 @@ from app.services.instrument_analytics import (
     compute_peer_grades,
 )
 from app.services.sector_classification import resolve_sector_spdr
+from app.services.thesis_subject_identity import QUARANTINE_REASON, is_thesis_usable
 from app.services.xbrl_derived_stats import (
     MarketCapResolution,
     resolve_market_cap_basis,
@@ -1286,7 +1287,8 @@ def _load_instrument_data(
         # Latest thesis (confidence + valuation bands + stance + created_at)
         cur.execute(
             """
-            SELECT confidence_score, base_value, bear_value, stance, created_at
+            SELECT confidence_score, base_value, bear_value, stance, created_at,
+                   subject_identity_ok
             FROM theses
             WHERE instrument_id = %(id)s
             ORDER BY thesis_version DESC
@@ -1295,6 +1297,14 @@ def _load_instrument_data(
             {"id": instrument_id},
         )
         thesis_row: dict[str, Any] | None = cur.fetchone()
+        # #2436 — the value family reads base_value/bear_value and the stance;
+        # a memo about a different company supplies all three. Drop the row
+        # entirely rather than null the bands: the confidence and the stance
+        # are that same memo's, and a half-kept thesis is a mixed record that
+        # reads as partly authoritative.
+        thesis_quarantined = thesis_row is not None and not is_thesis_usable(thesis_row)
+        if thesis_quarantined:
+            thesis_row = None
 
         # Recent news sentiment (last 30 days).
         # Cutoff is a full TIMESTAMPTZ to match the event_time column type.
@@ -1490,6 +1500,7 @@ def _load_instrument_data(
         "price_row": price_row,
         "quote_row": quote_row,
         "thesis_row": thesis_row,
+        "thesis_quarantined": thesis_quarantined,
         "news_rows": news_rows,
         # AVG() always returns one row, even when no matching rows exist (returns NULL).
         # rf_row is therefore never None; avg_red_flag may be None if no filings matched.
@@ -1516,6 +1527,7 @@ def _empty_instrument_data() -> dict[str, Any]:
         "price_row": None,
         "quote_row": None,
         "thesis_row": None,
+        "thesis_quarantined": False,
         "news_rows": [],
         "avg_red_flag_score": None,
         "valuation_row": None,
@@ -1633,7 +1645,8 @@ def _bulk_load_instrument_data(
         cur.execute(
             """
             SELECT DISTINCT ON (instrument_id)
-                   instrument_id, confidence_score, base_value, bear_value, stance, created_at
+                   instrument_id, confidence_score, base_value, bear_value, stance, created_at,
+                   subject_identity_ok
             FROM theses
             WHERE instrument_id = ANY(%(ids)s::bigint[])
             ORDER BY instrument_id, thesis_version DESC
@@ -1641,7 +1654,14 @@ def _bulk_load_instrument_data(
             p,
         )
         for r in cur.fetchall():
-            out[int(r.pop("instrument_id"))]["thesis_row"] = r
+            # #2436 — same rule as the single-instrument path above. Batch and
+            # single MUST agree: a score that depends on which entry point
+            # computed it is not a score.
+            iid = int(r.pop("instrument_id"))
+            if not is_thesis_usable(r):
+                out[iid]["thesis_quarantined"] = True
+                continue
+            out[iid]["thesis_row"] = r
 
         # News sentiment rows (last 30d). Deterministic tie-break on news_event_id
         # so list order is reproducible (the sentiment aggregate is an
@@ -1977,6 +1997,13 @@ def _score_from_data(
         price_target_mean=None,
         thesis_stance=str(thesis_row["stance"]) if thesis_row and thesis_row["stance"] is not None else None,
     )
+    if data.get("thesis_quarantined"):
+        # #2436 — without this the explanation reads "value: base_value
+        # missing", which is true of the arithmetic and false about the world:
+        # a base_value exists, and we refused it. The fundamentals fallback
+        # that produced this score is a legitimate independent computation,
+        # but the operator has to be able to tell which path ran and why.
+        v_notes = [f"thesis {QUARANTINE_REASON}", *v_notes]
     if v_notes:
         explanation_parts.append("value: " + "; ".join(v_notes))
 

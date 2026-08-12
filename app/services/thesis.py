@@ -51,7 +51,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Final, Literal
+from typing import Any, Literal
 
 import psycopg
 import psycopg.rows
@@ -81,6 +81,17 @@ from app.services.technical_analysis import derive_trend_signals
 # no cycle risk by construction (its module docstring pins that contract).
 from app.services.thesis_break import sanitize_writer_break_predicates
 from app.services.thesis_context_audit import hash_context, summarize_context
+
+# #2436 — the subject-identity rule moved out of this module so its
+# ``RULE_SET_VERSION`` can be a hash of the rule alone. Same pure-stdlib
+# contract as thesis_break above, so no cycle risk.
+from app.services.thesis_subject_identity import (
+    RULE_SET_VERSION as SUBJECT_IDENTITY_RULE_VERSION,
+)
+from app.services.thesis_subject_identity import (
+    memo_names_subject as _memo_names_subject,
+)
+from app.services.thesis_subject_identity import subject_is_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -1616,138 +1627,6 @@ def _call_with_one_retry(
 # uses them, which is how they leaked into memo prose in the first place.
 _PLACEHOLDER_RE = re.compile(r"\[[A-Za-z][A-Za-z ]{0,24}\](?!\()|<[a-z][a-z ]{0,24}>")
 
-#: Trailing legal forms stripped before matching a company name in a memo. A
-#: correct memo says "Open Text" or "OpenText", never "Open Text Corp".
-_CORPORATE_SUFFIXES: Final = (
-    "corporation",
-    "incorporated",
-    "holdings",
-    "holding",
-    "company",
-    "limited",
-    "group",
-    "corp",
-    "inc",
-    "ltd",
-    "plc",
-    "nv",
-    "sa",
-    "ag",
-    "co",
-)
-
-
-def _squash(text: str) -> str:
-    """Lowercase, alphanumerics only — so "OpenText" matches "Open Text Corp"."""
-    return re.sub(r"[^a-z0-9]", "", text.lower())
-
-
-def _memo_names_subject(memo: str, instrument: object) -> bool:
-    """Does the memo name the company it is supposed to be about? (#2431)
-
-    ⚠⚠ THE GATE THAT #2235 WANTED AND COULD NOT FIND. That ticket closed the
-    PLACEHOLDER half deterministically and left misattribution to prose,
-    recording that it lacked "a clean discriminator". This is one, and it is
-    verified on the FULL stored corpus rather than argued:
-
-    ```text
-    ver      n   REJECTS   reject-rate
-     v1     25         0       0.0%
-     v2     36         0       0.0%
-     v3     71         0       0.0%
-     v4    355         0       0.0%      <- 487 known-good memos, ZERO rejected
-     v5   2038      1378      67.6%
-     v6    127       127     100.0%
-    ```
-
-    Reproduce with ``scripts/verify_2431_subject_identity.py``. The load-bearing
-    number is the FIRST FOUR ROWS, not the last two: a narrowing gate is only
-    safe if it rejects nothing correct, and v1-v4 are the populations where the
-    writer was demonstrably naming the right company.
-
-    ⚠ Three spellings are accepted, because a correct memo uses whichever reads
-    best and all three are the subject:
-
-      1. the SYMBOL on a word boundary — "OTEX";
-      2. the full company name minus its legal suffix, squashed — so
-         "OpenText Corporation" matches ``Open Text Corp``;
-      3. the LEADING TOKEN when it is >= 5 characters — "Axalta" for
-         ``Axalta Coating Systems Ltd``, "Costco" for ``Costco Wholesale
-         Corp``. ⚠ Five, not four, and the bound is measured: those two were
-         the ONLY false positives across 487 known-good memos before this
-         clause, and a 4-character bound would admit generic leads like "Open"
-         (``Open Text Corp``), where spelling 2 is the discriminator instead.
-
-    ⚠ Presence, NOT exclusivity. A memo may name peers and the benchmark — the
-    system prompt allows exactly that ("versus <peer>"). This asks only whether
-    the subject appears at all, which is the failure actually observed: memos
-    about Microsoft, Tesla and Apple that never mention their own instrument.
-    """
-    if not isinstance(instrument, dict):
-        return True  # nothing to check against; the schema gates elsewhere
-
-    symbol = str(instrument.get("symbol") or "").strip()
-    if symbol:
-        # ⚠⚠ CASE-SENSITIVE, and for a SHORT symbol also position-sensitive.
-        # 2,186 of 12,696 symbols in the universe are three characters or fewer
-        # (17.2%) and many are ordinary words — ON, IT, ALL, KEY, CAR. A
-        # case-insensitive bare match would let "Apple is executing on AI" pass
-        # as an ON Semiconductor memo, which is precisely the misattribution
-        # this gate exists to catch (Codex checkpoint 2). Tickers are written
-        # in caps, so requiring caps costs a correct memo nothing; a short one
-        # additionally has to appear where a ticker appears — "(ON)",
-        # "NASDAQ: ON" — rather than anywhere in the prose.
-        if len(symbol) >= 4 and re.search(rf"\b{re.escape(symbol)}\b", memo):
-            return True
-
-    raw_name = str(instrument.get("company_name") or "").strip()
-    # ⚠⚠ A SUFFIX IS A TOKEN, NOT A TRAILING SUBSTRING (#2434 review). Matching
-    # the substring mangles 1,820 of 12,696 names in the universe — "Tesco"
-    # loses its "co" and becomes "tes", "Citigroup" becomes "citi" — and a name
-    # cut below four characters can never match anything. Splitting on
-    # non-alphanumerics and popping whole trailing tokens keeps "Tesco" intact
-    # while still reducing "Axalta Coating Systems Ltd" and "Avis Budget Group
-    # Inc" to the part a memo actually writes.
-    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", raw_name) if token]
-    while len(tokens) > 1 and _squash(tokens[-1]) in _CORPORATE_SUFFIXES:
-        tokens.pop()
-    squashed = _squash("".join(tokens))
-
-    if len(squashed) < 4:
-        # ⚠ 97 instruments have BOTH a short symbol and a name too short to
-        # carry the check — 3M (MMM), Gap (GAP), NOV, AES, FMC. For those the
-        # name offers nothing, so the symbol is allowed to match as a standalone
-        # uppercase word rather than only inside ticker punctuation. The
-        # relaxation is scoped to the cases with no alternative: ON
-        # Semiconductor and Gartner (IT) keep the strict rule, because their
-        # names are long enough to do the work.
-        # ⚠ ONLY the short symbols reach the regex here: a symbol of 4+ characters
-        # already ran this exact search above and failed it, so repeating it is
-        # dead work (review round 2).
-        if symbol and len(symbol) < 4 and re.search(rf"\b{re.escape(symbol)}\b", memo):
-            return True
-        # ⚠ CASE-SENSITIVE for a short name, which is what separates the company
-        # "Gap" from the English word "gap". A memo writing "Gap Inc. comped
-        # positive" names its subject; one writing "the valuation gap widened"
-        # does not, and a case-insensitive match could not tell them apart.
-        short = " ".join(tokens)
-        return bool(short) and re.search(rf"\b{re.escape(short)}\b", memo) is not None
-
-    if symbol and len(symbol) < 4 and re.search(rf"(?:[(:]\s*{re.escape(symbol)}\b|\b{re.escape(symbol)}\s*\))", memo):
-        return True
-
-    # ⚠⚠ A PREFIX OF THE NAME, not its leading TOKEN. A correct memo shortens a
-    # long name — "Axalta" for ``Axalta Coating Systems Ltd``, "Costco" for
-    # ``Costco Wholesale Corp`` — and those two were the only false positives
-    # across 487 known-good memos when the full name was required. But matching
-    # the leading token alone is far too loose: 3,360 companies (26.5%) share a
-    # >= 5-character leading token with a DIFFERENT issuer, so ``Apple
-    # Hospitality REIT Inc`` would accept a memo titled "Apple Inc. (AAPL)"
-    # (Codex checkpoint 2). A six-character prefix of the squashed name splits
-    # them exactly: "axalta" and "costco" still match, while Apple Hospitality
-    # needs "appleh", which an Apple Inc memo does not contain.
-    return squashed[:6] in _squash(memo)
-
 
 def _call_writer(client: LLMClient, context: dict[str, object]) -> tuple[dict[str, object], LLMCompletion]:
     """
@@ -1931,6 +1810,7 @@ def _insert_thesis_atomic(
     *,
     model: str,
     provider: str,
+    subject: object = None,
 ) -> tuple[int, int]:
     """
     Insert a new thesis row and return (thesis_id, thesis_version).
@@ -1943,6 +1823,22 @@ def _insert_thesis_atomic(
     ``model`` is the model string AS REPORTED by the provider response
     (not the configured knob) and ``provider`` the resolved provider name —
     stored with ``_PROMPT_VERSION`` so every memo is attributable (#1919).
+
+    ``subject`` is the context's instrument block — the same object
+    ``_validate_writer_output`` checked the memo against. #2436 stores the
+    subject-identity VERDICT on the row so consumers read a decision instead of
+    re-deriving one under whatever rule is current at read time.
+
+    ⚠⚠ THE VERDICT IS RECOMPUTED HERE, not assumed from "the validator let this
+    through". ``memo_names_subject`` returns True when the subject is not a dict
+    ("nothing to check against; the schema gates elsewhere") — that is
+    UNCHECKED, not PASSED, and stamping ``subject_identity_ok = true`` on it
+    would be a lie in the column a consumer trusts most. No usable subject
+    therefore stores the whole triple NULL, which the consumers fail closed on.
+
+    ⚠ Correspondence between ``subject`` and ``instrument_id`` holds by
+    construction, not by check: ``_build_context`` reads the instrument block
+    from the same ``instrument_id`` this function is passed, in the same call.
 
     Must be called inside an open transaction.
     """
@@ -1963,6 +1859,16 @@ def _insert_thesis_atomic(
             "; ".join(dropped),
         )
 
+    # #2436 — the triple is all-set or all-NULL (sql/332 CHECK). No usable
+    # subject means nobody decided, which stores NULL.
+    # ⚠ An EMPTY instrument dict is not a checkable subject. _build_context
+    # yields ``{}`` when the instruments row is missing, and the rule would
+    # score that False — "checked and failed" — when the truth is that there
+    # was nothing to check against.
+    subject_ok: bool | None = None
+    if subject_is_checkable(subject):
+        subject_ok = _memo_names_subject(str(writer["memo_markdown"]), subject)
+
     row = conn.execute(
         """
         INSERT INTO theses (
@@ -1971,7 +1877,8 @@ def _insert_thesis_atomic(
             buy_zone_low, buy_zone_high,
             base_value, bull_value, bear_value,
             break_conditions_json, break_predicates_json, memo_markdown, critic_json,
-            model, provider, prompt_version
+            model, provider, prompt_version,
+            subject_identity_ok, subject_identity_rule_version, subject_identity_checked_at
         )
         VALUES (
             %(instrument_id)s,
@@ -1981,7 +1888,10 @@ def _insert_thesis_atomic(
             %(buy_zone_low)s, %(buy_zone_high)s,
             %(base_value)s, %(bull_value)s, %(bear_value)s,
             %(break_conditions_json)s, %(break_predicates_json)s, %(memo_markdown)s, %(critic_json)s,
-            %(model)s, %(provider)s, %(prompt_version)s
+            %(model)s, %(provider)s, %(prompt_version)s,
+            %(subject_identity_ok)s,
+            CASE WHEN %(subject_identity_ok)s IS NULL THEN NULL ELSE %(subject_identity_rule_version)s END,
+            CASE WHEN %(subject_identity_ok)s IS NULL THEN NULL ELSE now() END
         )
         RETURNING thesis_id, thesis_version
         """,
@@ -2002,6 +1912,8 @@ def _insert_thesis_atomic(
             "model": model,
             "provider": provider,
             "prompt_version": _PROMPT_VERSION,
+            "subject_identity_ok": subject_ok,
+            "subject_identity_rule_version": SUBJECT_IDENTITY_RULE_VERSION,
         },
     ).fetchone()
 
@@ -2275,6 +2187,10 @@ def generate_thesis(
                 critic_output if critic_output else None,
                 model=writer_completion.model,
                 provider=clients.writer.provider_name,
+                # #2436 — the same object _validate_writer_output checked the
+                # memo against, so the stored verdict and the write-time gate
+                # can never disagree about which subject was expected.
+                subject=context.get("instrument"),
             )
             # #2009 PR-B: snapshot band-vs-LLM divergence in the same atomic
             # txn as the thesis insert (FK requires thesis_id to exist first).
