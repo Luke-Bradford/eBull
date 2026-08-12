@@ -987,15 +987,27 @@ def verify_outcome_access_provenance(
     write half is ``require_outcome_access``, which the caller must have run and
     committed first.
 
-    ⚠⚠ STATED LIMIT, because overstating one is what #2614 exists to fix. The
-    named access must be the NEWEST ``read`` for the trial, which stops a copied
-    ``access_id`` from authorising look after look — but a caller who
-    hand-constructs the value object AND records a fresh access first is
-    indistinguishable from a legitimate run, and one who skips these helpers
-    entirely and ``SELECT``s the price tables is not observed at all. That second
-    case is the same acknowledged class as ``sql/264``'s RLS finding. What is
-    enforced is every path that loads outcomes THROUGH THIS EVALUATOR; the
-    honest claim is not "no path exists".
+    ⚠⚠ STATED LIMITS, because overstating one is what #2614 exists to fix — and
+    the first draft of this docstring did exactly that until Codex checkpoint 3
+    called it. Three things this does NOT establish:
+
+    1. **It is not single-use.** The named access must be the NEWEST ``read``
+       for the trial, which rules out reuse of a STALE id. A caller holding the
+       newest id can reuse it until some other read is recorded. Real single-use
+       needs consumable state, and this is an append-only audit log.
+    2. **It is snapshot-relative.** Callers run inside a ``REPEATABLE READ``
+       transaction, so a read committed after that snapshot is invisible and two
+       concurrent gates can both pass.
+    3. **It does not bind a caller who bypasses these helpers.** One who
+       hand-constructs the value object AND records a fresh access first is
+       indistinguishable from a legitimate run; one who ``SELECT``s the price
+       tables directly is not observed at all — the same acknowledged class as
+       ``sql/264``'s RLS finding.
+
+    What IS enforced: every path that loads outcomes THROUGH THIS EVALUATOR
+    presents a coherent, digest-intact declaration frozen strictly before a
+    committed, non-superseded access bound to the same trial. That is a narrower
+    claim than "no path exists", and narrower is the point.
 
     Raises ``PreregDeclarationRefused`` carrying every code that fired.
     """
@@ -1023,13 +1035,27 @@ def verify_outcome_access_provenance(
             refusals.append("outcome_access_kind_mismatch")
         if not frozen_before_access:
             refusals.append("declaration_not_frozen_before_access")
-        # ⚠ #2614 Codex checkpoint 2: without this, a caller could copy ONE
-        # legitimate `access_id` and reuse it to authorise unlimited later
-        # evaluations, so "every look records an access" would hold for the first
-        # look only. Requiring the NEWEST `read` means a stale id is refused the
-        # moment any newer look is logged, and a real run always names the newest
-        # because it just wrote it. Ordered on `(accessed_at, access_id)` so two
-        # accesses sharing a transaction timestamp still order deterministically.
+        # ⚠ #2614 Codex checkpoint 2 — refuses a SUPERSEDED access id. A real run
+        # always names the newest `read`, because it has just written it.
+        #
+        # ⚠⚠ WHAT THIS DOES NOT DO, stated because overstating an enforcement is
+        # the defect this whole ticket exists to fix (Codex checkpoint 3 caught
+        # the first draft of this comment claiming it stopped "look after look").
+        # It does NOT make an access single-use: a caller holding the NEWEST
+        # `access_id` can reuse it until some other read is recorded. What it
+        # rules out is reuse of a STALE id — the careless case, where an old
+        # gate value is carried forward past later activity. Genuine single-use
+        # would need consumable state, and `strategy_holdout_accesses` is an
+        # append-only audit log by design.
+        #
+        # ⚠ And it is snapshot-relative: every caller is inside the evaluator's
+        # REPEATABLE READ transaction, so a read committed after that snapshot is
+        # invisible here. Two concurrent gates can therefore both pass. Within
+        # one run the four population calls share the snapshot, so they cannot
+        # disagree with each other.
+        #
+        # Ordered on `(accessed_at, access_id)` so two accesses sharing a
+        # transaction timestamp still order deterministically.
         if not is_latest_read:
             refusals.append("outcome_access_superseded_by_a_later_look")
     if refusals:

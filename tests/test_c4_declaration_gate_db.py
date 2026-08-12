@@ -171,13 +171,18 @@ def test_provenance_refuses_an_evaluate_kind_access(
 def test_provenance_refuses_a_stale_access_once_a_later_look_is_logged(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
-    """⚠ Codex checkpoint 2: without this, ONE access authorises every later look.
+    """⚠ Codex checkpoint 2: a STALE ``access_id`` must stop authorising looks.
 
-    A caller could copy a single legitimate ``access_id`` into a hand-built
-    ``OutcomeGate`` and evaluate repeatedly, so "every look records an access"
-    would hold for the first look only. Requiring the NEWEST ``read`` refuses the
-    stale id as soon as any newer look exists; a real run always names the newest
-    because it has just written it.
+    A caller could otherwise copy an old legitimate ``access_id`` into a
+    hand-built ``OutcomeGate`` and keep evaluating past later activity. A real
+    run always names the newest ``read``, because it has just written it.
+
+    ⚠⚠ WHAT THIS DOES NOT ASSERT, per Codex checkpoint 3: this is not single-use.
+    Holding the NEWEST id still authorises repeat evaluations until some other
+    read is recorded, and the check is relative to the caller's REPEATABLE READ
+    snapshot. Both limits are stated on
+    ``result_ledger.verify_outcome_access_provenance``; naming them here stops
+    this test from reading as a stronger guarantee than it is.
     """
 
     with ebull_test_conn.transaction():
