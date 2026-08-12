@@ -33,7 +33,7 @@ from app.services.strategy_result import (
 )
 from tests.test_result_ledger import build_result
 
-_INELIGIBLE = ("universe_basis_not_survivorship_free", "carry_unmodelled")
+_INELIGIBLE = ("universe_basis_not_survivorship_free", "carry_unmodelled", "fx_unmodelled")
 
 
 def _declaration(**overrides: object) -> PreregDeclaration:
@@ -46,6 +46,7 @@ def _declaration(**overrides: object) -> PreregDeclaration:
         "structural_refusal_policy_version": STRUCTURAL_REFUSAL_POLICY_VERSION,
         "declared_universe_basis": "survivor_only",
         "declared_carry_unmodelled": True,
+        "declared_fx_unmodelled": True,
         "expected_structural_refusals": _INELIGIBLE,
         "forward_shadow": ForwardShadowFloor(
             min_independent_decision_dates=40,
@@ -69,6 +70,7 @@ def _eligible(**overrides: object) -> PreregDeclaration:
         "prereg_purpose": "capital_candidate",
         "declared_universe_basis": "survivorship_free",
         "declared_carry_unmodelled": False,
+        "declared_fx_unmodelled": False,
         "expected_structural_refusals": (),
     }
     eligible.update(overrides)
@@ -210,18 +212,26 @@ def test_malformed_declaration_raises_at_construction(overrides: dict[str, objec
 
 
 @pytest.mark.parametrize(
-    "basis,carry,expected",
+    "basis,carry,fx,expected",
     [
-        ("survivorship_free", False, ()),
-        ("survivorship_free", True, ("carry_unmodelled",)),
-        ("survivor_only", True, _INELIGIBLE),
-        ("", True, ("universe_basis_absent", "carry_unmodelled")),
-        (None, False, ("universe_basis_absent",)),
-        ("a_label_nobody_anticipated", False, ("universe_basis_not_survivorship_free",)),
+        # ⚠ ALL FOUR (carry, fx) STATES, not just the two single-clear ones
+        # (#2363). The whole point of the split is that each closes on its own
+        # evidence, so a test that only ever moves them together would pass
+        # against the coupled flag it replaced.
+        ("survivorship_free", False, False, ()),
+        ("survivorship_free", True, True, ("carry_unmodelled", "fx_unmodelled")),
+        ("survivorship_free", True, False, ("carry_unmodelled",)),
+        ("survivorship_free", False, True, ("fx_unmodelled",)),
+        ("survivor_only", True, True, _INELIGIBLE),
+        ("", True, True, ("universe_basis_absent", "carry_unmodelled", "fx_unmodelled")),
+        (None, False, False, ("universe_basis_absent",)),
+        ("a_label_nobody_anticipated", False, False, ("universe_basis_not_survivorship_free",)),
     ],
 )
-def test_structural_refusals_are_an_allowlist(basis: str | None, carry: bool, expected: tuple[str, ...]) -> None:
-    assert structural_promotion_refusals(universe_basis=basis, carry_unmodelled=carry) == expected
+def test_structural_refusals_are_an_allowlist(
+    basis: str | None, carry: bool, fx: bool, expected: tuple[str, ...]
+) -> None:
+    assert structural_promotion_refusals(universe_basis=basis, carry_unmodelled=carry, fx_unmodelled=fx) == expected
 
 
 def test_check_promotable_still_emits_the_same_stamp_refusals() -> None:
@@ -232,15 +242,16 @@ def test_check_promotable_still_emits_the_same_stamp_refusals() -> None:
     gap, and `extend` must not have reordered them.
     """
     candidate = PromotionCandidate(
-        result=build_result(universe_basis="survivor_only", carry_unmodelled=True),
+        result=build_result(universe_basis="survivor_only", carry_unmodelled=True, fx_unmodelled=True),
         validated_universe_ids=frozenset({1}),
         evaluated_instrument_ids=frozenset({1}),
     )
     refusals = check_promotable(candidate)
     assert "universe_basis_not_survivorship_free" in refusals
     assert "carry_unmodelled" in refusals
+    assert "fx_unmodelled" in refusals
     first = refusals.index("universe_basis_not_survivorship_free")
-    assert refusals[first : first + 2] == _INELIGIBLE
+    assert refusals[first : first + len(_INELIGIBLE)] == _INELIGIBLE
 
 
 # ---------------------------------------------------------------------------

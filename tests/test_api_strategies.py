@@ -33,6 +33,7 @@ def test_result_refusals_fail_closed_without_expanding_the_database() -> None:
         "purpose": "capital_candidate",
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
+        "fx_unmodelled": True,
         "evaluated_instrument_count": 5266,
         "deflated_sharpe": None,
         "trial_count": None,
@@ -49,6 +50,7 @@ def test_result_refusals_fail_closed_without_expanding_the_database() -> None:
     ) == [
         "universe_basis_not_survivorship_free",
         "carry_unmodelled",
+        "fx_unmodelled",
         "holdout_accesses_unrecorded",
         "deflated_sharpe_not_computed",
         "trial_count_undeclared",
@@ -64,6 +66,7 @@ def test_harness_result_carries_a_permanent_refusal() -> None:
         "purpose": "harness_validation",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
+        "fx_unmodelled": False,
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 1,
         "trial_count": TRIAL_REGISTER.declared_count,
@@ -88,6 +91,7 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
         "purpose": "capital_candidate",
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
+        "fx_unmodelled": True,
         "evaluated_instrument_count": 5266,
         "deflated_sharpe": 0.8,
         "trial_count": TRIAL_REGISTER.declared_count,
@@ -108,6 +112,7 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
     ) == [
         "universe_basis_not_survivorship_free",
         "carry_unmodelled",
+        "fx_unmodelled",
         "trial_register_superseded",
     ]
 
@@ -117,6 +122,7 @@ def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing()
         "purpose": "capital_candidate",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
+        "fx_unmodelled": False,
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 0.8,
         "trial_count": TRIAL_REGISTER.declared_count,
@@ -141,6 +147,7 @@ def test_a_current_register_label_cannot_hide_a_stale_trial_count() -> None:
         "purpose": "capital_candidate",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
+        "fx_unmodelled": False,
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 0.8,
         "trial_count": 12,
@@ -166,6 +173,7 @@ def test_a_missing_count_is_not_also_described_as_superseded_when_the_version_is
         "purpose": "capital_candidate",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
+        "fx_unmodelled": False,
         "evaluated_instrument_count": 1,
         "deflated_sharpe": 0.8,
         "trial_count": None,

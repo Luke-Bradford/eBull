@@ -495,6 +495,7 @@ def test_the_counts_move_the_promotion_gate_off_holdout_never_evaluated(
         assert set(refusals) == {
             "universe_basis_not_survivorship_free",
             "carry_unmodelled",
+            "fx_unmodelled",
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "effective_sample_size_not_computed",
@@ -871,7 +872,12 @@ def _declaration(**overrides: object) -> PreregDeclaration:
         "structural_refusal_policy_version": STRUCTURAL_REFUSAL_POLICY_VERSION,
         "declared_universe_basis": "survivor_only",
         "declared_carry_unmodelled": True,
-        "expected_structural_refusals": ("universe_basis_not_survivorship_free", "carry_unmodelled"),
+        "declared_fx_unmodelled": True,
+        "expected_structural_refusals": (
+            "universe_basis_not_survivorship_free",
+            "carry_unmodelled",
+            "fx_unmodelled",
+        ),
         "forward_shadow": ForwardShadowFloor(40, 12, "candidate power calculation"),
         "declared_by": _ACTOR,
     }
@@ -974,6 +980,7 @@ def test_storing_a_result_whose_stamps_contradict_the_declaration_is_refused(
                 prereg_purpose="capital_candidate",
                 declared_universe_basis="survivorship_free",
                 declared_carry_unmodelled=False,
+                declared_fx_unmodelled=False,
                 expected_structural_refusals=(),
             ),
         )
@@ -984,9 +991,14 @@ def test_storing_a_result_whose_stamps_contradict_the_declaration_is_refused(
                 accessed_by=_ACTOR,
                 purpose=_PURPOSE,
             )
+        # ⚠ THREE, not two (#2363): the FX twin is asserted here rather than in
+        # a test of its own, because the point is that each stamp is compared
+        # SEPARATELY — a single coupled comparison would report one code for
+        # what are three distinct substitutions.
         assert set(excinfo.value.refusals) == {
             "declared_universe_basis_substituted",
             "declared_carry_unmodelled_substituted",
+            "declared_fx_unmodelled_substituted",
         }
 
 

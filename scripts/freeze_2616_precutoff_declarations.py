@@ -170,6 +170,8 @@ def _build(
     verify_preregistration_document(trial)
     universe_basis = "survivor_only"
     carry_unmodelled = True
+    # #2363 split the cost refusal; FX is unmodelled on the same stamp.
+    fx_unmodelled = True
     return PreregDeclaration(
         strategy_id=trial.strategy_id,
         strategy_version=trial.strategy_version,
@@ -178,10 +180,11 @@ def _build(
         structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
         declared_universe_basis=universe_basis,
         declared_carry_unmodelled=carry_unmodelled,
+        declared_fx_unmodelled=fx_unmodelled,
         # ⚠ COMPUTED, never written out — a hand-typed list is a second copy of
         # the refusal policy that drifts the first time the policy moves.
         expected_structural_refusals=structural_promotion_refusals(
-            universe_basis=universe_basis, carry_unmodelled=carry_unmodelled
+            universe_basis=universe_basis, carry_unmodelled=carry_unmodelled, fx_unmodelled=fx_unmodelled
         ),
         forward_shadow=forward_shadow,
         declared_by=DECLARED_BY,

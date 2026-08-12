@@ -62,7 +62,12 @@ from typing import Any, Final, Literal, cast
 import numpy as np
 import psycopg
 
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
+from app.services.cost_model import (
+    CARRY_UNMODELLED,
+    COST_MODEL_ID,
+    FX_UNMODELLED,
+    UNKNOWN_NOMINAL_PRICE_BAND,
+)
 from app.services.deflated_sharpe import (
     MIN_MEASURED_TRIALS,
     DeflatedSharpeResult,
@@ -245,7 +250,10 @@ BACKTEST_BOOTSTRAP_SEED: Final = 20260808
 
 #: §9/#2505 — the three refusals no invocation of this job can close, whatever
 #: it measures. ``universe_basis_not_survivorship_free`` is blocked on #2284's
-#: corpus purchase and ``carry_unmodelled`` on #2277's carry measurement.
+#: corpus purchase, ``carry_unmodelled`` on #2277's carry measurement and
+#: ``fx_unmodelled`` on #2363's FX measurement — SEPARATE members since #2363,
+#: because they close on unrelated evidence and one will be live while the
+#: other is not.
 #:
 #: ⚠⚠ ``synthetic_control_not_run`` WAS A FOURTH MEMBER HERE AND IS NOT ANY MORE
 #: (#2601). It stood on the stated grounds that *"the only cohort that exists
@@ -265,6 +273,7 @@ STANDING_REFUSALS: Final[frozenset[PromotionRefusal]] = frozenset(
     {
         "universe_basis_not_survivorship_free",
         "carry_unmodelled",
+        "fx_unmodelled",
         "promotion_evidence_missing",
     }
 )
@@ -2207,6 +2216,7 @@ def build_result(
         # STAY unpromotable, which a gate reading today's module constant would
         # silently undo.
         carry_unmodelled=CARRY_UNMODELLED,
+        fx_unmodelled=FX_UNMODELLED,
         evaluated_instrument_count=len(outcome.evaluated_instrument_ids),
         trial_count=None if deflated is None else deflated.declared_trials,
         deflated_sharpe=None if deflated is None else Decimal(repr(deflated.deflated_sharpe)),

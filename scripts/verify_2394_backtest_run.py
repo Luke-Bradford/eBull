@@ -70,7 +70,7 @@ from typing import Final
 import psycopg
 
 from app.config import settings
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID
+from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELLED
 from app.services.deflated_sharpe import MIN_MEASURED_TRIALS
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
@@ -467,7 +467,10 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
 
     print(f"\n[arm] {strategy_id} {identity.version}", flush=True)
     print(f"      builder {BUILDER_RULE_SET_VERSION}", flush=True)
-    print(f"      cost model {COST_MODEL_ID}   carry_unmodelled {CARRY_UNMODELLED}", flush=True)
+    print(
+        f"      cost model {COST_MODEL_ID}   carry_unmodelled {CARRY_UNMODELLED}   fx_unmodelled {FX_UNMODELLED}",
+        flush=True,
+    )
     print(f"      sizing rule {SIZING_RULE_ID}   metric set {METRIC_SET_ID}", flush=True)
     print("      quarantine arm masked   ambiguity arm worst_case   scope sleeve", flush=True)
 
@@ -680,6 +683,7 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
             metrics=metrics,
             universe_basis=UNIVERSE,
             carry_unmodelled=CARRY_UNMODELLED,
+            fx_unmodelled=FX_UNMODELLED,
             # ⚠⚠ THE WHOLE-CORPUS COUNT, matching the WHOLE-WINDOW curve the
             # metrics above came off — not the in-sample subset, which would
             # describe a population these metrics were not computed over. This

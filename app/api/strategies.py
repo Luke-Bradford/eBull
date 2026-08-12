@@ -744,6 +744,8 @@ def _promotion_refusals(
         refusals.append("universe_basis_not_survivorship_free")
     if row["carry_unmodelled"]:
         refusals.append("carry_unmodelled")
+    if row["fx_unmodelled"]:
+        refusals.append("fx_unmodelled")
     if cast(int, row["evaluated_instrument_count"]) == 0:
         refusals.append("no_instruments_evaluated")
     if not accesses_complete:

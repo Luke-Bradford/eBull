@@ -107,7 +107,7 @@ _PROBE_TAIL = """
 _PROBE_COLUMNS = """
         strategy_id, strategy_version, result_version, result_scope, namespace,
         ambiguity_arm, quarantine_arm, window_start, window_end, purpose, universe_basis, corpus_version,
-        cost_model_id, carry_unmodelled, sizing_rule, position_rule_set_version,
+        cost_model_id, carry_unmodelled, fx_unmodelled, sizing_rule, position_rule_set_version,
         outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
         expectancy_per_trade_pct, profit_factor, cagr_pct, annualised_volatility_pct, sharpe, sortino,
         max_drawdown_pct, exposure_time_pct, turnover_annualised, trade_count,

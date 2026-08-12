@@ -178,6 +178,10 @@ def _seed(
             window_start=date(2022, 1, 1),
             universe_basis="survivorship_free",
             carry_unmodelled=False,
+            # ⚠ BOTH, since #2363: the funding sweep requires each component
+            # cleared, so a fixture that only cleared carry would stop
+            # qualifying — which is the widened predicate working.
+            fx_unmodelled=False,
             metrics=metrics,
             deflated=deflated,
             trial_count=deflated.declared_trials,

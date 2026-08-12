@@ -110,6 +110,10 @@ class PreregDeclaration:
     structural_refusal_policy_version: str
     declared_universe_basis: str
     declared_carry_unmodelled: bool
+    #: #2363's FX half. ⚠ REQUIRED, not defaulted: a declaration that could not
+    #: name FX separately could not pre-declare the refusal set its run will
+    #: produce, which is the whole function of freezing one.
+    declared_fx_unmodelled: bool
     expected_structural_refusals: tuple[str, ...]
     forward_shadow: ForwardShadowFloor
     declared_by: str
@@ -143,6 +147,7 @@ class PreregDeclaration:
         return structural_promotion_refusals(
             universe_basis=self.declared_universe_basis,
             carry_unmodelled=self.declared_carry_unmodelled,
+            fx_unmodelled=self.declared_fx_unmodelled,
         )
 
     @property
@@ -163,6 +168,7 @@ class PreregDeclaration:
             "structural_refusal_policy_version": self.structural_refusal_policy_version,
             "declared_universe_basis": self.declared_universe_basis,
             "declared_carry_unmodelled": self.declared_carry_unmodelled,
+            "declared_fx_unmodelled": self.declared_fx_unmodelled,
             "expected_structural_refusals": sorted(self.expected_structural_refusals),
             "min_independent_decision_dates": self.forward_shadow.min_independent_decision_dates,
             "min_calendar_weeks": self.forward_shadow.min_calendar_weeks,

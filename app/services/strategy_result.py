@@ -242,7 +242,17 @@ PromotionRefusal = Literal[
     "harness_validation_only",
     "universe_basis_absent",
     "universe_basis_not_survivorship_free",
+    #: §5.1's cost components. ⚠ TWO CODES, NOT ONE, since #2363. The single
+    #: `carry_unmodelled` was derived from `CARRY_BPS is None or FX_BPS is
+    #: None`, so it could not say WHICH component was missing — and the two
+    #: close on unrelated evidence: carry on a per-order eToro product
+    #: eligibility proving underlying-at-x1, FX on the funding account's
+    #: currency and a measured conversion markup. Promotion still requires both
+    #: absent; what the split buys is that an operator can act on the one that
+    #: is actually blocking, and that whichever evidence lands first can be
+    #: banked. Same argument as the `synthetic_control_*` trio below.
     "carry_unmodelled",
+    "fx_unmodelled",
     "no_instruments_evaluated",
     "instrument_outside_validated_universe",
     "holdout_never_evaluated",
@@ -568,6 +578,11 @@ class StrategyResult:
     #: unpromotable, and a gate reading today's module constant would silently
     #: promote a two-year-old result that never charged it.
     carry_unmodelled: bool
+    #: ``cost_model.FX_UNMODELLED``, same contract. ⚠ REQUIRED AND UNDEFAULTED,
+    #: like every other stamp here: a default would let a writer that never
+    #: considered FX inherit a verdict about it, and #2363 exists because a
+    #: single flag was standing in for two facts.
+    fx_unmodelled: bool
     #: ``len`` of the evaluated set. ⚠ Stored for the record and for criterion
     #: 9's census; the GATE reads the ids themselves, because a count cannot
     #: answer "is every one of them in the validated universe".
@@ -770,11 +785,22 @@ class PromotionCandidate:
 #: A preregistration freezes its expected refusals under a named version, and
 #: #2599 refuses a declaration frozen under a superseded one rather than
 #: re-interpreting it. Same shape as ``trial_register_superseded`` above.
-STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-12-v1"
+#:
+#: ⚠ Bumped by #2363, which split the single cost refusal in two. A declaration
+#: frozen under ``-v1`` expected at most one cost code and cannot be
+#: re-interpreted under a rule that may emit two, so it is refused —
+#: `strategy_live_gate.assess_live_gate` reads the same verdict and will drop
+#: such a trial's forward-shadow floor. ⚠⚠ That refusal is PERMANENT for the
+#: affected trial: declarations are immutable, undeletable and unique on
+#: (strategy_id, strategy_version), so the remedy is a new ``strategy_version``,
+#: not a re-freeze. Measured 2026-08-12 before the bump —
+#: ``select count(*) from strategy_preregistration_declarations`` returned 0, so
+#: no trial pays that cost here.
+STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-12-v2-carry-fx-split"
 
 
 def structural_promotion_refusals(
-    *, universe_basis: str | None, carry_unmodelled: bool
+    *, universe_basis: str | None, carry_unmodelled: bool, fx_unmodelled: bool
 ) -> tuple[PromotionRefusal, ...]:
     """The refusals fully determined by the corpus/cost stamps a run will carry.
 
@@ -784,7 +810,7 @@ def structural_promotion_refusals(
     a second hand-written copy of it would drift silently the first time the
     corpus rule changed.
 
-    ⚠ These three and no others. Every remaining refusal in the vocabulary
+    ⚠ These four and no others. Every remaining refusal in the vocabulary
     depends on what the run PRODUCES (a Deflated Sharpe, a synthetic control, an
     evaluated instrument set), so it cannot be known at freeze time and must not
     be pre-declared.
@@ -802,10 +828,17 @@ def structural_promotion_refusals(
     elif universe_basis not in PROMOTABLE_UNIVERSE_BASES:
         refusals.append("universe_basis_not_survivorship_free")
 
-    # §5.1 — carry and FX are NULL, not zero, so no result charging neither is
-    # promotable. Read off the ROW, never off `cost_model` (see the field).
+    # §5.1 — carry and FX are NULL, not zero, so a result charging neither is
+    # not promotable. Read off the ROW, never off `cost_model` (see the field).
+    #
+    # ⚠ TWO INDEPENDENT CLAUSES, AND-COMPLETE (#2363). Either one alone refuses,
+    # so promotion is exactly as hard as it was under the coupled flag; the
+    # split only makes the reason legible and lets the first evidence to arrive
+    # close its own half.
     if carry_unmodelled:
         refusals.append("carry_unmodelled")
+    if fx_unmodelled:
+        refusals.append("fx_unmodelled")
 
     return tuple(refusals)
 
@@ -836,6 +869,7 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
         structural_promotion_refusals(
             universe_basis=result.universe_basis,
             carry_unmodelled=result.carry_unmodelled,
+            fx_unmodelled=result.fx_unmodelled,
         )
     )
 

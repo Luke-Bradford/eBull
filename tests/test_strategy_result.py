@@ -175,6 +175,7 @@ def _result(**overrides: object) -> StrategyResult:
         "metrics": _metrics(),
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
+        "fx_unmodelled": True,
         "evaluated_instrument_count": 3,
         "trial_count": None,
         "deflated_sharpe": None,
@@ -235,6 +236,7 @@ def _deflated_result(**overrides: object) -> DeflatedSharpeResult:
 _CLEAN_RESULT_FIELDS: dict[str, object] = {
     "universe_basis": "survivorship_free",
     "carry_unmodelled": False,
+    "fx_unmodelled": False,
     "trial_count": TRIAL_REGISTER.declared_count,
     "deflated_sharpe": Decimal("0.72"),
     "deflated": _deflated_result(),
@@ -997,6 +999,7 @@ class TestPromotionGateReportsEverything:
         assert set(check_promotable(candidate)) == {
             "universe_basis_absent",
             "carry_unmodelled",
+            "fx_unmodelled",
             "no_instruments_evaluated",
             "holdout_never_evaluated",
             "deflated_sharpe_not_computed",
@@ -1020,6 +1023,7 @@ class TestPromotionGateReportsEverything:
         assert set(check_promotable(candidate)) == {
             "universe_basis_not_survivorship_free",
             "carry_unmodelled",
+            "fx_unmodelled",
             "holdout_never_evaluated",
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
