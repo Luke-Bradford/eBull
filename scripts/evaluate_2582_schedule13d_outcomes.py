@@ -13,18 +13,19 @@ import argparse
 import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final, LiteralString
+from typing import Any, Final, Literal, LiteralString, cast
 
 import psycopg
 
 from app.services.market_calendar import us_market_status
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.trial_register import TRIAL_REGISTER
-from scripts.schedule13d_challengers import RULE_13G
+from scripts.schedule13d_challengers import RULE_13G, MatchFeatures
+from scripts.schedule13d_statistics import EventOutcome
 from scripts.verify_2582_schedule13d_preregistration import EXPECTED_SHA256, load_and_verify
 
 TRIAL_ID: Final = "c4-schedule13d-public-catalyst-v1"
@@ -394,14 +395,11 @@ def _verify_market_series(conn: psycopg.Connection[Any]) -> None:
         raise OutcomeGateRefusal("frozen SPY market-series identity moved")
 
 
-def load_price_windows(
-    conn: psycopg.Connection[Any], gate: OutcomeGate, events: Sequence[SourceEvent]
+def _load_selected_price_windows(
+    conn: psycopg.Connection[Any], gate: OutcomeGate, selected: Sequence[SourceEvent | Initial13GSourceEvent]
 ) -> tuple[PriceWindow, ...]:
-    """Read exact price windows only after the reviewed sealed gate opens."""
-
     _validate_gate(gate)
     _verify_market_series(conn)
-    selected = [event for event in events if event.primary_source_refusal is None]
     conn.execute("DROP TABLE IF EXISTS schedule13d_trial_sessions")
     conn.execute(_CREATE_TEMP_SESSIONS)
     with conn.cursor() as cursor:
@@ -441,9 +439,40 @@ def load_price_windows(
                 prior_20_stock_return_pct=decimal_values[6],
                 prior_20_market_return_pct=decimal_values[7],
                 holding_market_return_pct=decimal_values[8],
+                population="13g" if isinstance(event, Initial13GSourceEvent) else "primary",
             )
         )
     return tuple(windows)
+
+
+def load_price_windows(
+    conn: psycopg.Connection[Any],
+    gate: OutcomeGate,
+    events: Sequence[SourceEvent],
+    *,
+    population: Literal["primary", "unfiltered"] = "primary",
+) -> tuple[PriceWindow, ...]:
+    """Read treatment or unfiltered-13D windows through identical math."""
+
+    if population == "primary":
+        selected = [event for event in events if event.primary_source_refusal is None]
+    elif population == "unfiltered":
+        selected = [event for event in events if event.unfiltered_source_refusal is None]
+    else:
+        raise ValueError("unsupported Schedule 13D population")
+    windows = _load_selected_price_windows(conn, gate, selected)
+    if population == "unfiltered":
+        return tuple(replace(window, population="unfiltered") for window in windows)
+    return windows
+
+
+def load_initial_13g_price_windows(
+    conn: psycopg.Connection[Any], gate: OutcomeGate, events: Sequence[Initial13GSourceEvent]
+) -> tuple[PriceWindow, ...]:
+    """Read eligible 13G challenger windows through the shared evaluator."""
+
+    selected = [event for event in events if event.source_refusal is None]
+    return _load_selected_price_windows(conn, gate, selected)
 
 
 class OutcomeGateRefusal(RuntimeError):
@@ -459,7 +488,7 @@ class OutcomeGate:
 
 @dataclass(frozen=True)
 class PriceWindow:
-    event: SourceEvent
+    event: SourceEvent | Initial13GSourceEvent
     entry_date: date
     exit_date: date
     stock_bars_present: int
@@ -477,11 +506,18 @@ class PriceWindow:
     prior_20_stock_return_pct: Decimal | None
     prior_20_market_return_pct: Decimal | None
     holding_market_return_pct: Decimal | None
+    population: Literal["primary", "unfiltered", "13g"] = "primary"
 
     @property
     def outcome_refusal(self) -> str | None:
-        if self.event.primary_source_refusal is not None:
-            return self.event.primary_source_refusal
+        if isinstance(self.event, Initial13GSourceEvent):
+            source_refusal = self.event.source_refusal
+        elif self.population == "unfiltered":
+            source_refusal = self.event.unfiltered_source_refusal
+        else:
+            source_refusal = self.event.primary_source_refusal
+        if source_refusal is not None:
+            return source_refusal
         if self.stock_bars_present != 70:
             return "exact_stock_session_missing"
         if self.market_bars_present != 70:
@@ -499,6 +535,70 @@ class PriceWindow:
         if self.trailing_median_dollar_volume is None or self.trailing_median_dollar_volume < Decimal("10000000"):
             return "trailing_median_dollar_volume_below_floor"
         return None
+
+
+def accepted_window_return_pct(window: PriceWindow) -> Decimal:
+    """Return the frozen net result, refusing every ineligible window."""
+
+    refusal = window.outcome_refusal
+    if refusal is not None:
+        raise ValueError(f"price window refused: {refusal}")
+    required = (
+        window.entry_open,
+        window.entry_close,
+        window.entry_adj_close,
+        window.exit_close,
+        window.exit_adj_close,
+    )
+    if any(value is None for value in required):
+        raise ValueError("accepted price window is missing a return input")
+    return total_return_pct(
+        entry_open=cast(Decimal, window.entry_open),
+        entry_close=cast(Decimal, window.entry_close),
+        entry_adj_close=cast(Decimal, window.entry_adj_close),
+        exit_close=cast(Decimal, window.exit_close),
+        exit_adj_close=cast(Decimal, window.exit_adj_close),
+    )
+
+
+def window_match_features(window: PriceWindow) -> MatchFeatures:
+    """Build the exact pre-outcome matching cell for an accepted window."""
+
+    refusal = window.outcome_refusal
+    if refusal is not None:
+        raise ValueError(f"price window refused: {refusal}")
+    if window.entry_open is None or window.trailing_median_dollar_volume is None:
+        raise ValueError("accepted price window is missing matching features")
+    if window.prior_20_market_return_pct is None:
+        raise ValueError("accepted price window is missing prior market context")
+    return MatchFeatures(
+        accession_number=window.event.accession_number,
+        issuer_cik=window.event.issuer_cik,
+        filing_date=window.event.public_filing_date,
+        entry_date=window.entry_date,
+        entry_price=window.entry_open,
+        trailing_median_dollar_volume=window.trailing_median_dollar_volume,
+        prior_20_market_return_pct=window.prior_20_market_return_pct,
+        rule=window.event.rule if isinstance(window.event, Initial13GSourceEvent) else None,
+    )
+
+
+def treatment_event_outcome(window: PriceWindow, *, sector: str | None = None) -> EventOutcome:
+    """Convert only an accepted 13D treatment window to frozen statistics."""
+
+    if not isinstance(window.event, SourceEvent) or window.population != "primary":
+        raise ValueError("event outcomes are defined only for the clean primary population")
+    return EventOutcome(
+        accession_number=window.event.accession_number,
+        issuer_cik=window.event.issuer_cik,
+        entry_date=window.entry_date,
+        exit_date=window.exit_date,
+        net_return_pct=float(accepted_window_return_pct(window)),
+        maximum_percent_of_class=(
+            None if window.event.maximum_percent_of_class is None else float(window.event.maximum_percent_of_class)
+        ),
+        sector=sector,
+    )
 
 
 def require_outcome_gate(*, acknowledgement: str | None, contract_path: Path) -> OutcomeGate:
@@ -557,7 +657,7 @@ def regular_sessions_ending_before(anchor: date, count: int) -> tuple[date, ...]
     return tuple(reversed(found))
 
 
-def required_event_sessions(event: SourceEvent) -> tuple[date, ...]:
+def required_event_sessions(event: SourceEvent | Initial13GSourceEvent) -> tuple[date, ...]:
     """Sixty formation sessions followed by the exact ten-session position."""
 
     entry = next_regular_session_strictly_after(event.public_filing_date)
