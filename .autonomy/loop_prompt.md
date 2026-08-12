@@ -9,10 +9,50 @@ whatever is left, so always leave the repo in a clean state (no half-done
 branches, no unpushed WIP).
 
 ## Each iteration
-1. **Triage the board.** `gh issue list --state open --limit 100`. Pick the
-   highest-value *actionable* ticket: prefer correctness bugs > operator-visible
-   gaps > tech-debt; skip anything blocked, needing a human decision, or already
-   in flight (open PR). Decide the order yourself — do not ask.
+1. **Triage — the active milestone first, the board second.**
+
+   ```bash
+   gh issue list --milestone "M9: Autonomous trading readiness" --state open --limit 50
+   ```
+
+   **a. Work the active milestone top-down.** The ordered queue is a comment on the
+   milestone's umbrella issue, not the issue-number order — read it and follow it.
+   Currently: milestone **"M9: Autonomous trading readiness"**, queue = the
+   2026-08-12 "requirements settled" comment on **#2437**. Take the highest
+   unfinished item that is actionable and not `loop-ineligible` (below).
+
+   **b. Fall back to the board** — `gh issue list --state open --limit 100`, preferring
+   correctness bugs > operator-visible gaps > tech-debt — only when the milestone has
+   no actionable item left.
+
+   **c. If the milestone is absent, renamed or `gh` cannot read it, do not halt.** Use
+   (b), and say in the run note that the milestone lookup failed. A missing milestone
+   is never a reason to end a run.
+
+   Skip anything blocked, already in flight (open PR), or needing a genuine human
+   decision. Within those rules decide the order yourself — do not ask.
+
+   ⚠ **Why this ordering exists.** Between 2026-08-09 and 2026-08-12 this prompt said
+   only "decide the order yourself". The loop produced 167 commits and six sealed
+   research trials while the three refusals #2437 had declared as gating *everything*
+   moved not at all — so every trial run in that window was unpromotable before it
+   started, and each one permanently raised the statistical bar for the next. The loop
+   optimised exactly what it was asked to. The milestone is the fix: it encodes which
+   work actually unblocks the product.
+
+   **d. `loop-ineligible` — recognise and skip, do not attempt.** Some tickets cannot be
+   finished unattended however actionable they look. Note why on the issue if it is not
+   already stated, and move to the next queue item:
+
+   - **anything needing broker credentials.** This worktree has no `.env` and no eToro
+     credentials by design, so eligibility/cost preflight calls fail closed. #2598 is
+     the current example — its whole deliverable is live preflight decode.
+   - **anything whose acceptance is a trade, a fill, a position close or a kill-switch
+     drill.** #2603's acceptance is an operator-attended demo session for exactly this
+     reason. Building its schema and allocator logic IS in scope; running its acceptance
+     is not.
+   - **settled-decision reversals and irreversible-loss calls** (already covered under
+     "When to stop").
 2. **Execute the full workflow** from `.claude/CLAUDE.md` for that ticket:
    read the issue → `docs/settled-decisions.md` + `docs/review-prevention-log.md`
    → research the source rule + **falsify the premise on the dev DB / full
@@ -132,6 +172,12 @@ added — no code change. Until activated, the flow is In Review → Done direct
   design. If a ticket's only path forward is executing a trade, skip it. (The
   loop is also run with NO broker credentials configured, so the order client
   fails closed — see setup.md; this rule is the second layer.)
+- **Never open a sealed research outcome outside the #2599 declaration contract.** A
+  preregistration whose stamps guarantee it cannot promote (survivor-only universe,
+  unmodelled carry) may only be opened when it declares itself a falsification run. The
+  code gate in #2599 is authoritative once merged — this line exists so the prompt agrees
+  with it rather than contradicting it. This is NOT a ban on falsification trials: it is a
+  ban on burning trial-register budget without saying so first.
 - Never `git push --no-verify` (emergencies only, which this is not).
 - Never restart the API (`:8000`) or vite (`:5173`) VS Code tasks.
 - Never hard-delete dev data; never run destructive ops on the dev DB beyond a
