@@ -24,6 +24,13 @@ import psycopg
 
 from app.services.market_calendar import us_market_status
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
+from app.services.result_ledger import (
+    HoldoutAccess,
+    PreregDeclarationRefused,
+    load_preregistration,
+    require_outcome_access,
+    verify_outcome_access_provenance,
+)
 from app.services.trial_register import TRIAL_REGISTER
 from scripts.schedule13d_challengers import RULE_13G, MatchFeatures, select_random_time_sessions
 from scripts.schedule13d_statistics import EventOutcome
@@ -31,6 +38,13 @@ from scripts.verify_2582_schedule13d_preregistration import EXPECTED_SHA256, loa
 
 TRIAL_ID: Final = "c4-schedule13d-public-catalyst-v1"
 ACKNOWLEDGEMENT: Final = "OPEN-2582-SEALED-OUTCOMES"
+
+#: #2614 — C-4's identity in ``strategy_preregistration_declarations``. Both are
+#: the frozen contract's own fields (``candidate_id`` / ``contract_version``),
+#: not a naming invented here; ``test_evaluate_2582_schedule13d_outcomes``
+#: asserts they still match the contract bytes the digest protects.
+STRATEGY_ID: Final = "c4-schedule13d-public-catalyst"
+STRATEGY_VERSION: Final = "schedule13d-public-catalyst-v1"
 RESEARCH_VENDOR: Final = "paperswithbacktest/Stocks-Daily-Price"
 FIRST_SOURCE_DATE: Final = date(2024, 12, 18)
 LAST_COMPLETE_FILING_DATE: Final = date(2026, 6, 18)
@@ -402,6 +416,29 @@ def _validate_gate(gate: OutcomeGate) -> None:
         raise OutcomeGateRefusal("invalid or stale outcome gate")
 
 
+def _validate_gate_provenance(conn: psycopg.Connection[Any], gate: OutcomeGate) -> None:
+    """#2614 — re-check #2599's declaration and the access row, from the tables.
+
+    ⚠ THE POINT IS THAT IT DOES NOT TRUST THE GATE. ``OutcomeGate`` is a plain
+    frozen dataclass, so ``_validate_gate`` above proves only that a caller can
+    copy three constants out of this module. Loading the declaration and the
+    access row BY ID is what a caller cannot fake, because it cannot write a row
+    that predates its own look.
+
+    ⚠ Read-only, and it must stay that way: every caller is inside
+    ``evaluate_historical_falsification``'s ``REPEATABLE READ READ ONLY``
+    transaction, where an INSERT fails. The matching write happened in
+    ``require_outcome_gate`` and was committed by the runner.
+    """
+    verify_outcome_access_provenance(
+        cast(psycopg.Connection[tuple], conn),
+        strategy_id=STRATEGY_ID,
+        strategy_version=STRATEGY_VERSION,
+        declaration_id=gate.declaration_id,
+        access_id=gate.access_id,
+    )
+
+
 def _verify_market_series(conn: psycopg.Connection[Any]) -> None:
     row = conn.execute(
         """
@@ -425,6 +462,12 @@ def _load_requested_price_windows(
     conn: psycopg.Connection[Any], gate: OutcomeGate, requests: Sequence[WindowRequest]
 ) -> tuple[PriceWindow, ...]:
     _validate_gate(gate)
+    # ⚠ #2614 — BEFORE the market-series check and before any bar is read. This
+    # is the chokepoint all four populations (primary, unfiltered, 13g, random)
+    # funnel through, which is the same placement argument #2599 makes for
+    # `record_holdout_access`: one check covers every door, and no future loader
+    # has to remember a convention.
+    _validate_gate_provenance(conn, gate)
     _verify_market_series(conn)
     if len(requests) > 32_767:
         raise OutcomeGateRefusal("price-window request exceeds frozen SMALLINT event bound")
@@ -515,6 +558,14 @@ class OutcomeGate:
     contract_sha256: str
     trial_register_version: str
     trial_id: str
+    #: #2614 — the frozen #2599 declaration this look is authorised by, and the
+    #: committed ``strategy_holdout_accesses`` row recording it. ⚠ NEITHER IS
+    #: TRUSTED AS CARRIED. This dataclass is constructible by anyone; both ids
+    #: are re-loaded from their tables on every price-window read (see
+    #: ``_validate_gate_provenance``). They are here as a lookup key, not as
+    #: evidence.
+    declaration_id: int
+    access_id: int
 
 
 @dataclass(frozen=True)
@@ -632,8 +683,15 @@ def treatment_event_outcome(window: PriceWindow, *, sector: str | None = None) -
     )
 
 
-def require_outcome_gate(*, acknowledgement: str | None, contract_path: Path) -> OutcomeGate:
-    """Refuse unless the reviewed contract and declared trial are both exact."""
+def require_outcome_gate_preconditions(*, acknowledgement: str | None, contract_path: Path) -> str:
+    """The three checks that need no database. Returns the verified digest.
+
+    ⚠ SPLIT OUT BY #2614 SO THE CHEAP REFUSALS STAY CHEAP. Adding the declaration
+    check gave ``require_outcome_gate`` a connection, and folding everything into
+    it would mean a wrong acknowledgement opens a database connection before
+    being told no. A refusal that costs a connection is a refusal somebody
+    eventually routes around.
+    """
 
     if acknowledgement != ACKNOWLEDGEMENT:
         raise OutcomeGateRefusal(
@@ -646,7 +704,61 @@ def require_outcome_gate(*, acknowledgement: str | None, contract_path: Path) ->
         raise OutcomeGateRefusal(
             f"{TRIAL_ID} is absent from {TRIAL_REGISTER.version}; declare the price-data search before reading outcomes"
         )
-    return OutcomeGate(digest, TRIAL_REGISTER.version, TRIAL_ID)
+    return digest
+
+
+def require_outcome_gate(
+    conn: psycopg.Connection[Any], *, acknowledgement: str | None, contract_path: Path
+) -> OutcomeGate:
+    """Refuse unless the contract, the trial and #2599's declaration are all exact.
+
+    ⚠⚠ #2614 — THIS FUNCTION TAKES A CONNECTION BECAUSE THE GATE IT DESCRIBED
+    DID NOT BIND. #2599 put the declaration check at the ledger chokepoint, on
+    the correct observation that all three hold-out doors funnel through it. The
+    unchecked premise was that opening an outcome always goes through the ledger.
+    C-4 computes its statistics from raw price windows and emits a signed
+    artifact — it stores no result row, so there was no ledger call to intercept,
+    and the register entry that makes this trial runnable would otherwise have
+    unlocked an entirely ungated path.
+
+    ⚠ IT DOES NOT FREEZE THE DECLARATION, AND MUST NOT. Freezing one here would
+    make it a description of a run already under way rather than a prediction of
+    it, which is the exact defect Codex killed in #2599's first draft (*"a caller
+    can construct a favourable declaration after seeing/reading outcomes"*), just
+    with the constructor moved. Freezing is
+    ``scripts/freeze_2582_schedule13d_declaration.py``, run separately and
+    earlier.
+
+    ⚠ THE CALLER OWNS THE COMMIT. ``require_outcome_access`` writes in this
+    transaction and does not commit it. The caller must ``conn.commit()`` before
+    evaluating — not only so the look stays logged if the evaluation dies, but
+    because ``evaluate_historical_falsification`` opens with
+    ``SET TRANSACTION ISOLATION LEVEL ... READ ONLY``, which is only valid as the
+    first statement of a transaction and fails outright while this INSERT is
+    still open.
+    """
+
+    digest = require_outcome_gate_preconditions(acknowledgement=acknowledgement, contract_path=contract_path)
+    frozen = load_preregistration(conn, STRATEGY_ID, STRATEGY_VERSION)
+    if frozen is None:
+        raise PreregDeclarationRefused(STRATEGY_ID, STRATEGY_VERSION, ("preregistration_not_frozen",))
+    # ⚠ `read`, with a NULL result_version, and not `evaluate`. sql/264's
+    # `strategy_holdout_accesses_evaluate_names_a_result` requires an `evaluate`
+    # to name the result row it authorises, and C-4 never writes one — so
+    # `evaluate` here would either be refused or would stand for a row that
+    # never arrives. A `read` is what this is: the withheld side being LOOKED AT.
+    access_id = require_outcome_access(
+        conn,
+        HoldoutAccess(
+            strategy_id=STRATEGY_ID,
+            strategy_version=STRATEGY_VERSION,
+            result_version=None,
+            access_kind="read",
+            accessed_by="scripts/run_2582_schedule13d_outcomes.py",
+            purpose=f"open the sealed #2582 Schedule 13D historical falsification under {TRIAL_ID}",
+        ),
+    )
+    return OutcomeGate(digest, TRIAL_REGISTER.version, TRIAL_ID, frozen.declaration_id, access_id)
 
 
 def next_regular_session_strictly_after(filing_date: date) -> date:
@@ -837,12 +949,19 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json"),
     )
     args = parser.parse_args(argv)
-    gate = require_outcome_gate(acknowledgement=args.acknowledgement, contract_path=args.contract)
-    # Deliberate second lock.  This PR establishes and tests the outcome
-    # boundary; it does not yet contain the reviewed database evaluator.
+    # ⚠ #2614 — REFUSES BEFORE THE GATE IS BUILT, NOT AFTER. This entry point is
+    # vestigial: it predates `scripts/run_2582_schedule13d_outcomes.py` and its
+    # old comment ("does not yet contain the reviewed database evaluator") stopped
+    # being true when `schedule13d_orchestrator` landed at `55c75dce`. Building a
+    # gate here would now COMMIT AN ACCESS ROW for a look this function never
+    # takes, putting a fabricated look in criterion 5's audit log. So the
+    # preconditions run — a wrong acknowledgement is still named as such — and
+    # then it refuses without touching the ledger.
+    require_outcome_gate_preconditions(acknowledgement=args.acknowledgement, contract_path=args.contract)
     raise OutcomeGateRefusal(
-        "gate satisfied but database outcome evaluator is not present; no price query was executed: "
-        + json.dumps(gate.__dict__, sort_keys=True)
+        "preconditions satisfied but this is not the evaluator entry point and no access was recorded; "
+        "run scripts/run_2582_schedule13d_outcomes.py, which owns the access record and its commit: "
+        + json.dumps({"trial_id": TRIAL_ID, "trial_register_version": TRIAL_REGISTER.version}, sort_keys=True)
     )
 
 

@@ -135,7 +135,26 @@ so no door is missed and no new convention has to be remembered.
 
 ⚠ Stated limit, not papered over: a direct `SELECT` against the hold-out tables
 remains physically possible. This closes every path that goes through the
-ledger, which is every path we have written.
+ledger — **which is every path that WRITES A RESULT ROW.**
+
+⚠⚠ **CORRECTED BY #2614.** This sentence originally ended *"which is every path
+we have written"*, and that clause was false on the day it was written. The
+unchecked premise is that opening an outcome always goes through the ledger. A
+sealed study that computes its own statistics from raw price windows and emits a
+signed artifact stores nothing in `strategy_results_store`, so there is no ledger
+call to intercept — and three such scripts existed
+(`scripts/evaluate_2582_schedule13d_outcomes.py`,
+`scripts/verify_2476_pead_outcomes.py`, `scripts/verify_2480_insider_outcomes.py`).
+C-4, the very trial that motivated this gate, was one of them.
+
+#2614 gates C-4 explicitly (`require_outcome_access` at gate construction, then
+`verify_outcome_access_provenance` at the price-window chokepoint) and adds
+`tests/test_sealed_outcome_scripts_are_gated.py` so a NEW sealed opener fails by
+default rather than relying on someone remembering the convention. The two
+pre-cutoff `verify_*` scripts stay on that test's explicit allowlist with their
+trial-register entries named. The generalisation worth carrying: **a second path
+to the outcomes needs its own gate, and "we have written them all" is a claim to
+verify by grep, not to assert.**
 
 ### 5. Forward-shadow floor reaches the live gate
 
