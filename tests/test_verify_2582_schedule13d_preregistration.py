@@ -28,3 +28,14 @@ def test_verifier_rejects_a_bracket_smuggled_into_the_historical_trial(tmp_path:
 
     with pytest.raises(AssertionError):
         load_and_verify(mutated)
+
+
+def test_verifier_rejects_an_otherwise_unchecked_contract_mutation(tmp_path: Path) -> None:
+    source = Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json")
+    contract = json.loads(source.read_text())
+    contract["hypothesis"] = "changed after outcomes"
+    mutated = tmp_path / "contract.json"
+    mutated.write_text(json.dumps(contract))
+
+    with pytest.raises(AssertionError, match="frozen contract digest moved"):
+        load_and_verify(mutated)

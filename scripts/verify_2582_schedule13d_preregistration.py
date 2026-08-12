@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 CONTRACT = Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json")
+EXPECTED_SHA256 = "5a65e2d1e113cc66301cef625a99f999034ad3b2423635dc4d1657c3813ae6b7"
 
 
 def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
@@ -40,6 +41,7 @@ def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
     assert stats["minimum_planning_effective_sample_size"] == expected_n
 
     digest = hashlib.sha256(raw).hexdigest()
+    assert digest == EXPECTED_SHA256, f"frozen contract digest moved: {digest}"
     return contract, digest
 
 
