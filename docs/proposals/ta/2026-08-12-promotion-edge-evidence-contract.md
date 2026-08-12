@@ -136,16 +136,18 @@ scope definition lives in one place,
 `set() - anything` is empty, so a result over no instruments would otherwise
 satisfy the subset test while being no evidence at all.
 
-⚠⚠ **THE PROMOTION TRANSITION DOES NOT RE-CHECK THIS (#2621).**
-`promote_strategy` never calls `check_promotable`; it validates result-id
-ownership and then the compact evidence record above. It cannot re-derive the
-universe check either — the refusal is returned in `WrittenRow.refusals` and
-never persisted, and the result store carries `evaluated_instrument_count` but
-not the ids. This is the section's own scope boundary below, instantiated: an
-input the transition cannot independently replay. Not fail-open today only
-because `run_backtest` is the sole writer, which is the same "would become
-fail-open as soon as a candidate is registered" shape #2505 closed for viability
-evidence. #2621 owns closing it for the universe input.
+**The promotion transition re-checks this since #2621 (2026-08-12).**
+`run_backtest` freezes each result's universe inputs in
+`strategy_result_universe` (evaluated ids + the run's loaded universe,
+immutable + hashed, in the pair's own transaction), and `promote_strategy`
+replays `evaluated ⊆ validated` from the frozen record for every pinned result
+at the evidence stages — a result without a record refuses
+`evaluated_universe_unrecorded`, closing the same "fail-open as soon as a
+candidate is registered" shape #2505 closed for viability evidence. ⚠ The
+replay is against the universe FROZEN at result time, never today's
+`load_validated_universe`; the reasons are recorded in
+`app/services/strategy_result_universe.py`. The remaining non-persisted gate
+inputs are the scope boundary below, unchanged.
 
 **What this bounds for #2363, and what it does not.** Every instrument in the
 validated universe is quoted in USD — asserted, not merely displayed, on the
