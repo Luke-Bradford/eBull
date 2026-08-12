@@ -47,8 +47,11 @@ nothing to paper trade.
 The primary population is one accession per clean campaign:
 
 - exact form `SCHEDULE 13D`;
+- public filing date comes only from `sec_filing_manifest.filed_at`; the typed
+  blockholder `filed_at` is signature/fallback provenance and is forbidden as
+  a public decision clock;
 - every reporting person contributes prior issuer/reporting-person history;
-- only strictly earlier `filed_at` timestamps establish history;
+- only strictly earlier SEC-manifest public filing dates establish history;
 - no earlier active filing, no earlier passive filing and no same-timestamp
   peer for any attached reporting person;
 - one accession is counted once even when it has joint reporters;
@@ -57,7 +60,8 @@ The primary population is one accession per clean campaign:
 
 Conversions, repeats and same-timestamp ambiguity are labelled attribution
 groups and never silently mixed into the primary estimate. Date-only rows and
-the 123 rows with a precise time deliberately share the next-session-open rule:
+rows carrying optional SEC acceptance timestamps deliberately share the
+next-session-open rule:
 the daily archive cannot simulate a causal intraday fill, and a more favourable
 fill for one subset would make the arms incomparable.
 

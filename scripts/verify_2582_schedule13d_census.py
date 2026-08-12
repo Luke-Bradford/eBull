@@ -28,34 +28,35 @@ _VENDOR = "paperswithbacktest/Stocks-Daily-Price"
 
 _YEARLY_COVERAGE: LiteralString = """
 WITH accessions AS (
-    SELECT accession_number,
-           min(filed_at) AS filed_at,
-           max(instrument_id) FILTER (WHERE instrument_id IS NOT NULL) AS instrument_id
-    FROM blockholder_filings
-    WHERE submission_type = 'SCHEDULE 13D'
-    GROUP BY accession_number
+    SELECT b.accession_number,
+           m.filed_at AS public_filed_at,
+           max(b.instrument_id) FILTER (WHERE b.instrument_id IS NOT NULL) AS instrument_id
+    FROM blockholder_filings b
+    JOIN sec_filing_manifest m USING (accession_number)
+    WHERE b.submission_type = 'SCHEDULE 13D'
+    GROUP BY b.accession_number, m.filed_at
 ), covered AS (
     SELECT a.*,
            s.series_id,
            s.first_bar,
            s.last_bar,
-           s.first_bar <= a.filed_at::date - 60
-               AND s.last_bar >= a.filed_at::date + 20 AS covered_60_20
+           s.first_bar <= a.public_filed_at::date - 60
+               AND s.last_bar >= a.public_filed_at::date + 20 AS covered_60_20
     FROM accessions a
     LEFT JOIN research_price_series s
       ON s.instrument_id = a.instrument_id
      AND s.vendor = %(vendor)s
 )
-SELECT extract(year FROM filed_at)::int AS filing_year,
+SELECT extract(year FROM public_filed_at)::int AS filing_year,
        count(*) AS accessions,
        count(instrument_id) AS instrument_mapped,
        count(series_id) AS research_series_mapped,
        count(*) FILTER (WHERE covered_60_20) AS covered_60_prior_20_later,
        count(*) FILTER (
-           WHERE series_id IS NOT NULL AND last_bar < filed_at::date + 20
+           WHERE series_id IS NOT NULL AND last_bar < public_filed_at::date + 20
        ) AS outcome_window_incomplete,
        count(*) FILTER (
-           WHERE series_id IS NOT NULL AND first_bar > filed_at::date - 60
+           WHERE series_id IS NOT NULL AND first_bar > public_filed_at::date - 60
        ) AS prior_window_incomplete
 FROM covered
 GROUP BY 1
@@ -64,22 +65,25 @@ ORDER BY 1
 
 _CHAIN_SHAPE: LiteralString = """
 WITH initial_accessions AS (
-    SELECT accession_number,
-           min(issuer_cik) AS issuer_cik,
-           min(filed_at) AS filed_at,
-           max(instrument_id) FILTER (WHERE instrument_id IS NOT NULL) AS instrument_id
-    FROM blockholder_filings
-    WHERE submission_type = 'SCHEDULE 13D'
-    GROUP BY accession_number
+    SELECT b.accession_number,
+           min(b.issuer_cik) AS issuer_cik,
+           m.filed_at::date AS public_filing_date,
+           max(b.instrument_id) FILTER (WHERE b.instrument_id IS NOT NULL) AS instrument_id
+    FROM blockholder_filings b
+    JOIN sec_filing_manifest m USING (accession_number)
+    WHERE b.submission_type = 'SCHEDULE 13D'
+    GROUP BY b.accession_number, m.filed_at::date
 ), reporter_events AS (
-    SELECT DISTINCT accession_number,
-           issuer_cik,
-           coalesce(reporter_cik, reporter_name) AS reporter_identity,
-           filed_at,
-           submission_type,
-           status
-    FROM blockholder_filings
-    WHERE submission_type IN (
+    SELECT DISTINCT b.accession_number,
+           b.issuer_cik,
+           coalesce(b.reporter_cik, lower(regexp_replace(trim(b.reporter_name), '\\s+', ' ', 'g')))
+               AS reporter_identity,
+           m.filed_at::date AS public_filing_date,
+           b.submission_type,
+           b.status
+    FROM blockholder_filings b
+    JOIN sec_filing_manifest m USING (accession_number)
+    WHERE b.submission_type IN (
         'SCHEDULE 13D', 'SCHEDULE 13D/A',
         'SCHEDULE 13G', 'SCHEDULE 13G/A'
     )
@@ -88,7 +92,7 @@ WITH initial_accessions AS (
            coalesce(
                bool_or(status = 'active') OVER (
                    PARTITION BY issuer_cik, reporter_identity
-                   ORDER BY filed_at
+                   ORDER BY public_filing_date
                    RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                    EXCLUDE GROUP
                ), false
@@ -96,13 +100,13 @@ WITH initial_accessions AS (
            coalesce(
                bool_or(status = 'passive') OVER (
                    PARTITION BY issuer_cik, reporter_identity
-                   ORDER BY filed_at
+                   ORDER BY public_filing_date
                    RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                    EXCLUDE GROUP
                ), false
            ) AS prior_13g,
            count(*) OVER (
-               PARTITION BY issuer_cik, reporter_identity, filed_at
+               PARTITION BY issuer_cik, reporter_identity, public_filing_date
            ) > 1 AS same_timestamp_peer
     FROM reporter_events r
 ), classified AS (
@@ -127,17 +131,22 @@ FROM classified
 
 _SOURCE_SHAPE: LiteralString = """
 WITH accessions AS (
-    SELECT accession_number,
-           min(filed_at) AS filed_at,
-           max(date_of_event) AS date_of_event
-    FROM blockholder_filings
-    WHERE submission_type = 'SCHEDULE 13D'
-    GROUP BY accession_number
+    SELECT b.accession_number,
+           m.filed_at AS public_filed_at,
+           m.accepted_at AS public_accepted_at,
+           min(b.filed_at) AS typed_signature_or_manifest_time,
+           max(b.date_of_event) AS date_of_event
+    FROM blockholder_filings b
+    JOIN sec_filing_manifest m USING (accession_number)
+    WHERE b.submission_type = 'SCHEDULE 13D'
+    GROUP BY b.accession_number, m.filed_at, m.accepted_at
 )
 SELECT count(*) AS accessions,
        count(date_of_event) AS event_date_present,
-       count(*) FILTER (WHERE filed_at::time <> time '00:00') AS precise_filing_time,
-       count(*) FILTER (WHERE filed_at::time = time '00:00') AS date_only_filing_time,
+       count(public_accepted_at) AS sec_acceptance_time_present,
+       count(*) FILTER (WHERE public_accepted_at IS NULL) AS public_date_only,
+       count(*) FILTER (WHERE typed_signature_or_manifest_time::date <> public_filed_at::date)
+           AS typed_time_disagrees_with_public_date,
        count(raw.payload) AS raw_document_present,
        count(*) FILTER (
            WHERE raw.payload ~* '<([[:alnum:]_]+:)?item4([ >])'
