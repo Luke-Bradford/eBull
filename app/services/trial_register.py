@@ -47,6 +47,31 @@ By that test, and stated so a later reader can contest it rather than guess:
   against the SPEC (parent §"What the review changed", item 3), not a
   measurement, so nothing was searched.
 
+⚠⚠ THE UNIT IS A SEARCH, NOT A CANDIDATE STRATEGY, AND THAT IS SETTLED.
+
+Bailey/López de Prado's ``M`` is nominally the number of candidate strategy
+Sharpes a maximum could have been taken over, which would exclude a conditioning
+diagnostic. This register already rejected that narrower reading: the merged
+``short-horizon-search-session-2026-08-09`` entry charges *"25 breadth cells, 12
+confluence buckets, 13 individual conditions"* — diagnostics, not candidates —
+because criterion 6 names *"manual eyeballing"* explicitly. #2600's
+reconstruction stayed consistent with that unit rather than re-litigating it: a
+mixed population is safe in the direction that matters (a larger ``M`` raises
+``SR_0`` and LOWERS the DSR), and switching units mid-register would make the 101
+floor incommensurable with everything added after it. ⚠ The cost is that a DSR
+computed here is conservative by construction; anyone reading a **pass** off it
+must know that. A **fail** is unaffected.
+
+⚠⚠ THE ROBUSTNESS FAN IS ONE SEARCH, NOT FOUR.
+
+``ambiguity_arm`` × ``quarantine_arm`` fans every stored evaluation into four
+result rows. They are not four trials, because ``check_promotable`` requires them
+to pass jointly (``ambiguity_material``, ``quarantine_arms_not_compared``) — the
+flattering arm cannot be selected, so no maximum was taken over them. The same
+rule is applied to every family here, including where it costs count: the
+autocorrelation grid's pooled and year-clustered tables are two inference
+treatments of the same 28 effects, so that family is 28 and not 56.
+
 ⚠⚠ THE COUNT IS A FLOOR, AND THE BIAS DIRECTION IS THE REASON TO SAY SO.
 
 Sessions before this register existed did not record their variants, so trials
@@ -55,6 +80,23 @@ are missing from it. Under-counting ``M`` lowers ``N_hat``, which lowers
 DSR computed here is therefore an UPPER BOUND on the honest one, and a strategy
 that fails criterion 6 against this register would fail it harder against a
 complete one. ⚠ The converse does not hold and must not be read into a pass.
+
+⚠ #2600's reconstruction narrowed that gap; it did not close it. What it still
+does not reach is listed in
+``docs/proposals/ta/2026-08-12-trial-register-reconstruction.md`` §"What this
+reconstruction still does not reach" — chiefly the pre-ledger parameter
+development that SELECTED S-1..S-4's windows and thresholds. The counts below are
+evaluations of already-chosen rules.
+
+⚠⚠ FAMILY CORRELATION IS NOT THE REGISTER'S JOB, AND MUST NOT BECOME IT.
+
+Eight per-name-cap arms of one event stream are eight searches, and the register
+says eight. Whether they carry eight arms' worth of independent evidence is
+equation (9)'s question: ``deflated_sharpe.implied_independent_trials(rho, M)``
+shrinks ``M`` to an effective ``N`` using a ``rho`` MEASURED off the trials'
+realised return series (``scripts/verify_2240_statistics.py`` P11 asserts exactly
+that it is measured, not declared). Discounting correlated arms inside ``M`` as
+well would apply the same correction twice, in the anti-conservative direction.
 
 The same asymmetry applies to ``V[{SR_n}]``: it is estimated from the trials
 that carry a measured Sharpe, and those are the ones that survived far enough to
@@ -69,12 +111,52 @@ from __future__ import annotations
 import statistics
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Final
 
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-11-r3"
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-12-r4"
+
+#: #2600 Gate D-0.1. Every search this register counts happened at or before this
+#: instant; the two durable clocks (``strategy_results_store.created_at`` and
+#: ``strategy_holdout_accesses.accessed_at``) both top out at 2026-08-12
+#: 06:39:47Z. A search opened AFTER it charges itself under #2599's declaration
+#: contract rather than waiting for the next reconstruction.
+#:
+#: ⚠ THIS IS A DECLARATION, NOT AN ENFORCEMENT. Nothing here intercepts a
+#: read-only script or an ad-hoc SQL session, so an undeclared post-cutoff search
+#: is as invisible as a pre-ledger one. Closing that is #2599's scope; the
+#: constant exists so #2599 has a boundary to enforce from.
+TRIAL_REGISTER_CUTOFF: Final = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+
+
+class TrialExactness(StrEnum):
+    """Whether a declaration's ``searches`` is the count or a lower bound on it.
+
+    ⚠ REQUIRED on every entry — no default. The flag is a claim about evidence,
+    and a default would let an author skip the one judgement it records. Guessing
+    it wrong in either direction is worse than being made to state it: ``EXACT``
+    over-claims precision the register exists to avoid, ``FLOOR`` on a fully
+    enumerated family invites a later reader to pad it.
+    """
+
+    #: Every arm is individually enumerated by a durable artefact — a database
+    #: census, a code-level grid at the commit that ran it, or a result page's own
+    #: table. The number IS the search count, not an estimate of it.
+    EXACT = "exact"
+
+    #: The true number of searches is AT LEAST this, and the excess is not
+    #: recoverable. ⚠ A floored count admits only arms the evidence shows actually
+    #: ran; where the evidence bounds a range it takes the SMALLEST count
+    #: consistent with it. Gate D-0.1 asks for "a visible overcount over false
+    #: precision", and this is narrower on purpose: an unevidenced padding number
+    #: is not conservative, it is indistinguishable from an entry invented to make
+    #: a DSR look harder-won — which is what ``evidence`` exists to prevent. The
+    #: honest conservative move is a defensible floor plus a flag saying it is one.
+    FLOOR = "floor"
 
 
 @dataclass(frozen=True)
@@ -98,6 +180,9 @@ class DeclaredTrial:
     description: str
     #: Where the evaluation is recorded — an issue, a commit, a spec section.
     evidence: str
+    #: Whether ``searches`` is enumerated or a lower bound. ⚠ No default: see
+    #: ``TrialExactness``.
+    exactness: TrialExactness
     #: Number of price-data searches represented by this traceable declaration.
     searches: int = 1
 
@@ -107,6 +192,12 @@ class DeclaredTrial:
                 raise ValueError(f"{field_name} is blank — a present-but-empty declaration declares nothing (#2286)")
         if type(self.searches) is not int or self.searches < 1:
             raise ValueError(f"searches must be a positive integer, got {self.searches!r}")
+        # ⚠ Rejected rather than coerced. A raw string here would pass every
+        # `== "floor"` comparison a reader writes and silently fail every
+        # `is TrialExactness.FLOOR` one, so `floored_searches` would under-report
+        # on an entry that looked correct in the source.
+        if not isinstance(self.exactness, TrialExactness):
+            raise ValueError(f"exactness must be a TrialExactness, got {self.exactness!r}")
 
 
 @dataclass(frozen=True)
@@ -128,6 +219,17 @@ class TrialRegister:
         return sum(trial.searches for trial in self.trials)
 
     @property
+    def floored_searches(self) -> int:
+        """How much of ``declared_count`` is a lower bound rather than a count.
+
+        ⚠ Reported, never subtracted. A floored family's searches are searches
+        that happened; the flag says only that MORE of them happened than the
+        register can name. Removing them would move ``M`` in the flattering
+        direction, which is the failure this whole module is built against.
+        """
+        return sum(trial.searches for trial in self.trials if trial.exactness is TrialExactness.FLOOR)
+
+    @property
     def trial_ids(self) -> frozenset[str]:
         return frozenset(trial.trial_id for trial in self.trials)
 
@@ -143,6 +245,15 @@ class TrialRegister:
         measured trial absent from the register is a trial missing from ``M``,
         which is exactly the under-count criterion 6 calls decorative — and
         silently ignoring the key would hide it.
+
+        ⚠⚠ ``searches`` AND ``exactness`` DO NOT ENTER HERE, AND THE OMISSION IS
+        A KNOWN BIAS, NOT AN OVERSIGHT. The variance is over the trials MEASURED
+        this run, keyed by ``trial_id``, so a family declaring 101 searches
+        contributes at most ONE Sharpe. The measured subset is also the subset
+        that survived far enough to be measured, so it understates the spread of
+        trial Sharpes, which understates ``SR_0`` and RAISES the DSR. Weighting
+        by ``searches`` would not repair it — there is no second Sharpe to weight
+        — it would only fabricate spread the register never observed.
         """
         unknown = set(measured) - self.trial_ids
         if unknown:
@@ -158,31 +269,62 @@ class TrialRegister:
 
 #: ⚠ THE REPO'S DECLARATION. Every entry was checked against its evidence at
 #: implementation time; none is recalled. Append here — do not re-derive.
+#:
+#: ⚠⚠ #2600 RECONSTRUCTED THIS, IT DID NOT MERELY APPEND TO IT. Six families that
+#: were charged as one search each are now charged at their enumerated arm count,
+#: and six families that were never charged at all were added. The per-family
+#: derivation, the queries that produced each number and the families deliberately
+#: NOT counted are in
+#: ``docs/proposals/ta/2026-08-12-trial-register-reconstruction.md``. Read it
+#: before changing a count here — several of these numbers are the answer to a
+#: question a reader will otherwise re-litigate from first principles.
 TRIAL_REGISTER: Final = TrialRegister(
     version=TRIAL_REGISTER_VERSION,
     trials=(
+        # ⚠⚠ S-1..S-4 ARE COUNTED FROM `strategy_holdout_accesses`, NOT FROM THE
+        # RESULT STORE. The access ledger records every LOOK at the hold-out,
+        # including `read` eyeballs that wrote no result row, and
+        # `check_promotable` already treats it as the complete record
+        # (`holdout_accesses_unrecorded`). Per strategy the arithmetic is
+        # `evaluate accesses / 4` (the robustness fan) + `in_sample rows / 4` + 1
+        # `read`. Both queries are in the reconstruction page.
+        #
+        # ⚠ FLOOR, for two named populations that left no row at all: the
+        # read-only harness runs (`verify_2240_statistics.py`, `probe_2240_*.py`),
+        # and — the larger gap — the pre-ledger parameter development that CHOSE
+        # these four rules' windows, thresholds and exits. What is counted here is
+        # evaluation of an already-selected rule.
         DeclaredTrial(
             trial_id="s1-time-series-momentum",
-            description="S-1 time-series momentum, evaluated over the validated universe.",
-            evidence="app/services/strategies/s1_time_series_momentum.py; full-population run in "
-            "scripts/verify_2240_statistics.py --curve",
+            description="S-1 time-series momentum: 16 hold-out evaluations, 2 in-sample, 1 audit read.",
+            evidence="strategy_holdout_accesses (64 evaluate + 1 read) and strategy_results_store "
+            "(8 in_sample rows); docs/proposals/ta/2026-08-12-trial-register-reconstruction.md",
+            exactness=TrialExactness.FLOOR,
+            searches=19,
         ),
         DeclaredTrial(
             trial_id="s2-cross-sectional-momentum",
-            description="S-2 cross-sectional momentum, monthly rebalance on the panel.",
-            evidence="app/services/strategies/s2_cross_sectional_momentum.py; "
-            "docs/proposals/ta/2026-08-06-cross-sectional-contract-and-s2.md",
+            description="S-2 cross-sectional momentum: 16 hold-out evaluations, 2 in-sample, 1 audit read.",
+            evidence="strategy_holdout_accesses (64 evaluate + 1 read) and strategy_results_store "
+            "(8 in_sample rows); docs/proposals/ta/2026-08-12-trial-register-reconstruction.md",
+            exactness=TrialExactness.FLOOR,
+            searches=19,
         ),
         DeclaredTrial(
             trial_id="s3-mean-reversion-in-trend",
-            description="S-3 mean reversion in an established uptrend.",
-            evidence="app/services/strategies/s3_mean_reversion_in_trend.py; full-population run in "
-            "scripts/verify_2240_statistics.py --curve",
+            description="S-3 mean reversion in an uptrend: 16 hold-out evaluations, 2 in-sample, 1 audit read.",
+            evidence="strategy_holdout_accesses (64 evaluate + 1 read) and strategy_results_store "
+            "(8 in_sample rows); docs/proposals/ta/2026-08-12-trial-register-reconstruction.md",
+            exactness=TrialExactness.FLOOR,
+            searches=19,
         ),
         DeclaredTrial(
             trial_id="s4-volatility-compression-breakout",
-            description="S-4 volatility compression breakout.",
-            evidence="app/services/strategies/s4_volatility_compression_breakout.py",
+            description="S-4 volatility compression breakout: 7 hold-out evaluations, 1 audit read.",
+            evidence="strategy_holdout_accesses (28 evaluate + 1 read); no in_sample rows; "
+            "docs/proposals/ta/2026-08-12-trial-register-reconstruction.md",
+            exactness=TrialExactness.FLOOR,
+            searches=8,
         ),
         # ⚠ THE #2260 ARMS. Six causal recomputes (three rule variants across two
         # corpora) plus the original non-causal measurement they were run to
@@ -194,41 +336,60 @@ TRIAL_REGISTER: Final = TrialRegister(
             trial_id="rsi30-20d-noncausal-s7",
             description="RSI<30 → 20-day forward hit rate, the original non-causal measurement (the 76.8%).",
             evidence="issue #2260 (opening report, spike S7); withdrawn 2026-08-05",
+            exactness=TrialExactness.EXACT,
         ),
         DeclaredTrial(
             trial_id="rsi30-20d-overlapping-price-daily",
             description="RSI<30 → 20-day hit, causal Wilder, overlapping triggers, price_daily.",
             evidence="issue #2260 comment 2026-08-05 (full-population recompute)",
+            exactness=TrialExactness.EXACT,
         ),
         DeclaredTrial(
             trial_id="rsi30-20d-nonoverlapping-price-daily",
             description="RSI<30 → 20-day hit, causal Wilder, non-overlapping triggers (candidate 3), price_daily.",
             evidence="issue #2260 comment 2026-08-05 (full-population recompute)",
+            exactness=TrialExactness.EXACT,
         ),
         DeclaredTrial(
             trial_id="rsi30-20d-quarantined-price-daily",
             description="RSI<30 → 20-day hit, causal Wilder, quarantined bars excluded (candidate 4), price_daily.",
             evidence="issue #2260 comment 2026-08-05 (full-population recompute)",
+            exactness=TrialExactness.EXACT,
         ),
         DeclaredTrial(
             trial_id="rsi30-20d-overlapping-research-corpus",
             description="RSI<30 → 20-day hit, causal Wilder, overlapping triggers, research corpus.",
             evidence="issue #2260 comment 2026-08-05 (full-population recompute)",
+            exactness=TrialExactness.EXACT,
         ),
         DeclaredTrial(
             trial_id="rsi30-20d-nonoverlapping-research-corpus",
             description="RSI<30 → 20-day hit, causal Wilder, non-overlapping triggers (candidate 3), research corpus.",
             evidence="issue #2260 comment 2026-08-05 (full-population recompute)",
+            exactness=TrialExactness.EXACT,
         ),
         DeclaredTrial(
             trial_id="rsi30-20d-quarantined-research-corpus",
             description="RSI<30 → 20-day hit, causal Wilder, quarantined bars excluded (candidate 4), research corpus.",
             evidence="issue #2260 comment 2026-08-05 (full-population recompute)",
+            exactness=TrialExactness.EXACT,
         ),
+        # ⚠ #2600 raised this from 1 to 8. The result page tabulates its own arms
+        # and the original entry charged the family as one: the preregistered
+        # 62-session equal-gross primary, its separately-tabulated Long and Short
+        # legs, trailing-24 and trailing-36 pooled slices, and the declared
+        # 5/20/40-session horizon diagnostics. The matched middle-SUE row is a
+        # CONTROL and is excluded.
         DeclaredTrial(
             trial_id="pead-historical-sue-net-income-v1",
-            description="Issuer-deduplicated historical-SUE SEC filing drift; fixed 62-session equal-gross long/short.",
-            evidence="docs/proposals/ta/2026-08-10-pead-result.md; issue #2476 comment 2026-08-10 (sealed outcome)",
+            description=(
+                "Issuer-deduplicated historical-SUE SEC filing drift: 62-session equal-gross long/short primary, "
+                "its long and short legs, trailing-24/36-month slices and 5/20/40-session horizon diagnostics."
+            ),
+            evidence="docs/proposals/ta/2026-08-10-pead-result.md (§'Preregistered primary result' arm table and "
+            "§'Recency and horizon diagnostics'); issue #2476 comment 2026-08-10 (sealed outcome)",
+            exactness=TrialExactness.EXACT,
+            searches=8,
         ),
         DeclaredTrial(
             trial_id="short-horizon-search-session-2026-08-09",
@@ -237,22 +398,133 @@ TRIAL_REGISTER: Final = TrialRegister(
                 "25 breadth cells, 12 confluence buckets, 13 individual conditions, 6 short arms and 5 stop arms."
             ),
             evidence="docs/proposals/ta/2026-08-09-plan-of-attack.md §2b",
+            exactness=TrialExactness.FLOOR,
             searches=101,
         ),
+        # ⚠ #2600 raised this from 8 to 15. The page charges eight itself ("those
+        # eight evaluations are now charged to the trial [register]") and then
+        # reports SEVEN calendar-year returns for the 1%/25% diagnostic arm, which
+        # were never charged. An era cut is exactly what the page warns against
+        # selecting on — "do not rescue it by selecting a cap, threshold, hold,
+        # stop, era, sector" — so it is a search.
         DeclaredTrial(
             trial_id="extreme-shock-portfolio-sizing-stress-v1",
             description=(
                 "Frozen extreme-shock event stream under four per-name caps, each with and without the "
-                "declared 25% sector cap; all eight capital-weighted arms were rejected."
+                "declared 25% sector cap (8 rejected capital-weighted arms), plus 7 calendar-year cuts of "
+                "the 1%/25% diagnostic arm (2020 through the 2026 corpus frontier)."
             ),
-            evidence="docs/proposals/ta/2026-08-11-extreme-shock-portfolio-result.md; issue #2481",
-            searches=8,
+            evidence="docs/proposals/ta/2026-08-11-extreme-shock-portfolio-result.md (arm table and the "
+            "calendar-return paragraph); issue #2481",
+            exactness=TrialExactness.EXACT,
+            searches=15,
         ),
+        # ⚠ #2600 raised this from 1 to 7: the primary spread, the five reported
+        # windows (trailing 36, trailing 24, 2024, 2025, 2026 YTD) and the
+        # equal-weight spread. The timing-matched placebo is a CONTROL, excluded.
         DeclaredTrial(
             trial_id="form4-code-p-opportunistic-purchase-v1",
-            description="Purchase-value-weighted long opportunistic Form-4 code-P buys / short routine buys, monthly.",
-            evidence="docs/proposals/ta/2026-08-10-insider-purchase-result.md; "
+            description=(
+                "Purchase-value-weighted long opportunistic Form-4 code-P buys / short routine buys, monthly: "
+                "the primary spread, five reported windows and the equal-weight spread."
+            ),
+            evidence="docs/proposals/ta/2026-08-10-insider-purchase-result.md (§'Sealed result' window table); "
             "https://github.com/Luke-Bradford/eBull/issues/2480#issuecomment-5238836691",
+            exactness=TrialExactness.EXACT,
+            searches=7,
+        ),
+        # ⚠⚠ THE 2026-08-09 02:28 SCRIPTS (commit 61fb17da), ADDED BY #2600.
+        # All three predate the plan-of-attack's §2b floor (03:13:41, dbe5107b),
+        # whose seven named families sum to exactly 101 and name none of them.
+        # ⚠ A double-count against that floor is possible: §2b is itemised only to
+        # family names and cannot be reconciled arm-by-arm. Declaring these
+        # separately may count some arms twice; folding them in would count them
+        # zero times if §2b never covered them. Under-counting M raises the DSR,
+        # so the overcount is the safe error, and this is the one place the
+        # reconstruction knowingly takes it.
+        DeclaredTrial(
+            trial_id="autocorrelation-term-structure-2026-08-09",
+            description=(
+                "Return-autocorrelation term structure on the research corpus: 7 horizons "
+                "(1/5/21/63/126/252/756d) x 4 price bands. The pooled and year-clustered tables are two "
+                "inference treatments of the same 28 cells, not 56 searches."
+            ),
+            evidence="scripts/verify_2437_autocorrelation_term_structure.py at 61fb17da (HORIZONS has 7 entries, "
+            "_band returns 4 labels); docs/proposals/ta/2026-08-12-trial-register-reconstruction.md",
+            exactness=TrialExactness.FLOOR,
+            searches=28,
+        ),
+        DeclaredTrial(
+            trial_id="roll-bounce-spread-recovery-2026-08-09",
+            description=(
+                "Roll (1984) implied effective spread recovered from return autocovariance and compared with "
+                "the calibrated band spread, once per cost_model price band."
+            ),
+            evidence="scripts/verify_2437_roll_bounce.py at 61fb17da; len(app.services.cost_model.BANDS) == 4",
+            exactness=TrialExactness.EXACT,
+            searches=4,
+        ),
+        DeclaredTrial(
+            trial_id="insider-purchase-forward-returns-first-look-2026-08-09",
+            description=(
+                "First look at Form-4 code-P forward excess returns, year-clustered against a matched "
+                "random-date control, at 21/63/126/252 sessions. Distinct construction from the later sealed "
+                "form4-code-p-opportunistic-purchase-v1 portfolio run."
+            ),
+            evidence="scripts/verify_2437_insider_forward_returns.py at 61fb17da (HORIZONS has 4 entries)",
+            exactness=TrialExactness.EXACT,
+            searches=4,
+        ),
+        # ⚠ FLOOR at 7, not higher. Six arms are evidenced by the result page; the
+        # page also records the intended 2026 hold-out as "contaminated by
+        # discarded diagnostic runs", which evidences AT LEAST ONE such run and
+        # bounds nothing above it. A larger number would be invented. The page's
+        # no-model comparator is a CONTROL; its raw-shock, market-only and
+        # matched-random challenger arms were preregistered and NOT executed, so
+        # by the admission test they are not trials.
+        DeclaredTrial(
+            trial_id="residual-confluence-v1-development-arms",
+            description=(
+                "residual-confluence-v1+946d549861cc development arms: calendar-2024 and calendar-2025 primaries, "
+                "their broad top predicted-EV decile cuts, their predicted-EV-crosses-zero action boundaries, "
+                "and at least one discarded 2026 diagnostic run."
+            ),
+            evidence="docs/proposals/ta/2026-08-10-residual-confluence-development-result.md; issue #2499",
+            exactness=TrialExactness.FLOOR,
+            searches=7,
+        ),
+        # ⚠ FLOOR at the 4 EXECUTED arms, not the 6 preregistered ones. The
+        # preregistration declares `signed` and `long_only` across SPY/QQQ/IWM,
+        # but an unexecuted design is not a trial, and the census evidences
+        # long_only for all three plus a signed SPY diagnostic only. The
+        # always-long comparators are CONTROLS; the first census attempt selected
+        # no rows and loaded no outcome.
+        DeclaredTrial(
+            trial_id="etf-intraday-momentum-v1-retained-census",
+            description=(
+                "etf-intraday-momentum-v1+0b3804ab4111 gross feasibility on retained 30-minute bars: "
+                "long_only for SPY, QQQ and IWM plus the signed SPY diagnostic."
+            ),
+            evidence="docs/proposals/ta/2026-08-10-etf-intraday-momentum-retained-census.md; issue #2502",
+            exactness=TrialExactness.FLOOR,
+            searches=4,
+        ),
+        # ⚠ The production `equal_weight_concurrent_v1` column of that page is NOT
+        # counted here — those are the S-1..S-4 evaluations already charged above,
+        # and charging them again would double-count the same searches.
+        DeclaredTrial(
+            trial_id="sizing-rule-attribution-2026-08-12",
+            description=(
+                "Causal sizing-rule attribution: entry_weight_drift_v1 and calendar_month_end_equal_weight_v1 "
+                "across the four controls (8 arms), plus the first monthly pass stopped on the month-end "
+                "boundary defect. S-4's best/worst rows are the ambiguity fan, not separate arms."
+            ),
+            evidence="docs/proposals/ta/2026-08-12-sizing-rule-attribution-result.md — §'Entry-weight drift' and "
+            "§'Calendar-month-end equal weight' each tabulate 5 rows for 4 strategies because S-4 is split into "
+            "best/worst, which is why 8 arms and not 10; §'Boundary correction' records the stopped first monthly "
+            "pass. Issue #2430; scripts/verify_2430_sizing_rule_ab.py --window primary-2022-plus",
+            exactness=TrialExactness.FLOOR,
+            searches=9,
         ),
     ),
 )
@@ -260,7 +532,9 @@ TRIAL_REGISTER: Final = TrialRegister(
 
 __all__ = [
     "TRIAL_REGISTER",
+    "TRIAL_REGISTER_CUTOFF",
     "TRIAL_REGISTER_VERSION",
     "DeclaredTrial",
+    "TrialExactness",
     "TrialRegister",
 ]
