@@ -272,7 +272,9 @@ the independent-observation requirement is 785 before clustering. The result may
 therefore be inconclusive even if its mean is positive; that is not permission to
 relax the population. Historical data can only falsify or justify prospective
 shadow collection and can never promote capital because its universe is
-survivor-biased and it lacks historical broker economics. See
+survivor-biased, its stock classification is current-only and it lacks
+historical broker economics. Recent market context is pinned to the price-only
+SPY series 7713 and is not a total-return benchmark. See
 `2026-08-12-schedule-13d-source-census.md` and
 `2026-08-12-schedule-13d-preregistration.md`.
 

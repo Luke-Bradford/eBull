@@ -30,7 +30,7 @@ Sources:
 
 ## Exact question
 
-For a liquid US common stock whose clean first active Schedule 13D becomes
+For a liquid current eToro stock on Nasdaq or NYSE whose clean first active Schedule 13D becomes
 public, does buying at the first regular-session open strictly after the filing
 date and selling at the tenth session close produce positive total return after
 50 basis points round trip?
@@ -52,8 +52,8 @@ The primary population is one accession per clean campaign:
 - no earlier active filing, no earlier passive filing and no same-timestamp
   peer for any attached reporting person;
 - one accession is counted once even when it has joint reporters;
-- mapped liquid US common equity with 60 prior sessions and complete outcome
-  coverage.
+- mapped currently tradable eToro `Stocks` type on exchange id 4 (Nasdaq) or
+  5 (NYSE), with 60 prior sessions and complete outcome coverage.
 
 Conversions, repeats and same-timestamp ambiguity are labelled attribution
 groups and never silently mixed into the primary estimate. Date-only rows and
@@ -65,6 +65,11 @@ Eligibility is known before entry: at least $5 at the proposed open and at
 least $10 million trailing median daily dollar volume over 20 completed
 sessions. Missing identity, security type, OHLCV or corporate-action treatment
 is a refusal, not a dropped observation.
+
+The security classification is a current eToro snapshot, not point-in-time
+proof that every historical security was a common share. The historical result
+therefore remains survivor-biased and cannot promote capital even if every
+return test passes.
 
 ## Returns, controls and multiple testing
 
@@ -97,6 +102,11 @@ strength monotonicity is reported only for the accession's maximum disclosed
 percent of class; it does not authorise a threshold search. Item 4 text is not
 classified in v1: its presence and document hash are audited, but a subjective
 post-outcome purpose taxonomy cannot enter this trial.
+
+Market matching and attribution use exactly research series 7713, the
+`etoro-comparators-2026-07-08-v1` SPY snapshot, on price-only close-to-close
+returns. Its `adj_close` is unavailable, so it is not called a total-return
+benchmark and cannot support an excess-wealth claim.
 
 The complete modern archive is one historical falsification interval. It does
 not claim a pristine terminal holdout: the genuinely untouched interval begins

@@ -29,7 +29,9 @@
     "minimum_prior_daily_sessions": 60,
     "minimum_entry_price_usd": 5.0,
     "minimum_trailing_20_session_median_dollar_volume_usd": 10000000,
-    "security_scope": "US_listed_common_equity",
+    "security_scope": "current_tradable_etoro_instrument_type_5_Stocks_and_exchange_id_4_Nasdaq_or_5_NYSE",
+    "current_is_tradable_required": true,
+    "historical_security_identity_limit": "current_snapshot_only_not_point_in_time_common_share_proof",
     "unknown_security_type": "refuse",
     "missing_or_nonpositive_ohlcv": "refuse",
     "corporate_action_ambiguity": "refuse"
@@ -73,6 +75,14 @@
     "multiplicity": "holm_adjust_random_13d_1b_and_13d_1c_differences_at_family_alpha_0_05"
   },
   "context": {
+    "market_series": {
+      "series_id": 7713,
+      "vendor": "etoro/etoro-comparators-2026-07-08-v1",
+      "vendor_symbol": "SPY",
+      "comparator_snapshot_id": "etoro-comparators-2026-07-08-v1",
+      "return_basis": "price_only_close_to_close",
+      "allowed_use": "matching_and_attribution_only_not_total_return_benchmark"
+    },
     "predeclared_attribution_only": [
       "filing_year_month",
       "exchange",
