@@ -1,4 +1,13 @@
-"""Open and report #2476's sealed recent return interval exactly once."""
+"""Open and report #2476's sealed recent return interval.
+
+⚠⚠ GATED SINCE #2616. The first look ran before ``TRIAL_REGISTER_CUTOFF`` and
+was charged by #2600's reconstruction as ``pead-historical-sue-net-income-v1``
+(8 searches, exact). That entry does not pre-pay for another look: any re-run
+must name a NEW register entry (``--rerun-trial-id``), present a frozen #2599
+declaration (``scripts/freeze_2616_precutoff_declarations.py``), and writes a
+``read`` access row before any outcome is read. See
+``scripts/sealed_rerun_gate.py`` for the rules and why each exists.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +16,9 @@ import sys
 from collections import Counter
 from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 from statistics import mean
+from typing import Final
 
 import psycopg
 
@@ -23,6 +34,23 @@ from app.services.pead_outcomes import (
     concurrency_counts,
     evaluate_outcomes,
     median_time_to_outcome_days,
+)
+from app.services.result_ledger import verify_outcome_access_provenance
+from scripts.sealed_rerun_gate import SealedTrialIdentity, require_outcome_gate, require_outcome_gate_preconditions
+
+STRATEGY_ID: Final = "pead-historical-sue-net-income"
+STRATEGY_VERSION: Final = "pead-historical-sue-net-income-v1"
+
+#: This trial's contract is its preregistration document, digest-frozen like
+#: C-4's JSON contract. A deliberate edit must update this digest in review.
+SEALED_TRIAL: Final = SealedTrialIdentity(
+    strategy_id=STRATEGY_ID,
+    strategy_version=STRATEGY_VERSION,
+    prereg_doc=Path("docs/proposals/ta/2026-08-10-pead-preregistration.md"),
+    prereg_sha256="dc5aa8034372e678b7cc1e798a68a4ce2018aaf7c7226383dbbf09b880bb9126",
+    original_trial_id="pead-historical-sue-net-income-v1",
+    rerun_trial_id_prefix="pead-historical-sue-net-income",
+    accessed_by="scripts/verify_2476_pead_outcomes.py",
 )
 
 
@@ -127,12 +155,35 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="required acknowledgement: this reads the preregistered recent outcomes",
     )
+    parser.add_argument(
+        "--rerun-trial-id",
+        help="the trial_register entry charging THIS look; the original "
+        "pead-historical-sue-net-income-v1 entry covers only the pre-cutoff look already taken",
+    )
     args = parser.parse_args(argv)
     if not args.open_sealed_holdout:
         parser.error("pass --open-sealed-holdout only after the source and outcome code are frozen and tested")
+    # ⚠ The database-free refusals fire before a connection is opened (#2616).
+    require_outcome_gate_preconditions(SEALED_TRIAL, args.rerun_trial_id)
 
     archive = resolve_data_dir() / "sec" / "bulk" / "companyfacts.zip"
     with psycopg.connect(settings.database_url) as conn:
+        gate = require_outcome_gate(conn, SEALED_TRIAL, trial_id=args.rerun_trial_id)
+        # ⚠ The look is logged even if the evaluation below dies — and the
+        # provenance re-check immediately after is what proves it COMMITTED
+        # and that the declaration was frozen strictly before it.
+        conn.commit()
+        verify_outcome_access_provenance(
+            conn,
+            strategy_id=STRATEGY_ID,
+            strategy_version=STRATEGY_VERSION,
+            declaration_id=gate.declaration_id,
+            access_id=gate.access_id,
+        )
+        print(
+            f"re-run charged to register entry {gate.rerun_trial_id} "
+            f"(declaration {gate.declaration_id}, access {gate.access_id})"
+        )
         source, loaded = build_archive_source(conn, archive)
         control_events, control_match = build_matched_control_events(source.triggers)
         signal_events = expand_instrument_alternatives(source.triggers, source.instrument_alternatives)

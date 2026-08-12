@@ -1,4 +1,15 @@
-"""Open and report #2480's preregistered sealed outcome interval once."""
+"""Open and report #2480's preregistered sealed outcome interval.
+
+⚠⚠ GATED SINCE #2616. The first look ran before ``TRIAL_REGISTER_CUTOFF`` and
+was charged by #2600's reconstruction as ``form4-code-p-opportunistic-purchase-v1``
+(7 searches, exact) — NOT as ``insider-purchase-forward-returns-first-look-2026-08-09``,
+which is ``scripts/verify_2437_insider_forward_returns.py``'s distinct first-look
+construction; #2614's table and #2616's opening report both mis-attributed it.
+That entry does not pre-pay for another look: any re-run must name a NEW register
+entry (``--rerun-trial-id``), present a frozen #2599 declaration
+(``scripts/freeze_2616_precutoff_declarations.py``), and writes a ``read`` access
+row before any outcome is read. See ``scripts/sealed_rerun_gate.py``.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +19,7 @@ from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 from statistics import mean
+from typing import Final
 
 import psycopg
 
@@ -25,6 +37,23 @@ from app.services.insider_purchase_outcomes import (
     maximum_drawdown_pct,
     median_firm_count,
     profit_factor,
+)
+from app.services.result_ledger import verify_outcome_access_provenance
+from scripts.sealed_rerun_gate import SealedTrialIdentity, require_outcome_gate, require_outcome_gate_preconditions
+
+STRATEGY_ID: Final = "form4-code-p-opportunistic-purchase"
+STRATEGY_VERSION: Final = "form4-code-p-opportunistic-purchase-v1"
+
+#: This trial's contract is its preregistration document, digest-frozen like
+#: C-4's JSON contract. A deliberate edit must update this digest in review.
+SEALED_TRIAL: Final = SealedTrialIdentity(
+    strategy_id=STRATEGY_ID,
+    strategy_version=STRATEGY_VERSION,
+    prereg_doc=Path("docs/proposals/ta/2026-08-10-insider-purchase-preregistration.md"),
+    prereg_sha256="27b0361dee73d033137a435f81ef0a43d4ffec20ecb5e294caac91056769603a",
+    original_trial_id="form4-code-p-opportunistic-purchase-v1",
+    rerun_trial_id_prefix="form4-code-p-opportunistic-purchase",
+    accessed_by="scripts/verify_2480_insider_outcomes.py",
 )
 
 
@@ -83,12 +112,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--archive-dir", type=Path, required=True)
     parser.add_argument("--last-quarter", required=True)
     parser.add_argument("--open-sealed-holdout", action="store_true")
+    parser.add_argument(
+        "--rerun-trial-id",
+        help="the trial_register entry charging THIS look; the original "
+        "form4-code-p-opportunistic-purchase-v1 entry covers only the pre-cutoff look already taken",
+    )
     args = parser.parse_args(argv)
     if not args.open_sealed_holdout:
         parser.error("pass --open-sealed-holdout only after source and outcome code are frozen and reviewed")
+    # ⚠ The database-free refusals fire before a connection is opened (#2616).
+    require_outcome_gate_preconditions(SEALED_TRIAL, args.rerun_trial_id)
     archives = sorted(args.archive_dir.glob("*_form345.zip"))
 
     with psycopg.connect(settings.database_url) as conn:
+        gate = require_outcome_gate(conn, SEALED_TRIAL, trial_id=args.rerun_trial_id)
+        # ⚠ The look is logged even if the evaluation below dies — and the
+        # provenance re-check immediately after is what proves it COMMITTED
+        # and that the declaration was frozen strictly before it.
+        conn.commit()
+        verify_outcome_access_provenance(
+            conn,
+            strategy_id=STRATEGY_ID,
+            strategy_version=STRATEGY_VERSION,
+            declaration_id=gate.declaration_id,
+            access_id=gate.access_id,
+        )
+        print(
+            f"re-run charged to register entry {gate.rerun_trial_id} "
+            f"(declaration {gate.declaration_id}, access {gate.access_id})"
+        )
         source = build_source(conn, archives, expected_last_quarter=args.last_quarter)
         signals = build_firm_month_signals(source.classified)
         controls, control_match = build_matched_control_signals(signals)
