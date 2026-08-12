@@ -22,6 +22,7 @@ from app.providers.implementations.etoro import (
     _normalise_instruments,
     _normalise_intraday_candle,
     _normalise_intraday_candles,
+    _normalise_market_snapshot_instrument,
     _normalise_rate,
     _normalise_rates,
 )
@@ -114,6 +115,24 @@ FIXTURE_RATE_2 = {
 
 FIXTURE_RATES_RESPONSE = {"rates": [FIXTURE_RATE, FIXTURE_RATE_2]}
 
+FIXTURE_MARKET_SNAPSHOT = {
+    "instrumentId": 1001,
+    "currentRate": 305.1,
+    "dailyPriceChange": 0.0623,
+    "weeklyPriceChange": 2.1,
+    "monthlyPriceChange": 4.2,
+    "isCurrentlyTradable": True,
+    "isExchangeOpen": True,
+    "isActiveInPlatform": True,
+    "isBuyEnabled": True,
+    "internalIndustryId": 42,
+    "sectorNameId": 7,
+    "popularityUniques7Day": 1234,
+    "traders7DayChange": -3,
+    "buyHoldingPct": 91.5,
+    "sellHoldingPct": 8.5,
+}
+
 
 # ---------------------------------------------------------------------------
 # Instrument normalisation
@@ -167,6 +186,36 @@ class TestNormaliseInstruments:
         raw = {"instrumentDisplayDatas": [FIXTURE_INSTRUMENT, "not a dict", {}]}
         records = _normalise_instruments(raw)
         assert len(records) == 1
+
+
+class TestNormaliseMarketSnapshotInstrument:
+    def test_projected_values_preserve_provider_units(self) -> None:
+        row = _normalise_market_snapshot_instrument(FIXTURE_MARKET_SNAPSHOT)
+        assert row is not None
+        assert row.instrument_id == 1001
+        assert row.current_rate == Decimal("305.1")
+        assert row.daily_price_change_pct == Decimal("0.0623")
+        assert row.is_exchange_open is True
+        assert row.industry_id == 42
+        assert row.buy_holding_pct == Decimal("91.5")
+
+    @pytest.mark.parametrize("instrument_id", [None, 0, -1, "bad"])
+    def test_invalid_provider_id_is_discarded(self, instrument_id: object) -> None:
+        assert _normalise_market_snapshot_instrument({**FIXTURE_MARKET_SNAPSHOT, "instrumentId": instrument_id}) is None
+
+    def test_missing_and_non_finite_optional_values_remain_unknown(self) -> None:
+        row = _normalise_market_snapshot_instrument(
+            {
+                "instrumentId": 1001,
+                "currentRate": 0,
+                "dailyPriceChange": "NaN",
+                "isCurrentlyTradable": 1,
+            }
+        )
+        assert row is not None
+        assert row.current_rate is None
+        assert row.daily_price_change_pct is None
+        assert row.is_currently_tradable is None
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +558,106 @@ class TestGetQuotesChunking:
             # raw-persistence path was retired now that SQL coverage
             # is complete. Error diagnostics live in the log line via
             # exc_info instead.
+
+
+class TestGetBroadMarketSnapshot:
+    def test_one_page_uses_live_page_parameter_and_tracks_discarded_rows(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 2,
+            "items": [FIXTURE_MARKET_SNAPSHOT, {"instrumentId": -100000}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            snapshot = provider.get_broad_market_snapshot()
+            params = provider._http.get.call_args.kwargs["params"]
+
+        assert params["page"] == 1
+        assert "pageNumber" not in params
+        assert snapshot.reported_total_items == 2
+        assert snapshot.discarded_items == 1
+        assert [row.instrument_id for row in snapshot.instruments] == [1001]
+        assert snapshot.observed_from <= snapshot.observed_to
+
+    def test_fetches_every_reported_page(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        first = MagicMock()
+        first.raise_for_status = MagicMock()
+        first.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 10_001,
+            "items": [{"instrumentId": i} for i in range(1, 10_001)],
+        }
+        second = MagicMock()
+        second.raise_for_status = MagicMock()
+        second.json.return_value = {
+            "page": 2,
+            "pageSize": 10_000,
+            "totalItems": 10_001,
+            "items": [{"instrumentId": 10_001}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.side_effect = [first, second]
+            snapshot = provider.get_broad_market_snapshot()
+            requested_pages = [call.kwargs["params"]["page"] for call in provider._http.get.call_args_list]
+
+        assert len(snapshot.instruments) == 10_001
+        assert requested_pages == [1, 2]
+
+    def test_refuses_incomplete_pagination(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"page": 1, "pageSize": 10_000, "totalItems": 3, "items": []}
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="pagination incomplete"):
+                provider.get_broad_market_snapshot()
+
+    def test_refuses_duplicate_ids(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 2,
+            "items": [{"instrumentId": 1001}, {"instrumentId": 1001}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="repeated instrumentId"):
+                provider.get_broad_market_snapshot()
+
+    def test_refuses_unbounded_page_count(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 20_001,
+            "items": [],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="bounded adapter permits 2"):
+                provider.get_broad_market_snapshot()
 
 
 # ---------------------------------------------------------------------------

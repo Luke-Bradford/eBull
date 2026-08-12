@@ -125,6 +125,51 @@ class Quote:
     conversion_rate: Decimal | None = None
 
 
+@dataclass(frozen=True)
+class MarketSnapshotInstrument:
+    """One projected row from a provider's broad market catalogue.
+
+    This is screening context, not an executable quote: provider search rows
+    do not carry a per-instrument timestamp or a bid/ask pair.  Any candidate
+    selected from this snapshot must still pass the normal fresh-quote gate.
+    Price-change values are percentages in the provider's published units.
+    """
+
+    instrument_id: int
+    current_rate: Decimal | None
+    daily_price_change_pct: Decimal | None
+    weekly_price_change_pct: Decimal | None
+    monthly_price_change_pct: Decimal | None
+    is_currently_tradable: bool | None
+    is_exchange_open: bool | None
+    is_active_in_platform: bool | None
+    is_buy_enabled: bool | None
+    industry_id: int | None
+    sector_id: int | None
+    popularity_uniques_7d: Decimal | None
+    traders_7d_change: Decimal | None
+    buy_holding_pct: Decimal | None
+    sell_holding_pct: Decimal | None
+
+
+@dataclass(frozen=True)
+class BroadMarketSnapshot:
+    """A completed, paginated broad-market observation.
+
+    ``observed_from``/``observed_to`` expose the collection interval rather
+    than pretending thousands of projected values share one source timestamp.
+    ``reported_total_items`` includes provider rows with invalid/non-positive
+    IDs; those rows are counted in ``discarded_items`` and never enter
+    ``instruments``.
+    """
+
+    observed_from: datetime
+    observed_to: datetime
+    reported_total_items: int
+    discarded_items: int
+    instruments: tuple[MarketSnapshotInstrument, ...]
+
+
 class MarketDataProvider(ABC):
     """
     Interface for market data: tradable universe, candles, and quotes.
@@ -222,4 +267,13 @@ class MarketDataProvider(ABC):
 
         Instruments that are not recognised or not currently quoted
         are silently omitted from the result list.
+        """
+
+    @abstractmethod
+    def get_broad_market_snapshot(self) -> BroadMarketSnapshot:
+        """Return a bounded provider-wide screening snapshot.
+
+        The snapshot is not a quote source and must not be used directly for
+        order pricing. Implementations must complete and validate every page;
+        partial pagination is an error rather than a smaller apparent market.
         """
