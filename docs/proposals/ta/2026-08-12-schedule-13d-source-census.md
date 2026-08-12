@@ -58,11 +58,15 @@ must carry those source refusals.
 
 Chain shape is material:
 
-- 1,216 accessions have no earlier active filing for any reporting person on
+- 1,227 accessions have no strictly earlier active filing timestamp for any
+  reporting person on
   the issuer in the retained chain;
-- 69 have an earlier active filing for at least one reporting person;
-- 47 have an earlier passive 13G-family filing for at least one reporting
+- 58 have an earlier active filing for at least one reporting person;
+- 46 have an earlier passive 13G-family filing for at least one reporting
   person;
+- 37 have another filing for the same reporter and issuer at the same retained
+  timestamp, so their within-timestamp chain order is ambiguous and is not
+  invented from accession-number order;
 - the mapped accessions cover 855 distinct instruments.
 
 Those figures do not yet prove the chain identity is economically correct.

@@ -96,4 +96,19 @@ def test_joint_accession_uses_every_reporter_chain(ebull_test_conn: psycopg.Conn
     )
 
     row = ebull_test_conn.execute(_CHAIN_SHAPE).fetchone()
-    assert row == (3, 2, 1, 1, 0)
+    assert row == (3, 2, 1, 1, 0, 0)
+
+
+def test_same_timestamp_does_not_invent_chain_order(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    filed_at = datetime(2025, 2, 3, tzinfo=UTC)
+    for accession in ("0000000006-25-000001", "0000000006-25-000002"):
+        _seed(
+            ebull_test_conn,
+            accession=accession,
+            submission_type="SCHEDULE 13D",
+            reporter_cik="0000000006",
+            filed_at=filed_at,
+        )
+
+    row = ebull_test_conn.execute(_CHAIN_SHAPE).fetchone()
+    assert row == (2, 2, 0, 0, 2, 0)

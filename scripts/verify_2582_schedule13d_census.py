@@ -88,23 +88,29 @@ WITH initial_accessions AS (
            coalesce(
                bool_or(status = 'active') OVER (
                    PARTITION BY issuer_cik, reporter_identity
-                   ORDER BY filed_at, accession_number
-                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                   ORDER BY filed_at
+                   RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                   EXCLUDE GROUP
                ), false
            ) AS prior_13d,
            coalesce(
                bool_or(status = 'passive') OVER (
                    PARTITION BY issuer_cik, reporter_identity
-                   ORDER BY filed_at, accession_number
-                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                   ORDER BY filed_at
+                   RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                   EXCLUDE GROUP
                ), false
-           ) AS prior_13g
+           ) AS prior_13g,
+           count(*) OVER (
+               PARTITION BY issuer_cik, reporter_identity, filed_at
+           ) > 1 AS same_timestamp_peer
     FROM reporter_events r
 ), classified AS (
     SELECT a.accession_number,
            a.instrument_id,
            bool_or(h.prior_13d) AS prior_13d,
-           bool_or(h.prior_13g) AS prior_13g
+           bool_or(h.prior_13g) AS prior_13g,
+           bool_or(h.same_timestamp_peer) AS ambiguous_chain_order
     FROM initial_accessions a
     JOIN reporter_history h USING (accession_number)
     WHERE h.submission_type = 'SCHEDULE 13D'
@@ -114,6 +120,7 @@ SELECT count(*) AS accessions,
        count(*) FILTER (WHERE NOT prior_13d) AS first_13d_per_chain,
        count(*) FILTER (WHERE prior_13d) AS repeated_initial_label,
        count(*) FILTER (WHERE prior_13g) AS prior_13g,
+       count(*) FILTER (WHERE ambiguous_chain_order) AS ambiguous_chain_order,
        count(DISTINCT instrument_id) AS mapped_instruments
 FROM classified
 """
