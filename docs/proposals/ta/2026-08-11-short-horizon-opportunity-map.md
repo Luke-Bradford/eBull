@@ -82,7 +82,7 @@ stale quote, unknown shortability or an uneconomic bracket.
 
 | family | observable mechanism | exact data need | current decision |
 | --- | --- | --- | --- |
-| Stocks-in-Play opening-range breakout | abnormal opening participation followed by a first-range break | full-market opening 5-minute volume, selected intraday paths, quotes and shortability | exact contract frozen in #2485; eight-name imitation refused; free delayed/realtime source work in #2520/#2521 |
+| Stocks-in-Play opening-range breakout | abnormal opening participation followed by a first-range break | full-market opening 5-minute volume, selected intraday paths, quotes and shortability | exact contract frozen in #2485; eight-name imitation refused; #2521 found no qualifying free live discovery source, while delayed-history access remains unproved in #2520 |
 | 30-minute residual reversal | provide liquidity against an extreme stock-specific move after removing intraday factors | broad, continuously covered bid/ask midpoints and factor cross-section | exact replication in #2484; collect prospectively, do not substitute candles |
 | same-clock intraday continuation | a stock's return in one half-hour predicts the same half-hour on later days | broad half-hour cross-section with stable session clock and execution quotes | independent research family, but lower priority until broad intraday data exists |
 | first-to-last-half-hour ETF momentum | overnight/first-half-hour ETF return predicts the final half-hour | exact ETF interval bars and executable costs | recent eToro test rejected; do not generalise it to stocks |
