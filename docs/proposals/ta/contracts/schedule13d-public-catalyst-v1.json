@@ -108,6 +108,8 @@
   "statistics": {
     "primary_estimand": "mean_net_total_return_pct",
     "confidence_interval": "two_way_pigeonhole_bootstrap_by_issuer_and_entry_session_95pct_percentile",
+    "bootstrap_weighting": "independent_multinomial_cluster_counts_product_discard_empty_intersection_until_10000_valid_draws",
+    "bootstrap_quantile_method": "linear",
     "bootstrap_seed": 2582,
     "bootstrap_resamples": 10000,
     "minimum_worthwhile_net_effect_pct": 1.0,
@@ -115,6 +117,15 @@
     "planning_alpha_two_sided": 0.05,
     "planning_power": 0.8,
     "minimum_planning_effective_sample_size": 785,
+    "effective_sample_size_definition": "min_raw_n_sample_return_variance_div_pigeonhole_bootstrap_mean_variance",
+    "recent_stability_windows": [
+      "2025-01-01_to_2025-06-30",
+      "2025-07-01_to_2025-12-31",
+      "2026-01-01_to_2026-06-30",
+      "latest_12m_2025-07-01_to_2026-06-30"
+    ],
+    "signal_strength_monotonicity_definition": "spearman_average_tie_rank_maximum_percent_of_class_vs_net_return_attribution_only",
+    "concentration_return_basis": "gross_return_before_fixed_50bps_cost_positive_part",
     "required_reports": [
       "eligible_event_count",
       "effective_sample_size",
@@ -124,7 +135,7 @@
       "average_winner_and_loser",
       "profit_factor",
       "expected_shortfall_5pct",
-      "worst_gap",
+      "worst_net_event_return",
       "concurrency",
       "sector_and_issuer_concentration",
       "result_excluding_best_1pct",

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 CONTRACT = Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json")
-EXPECTED_SHA256 = "46cf162d4c1781dcd8f1ae929425d19a2f2b50a72bda1b6269d0a021845b7e6a"
+EXPECTED_SHA256 = "277e200233095bde072eb9a7583dcb62a04325d3b8b6f43b4cd96f55f71f1e9d"
 
 
 def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
@@ -49,6 +49,9 @@ def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
     expected_n = 785
     assert round(7.84888 * (sigma / effect) ** 2) == expected_n
     assert stats["minimum_planning_effective_sample_size"] == expected_n
+    assert stats["effective_sample_size_definition"].startswith("min_raw_n")
+    assert len(stats["recent_stability_windows"]) == 4
+    assert stats["concentration_return_basis"].startswith("gross_return")
 
     digest = hashlib.sha256(raw).hexdigest()
     assert digest == EXPECTED_SHA256, f"frozen contract digest moved: {digest}"
