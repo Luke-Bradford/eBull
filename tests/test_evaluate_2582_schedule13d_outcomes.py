@@ -3,11 +3,14 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
+import psycopg
 import pytest
 
 from scripts.evaluate_2582_schedule13d_outcomes import (
     _ALL_13D_PUBLIC_DATES_SQL,
+    _CREATE_TEMP_SESSIONS,
     _INITIAL_13G_SOURCE_SQL,
     _SOURCE_EVENTS_SQL,
     ACKNOWLEDGEMENT,
@@ -21,6 +24,7 @@ from scripts.evaluate_2582_schedule13d_outcomes import (
     match_tie_break,
     next_regular_session_strictly_after,
     nth_regular_session,
+    prepare_price_window_workspace,
     regular_sessions_ending_before,
     require_outcome_gate,
     required_event_sessions,
@@ -64,6 +68,62 @@ def test_random_placebo_halo_source_is_outcome_free_and_includes_amendments() ->
     assert "'schedule 13d', 'schedule 13d/a'" in lowered
     assert "sec_filing_manifest" in lowered
     assert "research_price_daily" not in lowered
+
+
+def test_price_workspace_survives_commit_for_one_read_only_outcome_snapshot() -> None:
+    assert "ON COMMIT PRESERVE ROWS" in _CREATE_TEMP_SESSIONS
+    assert "ON COMMIT DROP" not in _CREATE_TEMP_SESSIONS
+
+
+class _WorkspaceInfo:
+    transaction_status = psycopg.pq.TransactionStatus.IDLE
+
+
+class _WorkspaceConnection:
+    info = _WorkspaceInfo()
+
+    def __init__(self, *, existing: bool = False) -> None:
+        self.executed: list[str] = []
+        self.committed = False
+        self.existing = existing
+
+    def execute(self, query: str) -> Any:
+        self.executed.append(query)
+        if "to_regclass" in query:
+            return _WorkspaceResult(("schedule13d_trial_sessions" if self.existing else None,))
+        return None
+
+    def commit(self) -> None:
+        self.committed = True
+
+
+class _WorkspaceResult:
+    def __init__(self, row: tuple[str | None]) -> None:
+        self.row = row
+
+    def fetchone(self) -> tuple[str | None]:
+        return self.row
+
+
+def test_price_workspace_preparation_has_an_explicit_pre_outcome_commit() -> None:
+    conn = _WorkspaceConnection()
+    prepare_price_window_workspace(conn)  # type: ignore[arg-type]
+    assert conn.executed == ["SELECT to_regclass('pg_temp.schedule13d_trial_sessions')", _CREATE_TEMP_SESSIONS]
+    assert conn.committed
+
+
+def test_price_workspace_preparation_reuses_an_idle_connection() -> None:
+    conn = _WorkspaceConnection(existing=True)
+    prepare_price_window_workspace(conn)  # type: ignore[arg-type]
+    assert conn.executed == ["SELECT to_regclass('pg_temp.schedule13d_trial_sessions')"]
+    assert conn.committed
+
+
+def test_price_workspace_refuses_to_commit_a_caller_owned_transaction() -> None:
+    conn = _WorkspaceConnection()
+    conn.info.transaction_status = psycopg.pq.TransactionStatus.INTRANS
+    with pytest.raises(OutcomeGateRefusal, match="idle connection"):
+        prepare_price_window_workspace(conn)  # type: ignore[arg-type]
 
 
 def test_gate_refuses_even_with_ack_until_trial_is_declared() -> None:
