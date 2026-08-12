@@ -479,6 +479,35 @@ class TestMakeLLMClients:
         assert clients.writer.model == "qwen3:14b"
         assert clients.critic.model == "qwen3:14b"
 
+    @respx.mock
+    def test_ollama_probe_is_cached_per_process(self) -> None:
+        """Review NITPICK on #2618 — ``make_llm_clients`` is documented as doing
+        no network I/O (``scheduler.py`` calls it purely to resolve config), so
+        the probe must not fire per call and turn a config gate into a
+        connectivity gate.
+        """
+        from app.services import llm_client
+
+        llm_client._OLLAMA_PROBE_CACHE.clear()
+        probe = respx.get("http://localhost:11434/api/version").mock(
+            return_value=httpx.Response(200, json={"version": "0.31.1"})
+        )
+        for _ in range(3):
+            make_llm_clients(_config_conn(provider="openai_compatible"))
+        assert probe.call_count == 1
+
+    @respx.mock
+    def test_unreachable_probe_is_not_cached(self) -> None:
+        """A restarting Ollama must not pin the OpenAI transport for the process."""
+        from app.services import llm_client
+
+        llm_client._OLLAMA_PROBE_CACHE.clear()
+        probe = respx.get("http://localhost:11434/api/version").mock(side_effect=httpx.ConnectError("down"))
+        for _ in range(2):
+            clients = make_llm_clients(_config_conn(provider="openai_compatible"))
+            assert not isinstance(clients.writer, OllamaNativeProvider)
+        assert probe.call_count == 2  # retried, not remembered
+
     def test_remote_endpoint_keeps_the_openai_contract(self) -> None:
         """The converse, so the selection is pinned from both sides: a remote
         endpoint speaks OpenAI and must NOT be handed Ollama-native fields.

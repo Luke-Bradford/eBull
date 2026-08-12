@@ -312,8 +312,22 @@ class OpenAICompatProvider:
             logger.info("llm: released local model %s", self.model)
 
 
+#: Probe results, keyed by base URL. ⚠ CACHED BECAUSE ``make_llm_clients`` IS
+#: DOCUMENTED AS DOING NO NETWORK I/O — ``scheduler.py``'s
+#: ``_llm_provider_resolvable`` prerequisite check calls it purely to resolve
+#: config, and a per-call round trip would turn a config gate into a
+#: connectivity gate. One probe per process per URL, so the hourly job pays it
+#: at most once. Review NITPICK on #2618.
+#:
+#: ⚠ Staleness is the accepted trade: swapping Ollama for llama.cpp at the same
+#: URL without restarting the process keeps the old answer. That is a
+#: deployment change, and the probe fails TO the OpenAI transport anyway, so the
+#: stale direction that matters degrades to the pre-#2431 behaviour.
+_OLLAMA_PROBE_CACHE: dict[str, bool] = {}
+
+
 def _endpoint_is_ollama(base_url: str) -> bool:
-    """Is this endpoint actually Ollama? Probed, never assumed (#2431).
+    """Is this endpoint actually Ollama? Probed once per process, never assumed (#2431).
 
     ``/api/version`` is Ollama's own route: llama.cpp and vLLM serve the OpenAI
     surface but not this one, so a 200 here is positive evidence rather than a
@@ -326,6 +340,9 @@ def _endpoint_is_ollama(base_url: str) -> bool:
     """
     if not is_local_llm_endpoint(base_url):
         return False
+    cached = _OLLAMA_PROBE_CACHE.get(base_url)
+    if cached is not None:
+        return cached
     try:
         # ⚠ ``rstrip('/')`` HERE and not in ``complete()`` — deliberate, not an
         # oversight (review NITPICK on #2618). This takes the RAW configured
@@ -336,8 +353,13 @@ def _endpoint_is_ollama(base_url: str) -> bool:
             timeout=LLM_RELEASE_TIMEOUT,
         )
     except httpx.HTTPError:
+        # ⚠ NOT cached. An unreachable server is a transient condition — caching
+        # it would pin the OpenAI transport for the life of the process because
+        # Ollama happened to be restarting when the first probe fired.
         return False
-    return response.status_code == 200
+    is_ollama = response.status_code == 200
+    _OLLAMA_PROBE_CACHE[base_url] = is_ollama
+    return is_ollama
 
 
 class OllamaNativeProvider(OpenAICompatProvider):
