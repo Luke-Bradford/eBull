@@ -253,6 +253,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await asyncio.to_thread(_ensure_exchanges_seeded_probe)
 
+    # #2436 — give every stored thesis a subject-identity verdict under the
+    # CURRENT rule. Same self-heal posture as the probes above, and load-bearing
+    # for the same reason: sql/332 can only add NULL columns, every consumer
+    # reads NULL as quarantined, so a migrate-and-deploy without this would
+    # silently strip the whole historical thesis corpus out of portfolio
+    # decisions, scoring, take-profit and reporting. Steady state writes zero
+    # rows; a rule-hash change re-verdicts the corpus on the next boot.
+    from app.services.thesis_subject_identity import ensure_subject_identity_verdicts
+
+    def _ensure_subject_identity_verdicts_probe() -> None:
+        with psycopg.connect(settings.database_url, autocommit=True) as guard_conn:
+            written = ensure_subject_identity_verdicts(guard_conn)
+        if written:
+            logger.warning("Thesis subject-identity verdicts (re)computed for %d row(s) (#2436).", written)
+
+    await asyncio.to_thread(_ensure_subject_identity_verdicts_probe)
+
     # Open the connection pool after migrations so the schema is up to date.
     pool = open_pool(
         "db_pool",

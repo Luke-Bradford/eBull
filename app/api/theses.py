@@ -198,6 +198,13 @@ class ThesisDetail(BaseModel):
     prompt_version: str | None = None
     model: str | None = None
     provider: str | None = None
+    # #2436 — the stored subject-identity verdict. NOT a filter: the row stays
+    # visible because it is the truthful record of what the writer produced and
+    # the evidence base for the write-side fix (#2431). False = the memo never
+    # names its own instrument, so every figure in it belongs to a different
+    # company and the deterministic layer refuses its band. None = never
+    # checked (written before sql/332), which consumers also refuse.
+    subject_identity_ok: bool | None = None
     is_stale: bool | None = None
     stale_reason: str | None = None
     # #2071 — magnitude string for the data-driven staleness reasons
@@ -268,6 +275,9 @@ class ThesisLibraryItem(BaseModel):
     # None/False when the latest thesis is v1 or the predecessor is missing.
     last_change_summary: str | None = None
     last_change_material: bool = False
+    # #2436 — see ThesisDetail.subject_identity_ok. Carried on the list row so
+    # the library can mark a quarantined thesis without a second fetch.
+    subject_identity_ok: bool | None = None
 
 
 class ThesisLibraryResponse(BaseModel):
@@ -310,6 +320,7 @@ def _parse_thesis(row: dict[str, object]) -> ThesisDetail:
         prompt_version=row.get("prompt_version"),  # type: ignore[arg-type]
         model=row.get("model"),  # type: ignore[arg-type]
         provider=row.get("provider"),  # type: ignore[arg-type]
+        subject_identity_ok=row.get("subject_identity_ok"),  # type: ignore[arg-type]
     )
 
 
@@ -319,7 +330,8 @@ _THESIS_COLUMNS = """
     t.buy_zone_low, t.buy_zone_high,
     t.base_value, t.bull_value, t.bear_value,
     t.break_conditions_json, t.memo_markdown, t.critic_json,
-    t.created_at, t.prompt_version, t.model, t.provider
+    t.created_at, t.prompt_version, t.model, t.provider,
+    t.subject_identity_ok
 """
 
 
@@ -473,7 +485,7 @@ _LIBRARY_SQL = """
         t.thesis_id, t.instrument_id, t.thesis_version, t.thesis_type,
         t.stance, t.confidence_score, t.buy_zone_low, t.buy_zone_high,
         t.base_value, t.bull_value, t.bear_value,
-        t.critic_json, t.created_at,
+        t.critic_json, t.created_at, t.subject_identity_ok,
         i.symbol, i.company_name,
         EXISTS (
             SELECT 1 FROM positions p
@@ -500,7 +512,7 @@ _LIBRARY_SQL = """
             thesis_id, instrument_id, thesis_version, thesis_type,
             stance, confidence_score, buy_zone_low, buy_zone_high,
             base_value, bull_value, bear_value,
-            critic_json, created_at
+            critic_json, created_at, subject_identity_ok
         FROM theses
         ORDER BY instrument_id, created_at DESC, thesis_version DESC
     ) t
@@ -707,6 +719,7 @@ def list_theses(
             run_error=row["run_error"],  # type: ignore[arg-type]
             run_trigger=row["run_trigger"],  # type: ignore[arg-type]
             run_started_at=row["run_started_at"],  # type: ignore[arg-type]
+            subject_identity_ok=row.get("subject_identity_ok"),  # type: ignore[arg-type]
         )
         for idx, row in enumerate(page)
     ]

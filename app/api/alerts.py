@@ -196,6 +196,12 @@ class ThesisChangesResponse(BaseModel):
     alerts_last_seen_thesis_change_id: int | None
     unseen_count: int
     changes: list[ThesisChange]
+    # #2436 — pairs dropped because one side's memo does not name its own
+    # instrument. Published rather than silently omitted: an operator whose
+    # feed empties is entitled to know it emptied because we refused the
+    # rows, not because nothing changed (narrowing-gate rule — enumerate what
+    # the gate REJECTS). On the dev corpus at ship time this was 809 of 809.
+    suppressed_quarantined: int = 0
 
 
 class ThesisChangesMarkSeenRequest(BaseModel):
@@ -813,6 +819,8 @@ def get_thesis_changes(
             SELECT
                 t.thesis_id, t.instrument_id, i.symbol, t.thesis_version,
                 t.created_at,
+                t.subject_identity_ok,
+                p.subject_identity_ok AS prev_subject_identity_ok,
                 {curr_cols},
                 {prev_cols}
             FROM theses t
@@ -828,7 +836,15 @@ def get_thesis_changes(
 
     changes: list[ThesisChange] = []
     unseen_count = 0
+    suppressed_quarantined = 0
     for row in rows:
+        # #2436 — the diff is computed over stance and the five valuation
+        # fields, so BOTH sides have to be trustworthy. Filtering only the
+        # current row would still diff it against a contaminated predecessor
+        # and report a target "move" between two fabricated numbers.
+        if row["subject_identity_ok"] is not True or row["prev_subject_identity_ok"] is not True:
+            suppressed_quarantined += 1
+            continue
         curr = {f: row[f] for f in _THESIS_CHANGE_DIFF_FIELDS}
         prev = {f: row[f"prev_{f}"] for f in _THESIS_CHANGE_DIFF_FIELDS}
         version = int(row["thesis_version"])  # type: ignore[arg-type]
@@ -857,6 +873,7 @@ def get_thesis_changes(
         alerts_last_seen_thesis_change_id=last_seen,
         unseen_count=unseen_count,
         changes=changes,
+        suppressed_quarantined=suppressed_quarantined,
     )
 
 

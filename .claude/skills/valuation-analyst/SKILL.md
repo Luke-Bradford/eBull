@@ -71,6 +71,21 @@ price targets in the instrument currency, null if insufficient data;
 `buy_zone_low/high` are populated only when `stance == "buy"`, null
 otherwise. Rows are append-only (`UNIQUE(instrument_id, thesis_version)`).
 
+⚠⚠ **A stored band is only readable if its memo names its own company
+(#2436).** `theses.subject_identity_ok` carries the verdict
+(`app/services/thesis_subject_identity.py`), and every consumer of these five
+figures refuses anything but `TRUE` — `portfolio.py`, `scoring.py`,
+`entry_timing.py`, `reporting.py`. **NULL means NOT YET CHECKED, not passed**,
+so the test is always `is True`. Measured on the dev corpus 2026-08-12:
+**1,512 of 2,652** stored theses fail the check, **178** of them the latest for
+their instrument, and **14 `EXIT` recommendations had already fired
+"Valuation target reached"** against a `base_value` written about a different
+company. Quarantined ⇒ the instrument loses stance, buy zone and band with a
+`thesis_quarantined` reason — **never a fallback to an older passing thesis**,
+which would be a months-stale band presented as current. Reproduce:
+`PYTHONPATH=. uv run python scripts/backfill_thesis_subject_identity.py`
+(dry run; prints the per-prompt-version census and the false-positive audit).
+
 **Fundamentals fallback surface.** `instrument_valuation` is a VIEW
 (`CREATE VIEW`, `sql/201_instrument_valuation_dual_class_suppress.sql:45`,
 latest revision) joining latest quote + TTM fundamentals. It NULLs
