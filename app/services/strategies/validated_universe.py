@@ -35,9 +35,17 @@ scope"; it does not stop anything.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 import psycopg
+
+#: Names the definition below for records that freeze this universe (#2621).
+#: ⚠ Bump when the DEFINITION changes (the predicates, not this module's
+#: comments) — a frozen ``strategy_result_universe`` record carries the version
+#: its ids were produced under, and the promotion transition refuses versions it
+#: does not recognise rather than re-interpreting them. Same shape as
+#: ``TRIAL_REGISTER_VERSION``.
+VALIDATED_UNIVERSE_RULE_VERSION: Final = "validated-universe-us-stocks-v1"
 
 #: The ``etoro_instrument_types.description`` of the one type in scope.
 #: ⚠ Resolved through the table rather than written as ``instrument_type_id = 5``.
@@ -105,6 +113,7 @@ def load_validated_universe(conn: psycopg.Connection[Any]) -> tuple[int, ...]:
 __all__ = [
     "STOCKS_TYPE_DESCRIPTION",
     "US_EQUITY_ASSET_CLASS",
+    "VALIDATED_UNIVERSE_RULE_VERSION",
     "load_validated_universe",
     "resolve_stocks_type_id",
 ]

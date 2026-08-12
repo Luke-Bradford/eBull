@@ -117,7 +117,10 @@ from app.services.result_ledger import (
     store_walk_forward_folds,
 )
 from app.services.signal_ledger import LedgerRow, resolve_fills
-from app.services.strategies.validated_universe import load_validated_universe
+from app.services.strategies.validated_universe import (
+    VALIDATED_UNIVERSE_RULE_VERSION,
+    load_validated_universe,
+)
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
 from app.services.strategy_registry import StrategyIdentity, StrategySignal
 from app.services.strategy_result import (
@@ -136,6 +139,11 @@ from app.services.strategy_result import (
     StrategyResult,
     check_promotable,
     namespace_for_position,
+)
+from app.services.strategy_result_universe import (
+    ResultUniverseRecord,
+    load_result_universe,
+    store_result_universe,
 )
 from app.services.strategy_segmented_evaluation import segmented_member, segmented_signals
 from app.services.strategy_statistics import StrategyMetrics, TradeReturns, compute_metrics
@@ -2789,13 +2797,20 @@ def _write_rows(
     for strategy_id, namespace, ambiguity, masked, admitted in pending:
         if namespace == "hold_out":
             assert holdout_purpose is not None and holdout_accessed_by is not None
-            ids = store_holdout_arm_pair(
-                conn,
-                masked,
-                admitted,
-                accessed_by=holdout_accessed_by,
-                purpose=holdout_purpose,
-            )
+            # ⚠ The universe record joins the pair's own transaction as a
+            # savepoint member (the pair writer's ``conn.transaction()`` nests),
+            # so "a result row without its frozen universe" is unreachable
+            # through this writer rather than merely refused later (#2621).
+            with conn.transaction():
+                ids = store_holdout_arm_pair(
+                    conn,
+                    masked,
+                    admitted,
+                    accessed_by=holdout_accessed_by,
+                    purpose=holdout_purpose,
+                )
+                for result_id, result in zip(ids, (masked, admitted), strict=True):
+                    _store_universe_record(conn, result_id, result, arms=arms, validated=validated)
             stored.extend((result_id, result, 0) for result_id, result in zip(ids, (masked, admitted), strict=True))
             continue
         # ⚠ ONE SPLIT PER ARM, NOT PER PAIR. The two rows of a pair differ in
@@ -2815,6 +2830,7 @@ def _write_rows(
                     result_id,
                     splits.get(split_key) or splits[shared_key],
                 )
+                _store_universe_record(conn, result_id, result, arms=arms, validated=validated)
                 stored.append((result_id, result, folds))
 
     # Criterion 8 — RE-MEASURED on every written row, with the hold-out counts
@@ -2831,11 +2847,23 @@ def _write_rows(
             counts_cache[key] = (counts.holdout_evaluations, counts.recorded_accesses)
         evaluations, accesses = counts_cache[key]
         ambiguity_material = _ambiguity_material_for(arms, result)
+        # ⚠ The universe inputs are READ BACK from the frozen record, not taken
+        # from memory — the same argument that reads the hold-out counts off the
+        # database. The re-measure then verifies exactly what the promotion
+        # transition will load (#2621); a missing or divergent record makes the
+        # refusal cross-check below fail loudly instead of surfacing months
+        # later as an unpromotable row.
+        record = load_result_universe(conn, result_id)
+        if record is None:
+            raise RuntimeError(
+                f"{identity.strategy_id} {identity.namespace}/{identity.quarantine_arm} stored without its frozen "
+                "universe record — the writer must freeze the gate's inputs in the pair's own transaction"
+            )
         outcome = check_promotable(
             _candidate(
                 result,
-                validated=validated,
-                evaluated=_evaluated_ids(arms, result),
+                validated=record.validated_universe_ids,
+                evaluated=record.evaluated_instrument_ids,
                 holdout_evaluations=evaluations,
                 recorded_accesses=accesses,
                 ambiguity_material=ambiguity_material,
@@ -2979,6 +3007,41 @@ def _evaluated_ids(arms: Sequence[ArmMeasurement], result: StrategyResult) -> fr
                 return outcome.evaluated_instrument_ids
     raise RuntimeError(  # pragma: no cover - every stored row came from a measurement
         f"no measurement matches the stored row {result.identity.version}"
+    )
+
+
+def _store_universe_record(
+    conn: psycopg.Connection[Any],
+    result_id: int,
+    result: StrategyResult,
+    *,
+    arms: Sequence[ArmMeasurement],
+    validated: frozenset[int],
+) -> None:
+    """Freeze the row's universe inputs in the pair's own transaction (#2621).
+
+    The evaluated set comes from ``_evaluated_ids`` — the same source the
+    write-time gate consumes — and the universe is the run's single
+    ``load_validated_universe`` read (``corpus.universe``). The count assertion
+    pins the record to the row it describes BEFORE the insert: the two are equal
+    by construction today (both are views of one ``NamespaceMeasurement``), and
+    a drift would otherwise surface only at the promotion transition, as an
+    ``evaluated_universe_count_mismatch`` refusal on a row already committed.
+    """
+    evaluated = _evaluated_ids(arms, result)
+    if len(evaluated) != result.evaluated_instrument_count:
+        raise RuntimeError(
+            f"{result.identity.version} would freeze {len(evaluated)} evaluated instruments against a row "
+            f"claiming {result.evaluated_instrument_count} — the universe record must describe its own row"
+        )
+    store_result_universe(
+        conn,
+        result_id=result_id,
+        record=ResultUniverseRecord(
+            universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+            evaluated_instrument_ids=evaluated,
+            validated_universe_ids=validated,
+        ),
     )
 
 

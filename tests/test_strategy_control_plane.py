@@ -12,6 +12,7 @@ import pytest
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.result_ledger import store_in_sample_result
+from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
 from app.services.strategy_control_plane import (
     StrategyControlError,
     StrategyOwnershipError,
@@ -40,6 +41,7 @@ from app.services.strategy_promotion_evidence import (
     RecentYearEvidence,
 )
 from app.services.strategy_promotion_evidence_store import store_promotion_evidence
+from app.services.strategy_result_universe import ResultUniverseRecord, store_result_universe
 from tests.test_result_ledger import build_metrics, build_result
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
@@ -110,6 +112,25 @@ def _passing_promotion_evidence(*, lower_bound: str = "0.1") -> PromotionEvidenc
         outcome_contrasts=tuple(
             OutcomeContrast(role, 60, 40, Decimal("1"), Decimal("0"), Decimal("1"))
             for role in sorted(REQUIRED_CONTRASTS)
+        ),
+    )
+
+
+def _universe_record(
+    conn: psycopg.Connection[Any],
+    result_id: int,
+    *,
+    evaluated: frozenset[int] = frozenset({1, 2, 3}),
+    universe: frozenset[int] = frozenset({1, 2, 3, 4, 5}),
+) -> None:
+    """The #2621 frozen-universe record a pinned result must carry to promote."""
+    store_result_universe(
+        conn,
+        result_id=result_id,
+        record=ResultUniverseRecord(
+            universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+            evaluated_instrument_ids=evaluated,
+            validated_universe_ids=universe,
         ),
     )
 
@@ -280,8 +301,10 @@ def test_historical_validation_requires_passing_edge_evidence(
         strategy_version="v1",
         namespace="in_sample",
         metrics=build_metrics(profit_factor=1.2),
+        evaluated_instrument_count=3,
     )
     result_id = store_in_sample_result(conn, result)
+    _universe_record(conn, result_id)
 
     with pytest.raises(StrategyControlError, match="promotion_evidence_missing"):
         promote_strategy(
@@ -318,8 +341,10 @@ def test_historical_validation_requires_passing_edge_evidence(
         namespace="in_sample",
         ambiguity_arm="best_case",
         metrics=build_metrics(profit_factor=1.2),
+        evaluated_instrument_count=3,
     )
     passing_result_id = store_in_sample_result(conn, passing_result)
+    _universe_record(conn, passing_result_id)
     store_promotion_evidence(
         conn,
         result_id=passing_result_id,
@@ -348,6 +373,80 @@ def test_historical_validation_requires_passing_edge_evidence(
             evidence_ref="result:test-failing-forward",
             result_ids=(result_id,),
         )
+
+
+def test_promotion_replays_the_frozen_universe_check(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2621 — a result whose evaluated set left the §4.0 validated universe
+    cannot reach ``historical_validated`` through ``promote_strategy``, and a
+    result stored without its frozen record refuses rather than passing on
+    trust in the writer."""
+    conn = ebull_test_conn
+    promote_strategy(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="research_candidate",
+        promoted_by="operator",
+        reason="register candidate",
+    )
+
+    def _result_id(ambiguity_arm: str, quarantine_arm: str) -> int:
+        result = build_result(
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            namespace="in_sample",
+            ambiguity_arm=ambiguity_arm,
+            quarantine_arm=quarantine_arm,
+            metrics=build_metrics(profit_factor=1.2),
+            evaluated_instrument_count=2,
+        )
+        result_id = store_in_sample_result(conn, result)
+        store_promotion_evidence(conn, result_id=result_id, evidence=_passing_promotion_evidence())
+        return result_id
+
+    def _refuses(result_id: int, code: str) -> None:
+        with pytest.raises(StrategyControlError, match=code):
+            promote_strategy(
+                conn,
+                strategy_id="S-GOV",
+                strategy_version="v1",
+                to_stage="historical_validated",
+                promoted_by="operator",
+                reason="universe re-check must refuse",
+                evidence_ref="result:test-universe",
+                result_ids=(result_id,),
+            )
+        assert current_stage(conn, "S-GOV", "v1") == "research_candidate"
+
+    # No frozen record at all — evidence alone must not be enough.
+    _refuses(_result_id("worst_case", "masked"), "evaluated_universe_unrecorded")
+
+    # Evaluated set leaves the frozen universe.
+    outside_id = _result_id("worst_case", "admitted")
+    _universe_record(conn, outside_id, evaluated=frozenset({1, 99}), universe=frozenset({1, 2, 3}))
+    _refuses(outside_id, "instrument_outside_validated_universe")
+
+    # Record that does not describe its own row.
+    mismatched_id = _result_id("best_case", "masked")
+    _universe_record(conn, mismatched_id, evaluated=frozenset({1, 2, 3}), universe=frozenset({1, 2, 3}))
+    _refuses(mismatched_id, "evaluated_universe_count_mismatch")
+
+    # A consistent subset record plus passing evidence promotes.
+    passing_id = _result_id("best_case", "admitted")
+    _universe_record(conn, passing_id, evaluated=frozenset({1, 2}), universe=frozenset({1, 2, 3}))
+    promotion = promote_strategy(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="historical_validated",
+        promoted_by="operator",
+        reason="frozen universe replay passes",
+        evidence_ref="result:test-universe-passing",
+        result_ids=(passing_id,),
+    )
+    assert promotion.to_stage == "historical_validated"
 
 
 def test_harness_control_cannot_be_promoted_or_funded(
