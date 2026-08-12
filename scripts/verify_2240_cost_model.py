@@ -75,9 +75,9 @@ from app.services.cost_model import (
     COST_MODEL_ID,
     FX_BPS,
     SESSION_RULE,
+    UNKNOWN_NOMINAL_PRICE_BAND,
     _check_bands_are_total,
     band_for,
-    half_spread_for,
 )
 from app.services.market_calendar import us_market_status
 from app.services.position_builder import Window, build_positions
@@ -271,12 +271,13 @@ class _CostTally:
                     f"{self.label}/{position.instrument_id}: P1 uncharged entry — net {row.entry_price_net} "
                     f"does not exceed gross {position.entry_fill_price}"
                 )
-            # P3 — the band is the ENTRY band, checked against the source price.
-            expected = half_spread_for(position.entry_fill_price)
-            if row.half_spread != expected:
+            # P3 — adjusted research prices receive the declared adverse band;
+            # they never pretend their numeric value is a nominal price.
+            expected = UNKNOWN_NOMINAL_PRICE_BAND.half_spread
+            if row.price_basis != "split_adjusted" or row.half_spread != expected:
                 problems.append(
-                    f"{self.label}/{position.instrument_id}: P3 band key — half_spread {row.half_spread} against "
-                    f"{expected} for an entry at {position.entry_fill_price}"
+                    f"{self.label}/{position.instrument_id}: P3 basis — {(row.price_basis, row.half_spread)!r} against "
+                    f"split_adjusted/{expected} for an entry at {position.entry_fill_price}"
                 )
             # P4 — priced or reasoned, never both and never neither. (The row's
             # own __post_init__ already refuses the mixed state; this counts it.)
@@ -297,7 +298,7 @@ class _CostTally:
                         f"{row.gross_return_pct}"
                     )
                 assert row.exit_price_gross is not None
-                if band_for(row.exit_price_gross).label != row.band_label:
+                if row.price_basis == "as_traded" and band_for(row.exit_price_gross).label != row.band_label:
                     self.crossings += 1
                 if row.exit_basis == "close":
                     self.closed_priced += 1
@@ -332,7 +333,7 @@ class _CostTally:
             print(f"        exit basis {basis:<10} {count:>10,}")
         for reason, count in self.uncosted.most_common():
             print(f"        uncosted {reason:<12} {count:>10,}")
-        print(f"      band crossings         {self.crossings:>12,}   (entry band kept; §5.1)")
+        print("      nominal band crossings          n/a   (split-adjusted price basis)")
         for label, count in self.entry_bands.most_common():
             share = 100.0 * count / self.positions if self.positions else 0.0
             print(f"        entry band {label:<10} {count:>10,}   {share:6.3f}%")
@@ -431,7 +432,7 @@ def positions(*, limit: int | None) -> int:
                     regime=regime,
                     window=window,
                 )
-                costed = cost_positions(built.positions)
+                costed = cost_positions(built.positions, price_basis="split_adjusted")
                 # P4 — conservation across the layer boundary.
                 if len(costed) != len(built.positions):
                     problems.append(

@@ -21,11 +21,14 @@ from app.services.cost_model import (
     CARRY_UNMODELLED,
     COST_MODEL_ID,
     FX_BPS,
+    PRICE_BASES,
+    UNKNOWN_NOMINAL_PRICE_BAND,
     PriceBand,
     _check_bands_are_total,
     _check_half_spread,
     band_for,
     buy_price,
+    cost_band_for,
     half_spread_for,
     sell_price,
 )
@@ -45,7 +48,7 @@ SPEC_BANDS: tuple[tuple[str, str | None, str | None, str, int], ...] = (
     (">=$100", "100", None, "0.322", 210),
 )
 
-SPEC_COST_MODEL_ID = "static-p75-insession-v1"
+SPEC_COST_MODEL_ID = "static-p75-insession-v2+split-adjusted-max"
 
 
 class TestTheFrozenTable:
@@ -105,6 +108,24 @@ class TestBandLookup:
 
     def test_half_spread_for_reads_the_entry_price_band(self) -> None:
         assert half_spread_for(Decimal("50")) == Decimal("0.509") / 200
+
+    def test_split_adjusted_price_uses_the_maximum_band_not_its_numeric_band(self) -> None:
+        assert cost_band_for(Decimal("500"), price_basis="split_adjusted") is UNKNOWN_NOMINAL_PRICE_BAND
+        assert UNKNOWN_NOMINAL_PRICE_BAND.p75_spread_pct == max(b.p75_spread_pct for b in BANDS)
+
+    def test_as_traded_price_can_select_its_nominal_band(self) -> None:
+        assert cost_band_for(Decimal("500"), price_basis="as_traded").label == ">=$100"
+
+    def test_an_unknown_basis_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="unknown price basis"):
+            cost_band_for(Decimal("50"), price_basis="raw")  # type: ignore[arg-type]
+
+    def test_split_adjusted_still_requires_a_positive_price(self) -> None:
+        with pytest.raises(ValueError, match="must be > 0"):
+            cost_band_for(Decimal("0"), price_basis="split_adjusted")
+
+    def test_the_basis_vocabulary_is_closed(self) -> None:
+        assert PRICE_BASES == {"as_traded", "split_adjusted"}
 
 
 class TestTheBandTableIsTotal:

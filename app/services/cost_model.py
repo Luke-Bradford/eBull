@@ -34,19 +34,18 @@ nothing averages it as performance.
 NOT charged: carry (eToro's overnight/weekend CFD fee) and FX. Both are
 ``None``, not zero — see ``CARRY_BPS``.
 
-⚠ THE BAND IS KEYED ON THE **ENTRY** FILL PRICE AND FIXED FOR THE LIFE OF THE
-POSITION, and that is enforced by the shape of this API rather than documented:
-``half_spread_for`` is the only function that reads a price to choose a band,
-and ``buy_price`` / ``sell_price`` take the resulting ``half_spread`` as an
-argument. A caller cannot re-key mid-hold without passing a second half-spread
-it had to compute on purpose. §5.1: *"the cost is a property of the trade, and
-re-keying mid-hold would make the cost depend on the outcome"*.
+For an **as-traded** entry price the band is keyed on that entry and fixed for
+the life of the position. A split-adjusted research price cannot select a
+nominal threshold, so ``cost_band_for`` uses the maximum calibrated band. In
+both cases ``buy_price`` / ``sell_price`` take the selected ``half_spread`` as
+an argument; a caller cannot accidentally re-key mid-hold.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal, get_args
 
 #: ⚠ FROZEN. A recalibration ships under a NEW id — §5.1: *"so a recalibration
 #: is a new strategy version rather than a silent improvement (criterion 11)"*.
@@ -55,7 +54,13 @@ from decimal import Decimal
 #: admits only quotes captured inside a real NYSE session, resolved from
 #: ``market_calendar`` rather than from a UTC-hour literal (see
 #: ``SESSION_RULE``).
-COST_MODEL_ID = "static-p75-insession-v1"
+COST_MODEL_ID = "static-p75-insession-v2+split-adjusted-max"
+
+#: Whether a price can honestly select a nominal-price spread band.  The
+#: research corpus is split-adjusted, not as-traded; treating those two as the
+#: same is #2400's two-sided cost-attribution error.
+PriceBasis = Literal["as_traded", "split_adjusted"]
+PRICE_BASES: frozenset[str] = frozenset(get_args(PriceBasis))
 
 #: When the frozen table below was measured, and against what.
 #:
@@ -218,6 +223,12 @@ BANDS: tuple[PriceBand, ...] = (
     PriceBand(label=">=$100", lower=Decimal("100"), upper=None, p75_spread_pct=Decimal("0.322"), sample_size=210),
 )
 
+#: A split-adjusted historical price cannot select a nominal price band without
+#: the point-in-time split factor.  The corpus has no such factors, so use the
+#: most expensive measured band.  This is an adverse sensitivity suitable for
+#: falsification, not a claim that the resulting cost is the historical quote.
+UNKNOWN_NOMINAL_PRICE_BAND: PriceBand = max(BANDS, key=lambda band: band.p75_spread_pct)
+
 
 def _check_bands_are_total(bands: tuple[PriceBand, ...]) -> None:
     """Every positive price falls in exactly one band, or this module will not import.
@@ -274,6 +285,23 @@ def half_spread_for(entry_fill_price: Decimal) -> Decimal:
     return band_for(entry_fill_price).half_spread
 
 
+def cost_band_for(entry_fill_price: Decimal, *, price_basis: PriceBasis) -> PriceBand:
+    """Select a cost band without confusing adjusted and nominal prices.
+
+    ``as_traded`` may use the price thresholds. ``split_adjusted`` cannot: in
+    the absence of a point-in-time split factor it receives the maximum frozen
+    spread.  The price is still validated because callers must never cost a
+    non-price, even when its scale cannot choose a band.
+    """
+    if price_basis not in PRICE_BASES:
+        raise ValueError(f"unknown price basis {price_basis!r}; must be one of {sorted(PRICE_BASES)}")
+    if entry_fill_price <= 0:
+        raise ValueError(f"price must be > 0 to carry a cost band, got {entry_fill_price}")
+    if price_basis == "split_adjusted":
+        return UNKNOWN_NOMINAL_PRICE_BAND
+    return band_for(entry_fill_price)
+
+
 def buy_price(price: Decimal, *, half_spread: Decimal) -> Decimal:
     """§5.1's buy side: ``fill_price × (1 + h)``.
 
@@ -314,10 +342,14 @@ __all__ = [
     "CARRY_UNMODELLED",
     "COST_MODEL_ID",
     "FX_BPS",
+    "PRICE_BASES",
     "SESSION_RULE",
     "PriceBand",
+    "PriceBasis",
+    "UNKNOWN_NOMINAL_PRICE_BAND",
     "band_for",
     "buy_price",
+    "cost_band_for",
     "half_spread_for",
     "sell_price",
 ]

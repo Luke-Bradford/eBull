@@ -412,7 +412,7 @@ def _absorb_series(
             window=window,
         )
         sleeves[label].absorb(
-            list(cost_positions(built.positions)),
+            list(cost_positions(built.positions, price_basis="split_adjusted")),
             series=series,
             window=window,
             axis_pos=axis_pos,

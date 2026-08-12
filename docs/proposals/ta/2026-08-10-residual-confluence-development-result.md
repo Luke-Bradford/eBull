@@ -9,7 +9,8 @@ strategy manifest, capital picker, forward scanner or order path.
 - research corpus: `paperswithbacktest/Stocks-Daily-Price@2026-07-08`;
 - comparator snapshot: `etoro-comparators-2026-07-08-v1`;
 - quarantine rules: `price-quarantine-v1+d0423dbd9cb5`;
-- static cost model is applied to entry and every conditional exit;
+- static cost model `static-p75-insession-v1` is applied to entry and every
+  conditional exit;
 - anchored prior-only training; calendar 2024 and 2025 development tests;
 - 2,000 circular block-bootstrap resamples, clustered by entry date, seed
   `20260810`;
@@ -20,6 +21,12 @@ strategy manifest, capital picker, forward scanner or order path.
 The verifier is read-only. It created no feature, outcome, strategy, capital or
 order rows. The corrected run streamed 4,229,543 development bars and retained only in-memory
 candidate observations and aggregate output.
+
+⚠ #2400 later invalidated v1's use of split-adjusted prices as nominal cost-band
+keys. The cost-policy change intentionally moved the frozen candidate to
+`residual-confluence-v1+32dae77ea948`; that version has not been evaluated.
+This page remains the historical rejection record for `+946d549861cc`, not
+evidence for the new identity.
 
 ## Primary masked-data result
 

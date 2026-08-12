@@ -62,7 +62,7 @@ from typing import Any, Final, Literal, cast
 import numpy as np
 import psycopg
 
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, half_spread_for
+from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.deflated_sharpe import (
     MIN_MEASURED_TRIALS,
     DeflatedSharpeResult,
@@ -1035,7 +1035,9 @@ def _benchmark_book(
         exit_wealth = float(wealth_window[exit_offset])
         if entry_close <= 0.0 or entry_wealth <= 0.0 or exit_wealth <= 0.0:
             continue
-        half = half_spread_for(Decimal(repr(entry_close)))
+        # The corpus OHLC is split-adjusted and has no point-in-time split
+        # factors.  It cannot honestly choose a nominal-price cost band (#2400).
+        half = UNKNOWN_NOMINAL_PRICE_BAND.half_spread
         book.add(
             entry_index=start + entry_offset - lo,
             exit_index=start + exit_offset - lo,
@@ -1491,7 +1493,7 @@ def evaluate_arm(
             window=corpus.window,
         )
         _absorb(
-            list(cost_positions(built.positions)),
+            list(cost_positions(built.positions, price_basis="split_adjusted")),
             series=series,
             window=corpus.window,
             axis_pos=corpus.axis_pos,
@@ -1663,7 +1665,7 @@ def evaluate_level_arms(
                 window=corpus.window,
             )
             _absorb(
-                list(cost_positions(built.positions)),
+                list(cost_positions(built.positions, price_basis="split_adjusted")),
                 series=series,
                 window=corpus.window,
                 axis_pos=corpus.axis_pos,

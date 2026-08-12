@@ -52,8 +52,8 @@ def _inputs() -> dict[str, object]:
 
 def test_definition_is_complete_stable_and_contains_no_measured_result() -> None:
     payload = definition_json()
-    assert definition_hash() == "946d549861ccca18e1e0d78a1615815e97a989afd45009de12aabf7e0384fc26"
-    assert CANDIDATE_VERSION == "residual-confluence-v1+946d549861cc"
+    assert definition_hash() == "32dae77ea948d553589b98f42feb117f3efee25871e37c21aa0b3741a60e97d1"
+    assert CANDIDATE_VERSION == "residual-confluence-v1+32dae77ea948"
     assert DEFINITION.market_vol_long_lookback == 252
     assert DEFINITION.model_features == MODEL_FEATURE_NAMES
     assert "expectancy" not in payload

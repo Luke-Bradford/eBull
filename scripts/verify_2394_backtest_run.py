@@ -544,7 +544,7 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
                 regime=regime,
                 window=window,
             )
-            costed: list[CostedPosition] = list(cost_positions(built.positions))
+            costed: list[CostedPosition] = list(cost_positions(built.positions, price_basis="split_adjusted"))
             evaluate_s += time.monotonic() - mark
 
             # A2 / A3 — the §5.2 partition and the close-source census, taken on

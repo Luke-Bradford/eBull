@@ -85,7 +85,7 @@ import numpy.typing as npt
 import psycopg
 
 from app.config import settings
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, half_spread_for
+from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.equity_curve import SIZING_RULE_ID, EquityCurve, LegBook, build_equity_curve
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import Window, build_positions
@@ -484,7 +484,7 @@ def _absorb_series(
         eligible_bar.append(index)
         eligible_panel.append(slot)
         eligible_open.append(float(bar_open))
-        eligible_half.append(float(half_spread_for(bar_open)))
+        eligible_half.append(float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread))
 
     bar_to_ordinal = {bar: ordinal for ordinal, bar in enumerate(eligible_bar)}
     warm_start: dict[str, int] = {}
@@ -530,7 +530,7 @@ def _absorb_series(
             regime=regime,
             window=window,
         )
-        costed = list(cost_positions(built.positions))
+        costed = list(cost_positions(built.positions, price_basis="split_adjusted"))
         sleeves[label].absorb(
             costed,
             series=series,

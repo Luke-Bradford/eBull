@@ -26,7 +26,15 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal, get_args
 
-from app.services.cost_model import COST_MODEL_ID, band_for, buy_price, half_spread_for, sell_price
+from app.services.cost_model import (
+    COST_MODEL_ID,
+    PRICE_BASES,
+    PriceBasis,
+    band_for,
+    buy_price,
+    cost_band_for,
+    sell_price,
+)
 from app.services.position_builder import Position
 
 #: Why a position carries no return even though it carries a cost band.
@@ -64,6 +72,9 @@ class CostedPosition:
 
     position: Position
     cost_model_id: str
+    price_basis: PriceBasis
+    #: A nominal band for ``as_traded`` or ``max:<band>`` when the nominal
+    #: price is unavailable. The latter must not read like observed history.
     band_label: str
     #: ``h`` — one side, as a fraction. Keyed on the ENTRY fill price (§5.1) and
     #: applied to BOTH sides, so a position crossing a band boundary mid-hold
@@ -78,6 +89,16 @@ class CostedPosition:
     uncosted_reason: UncostedReason | None
 
     def __post_init__(self) -> None:
+        if self.price_basis not in PRICE_BASES:
+            raise ValueError(f"unknown price basis {self.price_basis!r}; must be one of {sorted(PRICE_BASES)}")
+        expected_band = cost_band_for(self.position.entry_fill_price, price_basis=self.price_basis)
+        expected_label = expected_band.label if self.price_basis == "as_traded" else f"max:{expected_band.label}"
+        if self.band_label != expected_label or self.half_spread != expected_band.half_spread:
+            raise ValueError(
+                f"position on signal {self.position.entry_signal_id}: "
+                f"cost basis {(self.band_label, self.half_spread)!r} "
+                f"does not match {self.price_basis} entry basis {(expected_label, expected_band.half_spread)!r}"
+            )
         if self.exit_basis is not None and self.exit_basis not in EXIT_BASES:
             raise ValueError(f"unknown exit basis {self.exit_basis!r}; must be one of {sorted(EXIT_BASES)}")
         if self.uncosted_reason is not None and self.uncosted_reason not in UNCOSTED_REASONS:
@@ -148,15 +169,15 @@ def _exit_leg(position: Position) -> tuple[Decimal | None, ExitBasis | None, Unc
     return position.mark_price, "mark", None
 
 
-def cost_position(position: Position) -> CostedPosition:
+def cost_position(position: Position, *, price_basis: PriceBasis) -> CostedPosition:
     """Charge the half-spread on one position. Pure; reads no database.
 
-    ⚠ ``half_spread_for`` is called ONCE, on the entry fill price, and the same
-    ``h`` goes to both sides — §5.1's *"the band is keyed on the ENTRY fill
-    price, fixed for the life of the position"*.
+    ``price_basis`` is mandatory: nominal prices select their calibrated band;
+    split-adjusted research prices cannot and receive the maximum band. The
+    selected ``h`` goes to both sides and never re-keys during the position.
     """
-    half_spread = half_spread_for(position.entry_fill_price)
-    band = band_for(position.entry_fill_price)
+    band = cost_band_for(position.entry_fill_price, price_basis=price_basis)
+    half_spread = band.half_spread
     entry_net = buy_price(position.entry_fill_price, half_spread=half_spread)
 
     exit_gross, exit_basis, uncosted = _exit_leg(position)
@@ -172,7 +193,8 @@ def cost_position(position: Position) -> CostedPosition:
     return CostedPosition(
         position=position,
         cost_model_id=COST_MODEL_ID,
-        band_label=band.label,
+        price_basis=price_basis,
+        band_label=band.label if price_basis == "as_traded" else f"max:{band.label}",
         half_spread=half_spread,
         entry_price_net=entry_net,
         exit_price_gross=exit_gross,
@@ -184,9 +206,9 @@ def cost_position(position: Position) -> CostedPosition:
     )
 
 
-def cost_positions(positions: Iterable[Position]) -> tuple[CostedPosition, ...]:
+def cost_positions(positions: Iterable[Position], *, price_basis: PriceBasis) -> tuple[CostedPosition, ...]:
     """``cost_position`` over a set, preserving order."""
-    return tuple(cost_position(position) for position in positions)
+    return tuple(cost_position(position, price_basis=price_basis) for position in positions)
 
 
 def band_crossings(costed: Sequence[CostedPosition]) -> int:
@@ -197,9 +219,14 @@ def band_crossings(costed: Sequence[CostedPosition]) -> int:
     so a crossing is correct behaviour, not a defect. It is counted because the
     count is how big the deliberate approximation is, and a narrowing that is
     not counted is a narrowing asserted harmless.
+
+    Split-adjusted prices are skipped: their numeric thresholds are not nominal
+    bands, so calling a movement between them a crossing would repeat #2400.
     """
     crossings = 0
     for row in costed:
+        if row.price_basis != "as_traded":
+            continue
         if row.exit_price_gross is None:
             continue
         if band_for(row.exit_price_gross).label != row.band_label:

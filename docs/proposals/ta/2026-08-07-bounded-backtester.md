@@ -392,11 +392,13 @@ table below is kept as the design record, not as a live number.
   half-spread for the band. Net return is computed from those adjusted prices,
   never by subtracting a cost from `gross_return_pct` — `sql/256` names that
   column GROSS precisely so nothing averages it as performance.
-- **The band is keyed on the ENTRY fill price**, fixed for the life of the
-  position. A position that crosses a band boundary does not re-key: the cost is
-  a property of the trade, and re-keying mid-hold would make the cost depend on
-  the outcome.
-- **Frozen as `cost_model_id = "static-p75-insession-v1"`**, so a recalibration
+- **The band is keyed on the ENTRY fill price only when that price is
+  as-traded.** Research OHLC is split-adjusted and the corpus has no historical
+  split factors, so it cannot honestly select a nominal-price band. Such rows
+  use the maximum calibrated band as an adverse falsification arm (#2400),
+  fixed for the life of the position.
+- **Frozen as `cost_model_id =
+  "static-p75-insession-v2+split-adjusted-max"`**, so the basis-policy change
   is a new strategy version rather than a silent improvement (criterion 11).
 - **FX is a declared field, and setting it to zero requires a fact not yet
   established.** §4.0 restricts the validated universe to `us_equity`, which
@@ -772,7 +774,7 @@ verification.
 | stage | what | depends on |
 | --- | --- | --- |
 | **5a** | **Position construction** — §3 in full: the three regimes, the §3.1 pyramiding rule, version pinning, `ambiguous` as terminal, same-bar ordering, S-2's drop-out close. Pure function over ledger rows. | resolver version selection (an input, not new code) |
-| **5b** | **Cost model** — table + `static-p75-insession-v1` per §5.1, `carry_bps` NULL, session resolved from the exchange calendar. Threads `cost_model_id` through the four `*_identity()` functions in place of `"undeclared-v0"`. | 5a |
+| **5b** | **Cost model** — frozen table plus an explicit price-basis policy; split-adjusted research prices use the maximum band under `static-p75-insession-v2+split-adjusted-max` (#2400). `carry_bps` remains NULL and the session is resolved from the exchange calendar. | 5a |
 | **5c** | **Result model + #2288 clauses 2–4** — the result table, basis `NOT NULL` no default, corpus version, and the promotion-refusal function. | 5b |
 | **5d** | **Statistics** — criterion 7's full metric set on the equity curve; the `vectorbt` adoption decision (§4) is taken here against 5a's trade list. | 5c |
 | **5e** | **Validity gates** — frozen hold-out namespace with access logging (criterion 5), purged walk-forward + embargo (§5.3, including S-1's declared bound), block bootstrap clustered by date (criterion 3), Deflated Sharpe with a declared trial count (criterion 6), quarantine sensitivity arm (criterion 9), and the 1,000-strategy random-entry synthetic control. | 5d |
