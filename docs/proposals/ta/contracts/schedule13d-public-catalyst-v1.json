@@ -62,9 +62,9 @@
   },
   "challengers": {
     "unfiltered_eligible_13d": "same_fill_exit_cost_and_coverage",
-    "matched_random_time": "one_seeded_eligible_non_event_date_per_treatment_same_instrument_calendar_month_excluding_any_13d_plus_or_minus_10_sessions",
+    "matched_random_time": "one_sha256_seeded_price_covered_non_event_entry_session_per_treatment_same_instrument_and_treatment_entry_year_month_excluding_any_13d_entry_plus_or_minus_10_nyse_sessions_empty_set_is_unmatched",
     "random_seed": 2582,
-    "initial_13g": "match_without_replacement_and_report_separately_by_13d_1b_13d_1c_both_or_unknown_rule",
+    "initial_13g": "match_without_replacement_and_report_separately_by_13g_1b_13g_1c_both_or_unknown_rule",
     "matching": {
       "exact_fields": [
         "filing_year_month",
@@ -76,10 +76,15 @@
       "trailing_dollar_volume_bucket_usd_edges": [10000000, 25000000, 100000000, 500000000],
       "prior_20_session_market_return_pct_edges": [-5, 0, 5],
       "tie_break": "sha256_treatment_accession_challenger_accession_seed_ascending",
+      "treatment_order": "accession_number_ascending_within_each_separate_rule_population",
       "unmatched_treatment": "retain_primary_but_refuse_that_challenger_pair"
     },
     "unknown_13g_rule": "never_pool_with_known_rule",
-    "multiplicity": "holm_adjust_random_13d_1b_and_13d_1c_differences_at_family_alpha_0_05"
+    "paired_difference_inference": "treatment_return_minus_challenger_return_two_way_pigeonhole_bootstrap_by_treatment_issuer_and_treatment_entry_session",
+    "paired_confidence_interval": "two_sided_95pct_linear_percentile_interval",
+    "paired_one_sided_p_value": "null_center_bootstrap_probability_centered_mean_gte_observed_mean_with_plus_one_finite_resample_correction",
+    "multiplicity": "holm_step_down_adjust_one_sided_p_values_for_random_13g_1b_and_13g_1c_at_family_alpha_0_05",
+    "both_and_unknown_13g_rules": "report_separately_attribution_only_not_acceptance_gates"
   },
   "context": {
     "market_series": {
@@ -149,9 +154,9 @@
     "historical_pass_requires": [
       "effective_sample_size_gte_785",
       "adverse_cost_clustered_lower_bound_gt_zero",
-      "holm_adjusted_lower_bound_vs_random_gt_zero",
-      "holm_adjusted_lower_bound_vs_matched_13d_1b_gt_zero",
-      "holm_adjusted_lower_bound_vs_matched_13d_1c_gt_zero",
+      "paired_95pct_lower_bound_vs_random_gt_zero_and_holm_adjusted_one_sided_p_lte_0_05",
+      "paired_95pct_lower_bound_vs_matched_13g_1b_gt_zero_and_holm_adjusted_one_sided_p_lte_0_05",
+      "paired_95pct_lower_bound_vs_matched_13g_1c_gt_zero_and_holm_adjusted_one_sided_p_lte_0_05",
       "profit_factor_gt_one",
       "positive_result_excluding_best_1pct",
       "no_issuer_or_entry_session_supplies_20pct_or_more_of_gross_positive_return",

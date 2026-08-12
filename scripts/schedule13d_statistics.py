@@ -43,6 +43,26 @@ class ClusteredEstimate:
 
 
 @dataclass(frozen=True)
+class PairedDifference:
+    """One treatment-minus-challenger return difference."""
+
+    treatment_accession: str
+    treatment_issuer_cik: str
+    treatment_entry_date: date
+    difference_pct: float
+
+
+@dataclass(frozen=True)
+class DifferenceTest:
+    mean_difference_pct: float
+    lower_95_pct: float
+    upper_95_pct: float
+    one_sided_p_value: float
+    bootstrap_standard_error_pct: float
+    resamples: int
+
+
+@dataclass(frozen=True)
 class StabilityWindow:
     label: str
     start: date
@@ -73,34 +93,28 @@ class OutcomeStatistics:
     break_even_cost_bps: float
 
 
-def two_way_pigeonhole_bootstrap(
-    outcomes: Sequence[EventOutcome],
+def _pigeonhole_estimates(
+    values: np.ndarray,
+    issuer_values: Sequence[str],
+    session_values: Sequence[date],
     *,
-    seed: int = BOOTSTRAP_SEED,
-    resamples: int = BOOTSTRAP_RESAMPLES,
-) -> ClusteredEstimate:
-    """Bootstrap issuers and entry sessions independently with replacement.
-
-    Each observation receives the product of its issuer and entry-session
-    multinomial counts. Percentile bounds use NumPy's linear quantile method.
-    Effective sample size is ``sample variance / bootstrap variance of mean``,
-    capped at the raw event count; it is zero when clustering supplies no
-    estimable precision and never defaults to the row count.
-    """
-
-    if len(outcomes) < 2:
-        raise ValueError("clustered inference requires at least two outcomes")
+    seed: int,
+    resamples: int,
+) -> np.ndarray:
+    if len(values) < 2:
+        raise ValueError("clustered inference requires at least two observations")
+    if len(issuer_values) != len(values) or len(session_values) != len(values):
+        raise ValueError("every observation requires one issuer and one entry session")
     if resamples < 2:
         raise ValueError("resamples must be at least two")
-    values = np.asarray([item.net_return_pct for item in outcomes], dtype=np.float64)
     if not np.all(np.isfinite(values)):
-        raise ValueError("outcome returns must all be finite")
-    issuers = sorted({item.issuer_cik for item in outcomes})
-    sessions = sorted({item.entry_date for item in outcomes})
+        raise ValueError("observations must all be finite")
+    issuers = sorted(set(issuer_values))
+    sessions = sorted(set(session_values))
     issuer_index = {value: index for index, value in enumerate(issuers)}
     session_index = {value: index for index, value in enumerate(sessions)}
-    event_issuers = np.asarray([issuer_index[item.issuer_cik] for item in outcomes])
-    event_sessions = np.asarray([session_index[item.entry_date] for item in outcomes])
+    event_issuers = np.asarray([issuer_index[value] for value in issuer_values])
+    event_sessions = np.asarray([session_index[value] for value in session_values])
     rng = np.random.default_rng(seed)
     estimates = np.empty(resamples, dtype=np.float64)
     valid_draws = 0
@@ -117,6 +131,32 @@ def two_way_pigeonhole_bootstrap(
             continue
         estimates[valid_draws] = float(np.dot(values, weights) / total_weight)
         valid_draws += 1
+    return estimates
+
+
+def two_way_pigeonhole_bootstrap(
+    outcomes: Sequence[EventOutcome],
+    *,
+    seed: int = BOOTSTRAP_SEED,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+) -> ClusteredEstimate:
+    """Bootstrap issuers and entry sessions independently with replacement.
+
+    Each observation receives the product of its issuer and entry-session
+    multinomial counts. Percentile bounds use NumPy's linear quantile method.
+    Effective sample size is ``sample variance / bootstrap variance of mean``,
+    capped at the raw event count; it is zero when clustering supplies no
+    estimable precision and never defaults to the row count.
+    """
+
+    values = np.asarray([item.net_return_pct for item in outcomes], dtype=np.float64)
+    estimates = _pigeonhole_estimates(
+        values,
+        [item.issuer_cik for item in outcomes],
+        [item.entry_date for item in outcomes],
+        seed=seed,
+        resamples=resamples,
+    )
     lower, upper = np.quantile(estimates, (0.025, 0.975), method="linear")
     bootstrap_variance = float(np.var(estimates, ddof=1))
     sample_variance = variance(float(value) for value in values)
@@ -129,6 +169,58 @@ def two_way_pigeonhole_bootstrap(
         effective_sample_size=effective_n,
         resamples=resamples,
     )
+
+
+def paired_clustered_difference_test(
+    differences: Sequence[PairedDifference],
+    *,
+    seed: int = BOOTSTRAP_SEED,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+) -> DifferenceTest:
+    """Test a paired treatment-minus-control mean with treatment clustering.
+
+    The one-sided p-value is computed from the null-centred bootstrap
+    distribution with a plus-one finite-resample correction. The confidence
+    interval is the preregistered percentile interval of the paired mean.
+    """
+
+    values = np.asarray([item.difference_pct for item in differences], dtype=np.float64)
+    estimates = _pigeonhole_estimates(
+        values,
+        [item.treatment_issuer_cik for item in differences],
+        [item.treatment_entry_date for item in differences],
+        seed=seed,
+        resamples=resamples,
+    )
+    observed = float(np.mean(values))
+    lower, upper = np.quantile(estimates, (0.025, 0.975), method="linear")
+    centred = estimates - observed
+    p_value = (1 + int(np.count_nonzero(centred >= observed))) / (resamples + 1)
+    return DifferenceTest(
+        mean_difference_pct=observed,
+        lower_95_pct=float(lower),
+        upper_95_pct=float(upper),
+        one_sided_p_value=p_value,
+        bootstrap_standard_error_pct=float(np.std(estimates, ddof=1)),
+        resamples=resamples,
+    )
+
+
+def holm_adjust(p_values: Sequence[float]) -> tuple[float, ...]:
+    """Return Holm step-down adjusted p-values in original input order."""
+
+    if not p_values:
+        raise ValueError("at least one p-value is required")
+    if any(not np.isfinite(value) or not 0 <= value <= 1 for value in p_values):
+        raise ValueError("p-values must be finite and between zero and one")
+    ordered = sorted(enumerate(p_values), key=lambda item: (item[1], item[0]))
+    adjusted = [0.0] * len(ordered)
+    running = 0.0
+    count = len(ordered)
+    for rank, (original_index, value) in enumerate(ordered):
+        running = max(running, min(1.0, (count - rank) * value))
+        adjusted[original_index] = running
+    return tuple(adjusted)
 
 
 def _average_rank(values: Sequence[float]) -> list[float]:
