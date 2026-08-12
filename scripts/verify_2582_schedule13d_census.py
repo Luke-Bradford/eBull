@@ -21,7 +21,6 @@ from typing import Any, LiteralString, cast
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.sql import SQL
 
 from app.config import settings
 
@@ -144,7 +143,7 @@ def _json_default(value: object) -> str:
 
 
 def _one(conn: psycopg.Connection[dict[str, Any]], query: LiteralString) -> dict[str, Any]:
-    row = conn.execute(SQL(query)).fetchone()
+    row = conn.execute(query).fetchone()
     if row is None:
         raise RuntimeError("Schedule 13D census aggregate returned no row")
     return row
