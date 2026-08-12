@@ -21,53 +21,78 @@ from app.config import settings
 from app.services.price_quarantine import RULE_SET_VERSION
 from app.services.strategy_regime_context import (
     CompletedSessionPanel,
+    ReferenceSessionCoverage,
     RegimeMember,
     measure_completed_session_regime,
+    select_completed_session_dates,
 )
 
-_SQL = """
-WITH cohort AS (
+_COHORT_CTE = """
+cohort AS (
     SELECT h.instrument_id, h.provider_industry_id
       FROM instrument_market_classification_history h
      WHERE h.effective_to IS NULL
        AND h.security_type = 'common_stock'
        AND h.primary_listing_market IN ('nyse', 'nasdaq')
        AND h.provider_industry_id IS NOT NULL
-), sessions AS (
-    -- eToro's daily bar label is not a civil NYSE date (Monday sessions can
-    -- carry a Sunday date), so a weekday filter would be wrong.  Use the
-    -- declared SPY provider series as the session calendar instead of a union
-    -- in which a handful of sparse foreign/off-calendar bars create fake
-    -- sessions.  Instrument 3000 is asserted below by the verification query.
-    SELECT p.price_date
-      FROM price_daily p
-      JOIN price_quarantine_coverage cov
-        ON cov.instrument_id = p.instrument_id
-       AND cov.rule_set_version = %(rule_set_version)s
-       AND p.price_date BETWEEN cov.first_bar AND cov.last_bar
-      LEFT JOIN price_bar_quarantine q
-        ON q.instrument_id = p.instrument_id
-       AND q.price_date = p.price_date
-       AND q.rule_set_version = %(rule_set_version)s
-     WHERE p.instrument_id = 3000
-       AND p.close > 0
-       AND COALESCE(q.return_usable, TRUE)
-       AND NOT COALESCE(q.provisional, FALSE)
-     ORDER BY p.price_date DESC
-     LIMIT 21
+)
+"""
+
+# eToro's daily bar label is not a civil NYSE date, so a weekday filter is
+# wrong. SPY supplies the ordered provider-session labels. Cross-sectional
+# coverage separately decides whether the latest label is complete enough to
+# anchor; it does not remove sparse dates from the middle of a horizon.
+_REFERENCE_SQL = f"""
+WITH {_COHORT_CTE}
+SELECT reference.price_date,
+       count(cohort_price.instrument_id) FILTER (
+           WHERE cohort_price.close > 0
+             AND cohort_cov.instrument_id IS NOT NULL
+             AND COALESCE(cohort_q.return_usable, TRUE)
+       ) AS observed_count,
+       (SELECT count(*) FROM cohort) AS expected_count
+  FROM price_daily reference
+  JOIN price_quarantine_coverage reference_cov
+    ON reference_cov.instrument_id = reference.instrument_id
+   AND reference_cov.rule_set_version = %(rule_set_version)s
+   AND reference.price_date BETWEEN reference_cov.first_bar AND reference_cov.last_bar
+  LEFT JOIN price_bar_quarantine reference_q
+    ON reference_q.instrument_id = reference.instrument_id
+   AND reference_q.price_date = reference.price_date
+   AND reference_q.rule_set_version = %(rule_set_version)s
+ CROSS JOIN cohort c
+  LEFT JOIN price_daily cohort_price
+    ON cohort_price.instrument_id = c.instrument_id
+   AND cohort_price.price_date = reference.price_date
+  LEFT JOIN price_quarantine_coverage cohort_cov
+    ON cohort_cov.instrument_id = c.instrument_id
+   AND cohort_cov.rule_set_version = %(rule_set_version)s
+   AND cohort_price.price_date BETWEEN cohort_cov.first_bar AND cohort_cov.last_bar
+  LEFT JOIN price_bar_quarantine cohort_q
+    ON cohort_q.instrument_id = c.instrument_id
+   AND cohort_q.price_date = cohort_price.price_date
+   AND cohort_q.rule_set_version = %(rule_set_version)s
+ WHERE reference.instrument_id = 3000
+   AND reference.close > 0
+   AND COALESCE(reference_q.return_usable, TRUE)
+ GROUP BY reference.price_date
+ ORDER BY reference.price_date
+"""
+
+_PANEL_SQL = f"""
+WITH {_COHORT_CTE}, sessions AS (
+    SELECT unnest(%(session_dates)s::date[]) AS price_date
 )
 SELECT c.instrument_id, c.provider_industry_id, s.price_date,
        CASE WHEN p.close > 0
                   AND cov.instrument_id IS NOT NULL
                   AND COALESCE(q.return_usable, TRUE)
-                  AND NOT COALESCE(q.provisional, FALSE)
             THEN p.close
             ELSE NULL
        END AS close,
        p.close > 0
            AND cov.instrument_id IS NOT NULL
            AND COALESCE(q.return_usable, TRUE)
-           AND NOT COALESCE(q.provisional, FALSE)
            AND tq.instrument_id IS NULL
            AND b.instrument_id IS NULL AS return_link_usable
   FROM cohort c
@@ -94,7 +119,7 @@ SELECT c.instrument_id, c.provider_industry_id, s.price_date,
 """
 
 
-def _load(conn: psycopg.Connection[Any]) -> CompletedSessionPanel:
+def _load(conn: psycopg.Connection[Any], *, minimum_session_coverage: Decimal) -> CompletedSessionPanel:
     reference = conn.execute("SELECT symbol, instrument_type_id FROM instruments WHERE instrument_id = 3000").fetchone()
     if reference != ("SPY", 6):
         raise RuntimeError(f"reference calendar identity drifted: expected SPY ETF (3000, 6), got {reference!r}")
@@ -105,10 +130,30 @@ def _load(conn: psycopg.Connection[Any]) -> CompletedSessionPanel:
     if frontiers is None:
         raise RuntimeError("could not pin price unit-regime frontiers")
     break_frontier, adjustment_frontier = frontiers
-    rows = conn.execute(_SQL, {"rule_set_version": RULE_SET_VERSION}).fetchall()
+    reference_rows = conn.execute(_REFERENCE_SQL, {"rule_set_version": RULE_SET_VERSION}).fetchall()
+    if not reference_rows:
+        raise RuntimeError("reference calendar has no quarantine-covered sessions")
+    expected_counts = {int(row[2]) for row in reference_rows}
+    if len(expected_counts) != 1:
+        raise RuntimeError(f"point-in-time cohort count changed inside one snapshot: {sorted(expected_counts)!r}")
+    expected_count = expected_counts.pop()
+    dates = select_completed_session_dates(
+        tuple(ReferenceSessionCoverage(row[0], int(row[1])) for row in reference_rows),
+        expected_count=expected_count,
+        minimum_anchor_coverage=minimum_session_coverage,
+        required_sessions=21,
+    )
+    rows = conn.execute(
+        _PANEL_SQL,
+        {
+            "rule_set_version": RULE_SET_VERSION,
+            "session_dates": list(dates),
+        },
+    ).fetchall()
     if not rows:
         raise RuntimeError("current point-in-time cohort has no usable completed-session rows")
-    dates = tuple(sorted({row[2] for row in rows}))
+    if tuple(sorted({row[2] for row in rows})) != dates:
+        raise RuntimeError("loaded panel did not preserve the selected reference sessions")
     grouped: dict[tuple[int, int], dict[date, Decimal | None]] = {}
     links: dict[tuple[int, int], dict[date, bool]] = {}
     for instrument_id, industry_id, session_date, close, return_link_usable in rows:
@@ -135,14 +180,15 @@ def _load(conn: psycopg.Connection[Any]) -> CompletedSessionPanel:
 
 
 def main() -> None:
+    minimum_coverage = Decimal("0.80")
     started = time.perf_counter()
     with psycopg.connect(settings.database_url) as conn:
         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        panel = _load(conn)
+        panel = _load(conn, minimum_session_coverage=minimum_coverage)
     loaded = time.perf_counter()
     result = measure_completed_session_regime(
         panel,
-        minimum_coverage=Decimal("0.80"),
+        minimum_coverage=minimum_coverage,
         minimum_sector_members=20,
     )
     finished = time.perf_counter()
@@ -153,6 +199,7 @@ def main() -> None:
                 "formula_version": result.version,
                 "latest_completed_session": result.latest_completed_session.isoformat(),
                 "sessions": len(panel.session_dates),
+                "minimum_session_coverage": str(minimum_coverage),
                 "expected_members": result.expected_count,
                 "trend_coverage": str(result.prior_trend.coverage),
                 "common_movement": {

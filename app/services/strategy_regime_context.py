@@ -69,6 +69,12 @@ class CompletedSessionPanel:
 
 
 @dataclass(frozen=True)
+class ReferenceSessionCoverage:
+    session_date: date
+    observed_count: int
+
+
+@dataclass(frozen=True)
 class HorizonAggregate:
     horizon_sessions: int
     verdict: RegimeVerdict
@@ -160,6 +166,47 @@ def _simple_return(member: RegimeMember, horizon: int) -> Decimal | None:
 
 def _coverage(observed: int, expected: int) -> Decimal:
     return Decimal(observed) / Decimal(expected)
+
+
+def select_completed_session_dates(
+    observations: tuple[ReferenceSessionCoverage, ...],
+    *,
+    expected_count: int,
+    minimum_anchor_coverage: Decimal,
+    required_sessions: int,
+) -> tuple[date, ...]:
+    """Anchor on the latest broadly populated reference-market session.
+
+    A provider can publish a reference instrument before the wider universe is
+    complete. The latest date alone is therefore not a completed-session
+    contract. Once the anchor is chosen, every prior reference date is retained
+    even when its coverage is poor; skipping a sparse middle session would
+    silently change every horizon instead of letting downstream coverage fail.
+    """
+    if expected_count <= 0:
+        raise ValueError("expected_count must be positive")
+    if not Decimal(0) < minimum_anchor_coverage <= Decimal(1):
+        raise ValueError("minimum_anchor_coverage must be inside (0, 1]")
+    if required_sessions <= 0:
+        raise ValueError("required_sessions must be positive")
+    dates = tuple(item.session_date for item in observations)
+    if dates != tuple(sorted(dates)) or len(dates) != len(set(dates)):
+        raise ValueError("reference session observations must be strictly increasing and unique")
+    for item in observations:
+        if not 0 <= item.observed_count <= expected_count:
+            raise ValueError("reference session observed_count must be inside 0..expected_count")
+    anchors = [
+        index
+        for index, item in enumerate(observations)
+        if _coverage(item.observed_count, expected_count) >= minimum_anchor_coverage
+    ]
+    if not anchors:
+        raise ValueError("no reference session reaches minimum anchor coverage")
+    anchor_index = anchors[-1]
+    first_index = anchor_index - required_sessions + 1
+    if first_index < 0:
+        raise ValueError(f"fewer than {required_sessions} reference sessions exist through the covered anchor")
+    return dates[first_index : anchor_index + 1]
 
 
 def _horizon_aggregate(
@@ -395,6 +442,7 @@ def _version() -> str:
         _valid_close,
         _simple_return,
         _coverage,
+        select_completed_session_dates,
         _horizon_aggregate,
         _trend_share,
         _common_movement,
@@ -414,7 +462,9 @@ __all__ = [
     "HorizonAggregate",
     "ParticipationAggregate",
     "REGIME_VERSION",
+    "ReferenceSessionCoverage",
     "RegimeMember",
     "decompose_return",
     "measure_completed_session_regime",
+    "select_completed_session_dates",
 ]
