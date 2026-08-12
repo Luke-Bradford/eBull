@@ -765,6 +765,51 @@ class PromotionCandidate:
     promotion_evidence: PromotionEvidence | None = None
 
 
+#: The version under which ``structural_promotion_refusals`` was computed.
+#: ⚠ Bump this whenever that function's RULE changes — not when its comments do.
+#: A preregistration freezes its expected refusals under a named version, and
+#: #2599 refuses a declaration frozen under a superseded one rather than
+#: re-interpreting it. Same shape as ``trial_register_superseded`` above.
+STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-12-v1"
+
+
+def structural_promotion_refusals(
+    *, universe_basis: str | None, carry_unmodelled: bool
+) -> tuple[PromotionRefusal, ...]:
+    """The refusals fully determined by the corpus/cost stamps a run will carry.
+
+    ⚠ THE POINT OF THE EXTRACTION IS THAT THERE IS ONE COPY. #2599 needs to know,
+    at preregistration-freeze time, whether a trial is structurally unpromotable
+    before it starts — which is exactly this subset of ``check_promotable``, and
+    a second hand-written copy of it would drift silently the first time the
+    corpus rule changed.
+
+    ⚠ These three and no others. Every remaining refusal in the vocabulary
+    depends on what the run PRODUCES (a Deflated Sharpe, a synthetic control, an
+    evaluated instrument set), so it cannot be known at freeze time and must not
+    be pre-declared.
+    """
+    refusals: list[PromotionRefusal] = []
+
+    # §6 clause 2 — basis missing, or survivor_only. #2288: "An unlabelled
+    # result is treated as survivor_only, never as validated."
+    #
+    # ⚠ Two codes rather than one. They are the same verdict and different
+    # operator actions: absent means the WRITER is broken, and survivor_only
+    # means the CORPUS is (and #2284's purchase is the fix).
+    if not universe_basis:
+        refusals.append("universe_basis_absent")
+    elif universe_basis not in PROMOTABLE_UNIVERSE_BASES:
+        refusals.append("universe_basis_not_survivorship_free")
+
+    # §5.1 — carry and FX are NULL, not zero, so no result charging neither is
+    # promotable. Read off the ROW, never off `cost_model` (see the field).
+    if carry_unmodelled:
+        refusals.append("carry_unmodelled")
+
+    return tuple(refusals)
+
+
 def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, ...]:
     """Every reason this result may not be promoted. Empty means promotable.
 
@@ -783,21 +828,16 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
     if result.purpose == "harness_validation":
         refusals.append("harness_validation_only")
 
-    # §6 clause 2 — basis missing, or survivor_only. #2288: "An unlabelled
-    # result is treated as survivor_only, never as validated."
-    #
-    # ⚠ Two codes rather than one. They are the same verdict and different
-    # operator actions: absent means the WRITER is broken, and survivor_only
-    # means the CORPUS is (and #2284's purchase is the fix).
-    if not result.universe_basis:
-        refusals.append("universe_basis_absent")
-    elif result.universe_basis not in PROMOTABLE_UNIVERSE_BASES:
-        refusals.append("universe_basis_not_survivorship_free")
-
-    # §5.1 — carry and FX are NULL, not zero, so no result charging neither is
-    # promotable. Read off the ROW, never off `cost_model` (see the field).
-    if result.carry_unmodelled:
-        refusals.append("carry_unmodelled")
+    # §6 clause 2 (universe basis) and §5.1 (carry). Both are decided by the
+    # stamps alone, so they live in `structural_promotion_refusals` — the same
+    # function #2599's preregistration freeze calls, which is what keeps the
+    # frozen expectation and the gate from drifting apart.
+    refusals.extend(
+        structural_promotion_refusals(
+            universe_basis=result.universe_basis,
+            carry_unmodelled=result.carry_unmodelled,
+        )
+    )
 
     # §6 — "instrument outside the §4.0 validated universe". §4.0's allocation
     # invariant 2 is a universe rule, not only a survivorship one.
@@ -946,6 +986,7 @@ __all__ = [
     "RESULT_SCOPES",
     "RESULT_SET_ID",
     "SIZING_RULE",
+    "STRUCTURAL_REFUSAL_POLICY_VERSION",
     "UNIVERSE_BASES",
     "AmbiguityArm",
     "PromotionCandidate",
@@ -958,6 +999,7 @@ __all__ = [
     "UniverseBasis",
     "check_promotable",
     "is_promotable",
+    "structural_promotion_refusals",
     "namespace_for_bar",
     "namespace_for_position",
     "namespace_for_signal",

@@ -600,11 +600,23 @@ class LiveGatePolicyView(BaseModel):
     currency: str
     leverage: int
     registered_at: datetime
+    #: #2599 — the frozen preregistration declaration this policy is bound to.
+    #: None on a policy registered before #2599, which the gate refuses.
+    declaration_id: int | None
+
+
+class ForwardShadowFloorView(BaseModel):
+    """#2599's contract-frozen forward-shadow floor, as the gate read it."""
+
+    min_independent_decision_dates: int
+    min_calendar_weeks: int
+    derivation: str
 
 
 class LiveGateFactsView(BaseModel):
     stage: str | None
     forward_resolved_signals: int
+    forward_decision_dates: int
     forward_days: int
     paper_closed_trades: int
     paper_days: int
@@ -639,6 +651,9 @@ class LiveGateResponse(BaseModel):
     required_kill_drills: list[str]
     passed: bool
     refusal_codes: list[str]
+    #: None means no floor was frozen for this policy — the gate refuses with
+    #: `forward_shadow_floor_missing` rather than treating it as unbounded.
+    forward_shadow_floor: ForwardShadowFloorView | None
 
 
 class LivePromotionAttemptRequest(BaseModel):
@@ -691,6 +706,11 @@ def _live_gate_view(report: LiveGateReport) -> LiveGateResponse:
         required_kill_drills=list(REQUIRED_KILL_DRILLS),
         passed=report.passed,
         refusal_codes=list(report.refusal_codes),
+        forward_shadow_floor=(
+            None
+            if report.forward_shadow_floor is None
+            else ForwardShadowFloorView(**report.forward_shadow_floor.__dict__)
+        ),
     )
 
 

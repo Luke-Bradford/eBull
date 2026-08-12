@@ -205,6 +205,14 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # #2450 — immutable preregistered live threshold root. Drill and
     # assessment children are discovered through their FKs.
     "strategy_live_gate_policies",
+    # #2599 (sql/333) — the frozen preregistration declaration. ⚠ LISTED
+    # BECAUSE IT IS A PARENT, NOT A CHILD: `strategy_live_gate_policies`
+    # references IT, so the inbound-FK closure walking down from the roots
+    # above never reaches it. Measured, not assumed — two new live-gate tests
+    # failed with `DID NOT RAISE` and a UniqueViolation on a declaration a
+    # previous test had frozen. Listed AFTER its own child so the fallback
+    # TRUNCATE order stays child-to-parent.
+    "strategy_preregistration_declarations",
     # #2451 — bounded current kill state has no FK by design.
     "strategy_execution_blocks",
     # #2469 — the shared paper-pool current state is an append-only standalone

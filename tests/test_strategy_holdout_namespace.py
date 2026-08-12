@@ -25,18 +25,27 @@ from __future__ import annotations
 import psycopg
 import pytest
 
+from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.result_ledger import (
     HoldoutAccess,
+    PreregDeclarationRefused,
+    freeze_preregistration,
     holdout_access_counts,
     quarantine_arms_compared,
     read_holdout_results,
     record_holdout_access,
+    require_outcome_access,
     store_holdout_arm_pair,
     store_holdout_result,
     store_in_sample_arm_pair,
     store_in_sample_result,
 )
-from app.services.strategy_result import PromotionCandidate, StrategyResult, check_promotable
+from app.services.strategy_result import (
+    STRUCTURAL_REFUSAL_POLICY_VERSION,
+    PromotionCandidate,
+    StrategyResult,
+    check_promotable,
+)
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
     build_control,
@@ -845,3 +854,172 @@ def test_the_pair_writer_is_atomic_on_an_autocommit_connection(
         # connection's mode are restored here rather than left for the fixture.
         ebull_test_conn.execute("DELETE FROM strategy_results_store WHERE strategy_id = 'S-PAIR-ATOMIC'")
         ebull_test_conn.autocommit = False
+
+
+# ---------------------------------------------------------------------------
+# #2599 — the frozen preregistration declaration
+# ---------------------------------------------------------------------------
+
+
+def _declaration(**overrides: object) -> PreregDeclaration:
+    """A coherent falsification declaration over a survivor-only trial."""
+    base: dict[str, object] = {
+        "strategy_id": "S-1",
+        "strategy_version": "strategy-registry-v1+aaaaaaaaaaaa",
+        "contract_version": "test-contract-v1",
+        "prereg_purpose": "falsification_only",
+        "structural_refusal_policy_version": STRUCTURAL_REFUSAL_POLICY_VERSION,
+        "declared_universe_basis": "survivor_only",
+        "declared_carry_unmodelled": True,
+        "expected_structural_refusals": ("universe_basis_not_survivorship_free", "carry_unmodelled"),
+        "forward_shadow": ForwardShadowFloor(40, 12, "candidate power calculation"),
+        "declared_by": _ACTOR,
+    }
+    base.update(overrides)
+    return PreregDeclaration(**base)  # type: ignore[arg-type]
+
+
+def test_a_frozen_declaration_cannot_be_edited_or_deleted(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠ IMMUTABILITY IS A PROPERTY OF THE RELATION, not of Python.
+
+    DELETE is barred alongside UPDATE because "unfreeze, look, re-freeze" is the
+    same fabrication with an extra step.
+    """
+    with ebull_test_conn.transaction(force_rollback=True):
+        freeze_preregistration(ebull_test_conn, _declaration())
+        for statement in (_DECLARATION_UPDATE, _DECLARATION_DELETE):
+            with pytest.raises(psycopg.errors.RaiseException, match="immutable"):
+                with ebull_test_conn.transaction():
+                    ebull_test_conn.execute(statement, {"strategy_id": "S-1"})
+
+
+def test_one_declaration_per_trial(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """Two declarations would let a caller pick whichever the outcome favours."""
+    with ebull_test_conn.transaction(force_rollback=True):
+        freeze_preregistration(ebull_test_conn, _declaration())
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            with ebull_test_conn.transaction():
+                freeze_preregistration(ebull_test_conn, _declaration(contract_version="test-contract-v2"))
+
+
+def test_an_incoherent_declaration_is_refused_at_freeze_time(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    with ebull_test_conn.transaction(force_rollback=True):
+        with pytest.raises(PreregDeclarationRefused) as excinfo:
+            freeze_preregistration(ebull_test_conn, _declaration(prereg_purpose="capital_candidate"))
+        assert "ineligible_trial_not_declared_falsification" in excinfo.value.refusals
+
+
+def test_an_undeclared_trial_is_untouched_but_the_named_door_refuses_it(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """⚠ NO RETROACTIVE INVALIDATION, and that asymmetry is the whole design.
+
+    ``record_holdout_access`` leaves a trial that predates #2599 alone;
+    ``require_outcome_access`` — the door a NEW evaluator uses — refuses it.
+    """
+    access = HoldoutAccess(
+        strategy_id="S-UNDECLARED",
+        strategy_version="strategy-registry-v1+undecl",
+        access_kind="read",
+        accessed_by=_ACTOR,
+        purpose=_PURPOSE,
+    )
+    with ebull_test_conn.transaction(force_rollback=True):
+        assert record_holdout_access(ebull_test_conn, access) > 0
+        with pytest.raises(PreregDeclarationRefused) as excinfo:
+            require_outcome_access(ebull_test_conn, access)
+        assert excinfo.value.refusals == ("preregistration_not_frozen",)
+
+
+def test_a_declared_trial_is_enforced_at_the_shared_chokepoint(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Every paved door funnels through ``record_holdout_access``.
+
+    ⚠ The declaration is frozen coherent and then the POLICY moves underneath
+    it — the supersession case. It authorised looks a moment ago and stops now,
+    through the old door, with no evaluator change.
+    """
+    access = HoldoutAccess(
+        strategy_id="S-1",
+        strategy_version="strategy-registry-v1+aaaaaaaaaaaa",
+        access_kind="read",
+        accessed_by=_ACTOR,
+        purpose=_PURPOSE,
+    )
+    with ebull_test_conn.transaction(force_rollback=True):
+        freeze_preregistration(ebull_test_conn, _declaration())
+        assert record_holdout_access(ebull_test_conn, access) > 0
+
+        ebull_test_conn.execute(_DECLARATION_TRIGGER_OFF)
+        ebull_test_conn.execute(_DECLARATION_POLICY_DRIFT, {"strategy_id": "S-1"})
+        ebull_test_conn.execute(_DECLARATION_TRIGGER_ON)
+        with pytest.raises(PreregDeclarationRefused) as excinfo:
+            record_holdout_access(ebull_test_conn, access)
+        assert "structural_refusal_policy_superseded" in excinfo.value.refusals
+
+
+def test_storing_a_result_whose_stamps_contradict_the_declaration_is_refused(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Declaring eligible and storing survivor-only is the substitution."""
+    with ebull_test_conn.transaction(force_rollback=True):
+        freeze_preregistration(
+            ebull_test_conn,
+            _declaration(
+                prereg_purpose="capital_candidate",
+                declared_universe_basis="survivorship_free",
+                declared_carry_unmodelled=False,
+                expected_structural_refusals=(),
+            ),
+        )
+        with pytest.raises(PreregDeclarationRefused) as excinfo:
+            store_holdout_result(
+                ebull_test_conn,
+                build_result(namespace="hold_out", universe_basis="survivor_only", carry_unmodelled=True),
+                accessed_by=_ACTOR,
+                purpose=_PURPOSE,
+            )
+        assert set(excinfo.value.refusals) == {
+            "declared_universe_basis_substituted",
+            "declared_carry_unmodelled_substituted",
+        }
+
+
+_DECLARATION_UPDATE = """
+    UPDATE strategy_preregistration_declarations
+       SET declared_by = 'someone else'
+     WHERE strategy_id = %(strategy_id)s
+"""
+
+_DECLARATION_DELETE = """
+    DELETE FROM strategy_preregistration_declarations WHERE strategy_id = %(strategy_id)s
+"""
+
+#: ⚠ Simulates the POLICY moving, not the row being edited — the row is
+#: immutable, so the only way this state arises in production is a version bump
+#: in `strategy_result`. The trigger is dropped for the one statement because
+#: there is no other way to reach the state.
+#:
+#: ⚠ THREE STATEMENTS AND NOT ONE STRING. psycopg prepares every query, and a
+#: prepared statement cannot carry multiple commands — measured here as
+#: `SyntaxError: cannot insert multiple commands into a prepared statement`.
+_DECLARATION_TRIGGER_OFF = """
+    ALTER TABLE strategy_preregistration_declarations
+        DISABLE TRIGGER trg_strategy_preregistration_declaration_immutable
+"""
+
+_DECLARATION_POLICY_DRIFT = """
+    UPDATE strategy_preregistration_declarations
+       SET structural_refusal_policy_version = 'structural-refusal-policy-1999-01-01-v0'
+     WHERE strategy_id = %(strategy_id)s
+"""
+
+_DECLARATION_TRIGGER_ON = """
+    ALTER TABLE strategy_preregistration_declarations
+        ENABLE TRIGGER trg_strategy_preregistration_declaration_immutable
+"""
