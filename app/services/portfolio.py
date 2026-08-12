@@ -891,9 +891,14 @@ def _thesis_absence_reason(details: dict[str, Any]) -> str:
     Two different facts, and the operator-facing rationale must not collapse
     them. ``details["thesis"]`` is withheld in both cases, so the flag set
     beside it is the only thing that can tell them apart at this point.
+
+    Returns a bare LABEL, not a sentence — both call sites embed it, one as
+    ``"{label} and score …"`` and one as ``"score-only entry ({label})"``, so a
+    label carrying its own leading noun or parenthetical reads redundantly in
+    at least one of them (review NITPICK on PR #2608).
     """
     if details.get("thesis_quarantined") is True:
-        return f"Thesis {QUARANTINE_REASON} (memo does not name its subject)"
+        return QUARANTINE_REASON
     return "No thesis"
 
 
