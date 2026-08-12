@@ -14,7 +14,7 @@ write no access row: a second look presented as the first, invisible to every
 automated check, under-counting ``M`` in the direction that RAISES the Deflated
 Sharpe.
 
-⚠⚠ THE REGISTER CHECK IS THREE RULES, AND EACH CLOSES A DIFFERENT DODGE:
+⚠⚠ THE REGISTER CHECK IS FOUR RULES, AND EACH CLOSES A DIFFERENT DODGE:
 
 1. the named entry must NOT be the original pre-cutoff one — spent entries do
    not pre-pay;
