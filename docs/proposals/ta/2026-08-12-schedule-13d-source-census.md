@@ -109,9 +109,16 @@ separate; they are never pooled into a known regulatory rule.
 | filing year | Rule 13d-1(b) | Rule 13d-1(c) | both | unknown | total with 60 prior + 20 later days |
 |---|---:|---:|---:|---:|---:|
 | 2024 from 18 December | 3 | 49 | 1 | 4 | 57 |
-| 2025 | 3,350 | 1,418 | 21 | 486 | 5,275 |
+| 2025 | 3,350 | 1,419 | 20 | 486 | 5,275 |
 | 2026 through complete coverage | 4,076 | 795 | 11 | 205 | 5,087 |
-| **total** | **7,429** | **2,262** | **33** | **695** | **10,419** |
+| **total** | **7,429** | **2,263** | **32** | **695** | **10,419** |
+
+Rule identity is read only from the structured
+`designateRulePursuantThisScheduleFiled` XML element. A broad text search had
+previously misclassified accession `0002042569-25-000002` as `both`: its
+structured designation is Rule 13d-1(c), while a signature comment says the
+prior filing had incorrectly selected Rule 13d-1(b). No price outcome was used
+to make this correction.
 
 Initial 13Gs cluster heavily in February and at quarter/annual reporting waves.
 That source shape is why the frozen challenger matches within filing month and

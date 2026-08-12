@@ -24,6 +24,7 @@ import psycopg
 from app.services.market_calendar import us_market_status
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
 from app.services.trial_register import TRIAL_REGISTER
+from scripts.schedule13d_challengers import RULE_13G
 from scripts.verify_2582_schedule13d_preregistration import EXPECTED_SHA256, load_and_verify
 
 TRIAL_ID: Final = "c4-schedule13d-public-catalyst-v1"
@@ -49,7 +50,7 @@ class SourceEvent:
     series_adjustment_bases: tuple[str, ...]
 
     @property
-    def primary_source_refusal(self) -> str | None:
+    def unfiltered_source_refusal(self) -> str | None:
         if not self.reporter_identity_complete:
             return "reporter_identity_missing"
         if self.instrument_id is None:
@@ -60,12 +61,46 @@ class SourceEvent:
             return "research_series_missing_or_ambiguous"
         if self.series_adjustment_bases != ("split_adjusted",):
             return "research_series_adjustment_basis_unexpected"
+        return None
+
+    @property
+    def primary_source_refusal(self) -> str | None:
+        refusal = self.unfiltered_source_refusal
+        if refusal is not None:
+            return refusal
         if self.prior_active:
             return "prior_active_chain"
         if self.prior_passive:
             return "prior_passive_chain"
         if self.same_public_date_peer:
             return "same_public_date_chain_ambiguous"
+        return None
+
+
+@dataclass(frozen=True)
+class Initial13GSourceEvent:
+    accession_number: str
+    issuer_cik: str
+    instrument_id: int | None
+    public_filing_date: date
+    rule: RULE_13G
+    raw_document_count: int
+    current_security_eligible: bool
+    series_ids: tuple[int, ...]
+    series_adjustment_bases: tuple[str, ...]
+
+    @property
+    def source_refusal(self) -> str | None:
+        if self.raw_document_count != 1:
+            return "canonical_raw_document_missing_or_ambiguous"
+        if self.instrument_id is None:
+            return "instrument_mapping_missing"
+        if not self.current_security_eligible:
+            return "current_security_scope_ineligible"
+        if len(self.series_ids) != 1:
+            return "research_series_missing_or_ambiguous"
+        if self.series_adjustment_bases != ("split_adjusted",):
+            return "research_series_adjustment_basis_unexpected"
         return None
 
 
@@ -174,6 +209,85 @@ def load_source_events(conn: psycopg.Connection[Any]) -> tuple[SourceEvent, ...]
             current_security_eligible=bool(row[9]),
             series_ids=tuple(int(value) for value in row[10]),
             series_adjustment_bases=tuple(str(value) for value in row[11]),
+        )
+        for row in rows
+    )
+
+
+_INITIAL_13G_SOURCE_SQL: LiteralString = """
+WITH initial_accessions AS (
+    SELECT b.accession_number,
+           min(b.issuer_cik) AS issuer_cik,
+           max(b.instrument_id) FILTER (WHERE b.instrument_id IS NOT NULL) AS instrument_id,
+           m.filed_at::date AS public_filing_date
+    FROM blockholder_filings b
+    JOIN sec_filing_manifest m USING (accession_number)
+    WHERE b.submission_type = 'SCHEDULE 13G'
+      AND m.filed_at::date BETWEEN %(first_source_date)s AND %(last_complete_filing_date)s
+    GROUP BY b.accession_number, m.filed_at::date
+), raw_flags AS (
+    SELECT r.accession_number,
+           count(*) AS raw_document_count,
+           bool_or(r.payload ~* '<([[:alnum:]_]+:)?designateRulePursuantThisScheduleFiled[^>]*>'
+               '[[:space:]]*Rule[[:space:]]+13d-1\\(b\\)[[:space:]]*'
+               '</([[:alnum:]_]+:)?designateRulePursuantThisScheduleFiled>') AS rule_1b,
+           bool_or(r.payload ~* '<([[:alnum:]_]+:)?designateRulePursuantThisScheduleFiled[^>]*>'
+               '[[:space:]]*Rule[[:space:]]+13d-1\\(c\\)[[:space:]]*'
+               '</([[:alnum:]_]+:)?designateRulePursuantThisScheduleFiled>') AS rule_1c
+    FROM filing_raw_documents r
+    WHERE r.document_kind = 'primary_doc_13dg'
+    GROUP BY r.accession_number
+)
+SELECT a.accession_number, a.issuer_cik, a.instrument_id,
+       a.public_filing_date,
+       CASE
+         WHEN coalesce(raw.rule_1b, false) AND coalesce(raw.rule_1c, false) THEN 'both'
+         WHEN coalesce(raw.rule_1b, false) THEN '1b'
+         WHEN coalesce(raw.rule_1c, false) THEN '1c'
+         ELSE 'unknown'
+       END AS rule,
+       coalesce(raw.raw_document_count, 0) AS raw_document_count,
+       coalesce(i.is_tradable, false)
+           AND i.instrument_type_id = 5
+           AND i.exchange IN ('4', '5') AS current_security_eligible,
+       coalesce(array_agg(s.series_id ORDER BY s.series_id)
+           FILTER (WHERE s.series_id IS NOT NULL), '{}') AS series_ids,
+       coalesce(array_agg(s.adjustment_basis ORDER BY s.series_id)
+           FILTER (WHERE s.series_id IS NOT NULL), '{}') AS series_adjustment_bases
+FROM initial_accessions a
+LEFT JOIN raw_flags raw USING (accession_number)
+LEFT JOIN instruments i ON i.instrument_id = a.instrument_id
+LEFT JOIN research_price_series s
+  ON s.instrument_id = a.instrument_id AND s.vendor = %(research_vendor)s
+GROUP BY a.accession_number, a.issuer_cik, a.instrument_id,
+         a.public_filing_date, raw.rule_1b, raw.rule_1c,
+         raw.raw_document_count, i.is_tradable, i.instrument_type_id, i.exchange
+ORDER BY a.public_filing_date, a.accession_number
+"""
+
+
+def load_initial_13g_source_events(conn: psycopg.Connection[Any]) -> tuple[Initial13GSourceEvent, ...]:
+    """Build the passive-filing challenger population without loading prices."""
+
+    rows = conn.execute(
+        _INITIAL_13G_SOURCE_SQL,
+        {
+            "research_vendor": RESEARCH_VENDOR,
+            "first_source_date": FIRST_SOURCE_DATE,
+            "last_complete_filing_date": LAST_COMPLETE_FILING_DATE,
+        },
+    ).fetchall()
+    return tuple(
+        Initial13GSourceEvent(
+            accession_number=str(row[0]),
+            issuer_cik=str(row[1]),
+            instrument_id=None if row[2] is None else int(row[2]),
+            public_filing_date=row[3],
+            rule=row[4],
+            raw_document_count=int(row[5]),
+            current_security_eligible=bool(row[6]),
+            series_ids=tuple(int(value) for value in row[7]),
+            series_adjustment_bases=tuple(str(value) for value in row[8]),
         )
         for row in rows
     )
