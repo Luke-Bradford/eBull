@@ -45,8 +45,9 @@ performance evidence.
 ## Read-only corpus result
 
 The census grouped `blockholder_filings` by accession so joint reporters did
-not multiply events. It joined coverage metadata only; no return, target, stop,
-winner/loser or outcome path was calculated.
+not multiply events, but takes the public filing date from
+`sec_filing_manifest.filed_at`. It joined coverage metadata only; no return,
+target, stop, winner/loser or outcome path was calculated.
 
 | filing year | initial 13D accessions | instrument mapped | research-series mapped | 60 prior + 20 later calendar days |
 |---|---:|---:|---:|---:|
@@ -63,14 +64,14 @@ must carry those source refusals.
 
 Chain shape is material:
 
-- 1,227 accessions have no strictly earlier active filing timestamp for any
+- 1,228 accessions have no strictly earlier active public filing date for any
   reporting person on
   the issuer in the retained chain;
-- 58 have an earlier active filing for at least one reporting person;
-- 46 have an earlier passive 13G-family filing for at least one reporting
+- 57 have an earlier active filing for at least one reporting person;
+- 49 have an earlier passive 13G-family filing for at least one reporting
   person;
-- 37 have another filing for the same reporter and issuer at the same retained
-  timestamp, so their within-timestamp chain order is ambiguous and is not
+- 44 have another filing for the same reporter and issuer on the same public
+  filing date, so their within-date chain order is ambiguous and is not
   invented from accession-number order;
 - the mapped accessions cover 855 distinct instruments.
 
@@ -87,11 +88,13 @@ All 1,285 initial-13D accessions have their existing
 not persist that purpose. The evaluator can parse it from the one canonical
 document on demand. It must not duplicate the narrative in another table.
 
-Only 123 accessions carry a non-midnight `filed_at`; 1,162 are date-only. The
-date-only rows cannot support a same-day or market-hours fill. Their
-fail-closed historical decision is the next regular-session open after the
-filing date. A separately proven EDGAR acceptance-time source may recover a
-more precise decision without rewriting this trial identity.
+All 1,285 accessions map to a canonical SEC-manifest public filing date; 155
+also retain an SEC acceptance timestamp. The typed blockholder `filed_at` is
+not that field: it may be an XML signature timestamp and differs from the
+manifest public date on eight accessions. It is therefore forbidden as the
+decision clock. All rows use the fail-closed next regular-session open after
+the SEC-manifest filing date; optional acceptance times do not receive a more
+favourable fill in this daily-bar trial.
 
 No typed `date_of_event` is present for these initial rows. That field is the
 private ownership-trigger date, not the public action time in any case; it may

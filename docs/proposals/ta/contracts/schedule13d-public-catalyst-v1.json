@@ -6,6 +6,9 @@
   "source": {
     "form": "SCHEDULE 13D",
     "document_kind": "primary_doc_13dg",
+    "public_filing_date_source": "sec_filing_manifest.filed_at",
+    "accepted_timestamp_optional_source": "sec_filing_manifest.accepted_at",
+    "blockholder_filed_at_policy": "signature_or_fallback_provenance_only_never_public_decision_clock",
     "first_source_date": "2024-12-18",
     "last_complete_filing_date": "2026-06-18",
     "research_vendor": "paperswithbacktest/Stocks-Daily-Price"
@@ -15,7 +18,7 @@
     "reporter_identity": "reporter_cik_else_normalized_reporter_name",
     "issuer_identity": "issuer_cik",
     "joint_reporter_rule": "union_history_across_every_reporter_then_count_accession_once",
-    "prior_history_order": "strictly_earlier_filed_at_only",
+    "prior_history_order": "strictly_earlier_sec_manifest_public_filing_date_only",
     "primary_population": "no_prior_active_and_no_prior_passive_and_no_same_timestamp_peer",
     "separate_attribution_only": [
       "prior_passive_13g_to_13d_conversion",
@@ -38,6 +41,7 @@
   },
   "decision_clock": {
     "historical_fill": "first_regular_session_open_strictly_after_filing_date",
+    "filing_date_field": "sec_filing_manifest.filed_at_date",
     "date_only_policy": "never_same_day",
     "precise_timestamp_policy": "same_next_session_rule_for_daily_corpus_comparability",
     "same_close_fill": "forbidden"
