@@ -57,13 +57,20 @@ class JobProgress:
     candidates_seen: int | None = None
     outcomes: Mapping[str, int] = field(default_factory=dict)
     errors: Mapping[str, int] = field(default_factory=dict)
+    # Optional bounded provenance for aggregate population/session counters.
+    # It is omitted from the serialised shape when empty, preserving existing
+    # readers of the three axes above. The degradation verdict ignores it.
+    context: Mapping[str, object] = field(default_factory=dict)
 
     def as_json(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "candidates_seen": self.candidates_seen,
             "outcomes": dict(self.outcomes),
             "errors": dict(self.errors),
         }
+        if self.context:
+            payload["context"] = dict(self.context)
+        return payload
 
 
 def degradation_reason(progress: JobProgress | None) -> str | None:

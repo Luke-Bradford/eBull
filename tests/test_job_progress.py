@@ -109,6 +109,18 @@ def test_progress_serialises_with_its_three_axes_intact() -> None:
     }
 
 
+def test_progress_serialises_optional_population_context_without_changing_default_shape() -> None:
+    progress = JobProgress(
+        candidates_seen=10,
+        outcomes={"usable": 8},
+        context={"provider_session": "2026-08-10", "population_status": "partial"},
+    )
+    assert progress.as_json()["context"] == {
+        "provider_session": "2026-08-10",
+        "population_status": "partial",
+    }
+
+
 def test_negative_counts_are_not_treated_as_opposites() -> None:
     """Codex ckpt-3. A negative count is nonsense in either bucket, but under
     truthiness it degraded on the error side and read as PROGRESS on the

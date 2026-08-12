@@ -19,7 +19,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.services.market_data import most_recent_trading_day
 from app.workers.scheduler import (
     _T3_CANDLE_BATCH_SIZE,
     _T3_SUPPLY_LESS_MISSES,
@@ -33,6 +32,7 @@ def _make_mock_conn(
     t3_rows: list[tuple[int, str]],
     held_rows: list[tuple[int, str]] | None = None,
     benchmark_rows: list[tuple[int, str]] | None = None,
+    usable_count: int = 0,
 ) -> MagicMock:
     """Mock connection that returns held_rows / tier12_rows / benchmark_rows /
     t3_rows in the order the handler executes them
@@ -46,7 +46,9 @@ def _make_mock_conn(
     result_bm.fetchall.return_value = benchmark_rows or []
     result_t3 = MagicMock()
     result_t3.fetchall.return_value = t3_rows
-    conn.execute.side_effect = [result_held, result_12, result_bm, result_t3]
+    result_usable = MagicMock()
+    result_usable.fetchone.return_value = (usable_count,)
+    conn.execute.side_effect = [result_held, result_12, result_bm, result_t3, result_usable]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
     return conn
@@ -122,6 +124,7 @@ class TestDailyCandleRefreshT3Bootstrap:
         """Candle refresh must pass skip_quotes=True per quote ownership rule."""
         mock_refresh = self._run([(1, "AAPL")], [])
         assert mock_refresh.call_args[1]["skip_quotes"] is True
+        assert mock_refresh.call_args[1]["fresh_through"] is not None
 
     def test_empty_t3_batch_still_refreshes_tier12(self) -> None:
         """When no T3 instruments qualify, only T1/T2 are refreshed."""
@@ -177,6 +180,7 @@ class TestDailyCandleRefreshT3Bootstrap:
             patch(_PATCHES["provider_cls"], return_value=mock_provider),
             patch(_PATCHES["connect"], return_value=mock_conn),
             patch(_PATCHES["refresh"], return_value=mock_summary),
+            patch("app.workers.scheduler.latest_completed_us_session", return_value=date(2026, 8, 10)),
         ):
             daily_candle_refresh()
 
@@ -196,7 +200,7 @@ class TestDailyCandleRefreshT3Bootstrap:
             # request. A scope predicate looser than the skip predicate
             # burns requests on instruments that are then skipped; tighter,
             # and the series it excludes never get refreshed at all.
-            "fresh_through": most_recent_trading_day(date.today()),
+            "fresh_through": date(2026, 8, 10),
             # #2262 — supply-less de-prioritisation. The exclusion EXPIRES
             # (re-probe after supply_recheck) rather than latching, so a
             # relisted or newly-supplied instrument returns to scope on its
@@ -407,6 +411,86 @@ class TestDailyCandleRefreshEmptyFetchDisambiguation:
             )
         assert any("no new bars" in r.message for r in caplog.records if r.levelname == "INFO")
         assert not any(r.levelname == "WARNING" and "FAILED" in r.message for r in caplog.records)
+
+
+def test_candle_population_watermark_is_checkpointed_before_refresh_and_finalised() -> None:
+    """#2572: an orphan keeps a declared denominator; completion adds exact coverage."""
+    # One of the two resolved instruments has the completed provider session.
+    mock_conn = _make_mock_conn([(1, "AAPL"), (2, "MSFT")], [], usable_count=1)
+    mock_provider = MagicMock()
+    mock_provider.__enter__ = MagicMock(return_value=mock_provider)
+    mock_provider.__exit__ = MagicMock(return_value=False)
+    mock_tracker = MagicMock()
+    mock_tracker.__enter__ = MagicMock(return_value=mock_tracker)
+    mock_tracker.__exit__ = MagicMock(return_value=False)
+    summary = MagicMock(
+        candle_rows_upserted=3,
+        instruments_refreshed=2,
+        features_computed=2,
+        quotes_updated=0,
+        quotes_skipped=0,
+        spread_flags_set=0,
+        candles_skipped=0,
+        candles_failed=0,
+    )
+
+    def observe_checkpoint(*args: object, **kwargs: object) -> MagicMock:
+        initial = mock_tracker.progress
+        assert initial.candidates_seen == 2
+        assert initial.context["provider_session"] == "2026-08-10"
+        assert initial.context["population_status"] == "running"
+        assert initial.outcomes == {"attempted": 0, "successful": 0, "usable": 0, "unavailable": 0}
+        return summary
+
+    with (
+        patch(_PATCHES["creds"], return_value=("key", "ukey")),
+        patch(_PATCHES["tracked"], return_value=mock_tracker),
+        patch(_PATCHES["provider_cls"], return_value=mock_provider),
+        patch(_PATCHES["connect"], return_value=mock_conn),
+        patch(_PATCHES["refresh"], side_effect=observe_checkpoint),
+        patch("app.workers.scheduler.latest_completed_us_session", return_value=date(2026, 8, 10)),
+    ):
+        daily_candle_refresh()
+
+    mock_tracker.checkpoint_progress.assert_called_once_with()
+    final = mock_tracker.progress
+    assert final.outcomes == {"attempted": 2, "successful": 2, "usable": 1, "unavailable": 1}
+    assert final.errors == {"failed": 0}
+    assert final.context["population_status"] == "partial"
+    assert len(final.context["scope_fingerprint"]) == 16
+
+
+def test_candle_population_watermark_records_failed_attempts_without_double_counting() -> None:
+    mock_conn = _make_mock_conn([(1, "AAPL"), (2, "MSFT"), (3, "GME")], [], usable_count=2)
+    mock_provider = MagicMock()
+    mock_provider.__enter__ = MagicMock(return_value=mock_provider)
+    mock_provider.__exit__ = MagicMock(return_value=False)
+    mock_tracker = MagicMock()
+    mock_tracker.__enter__ = MagicMock(return_value=mock_tracker)
+    mock_tracker.__exit__ = MagicMock(return_value=False)
+    summary = MagicMock(
+        candle_rows_upserted=1,
+        instruments_refreshed=3,
+        features_computed=1,
+        quotes_updated=0,
+        quotes_skipped=0,
+        spread_flags_set=0,
+        candles_skipped=1,
+        candles_failed=1,
+    )
+    with (
+        patch(_PATCHES["creds"], return_value=("key", "ukey")),
+        patch(_PATCHES["tracked"], return_value=mock_tracker),
+        patch(_PATCHES["provider_cls"], return_value=mock_provider),
+        patch(_PATCHES["connect"], return_value=mock_conn),
+        patch(_PATCHES["refresh"], return_value=summary),
+        patch("app.workers.scheduler.latest_completed_us_session", return_value=date(2026, 8, 10)),
+    ):
+        daily_candle_refresh()
+
+    final = mock_tracker.progress
+    assert final.outcomes == {"attempted": 2, "successful": 1, "usable": 2, "unavailable": 1}
+    assert final.errors == {"failed": 1}
 
 
 # ---------------------------------------------------------------------------

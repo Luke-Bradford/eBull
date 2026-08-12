@@ -244,7 +244,7 @@ class TestCandlesIsFresh:
             [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (3,)]
         )
         monkeypatch.setattr(
-            "app.services.market_data.most_recent_trading_day",
+            "app.services.market_calendar.latest_completed_us_session",
             lambda _: date(2026, 4, 16),
         )
         fresh, detail = candles_is_fresh(conn)
@@ -257,7 +257,7 @@ class TestCandlesIsFresh:
             [(now - timedelta(hours=1), "success", None, timedelta(hours=1).total_seconds()), (0,)]
         )
         monkeypatch.setattr(
-            "app.services.market_data.most_recent_trading_day",
+            "app.services.market_calendar.latest_completed_us_session",
             lambda _: date(2026, 4, 16),
         )
         fresh, _ = candles_is_fresh(conn)

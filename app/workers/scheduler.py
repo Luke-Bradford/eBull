@@ -20,6 +20,7 @@ catch-up-on-boot and tests.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Generator, Mapping, Sequence
@@ -62,8 +63,8 @@ from app.services.execution_guard import evaluate_recommendation
 from app.services.filings import FilingsRefreshSummary, refresh_filings, upsert_cik_mapping
 from app.services.job_progress import JobProgress, degradation_reason
 from app.services.llm_client import LLMProviderNotConfigured, make_llm_clients, release_local_models
-from app.services.market_calendar import us_market_status
-from app.services.market_data import most_recent_trading_day, refresh_market_data, refresh_quotes
+from app.services.market_calendar import latest_completed_us_session, us_market_status
+from app.services.market_data import refresh_market_data, refresh_quotes
 from app.services.mf_directory import refresh_mf_directory
 from app.services.operators import AmbiguousOperatorError, NoOperatorError, sole_operator_id
 from app.services.ops_monitor import (
@@ -2454,6 +2455,16 @@ class _JobTracker:
         self.note: str | None = None
         self.progress: JobProgress | None = None
 
+    def checkpoint_progress(self) -> None:
+        """Persist an in-flight aggregate before a long, partial-commit sweep."""
+        if self.run_id <= 0 or self.progress is None:
+            return
+        with background_write_connection(autocommit=False) as conn:
+            conn.execute(
+                "UPDATE job_runs SET progress_json = %(progress)s WHERE run_id = %(run_id)s",
+                {"progress": Jsonb(self.progress.as_json()), "run_id": self.run_id},
+            )
+
 
 def _finish_tracked(conn: psycopg.Connection[Any], tracker: _JobTracker) -> None:
     """Write the non-failure terminal row for a tracked job (#2218).
@@ -2796,8 +2807,8 @@ BENCHMARK_SYMBOLS: frozenset[str] = frozenset(
 # The maintenance predicate must stay FRESHNESS-based, never
 # existence-based: an exclusion that expires keeps the instrument in
 # scope tomorrow, an exclusion that latches makes this a seeder again.
-# `%(fresh_through)s` is `most_recent_trading_day` — the SAME boundary
-# `_candles_are_fresh` uses to decide whether to spend a request — so
+# `%(fresh_through)s` is the last officially completed US session — the SAME
+# boundary passed to `_candles_are_fresh` when deciding whether to fetch — so
 # scope membership and the per-instrument freshness skip cannot drift.
 # SUPPLY-LESS DE-PRIORITISATION (#2262). An instrument whose series has
 # not advanced on %(supply_misses)s consecutive attempted fetches stops
@@ -2861,9 +2872,10 @@ def daily_candle_refresh() -> None:
 
     Fired by the orchestrator full sync (03:00 UTC) as the ``candles``
     DataLayer — NOT the "22:00 UTC after US close" this docstring used
-    to claim; there is no ``ScheduledJob`` entry for it. See
-    ``market_data.most_recent_trading_day`` for what the earlier start
-    means for same-day bars. Watchlist scope
+    to claim; there is no ``ScheduledJob`` entry for it. The run freezes the
+    last officially completed NYSE session, so it neither requires nor stores
+    a forming same-day bar merely because the UTC civil date advanced.
+    Watchlist scope
     (spec §1.3 bullet 2) lands once the watchlist table exists
     (Phase 3.2). High-frequency held-position refresh (5-min cadence
     during market hours) is Phase 4 (live quotes).
@@ -2952,12 +2964,17 @@ def daily_candle_refresh() -> None:
             # benchmark are fetched first, so if the batch circuit-breaker
             # (#1833) trips part-way through a long T3 sweep, the scoped
             # instruments that must be current already are.
+            # The run fires at 03:00 UTC, before the same civil day's US
+            # session. A weekday label is therefore not a completed-session
+            # watermark. Freeze the official last completed NYSE session once
+            # for scope selection and the aggregate population record (#2572).
+            completed_session = latest_completed_us_session(datetime.now(UTC))
             t3_rows = conn.execute(
                 _T3_CANDLE_SELECT,
                 {
                     "limit": _T3_CANDLE_BATCH_SIZE,
                     "benchmark_symbols": sorted(BENCHMARK_SYMBOLS),
-                    "fresh_through": most_recent_trading_day(date.today()),
+                    "fresh_through": completed_session,
                     "supply_misses": _T3_SUPPLY_LESS_MISSES,
                     "supply_recheck": _T3_SUPPLY_LESS_RECHECK,
                 },
@@ -3011,6 +3028,27 @@ def daily_candle_refresh() -> None:
             )
 
             instruments = ordered
+            scope_fingerprint = hashlib.sha256(
+                ",".join(str(instrument_id) for instrument_id, _ in instruments).encode()
+            ).hexdigest()[:16]
+            watermark_context: dict[str, object] = {
+                "contract_version": "candle-population-watermark-v1",
+                "source_version": f"etoro/{settings.etoro_env}/daily-candles-v1",
+                "scope_version": "daily-candle-refresh-resolved-v1",
+                "scope_fingerprint": scope_fingerprint,
+                "provider_session": completed_session.isoformat(),
+                "population_status": "running",
+            }
+            tracker.progress = JobProgress(
+                candidates_seen=len(instruments),
+                outcomes={"attempted": 0, "successful": 0, "usable": 0, "unavailable": 0},
+                errors={"failed": 0},
+                context=watermark_context,
+            )
+            # Per-instrument commits intentionally survive a worker restart.
+            # Persist the denominator first so an orphaned sweep cannot leave
+            # partial bars with no population identity.
+            tracker.checkpoint_progress()
             # skip_quotes=True: quote freshness is owned by ``quotes_refresh``
             # (hourly @ :23, #2271) — NOT by fx_rates_refresh, which gave up
             # its batch-quote phase in #502 and which this comment named as
@@ -3018,7 +3056,47 @@ def daily_candle_refresh() -> None:
             # is still right on its own merits: a 70-minute candle sweep would
             # stamp instruments quoted at wildly different times, and the
             # instruments it touches last would carry the stalest marks.
-            summary = refresh_market_data(provider, conn, instruments, skip_quotes=True)
+            summary = refresh_market_data(
+                provider,
+                conn,
+                instruments,
+                skip_quotes=True,
+                fresh_through=completed_session,
+            )
+            usable_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT instrument_id
+                    FROM price_daily
+                    WHERE instrument_id = ANY(%(instrument_ids)s)
+                      AND price_date >= %(provider_session)s
+                    GROUP BY instrument_id
+                ) AS usable
+                """,
+                {
+                    "instrument_ids": [instrument_id for instrument_id, _ in instruments],
+                    "provider_session": completed_session,
+                },
+            ).fetchone()
+            usable = int(usable_row[0]) if usable_row is not None else 0
+            attempted = len(instruments) - summary.candles_skipped
+            successful = attempted - summary.candles_failed
+            unavailable = len(instruments) - usable
+            tracker.progress = JobProgress(
+                candidates_seen=len(instruments),
+                outcomes={
+                    "attempted": attempted,
+                    "successful": successful,
+                    "usable": usable,
+                    "unavailable": unavailable,
+                },
+                errors={"failed": summary.candles_failed},
+                context={
+                    **watermark_context,
+                    "population_status": "partial" if summary.candles_failed or unavailable else "complete",
+                },
+            )
         tracker.row_count = summary.candle_rows_upserted
 
     logger.info(

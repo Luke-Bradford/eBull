@@ -18,7 +18,7 @@ BEFORE ordering would hide a newer failure behind an older success.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -118,11 +118,11 @@ def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
     if not audit_fresh:
         return False, audit_detail
     # Content check: every T1/T2 instrument must have a candle for the
-    # most recent trading day. Per-instrument query avoids the false-pass
+    # last completed US session. Per-instrument query avoids the false-pass
     # of global MAX(price_date) when the table is uniformly stale.
-    from app.services.market_data import most_recent_trading_day
+    from app.services.market_calendar import latest_completed_us_session
 
-    trading_day = most_recent_trading_day(date.today())
+    trading_day = latest_completed_us_session(datetime.now(UTC))
     row = conn.execute(
         """
         SELECT COUNT(*) AS missing

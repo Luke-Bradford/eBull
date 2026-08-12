@@ -239,6 +239,34 @@ def test_resolve_candle_offset_round_trip(
     assert "Resume from candles" in wm.human
 
 
+def test_resolve_candle_offset_prefers_declared_session_over_partial_price_max(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    ebull_test_conn.execute(
+        """
+        INSERT INTO job_runs (job_name, started_at, finished_at, status, progress_json)
+        VALUES (
+            'daily_candle_refresh', now(), now(), 'success',
+            '{"candidates_seen": 4351,
+              "outcomes": {"attempted": 4351, "successful": 4351, "usable": 3508, "unavailable": 843},
+              "errors": {"failed": 0},
+              "context": {"contract_version": "candle-population-watermark-v1",
+                            "provider_session": "2026-08-10", "population_status": "partial"}}'::jsonb
+        )
+        """
+    )
+    ebull_test_conn.commit()
+
+    wm = resolve_watermark(
+        ebull_test_conn,
+        process_id="daily_candle_refresh",
+        mechanism="scheduled_job",
+    )
+    assert wm is not None
+    assert wm.cursor_value == "2026-08-10"
+    assert wm.human == "Candles partial for 2026-08-10 (3508/4351 usable)"
+
+
 # ---------------------------------------------------------------------------
 # NPORT — accession cursor (n_port_ingest_log)
 # ---------------------------------------------------------------------------
