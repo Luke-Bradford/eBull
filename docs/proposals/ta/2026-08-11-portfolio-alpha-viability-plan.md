@@ -254,6 +254,11 @@ Every candidate moves through the same loop. A loop can change a specification o
 before its outcome is observed. After outcome access, a change creates a new trial,
 new version and new untouched future interval.
 
+Implementation note (2026-08-12, #2505): the result-to-historical-validation
+transition now requires the compact immutable viability and same-path challenger
+record defined in `2026-08-12-promotion-edge-evidence-contract.md`. A pinned
+result ID or prose evidence reference alone can no longer cross that boundary.
+
 | loop | question | output | failure action |
 | --- | --- | --- | --- |
 | 0. Mechanism | Who is forced, slow, constrained or compensated, and why should the payoff persist after discovery? | One-page hypothesis, published prior, falsifiers and family identity. | Reject ideas whose rationale is only a chart resemblance or indicator vote. |

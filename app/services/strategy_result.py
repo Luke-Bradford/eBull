@@ -71,13 +71,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Final, Literal, get_args
+from typing import Final, Literal, cast, get_args
 
 from app.services.cost_model import COST_MODEL_ID
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.random_entry_cohort import SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
+from app.services.strategy_promotion_evidence import PromotionEvidence, evidence_refusals
 from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
@@ -291,6 +292,27 @@ PromotionRefusal = Literal[
     "synthetic_control_not_run",
     "synthetic_control_cohort_shows_edge",
     "synthetic_control_sharpe_below_cohort",
+    "promotion_evidence_missing",
+    "expectancy_lower_bound_not_positive",
+    "profit_factor_not_computed",
+    "profit_factor_invalid",
+    "profit_factor_not_above_one",
+    "recent_year_instability",
+    "recent_year_evidence_incomplete",
+    "excluding_best_1_not_positive",
+    "tail_or_concentration_limits_failed",
+    "probability_calibration_failed",
+    "path_diagnostics_incomplete",
+    "executable_cost_inputs_missing",
+    "executable_cost_inputs_stale",
+    "broker_ineligible",
+    "challenger_evidence_incomplete",
+    "challenger_population_not_comparable",
+    "candidate_does_not_beat_challengers",
+    "ev_bucket_evidence_incomplete",
+    "ev_bucket_ranking_not_monotonic",
+    "outcome_contrast_evidence_incomplete",
+    "outcome_contrast_population_not_comparable",
 ]
 PROMOTION_REFUSALS: frozenset[str] = frozenset(get_args(PromotionRefusal))
 
@@ -738,6 +760,9 @@ class PromotionCandidate:
     #: missing and stops there. Compare ``ambiguity_material`` directly above,
     #: which DOES carry a magnitude verdict because §3.4 declares one.
     quarantine_arms_compared: bool = False
+    #: #2505's compact viability and edge-attribution record. A result without
+    #: it may be reproducible backtest evidence but cannot be capital evidence.
+    promotion_evidence: PromotionEvidence | None = None
 
 
 def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, ...]:
@@ -849,6 +874,24 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
             refusals.append("synthetic_control_cohort_shows_edge")
         if not control.sharpe_exceeds_cohort:
             refusals.append("synthetic_control_sharpe_below_cohort")
+
+    # #2505 — positive mean return is not enough. The candidate must have a
+    # positive clustered lower bound, measured tails/concentration, complete
+    # executable costs, calibrated ranking and same-path challenger attribution.
+    evidence = candidate.promotion_evidence
+    if evidence is None:
+        refusals.append("promotion_evidence_missing")
+    else:
+        refusals.extend(
+            cast(
+                tuple[PromotionRefusal, ...],
+                evidence_refusals(
+                    evidence,
+                    profit_factor=result.metrics.profit_factor,
+                    as_of=result.identity.window_end,
+                ),
+            )
+        )
 
     return tuple(refusals)
 

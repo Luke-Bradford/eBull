@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -10,6 +11,7 @@ import pytest
 
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
+from app.services.result_ledger import store_in_sample_result
 from app.services.strategy_control_plane import (
     StrategyControlError,
     StrategyOwnershipError,
@@ -26,8 +28,90 @@ from app.services.strategy_control_plane import (
     release_exact_position,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_promotion_evidence import (
+    EVIDENCE_VERSION,
+    REQUIRED_CHALLENGERS,
+    REQUIRED_CONTRASTS,
+    REQUIRED_COST_INPUTS,
+    ChallengerEvidence,
+    ExpectedValueBucket,
+    OutcomeContrast,
+    PromotionEvidence,
+    RecentYearEvidence,
+)
+from app.services.strategy_promotion_evidence_store import store_promotion_evidence
+from tests.test_result_ledger import build_metrics, build_result
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
+
+
+def _passing_promotion_evidence(*, lower_bound: str = "0.1") -> PromotionEvidence:
+    return PromotionEvidence(
+        evidence_version=EVIDENCE_VERSION,
+        causal_observation_rule_version="causal-v1",
+        fill_rule_version="fills-v1",
+        overlap_rule_version="overlap-v1",
+        after_cost_expectancy_ci_low_pct=Decimal(lower_bound),
+        max_drawdown_pct=Decimal("-8"),
+        expected_shortfall_5_pct=Decimal("-3"),
+        worst_gap_pct=Decimal("-5"),
+        excluding_best_1_expectancy_pct=Decimal("0.2"),
+        recent_year_stable=True,
+        recent_years_evaluated=3,
+        recent_year_evidence=(
+            RecentYearEvidence(2024, 34, Decimal("0.2"), Decimal("-0.1"), True),
+            RecentYearEvidence(2025, 33, Decimal("0.3"), Decimal("0.0"), True),
+            RecentYearEvidence(2026, 33, Decimal("0.4"), Decimal("0.1"), True),
+        ),
+        max_date_contribution_pct=Decimal("8"),
+        max_name_contribution_pct=Decimal("7"),
+        max_sector_contribution_pct=Decimal("20"),
+        max_concurrency=12,
+        capacity_usd=Decimal("100000"),
+        risk_limits_version="test-risk-v1",
+        risk_limits_passed=True,
+        probability_calibration_passed=True,
+        path_diagnostics_complete=True,
+        outcome_count=100,
+        profitable_outcome_count=60,
+        losing_outcome_count=40,
+        flat_outcome_count=0,
+        target_first_count=40,
+        stop_first_count=30,
+        timeout_count=30,
+        ambiguous_path_count=2,
+        observed_cost_inputs=REQUIRED_COST_INPUTS,
+        cost_observed_on=date.today(),
+        cost_valid_through=date.today(),
+        cost_source_version="etoro-quote-v1",
+        spread_bps=Decimal("8"),
+        slippage_bps=Decimal("5"),
+        financing_bps_per_day=Decimal("1"),
+        fx_bps=Decimal("2"),
+        broker_eligible=True,
+        challengers=tuple(
+            ChallengerEvidence(
+                role,
+                100,
+                Decimal("0.1"),
+                Decimal("0.2"),
+                True,
+                "causal-v1",
+                "fills-v1",
+                "overlap-v1",
+            )
+            for role in sorted(REQUIRED_CHALLENGERS)
+        ),
+        ev_buckets=(
+            ExpectedValueBucket(1, 34, Decimal("-0.2"), Decimal("-0.1")),
+            ExpectedValueBucket(2, 33, Decimal("0.1"), Decimal("0.2")),
+            ExpectedValueBucket(3, 33, Decimal("0.4"), Decimal("0.5")),
+        ),
+        outcome_contrasts=tuple(
+            OutcomeContrast(role, 60, 40, Decimal("1"), Decimal("0"), Decimal("1"))
+            for role in sorted(REQUIRED_CONTRASTS)
+        ),
+    )
 
 
 def _instrument(conn: psycopg.Connection[Any], instrument_id: int = 2454001) -> None:
@@ -177,6 +261,93 @@ def test_promotion_is_ordered_explicit_and_evidenced(
     # Runtime switches are deliberately irrelevant to governance state.
     conn.execute("UPDATE runtime_config SET enable_auto_trading = true, enable_live_trading = true WHERE id = true")
     assert current_stage(conn, "S-GOV", "v1") == "research_candidate"
+
+
+def test_historical_validation_requires_passing_edge_evidence(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    promote_strategy(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="research_candidate",
+        promoted_by="operator",
+        reason="register candidate",
+    )
+    result = build_result(
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        namespace="in_sample",
+        metrics=build_metrics(profit_factor=1.2),
+    )
+    result_id = store_in_sample_result(conn, result)
+
+    with pytest.raises(StrategyControlError, match="promotion_evidence_missing"):
+        promote_strategy(
+            conn,
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            to_stage="historical_validated",
+            promoted_by="operator",
+            reason="must not validate a bare result",
+            evidence_ref="result:test",
+            result_ids=(result_id,),
+        )
+
+    store_promotion_evidence(
+        conn,
+        result_id=result_id,
+        evidence=_passing_promotion_evidence(lower_bound="0"),
+    )
+    with pytest.raises(StrategyControlError, match="expectancy_lower_bound_not_positive"):
+        promote_strategy(
+            conn,
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            to_stage="historical_validated",
+            promoted_by="operator",
+            reason="present but failing evidence is still a refusal",
+            evidence_ref="result:test",
+            result_ids=(result_id,),
+        )
+
+    passing_result = build_result(
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        namespace="in_sample",
+        ambiguity_arm="best_case",
+        metrics=build_metrics(profit_factor=1.2),
+    )
+    passing_result_id = store_in_sample_result(conn, passing_result)
+    store_promotion_evidence(
+        conn,
+        result_id=passing_result_id,
+        evidence=_passing_promotion_evidence(),
+    )
+    promotion = promote_strategy(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="historical_validated",
+        promoted_by="operator",
+        reason="all #2505 evidence passes",
+        evidence_ref="result:test-passing",
+        result_ids=(passing_result_id,),
+    )
+    assert promotion.to_stage == "historical_validated"
+
+    with pytest.raises(StrategyControlError, match="expectancy_lower_bound_not_positive"):
+        promote_strategy(
+            conn,
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            to_stage="forward_observation",
+            promoted_by="operator",
+            reason="later evidence stages cannot introduce a failing result",
+            evidence_ref="result:test-failing-forward",
+            result_ids=(result_id,),
+        )
 
 
 def test_harness_control_cannot_be_promoted_or_funded(

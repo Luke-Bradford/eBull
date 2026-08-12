@@ -497,6 +497,8 @@ def test_the_counts_move_the_promotion_gate_off_holdout_never_evaluated(
             # synthetic control, so §9's null distribution does not exist for
             # this row and its Sharpe has no scale to be read against.
             "synthetic_control_not_run",
+            # #2505: reproducible performance is still not attributable edge.
+            "promotion_evidence_missing",
         }
 
 

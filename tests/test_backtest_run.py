@@ -327,7 +327,7 @@ class TestOptionalStr:
 class TestExpectedRefusals:
     """§9's table, as the projection the run gates on."""
 
-    def test_full_holdout_run_with_a_dsr_leaves_only_the_three_standing_refusals(self) -> None:
+    def test_full_holdout_run_with_a_dsr_leaves_only_the_standing_refusals(self) -> None:
         assert _expected_refusals(holdout_requested=True, deflated=True) == STANDING_REFUSALS
 
     def test_harness_validation_purpose_is_predicted_before_the_write(self) -> None:
@@ -381,11 +381,12 @@ class TestExpectedRefusals:
             "trial_count_undeclared",
         }
 
-    def test_the_three_standing_refusals_are_the_ones_this_cut_cannot_close(self) -> None:
+    def test_the_standing_refusals_are_the_ones_this_cut_cannot_close(self) -> None:
         assert STANDING_REFUSALS == {
             "universe_basis_not_survivorship_free",
             "carry_unmodelled",
             "synthetic_control_not_run",
+            "promotion_evidence_missing",
         }
 
 
