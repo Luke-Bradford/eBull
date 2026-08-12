@@ -327,6 +327,23 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
             field_type="bool",
             default=False,
         ),
+        # ⚠⚠ A BOOL AND NOT A COHORT SIZE (#2601). ``SPEC_COHORT_SIZE`` is §9's
+        # own literal — the 95th percentile of a 1,000-member sample IS its
+        # 950th order statistic — so an operator may choose whether the control
+        # runs and may not choose how big it is. An operator-set size would put
+        # a differently-estimated threshold on the row under the same model id.
+        ParamMetadata(
+            name="synthetic_control",
+            label="Run the random-entry synthetic control",
+            help_text=(
+                "Compute §9's 1,000-member random-entry cohort per arm and store it, closing "
+                "'synthetic_control_not_run'. ⚠ It is the run's dominant cost — a full equity curve per "
+                "member per arm on top of the corpus pass. Hold-out rows never carry one: a cohort over "
+                "the withheld side would be 1,000 looks at it."
+            ),
+            field_type="bool",
+            default=False,
+        ),
     ),
     "risk_metrics_refresh": (),
     # fair_value_band_refresh — #2009 deterministic fair-value band recompute.

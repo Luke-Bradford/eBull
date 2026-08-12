@@ -103,6 +103,7 @@ from app.services.price_segments import (
     series_segment_bounds,
 )
 from app.services.price_structure import StructureBar
+from app.services.random_entry_cohort import SPEC_COHORT_SIZE, SyntheticControl
 from app.services.research_price_structure_store import (
     QUARANTINE_ARMS,
     QUARANTINE_RULE_SET_VERSION,
@@ -138,6 +139,13 @@ from app.services.strategy_result import (
 )
 from app.services.strategy_segmented_evaluation import segmented_member, segmented_signals
 from app.services.strategy_statistics import StrategyMetrics, TradeReturns, compute_metrics
+from app.services.synthetic_control_run import (
+    CONTROL_NAMESPACE,
+    HOLDOUT_CONTROL_REASON,
+    CohortCollector,
+    CohortResult,
+    run_cohort,
+)
 from app.services.technical_analysis import OHLCVRow
 from app.services.trial_register import TRIAL_REGISTER
 from app.services.walk_forward import (
@@ -227,22 +235,28 @@ RESULT_SCOPE: Final = "sleeve"
 #: input.
 BACKTEST_BOOTSTRAP_SEED: Final = 20260808
 
-#: §9/#2505 — the four refusals no invocation of this job can close, whatever it
-#: measures. ``universe_basis_not_survivorship_free`` is blocked on #2284's
-#: corpus purchase, ``carry_unmodelled`` on #2277's carry measurement, and
-#: ``synthetic_control_not_run`` on a stage this cut does not contain (§9: the
-#: control is 1,000 full-corpus evaluations PER STRATEGY, and the only cohort
-#: that exists lives in a developer cache no job may depend on).
+#: §9/#2505 — the three refusals no invocation of this job can close, whatever
+#: it measures. ``universe_basis_not_survivorship_free`` is blocked on #2284's
+#: corpus purchase and ``carry_unmodelled`` on #2277's carry measurement.
 #:
-#: ⚠ The job cannot make anything promotable, and that is correct rather than a
-#: shortfall — §6 of the bounded-backtester spec states the intended initial
-#: state in those words. What it changes is that the refusals become SPECIFIC
-#: AND FEW instead of a generic failure.
+#: ⚠⚠ ``synthetic_control_not_run`` WAS A FOURTH MEMBER HERE AND IS NOT ANY MORE
+#: (#2601). It stood on the stated grounds that *"the only cohort that exists
+#: lives in a developer cache no job may depend on"* — which was true of the
+#: cohort, not of the control: ``synthetic_control_run`` now builds the cohort's
+#: inputs by riding the corpus pass this job already makes, so the refusal is
+#: closable by an invocation that asks for it. It is still added by
+#: ``_expected_refusals`` for a run that does not, and for every hold-out row
+#: (``HOLDOUT_CONTROL_REASON``) — a CONDITIONAL refusal rather than a standing
+#: one, which is the whole difference.
+#:
+#: ⚠ The job still cannot make anything promotable on this corpus, and that is
+#: correct rather than a shortfall — §6 of the bounded-backtester spec states
+#: the intended initial state in those words. What it changes is that the
+#: refusals become SPECIFIC AND FEW instead of a generic failure.
 STANDING_REFUSALS: Final[frozenset[PromotionRefusal]] = frozenset(
     {
         "universe_basis_not_survivorship_free",
         "carry_unmodelled",
-        "synthetic_control_not_run",
         "promotion_evidence_missing",
     }
 )
@@ -416,6 +430,11 @@ class ArmMeasurement:
     #: ``None`` means the strategy cannot produce an ambiguous level touch, so
     #: one measured population is shared by both stored ambiguity identities.
     ambiguity_arm: AmbiguityArm | None = None
+    #: §9's random-entry control for this arm's ``in_sample`` namespace, when the
+    #: invocation asked for one. ⚠ ``None`` is the DEFAULT and means the run did
+    #: not compute it — never that a computed control was lost: ``run_cohort``
+    #: raises rather than returning a partial one.
+    cohort: CohortResult | None = None
 
 
 @dataclass(frozen=True)
@@ -946,23 +965,8 @@ def build_in_sample_split(
 
 
 def _shifted(book: LegBook, offset: int) -> LegBook:
-    """The same legs, re-based onto an axis starting ``offset`` bars later.
-
-    ⚠ The price, spread, ``realised`` and ``marks`` arrays are SHARED rather
-    than copied. They are read-only from here on and the marks array is the
-    large one (hundreds of MB on a full-corpus arm); copying it to change two
-    integer columns would double the peak for nothing.
-    """
-    return LegBook(
-        entry_index=[index - offset for index in book.entry_index],
-        exit_index=[index - offset for index in book.exit_index],
-        entry_price=book.entry_price,
-        exit_price=book.exit_price,
-        half_spread=book.half_spread,
-        realised=book.realised,
-        mark_offset=book.mark_offset,
-        marks=book.marks,
-    )
+    """``LegBook.rebased``, kept as a name this module already reads by."""
+    return book.rebased(offset)
 
 
 def _benchmark_book(
@@ -1369,8 +1373,16 @@ def evaluate_arm(
     progress: ProgressCallback | None = None,
     return_basis: str = TOTAL_RETURN_BASIS,
     sizing_rule: str = SIZING_RULE_ID,
+    cohort_size: int | None = None,
 ) -> ArmMeasurement:
     """One ``(strategy, quarantine arm)`` corpus pass, end to end.
+
+    ⚠ ``cohort_size`` OPTS IN TO §9's CONTROL AND RIDES THIS SAME PASS. The
+    cohort's inputs — the eligible fill bars, their total-return-adjusted opens,
+    and the realised in-sample holds — are all derivable from what the loop
+    below already holds, so asking for a control costs no second corpus read.
+    ``None`` means the invocation did not ask, and the row keeps
+    ``synthetic_control_not_run``.
 
     ⚠ BOTH NAMESPACES COME OUT OF THIS ONE PASS when both are requested (§4);
     the caller decides whether the hold-out side is one of them, and when it is
@@ -1396,6 +1408,7 @@ def evaluate_arm(
     books: dict[ResultNamespace, _NamespaceBook] = {
         name: _NamespaceBook(records_label_windows=(name == "in_sample")) for name in namespaces
     }
+    collector = _collector_for(cohort_size, corpus=corpus, namespaces=namespaces)
     close_sources: Counter[str] = Counter()
     discarded: Counter[str] = Counter()
     raw_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
@@ -1492,8 +1505,9 @@ def evaluate_arm(
             regime=regime,
             window=corpus.window,
         )
+        costed = list(cost_positions(built.positions, price_basis="split_adjusted"))
         _absorb(
-            list(cost_positions(built.positions, price_basis="split_adjusted")),
+            costed,
             series=series,
             window=corpus.window,
             axis_pos=corpus.axis_pos,
@@ -1505,6 +1519,16 @@ def evaluate_arm(
             close_sources=close_sources,
             discarded=discarded,
         )
+        if collector is not None:
+            collector.collect(
+                rows=rows,
+                series=series,
+                costed=costed,
+                axis_pos=corpus.axis_pos,
+                raw_closes=raw_closes,
+                wealth_closes=wealth_closes,
+                first_axis_index=first_axis_index,
+            )
         _emit_series_progress(
             progress,
             phase="evaluation",
@@ -1537,7 +1561,84 @@ def evaluate_arm(
         close_sources=dict(close_sources),
         series_evaluated=evaluated,
         elapsed_s=time.monotonic() - started,
+        cohort=_run_cohort_for(
+            collector,
+            measured=measured,
+            corpus=corpus,
+            cohort_size=cohort_size,
+            label=f"{entry.strategy_id}/{ambiguity_arm or 'shared'}/{quarantine_arm}",
+        ),
     )
+
+
+def _collector_for(
+    cohort_size: int | None,
+    *,
+    corpus: _Corpus,
+    namespaces: Sequence[ResultNamespace],
+) -> CohortCollector | None:
+    """A collector when this pass measures the namespace a control is defined for.
+
+    ⚠ A hold-out-only invocation gets NONE rather than an empty collector, and
+    the reason is ``HOLDOUT_CONTROL_REASON``: the control is an in-sample
+    construction, so an arm that measures no in-sample namespace has nothing to
+    build one against and must say ``synthetic_control_not_run`` rather than
+    produce a control over the withheld side.
+    """
+    if cohort_size is None or CONTROL_NAMESPACE not in namespaces:
+        return None
+    return CohortCollector(window=corpus.window)
+
+
+def _run_cohort_for(
+    collector: CohortCollector | None,
+    *,
+    measured: Mapping[ResultNamespace, NamespaceMeasurement],
+    corpus: _Corpus,
+    cohort_size: int | None,
+    label: str,
+) -> CohortResult | None:
+    """§9's control for this arm, once the sleeve it is compared against exists.
+
+    ⚠ THE STRATEGY-SIDE FIGURES COME FROM THE MEASUREMENT THIS RUN JUST MADE,
+    not from a stored row. Criterion 11's argument applies to the control as
+    much as to the result — a Sharpe compared with a cohort built for a
+    different arm is two measurements joined on nothing — and the measurement is
+    already in hand here.
+    """
+    if collector is None or cohort_size is None:
+        return None
+    outcome = measured.get(CONTROL_NAMESPACE)
+    if outcome is None:
+        raise RuntimeError(
+            f"{label} asked for §9's control but produced no {CONTROL_NAMESPACE} measurement to compare it against — "
+            "a cohort with no strategy Sharpe beside it is a null distribution nobody can read"
+        )
+    result = run_cohort(
+        collector,
+        axis=corpus.axis,
+        strategy_metrics=outcome.metrics,
+        benchmark=None,
+        cohort_size=cohort_size,
+    )
+    logger.info(
+        "strategy_backtest_run: %s synthetic control — %d members over %d series in %.1fs (%.3fs/member), "
+        "cohort mean %.3f%% CI [%.3f, %.3f], cohort Sharpe p%.0f %.4f against %.4f, passed=%s, unmatchable %s",
+        label,
+        result.control.cohort_size,
+        result.series_placed,
+        result.elapsed_s,
+        result.seconds_per_member,
+        result.control.mean_return_pct,
+        result.control.mean_return_ci_low_pct,
+        result.control.mean_return_ci_high_pct,
+        result.control.sharpe_percentile,
+        result.control.cohort_sharpe_threshold,
+        result.control.strategy_sharpe,
+        result.control.passed,
+        result.unmatchable,
+    )
+    return result
 
 
 def evaluate_level_arms(
@@ -1551,8 +1652,15 @@ def evaluate_level_arms(
     progress: ProgressCallback | None = None,
     return_basis: str = TOTAL_RETURN_BASIS,
     sizing_rule: str = SIZING_RULE_ID,
+    cohort_size: int | None = None,
 ) -> tuple[ArmMeasurement, ...]:
     """Evaluate both daily-OHLC ambiguity projections from one corpus pass.
+
+    ⚠ ONE COLLECTOR PER AMBIGUITY ARM, not one shared. The arms differ in which
+    level a bar resolved to, which moves the CLOSE bar of a position and
+    therefore its hold — so a shared placement space would permute one arm's
+    holds into the other's null and report a control for a population neither
+    arm measured.
 
     The two arms differ only where one daily bar spans both fixed levels. They
     therefore share immutable series reads, signal rows, fill ids, causal level
@@ -1574,6 +1682,10 @@ def evaluate_level_arms(
     }
     close_sources: dict[AmbiguityArm, Counter[str]] = {ambiguity: Counter() for ambiguity in AMBIGUITY_ARM_ORDER}
     discarded: dict[AmbiguityArm, Counter[str]] = {ambiguity: Counter() for ambiguity in AMBIGUITY_ARM_ORDER}
+    collectors: dict[AmbiguityArm, CohortCollector | None] = {
+        ambiguity: _collector_for(cohort_size, corpus=corpus, namespaces=namespaces)
+        for ambiguity in AMBIGUITY_ARM_ORDER
+    }
     raw_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     wealth_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     ranking = (
@@ -1664,8 +1776,9 @@ def evaluate_level_arms(
                 regime=regime,
                 window=corpus.window,
             )
+            costed = list(cost_positions(built.positions, price_basis="split_adjusted"))
             _absorb(
-                list(cost_positions(built.positions, price_basis="split_adjusted")),
+                costed,
                 series=series,
                 window=corpus.window,
                 axis_pos=corpus.axis_pos,
@@ -1677,6 +1790,17 @@ def evaluate_level_arms(
                 close_sources=close_sources[ambiguity],
                 discarded=discarded[ambiguity],
             )
+            arm_collector = collectors[ambiguity]
+            if arm_collector is not None:
+                arm_collector.collect(
+                    rows=rows,
+                    series=series,
+                    costed=costed,
+                    axis_pos=corpus.axis_pos,
+                    raw_closes=raw_closes,
+                    wealth_closes=wealth_closes,
+                    first_axis_index=first_axis_index,
+                )
         _emit_series_progress(
             progress,
             phase="evaluation",
@@ -1713,6 +1837,13 @@ def evaluate_level_arms(
                 close_sources=dict(close_sources[ambiguity]),
                 series_evaluated=evaluated,
                 elapsed_s=elapsed,
+                cohort=_run_cohort_for(
+                    collectors[ambiguity],
+                    measured=measured,
+                    corpus=corpus,
+                    cohort_size=cohort_size,
+                    label=f"{entry.strategy_id}/{ambiguity}/{quarantine_arm}",
+                ),
             )
         )
     return tuple(measurements)
@@ -2017,6 +2148,7 @@ def build_result(
     quarantine_arm: QuarantineArm,
     deflated: DeflatedSharpeResult | None,
     evaluation_window: Window | None = None,
+    synthetic_control: SyntheticControl | None = None,
 ) -> StrategyResult:
     """One ``strategy_results`` row. §7's fourteen identity members, all pinned.
 
@@ -2071,6 +2203,13 @@ def build_result(
         trial_count=None if deflated is None else deflated.declared_trials,
         deflated_sharpe=None if deflated is None else Decimal(repr(deflated.deflated_sharpe)),
         deflated=deflated,
+        # ⚠ NOT PART OF ``ResultIdentity`` (§7 lists fourteen members and this is
+        # none of them), so attaching a control does NOT mint a new
+        # ``result_version``. A row already stored without one therefore blocks
+        # its own re-run through ``assert_no_existing_results`` — deliberately:
+        # a stored result silently gaining a passed threshold is exactly the
+        # "track record nobody can audit" that assertion exists to prevent.
+        synthetic_control=synthetic_control,
     )
 
 
@@ -2158,8 +2297,16 @@ def _expected_refusals(
     purpose: StrategyPurpose = "capital_candidate",
     ambiguity_material: bool | None = False,
     prior_holdout_evaluations: int = 0,
+    synthetic_control: SyntheticControl | None = None,
 ) -> frozenset[PromotionRefusal]:
     """What §9's table says a row from this run must still refuse on.
+
+    ⚠⚠ THE THREE SYNTHETIC-CONTROL CODES ARE PREDICTED HERE AND DECIDED IN
+    ``check_promotable``, AND THE DUPLICATION IS THE POINT. Criterion 8 requires
+    the refusal list re-measured on every stored row and equal to §9's table;
+    that check is only worth running while the two sides are computed
+    independently. A helper shared with the gate would make the comparison
+    vacuous — it would agree with itself.
 
     ⚠⚠ ``holdout_never_evaluated`` IS A PROPERTY OF THE STRATEGY VERSION, NOT OF
     THIS INVOCATION (#2433). ``check_promotable`` derives it from the LEDGER —
@@ -2186,6 +2333,13 @@ def _expected_refusals(
         expected.add("ambiguity_arms_not_compared")
     elif ambiguity_material:
         expected.add("ambiguity_material")
+    if synthetic_control is None:
+        expected.add("synthetic_control_not_run")
+    else:
+        if not synthetic_control.mean_return_ci_contains_zero:
+            expected.add("synthetic_control_cohort_shows_edge")
+        if not synthetic_control.sharpe_exceeds_cohort:
+            expected.add("synthetic_control_sharpe_below_cohort")
     return frozenset(expected)
 
 
@@ -2234,8 +2388,22 @@ def run_backtest(
     evaluation_window: Window | None = None,
     manifest: Mapping[str, StrategyEntry] = STRATEGY_MANIFEST,
     progress: ProgressCallback | None = None,
+    synthetic_control: bool = False,
 ) -> BacktestRunReport:
     """Evaluate every runnable strategy and persist criterion 9's arm pairs.
+
+    ⚠⚠ ``synthetic_control`` IS A BOOLEAN AND NOT A COHORT SIZE (#2601).
+    ``SPEC_COHORT_SIZE`` is §9's own literal — *"a ``SPEC_`` literal and not a
+    tuning knob: the 95th percentile of a 1,000-member sample is its 950th order
+    statistic"* — so an invocation may choose whether to run the control and may
+    NOT choose how big it is. A 200-member cohort stored under the same
+    ``model_id`` would be a different estimator wearing the same name.
+
+    ⚠ IT DEFAULTS OFF, AND THE COST IS WHY (§9, and see
+    ``SYNTHETIC_CONTROL_BUDGET``). Every other phase of this job is one corpus
+    pass; the control is ``SPEC_COHORT_SIZE`` equity curves PER ARM on top of
+    it. An operator who wants promotable evidence asks for it; a run that only
+    wants the metric set does not pay for it and says ``synthetic_control_not_run``.
 
     ⚠⚠ THE TRANSACTION BOUNDARY IS NOT PER STRATEGY, AND THAT INVERTS §3.1's
     "one strategy's failure does not stop the others". §2 puts the Deflated
@@ -2265,6 +2433,15 @@ def run_backtest(
         evaluation_window=evaluation_window,
     )
 
+    cohort_size = SPEC_COHORT_SIZE if synthetic_control else None
+    if cohort_size is not None and holdout_requested:
+        # ⚠ DECLARED IN THE RUN LOG, not left as a comment. An operator who
+        # asked for §9's control and then reads `synthetic_control_not_run` on
+        # half the rows is owed the reason at the moment it is decided.
+        logger.info(
+            "strategy_backtest_run: hold-out rows will carry synthetic_control_not_run — %s",
+            HOLDOUT_CONTROL_REASON,
+        )
     runnable, excluded = runnable_strategies(manifest)
     if strategy_id is not None:
         if strategy_id not in runnable:
@@ -2340,6 +2517,7 @@ def run_backtest(
                     identity=identities[entry_id],
                     namespaces=namespaces,
                     progress=progress,
+                    cohort_size=cohort_size,
                 )
             else:
                 measurements = (
@@ -2352,6 +2530,7 @@ def run_backtest(
                         identity=identities[entry_id],
                         namespaces=namespaces,
                         progress=progress,
+                        cohort_size=cohort_size,
                     ),
                 )
             for measurement in measurements:
@@ -2487,6 +2666,21 @@ def _assert_ambiguity_contract(measurement: ArmMeasurement) -> None:
         )
 
 
+def _control_for(measurement: ArmMeasurement, namespace: ResultNamespace) -> SyntheticControl | None:
+    """This arm's control, on the ONE namespace it was built for.
+
+    ⚠ A hold-out row gets ``None`` even on a run that computed a control, and
+    that is not a gap: the cohort was placed into in-sample bars against the
+    in-sample sleeve's holds, so attaching it to a hold-out row would put an
+    in-sample null beside a withheld Sharpe and let the pair pass a threshold
+    neither side measured. ``HOLDOUT_CONTROL_REASON`` records why no hold-out
+    cohort is built at all.
+    """
+    if namespace != CONTROL_NAMESPACE or measurement.cohort is None:
+        return None
+    return measurement.cohort.control
+
+
 def _write_rows(
     conn: psycopg.Connection[Any],
     *,
@@ -2556,6 +2750,7 @@ def _write_rows(
                         deflations.get((namespace, ambiguity, "masked")),
                     ),
                     evaluation_window=corpus.window,
+                    synthetic_control=_control_for(masked_arm, namespace),
                 )
                 admitted = build_result(
                     admitted_arm.namespaces[namespace],
@@ -2569,6 +2764,7 @@ def _write_rows(
                         deflations.get((namespace, ambiguity, "admitted")),
                     ),
                     evaluation_window=corpus.window,
+                    synthetic_control=_control_for(admitted_arm, namespace),
                 )
                 pending.append((strategy_id, namespace, ambiguity, masked, admitted))
 
@@ -2654,6 +2850,7 @@ def _write_rows(
             purpose=result.purpose,
             ambiguity_material=ambiguity_material,
             prior_holdout_evaluations=evaluations,
+            synthetic_control=result.synthetic_control,
         )
         if set(outcome) != expected:
             raise RuntimeError(
@@ -2840,6 +3037,7 @@ def _preflight_gate(
                 prior_holdout_evaluations=prior_holdout.get(
                     (result.identity.strategy_id, result.identity.strategy_version), 0
                 ),
+                synthetic_control=result.synthetic_control,
             )
             if set(outcome) != expected:
                 raise RuntimeError(
@@ -2934,6 +3132,37 @@ def log_report(report: BacktestRunReport) -> None:
                 len(outcome.evaluated_instrument_ids),
                 outcome.metrics.sharpe,
                 outcome.metrics.effective_sample_size,
+            )
+        cohort = measurement.cohort
+        if cohort is None:
+            # ⚠ SAID, not omitted. §11's report is what an operator reads to
+            # find out why a row refuses, and "the control does not appear in
+            # the report" is indistinguishable from "the control was lost".
+            logger.info("    synthetic control: NOT RUN — the invocation did not ask for one")
+        else:
+            logger.info(
+                "    synthetic control %s/%s: %d members, %d series, %.1fs (%.3fs/member); "
+                "mean %.3f%% CI [%.3f, %.3f] contains_zero=%s; sharpe p%.0f %.4f vs strategy %.4f exceeds=%s; "
+                "passed=%s; exposure %+.2fpp turnover %+.3f; unmatchable=%s no_slack_series=%d",
+                cohort.control.model_id,
+                cohort.placement_space_id,
+                cohort.control.cohort_size,
+                cohort.series_placed,
+                cohort.elapsed_s,
+                cohort.seconds_per_member,
+                cohort.control.mean_return_pct,
+                cohort.control.mean_return_ci_low_pct,
+                cohort.control.mean_return_ci_high_pct,
+                cohort.control.mean_return_ci_contains_zero,
+                cohort.control.sharpe_percentile,
+                cohort.control.cohort_sharpe_threshold,
+                cohort.control.strategy_sharpe,
+                cohort.control.sharpe_exceeds_cohort,
+                cohort.control.passed,
+                cohort.residual.exposure_delta_pct_points,
+                cohort.residual.turnover_delta,
+                dict(sorted(cohort.unmatchable.items())),
+                cohort.no_slack_series,
             )
     for group, reason in sorted(report.deflation_refusals.items()):
         logger.warning("  no Deflated Sharpe for %s: %s", group, reason)

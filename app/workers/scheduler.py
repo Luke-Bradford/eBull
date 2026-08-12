@@ -5537,6 +5537,11 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
     * ``refresh_recent`` (bool) — complete every missing pinned recent window.
       Each window commits independently, so a killed process resumes at the
       next missing identity. Existing evidence is immutable and skipped.
+    * ``synthetic_control`` (bool) — compute §9's random-entry cohort per arm
+      and store it, closing ``synthetic_control_not_run`` (#2601). ⚠ REFUSED in
+      combination with ``refresh_recent``: that path runs every pinned window in
+      one invocation, so a control there would multiply the run's dominant cost
+      by the window count. Ask for one window at a time via ``evidence_window``.
 
     ⚠ ``row_count`` is RESULT ROWS written. Zero is never a success here: the
     service raises if a runnable strategy produced no row, because an absent row
@@ -5553,8 +5558,19 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
     with _tracked_job(JOB_STRATEGY_BACKTEST_RUN) as tracker:
         refresh_recent = params.get("refresh_recent") is True
         evidence_window_id = _optional_str(params.get("evidence_window"))
+        synthetic_control = params.get("synthetic_control") is True
         if refresh_recent and (evidence_window_id is not None or _optional_str(params.get("strategy_id")) is not None):
             raise ValueError("refresh_recent cannot be combined with evidence_window or strategy_id")
+        if refresh_recent and synthetic_control:
+            # ⚠ REFUSED, not ignored. `refresh_recent` runs every pinned window
+            # in one invocation and the control is the run's dominant cost, so
+            # honouring it here would multiply that by the window count; and
+            # silently dropping it would hand back rows that say
+            # `synthetic_control_not_run` to an operator who asked for one.
+            raise ValueError(
+                "refresh_recent cannot be combined with synthetic_control — the control is a per-arm cohort and "
+                "this path runs every pinned window; ask for one window at a time through evidence_window"
+            )
         evaluation_window = None if evidence_window_id is None else recent_evidence_window(evidence_window_id).window
         with connect_job() as conn:
             if refresh_recent:
@@ -5646,6 +5662,7 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                 holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
                 trial_register_version=_optional_str(params.get("trial_register_version")),
                 evaluation_window=evaluation_window,
+                synthetic_control=synthetic_control,
             )
             tracker.row_count = report.rows_written
 
