@@ -12,7 +12,7 @@ arrival order.
 Candidate admission, trial budget and build order are governed by
 `2026-08-11-portfolio-alpha-viability-plan.md`. This map is a taxonomy and
 diagnostic backlog, not authority to test every row. In particular, the
-3/5/10-session sector-residual work remains reserved until it establishes a
+sector-residual work remains reserved until it establishes a
 mechanism independent of the rejected residual-confluence candidate and an
 uncontaminated evaluation interval.
 
@@ -122,28 +122,36 @@ versioned, prospective mechanism trial.
 
 ### Three to ten sessions
 
-The highest-priority daily-data research family is **sector/factor-neutral
-relative value**, because it directly models the common movement the operator
-identified. For stock `i`, fit factor exposures on data ending before the
-decision, accumulate the residual, then model its equilibrium and speed:
+The highest-priority daily-data research family to source-check is
+**sector/factor-neutral relative value**, because it directly models the common
+movement the operator identified. The primary Avellaneda-Lee contract has now
+been transcribed in
+`2026-08-12-sector-etf-residual-replication-contract.md`. For stock `i`, it fits
+the single assigned sector-ETF exposure on the 60 completed sessions ending at
+the decision close, accumulates the residual, then models its equilibrium and
+speed:
 
 ```text
 X(i,t) = cumulative residual return
 s(i,t) = (X(i,t) - equilibrium(i,t)) / equilibrium_sigma(i,t)
-half_life(i,t) = ln(2) / kappa(i,t)
+characteristic_time(i,t) = 1 / kappa(i,t)
 ```
 
-Only relationships with stable pre-decision exposure, stationary residual and
-a half-life compatible with the declared 3/5/10-session horizon enter the
-trial. Market- or sector-neutral long/short is the published economic form;
-long-only and unhedged versions are adaptations and must not inherit its
-evidence. Shortability, borrow/CFD carry and factor-leg execution are standing
-blockers for capital even if a research arm is positive.
+The paper admits `kappa > 8.4` (characteristic reversion time below about 30
+sessions), opens at `|s| > 1.25`, and exits on score reversion; it does not use
+fixed 3/5/10-session exits. Market- or sector-neutral long/short is the
+published economic form; fixed-horizon, long-only and unhedged versions are
+adaptations and must not inherit its evidence. Point-in-time sector mapping,
+survivorship-safe membership/market cap, causal next fills, shortability,
+borrow/CFD carry and factor-leg execution are source blockers before outcomes
+may be opened.
 
 Avellaneda and Lee's sector-ETF/PCA work supplies a reproducible model, but its
 1997–2007 performance decayed after 2002. It is therefore a formula source,
-not current evidence. eBull must test recent 3-, 5- and 10-session arms
-separately, after costs, without selecting the best horizon afterwards.
+not current evidence. If the source gate passes, eBull must first test the
+published score-exit rule as one frozen replication after costs. Fixed
+3/5/10-session exits are separately motivated adaptations, not a horizon menu
+from which to select a winner on the same outcomes.
 
 Da, Liu and Schaumburg likewise find that the residual component of short-term
 reversal—not raw losing returns—is the positive component in their historical
@@ -254,9 +262,9 @@ promoted candidates.
    pure completed-session multi-horizon/dispersion/common-movement mathematics
    are now implemented; candidate-owned loading, compact persistence and exact
    intraday coverage remain.
-3. Preregister a recent sector-ETF residual relative-value replication at
-   separate 3/5/10-session horizons under #2522, research-only until side/carry
-   contracts exist.
+3. Run #2522's source census against the exact sector-ETF residual contract.
+   Do not open outcomes or substitute fixed 3/5/10-session exits until
+   point-in-time mapping/membership and two-leg execution evidence exist.
 4. Complete the already-frozen 10–20 session point-in-time earnings/event
    continuation spike (#2476).
 5. Continue prospective intraday collection; run #2484 and #2485 only when
