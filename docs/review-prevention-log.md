@@ -3918,3 +3918,9 @@ Two things S-4 adds to the prevention above:
 - Risk: a later legitimate history-table redesign could turn either relationship one-to-many and silently multiply money inside `SUM`, even though the query itself still looks valid.
 - Prevention: establish the monetary grain explicitly before aggregation. Select distinct exact broker-position IDs before joining close events; use `EXISTS` for lifecycle-state membership when summing one funding decision's amount. Do not rely on a distant uniqueness constraint to make a money aggregation correct.
 - Enforced in: this log; `app/services/strategy_wealth.py` `owned_broker_positions` CTE; `app/services/strategy_control_plane.py::configure_paper_pool` committed-capital `EXISTS` predicates.
+
+## Corporate-action labels do not prove ratio direction (#2580, 2026-08-12)
+
+- Symptom: the delayed-SIP source probe accepted a `forward_splits` record whenever `new_rate != old_rate`; a reverse-split-shaped ratio could therefore qualify the forward-split contract.
+- Prevention: validate the economic direction as well as the provider's category. A forward split requires positive `old_rate` and `new_rate > old_rate`; unequal rates alone are insufficient.
+- Enforced in: this log; `app/services/alpaca_delayed_sip_probe.py::_require_tsla_forward_split`; `tests/test_alpaca_delayed_sip_probe.py::test_forward_split_check_requires_actual_matching_action`.
