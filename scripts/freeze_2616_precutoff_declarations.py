@@ -90,23 +90,21 @@ PEAD_MIN_FORWARD_CALENDAR_WEEKS: Final = math.ceil(
     PEAD_MIN_FORWARD_DECISION_DATES * _PEAD_PRIMARY_SPAN_DAYS / (_PEAD_SEALED_ENTRY_DATES * 7)
 )
 
+#: ⚠ sql/333 caps this column at 1000 characters; the DB test caught the first
+#: draft over it. The longer reading lives in this module's docstring.
 _PEAD_FORWARD_SHADOW_DERIVATION: Final = (
-    "No power calculation exists in the preregistration (2026-08-10-pead-preregistration.md, checked "
-    "2026-08-12 — #2616's premise that one does is corrected here). Constructed floor: the smallest forward "
-    "sample at which the prereg's own primary gate (positive lower 95% confidence bound) reaches power 0.8 "
-    "if the sealed point estimate is the true effect; alpha 0.05 two-sided, z_0.975 + z_0.8 = 2.8016, the "
-    "constants C-4's contract froze (7.84888 = 2.8016^2). Inputs frozen from 2026-08-10-pead-result.md "
-    f"§'Preregistered primary result': net mean {_PEAD_SEALED_NET_MEAN_PCT:+.3f}% per event, Bonferroni 95% "
-    f"joint CI [{_PEAD_SEALED_CI_LOW_PCT:+.3f}%, {_PEAD_SEALED_CI_HIGH_PCT:+.3f}%], {_PEAD_SEALED_EVENTS} "
-    f"events over {_PEAD_SEALED_ENTRY_DATES} entry dates spanning {_PEAD_PRIMARY_SPAN_DAYS} days "
-    "(2022-01-01..2026-07-08). SE = (3.763+2.866)/3.92 = 1.6911%; events = ceil(2427 x (1.6911 x "
-    f"2.8016 / 0.440)^2) = {PEAD_MIN_FORWARD_EVENTS}; dates = ceil(events x 508/2427) = "
-    f"{PEAD_MIN_FORWARD_DECISION_DATES}; weeks = ceil(dates x 1649/(508 x 7)) = "
-    f"{PEAD_MIN_FORWARD_CALENDAR_WEEKS}. Conservative both ways: reading the joint half-width as 1.96 x SE "
-    "overstates SE and so raises the floor, and a true effect below the sealed point estimate raises the "
-    "genuine requirement above any floor computed from it. A floor this size records that the sealed effect "
-    "cannot realistically be validated forward — consistent with the run failing its own primary gate and "
-    "the trial being falsification_only."
+    "No power calculation exists in 2026-08-10-pead-preregistration.md (checked 2026-08-12; #2616's premise "
+    "corrected). Constructed floor: smallest forward sample at which the prereg's own primary gate (positive "
+    "lower 95% CI bound) reaches power 0.8 if the sealed point estimate is true; alpha 0.05 two-sided, "
+    "z_0.975+z_0.8=2.8016 (C-4's constants; 7.84888=2.8016^2). Inputs: 2026-08-10-pead-result.md "
+    f"§'Preregistered primary result' — {_PEAD_SEALED_NET_MEAN_PCT:+.3f}%/event, Bonferroni 95% joint CI "
+    f"[{_PEAD_SEALED_CI_LOW_PCT:+.3f}%, {_PEAD_SEALED_CI_HIGH_PCT:+.3f}%], {_PEAD_SEALED_EVENTS} events / "
+    f"{_PEAD_SEALED_ENTRY_DATES} entry dates / {_PEAD_PRIMARY_SPAN_DAYS} days (2022-01-01..2026-07-08). "
+    f"SE=(3.763+2.866)/3.92=1.6911%; events=ceil(2427x(1.6911x2.8016/0.440)^2)={PEAD_MIN_FORWARD_EVENTS}; "
+    f"dates=ceil(events x 508/2427)={PEAD_MIN_FORWARD_DECISION_DATES}; weeks=ceil(dates x 1649/(508x7))="
+    f"{PEAD_MIN_FORWARD_CALENDAR_WEEKS}. Conservative both ways: the joint half-width read as 1.96xSE "
+    "overstates SE, raising the floor; a true effect below the point estimate raises the genuine "
+    "requirement. The size records the sealed effect cannot be validated forward; falsification_only."
 )
 
 
@@ -128,21 +126,20 @@ INSIDER_MIN_FORWARD_DECISION_DATES: Final = _required_forward_samples(
 )
 INSIDER_MIN_FORWARD_CALENDAR_WEEKS: Final = math.ceil(INSIDER_MIN_FORWARD_DECISION_DATES * 365.25 / (12 * 7))
 
+#: ⚠ sql/333 caps this column at 1000 characters — same note as the pead floor.
 _INSIDER_FORWARD_SHADOW_DERIVATION: Final = (
-    "No power calculation exists in the preregistration (2026-08-10-insider-purchase-preregistration.md, "
-    "checked 2026-08-12 — #2616's premise that one does is corrected here). Constructed floor: the smallest "
-    "forward sample at which the prereg's own primary gate (positive lower 95% confidence bound) reaches "
-    "power 0.8 if the sealed point estimate is the true effect; alpha 0.05 two-sided, z_0.975 + z_0.8 = "
-    "2.8016, the constants C-4's contract froze (7.84888 = 2.8016^2). Inputs frozen from "
-    "2026-08-10-insider-purchase-result.md §'Sealed result': primary spread "
-    f"{_INSIDER_SEALED_MEAN_PCT:+.3f}% per month, block-bootstrap 95% CI [{_INSIDER_SEALED_CI_LOW_PCT:+.3f}%, "
-    f"{_INSIDER_SEALED_CI_HIGH_PCT:+.3f}%], {_INSIDER_SEALED_MONTHS} complete portfolio months. SE = "
-    "(4.215+1.452)/3.92 = 1.4457%; months = ceil(49 x (1.4457 x 2.8016 / 1.192)^2) = "
-    f"{INSIDER_MIN_FORWARD_DECISION_DATES}. Formation is monthly, so decision dates = months; weeks = "
-    f"ceil(months x 365.25/(12 x 7)) = {INSIDER_MIN_FORWARD_CALENDAR_WEEKS}. Conservative: a true effect "
-    "below the sealed point estimate raises the genuine requirement above any floor computed from it. A "
-    "floor this size records that the sealed effect cannot realistically be validated forward — consistent "
-    "with the run failing its own primary gate and the trial being falsification_only."
+    "No power calculation exists in 2026-08-10-insider-purchase-preregistration.md (checked 2026-08-12; "
+    "#2616's premise corrected). Constructed floor: smallest forward sample at which the prereg's own "
+    "primary gate (positive lower 95% CI bound) reaches power 0.8 if the sealed point estimate is true; "
+    "alpha 0.05 two-sided, z_0.975+z_0.8=2.8016 (C-4's constants; 7.84888=2.8016^2). Inputs: "
+    "2026-08-10-insider-purchase-result.md §'Sealed result' — primary spread "
+    f"{_INSIDER_SEALED_MEAN_PCT:+.3f}%/month, block-bootstrap 95% CI [{_INSIDER_SEALED_CI_LOW_PCT:+.3f}%, "
+    f"{_INSIDER_SEALED_CI_HIGH_PCT:+.3f}%], {_INSIDER_SEALED_MONTHS} complete portfolio months. "
+    f"SE=(4.215+1.452)/3.92=1.4457%; months=ceil(49x(1.4457x2.8016/1.192)^2)={INSIDER_MIN_FORWARD_DECISION_DATES}. "
+    f"Formation is monthly, so decision dates = months; weeks=ceil(months x 365.25/(12x7))="
+    f"{INSIDER_MIN_FORWARD_CALENDAR_WEEKS}. Conservative: a true effect below the point estimate raises the "
+    "genuine requirement. A floor this size records the sealed effect cannot realistically be validated "
+    "forward — the run failed its own gate; falsification_only."
 )
 
 

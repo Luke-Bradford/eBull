@@ -23,11 +23,20 @@ Sharpe.
    new for this family's look;
 3. it must be present in ``TRIAL_REGISTER`` — appending a ``DeclaredTrial`` is a
    reviewed PR that bumps the register version, so the charge precedes the look,
-   which is the property C-4's gate established for post-cutoff trials.
+   which is the property C-4's gate established for post-cutoff trials;
+4. it must not already have charged a COMMITTED look — enforced in the DB half
+   against ``strategy_holdout_accesses``, because a register entry counts once
+   in ``M`` and a second look under the same entry is exactly the uncharged
+   re-run rules 1-3 exist to stop, one step later (Codex checkpoint 2 caught
+   the first draft omitting this). The durable spent-marker is the access row
+   this gate itself writes, matched on the exact ``purpose`` string
+   ``rerun_purpose`` produces. ⚠ A run that dies after the gate commits has
+   spent its entry even if no bar was read — over-counting ``M`` is the safe
+   error direction, and the next attempt declares a fresh entry.
 
 Because the only current entry carrying each family prefix IS the original, the
-three rules together are satisfiable only by an entry that did not exist when
-this module shipped.
+rules together are satisfiable only by an entry that did not exist when this
+module shipped — and by each such entry exactly once.
 """
 
 from __future__ import annotations
@@ -128,7 +137,9 @@ def require_rerun_trial_id(
     return trial_id
 
 
-def require_outcome_gate_preconditions(identity: SealedTrialIdentity, trial_id: str | None) -> str:
+def require_outcome_gate_preconditions(
+    identity: SealedTrialIdentity, trial_id: str | None, register: TrialRegister = TRIAL_REGISTER
+) -> str:
     """The checks that need no database, so a wrong invocation is refused for free.
 
     Same split C-4 makes: a refusal that costs a connection is a refusal
@@ -136,12 +147,40 @@ def require_outcome_gate_preconditions(identity: SealedTrialIdentity, trial_id: 
     """
 
     digest = verify_preregistration_document(identity)
-    require_rerun_trial_id(identity, trial_id)
+    require_rerun_trial_id(identity, trial_id, register)
     return digest
 
 
+def rerun_purpose(identity: SealedTrialIdentity, trial_id: str) -> str:
+    """The access row's ``purpose``, and therefore the spent-marker for rule 4.
+
+    ⚠ ONE PRODUCER. The spent-entry check matches this string EXACTLY, so the
+    format lives in one function; a second hand-written copy would let the
+    check and the marker drift apart, and a drifted marker never matches —
+    which fails silent in the direction that re-opens the sealed population.
+    """
+
+    return f"re-open the sealed {identity.original_trial_id} population under register entry {trial_id} (#2616)"
+
+
+#: Rule 4's lookup. All three parameters are non-null TEXT; `LIMIT 1` because
+#: existence is the question.
+_SPENT_ENTRY_SQL = """
+SELECT 1
+FROM strategy_holdout_accesses
+WHERE strategy_id = %(strategy_id)s
+  AND strategy_version = %(strategy_version)s
+  AND purpose = %(purpose)s
+LIMIT 1
+"""
+
+
 def require_outcome_gate(
-    conn: psycopg.Connection[Any], identity: SealedTrialIdentity, *, trial_id: str | None
+    conn: psycopg.Connection[Any],
+    identity: SealedTrialIdentity,
+    *,
+    trial_id: str | None,
+    register: TrialRegister = TRIAL_REGISTER,
 ) -> RerunOutcomeGate:
     """Refuse unless the document, the register entry and #2599's declaration all hold.
 
@@ -157,11 +196,24 @@ def require_outcome_gate(
     commit actually happened.
     """
 
-    digest = require_outcome_gate_preconditions(identity, trial_id)
+    digest = require_outcome_gate_preconditions(identity, trial_id, register)
     assert trial_id is not None  # require_rerun_trial_id refused None above
     frozen = load_preregistration(conn, identity.strategy_id, identity.strategy_version)
     if frozen is None:
         raise PreregDeclarationRefused(identity.strategy_id, identity.strategy_version, ("preregistration_not_frozen",))
+    # ⚠ Rule 4 — a register entry charges exactly one committed look. Checked
+    # against the audit ledger, not in-process state, so a crashed-then-retried
+    # run and a second deliberate run are refused identically.
+    purpose = rerun_purpose(identity, trial_id)
+    spent = conn.execute(
+        _SPENT_ENTRY_SQL,
+        {"strategy_id": identity.strategy_id, "strategy_version": identity.strategy_version, "purpose": purpose},
+    ).fetchone()
+    if spent is not None:
+        raise RerunGateRefusal(
+            f"register entry {trial_id} already charged a committed look at this sealed population; "
+            "append a fresh DeclaredTrial for this one — entries are single-use"
+        )
     # ⚠ `read`, with a NULL result_version — same reasoning as C-4: these
     # scripts write no result row, so an `evaluate` would stand for a row that
     # never arrives. A `read` is what this is: the sealed side being looked at.
@@ -173,8 +225,7 @@ def require_outcome_gate(
             result_version=None,
             access_kind="read",
             accessed_by=identity.accessed_by,
-            purpose=f"re-open the sealed {identity.original_trial_id} population under register entry "
-            f"{trial_id} (#2616)",
+            purpose=purpose,
         ),
     )
     return RerunOutcomeGate(
@@ -189,5 +240,6 @@ __all__ = [
     "require_outcome_gate",
     "require_outcome_gate_preconditions",
     "require_rerun_trial_id",
+    "rerun_purpose",
     "verify_preregistration_document",
 ]

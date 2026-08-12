@@ -95,9 +95,12 @@ def test_the_derivations_record_the_falsified_power_calc_premise() -> None:
 
     for build in _BUILDERS:
         derivation = build().forward_shadow.derivation
-        assert "No power calculation exists in the preregistration" in derivation
+        assert "No power calculation exists in" in derivation
         assert "2.8016" in derivation
         assert "falsification_only" in derivation
+        # ⚠ Mirrors sql/333's CHECK (char_length BETWEEN 1 AND 1000) in the
+        # tier that runs on every push; the DB caught the first draft over it.
+        assert 1 <= len(derivation) <= 1000, len(derivation)
 
 
 def test_the_digests_are_stable_across_two_builds() -> None:
