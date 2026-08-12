@@ -9,9 +9,11 @@ import pytest
 from app.services.strategy_regime_context import (
     REGIME_VERSION,
     CompletedSessionPanel,
+    ReferenceSessionCoverage,
     RegimeMember,
     decompose_return,
     measure_completed_session_regime,
+    select_completed_session_dates,
 )
 
 
@@ -233,6 +235,52 @@ def test_unsorted_or_duplicate_sessions_are_rejected() -> None:
             _panel(_member(1, 10, _rising(100)), dates=tuple(sessions)),
             minimum_coverage=Decimal("1"),
             minimum_sector_members=2,
+        )
+
+
+def test_session_anchor_ignores_a_partial_latest_reference_date() -> None:
+    observations = tuple(
+        ReferenceSessionCoverage(session_date, 90 if index < 21 else 12)
+        for index, session_date in enumerate(_dates(22))
+    )
+    selected = select_completed_session_dates(
+        observations,
+        expected_count=100,
+        minimum_anchor_coverage=Decimal("0.8"),
+        required_sessions=21,
+    )
+    assert selected == _dates(21)
+
+
+def test_session_anchor_keeps_a_sparse_middle_reference_date() -> None:
+    observations = tuple(
+        ReferenceSessionCoverage(session_date, 10 if index == 8 else 90)
+        for index, session_date in enumerate(_dates(21))
+    )
+    selected = select_completed_session_dates(
+        observations,
+        expected_count=100,
+        minimum_anchor_coverage=Decimal("0.8"),
+        required_sessions=21,
+    )
+    assert selected == _dates(21)
+    assert selected[8] == observations[8].session_date
+
+
+def test_session_anchor_refuses_without_coverage_or_history() -> None:
+    with pytest.raises(ValueError, match="no reference session"):
+        select_completed_session_dates(
+            tuple(ReferenceSessionCoverage(day, 7) for day in _dates(21)),
+            expected_count=10,
+            minimum_anchor_coverage=Decimal("0.8"),
+            required_sessions=21,
+        )
+    with pytest.raises(ValueError, match="fewer than 22"):
+        select_completed_session_dates(
+            tuple(ReferenceSessionCoverage(day, 10) for day in _dates(21)),
+            expected_count=10,
+            minimum_anchor_coverage=Decimal("0.8"),
+            required_sessions=22,
         )
 
 

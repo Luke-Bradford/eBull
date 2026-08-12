@@ -114,32 +114,53 @@ collapsed to **9 / 4,351 (0.21%)**. That approach is rejected. eToro daily bars
 also do not use New York civil dates consistently (a Monday session may carry a
 Sunday provider date), so filtering weekdays would introduce a second error.
 
-The corrected check pins the provider SPY series (`instrument_id=3000`, asserted
-as the ETF identity) as the completed-session calendar:
+The first corrected check pinned the provider SPY series (`instrument_id=3000`,
+asserted as the ETF identity) as the session calendar but incorrectly excluded
+every bar carrying the quarantine's five-day `provisional` flag. That flag does
+not mean “unusable close”: it means a magnitude-triggered transition inside the
+window cannot yet use partial turnover to decide T3. Ordinary recent returns are
+valid; a stored deferred/quarantined transition still makes its link unusable.
+
+Removing that over-rejection exposed the opposite trap. A later failed candle
+run had committed only **551 / 4,351** 2026-08-11 cohort rows, while SPY already
+carried that label. Maximum reference date was therefore not a completed broad
+session. The frozen calendar rule is now:
+
+1. take ordered quarantine-usable SPY provider dates;
+2. anchor on the latest date whose quarantine-usable cohort close coverage
+   reaches the candidate's predeclared floor;
+3. retain the preceding 20 SPY dates exactly, even if a middle date has poor
+   coverage, so a missing session cannot be skipped to improve an outcome.
+
+The 80% value below remains an illustrative feasibility floor rather than a
+promoted candidate parameter:
 
 | measure | observed result |
 |---|---:|
 | point-in-time members with provider industry | 4,351 |
 | completed source sessions | 21 |
-| latest quarantine-complete provider session | 2026-08-05 |
+| latest broadly complete provider session | 2026-08-10 |
+| partial later session excluded at anchor | 2026-08-11: 551 / 4,351 (12.66%) |
 | 1-session endpoint + joinable-unit coverage | 80.602% |
-| 3-session endpoint + joinable-unit coverage | 80.602% |
-| 5-session endpoint + joinable-unit coverage | 80.487% |
-| 10-session endpoint + joinable-unit coverage | 80.487% |
-| 20-session endpoint + joinable-unit coverage | 80.464% |
-| balanced 21-close/trend/unit coverage | 80.257% |
+| 3-session endpoint + joinable-unit coverage | 80.533% |
+| 5-session endpoint + joinable-unit coverage | 80.418% |
+| 10-session endpoint + joinable-unit coverage | 80.257% |
+| 20-session endpoint + joinable-unit coverage | 80.188% |
+| balanced 21-close/trend/unit coverage | 80.188% |
 | provider industries / with at least 20 members | 9 / 8 |
-| representative database load / pure calculation | 1.428s / 0.116s |
+| representative database load / pure calculation | 3.155s / 0.114s |
 
-The 2026-08-05 frontier is intentional: newer raw bars exist, but the current
-fail-closed quarantine coverage does not yet admit them. A runtime candidate
-must report this staleness and refuse rather than silently reading unchecked
-2026-08-11 bars.
+The quarantine refresh itself was healthy: its 2026-08-11 run succeeded over
+12,192 instruments. The daily-candle audit showed a subsequent orphaned run at
+11:51 UTC; its owning worker died without terminal status after incrementally
+writing the 551 rows. The session anchor prevents those rows from masquerading
+as a completed denominator. A candidate must still report the 2026-08-10
+frontier and refuse if its own staleness contract requires a later session.
 
-The unit-regime mask removed only a small fraction of members but moved the
-descriptive common-variance share from 3.45% to 5.60%. Neither value is a trade
-signal; the sensitivity demonstrates why corporate-action joins are mandatory
-before regime attribution rather than an optional cleanup after it.
+The unit-regime and corrected-session rules materially change the descriptive
+common-variance value. None of those values is a trade signal; the sensitivity
+demonstrates why corporate-action joins and completed-session identity are
+mandatory before regime attribution rather than optional cleanup afterward.
 
 ## Storage and product impact
 
