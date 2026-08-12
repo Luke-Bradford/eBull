@@ -4,6 +4,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from scripts import schedule13d_orchestrator as subject
 from scripts.evaluate_2582_schedule13d_outcomes import OutcomeGate, SourceEvent
 
@@ -36,12 +38,16 @@ class _Result:
 class _Connection:
     def __init__(self) -> None:
         self.statements: list[tuple[str, object | None]] = []
+        self.rolled_back = False
 
     def execute(self, query: str, params: object | None = None) -> _Result:
         self.statements.append((query, params))
         if "FROM instruments i" in query:
             return _Result([(42, "Technology"), (43, "provider_industry_id:9")])
         return _Result([])
+
+    def rollback(self) -> None:
+        self.rolled_back = True
 
 
 def test_current_sector_labels_are_current_attribution_and_keep_provider_fallback() -> None:
@@ -91,8 +97,19 @@ def test_orchestrator_is_read_only_and_loads_every_arm_before_one_report(monkeyp
     result = subject.evaluate_historical_falsification(conn, gate)  # type: ignore[arg-type]
 
     assert result == "aggregate"
+    assert conn.rolled_back
     assert conn.statements[0] == ("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", None)
     assert calls == ["workspace", "sources", "13g_sources", "primary", "unfiltered", "random", "13g_prices"]
     assert captured["sector_by_instrument"] == {42: "Technology"}
     assert captured["primary_windows"] == ("primary",)
     assert captured["unfiltered_windows"] == ("unfiltered",)
+
+
+def test_orchestrator_rolls_back_its_snapshot_when_evaluation_raises(monkeypatch: Any) -> None:
+    conn = _Connection()
+    monkeypatch.setattr(subject, "prepare_price_window_workspace", lambda _conn: None)
+    monkeypatch.setattr(subject, "load_source_events", lambda _conn: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        subject.evaluate_historical_falsification(conn, OutcomeGate("hash", "register", "trial"))  # type: ignore[arg-type]
+    assert conn.rolled_back

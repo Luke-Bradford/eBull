@@ -63,22 +63,25 @@ def evaluate_historical_falsification(
 
     prepare_price_window_workspace(conn)
     conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-    source_events = load_source_events(conn)
-    initial_13g_sources = load_initial_13g_source_events(conn)
-    primary_windows = load_price_windows(conn, gate, source_events, population="primary")
-    unfiltered_windows = load_price_windows(conn, gate, source_events, population="unfiltered")
-    random_windows = load_random_time_price_windows(conn, gate, source_events)
-    initial_13g_windows = load_initial_13g_price_windows(conn, gate, initial_13g_sources)
-    sectors = load_current_sector_labels(conn, source_events)
-    return build_historical_falsification_report(
-        source_events=source_events,
-        initial_13g_sources=initial_13g_sources,
-        primary_windows=primary_windows,
-        unfiltered_windows=unfiltered_windows,
-        random_windows=random_windows,
-        initial_13g_windows=initial_13g_windows,
-        sector_by_instrument=sectors,
-    )
+    try:
+        source_events = load_source_events(conn)
+        initial_13g_sources = load_initial_13g_source_events(conn)
+        primary_windows = load_price_windows(conn, gate, source_events, population="primary")
+        unfiltered_windows = load_price_windows(conn, gate, source_events, population="unfiltered")
+        random_windows = load_random_time_price_windows(conn, gate, source_events)
+        initial_13g_windows = load_initial_13g_price_windows(conn, gate, initial_13g_sources)
+        sectors = load_current_sector_labels(conn, source_events)
+        return build_historical_falsification_report(
+            source_events=source_events,
+            initial_13g_sources=initial_13g_sources,
+            primary_windows=primary_windows,
+            unfiltered_windows=unfiltered_windows,
+            random_windows=random_windows,
+            initial_13g_windows=initial_13g_windows,
+            sector_by_instrument=sectors,
+        )
+    finally:
+        conn.rollback()
 
 
 __all__ = [
