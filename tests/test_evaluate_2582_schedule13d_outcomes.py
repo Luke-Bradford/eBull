@@ -8,12 +8,16 @@ from typing import Any
 import psycopg
 import pytest
 
+from app.services.trial_register import TRIAL_REGISTER, TrialExactness
 from scripts.evaluate_2582_schedule13d_outcomes import (
     _ALL_13D_PUBLIC_DATES_SQL,
     _CREATE_TEMP_SESSIONS,
     _INITIAL_13G_SOURCE_SQL,
     _SOURCE_EVENTS_SQL,
     ACKNOWLEDGEMENT,
+    STRATEGY_ID,
+    STRATEGY_VERSION,
+    TRIAL_ID,
     Initial13GSourceEvent,
     OutcomeGateRefusal,
     PriceWindow,
@@ -26,18 +30,19 @@ from scripts.evaluate_2582_schedule13d_outcomes import (
     nth_regular_session,
     prepare_price_window_workspace,
     regular_sessions_ending_before,
-    require_outcome_gate,
+    require_outcome_gate_preconditions,
     required_event_sessions,
     required_sessions_for_entry,
     total_return_pct,
     treatment_event_outcome,
     window_match_features,
 )
+from scripts.verify_2582_schedule13d_preregistration import EXPECTED_SHA256, load_and_verify
 
 
 def test_gate_refuses_without_explicit_acknowledgement() -> None:
     with pytest.raises(OutcomeGateRefusal, match="remain closed"):
-        require_outcome_gate(
+        require_outcome_gate_preconditions(
             acknowledgement=None,
             contract_path=Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json"),
         )
@@ -126,12 +131,42 @@ def test_price_workspace_refuses_to_commit_a_caller_owned_transaction() -> None:
         prepare_price_window_workspace(conn)  # type: ignore[arg-type]
 
 
-def test_gate_refuses_even_with_ack_until_trial_is_declared() -> None:
-    with pytest.raises(OutcomeGateRefusal, match="absent from trial-register"):
-        require_outcome_gate(
-            acknowledgement=ACKNOWLEDGEMENT,
-            contract_path=Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json"),
-        )
+def test_trial_is_now_declared_so_the_register_no_longer_refuses() -> None:
+    """⚠ THIS TEST'S PREMISE WAS DELIBERATELY DISSOLVED BY #2614.
+
+    It used to assert ``absent from trial-register``, and that assertion was the
+    only thing stopping C-4 from running. #2614's scope item 3 requires charging
+    C-4's arms to the register, which necessarily removes that refusal — so the
+    register entry and the declaration gate had to land in the SAME change, or
+    adding the entry alone would have opened the ungated path this ticket exists
+    to close.
+
+    What replaces it is the pair below: the preconditions now pass, and the door
+    they used to hold shut is held by the declaration check instead.
+    """
+
+    digest = require_outcome_gate_preconditions(
+        acknowledgement=ACKNOWLEDGEMENT,
+        contract_path=Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json"),
+    )
+    assert digest == EXPECTED_SHA256
+    assert TRIAL_ID in TRIAL_REGISTER.trial_ids
+
+
+def test_c4_register_entry_charges_seven_exact_arms() -> None:
+    entry = next(trial for trial in TRIAL_REGISTER.trials if trial.trial_id == TRIAL_ID)
+    # Three arms that load their own price windows (primary, unfiltered,
+    # random-time) plus the four separately-reported 13G rule cells.
+    assert entry.searches == 7
+    assert entry.exactness is TrialExactness.EXACT
+
+
+def test_strategy_identity_is_the_frozen_contract_s_own_fields() -> None:
+    """A renamed candidate must not silently declare under the old identity."""
+
+    contract, _digest = load_and_verify(Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json"))
+    assert contract["candidate_id"] == STRATEGY_ID
+    assert contract["contract_version"] == STRATEGY_VERSION
 
 
 def test_next_session_is_strict_and_observes_weekend_and_holiday() -> None:

@@ -17,7 +17,12 @@ from scripts.evaluate_2582_schedule13d_outcomes import (
 )
 from scripts.schedule13d_report import HistoricalFalsificationReport
 
-ARTIFACT_SCHEMA_VERSION: Final = "schedule13d-historical-falsification-artifact-v1"
+#: ⚠ v2 (#2614) — the envelope now carries the #2599 declaration and the access
+#: row that authorised the look. Bumped rather than added silently because a
+#: consumer reading a v1 artifact cannot tell "no declaration existed" from "this
+#: schema does not record one". No migration is owed: C-4 has never run, so no v1
+#: artifact exists.
+ARTIFACT_SCHEMA_VERSION: Final = "schedule13d-historical-falsification-artifact-v2"
 IMPLEMENTATION_FILES: Final = (
     "scripts/evaluate_2582_schedule13d_outcomes.py",
     "scripts/schedule13d_challengers.py",
@@ -54,6 +59,11 @@ class HistoricalFalsificationArtifact:
     trial_id: str
     trial_register_version: str
     contract_sha256: str
+    #: #2614 — which frozen declaration authorised this study, and which access
+    #: row recorded the look. An artifact that cannot name its own authorisation
+    #: leaves an auditor to take the study's word for it.
+    declaration_id: int
+    access_id: int
     implementation_sha256: str
     source_first_date: str
     source_last_complete_filing_date: str
@@ -86,6 +96,8 @@ def build_artifact(
         trial_id=gate.trial_id,
         trial_register_version=gate.trial_register_version,
         contract_sha256=gate.contract_sha256,
+        declaration_id=gate.declaration_id,
+        access_id=gate.access_id,
         implementation_sha256=implementation_sha256(root),
         source_first_date=FIRST_SOURCE_DATE.isoformat(),
         source_last_complete_filing_date=LAST_COMPLETE_FILING_DATE.isoformat(),

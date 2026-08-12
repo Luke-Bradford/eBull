@@ -61,7 +61,7 @@ def test_current_sector_labels_are_current_attribution_and_keep_provider_fallbac
 
 def test_orchestrator_is_read_only_and_loads_every_arm_before_one_report(monkeypatch: Any) -> None:
     conn = _Connection()
-    gate = OutcomeGate("hash", "register", "trial")
+    gate = OutcomeGate("hash", "register", "trial", 11, 22)
     source = (_source(),)
     calls: list[str] = []
 
@@ -111,5 +111,5 @@ def test_orchestrator_rolls_back_its_snapshot_when_evaluation_raises(monkeypatch
     monkeypatch.setattr(subject, "load_source_events", lambda _conn: (_ for _ in ()).throw(RuntimeError("boom")))
 
     with pytest.raises(RuntimeError, match="boom"):
-        subject.evaluate_historical_falsification(conn, OutcomeGate("hash", "register", "trial"))  # type: ignore[arg-type]
+        subject.evaluate_historical_falsification(conn, OutcomeGate("hash", "register", "trial", 11, 22))  # type: ignore[arg-type]
     assert conn.rolled_back

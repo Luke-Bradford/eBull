@@ -67,8 +67,22 @@ class TestTheShippedDeclaration:
         the total is caught by neither and is why every family below is pinned
         individually as well.
         """
-        assert TRIAL_REGISTER.declared_count == 259
+        # ⚠ 259 (#2600's Gate D-0.1 reconstruction) + 7 (#2614's C-4 entry, the
+        # first declared BEFORE its run). Moved deliberately, not loosened: the
+        # pin exists to catch a DROPPED entry, and an addition that raises M is
+        # the conservative direction — a larger M lowers the DSR.
+        assert TRIAL_REGISTER.declared_count == 266
         assert TRIAL_REGISTER.declared_count == sum(trial.searches for trial in TRIAL_REGISTER.trials)
+
+    def test_the_c4_schedule13d_arms_are_counted_before_the_run(self) -> None:
+        """#2614 — three arms that load their own bars, plus four 13G rule cells.
+
+        ⚠ EXACT, not FLOOR: `build_historical_falsification_report` computes all
+        seven unconditionally, so the code grid at this commit IS the search list.
+        """
+        family = next(trial for trial in TRIAL_REGISTER.trials if trial.trial_id == "c4-schedule13d-public-catalyst-v1")
+        assert family.searches == 7
+        assert family.exactness is TrialExactness.EXACT
 
     def test_the_rejected_extreme_shock_sizing_arms_are_counted(self) -> None:
         """⚠ 8 charged by the result page + 7 calendar-year cuts it never charged.

@@ -258,6 +258,28 @@ _SELECT_DECLARATION = """
     WHERE strategy_id = %(strategy_id)s AND strategy_version = %(strategy_version)s
 """
 
+#: #2614 — the provenance re-check for an evaluator that stores no result row.
+#: Joins the declaration to ONE named access row and lets the database compare
+#: the two server-side timestamps, so no client clock enters the ordering.
+_SELECT_ACCESS_PROVENANCE = """
+    SELECT a.access_kind,
+           a.strategy_id,
+           a.strategy_version,
+           d.frozen_at < a.accessed_at AS declared_before_access,
+           NOT EXISTS (
+               SELECT 1
+               FROM strategy_holdout_accesses later
+               WHERE later.strategy_id = a.strategy_id
+                 AND later.strategy_version = a.strategy_version
+                 AND later.access_kind = 'read'
+                 AND (later.accessed_at, later.access_id) > (a.accessed_at, a.access_id)
+           ) AS is_latest_read
+    FROM strategy_holdout_accesses a
+    JOIN strategy_preregistration_declarations d
+      ON d.strategy_id = a.strategy_id AND d.strategy_version = a.strategy_version
+    WHERE a.access_id = %(access_id)s AND d.declaration_id = %(declaration_id)s
+"""
+
 _RESULT_COLUMNS = """
     strategy_id, strategy_version, result_version, result_scope, namespace,
     ambiguity_arm, quarantine_arm, window_start, window_end, purpose, universe_basis, corpus_version,
@@ -917,12 +939,128 @@ def require_outcome_access(conn: psycopg.Connection[tuple], access: HoldoutAcces
     ⚠ Stated limit, not papered over: a direct ``SELECT`` against
     ``strategy_results_store`` remains physically possible — ``sql/264``'s
     header measured that RLS does not bind this app's superuser connection.
-    This closes every path that goes through the ledger, which is every path we
-    have written, and it is not the same claim as "no path exists".
+    This closes every path that goes through the ledger.
+
+    ⚠⚠ CORRECTED BY #2614. This docstring used to add *"which is every path we
+    have written"*, and that clause was FALSE when it was written. The ledger
+    covers every path that WRITES A RESULT ROW. A sealed study that computes its
+    own statistics from raw price windows and emits a signed artifact stores
+    nothing in ``strategy_results_store``, so there is no ledger call to
+    intercept — and ``scripts/evaluate_2582_schedule13d_outcomes.py`` was exactly
+    that shape, complete and runnable, on the day #2599 merged. Three such
+    scripts existed. C-4 now calls this function explicitly and re-checks the
+    result through ``verify_outcome_access_provenance``; the general rule is that
+    a second path needs its own gate, and
+    ``tests/test_sealed_outcome_scripts_are_gated.py`` is what notices a new one.
     """
     if load_preregistration(conn, access.strategy_id, access.strategy_version) is None:
         raise PreregDeclarationRefused(access.strategy_id, access.strategy_version, ("preregistration_not_frozen",))
     return record_holdout_access(conn, access)
+
+
+def verify_outcome_access_provenance(
+    conn: psycopg.Connection[tuple],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    declaration_id: int,
+    access_id: int,
+) -> FrozenPreregistration:
+    """#2614's read-only re-check, for an evaluator that writes no result row.
+
+    ⚠⚠ IT VERIFIES TWO ROWS, AND CHECKING ONLY THE DECLARATION WOULD BE
+    BYPASSABLE. A caller holding a real ``declaration_id`` can construct whatever
+    value object the evaluator's gate happens to be, so a check that reads only
+    the declaration lets every price window open with no access row written at
+    all. Re-loading the access row BY ID is what turns a returned ``access_id``
+    from decoration into enforcement — and because a rolled-back INSERT leaves no
+    visible row, the same lookup is what proves the access COMMITTED.
+
+    ⚠ ``frozen_at < accessed_at`` is ASSERTED, not assumed. Statement ordering
+    gives it for free in the normal case, which is precisely why it is worth
+    stating: "the declaration predates the look" is the entire property #2599
+    exists to establish, and an invariant nobody asserts is one nobody notices
+    breaking. Both timestamps are server-side ``DEFAULT now()``.
+
+    ⚠ READ-ONLY BY CONSTRUCTION — it runs inside the evaluator's
+    ``REPEATABLE READ READ ONLY`` transaction, where an INSERT would fail. The
+    write half is ``require_outcome_access``, which the caller must have run and
+    committed first.
+
+    ⚠⚠ STATED LIMITS, because overstating one is what #2614 exists to fix — and
+    the first draft of this docstring did exactly that until Codex checkpoint 3
+    called it. Three things this does NOT establish:
+
+    1. **It is not single-use.** The named access must be the NEWEST ``read``
+       for the trial, which rules out reuse of a STALE id. A caller holding the
+       newest id can reuse it until some other read is recorded. Real single-use
+       needs consumable state, and this is an append-only audit log.
+    2. **It is snapshot-relative.** Callers run inside a ``REPEATABLE READ``
+       transaction, so a read committed after that snapshot is invisible and two
+       concurrent gates can both pass.
+    3. **It does not bind a caller who bypasses these helpers.** One who
+       hand-constructs the value object AND records a fresh access first is
+       indistinguishable from a legitimate run; one who ``SELECT``s the price
+       tables directly is not observed at all — the same acknowledged class as
+       ``sql/264``'s RLS finding.
+
+    What IS enforced: every path that loads outcomes THROUGH THIS EVALUATOR
+    presents a coherent, digest-intact declaration frozen strictly before a
+    committed, non-superseded access bound to the same trial. That is a narrower
+    claim than "no path exists", and narrower is the point.
+
+    Raises ``PreregDeclarationRefused`` carrying every code that fired.
+    """
+    frozen = _refuse_incoherent_declaration(conn, strategy_id, strategy_version)
+    refusals: list[str] = []
+    if frozen is None:
+        refusals.append("preregistration_not_frozen")
+    elif frozen.declaration_id != declaration_id:
+        refusals.append("declaration_identity_mismatch")
+    row = conn.execute(
+        _SELECT_ACCESS_PROVENANCE,
+        {"access_id": access_id, "declaration_id": declaration_id},
+    ).fetchone()
+    if row is None:
+        # ⚠ Covers three distinct failures with one code on purpose: no access
+        # row, an access row for a DIFFERENT trial, and an access whose
+        # declaration is not the one named. All three mean the same thing to an
+        # operator — this look is not the one that was authorised.
+        refusals.append("outcome_access_not_recorded")
+    else:
+        access_kind, access_strategy_id, access_strategy_version, frozen_before_access, is_latest_read = row
+        if (str(access_strategy_id), str(access_strategy_version)) != (strategy_id, strategy_version):
+            refusals.append("outcome_access_trial_mismatch")
+        if str(access_kind) != "read":
+            refusals.append("outcome_access_kind_mismatch")
+        if not frozen_before_access:
+            refusals.append("declaration_not_frozen_before_access")
+        # ⚠ #2614 Codex checkpoint 2 — refuses a SUPERSEDED access id. A real run
+        # always names the newest `read`, because it has just written it.
+        #
+        # ⚠⚠ WHAT THIS DOES NOT DO, stated because overstating an enforcement is
+        # the defect this whole ticket exists to fix (Codex checkpoint 3 caught
+        # the first draft of this comment claiming it stopped "look after look").
+        # It does NOT make an access single-use: a caller holding the NEWEST
+        # `access_id` can reuse it until some other read is recorded. What it
+        # rules out is reuse of a STALE id — the careless case, where an old
+        # gate value is carried forward past later activity. Genuine single-use
+        # would need consumable state, and `strategy_holdout_accesses` is an
+        # append-only audit log by design.
+        #
+        # ⚠ And it is snapshot-relative: every caller is inside the evaluator's
+        # REPEATABLE READ transaction, so a read committed after that snapshot is
+        # invisible here. Two concurrent gates can therefore both pass. Within
+        # one run the four population calls share the snapshot, so they cannot
+        # disagree with each other.
+        #
+        # Ordered on `(accessed_at, access_id)` so two accesses sharing a
+        # transaction timestamp still order deterministically.
+        if not is_latest_read:
+            refusals.append("outcome_access_superseded_by_a_later_look")
+    if refusals:
+        raise PreregDeclarationRefused(strategy_id, strategy_version, tuple(refusals))
+    return cast(FrozenPreregistration, frozen)
 
 
 def store_in_sample_result(conn: psycopg.Connection[tuple], result: StrategyResult) -> int:
@@ -1358,4 +1496,5 @@ __all__ = [
     "store_in_sample_arm_pair",
     "store_in_sample_result",
     "store_walk_forward_folds",
+    "verify_outcome_access_provenance",
 ]

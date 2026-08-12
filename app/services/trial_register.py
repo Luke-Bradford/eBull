@@ -118,7 +118,7 @@ from typing import Final
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-12-r4"
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-12-r5"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -525,6 +525,47 @@ TRIAL_REGISTER: Final = TrialRegister(
             "pass. Issue #2430; scripts/verify_2430_sizing_rule_ab.py --window primary-2022-plus",
             exactness=TrialExactness.FLOOR,
             searches=9,
+        ),
+        # ⚠⚠ THE FIRST ENTRY DECLARED **BEFORE** ITS RUN, AND THE ONLY WAY THAT
+        # ORDER CAN HOLD. `evaluate_2582_schedule13d_outcomes.require_outcome_gate`
+        # refuses to open C-4's outcomes while its trial id is absent from this
+        # register, so the entry has to precede the search — which is what
+        # `TRIAL_REGISTER_CUTOFF` means by "a search opened after it charges
+        # itself under #2599's declaration contract". Every entry above it was
+        # reconstructed after the fact.
+        #
+        # ⚠ NOT "each arm reads its own bars" — that was the first draft of this
+        # entry and it is false. `load_initial_13g_price_windows` loads the 13G
+        # challenger population ONCE and arms 4-7 partition it. The count is
+        # three searches that load new bars, plus four separately-reported cells
+        # of one loaded population, which the merged
+        # `short-horizon-search-session-2026-08-09` entry above already charges
+        # per cell ("12 confluence buckets, 13 individual conditions").
+        #
+        # ⚠ The fan-collapse rule ("one search, not four") does NOT rescue arms
+        # 1/3/4/5 into one despite their being jointly required: the contract
+        # itself Holm-adjusts across random_time, 13g_1b and 13g_1c, and a study
+        # that corrects for three tests internally cannot declare one here.
+        #
+        # ⚠ NOT counted, deliberately: the eight non-paired gates in
+        # `_decision_gates` and the three 6-month stability windows. All are
+        # computed from the single primary `OutcomeStatistics` — no new bars —
+        # and all are conjunctive, so no maximum is taken over them. Same rule
+        # that makes the autocorrelation grid 28 and not 56.
+        DeclaredTrial(
+            trial_id="c4-schedule13d-public-catalyst-v1",
+            description=(
+                "Sealed Schedule 13D public-catalyst falsification, 7 arms: the clean 13D primary population, "
+                "the unfiltered-eligible 13D robustness population, the matched random-time challenger, and the "
+                "four initial-13G rule cells (1b, 1c, both, unknown). Declared before the run, which the outcome "
+                "gate requires."
+            ),
+            evidence="docs/proposals/ta/2026-08-12-c4-declaration-gate-binding.md §'Trial register entry'; "
+            "scripts/schedule13d_report.py::build_historical_falsification_report enumerates all seven "
+            "unconditionally; contract docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json "
+            "sha256 8f4424bea0581ba501d9779b93ff9268c65c6f0c899f1a66962bcb260cce895f. Issues #2614, #2582",
+            exactness=TrialExactness.EXACT,
+            searches=7,
         ),
     ),
 )
