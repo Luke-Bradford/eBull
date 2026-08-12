@@ -238,9 +238,15 @@ class CohortCollector:
         first_axis_index: int,
     ) -> None:
         """Add one instrument's placement space. Called once per series."""
+        # ⚠ BUILT ONCE AND PASSED DOWN. Both halves of this method need the
+        # date -> bar-index map and the corpus pass calls this ~5,266 times per
+        # arm, so building it twice is a second full dict per series for nothing
+        # (review bot NITPICK, PR #2619).
+        bar_of = {when: index for index, when in enumerate(series.dates)}
         eligible_bar, panel, adjusted = _eligible_fill_bars(
             rows=rows,
             series=series,
+            bar_of=bar_of,
             axis_pos=axis_pos,
             window=self.window,
             raw_closes=raw_closes,
@@ -251,7 +257,6 @@ class CohortCollector:
             _count_unmatchable(costed, self.unmatchable)
             return
         ordinal_of = {bar: ordinal for ordinal, bar in enumerate(eligible_bar)}
-        bar_of = {when: index for index, when in enumerate(series.dates)}
         holds = _matchable_holds(costed, bar_of=bar_of, ordinal_of=ordinal_of, unmatchable=self.unmatchable)
         if not holds:
             return
@@ -279,6 +284,7 @@ def _eligible_fill_bars(
     *,
     rows: Sequence[LedgerRow],
     series: BarSeries,
+    bar_of: Mapping[date, int],
     axis_pos: Mapping[date, int],
     window: Window,
     raw_closes: Sequence[float],
@@ -291,8 +297,10 @@ def _eligible_fill_bars(
     whether a position could be OPENED on the following bar, and S-1/S-3 emit
     both legs on every bar — so counting exits would double the space and let a
     member open where the strategy was cold.
+
+    ⚠ ``bar_of`` IS SUPPLIED, not rebuilt. The caller already needs the same
+    ``date -> bar index`` map to place the realised holds.
     """
-    bar_of = {when: index for index, when in enumerate(series.dates)}
     fills: set[int] = set()
     for row in rows:
         if row.signal_kind != "entry" or row.not_evaluable_reason is not None:
