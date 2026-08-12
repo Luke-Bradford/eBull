@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 CONTRACT = Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json")
-EXPECTED_SHA256 = "5a65e2d1e113cc66301cef625a99f999034ad3b2423635dc4d1657c3813ae6b7"
+EXPECTED_SHA256 = "e0fc00c8bddb5813db038cae37839252b0a79556a51bab002120887827f3a791"
 
 
 def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
@@ -22,7 +22,12 @@ def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
     assert contract["position"]["take_profit"] is None
     assert contract["position"]["round_trip_adverse_cost_bps"] == 50
     assert contract["decision_clock"]["same_close_fill"] == "forbidden"
+    assert contract["eligibility"]["security_scope"].startswith("current_tradable_etoro_instrument_type_5")
+    assert contract["eligibility"]["current_is_tradable_required"] is True
+    assert contract["eligibility"]["historical_security_identity_limit"].startswith("current_snapshot_only")
     assert contract["context"]["context_may_gate_primary_result"] is False
+    assert contract["context"]["market_series"]["series_id"] == 7713
+    assert contract["context"]["market_series"]["allowed_use"].endswith("not_total_return_benchmark")
     assert contract["context"]["item4_policy"].startswith("not_used_in_v1")
     assert contract["challengers"]["matching"]["entry_price_bucket_usd_edges"] == [5, 10, 25, 50, 100]
     assert contract["challengers"]["multiplicity"].startswith("holm_adjust")
