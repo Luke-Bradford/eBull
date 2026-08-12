@@ -302,8 +302,26 @@ CREATE TEMP TABLE schedule13d_trial_sessions (
     series_id BIGINT NOT NULL,
     bar_date DATE NOT NULL,
     PRIMARY KEY (event_index, session_ordinal)
-) ON COMMIT DROP
+) ON COMMIT PRESERVE ROWS
 """
+
+
+def prepare_price_window_workspace(conn: psycopg.Connection[Any]) -> None:
+    """Create the connection-local workspace before the read-only outcome transaction.
+
+    PostgreSQL permits DML on an existing temporary table in a read-only
+    transaction but forbids CREATE/DROP/TRUNCATE.  Requiring an idle fresh
+    connection keeps the commit boundary explicit and lets all durable-table
+    outcome reads run under one read-only snapshot.
+    """
+
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        raise OutcomeGateRefusal("price workspace preparation requires an idle connection")
+    existing = conn.execute("SELECT to_regclass('pg_temp.schedule13d_trial_sessions')").fetchone()
+    if existing is None or existing[0] is None:
+        conn.execute(_CREATE_TEMP_SESSIONS)
+    conn.commit()
+
 
 _PRICE_WINDOWS_SQL: LiteralString = """
 WITH joined AS (
@@ -410,8 +428,10 @@ def _load_requested_price_windows(
     _verify_market_series(conn)
     if len(requests) > 32_767:
         raise OutcomeGateRefusal("price-window request exceeds frozen SMALLINT event bound")
-    conn.execute("DROP TABLE IF EXISTS schedule13d_trial_sessions")
-    conn.execute(_CREATE_TEMP_SESSIONS)
+    prepared = conn.execute("SELECT to_regclass('pg_temp.schedule13d_trial_sessions')").fetchone()
+    if prepared is None or prepared[0] is None:
+        raise OutcomeGateRefusal("connection-local price workspace was not prepared")
+    conn.execute("DELETE FROM schedule13d_trial_sessions")
     with conn.cursor() as cursor:
         with cursor.copy(
             "COPY schedule13d_trial_sessions (event_index, session_ordinal, series_id, bar_date) FROM STDIN"
