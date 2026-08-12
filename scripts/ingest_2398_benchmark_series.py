@@ -39,13 +39,23 @@ from typing import Any
 import psycopg
 
 from app.config import settings
+from app.services.research_corpus_ingest import INTRADER_ARCHIVE
 
 logger = logging.getLogger("ingest_2398")
 
-VENDOR = "icyDenev/Intrader"
-UPSTREAM_SOURCE = "yahoo_derivative"
-LICENCE = "other/unspecified"
-ADJUSTMENT_BASIS = "split_adjusted"
+#: ⚠ Corrected in #2597: this vendor's OHLC are **unadjusted**, and the stamp
+#: here read ``split_adjusted`` from the day it shipped. Measured on the same
+#: mirror this script reads — AAPL 2020-08-27 close is 500.04 (the traded level
+#: four days before a 4:1 split) and its 1980-12-12 IPO bar is 28.75, against
+#: Yahoo's split-adjusted 0.1283. The dividend AND split adjustment live in the
+#: ninth column, stored as ``adj_close``, which is what the docstring above
+#: already said and what #2400 tells consumers to read for returns. The
+#: provenance now lives in one place, ``research_corpus_ingest.INTRADER_ARCHIVE``,
+#: so a bulk load of this vendor and this script cannot disagree about it.
+VENDOR = INTRADER_ARCHIVE.vendor
+UPSTREAM_SOURCE = INTRADER_ARCHIVE.upstream_source
+LICENCE = INTRADER_ARCHIVE.licence
+ADJUSTMENT_BASIS = INTRADER_ARCHIVE.adjustment_basis
 
 _MIRROR = Path("var/research_corpus/mirrors/icyDenev_Intrader/Data/Day")
 
@@ -149,14 +159,23 @@ def load(conn: psycopg.Connection[Any]) -> int:
 
 
 def verify(conn: psycopg.Connection[Any]) -> int:
-    """Acceptance: loaded, dividend-adjusted, and NOT tradable."""
+    """Acceptance: loaded, dividend-adjusted, and NOT tradable.
+
+    ⚠ Scoped to ``BENCHMARKS``, not to the whole vendor. #2597 bulk-loads the
+    same mirror under the same vendor, so a vendor-wide check would (a) count
+    22,879 series against 16 and (b) fail the ``factor <= 1`` assert on every
+    reverse-split name, where Yahoo's back-adjusted close is legitimately ABOVE
+    the raw close. Neither says anything about the comparators this verifies.
+    """
     failures = 0
     rows = conn.execute(
         """
         SELECT s.vendor_symbol, s.bar_count, s.first_bar, s.last_bar, s.instrument_id, s.resolution_method
-        FROM research_price_series s WHERE s.vendor = %s ORDER BY s.vendor_symbol
+        FROM research_price_series s
+        WHERE s.vendor = %s AND s.vendor_symbol = ANY(%s)
+        ORDER BY s.vendor_symbol
         """,
-        (VENDOR,),
+        (VENDOR, list(BENCHMARKS)),
     ).fetchall()
     print(f"{'symbol':<8}{'bars':>8}  {'first':<12}{'last':<12}{'tradable?':>10}")
     for sym, bars, first, last, iid, rm in rows:
@@ -175,13 +194,13 @@ def verify(conn: psycopg.Connection[Any]) -> int:
           SELECT s.vendor_symbol, d.adj_close/NULLIF(d.close,0) AS factor,
                  row_number() OVER (PARTITION BY d.series_id ORDER BY d.bar_date DESC) AS rn
           FROM research_price_daily d JOIN research_price_series s USING (series_id)
-          WHERE s.vendor = %s AND d.close > 0
+          WHERE s.vendor = %s AND s.vendor_symbol = ANY(%s) AND d.close > 0
         )
         SELECT count(*) FILTER (WHERE rn = 1 AND abs(factor - 1) > 1e-6),
                count(*) FILTER (WHERE factor > 1.000001)
         FROM f
         """,
-        (VENDOR,),
+        (VENDOR, list(BENCHMARKS)),
     ).fetchone()
     if bad is None:
         raise RuntimeError("adjustment check returned no row")
