@@ -70,9 +70,12 @@ This removes the quota objection to cheap broad screening and supplies a tested
 prospective current-session breadth primitive for liquid declared cohorts. The
 subsequent point-in-time-sector increment records the current eToro
 stocks-industry assignment prospectively and refuses unknown assignments. It
-still does not complete #2523: causal 1/3/5/10-session market and sector
-returns, percent-above-trend, residual dispersion/common-factor state and exact
-event state still require their declared formulas and fixture reconciliation.
+is followed by a completed-session increment that freezes and fixture-tests
+causal 1/3/5/10/20-session market/sector returns, percent-above-prior-trend,
+cross-sectional dispersion and a precisely labelled common-variance share. It
+also exposes a provider-session-calendar trap in the live corpus. #2523 is
+still incomplete: a candidate-owned production loader, compact persistence,
+exact event state and intraday coverage remain outstanding.
 
 It also does not make S1–S4 viable. The corrected after-cost evidence remains
 negative/weak, so the strategy catalogue must stay empty until a preregistered
