@@ -38,6 +38,7 @@ CI gate: `scripts/check_etl_source_docs.sh` enforces.
 | company_tickers_exchange | [company_tickers_exchange.md](company_tickers_exchange.md) | SEC bulk reference | ticker ↔ exchange |
 | sec_13f_securities_list | [sec_13f_securities_list.md](sec_13f_securities_list.md) | SEC bulk reference | 13F Official List |
 | etoro_candles | [etoro_candles.md](etoro_candles.md) | broker REST | market data |
+| cboe_vix | [cboe_vix.md](cboe_vix.md) | Cboe public reference | volatility-regime context |
 
 ---
 
@@ -86,6 +87,7 @@ of truth. Vocabulary:
 | company_tickers_exchange | `ResilientClient` backoff | `RuntimeError` on empty body | job-level; bundled call logs-but-doesn't-raise |
 | sec_13f_securities_list | HTTP errors propagate to caller | per-row drop (CUSIP regex miss) | job-level; defensive per-row parse |
 | etoro_candles | broker retry (429 → back-off; 5xx → retry budget) | — | 401 → token refresh; per-instrument isolated |
+| cboe_vix | HTTP failure raises; scheduler records failure and retries next due/catch-up | exact-schema or invalid-OHLC rejection; transaction rolls back | 304 → benign no-op; conditional `If-Modified-Since` |
 
 ---
 

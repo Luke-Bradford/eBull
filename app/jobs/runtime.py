@@ -75,6 +75,7 @@ from app.services.processes.param_metadata import (
 from app.services.sync_orchestrator.types import OrchestratorFenceHeld
 from app.workers.scheduler import (
     JOB_ATTRIBUTION_SUMMARY,
+    JOB_CBOE_VIX_REFRESH,
     JOB_CUSIP_EXTID_SWEEP,
     JOB_CUSIP_UNIVERSE_BACKFILL,
     JOB_DAILY_CANDLE_REFRESH,
@@ -145,6 +146,7 @@ from app.workers.scheduler import (
     CadenceKind,
     ScheduledJob,
     attribution_summary_job,
+    cboe_vix_refresh,
     compute_next_run,
     cusip_extid_sweep,
     cusip_universe_backfill,
@@ -356,6 +358,7 @@ _INVOKERS: Final[dict[str, JobInvoker]] = {
     # the frontier watermark rather than by a DAG edge. Own "strategy_scan" lane,
     # resolved from SCHEDULED_JOBS, so no MANUAL_TRIGGER_JOB_SOURCES entry.
     JOB_STRATEGY_SIGNAL_SCAN: _adapt_zero_arg(strategy_signal_scan),
+    JOB_CBOE_VIX_REFRESH: _adapt_zero_arg(cboe_vix_refresh),
     JOB_STRATEGY_HALT_FEED_REFRESH: _adapt_zero_arg(strategy_halt_feed_refresh),
     JOB_STRATEGY_INTRADAY_HARVEST: _adapt_zero_arg(strategy_intraday_harvest),
     JOB_STRATEGY_OUTCOME_RESOLUTION: _adapt_zero_arg(strategy_outcome_resolution),
