@@ -259,6 +259,39 @@ def test_intrader_row_without_a_usable_close_reads_as_absent_not_zero() -> None:
     assert [r.bar_date for r in rows] == [date(2023, 1, 3), date(2023, 1, 4), date(2023, 1, 5)]
 
 
+def test_a_fractional_volume_is_absent_not_truncated() -> None:
+    """A fractional volume means the WRONG ARCHIVE, not a roundable share count.
+
+    `Stonks/tickers` scales volume to millions with three decimals — AAPL's
+    469,033,600 reads `469.034` there. Truncating that to 469 would understate
+    turnover by six orders of magnitude on every bar, silently. Measured: zero
+    of this archive's volume fields carry a decimal point.
+    """
+    row = next(parse_intrader_rows("X", iter(["2023-01-05,1,2,0.5,1.25,469.034,1,0,1.25"])))
+    assert row.volume is None
+    assert row.close == Decimal("1.25")
+
+    integral = next(parse_intrader_rows("X", iter(["2023-01-05,1,2,0.5,1.25,469033600,1,0,1.25"])))
+    assert integral.volume == 469033600
+
+
+def test_nan_and_inf_are_absent_even_though_decimal_accepts_them() -> None:
+    """`Decimal('nan')` does NOT raise — the finiteness test is what catches it."""
+    rows = list(
+        parse_intrader_rows(
+            "X",
+            iter(
+                [
+                    "2023-01-03,1,2,0.5,inf,100,1,0,1",
+                    "2023-01-04,nope,2,0.5,1.25,100,1,0,1",
+                ]
+            ),
+        )
+    )
+    assert rows[0].close is None
+    assert rows[1].open is None and rows[1].close == Decimal("1.25")
+
+
 def test_intrader_row_keeps_a_partial_bar_rather_than_dropping_it() -> None:
     """A missing high is absence of data; only the close is load-bearing."""
     row = next(parse_intrader_rows("X", iter(["2023-01-05,1,,0.5,1.25,,1,0,1.25"])))

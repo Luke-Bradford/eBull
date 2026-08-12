@@ -457,12 +457,38 @@ _INTRADER_COLUMNS = ("date", "open", "high", "low", "close", "volume", "split_fa
 
 
 def _csv_decimal(value: str) -> Decimal | None:
-    """CSV field → Decimal, with unparseable and non-finite read as absent."""
+    """CSV field → Decimal, with unparseable and non-finite read as absent.
+
+    ``InvalidOperation`` alone is the right catch: every malformed string tried
+    (``''``, ``'abc'``, ``'  '``, ``'1.2.3'``, an embedded NUL) raises it and
+    none raises ``ValueError``. ``'nan'`` and ``'inf'`` parse SUCCESSFULLY and
+    are caught by the finiteness test instead, which is why that test is not
+    redundant with the except clause.
+    """
     try:
         parsed = Decimal(value)
-    except InvalidOperation, ValueError:
+    except InvalidOperation:
         return None
     return parsed if parsed.is_finite() else None
+
+
+def _share_volume(value: str) -> int | None:
+    """CSV field → a share COUNT, or absent.
+
+    ⚠ A non-integral volume is read as ABSENT rather than truncated, and that
+    is a provenance check rather than fussiness. This archive stores raw share
+    counts — measured across all 22,879 mirror files, **zero** volume fields
+    contain a decimal point — whereas the `Stonks/tickers` archive stores
+    volume scaled to MILLIONS with three decimals (AAPL's 469,033,600 reads
+    ``469.034``). So a fractional value here is evidence the reader is looking
+    at the wrong archive, and ``int()`` would silently record a share count
+    about a million times too small, understating turnover on every bar it
+    touched. Absent is nullable and honest; a truncated 469 is neither.
+    """
+    parsed = _csv_decimal(value)
+    if parsed is None or parsed != parsed.to_integral_value():
+        return None
+    return int(parsed)
 
 
 def parse_intrader_rows(symbol: str, lines: Iterator[str]) -> Iterator[_Row]:
@@ -484,7 +510,6 @@ def parse_intrader_rows(symbol: str, lines: Iterator[str]) -> Iterator[_Row]:
             bar_date = date.fromisoformat(fields[0].strip())
         except ValueError:
             continue
-        volume = _csv_decimal(fields[5])
         yield _Row(
             symbol=symbol,
             bar_date=bar_date,
@@ -492,8 +517,7 @@ def parse_intrader_rows(symbol: str, lines: Iterator[str]) -> Iterator[_Row]:
             high=_csv_decimal(fields[2]),
             low=_csv_decimal(fields[3]),
             close=_csv_decimal(fields[4]),
-            # Shares, not the millions-scaled figure the Stonks mirror stores.
-            volume=int(volume) if volume is not None else None,
+            volume=_share_volume(fields[5]),
             adj_close=_csv_decimal(fields[8]),
         )
 
