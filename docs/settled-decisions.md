@@ -858,12 +858,19 @@ paths and only the first is enforced today:
   `_Corpus.universe` → the candidate at `:2837`). The scope definition itself is
   `app/services/strategies/validated_universe.py`, pinned by
   `tests/test_validated_universe.py`.
-- **The promotion transition — NOT enforced (#2621).**
-  `strategy_control_plane.promote_strategy` never calls `check_promotable`, and
-  structurally cannot re-derive it: the refusal is returned in
-  `WrittenRow.refusals` and never persisted, and `strategy_results_store` stores
-  `evaluated_instrument_count` but not the ids. Not fail-open today only because
-  `run_backtest` is the sole writer. #2621 owns closing it.
+- **The promotion transition — enforced since #2621 (2026-08-12).**
+  `run_backtest` freezes each result's universe inputs in
+  `strategy_result_universe` (evaluated ids + the validated universe as the run
+  loaded it, immutable + hashed, written in the pair's own transaction), and
+  `promote_strategy` replays `evaluated ⊆ validated` from that record for every
+  pinned result at the evidence stages. A pinned result without a record —
+  every pre-#2621 row, and anything a non-`run_backtest` writer inserts —
+  refuses `evaluated_universe_unrecorded`. ⚠ The replay is against the universe
+  FROZEN AT RESULT TIME, deliberately: today's `is_tradable` would let a later
+  delisting retroactively invalidate a passing result, and the order-time rule
+  against the CURRENT universe is the execution guard's (phase 7), not
+  promotion's. The decision and its reasons live in
+  `app/services/strategy_result_universe.py`'s module docstring.
 
 **Why the restriction exists.** Every survivorship-free price source found *so
 far* is US-only, and Form 25 delisting evidence is US-only

@@ -20,6 +20,7 @@ import psycopg.rows
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
 from app.services.strategy_promotion_evidence import evidence_refusals
 from app.services.strategy_promotion_evidence_store import load_promotion_evidence
+from app.services.strategy_result_universe import load_result_universe, universe_promotion_refusals
 
 Stage = Literal[
     "research_candidate",
@@ -423,6 +424,14 @@ def promote_strategy(
     Evidence is pinned, never inferred from a current metric.  Result ids must
     belong to this exact strategy version.  Global auto/live switches are not
     read here and therefore cannot create or advance a promotion.
+
+    Evidence stages replay two persisted records per pinned result: the #2505
+    edge-evidence record and the #2621 frozen-universe record
+    (``evaluated ⊆ validated`` as the run loaded it — never today's
+    ``load_validated_universe``, whose ``is_tradable`` filter would let a later
+    delisting retroactively invalidate a passing result). A result stored
+    without either record refuses; this is the fail-closed replacement for
+    trusting that the sole writer ran ``check_promotable`` at write time.
     """
     for value, field in (
         (strategy_id, "strategy_id"),
@@ -457,7 +466,7 @@ def promote_strategy(
     if result_ids:
         rows = conn.execute(
             """
-            SELECT result_id, profit_factor
+            SELECT result_id, profit_factor, evaluated_instrument_count
             FROM strategy_results_store
             WHERE strategy_id = %s AND strategy_version = %s
               AND result_id = ANY(%s)
@@ -472,17 +481,34 @@ def promote_strategy(
             )
         if to_stage in _RESULT_EVIDENCE_STAGES:
             profit_factor_by_result = {int(row[0]): None if row[1] is None else Decimal(str(row[1])) for row in rows}
+            evaluated_count_by_result = {int(row[0]): int(row[2]) for row in rows}
             for result_id in result_ids:
+                # #2621 — the transition REPLAYS the universe check from the
+                # frozen record instead of trusting the write-time refusal that
+                # died with ``WrittenRow``. Frozen at result time, deliberately:
+                # today's date enters this gate only where a validity window was
+                # declared (the cost staleness clause inside
+                # ``evidence_refusals``); the universe declares none, and the
+                # order-time rule against the CURRENT universe is the execution
+                # guard's, not promotion's. Both refusal lists are gathered
+                # before raising so one missing input cannot mask the other.
+                refusals = list(
+                    universe_promotion_refusals(
+                        load_result_universe(conn, result_id),
+                        evaluated_instrument_count=evaluated_count_by_result[result_id],
+                    )
+                )
                 evidence = load_promotion_evidence(conn, result_id)
                 if evidence is None:
-                    raise StrategyControlError(
-                        f"result {result_id} fails promotion evidence: promotion_evidence_missing"
+                    refusals.append("promotion_evidence_missing")
+                else:
+                    refusals.extend(
+                        evidence_refusals(
+                            evidence,
+                            profit_factor=profit_factor_by_result[result_id],
+                            as_of=date.today(),
+                        )
                     )
-                refusals = evidence_refusals(
-                    evidence,
-                    profit_factor=profit_factor_by_result[result_id],
-                    as_of=date.today(),
-                )
                 if refusals:
                     raise StrategyControlError(f"result {result_id} fails promotion evidence: {', '.join(refusals)}")
 
