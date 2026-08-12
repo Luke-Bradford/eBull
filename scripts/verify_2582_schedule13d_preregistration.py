@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 CONTRACT = Path("docs/proposals/ta/contracts/schedule13d-public-catalyst-v1.json")
-EXPECTED_SHA256 = "dd076ab7601eec37b12fd5958c24012b23bb1490e2ccd4d48a62d72f0c87ccf8"
+EXPECTED_SHA256 = "46cf162d4c1781dcd8f1ae929425d19a2f2b50a72bda1b6269d0a021845b7e6a"
 
 
 def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
@@ -26,6 +26,8 @@ def load_and_verify(path: Path = CONTRACT) -> tuple[dict[str, Any], str]:
     assert contract["source"]["blockholder_filed_at_policy"].endswith("never_public_decision_clock")
     assert contract["decision_clock"]["filing_date_field"] == "sec_filing_manifest.filed_at_date"
     assert contract["eligibility"]["security_scope"].startswith("current_tradable_etoro_instrument_type_5")
+    assert contract["eligibility"]["prior_20_session_return_definition"].startswith("close_session_60")
+    assert contract["eligibility"]["required_session_policy"].endswith("never_skip_to_next_bar")
     assert contract["eligibility"]["current_is_tradable_required"] is True
     assert contract["eligibility"]["historical_security_identity_limit"].startswith("current_snapshot_only")
     assert contract["context"]["context_may_gate_primary_result"] is False
