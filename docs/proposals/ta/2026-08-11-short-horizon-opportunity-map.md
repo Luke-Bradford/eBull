@@ -265,8 +265,9 @@ promoted candidates.
 3. Run #2522's source census against the exact sector-ETF residual contract.
    Do not open outcomes or substitute fixed 3/5/10-session exits until
    point-in-time mapping/membership and two-leg execution evidence exist.
-4. Complete the already-frozen 10–20 session point-in-time earnings/event
-   continuation spike (#2476).
+4. Freeze #2582's exact initial-Schedule-13D trial after its successful source
+   census. The already-open #2476 PEAD trial is inconclusive and closed; do not
+   reopen its outcomes or describe it as pending work.
 5. Continue prospective intraday collection; run #2484 and #2485 only when
    their exact input universes exist. Do not wait for them before learning from
    daily 1–20 session outcomes.
