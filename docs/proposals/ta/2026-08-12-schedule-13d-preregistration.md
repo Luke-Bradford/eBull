@@ -113,7 +113,9 @@ a unique adjusted interval construction.
 
 The initial-13G challenger is source-feasible: an outcome-free raw-document
 census found 10,419 filings with the same basic coverage (7,429 Rule 13d-1(b),
-2,262 Rule 13d-1(c), 33 carrying both and 695 unknown). Its strong February and
+2,263 Rule 13d-1(c), 32 carrying both and 695 unknown). Rule identity comes only
+from the structured designation element; narrative mentions elsewhere in the
+document cannot classify a filing. Its strong February and
 quarterly filing waves are why filing month and rule are exact strata rather
 than an undifferentiated placebo.
 

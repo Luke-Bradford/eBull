@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 
 from scripts.evaluate_2582_schedule13d_outcomes import (
+    _INITIAL_13G_SOURCE_SQL,
     _SOURCE_EVENTS_SQL,
     ACKNOWLEDGEMENT,
+    Initial13GSourceEvent,
     OutcomeGateRefusal,
     PriceWindow,
     SourceEvent,
@@ -37,6 +39,17 @@ def test_source_population_uses_public_manifest_clock_and_cannot_read_prices() -
     assert "m.filed_at::date" in lowered
     assert "research_price_daily" not in lowered
     assert "b.filed_at" not in lowered
+    assert "between %(first_source_date)s and %(last_complete_filing_date)s" in lowered
+
+
+def test_13g_challenger_source_is_frozen_outcome_free_and_rule_separated() -> None:
+    lowered = _INITIAL_13G_SOURCE_SQL.lower()
+    assert "b.submission_type = 'schedule 13g'" in lowered
+    assert "sec_filing_manifest" in lowered
+    assert "filing_raw_documents" in lowered
+    assert "designaterulepursuantthisschedulefiled" in lowered
+    assert "[[:space:]]*rule[[:space:]]+13d-1" in lowered
+    assert "research_price_daily" not in lowered
     assert "between %(first_source_date)s and %(last_complete_filing_date)s" in lowered
 
 
@@ -107,6 +120,7 @@ def _source_event(**changes: object) -> SourceEvent:
 
 def test_primary_source_refusal_is_explicit_and_fail_closed() -> None:
     assert _source_event().primary_source_refusal is None
+    assert _source_event(prior_passive=True).unfiltered_source_refusal is None
     assert _source_event(prior_passive=True).primary_source_refusal == "prior_passive_chain"
     assert _source_event(series_ids=(1, 2)).primary_source_refusal == "research_series_missing_or_ambiguous"
     assert (
@@ -114,6 +128,31 @@ def test_primary_source_refusal_is_explicit_and_fail_closed() -> None:
         == "research_series_adjustment_basis_unexpected"
     )
     assert _source_event(reporter_identity_complete=False).primary_source_refusal == "reporter_identity_missing"
+
+
+def _13g_source(**changes: object) -> Initial13GSourceEvent:
+    values: dict[str, object] = {
+        "accession_number": "0000000001-26-000002",
+        "issuer_cik": "0000000001",
+        "instrument_id": 42,
+        "public_filing_date": date(2026, 2, 2),
+        "rule": "1b",
+        "raw_document_count": 1,
+        "current_security_eligible": True,
+        "series_ids": (99,),
+        "series_adjustment_bases": ("split_adjusted",),
+    }
+    values.update(changes)
+    return Initial13GSourceEvent(**values)  # type: ignore[arg-type]
+
+
+def test_initial_13g_source_refusal_is_explicit_and_unknown_rule_is_retained() -> None:
+    assert _13g_source().source_refusal is None
+    assert _13g_source(rule="unknown").source_refusal is None
+    assert _13g_source(raw_document_count=0).source_refusal == "canonical_raw_document_missing_or_ambiguous"
+    assert _13g_source(series_adjustment_bases=("raw",)).source_refusal == (
+        "research_series_adjustment_basis_unexpected"
+    )
 
 
 def test_required_sessions_are_exact_and_do_not_skip_market_dates() -> None:
