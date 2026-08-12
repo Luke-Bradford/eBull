@@ -555,9 +555,18 @@ def assess_live_gate(
     frozen = load_preregistration(conn, strategy_id, strategy_version)
     declaration: PreregDeclaration | None = None
     digest_intact = True
+    coherent = True
     if frozen is not None and policy is not None and policy.declaration_id == frozen.declaration_id:
         declaration = frozen.declaration
         digest_intact = frozen.digest_intact
+        # ⚠ RE-CHECKED ON EVERY ASSESSMENT, not only at registration. The policy
+        # is immutable but the structural-refusal POLICY VERSION is not, and a
+        # declaration frozen under a superseded one stops authorising anything
+        # the moment it moves — which is exactly what `record_holdout_access`
+        # does on the research side. Checking only the digest here left the two
+        # enforcement points disagreeing on the one case the "no
+        # re-interpretation" rule exists for.
+        coherent = not declaration_refusals(declaration)
 
     return LiveGateReport(
         strategy_id,
@@ -570,10 +579,11 @@ def assess_live_gate(
             policy=policy,
             declaration=declaration,
             declaration_digest_intact=digest_intact,
+            declaration_coherent=coherent,
             facts=facts,
             requested_capital=requested_capital,
         ),
-        None if declaration is None or not digest_intact else declaration.forward_shadow,
+        None if declaration is None or not digest_intact or not coherent else declaration.forward_shadow,
     )
 
 
@@ -585,6 +595,7 @@ def live_gate_refusals(
     facts: LiveGateFacts,
     requested_capital: Decimal,
     declaration_digest_intact: bool = True,
+    declaration_coherent: bool = True,
 ) -> tuple[str, ...]:
     """Every reason this strategy may not take live capital. Empty means none.
 
@@ -616,10 +627,13 @@ def live_gate_refusals(
     if declaration is None:
         refusals.append("forward_shadow_floor_missing")
     elif not declaration_digest_intact:
-        # ⚠ A DISTINCT CODE, not `forward_shadow_floor_missing`. "No floor was
-        # frozen" and "the frozen floor has been rewritten" are different
-        # operator emergencies, and collapsing them would hide the second.
+        # ⚠ THREE DISTINCT CODES, not one. "No floor was frozen", "the frozen
+        # floor has been rewritten" and "the frozen floor was computed under a
+        # policy that has since moved" are three different operator
+        # emergencies, and collapsing them would hide two of them.
         refusals.append("declaration_digest_mismatch")
+    elif not declaration_coherent:
+        refusals.append("declaration_no_longer_coherent")
     else:
         floor = declaration.forward_shadow
         if facts.forward_decision_dates < floor.min_independent_decision_dates:

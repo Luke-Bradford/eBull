@@ -19,6 +19,7 @@ from app.api.strategies import (
     execute_live_kill_drill,
 )
 from app.security.sessions import SessionRow
+from app.services import prereg_contract
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
@@ -568,3 +569,51 @@ def test_registration_refuses_a_falsification_only_trial(
             registered_by="operator",
             reason="preregister before paper",
         )
+
+
+def test_assessment_stops_honouring_a_declaration_whose_policy_was_superseded(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⚠ THE WIRING, not the rule — the pure function is covered elsewhere.
+
+    A revert-probe that removed the `declaration_refusals` call from
+    `assess_live_gate` passed every DB test in this file, which is exactly the
+    divergence the review bot named: the research side refuses a superseded
+    declaration on every look while the capital side kept honouring its frozen
+    floor. The policy row is immutable; the POLICY VERSION is not.
+
+    ⚠ SUPERSESSION IS SIMULATED BY MOVING THE CONSTANT, not by editing the row.
+    Editing the row changes its digest, so `declaration_digest_mismatch` fires
+    first and the coherence branch is never reached — the first draft of this
+    test asserted the wrong code for that reason. In production the row never
+    changes; `STRUCTURAL_REFUSAL_POLICY_VERSION` does.
+    """
+    _forward_stage(ebull_test_conn)
+    _policy(ebull_test_conn)
+
+    before = assess_live_gate(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        requested_capital=Decimal("100"),
+    )
+    assert before.forward_shadow_floor is not None
+    assert "declaration_no_longer_coherent" not in before.refusal_codes
+
+    monkeypatch.setattr(
+        prereg_contract,
+        "STRUCTURAL_REFUSAL_POLICY_VERSION",
+        "structural-refusal-policy-2099-01-01-v9",
+    )
+
+    after = assess_live_gate(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        requested_capital=Decimal("100"),
+    )
+    assert "declaration_no_longer_coherent" in after.refusal_codes
+    assert "declaration_digest_mismatch" not in after.refusal_codes
+    assert after.forward_shadow_floor is None
+    assert not after.passed

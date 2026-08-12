@@ -398,3 +398,25 @@ def test_a_rewritten_declaration_is_refused_by_the_live_gate() -> None:
 
 def test_an_intact_digest_leaves_the_floor_usable() -> None:
     assert "declaration_digest_mismatch" not in _gate()
+
+
+def test_a_declaration_that_became_incoherent_stops_authorising_the_floor() -> None:
+    """⚠ THE TWO ENFORCEMENT POINTS MUST NOT DIVERGE.
+
+    The live-gate policy is immutable; the structural-refusal POLICY VERSION is
+    not. `record_holdout_access` refuses a superseded declaration on every look,
+    and the live gate re-checks the same thing on every assessment — checking
+    only the digest here left the research side refusing while the capital side
+    kept honouring the frozen floor.
+    """
+    codes = _gate(declaration_coherent=False)
+    assert "declaration_no_longer_coherent" in codes
+    assert "forward_shadow_floor_missing" not in codes
+    assert "declaration_digest_mismatch" not in codes
+
+
+def test_a_rewritten_declaration_reports_the_digest_not_the_coherence() -> None:
+    """Three states, three codes — collapsing them would hide two."""
+    codes = _gate(declaration_digest_intact=False, declaration_coherent=False)
+    assert "declaration_digest_mismatch" in codes
+    assert "declaration_no_longer_coherent" not in codes
