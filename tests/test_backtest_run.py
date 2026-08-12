@@ -52,7 +52,7 @@ from app.services.backtest_run import (
     evaluate_level_arms,
     runnable_strategies,
 )
-from app.services.cost_model import COST_MODEL_ID
+from app.services.cost_model import COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
@@ -750,7 +750,7 @@ class TestBenchmarkBook:
         assert book.exit_price[0] < 15.0
         assert book.half_spread[0] > 0.0
 
-    def test_raw_close_selects_the_spread_but_adjusted_close_measures_wealth(self) -> None:
+    def test_split_adjusted_close_uses_the_maximum_spread_and_wealth_close_measures_return(self) -> None:
         book = _benchmark_book(
             instruments=frozenset({1}),
             raw_closes_by_instrument={1: (0, array("d", [10.0, 11.0]))},
@@ -760,6 +760,7 @@ class TestBenchmarkBook:
         )
         assert book.entry_price[0] > 100.0
         assert book.exit_price[0] < 120.0
+        assert book.half_spread[0] == float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)
         assert book.marks.tolist() == [100.0, 120.0]
 
     def test_non_finite_wealth_observation_excludes_the_benchmark_leg(self) -> None:
@@ -812,7 +813,7 @@ class TestTotalReturnStrategyLeg:
         )
         books = {"hold_out": _NamespaceBook()}
         _absorb(
-            [cost_position(position)],
+            [cost_position(position, price_basis="split_adjusted")],
             series=series,
             window=Window(entry_day, exit_day),
             axis_pos={entry_day: 0, exit_day: 1},

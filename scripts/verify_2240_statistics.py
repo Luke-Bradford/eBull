@@ -91,7 +91,7 @@ import numpy as np
 import psycopg
 
 from app.config import settings
-from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, half_spread_for
+from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.deflated_sharpe import (
     MIN_MEASURED_TRIALS,
     TradeMoments,
@@ -598,10 +598,8 @@ def _benchmark_leg(
     the window, so it is fixed by construction — and computing it with different
     machinery would attribute the machinery's difference to the strategy.
 
-    ⚠ It is charged the SAME cost model: one round trip at the entry band's
-    half-spread. A cost-free benchmark would make every strategy look worse by
-    exactly the amount the cost model charges, which is a comparison of cost
-    models rather than of strategies.
+    ⚠ It is charged the SAME adverse split-adjusted-price cost arm as the
+    strategy. A cost-free benchmark would compare cost models, not strategies.
     """
     usable = [i for i in range(len(series)) if series.rows[i].get("close") is not None]
     if len(usable) < 2:
@@ -615,7 +613,7 @@ def _benchmark_leg(
     exit_index = axis_pos.get(series.dates[last])
     if entry_index is None or exit_index is None or exit_index <= entry_index:
         return
-    half = half_spread_for(entry_close)
+    half = UNKNOWN_NOMINAL_PRICE_BAND.half_spread
     one = Decimal(1)
     book.add(
         entry_index=entry_index,
@@ -757,7 +755,7 @@ def curve(*, limit: int | None) -> int:
                     regime=regime,
                     window=window,
                 )
-                costed = list(cost_positions(built.positions))
+                costed = list(cost_positions(built.positions, price_basis="split_adjusted"))
                 # P6 — conservation across the layer boundary.
                 if len(costed) != len(built.positions):
                     sleeves[label].problems.append(

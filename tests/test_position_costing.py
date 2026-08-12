@@ -12,14 +12,27 @@ from decimal import Decimal
 
 import pytest
 
-from app.services.cost_model import COST_MODEL_ID, half_spread_for
+from app.services.cost_model import COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND, half_spread_for
 from app.services.position_builder import Position
 from app.services.position_costing import (
     CostedPosition,
     band_crossings,
-    cost_position,
-    cost_positions,
 )
+from app.services.position_costing import (
+    cost_position as _cost_position,
+)
+from app.services.position_costing import (
+    cost_positions as _cost_positions,
+)
+
+
+def cost_position(position: Position) -> CostedPosition:
+    """Synthetic fixtures use nominal, as-traded prices unless stated."""
+    return _cost_position(position, price_basis="as_traded")
+
+
+def cost_positions(positions: list[Position]) -> tuple[CostedPosition, ...]:
+    return _cost_positions(positions, price_basis="as_traded")
 
 
 def _position(**overrides: object) -> Position:
@@ -132,6 +145,21 @@ class TestTheBandIsKeyedOnTheEntryPrice:
         assert band_crossings(rows) == 0
 
 
+class TestSplitAdjustedPriceBasis:
+    def test_it_uses_the_maximum_cost_band_regardless_of_adjusted_price(self) -> None:
+        low = _cost_position(_position(entry_fill_price=Decimal("4")), price_basis="split_adjusted")
+        high = _cost_position(_position(entry_fill_price=Decimal("500")), price_basis="split_adjusted")
+        assert low.band_label == high.band_label == f"max:{UNKNOWN_NOMINAL_PRICE_BAND.label}"
+        assert low.half_spread == high.half_spread == UNKNOWN_NOMINAL_PRICE_BAND.half_spread
+        assert low.price_basis == high.price_basis == "split_adjusted"
+
+    def test_adjusted_prices_do_not_claim_nominal_band_crossings(self) -> None:
+        row = _cost_position(
+            _position(entry_fill_price=Decimal("500"), close_price=Decimal("4")), price_basis="split_adjusted"
+        )
+        assert band_crossings([row]) == 0
+
+
 class TestAnOpenPosition:
     def test_the_mark_is_charged_the_exit_side(self) -> None:
         """§3.2 rule 5: the mark is *"minus one side of the cost model (the exit
@@ -205,6 +233,7 @@ class TestRowInvariants:
         fields: dict[str, object] = {
             "position": position,
             "cost_model_id": COST_MODEL_ID,
+            "price_basis": "as_traded",
             "band_label": ">=$100",
             "half_spread": h,
             "entry_price_net": position.entry_fill_price * (1 + h),
@@ -283,6 +312,18 @@ class TestRowInvariants:
                 net_return_pct=None,
                 uncosted_reason="dunno",
             )
+
+    def test_an_unknown_price_basis_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unknown price basis"):
+            self._costed(price_basis="adjusted-ish")
+
+    def test_a_band_label_that_disagrees_with_the_basis_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="does not match as_traded entry basis"):
+            self._costed(band_label="max:<$5")
+
+    def test_a_half_spread_that_disagrees_with_the_basis_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="does not match as_traded entry basis"):
+            self._costed(half_spread=Decimal("0.01"), entry_price_net=Decimal("101"))
 
 
 class TestCostPositionsPreservesOrder:
