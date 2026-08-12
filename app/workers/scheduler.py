@@ -603,10 +603,15 @@ def _llm_provider_resolvable(conn: psycopg.Connection[Any]) -> PrerequisiteResul
 
     The local-first ``openai_compatible`` default always resolves (no key
     needed — Ollama ignores it); only ``llm_provider='anthropic'`` with no
-    ``ANTHROPIC_API_KEY`` fails. Construction is pure config resolution —
-    no network I/O. ``RuntimeConfigCorrupt`` deliberately propagates so a
-    corrupt config surfaces as a failure, never a silent skip (fail
-    closed, PR-A contract).
+    ``ANTHROPIC_API_KEY`` fails. Construction is config resolution plus, on
+    a LOCAL endpoint, at most ONE cached ``/api/version`` probe per process
+    (#2431 — it decides whether the endpoint is Ollama, which decides whether
+    ``num_ctx`` can be set at all). ⚠ The probe cannot turn this config gate
+    into a connectivity gate: it swallows every transport error and falls back
+    to the OpenAI provider, so an unreachable server resolves clients exactly
+    as before rather than raising here. ``RuntimeConfigCorrupt`` deliberately
+    propagates so a corrupt config surfaces as a failure, never a silent skip
+    (fail closed, PR-A contract).
     """
     try:
         make_llm_clients(conn)
