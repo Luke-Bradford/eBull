@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.evaluate_2582_schedule13d_outcomes import (
+    _ALL_13D_PUBLIC_DATES_SQL,
     _INITIAL_13G_SOURCE_SQL,
     _SOURCE_EVENTS_SQL,
     ACKNOWLEDGEMENT,
@@ -16,12 +17,14 @@ from scripts.evaluate_2582_schedule13d_outcomes import (
     SourceEvent,
     accepted_window_return_pct,
     bucket,
+    build_random_time_requests,
     match_tie_break,
     next_regular_session_strictly_after,
     nth_regular_session,
     regular_sessions_ending_before,
     require_outcome_gate,
     required_event_sessions,
+    required_sessions_for_entry,
     total_return_pct,
     treatment_event_outcome,
     window_match_features,
@@ -54,6 +57,13 @@ def test_13g_challenger_source_is_frozen_outcome_free_and_rule_separated() -> No
     assert "[[:space:]]*rule[[:space:]]+13d-1" in lowered
     assert "research_price_daily" not in lowered
     assert "between %(first_source_date)s and %(last_complete_filing_date)s" in lowered
+
+
+def test_random_placebo_halo_source_is_outcome_free_and_includes_amendments() -> None:
+    lowered = _ALL_13D_PUBLIC_DATES_SQL.lower()
+    assert "'schedule 13d', 'schedule 13d/a'" in lowered
+    assert "sec_filing_manifest" in lowered
+    assert "research_price_daily" not in lowered
 
 
 def test_gate_refuses_even_with_ack_until_trial_is_declared() -> None:
@@ -167,6 +177,18 @@ def test_required_sessions_are_exact_and_do_not_skip_market_dates() -> None:
         date(2026, 7, 1),
         date(2026, 7, 2),
     )
+    assert required_sessions_for_entry(date(2026, 7, 6)) == sessions
+
+
+def test_random_time_requests_stay_in_entry_month_and_outside_event_halo() -> None:
+    treatment = _source_event()
+    requests = build_random_time_requests((treatment,), {42: (date(2026, 7, 2),)})
+    assert requests
+    assert all(request.population == "random" for request in requests)
+    assert all(request.sessions[60].month == 7 for request in requests)
+    # Filing July 2 enters July 6; +/-10 NYSE sessions excludes through July 20.
+    assert min(request.sessions[60] for request in requests) == date(2026, 7, 21)
+    assert all(len(request.sessions) == 70 for request in requests)
 
 
 def _price_window(**changes: object) -> PriceWindow:
@@ -234,3 +256,5 @@ def test_return_and_primary_conversion_refuse_wrong_population() -> None:
     assert window_match_features(challenger).rule == "1b"
     with pytest.raises(ValueError, match="clean primary"):
         treatment_event_outcome(challenger)
+    with pytest.raises(ValueError, match="clean primary"):
+        treatment_event_outcome(_price_window(population="random"))
