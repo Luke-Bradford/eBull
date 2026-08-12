@@ -27,6 +27,8 @@ There is no bootstrap stage and no dependency on instrument-universe completion 
 
 None. This is a small job-owned reference series, not an accession/document stream, so it does not create `sec_filing_manifest` rows. Source provenance and conditional-fetch state live in `research_price_series` and `external_data_watermarks` respectively.
 
+The raw CSV is intentionally dropped after complete normalization. Every source field in the retained contract lands as typed SQL OHLC/date data, while the response hash, URL/version and modification watermark preserve identity. This follows the explicit #470/#471 narrowing in `docs/review-prevention-log.md`: raw persistence is redundant once SQL normalization is complete. Keeping a revised full-history CSV each day would duplicate the same ~1,439 retained observations and conflict with the bounded-storage requirement.
+
 ## 7. Parser
 
 `parse_vix_history` in `app/services/cboe_vix.py` requires the exact header `DATE,OPEN,HIGH,LOW,CLOSE`, parses dates as `%m/%d/%Y`, discards pre-2021 rows, then validates retained positive finite decimals and OHLC envelopes, rejects retained duplicates, and sorts ascending. Cboe's legacy file includes at least one published 1992 OHLC anomaly; it is explicitly outside the bounded contract and cannot block or widen the retained load. `SOURCE_VERSION='cboe-vix-daily-close-v1'` freezes this contract.
