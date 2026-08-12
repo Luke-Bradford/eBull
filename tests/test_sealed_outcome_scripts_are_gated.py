@@ -28,21 +28,20 @@ _GATE_CALLS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: ⚠ EXPLICIT, REASONED, AND NOT EMPTY — the two openers that ran BEFORE
-#: `TRIAL_REGISTER_CUTOFF` (2026-08-12 07:00Z). #2599 does not retroactively
-#: invalidate them (`sql/333`: "a trial with no row here behaves exactly as it
-#: did before this migration") and #2600's reconstruction already charged both to
-#: the register, so their searches are counted. Re-gating them is follow-up work,
-#: and this mapping is the visible record of that debt rather than a silent
-#: omission.
-_PRE_CUTOFF_UNGATED: Final[dict[str, str]] = {
-    "verify_2476_pead_outcomes.py": (
-        "ran before TRIAL_REGISTER_CUTOFF; charged as pead-historical-sue-net-income-v1 (8, exact)"
-    ),
-    "verify_2480_insider_outcomes.py": (
-        "ran before TRIAL_REGISTER_CUTOFF; charged as insider-purchase-forward-returns-first-look-2026-08-09 (4, exact)"
-    ),
-}
+#: ⚠ EMPTY SINCE #2616, AND EMPTY IS THE STATE WORTH KEEPING. The two pre-cutoff
+#: openers (`verify_2476_pead_outcomes.py`, `verify_2480_insider_outcomes.py`)
+#: were the visible record of a debt — first looks charged by #2600's
+#: reconstruction, re-runs ungated. #2616 gated their re-runs through
+#: `scripts/sealed_rerun_gate.py` (a NEW register entry per re-run, a frozen
+#: #2599 declaration, a `read` access row), so the rule now holds with no
+#: exemption. A new entry here needs the pre-cutoff justification the old ones
+#: had; nothing that runs after `TRIAL_REGISTER_CUTOFF` qualifies.
+#:
+#: ⚠ The retired insider entry mis-attributed its charge to
+#: `insider-purchase-forward-returns-first-look-2026-08-09` — the register
+#: charges that run as `form4-code-p-opportunistic-purchase-v1` (7, exact); the
+#: first-look entry is `scripts/verify_2437_insider_forward_returns.py`'s.
+_PRE_CUTOFF_UNGATED: Final[dict[str, str]] = {}
 
 
 def _sealed_outcome_scripts() -> list[Path]:
@@ -75,7 +74,8 @@ def test_the_glob_still_finds_the_known_sealed_openers() -> None:
     assert {
         "evaluate_2582_schedule13d_outcomes.py",
         "run_2582_schedule13d_outcomes.py",
-        *_PRE_CUTOFF_UNGATED,
+        "verify_2476_pead_outcomes.py",
+        "verify_2480_insider_outcomes.py",
     } <= names
 
 
@@ -105,3 +105,19 @@ def test_c4_is_gated_rather_than_allowlisted() -> None:
     called = _called_names((_SCRIPTS / "evaluate_2582_schedule13d_outcomes.py").read_text())
     assert "require_outcome_access" in called
     assert "verify_outcome_access_provenance" in called
+
+
+def test_the_precutoff_openers_are_gated_rather_than_allowlisted() -> None:
+    """#2616's acceptance: the allowlist is empty because both openers are gated.
+
+    ⚠ BOTH names asserted, not either: `require_outcome_gate` writes the access
+    row a re-run charges, and `verify_outcome_access_provenance` is what proves
+    it COMMITTED with the declaration frozen strictly before it. A script
+    calling only one has half a gate.
+    """
+
+    assert _PRE_CUTOFF_UNGATED == {}
+    for name in ("verify_2476_pead_outcomes.py", "verify_2480_insider_outcomes.py"):
+        called = _called_names((_SCRIPTS / name).read_text())
+        assert "require_outcome_gate" in called, name
+        assert "verify_outcome_access_provenance" in called, name

@@ -45,7 +45,15 @@ sealed outcome openers, none of which consults a declaration:
 | --- | --- | --- |
 | `evaluate_2582_schedule13d_outcomes.py` | C-4 | **has not run** — gate refuses |
 | `verify_2476_pead_outcomes.py` | `pead-historical-sue-net-income-v1` | ran pre-cutoff; charged 8, exact |
-| `verify_2480_insider_outcomes.py` | `insider-purchase-forward-returns-first-look-2026-08-09` | ran pre-cutoff; charged 4, exact |
+| `verify_2480_insider_outcomes.py` | `form4-code-p-opportunistic-purchase-v1` | ran pre-cutoff; charged 7, exact |
+
+⚠ Correction (#2616): this row originally attributed the `verify_2480` look to
+`insider-purchase-forward-returns-first-look-2026-08-09` (4, exact). Wrong: the
+register's first-look entry is `scripts/verify_2437_insider_forward_returns.py`'s
+distinct 4-horizon construction; the sealed portfolio run this script performs is
+charged as `form4-code-p-opportunistic-purchase-v1` (7, exact) — see
+`app/services/trial_register.py`, which cites issue #2480's sealed-outcome
+comment as that entry's evidence.
 
 The two `verify_*` scripts opened their outcomes before `TRIAL_REGISTER_CUTOFF`
 (2026-08-12 07:00Z) and are already charged by #2600's reconstruction. #2599 does
