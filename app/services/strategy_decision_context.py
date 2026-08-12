@@ -36,6 +36,8 @@ class ContextDefinition:
     volume_lookback_sessions: int = 20
     volume_capacity_statistic: str = "causal_mean"
     listing_semantics: str = "primary_listing_not_execution_venue"
+    sector_semantics: str = "provider_stocks_industry_not_gics"
+    sector_source: str = "prospective_instrument_market_classification_history"
     eligible_price_bases: tuple[str, ...] = ("observed_unadjusted", "reconstructed_unadjusted")
 
 
@@ -44,7 +46,7 @@ DEFINITION: Final = ContextDefinition()
 
 def _version() -> str:
     payload = repr(DEFINITION) + inspect.getsource(price_band_for) + inspect.getsource(dollar_volume_band_for)
-    return "decision-context-v1:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return "decision-context-v2:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def price_band_for(price: Decimal) -> PriceBand:
@@ -86,6 +88,7 @@ class MarketClassification:
     primary_listing_market: ListingMarket
     provider_exchange_id: str | None
     instrument_type_id: int | None
+    provider_industry_id: int | None
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,7 @@ class DecisionContext:
     primary_listing_market: ListingMarket | None
     provider_exchange_id: str | None
     instrument_type_id: int | None
+    provider_industry_id: int | None
     as_traded_price: Decimal | None
     as_traded_price_basis: AsTradedPriceBasis | None
     price_band: PriceBand | None
@@ -173,7 +177,8 @@ def load_market_classification(
         row = cur.execute(
             """
             SELECT effective_from, security_type, primary_listing_market,
-                   provider_exchange_id, instrument_type_id
+                   provider_exchange_id, instrument_type_id,
+                   provider_industry_id
               FROM instrument_market_classification_history
              WHERE instrument_id = %(instrument_id)s
                AND daterange(effective_from, effective_to, '[]') @> %(decision_date)s::date
@@ -191,6 +196,7 @@ def load_market_classification(
         primary_listing_market=row[2],
         provider_exchange_id=row[3],
         instrument_type_id=row[4],
+        provider_industry_id=row[5],
     )
 
 
@@ -240,6 +246,8 @@ def build_decision_context(
             missing.append("security_type")
         if classification.primary_listing_market == "unknown":
             missing.append("primary_listing_market")
+        if classification.provider_industry_id is None:
+            missing.append("provider_industry_id")
 
     price_band = None if inputs.as_traded_price is None else price_band_for(inputs.as_traded_price)
     dollar_band = (
@@ -264,6 +272,7 @@ def build_decision_context(
         primary_listing_market=None if classification is None else classification.primary_listing_market,
         provider_exchange_id=None if classification is None else classification.provider_exchange_id,
         instrument_type_id=None if classification is None else classification.instrument_type_id,
+        provider_industry_id=None if classification is None else classification.provider_industry_id,
         as_traded_price=inputs.as_traded_price,
         as_traded_price_basis=inputs.as_traded_price_basis,
         price_band=price_band,
@@ -289,7 +298,8 @@ _INSERT_CONTEXT = """
         strategy_id, strategy_version, instrument_id, decision_at, signal_id,
         candidate_verdict, refusal_reason, context_version,
         classification_effective_from, security_type, primary_listing_market,
-        provider_exchange_id, instrument_type_id, as_traded_price,
+        provider_exchange_id, instrument_type_id, provider_industry_id,
+        as_traded_price,
         as_traded_price_basis, price_band,
         volume_lookback_sessions, trailing_mean_share_volume,
         trailing_median_share_volume, trailing_mean_dollar_volume,
@@ -301,7 +311,8 @@ _INSERT_CONTEXT = """
         %(strategy_id)s, %(strategy_version)s, %(instrument_id)s, %(decision_at)s, %(signal_id)s,
         %(candidate_verdict)s, %(refusal_reason)s, %(context_version)s,
         %(classification_effective_from)s, %(security_type)s, %(primary_listing_market)s,
-        %(provider_exchange_id)s, %(instrument_type_id)s, %(as_traded_price)s,
+        %(provider_exchange_id)s, %(instrument_type_id)s, %(provider_industry_id)s,
+        %(as_traded_price)s,
         %(as_traded_price_basis)s, %(price_band)s,
         %(volume_lookback_sessions)s, %(trailing_mean_share_volume)s,
         %(trailing_median_share_volume)s, %(trailing_mean_dollar_volume)s,

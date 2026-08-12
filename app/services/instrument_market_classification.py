@@ -1,4 +1,4 @@
-"""Prospective point-in-time security type and listing classification (#2508)."""
+"""Prospective point-in-time type, listing and provider industry (#2508/#2523)."""
 
 from __future__ import annotations
 
@@ -34,6 +34,12 @@ def reconcile_instrument_market_classification(
             WITH observed AS (
                 SELECT i.instrument_id, i.exchange AS provider_exchange_id,
                        CASE
+                           WHEN i.sector ~ '^[0-9]+$'
+                            AND i.sector::BIGINT BETWEEN 1 AND 2147483647
+                               THEN i.sector::INTEGER
+                           ELSE NULL
+                       END AS provider_industry_id,
+                       CASE
                            WHEN i.exchange = '5' OR lower(coalesce(e.description, '')) = 'nyse' THEN 'nyse'
                            WHEN i.exchange = '4' OR lower(coalesce(e.description, '')) = 'nasdaq' THEN 'nasdaq'
                            ELSE CASE WHEN i.exchange IS NULL THEN 'unknown' ELSE 'other' END
@@ -52,16 +58,16 @@ def reconcile_instrument_market_classification(
                 WHERE i.is_tradable
             )
             UPDATE instrument_market_classification_history h
-               SET last_confirmed_on = CURRENT_DATE
+               SET last_confirmed_on = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
               FROM observed o
              WHERE h.instrument_id = o.instrument_id
                AND h.effective_to IS NULL
-               AND h.last_confirmed_on < CURRENT_DATE
-               AND (h.provider_exchange_id, h.primary_listing_market,
-                    h.instrument_type_id, h.security_type)
+               AND h.last_confirmed_on < (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
+               AND (h.provider_exchange_id, h.provider_industry_id,
+                    h.primary_listing_market, h.instrument_type_id, h.security_type)
                    IS NOT DISTINCT FROM
-                   (o.provider_exchange_id, o.primary_listing_market,
-                    o.instrument_type_id, o.security_type)
+                   (o.provider_exchange_id, o.provider_industry_id,
+                    o.primary_listing_market, o.instrument_type_id, o.security_type)
             """
         )
         confirmed = cur.rowcount
@@ -70,6 +76,12 @@ def reconcile_instrument_market_classification(
             """
             WITH observed AS (
                 SELECT i.instrument_id, i.exchange AS provider_exchange_id,
+                       CASE
+                           WHEN i.sector ~ '^[0-9]+$'
+                            AND i.sector::BIGINT BETWEEN 1 AND 2147483647
+                               THEN i.sector::INTEGER
+                           ELSE NULL
+                       END AS provider_industry_id,
                        CASE
                            WHEN i.exchange = '5' OR lower(coalesce(e.description, '')) = 'nyse' THEN 'nyse'
                            WHEN i.exchange = '4' OR lower(coalesce(e.description, '')) = 'nasdaq' THEN 'nasdaq'
@@ -90,19 +102,20 @@ def reconcile_instrument_market_classification(
             )
             UPDATE instrument_market_classification_history h
                SET provider_exchange_id = o.provider_exchange_id,
+                   provider_industry_id = o.provider_industry_id,
                    primary_listing_market = o.primary_listing_market,
                    instrument_type_id = o.instrument_type_id,
                    security_type = o.security_type,
-                   last_confirmed_on = CURRENT_DATE
+                   last_confirmed_on = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
               FROM observed o
              WHERE h.instrument_id = o.instrument_id
                AND h.effective_to IS NULL
-               AND h.effective_from = CURRENT_DATE
-               AND (h.provider_exchange_id, h.primary_listing_market,
-                    h.instrument_type_id, h.security_type)
+               AND h.effective_from = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
+               AND (h.provider_exchange_id, h.provider_industry_id,
+                    h.primary_listing_market, h.instrument_type_id, h.security_type)
                    IS DISTINCT FROM
-                   (o.provider_exchange_id, o.primary_listing_market,
-                    o.instrument_type_id, o.security_type)
+                   (o.provider_exchange_id, o.provider_industry_id,
+                    o.primary_listing_market, o.instrument_type_id, o.security_type)
             """
         )
         corrected_same_day = cur.rowcount
@@ -113,6 +126,12 @@ def reconcile_instrument_market_classification(
             """
             WITH observed AS (
                 SELECT i.instrument_id, i.exchange AS provider_exchange_id,
+                       CASE
+                           WHEN i.sector ~ '^[0-9]+$'
+                            AND i.sector::BIGINT BETWEEN 1 AND 2147483647
+                               THEN i.sector::INTEGER
+                           ELSE NULL
+                       END AS provider_industry_id,
                        CASE
                            WHEN i.exchange = '5' OR lower(coalesce(e.description, '')) = 'nyse' THEN 'nyse'
                            WHEN i.exchange = '4' OR lower(coalesce(e.description, '')) = 'nasdaq' THEN 'nasdaq'
@@ -132,17 +151,17 @@ def reconcile_instrument_market_classification(
                 WHERE i.is_tradable
             )
             UPDATE instrument_market_classification_history h
-               SET effective_to = CURRENT_DATE - 1,
-                   last_confirmed_on = CURRENT_DATE - 1
+               SET effective_to = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date - 1,
+                   last_confirmed_on = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date - 1
               FROM observed o
              WHERE h.instrument_id = o.instrument_id
                AND h.effective_to IS NULL
-               AND h.effective_from < CURRENT_DATE
-               AND (h.provider_exchange_id, h.primary_listing_market,
-                    h.instrument_type_id, h.security_type)
+               AND h.effective_from < (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
+               AND (h.provider_exchange_id, h.provider_industry_id,
+                    h.primary_listing_market, h.instrument_type_id, h.security_type)
                    IS DISTINCT FROM
-                   (o.provider_exchange_id, o.primary_listing_market,
-                    o.instrument_type_id, o.security_type)
+                   (o.provider_exchange_id, o.provider_industry_id,
+                    o.primary_listing_market, o.instrument_type_id, o.security_type)
             """
         )
         changed = cur.rowcount
@@ -152,9 +171,13 @@ def reconcile_instrument_market_classification(
             INSERT INTO instrument_market_classification_history (
                 instrument_id, effective_from, effective_to, last_confirmed_on,
                 provider_exchange_id, primary_listing_market,
-                instrument_type_id, security_type, source_event
+                instrument_type_id, security_type, source_event,
+                provider_industry_id
             )
-            SELECT i.instrument_id, CURRENT_DATE, NULL, CURRENT_DATE,
+            SELECT i.instrument_id,
+                   (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date,
+                   NULL,
+                   (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date,
                    i.exchange,
                    CASE
                        WHEN i.exchange = '5' OR lower(coalesce(e.description, '')) = 'nyse' THEN 'nyse'
@@ -171,7 +194,13 @@ def reconcile_instrument_market_classification(
                    CASE WHEN EXISTS (
                        SELECT 1 FROM instrument_market_classification_history p
                        WHERE p.instrument_id = i.instrument_id
-                   ) THEN 'classification_change' ELSE 'imported' END
+                   ) THEN 'classification_change' ELSE 'imported' END,
+                   CASE
+                       WHEN i.sector ~ '^[0-9]+$'
+                        AND i.sector::BIGINT BETWEEN 1 AND 2147483647
+                           THEN i.sector::INTEGER
+                       ELSE NULL
+                   END
               FROM instruments i
               LEFT JOIN exchanges e ON e.exchange_id = i.exchange
               LEFT JOIN etoro_instrument_types t
