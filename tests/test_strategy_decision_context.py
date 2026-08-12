@@ -50,7 +50,7 @@ def test_boundaries_are_explicit_and_stable() -> None:
     assert price_band_for(Decimal("150")) == "150_plus"
     assert dollar_volume_band_for(Decimal("9999999")) == "1m_to_10m"
     assert dollar_volume_band_for(Decimal("10000000")) == "10m_to_25m"
-    assert CONTEXT_VERSION.startswith("decision-context-v1:")
+    assert CONTEXT_VERSION.startswith("decision-context-v2:")
 
 
 def test_complete_context_is_eligible() -> None:
@@ -66,6 +66,7 @@ def test_complete_context_is_eligible() -> None:
             primary_listing_market="nasdaq",
             provider_exchange_id="4",
             instrument_type_id=5,
+            provider_industry_id=8,
         ),
         inputs=_complete_inputs(),
     )
@@ -90,11 +91,33 @@ def test_missing_or_unknown_point_in_time_data_refuses_by_name() -> None:
             primary_listing_market="unknown",
             provider_exchange_id=None,
             instrument_type_id=5,
+            provider_industry_id=8,
         ),
         inputs=_complete_inputs(vix=None, spread_bps=None),
     )
     assert context.candidate_verdict == "refused"
     assert context.refusal_reason == "missing:primary_listing_market,spread_bps,vix"
+
+
+def test_missing_point_in_time_sector_refuses_instead_of_using_current_metadata() -> None:
+    context = build_decision_context(
+        strategy_id="candidate-1",
+        strategy_version="sha256:abc",
+        instrument_id=1,
+        decision_at=datetime(2026, 8, 10, 14, 35, tzinfo=UTC),
+        signal_id=None,
+        classification=MarketClassification(
+            effective_from=date(2026, 8, 10),
+            security_type="common_stock",
+            primary_listing_market="nasdaq",
+            provider_exchange_id="4",
+            instrument_type_id=5,
+            provider_industry_id=None,
+        ),
+        inputs=_complete_inputs(),
+    )
+    assert context.candidate_verdict == "refused"
+    assert context.refusal_reason == "missing:provider_industry_id"
 
 
 def test_adjusted_or_unproven_price_basis_refuses_cohort_attribution() -> None:
@@ -110,6 +133,7 @@ def test_adjusted_or_unproven_price_basis_refuses_cohort_attribution() -> None:
             primary_listing_market="nasdaq",
             provider_exchange_id="4",
             instrument_type_id=5,
+            provider_industry_id=8,
         ),
         inputs=_complete_inputs(as_traded_price_basis="unknown"),
     )
@@ -147,9 +171,9 @@ def _seed_instrument(conn: psycopg.Connection[tuple[Any, ...]], iid: int) -> Non
     conn.execute(
         """
         INSERT INTO instruments (
-            instrument_id, symbol, company_name, exchange, currency,
+            instrument_id, symbol, company_name, exchange, currency, sector,
             is_tradable, instrument_type_id, first_seen_at, last_seen_at
-        ) VALUES (%s, %s, 'Context Test', '4', 'USD', TRUE, 5, NOW(), NOW())
+        ) VALUES (%s, %s, 'Context Test', '4', 'USD', '8', TRUE, 5, NOW(), NOW())
         """,
         (iid, f"CTX{iid}"),
     )
@@ -167,26 +191,33 @@ def test_reconcile_records_prospective_classification_and_same_day_correction(
 
     row = conn.execute(
         """
-        SELECT primary_listing_market, security_type, source_event
+        SELECT primary_listing_market, security_type, provider_industry_id,
+               source_event, effective_from,
+               (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
         FROM instrument_market_classification_history
         WHERE instrument_id = %s
         """,
         (iid,),
     ).fetchone()
-    assert row == ("nasdaq", "common_stock", "imported")
+    assert row is not None
+    assert row[:4] == ("nasdaq", "common_stock", 8, "imported")
+    assert row[4] == row[5]
 
-    conn.execute("UPDATE instruments SET exchange = '5', instrument_type_id = 6 WHERE instrument_id = %s", (iid,))
+    conn.execute(
+        "UPDATE instruments SET exchange = '5', instrument_type_id = 6, sector = '5' WHERE instrument_id = %s",
+        (iid,),
+    )
     stats = reconcile_instrument_market_classification(conn)
     assert stats.corrected_same_day == 1
     rows = conn.execute(
         """
-        SELECT primary_listing_market, security_type
+        SELECT primary_listing_market, security_type, provider_industry_id
         FROM instrument_market_classification_history
         WHERE instrument_id = %s
         """,
         (iid,),
     ).fetchall()
-    assert rows == [("nyse", "etf")]
+    assert rows == [("nyse", "etf", 5)]
 
 
 @pytest.mark.integration
@@ -218,7 +249,10 @@ def test_later_classification_change_closes_prior_row_without_overlap(
             provider_exchange_id, primary_listing_market, instrument_type_id,
             security_type, source_event
         ) VALUES (
-            %s, CURRENT_DATE - 1, NULL, CURRENT_DATE - 1,
+            %s,
+            (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date - 1,
+            NULL,
+            (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date - 1,
             '4', 'nasdaq', 5, 'common_stock', 'imported'
         )
         """,
@@ -237,7 +271,7 @@ def test_later_classification_change_closes_prior_row_without_overlap(
         """,
         (iid,),
     ).fetchall()
-    current_date_row = conn.execute("SELECT CURRENT_DATE").fetchone()
+    current_date_row = conn.execute("SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date").fetchone()
     assert current_date_row is not None
     current_date = current_date_row[0]
     assert rows == [
@@ -273,6 +307,13 @@ def test_context_round_trip_and_database_completeness_guard(
         (context_id,),
     ).fetchone()
     assert stored_basis == ("observed_unadjusted",)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with conn.transaction():
+            conn.execute(
+                "UPDATE strategy_decision_contexts SET provider_industry_id = NULL WHERE context_id = %s",
+                (context_id,),
+            )
 
     with pytest.raises(psycopg.errors.CheckViolation):
         with conn.transaction():

@@ -67,11 +67,12 @@ select a more favourable universe after seeing outcomes.
 ## What this does and does not unblock
 
 This removes the quota objection to cheap broad screening and supplies a tested
-prospective current-session breadth primitive for liquid declared cohorts. It
-does not complete #2523: causal 1/3/5/10-session market and sector returns,
-percent-above-trend, residual dispersion/common-factor state, exact event state
-and historical point-in-time membership still require their declared sources
-and fixture reconciliation.
+prospective current-session breadth primitive for liquid declared cohorts. The
+subsequent point-in-time-sector increment records the current eToro
+stocks-industry assignment prospectively and refuses unknown assignments. It
+still does not complete #2523: causal 1/3/5/10-session market and sector
+returns, percent-above-trend, residual dispersion/common-factor state and exact
+event state still require their declared formulas and fixture reconciliation.
 
 It also does not make S1–S4 viable. The corrected after-cost evidence remains
 negative/weak, so the strategy catalogue must stay empty until a preregistered

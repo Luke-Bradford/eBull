@@ -3,7 +3,8 @@
 ## Outcome
 
 Strategy evidence can now retain the security type, primary listing market,
-as-traded price band and causal liquidity/risk context that existed when a
+provider stocks-industry assignment, as-traded price band and causal
+liquidity/risk context that existed when a
 candidate was considered. The implementation fails closed when that context is
 not known; it does not fill a historical trade with today's instrument row.
 
@@ -25,6 +26,8 @@ this table. The row contains:
 
 - provider security type and normalised common-stock/ETF/other classification;
 - primary listing market (NYSE/Nasdaq/other), explicitly not execution venue;
+- prospective eToro stocks-industry ID, explicitly not a historical GICS
+  sector and never backfilled from later mutable instrument metadata;
 - contemporaneous as-traded price and fixed price band;
 - explicit price-level provenance: directly observed unadjusted or reconstructed
   from point-in-time corporate-action factors;
@@ -58,6 +61,20 @@ The empty decision-context relation occupied 48 KiB. This validates the
 transition-only storage shape; it does not yet measure context growth under a
 live candidate rate.
 
+On 2026-08-12, #2523 extended the transition identity with the provider
+stocks-industry assignment. The current NYSE/Nasdaq common-stock cohort had
+4,351/6,083 known assignments (71.53%) across nine provider categories; 1,732
+remain explicitly unknown. The one-time honest observation boundary closed the
+12,695 previous current rows and opened 12,695 sector-aware rows instead of
+rewriting the older interval. Total classification-history size became 8,176
+KiB including indexes; the still-empty decision-context table remained 48 KiB.
+Future storage is transition-only, not one row per instrument/day.
+
+This work also aligned classification writes to the America/New_York market
+date already used by decision lookup. The prior UTC `CURRENT_DATE` writer made
+a new row invisible between 00:00 UTC and New York midnight. Clean-install and
+integration fixtures now pin the common market-date boundary.
+
 ## Important boundaries
 
 - The imported classification is prospective from 2026-08-10. Historical
@@ -68,6 +85,9 @@ live candidate rate.
 - Primary listing affects listing rules, auctions and halt identity. It is not
   where an eToro order executed. Spread/slippage and broker execution evidence
   remain separate requirements.
+- The provider industry is coarse and incomplete. A sector-dependent candidate
+  refuses its missing 28.47%; it may not substitute today's label or silently
+  analyse the observed 71.53% as the whole market.
 - Exchange IDs 4/5 and instrument type IDs 5/6 are stable provider facts used
   during bootstrap; lookup labels cross-check them but are not required to have
   arrived first.
