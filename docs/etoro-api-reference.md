@@ -130,7 +130,7 @@ GET+POST requests cannot exceed the API limit.
 | GET | `/api/v1/market-data/instruments/rates` | Live bid/ask/last for up to 100 IDs | **Active** — quote refresh |
 | GET | `/api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}` | OHLCV candles (max 1000) | **Active** — daily candles |
 | GET | `/api/v1/market-data/instruments/history/closing-price` | Bulk closing prices (daily/weekly/monthly) | Not used — candles preferred |
-| GET | `/api/v1/market-data/search` | Search instruments with field projection | Not used — full universe synced |
+| GET | `/api/v1/market-data/search` | Paginated projected market snapshot | **Screening adapter** — two complete pages; never an execution quote |
 | GET | `/api/v1/market-data/exchanges` | Exchange ID → name mapping | Not used — IDs stored raw |
 | GET | `/api/v1/market-data/instrument-types` | Asset class ID → name mapping | Not used — IDs stored raw |
 | GET | `/api/v1/market-data/stocks-industries` | Industry ID → name mapping | Not used — IDs stored raw |
@@ -341,6 +341,23 @@ Primary page: `balances/get-historical-balance-snapshots`.
 | `isBuyEnabled` | bool | Buy orders accepted |
 | `currentRate` | float | Available via search |
 | `dailyPriceChange` | float | Available via search |
+
+The live search contract was reverified on 2026-08-12 against the
+[official endpoint reference](https://api-portal.etoro.com/api-reference/market-data/search-for-instruments).
+Despite that page documenting `pageNumber`, the live API ignores it; `page=2`
+returns page 2 and the response `page` must match. `pageSize=10000` returned
+12,187 rows in two pages (10,000 + 2,187) in 8.493 seconds. One provider row
+had a negative ID and was discarded; 12,185 normalised rows supplied both
+`currentRate` and `dailyPriceChange`.
+
+Search is not the full `/instruments` universe and carries no per-row quote
+timestamp or bid/ask. On the same dev census it covered 3,591/6,083 current
+NYSE/Nasdaq common-stock classifications; coverage rose to 1,480/1,601
+(92.44%) after the independently computed ≥$5 and ≥$25m recent-dollar-volume
+cohort, and 637/669 (95.22%) above $100m. Therefore callers must join an exact
+point-in-time local cohort, report the denominator and fail closed below their
+preregistered threshold. Search values may screen or form aggregate context;
+fresh `/instruments/rates` quotes remain mandatory before a candidate or order.
 
 ### Live rates (from `/market-data/instruments/rates`)
 
