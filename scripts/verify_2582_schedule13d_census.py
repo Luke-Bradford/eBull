@@ -63,37 +63,59 @@ ORDER BY 1
 """
 
 _CHAIN_SHAPE: LiteralString = """
-WITH accessions AS (
+WITH initial_accessions AS (
     SELECT accession_number,
-           min(filer_id) AS filer_id,
            min(issuer_cik) AS issuer_cik,
            min(filed_at) AS filed_at,
            max(instrument_id) FILTER (WHERE instrument_id IS NOT NULL) AS instrument_id
     FROM blockholder_filings
     WHERE submission_type = 'SCHEDULE 13D'
     GROUP BY accession_number
-), ranked AS (
-    SELECT a.*,
-           row_number() OVER (
-               PARTITION BY filer_id, issuer_cik
-               ORDER BY filed_at, accession_number
-           ) AS chain_rank,
-           EXISTS (
-               SELECT 1
-               FROM blockholder_filings prior
-               WHERE prior.filer_id = a.filer_id
-                 AND prior.issuer_cik = a.issuer_cik
-                 AND prior.status = 'passive'
-                 AND prior.filed_at < a.filed_at
+), reporter_events AS (
+    SELECT DISTINCT accession_number,
+           issuer_cik,
+           coalesce(reporter_cik, reporter_name) AS reporter_identity,
+           filed_at,
+           submission_type,
+           status
+    FROM blockholder_filings
+    WHERE submission_type IN (
+        'SCHEDULE 13D', 'SCHEDULE 13D/A',
+        'SCHEDULE 13G', 'SCHEDULE 13G/A'
+    )
+), reporter_history AS (
+    SELECT r.*,
+           coalesce(
+               bool_or(status = 'active') OVER (
+                   PARTITION BY issuer_cik, reporter_identity
+                   ORDER BY filed_at, accession_number
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+               ), false
+           ) AS prior_13d,
+           coalesce(
+               bool_or(status = 'passive') OVER (
+                   PARTITION BY issuer_cik, reporter_identity
+                   ORDER BY filed_at, accession_number
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+               ), false
            ) AS prior_13g
-    FROM accessions a
+    FROM reporter_events r
+), classified AS (
+    SELECT a.accession_number,
+           a.instrument_id,
+           bool_or(h.prior_13d) AS prior_13d,
+           bool_or(h.prior_13g) AS prior_13g
+    FROM initial_accessions a
+    JOIN reporter_history h USING (accession_number)
+    WHERE h.submission_type = 'SCHEDULE 13D'
+    GROUP BY a.accession_number, a.instrument_id
 )
 SELECT count(*) AS accessions,
-       count(*) FILTER (WHERE chain_rank = 1) AS first_13d_per_chain,
-       count(*) FILTER (WHERE chain_rank > 1) AS repeated_initial_label,
+       count(*) FILTER (WHERE NOT prior_13d) AS first_13d_per_chain,
+       count(*) FILTER (WHERE prior_13d) AS repeated_initial_label,
        count(*) FILTER (WHERE prior_13g) AS prior_13g,
        count(DISTINCT instrument_id) AS mapped_instruments
-FROM ranked
+FROM classified
 """
 
 _SOURCE_SHAPE: LiteralString = """

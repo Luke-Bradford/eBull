@@ -58,10 +58,11 @@ must carry those source refusals.
 
 Chain shape is material:
 
-- 961 accessions are the first initial-13D label in their current
-  `(filer, issuer)` chain;
-- 324 repeat that label in an existing chain;
-- 644 have an earlier 13G in the current chain;
+- 1,216 accessions have no earlier active filing for any reporting person on
+  the issuer in the retained chain;
+- 69 have an earlier active filing for at least one reporting person;
+- 47 have an earlier passive 13G-family filing for at least one reporting
+  person;
 - the mapped accessions cover 855 distinct instruments.
 
 Those figures do not yet prove the chain identity is economically correct.
