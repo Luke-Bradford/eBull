@@ -17,7 +17,7 @@ from typing import Any, Literal, cast
 import psycopg
 import psycopg.rows
 
-from app.services.result_ledger import holdout_access_counts, stored_result_promotion_refusals
+from app.services.result_ledger import holdout_access_counts, stored_result_promotion_refusals_for
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY,
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
@@ -26,10 +26,10 @@ from app.services.strategy_base_currency import (
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
 from app.services.strategy_promotion_evidence import evidence_refusals
-from app.services.strategy_promotion_evidence_store import load_promotion_evidence
+from app.services.strategy_promotion_evidence_store import load_promotion_evidences
 from app.services.strategy_result import holdout_count_promotion_refusals, structural_promotion_refusals
-from app.services.strategy_result_ambiguity import ambiguity_promotion_refusals, load_result_ambiguity
-from app.services.strategy_result_universe import load_result_universe, universe_promotion_refusals
+from app.services.strategy_result_ambiguity import ambiguity_promotion_refusals, load_result_ambiguities
+from app.services.strategy_result_universe import load_result_universes, universe_promotion_refusals
 
 Stage = Literal[
     "research_candidate",
@@ -550,6 +550,16 @@ def promote_strategy(
                 )
                 for row in rows
             }
+            # #2641 — every per-result record type is read for the WHOLE batch
+            # before the loop, one statement each, where the loop previously
+            # issued five round trips per pinned result. ⚠ The reordering this
+            # buys is named on `stored_result_promotion_refusals_for`: a corrupt
+            # record anywhere in the batch now raises before ANY result's
+            # refusals are gathered. Within a result nothing moves.
+            universes = load_result_universes(conn, result_ids)
+            ambiguities = load_result_ambiguities(conn, result_ids)
+            stored_refusals = stored_result_promotion_refusals_for(conn, result_ids)
+            evidences = load_promotion_evidences(conn, result_ids)
             for result_id in result_ids:
                 # #2621 — the transition REPLAYS the universe check from the
                 # frozen record instead of trusting the write-time refusal that
@@ -562,7 +572,7 @@ def promote_strategy(
                 # before raising so one missing input cannot mask the other.
                 refusals = list(
                     universe_promotion_refusals(
-                        load_result_universe(conn, result_id),
+                        universes.get(result_id),
                         evaluated_instrument_count=evaluated_count_by_result[result_id],
                     )
                 )
@@ -570,7 +580,7 @@ def promote_strategy(
                 # frozen record rather than trusted. Same shape and the same
                 # argument as the universe replay above; the record stores the
                 # comparison's INPUTS so the verdict can be disagreed with.
-                refusals.extend(ambiguity_promotion_refusals(load_result_ambiguity(conn, result_id)))
+                refusals.extend(ambiguity_promotion_refusals(ambiguities.get(result_id)))
                 # #2625 — the row's own STRUCTURAL stamps. ⚠ These were
                 # persisted and never replayed: before this, a result stamped
                 # `survivor_only` / `carry_unmodelled` / `fx_unmodelled` — which
@@ -595,9 +605,9 @@ def promote_strategy(
                 # stamps — see `stored_result_promotion_refusals` for why the
                 # read directly above is kept rather than sourced from the
                 # rebuilt object.
-                refusals.extend(stored_result_promotion_refusals(conn, result_id))
+                refusals.extend(stored_refusals[result_id])
                 refusals.extend(holdout_refusals)
-                evidence = load_promotion_evidence(conn, result_id)
+                evidence = evidences.get(result_id)
                 if evidence is None:
                     refusals.append("promotion_evidence_missing")
                 else:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal, DecimalException
 from typing import Any, cast
@@ -275,17 +276,12 @@ def _evidence_from_payload(payload: dict[str, Any]) -> PromotionEvidence:
     )
 
 
-def load_promotion_evidence(conn: psycopg.Connection[Any], result_id: int) -> PromotionEvidence | None:
-    row = conn.execute(
-        """
-        SELECT evidence_version, payload_sha256, evidence_payload
-        FROM strategy_promotion_evidence
-        WHERE result_id = %s
-        """,
-        (result_id,),
-    ).fetchone()
-    if row is None:
-        return None
+_SELECT_EVIDENCE_COLUMNS = "evidence_version, payload_sha256, evidence_payload"
+
+
+def _evidence_from_row(result_id: int, row: Any) -> PromotionEvidence:
+    """Verify and rebuild one row. Shared so the single and batch reads cannot
+    verify differently."""
     payload = row[2]
     if not isinstance(payload, dict):
         raise RuntimeError(f"promotion evidence for result {result_id} is not an object")
@@ -302,9 +298,43 @@ def load_promotion_evidence(conn: psycopg.Connection[Any], result_id: int) -> Pr
     return evidence
 
 
+def load_promotion_evidence(conn: psycopg.Connection[Any], result_id: int) -> PromotionEvidence | None:
+    row = conn.execute(
+        f"""
+        SELECT {_SELECT_EVIDENCE_COLUMNS}
+        FROM strategy_promotion_evidence
+        WHERE result_id = %s
+        """,  # noqa: S608 - module-level column literal, no caller input
+        (result_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _evidence_from_row(result_id, row)
+
+
+def load_promotion_evidences(conn: psycopg.Connection[Any], result_ids: Sequence[int]) -> dict[int, PromotionEvidence]:
+    """Every stored evidence record for ``result_ids``, in ONE statement (#2641).
+
+    Keys are only the results that HAVE one; ``promotion_evidence_missing`` is
+    the caller's name for the absent case, so a partial mapping preserves it.
+    """
+    if not result_ids:
+        return {}
+    rows = conn.execute(
+        f"""
+        SELECT result_id, {_SELECT_EVIDENCE_COLUMNS}
+        FROM strategy_promotion_evidence
+        WHERE result_id = ANY(%(result_ids)s::bigint[])
+        """,  # noqa: S608 - module-level column literal, no caller input
+        {"result_ids": list(result_ids)},
+    ).fetchall()
+    return {int(row[0]): _evidence_from_row(int(row[0]), row[1:]) for row in rows}
+
+
 __all__ = [
     "MAX_PAYLOAD_BYTES",
     "evidence_sha256",
     "load_promotion_evidence",
+    "load_promotion_evidences",
     "store_promotion_evidence",
 ]

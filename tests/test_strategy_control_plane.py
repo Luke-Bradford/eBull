@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import psycopg.sql
@@ -16,6 +16,8 @@ from app.services.result_ledger import (
     store_holdout_result,
     store_in_sample_arm_pair,
     store_in_sample_result,
+    stored_result_promotion_refusals,
+    stored_result_promotion_refusals_for,
 )
 from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
 from app.services.strategy_control_plane import (
@@ -45,14 +47,22 @@ from app.services.strategy_promotion_evidence import (
     PromotionEvidence,
     RecentYearEvidence,
 )
-from app.services.strategy_promotion_evidence_store import store_promotion_evidence
+from app.services.strategy_promotion_evidence_store import (
+    load_promotion_evidences,
+    store_promotion_evidence,
+)
 from app.services.strategy_result import StrategyResult
 from app.services.strategy_result_ambiguity import (
     AMBIGUITY_RULE_VERSION,
     AmbiguityRecord,
+    load_result_ambiguities,
     store_result_ambiguity,
 )
-from app.services.strategy_result_universe import ResultUniverseRecord, store_result_universe
+from app.services.strategy_result_universe import (
+    ResultUniverseRecord,
+    load_result_universes,
+    store_result_universe,
+)
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
@@ -1356,3 +1366,126 @@ def test_an_unsupported_currency_is_unrepresentable_at_rest(
                 (deployment.deployment_id,),
             )
     assert excinfo.value.diag.constraint_name == constraint
+
+
+class _CountingConn:
+    """A connection that records how many statements pass through ``execute``.
+
+    ⚠ Counts the CALLS this code makes, not what the server parses — which is
+    exactly the property #2641 is about. A batch that issued one statement per
+    result would be invisible to a timing assertion on an idle box and is
+    obvious here.
+    """
+
+    def __init__(self, conn: psycopg.Connection[Any]) -> None:
+        self._conn = conn
+        self.statements = 0
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        self.statements += 1
+        return self._conn.execute(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+def _three_stored_rows(conn: psycopg.Connection[Any]) -> list[int]:
+    """Three stored in-sample rows, each its own arm pair so criterion 9 passes.
+
+    Distinct ``input_rule_set_version`` per pair: neither the metrics nor the
+    DSR is part of ``ResultIdentity``, so pairs differing only in those hash to
+    the same ``result_version`` and collide on ``strategy_results_unique``.
+    """
+    result_ids: list[int] = []
+    for index in range(3):
+        version = f"price-quarantine-v1+2641batch{index}"
+        masked = _promotable_row(
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            namespace="in_sample",
+            ambiguity_arm="worst_case",
+            quarantine_arm="masked",
+            input_rule_set_version=version,
+        )
+        admitted = _promotable_row(
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            namespace="in_sample",
+            ambiguity_arm="worst_case",
+            quarantine_arm="admitted",
+            input_rule_set_version=version,
+        )
+        masked_id, _ = store_in_sample_arm_pair(conn, masked, admitted)
+        _universe_record(conn, masked_id, evaluated=frozenset({1, 2, 3}))
+        _ambiguity_record(conn, masked_id)
+        store_promotion_evidence(conn, result_id=masked_id, evidence=_passing_promotion_evidence())
+        result_ids.append(masked_id)
+    return result_ids
+
+
+def test_pinned_result_reads_do_not_scale_with_the_batch(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2641 — one statement per record type across the WHOLE batch.
+
+    The per-result loop issued five round trips per pinned result, so the read
+    cost was N+1 in the batch size. Asserting the count is EQUAL at N=1 and N=3
+    pins the property the issue asks for; asserting merely "fewer than before"
+    would pass for a batch that still grew.
+    """
+    conn = ebull_test_conn
+    result_ids = _three_stored_rows(conn)
+
+    def _counts(ids: list[int]) -> dict[str, int]:
+        counted: dict[str, int] = {}
+        for name, call in (
+            ("universe", load_result_universes),
+            ("ambiguity", load_result_ambiguities),
+            ("evidence", load_promotion_evidences),
+            ("stored_row", stored_result_promotion_refusals_for),
+        ):
+            proxy = _CountingConn(conn)
+            call(cast(Any, proxy), ids)
+            counted[name] = proxy.statements
+        return counted
+
+    one = _counts(result_ids[:1])
+    three = _counts(result_ids)
+
+    assert one == three, "a read that grows with the batch is the N+1 this ticket removes"
+    # The row read is two: the row itself, then criterion 9's arm versions.
+    assert three == {"universe": 1, "ambiguity": 1, "evidence": 1, "stored_row": 2}
+
+
+def test_batched_row_refusals_match_the_per_result_verdict(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """Batching changes the statement count and nothing about the verdict.
+
+    Compared against the singular entry point rather than a hard-coded list, so
+    the two cannot drift apart without this failing — a fixed expectation would
+    keep passing if BOTH sides regressed together.
+    """
+    conn = ebull_test_conn
+    result_ids = _three_stored_rows(conn)
+
+    batched = stored_result_promotion_refusals_for(conn, result_ids)
+    for result_id in result_ids:
+        assert batched[result_id] == stored_result_promotion_refusals(conn, result_id)
+
+
+def test_a_missing_row_in_the_batch_raises_rather_than_refusing(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The absent-row contract survives batching.
+
+    ⚠ It raises for the WHOLE batch now, before any result's refusals are
+    returned — the reordering named in the function's docstring. `promote_strategy`
+    refuses an unknown result_id with its own message long before reaching here,
+    so this is the caller-error path, not an operator-visible one.
+    """
+    conn = ebull_test_conn
+    result_ids = _three_stored_rows(conn)
+
+    with pytest.raises(RuntimeError, match="no stored result row for result_id 99999999"):
+        stored_result_promotion_refusals_for(conn, [*result_ids, 99999999])

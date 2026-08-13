@@ -506,6 +506,16 @@ _COUNT_ARM_PAIR = """
       AND result_version = ANY(%(result_versions)s)
 """
 
+#: The batch form of the above (#2641) — which versions exist, rather than how
+#: many rows. See ``_arm_pairs_present`` for why the two agree.
+_SELECT_ARM_VERSIONS = """
+    SELECT result_version
+    FROM strategy_results_store
+    WHERE strategy_id = %(strategy_id)s
+      AND strategy_version = %(strategy_version)s
+      AND result_version = ANY(%(result_versions)s::text[])
+"""
+
 #: ``sql/269``. Column order is shared with the read below and with
 #: ``_fold_row``; the round-trip test is what pins the three together.
 _FOLD_COLUMNS = """
@@ -1908,10 +1918,59 @@ def quarantine_arm_pair_present(conn: psycopg.Connection[tuple], identity: Resul
     return int(row[0]) == 2
 
 
+def _arm_pairs_present(
+    conn: psycopg.Connection[tuple], identities: Sequence[ResultIdentity]
+) -> dict[ResultIdentity, bool]:
+    """``quarantine_arm_pair_present`` for many identities, in ONE statement (#2641).
+
+    ⚠ MEMBERSHIP, NOT A COUNT — and the two are equivalent only because of
+    ``sql/262_strategy_results.sql:182``, ``UNIQUE (strategy_id,
+    strategy_version, result_version)``. The singular form asks for
+    ``count(*) == 2`` over the two arm versions, which without that constraint
+    could be satisfied by two rows of the SAME arm. Verified on the full
+    population 2026-08-13: 0 duplicate triples over 324 stored rows. If the
+    constraint is ever dropped, this batch and its singular sibling stop
+    agreeing — that is the reason to name it here rather than in a commit
+    message.
+
+    Every identity in one promotion shares a ``(strategy_id, strategy_version)``
+    by construction (they are results pinned to one version), so a single
+    predicate over the union of arm versions covers all of them; a mixed batch
+    would silently ask the wrong question, hence the assertion.
+    """
+    if not identities:
+        return {}
+    strategy_ids = {(identity.strategy_id, identity.strategy_version) for identity in identities}
+    if len(strategy_ids) != 1:
+        raise RuntimeError(f"arm-pair batch spans {len(strategy_ids)} strategy versions; expected exactly one")
+    strategy_id, strategy_version = next(iter(strategy_ids))
+    siblings = {
+        identity: replace(identity, quarantine_arm=("admitted" if identity.quarantine_arm == "masked" else "masked"))
+        for identity in identities
+    }
+    wanted = sorted({identity.version for identity in identities} | {s.version for s in siblings.values()})
+    rows = conn.execute(
+        _SELECT_ARM_VERSIONS,
+        {
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
+            "result_versions": wanted,
+        },
+    ).fetchall()
+    present = {str(row[0]) for row in rows}
+    return {identity: identity.version in present and siblings[identity].version in present for identity in identities}
+
+
 _SELECT_RESULT_BY_ID = f"""
     SELECT {_RESULT_COLUMNS}
     FROM strategy_results_store
     WHERE result_id = %(result_id)s
+"""  # noqa: S608 - a module-level literal, no caller input reaches the fragment
+
+_SELECT_RESULTS_BY_IDS = f"""
+    SELECT result_id, {_RESULT_COLUMNS}
+    FROM strategy_results_store
+    WHERE result_id = ANY(%(result_ids)s::bigint[])
 """  # noqa: S608 - a module-level literal, no caller input reaches the fragment
 
 
@@ -1956,16 +2015,16 @@ def stored_result_promotion_refusals(conn: psycopg.Connection[tuple], result_id:
     (``sql/262``, ``sql/335``), so this is defence in depth; the two coercions
     must not be collapsed onto the weaker one.
     """
-    row = conn.execute(_SELECT_RESULT_BY_ID, {"result_id": result_id}).fetchone()
-    if row is None:
-        # ⚠ RAISES, does not refuse. `PromotionRefusal` is a closed vocabulary
-        # of reasons a REAL result may not be promoted; "the row does not exist"
-        # is a caller error, and `promote_strategy` has already refused an
-        # unknown result_id with its own message before reaching here. Inventing
-        # a refusal code for it would put a programming error into the operator's
-        # list of things to fix about a strategy.
-        raise RuntimeError(f"no stored result row for result_id {result_id}")
-    result = _result_from_row(row)
+    return stored_result_promotion_refusals_for(conn, [result_id])[result_id]
+
+
+def _refusals_for_result(result: StrategyResult, *, arm_pair_present: bool) -> tuple[PromotionRefusal, ...]:
+    """The pure half: ``check_promotable``'s order over one rebuilt row.
+
+    Split out so the single and batch reads apply the same clauses in the same
+    order — the acceptance on #2641 is that batching changes the number of
+    statements and nothing about the verdict.
+    """
     refusals: list[PromotionRefusal] = []
     # `check_promotable`'s order, minus the blocks the transition replays from
     # their own frozen records (universe, ambiguity) or reads separately (the
@@ -1982,10 +2041,46 @@ def stored_result_promotion_refusals(conn: psycopg.Connection[tuple], result_id:
     # Criterion 9 — re-derived from the two arms' rows rather than from a
     # recorded boolean. See `quarantine_arm_pair_present` for why the recording
     # door is not the one the transition uses.
-    if not quarantine_arm_pair_present(conn, result.identity):
+    if not arm_pair_present:
         refusals.append("quarantine_arms_not_compared")
     refusals.extend(synthetic_control_promotion_refusals(result.synthetic_control))
     return tuple(refusals)
+
+
+def stored_result_promotion_refusals_for(
+    conn: psycopg.Connection[tuple], result_ids: Sequence[int]
+) -> dict[int, tuple[PromotionRefusal, ...]]:
+    """``stored_result_promotion_refusals`` for a whole batch, in TWO statements (#2641).
+
+    One row read for every result, one arm-version read for every identity —
+    where the per-result form issued two per result. The verdict, its codes and
+    their order are unchanged; only the statement count moves.
+
+    ⚠ Same ``RuntimeError`` on a missing row, and the same masking cost: a
+    corrupt or absent row anywhere in the batch now raises BEFORE any result's
+    refusals are returned, where the per-result loop would have reported the
+    earlier results first. That reordering is inherent to batching and is why it
+    is stated rather than assumed — the raise is an integrity failure either
+    way, but which one an operator sees first has changed.
+    """
+    if not result_ids:
+        return {}
+    rows = conn.execute(_SELECT_RESULTS_BY_IDS, {"result_ids": list(result_ids)}).fetchall()
+    results = {int(row[0]): _result_from_row(row[1:]) for row in rows}
+    for result_id in result_ids:
+        if result_id not in results:
+            # ⚠ RAISES, does not refuse. `PromotionRefusal` is a closed vocabulary
+            # of reasons a REAL result may not be promoted; "the row does not exist"
+            # is a caller error, and `promote_strategy` has already refused an
+            # unknown result_id with its own message before reaching here. Inventing
+            # a refusal code for it would put a programming error into the operator's
+            # list of things to fix about a strategy.
+            raise RuntimeError(f"no stored result row for result_id {result_id}")
+    pairs = _arm_pairs_present(conn, [results[result_id].identity for result_id in result_ids])
+    return {
+        result_id: _refusals_for_result(results[result_id], arm_pair_present=pairs[results[result_id].identity])
+        for result_id in result_ids
+    }
 
 
 # ---------------------------------------------------------------------------

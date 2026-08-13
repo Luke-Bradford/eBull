@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -185,26 +186,15 @@ def store_result_ambiguity(conn: psycopg.Connection[Any], *, result_id: int, rec
     )
 
 
-def load_result_ambiguity(conn: psycopg.Connection[Any], result_id: int) -> AmbiguityRecord | None:
-    """The frozen record, hash-verified, or ``None`` when no record exists.
+_SELECT_AMBIGUITY_COLUMNS = (
+    "ambiguity_rule_version, comparison_basis, best_case_sharpe, "
+    "worst_case_sharpe, cohort_gap_threshold, payload_sha256"
+)
 
-    ⚠ Corruption RAISES rather than refuses, matching ``load_result_universe``
-    and ``load_promotion_evidence``: a record that fails its own hash is an
-    integrity failure to surface loudly, not a gate verdict to report politely.
-    The cost is named in the #2625 spec — a corrupt record aborts before the
-    other refusals are gathered, so it MASKS them.
-    """
-    row = conn.execute(
-        """
-        SELECT ambiguity_rule_version, comparison_basis, best_case_sharpe,
-               worst_case_sharpe, cohort_gap_threshold, payload_sha256
-        FROM strategy_result_ambiguity
-        WHERE result_id = %s
-        """,
-        (result_id,),
-    ).fetchone()
-    if row is None:
-        return None
+
+def _record_from_row(result_id: int, row: Any) -> AmbiguityRecord:
+    """Verify and rebuild one row. Shared so the single and batch reads cannot
+    verify differently."""
     basis = str(row[1])
     if basis not in ("shared_measurement", "arm_sharpes"):
         raise RuntimeError(f"result ambiguity record for result {result_id} has unknown basis {basis!r}")
@@ -218,6 +208,49 @@ def load_result_ambiguity(conn: psycopg.Connection[Any], result_id: int) -> Ambi
     if record_sha256(record) != str(row[5]):
         raise RuntimeError(f"result ambiguity hash mismatch for result {result_id}")
     return record
+
+
+def load_result_ambiguity(conn: psycopg.Connection[Any], result_id: int) -> AmbiguityRecord | None:
+    """The frozen record, hash-verified, or ``None`` when no record exists.
+
+    ⚠ Corruption RAISES rather than refuses, matching ``load_result_universe``
+    and ``load_promotion_evidence``: a record that fails its own hash is an
+    integrity failure to surface loudly, not a gate verdict to report politely.
+    The cost is named in the #2625 spec — a corrupt record aborts before the
+    other refusals are gathered, so it MASKS them.
+    """
+    row = conn.execute(
+        f"""
+        SELECT {_SELECT_AMBIGUITY_COLUMNS}
+        FROM strategy_result_ambiguity
+        WHERE result_id = %s
+        """,  # noqa: S608 - module-level column literal, no caller input
+        (result_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _record_from_row(result_id, row)
+
+
+def load_result_ambiguities(conn: psycopg.Connection[Any], result_ids: Sequence[int]) -> dict[int, AmbiguityRecord]:
+    """Every frozen record for ``result_ids``, in ONE statement (#2641).
+
+    Keys are only the results that HAVE a record; an absent one is already named
+    by ``ambiguity_verdict_unrecorded``, so a partial mapping preserves the
+    distinction. Same snapshot bound as ``load_result_universes``: one instant
+    for this record type, not across record types.
+    """
+    if not result_ids:
+        return {}
+    rows = conn.execute(
+        f"""
+        SELECT result_id, {_SELECT_AMBIGUITY_COLUMNS}
+        FROM strategy_result_ambiguity
+        WHERE result_id = ANY(%(result_ids)s::bigint[])
+        """,  # noqa: S608 - module-level column literal, no caller input
+        {"result_ids": list(result_ids)},
+    ).fetchall()
+    return {int(row[0]): _record_from_row(int(row[0]), row[1:]) for row in rows}
 
 
 def ambiguity_promotion_refusals(record: AmbiguityRecord | None) -> tuple[str, ...]:
