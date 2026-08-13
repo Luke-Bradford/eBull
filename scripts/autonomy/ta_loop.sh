@@ -138,8 +138,35 @@ git_show_to() {
 # point of #2658 is that a human opening status.md can see WHICH prompt ran.
 prompt_status="not yet checked"
 
+# ⚠ `git show origin/main:…` reads the LOCAL remote-tracking ref and contacts
+# nothing. A merge landing on GitHub — which is where every prompt change lands,
+# since the loop merges from a different branch — leaves this worktree's
+# origin/main untouched, so without this the sync would compare the installed
+# copy against a snapshot as old as the last fetch and call it "in sync". That
+# is #2658 again one layer down: a check that passes because its reference point
+# is stale. Caught by Codex at checkpoint 2.
+#
+# Best-effort: a network failure warns and falls through to the last-known ref
+# rather than halting the loop, on the same reasoning as the UNVERIFIED path.
+refresh_prompt_ref() {
+  local remote branch
+  case "$PROMPT_REF" in
+    */*/*) return 0 ;;   # refs/remotes/... or a path-shaped ref: not <remote>/<branch>
+    */*)   remote="${PROMPT_REF%%/*}"; branch="${PROMPT_REF#*/}" ;;
+    *)     return 0 ;;   # a bare sha or tag — nothing to fetch
+  esac
+  git -C "$WORKTREE" remote get-url "$remote" >/dev/null 2>&1 || return 0
+  # Explicit refspec: `git fetch <remote> <branch>` updates the tracking ref only
+  # when the configured refspec happens to match, and this must not depend on
+  # how the remote was set up.
+  git -C "$WORKTREE" fetch --quiet "$remote" \
+      "+refs/heads/$branch:refs/remotes/$remote/$branch" 2>/dev/null \
+    || log "WARN could not fetch $remote/$branch -- comparing against the last-known $PROMPT_REF"
+}
+
 sync_prompt() {
   local tmp canon_sha installed_sha
+  refresh_prompt_ref
   installed_sha="$(file_sha "$PROMPT")"
   # Same directory as $PROMPT so the replacement below is a rename, not a copy:
   # an iteration must never read a half-written prompt.
@@ -244,8 +271,10 @@ log "=== ta_loop start (worktree=$WORKTREE, max=$MAX_ITERATIONS, cooldown=${COOL
 #
 # The prompt sync runs before the existence check on purpose: a fresh install is
 # now one `cp` of the driver, and the first sync writes the prompt beside it.
-check_driver_freshness
+# sync_prompt first: it refreshes the remote-tracking ref that the driver check
+# then compares against.
 sync_prompt
+check_driver_freshness
 
 if [[ ! -f "$PROMPT" ]]; then
   log "FATAL prompt not found at $PROMPT and none recoverable from $PROMPT_REF:$PROMPT_SOURCE"

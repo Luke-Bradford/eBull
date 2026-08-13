@@ -48,11 +48,15 @@ def _git(repo: Path, *args: str) -> None:
 def loop(tmp_path: Path):
     """A worktree with the driver installed, the canonical prompt on origin/main.
 
-    `origin/main` is minted with `update-ref` rather than by cloning: the driver
-    only ever reads it through `git show`, so a remote-tracking ref pointing at a
-    local commit exercises exactly the same path.
+    A REAL bare `origin` rather than a hand-minted remote-tracking ref: the
+    driver fetches before it compares, and a fixture that fakes the ref would
+    make that fetch untestable — which is the half Codex caught missing.
     """
-    worktree = Path(os.path.realpath(tmp_path)) / "wt"
+    root = Path(os.path.realpath(tmp_path))
+    origin = root / "origin.git"
+    worktree = root / "wt"
+    _git(root, "init", "-q", "--bare", "-b", "main", str(origin))
+
     (worktree / ".autonomy").mkdir(parents=True)
     (worktree / "scripts" / "autonomy").mkdir(parents=True)
     (worktree / CANONICAL_PATH).write_text(CANONICAL_TEXT)
@@ -61,7 +65,8 @@ def loop(tmp_path: Path):
     _git(worktree, "init", "-q", "-b", "main")
     _git(worktree, "add", "-A")
     _git(worktree, "commit", "-q", "-m", "base")
-    _git(worktree, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(worktree, "remote", "add", "origin", str(origin))
+    _git(worktree, "push", "-q", "-u", "origin", "main")
 
     installed_dir = worktree / "var" / "autonomy" / "bin"
     installed_dir.mkdir(parents=True)
@@ -82,6 +87,7 @@ def loop(tmp_path: Path):
 
     class Loop:
         root = worktree
+        origin_url = origin
         prompt = installed_dir / "ta_loop_prompt.md"
         driver = installed_dir / "ta_loop.sh"
         handed_to_agent = capture
@@ -172,6 +178,40 @@ def test_an_in_sync_prompt_is_reported_with_its_hash(loop):
     assert "RESYNCED" not in log
 
 
+def test_a_prompt_merged_elsewhere_is_fetched_not_just_read_locally(loop, tmp_path):
+    """`git show origin/main:…` contacts nothing — it reads the last fetch.
+
+    Every prompt change lands on GitHub from some other branch, so without a
+    fetch the loop would compare the installed copy against a snapshot as old as
+    whenever this worktree last synced and call it "in sync". The stale
+    reference point IS the #2658 defect, one layer down.
+    """
+    loop.prompt.write_text(CANONICAL_TEXT)
+    merged_elsewhere = "# canonical prompt v2\n\nThe milestone moved.\n"
+
+    other = Path(os.path.realpath(tmp_path)) / "other"
+    _git(Path(os.path.realpath(tmp_path)), "clone", "-q", str(loop.origin_url), str(other))
+    (other / CANONICAL_PATH).write_text(merged_elsewhere)
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "re-aim the loop")
+    _git(other, "push", "-q", "origin", "main")
+
+    # The loop's own remote-tracking ref is still at the old commit here — this
+    # is the state the driver must not trust.
+    before = subprocess.run(
+        ["git", "-C", str(loop.root), "show", f"origin/main:{CANONICAL_PATH}"],
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert before == CANONICAL_TEXT
+
+    result = loop.run()
+
+    assert result.returncode == 0, result.stderr
+    assert loop.handed_to_agent.read_text().strip() == merged_elsewhere.strip()
+    assert "prompt RESYNCED" in loop.log.read_text()
+
+
 def test_a_stale_driver_warns_and_is_never_replaced(loop):
     """The prompt is auto-corrected; the driver deliberately is not.
 
@@ -183,7 +223,7 @@ def test_a_stale_driver_warns_and_is_never_replaced(loop):
     tracked.write_text(installed_before.decode() + "\n# a later commit\n")
     _git(loop.root, "add", "-A")
     _git(loop.root, "commit", "-q", "-m", "driver moves on")
-    _git(loop.root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(loop.root, "push", "-q", "origin", "main")
 
     result = loop.run()
 
