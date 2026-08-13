@@ -345,7 +345,13 @@ def configure_core_mandate(
         # Inside the lock and inside this transaction, so the freshness test and
         # the INSERT see the same `now()` -- transaction-start time is constant,
         # which is what removes the check-then-write window.
-        assert values.core_instrument_id is not None  # guaranteed by validate_core_mandate
+        # ⚠ NOT an `assert`. `validate_core_mandate` does guarantee this, but
+        # `python -O` strips asserts, and the surviving code would then call the
+        # gate with `instrument_id=None` -- which fails closed only because no
+        # proof can match NULL. A check standing between a caller and an
+        # authorisation must not be removable by an interpreter flag.
+        if values.core_instrument_id is None:
+            raise CoreMandateError("an enabled core mandate must name a core instrument")
         require_core_eligibility(
             conn,
             instrument_id=values.core_instrument_id,
