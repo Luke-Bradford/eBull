@@ -20,6 +20,7 @@ import psycopg.rows
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY,
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
+    canonical_currency_code,
     normalise_deployment_currency,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
@@ -588,8 +589,8 @@ def configure_deployment(
     supported = normalise_deployment_currency(currency)
     if supported is None:
         raise StrategyControlError(
-            f"{DEPLOYMENT_CURRENCY_UNSUPPORTED}: {currency.strip().upper()!r} is not a supported "
-            f"deployment currency (FX is unmodelled -- #2363)"
+            f"{DEPLOYMENT_CURRENCY_UNSUPPORTED}: {canonical_currency_code(currency)!r} is not a "
+            f"supported deployment currency (FX is unmodelled -- #2363)"
         )
     currency = supported
 

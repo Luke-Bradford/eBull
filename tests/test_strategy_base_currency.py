@@ -8,6 +8,7 @@ from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY,
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
     SUPPORTED_DEPLOYMENT_CURRENCIES,
+    canonical_currency_code,
     normalise_deployment_currency,
 )
 
@@ -82,6 +83,30 @@ def test_normalise_canonicalises_case_and_operator_whitespace(supplied: str) -> 
 @pytest.mark.parametrize("supplied", ["GBP", "EUR", "gbp", "", "   ", "US", "USDD", "$"])
 def test_normalise_returns_none_for_anything_unsupported(supplied: str) -> None:
     assert normalise_deployment_currency(supplied) is None
+
+
+@pytest.mark.parametrize("supplied", ["USD", "usd", " uSd ", "gbp", " eur "])
+def test_the_refusal_path_canonicalises_by_the_same_rule_as_the_admit_path(
+    supplied: str,
+) -> None:
+    """One rule, both paths -- the refusal message cannot canonicalise differently.
+
+    ``normalise_deployment_currency`` answers ``None`` exactly when a caller needs to
+    NAME the offending code, so the refusal has no output of its own to reuse and the
+    obvious shortcut is a second ``.strip().upper()`` at the message.  That copy is
+    free to drift: widen canonicalisation here (say, to fold a full-width ``ＵＳＤ``)
+    and the message would go on reporting a code that was never the one compared.
+
+    Pinned by construction rather than by asserting both spellings: ``normalise_...``
+    calls ``canonical_currency_code``, so agreement on the ADMIT side is definitional.
+    What this adds is the REFUSE side, where nothing structural forces it.
+    """
+    canonical = canonical_currency_code(supplied)
+    assert canonical == supplied.strip().upper()
+    if canonical in SUPPORTED_DEPLOYMENT_CURRENCIES:
+        assert normalise_deployment_currency(supplied) == canonical
+    else:
+        assert normalise_deployment_currency(supplied) is None
 
 
 def test_the_refusal_code_is_the_one_already_rendered_to_the_operator() -> None:

@@ -50,19 +50,29 @@ SUPPORTED_DEPLOYMENT_CURRENCIES: frozenset[str] = frozenset({DEPLOYMENT_CURRENCY
 DEPLOYMENT_CURRENCY_UNSUPPORTED = "deployment_currency_unsupported"
 
 
-def normalise_deployment_currency(value: str) -> str | None:
-    """Canonical form of ``value`` if it is a supported deployment currency, else None.
+def canonical_currency_code(value: str) -> str:
+    """Canonical form of ``value``, whether or not it is a supported code.
 
     ISO 4217 makes upper case the canonical form of a currency code, which is the
     whole of what it licenses here.  ``strip()`` is applied because callers reject
     blank input separately (``_require_text``), so whitespace reaching this point is
     operator slop around a real code rather than a distinguishable empty value.
 
+    Split out of ``normalise_deployment_currency`` so a REFUSAL can name the code it
+    actually compared: on the refusal path ``normalise_...`` answers ``None``, so
+    there is no output for the message to reuse, and re-deriving ``.strip().upper()``
+    at the message would be a second copy of this rule free to drift from it.
+
     ⚠ Not for broker response fields.  What the broker may put in its ``currency``
     field is governed by its contract, not by ISO, and today the executor rejects
     ``" USD "`` -- widening that would be an unsourced behaviour change.
     """
-    code = value.strip().upper()
+    return value.strip().upper()
+
+
+def normalise_deployment_currency(value: str) -> str | None:
+    """Canonical form of ``value`` if it is a supported deployment currency, else None."""
+    code = canonical_currency_code(value)
     return code if code in SUPPORTED_DEPLOYMENT_CURRENCIES else None
 
 
@@ -70,5 +80,6 @@ __all__ = [
     "DEPLOYMENT_CURRENCY",
     "DEPLOYMENT_CURRENCY_UNSUPPORTED",
     "SUPPORTED_DEPLOYMENT_CURRENCIES",
+    "canonical_currency_code",
     "normalise_deployment_currency",
 ]

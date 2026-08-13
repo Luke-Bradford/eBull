@@ -856,7 +856,7 @@ def test_deployment_currency_is_validated_at_the_capital_authority(
     conn = ebull_test_conn
     _paper_stage(conn)
 
-    with pytest.raises(StrategyControlError, match="deployment_currency_unsupported"):
+    with pytest.raises(StrategyControlError, match="deployment_currency_unsupported") as refusal:
         configure_deployment(
             conn,
             strategy_id="S-OWN",
@@ -866,8 +866,11 @@ def test_deployment_currency_is_validated_at_the_capital_authority(
             enabled=True,
             changed_by="operator",
             reason="FX is unmodelled (#2363)",
-            currency="GBP",
+            currency=" gbp ",
         )
+    # Sloppy input on purpose: the message must name the code the membership test
+    # actually saw, so an operator reading it can tell which string was rejected.
+    assert "'GBP'" in str(refusal.value)
     assert conn.execute("SELECT count(*) FROM strategy_deployments").fetchone() == (0,)
 
 
