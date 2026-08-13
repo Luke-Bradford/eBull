@@ -389,13 +389,20 @@ def _stalled_job_names(conn: psycopg.Connection[object], now: datetime) -> set[s
     headline degradation is a nice-to-have, not load-bearing for the page. Uses
     the SAME orchestrator exclusion as the watchdog: ``orchestrator_*`` jobs write
     ``sync_runs`` not ``job_runs`` and would otherwise false-stall.
+
+    ⚠ The savepoint is what makes "degrades gracefully" true (#2674): on the
+    non-autocommit pooled connection, a bare catch leaves the transaction aborted
+    and the NEXT probe fails — here that is ``_build_credential_health_summary``,
+    which runs outside the handler's guard and would 500 the page this function
+    is promising not to 503.
     """
     try:
         from app.services.job_liveness import find_stalled_jobs
 
         excluded = {JOB_ORCHESTRATOR_FULL_SYNC, JOB_ORCHESTRATOR_HIGH_FREQUENCY_SYNC}
         jobs = [(j.name, j.cadence) for j in SCHEDULED_JOBS if j.name not in excluded]
-        return {s.job_name for s in find_stalled_jobs(conn, jobs, now)}
+        with conn.transaction():
+            return {s.job_name for s in find_stalled_jobs(conn, jobs, now)}
     except Exception:
         logger.warning("get_system_status: stall probe failed; headline stall signal omitted", exc_info=True)
         return set()
@@ -615,9 +622,14 @@ def _jobs_process_down(conn: psycopg.Connection[object], now: datetime) -> bool:
     page. Best-effort: any failure returns ``False`` so a probe error never
     503s ``/system/status`` — the headline degradation is a nice-to-have, the
     per-layer rows already carry the underlying fault.
+
+    ⚠ Savepoint per #2674, same reason as ``_stalled_job_names``: catching the
+    exception without rolling back leaves the shared connection aborted, so the
+    "never 503s" promise held only until the next probe ran.
     """
     try:
-        return _build_jobs_process_health(conn, now).state == "down"
+        with conn.transaction():
+            return _build_jobs_process_health(conn, now).state == "down"
     except Exception:
         logger.warning(
             "get_system_status: jobs-process heartbeat probe failed; engine-down signal omitted",
@@ -665,6 +677,22 @@ def _build_credential_health_summary(conn: psycopg.Connection[object]) -> Creden
     Falls back to MISSING when no operator yet so the admin UI shows
     the "save credentials in Settings" path on a fresh install rather
     than misreporting VALID.
+
+    ⚠ This is the function #2674 was reported ON: it runs OUTSIDE
+    ``get_system_status``'s 503 guard, so anything it raises is an HTTP
+    **500**. Two changes keep that from happening:
+
+    * ``sole_operator_id`` is now inside the guarded block. It previously
+      caught only the two operator-cardinality errors, so a DB-level fault
+      on the same lookup — poisoned transaction or otherwise — escaped and
+      500'd the page.
+    * the reads run in a SAVEPOINT, so a failure here leaves the connection
+      usable for the caller rather than merely the exception caught.
+
+    MISSING on a read failure is the SAME verdict the inner catch already
+    reported, not a new one — an honest 503 on a DB-level fault is
+    ``get_conn``'s job (``app/db/__init__.py``), which fires before any
+    handler code runs.
     """
     from app.services.credential_health import (
         CredentialHealth,
@@ -677,26 +705,27 @@ def _build_credential_health_summary(conn: psycopg.Connection[object]) -> Creden
         sole_operator_id,
     )
 
+    worst_health: CredentialHealth | None = None
+    recovered_at = None
+    last_error = None
     try:
-        op_id = sole_operator_id(conn)
-    except NoOperatorError:
+        # No early `return` inside the savepoint (prevention log, "Early return
+        # inside `with conn.transaction()`"): an empty `environments` leaves
+        # `worst_health` None and falls through to the same MISSING below.
+        with conn.transaction():
+            op_id = sole_operator_id(conn)
+            for env in _operator_environments(conn, op_id):
+                env_health = get_operator_credential_health(conn, operator_id=op_id, environment=env)
+                if worst_health is None or _is_worse(env_health, worst_health):
+                    worst_health = env_health
+
+            if worst_health is not None:
+                recovered_at = get_last_recovered_at(conn, operator_id=op_id)
+                last_error = (
+                    _latest_credential_error(conn, op_id) if worst_health == CredentialHealth.REJECTED else None
+                )
+    except NoOperatorError, AmbiguousOperatorError:
         return CredentialHealthSummary(state="missing")
-    except AmbiguousOperatorError:
-        return CredentialHealthSummary(state="missing")
-
-    try:
-        environments = _operator_environments(conn, op_id)
-        if not environments:
-            return CredentialHealthSummary(state="missing")
-
-        worst_health: CredentialHealth | None = None
-        for env in environments:
-            env_health = get_operator_credential_health(conn, operator_id=op_id, environment=env)
-            if worst_health is None or _is_worse(env_health, worst_health):
-                worst_health = env_health
-
-        recovered_at = get_last_recovered_at(conn, operator_id=op_id)
-        last_error = _latest_credential_error(conn, op_id) if worst_health == CredentialHealth.REJECTED else None
     except Exception:
         logger.exception("credential_health summary lookup failed; reporting missing")
         return CredentialHealthSummary(state="missing")

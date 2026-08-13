@@ -4538,3 +4538,34 @@ with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
 - Enforced in: `sql/345_price_daily_price_date_index.sql` (header carries all three
   measurements and states that the index alone is insufficient);
   `app/services/strategy_scan_freshness.py::_RECENT_TRADING_DATES`.
+
+### A `try/except` around a DB call contains the exception, not the transaction
+
+- First seen in: #2624 scope 3 (Codex checkpoint 2, in new code), then #2674 (the same defect
+  already shipped in `check_all_layers`, `_stalled_job_names`, `_jobs_process_down` and
+  `_build_credential_health_summary`).
+- Symptom: `check_all_layers`' docstring promised "the rest of the report still renders" and
+  it did not. `get_conn` hands out a **non-autocommit** pooled connection, so a failed query
+  leaves Postgres' transaction ABORTED; catching the Python exception does not clear that, and
+  every later statement on the same connection raises `InFailedSqlTransaction`. Measured on
+  dev: `caught: UndefinedTable` → `subsequent query RAISES: InFailedSqlTransaction`; the same
+  failure inside `conn.transaction()` → `after savepoint: OK`. So ONE broken layer failed all
+  eight — seven of them for a reason unrelated to their own health, which also hides which
+  layer started it — and then took out `_build_credential_health_summary`, which runs outside
+  the handler's 503 guard, turning a per-layer `error` row into an HTTP **500** on the page
+  whose entire job is to stay readable when something is broken.
+- The general shape: **containment on a transactional connection is `with conn.transaction():`
+  (a savepoint), not `try/except`.** The bare catch reads as correct at the call site precisely
+  because the damage lands on an unrelated later statement.
+- Prevention: any `try/except` whose justification is "best-effort, must not fail the caller"
+  around a DB call on a **caller-supplied** connection needs the savepoint. Grep the handler
+  for every probe that shares one connection and check each — the fault propagates forward, so
+  the LAST reader is where it surfaces and the FIRST is where it starts. ⚠ A test asserting the
+  returned `error` row PASSES against the broken version (`check_all_layers`' pre-existing
+  `test_single_layer_failure_does_not_abort_others` did); the post-condition that distinguishes
+  contained from poisoned is a **subsequent statement on the same connection**.
+- Enforced in: `app/services/ops_monitor.py::check_all_layers`;
+  `app/api/system.py::_stalled_job_names` / `_jobs_process_down` /
+  `_build_credential_health_summary`; `app/services/strategy_scan_freshness.py::check_scan_freshness`;
+  `tests/test_2674_status_probe_containment.py`;
+  `tests/test_ops_monitor.py::TestCheckAllLayers::test_a_failed_layer_leaves_the_connection_usable`.

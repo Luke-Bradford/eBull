@@ -362,7 +362,7 @@ def check_all_layers(
 ) -> list[LayerHealth]:
     """Check staleness for every monitored data layer.
 
-    Each per-layer query is wrapped in a try/except so a single broken layer
+    Each per-layer query runs in its own SAVEPOINT so a single broken layer
     (e.g. table missing during a partial migration) yields a ``LayerHealth``
     with ``status="error"`` instead of bubbling out and 500-ing the entire
     operator visibility endpoint.
@@ -370,12 +370,27 @@ def check_all_layers(
     Prevention-log #70: never let an infra-level fault degrade into a silent
     HTTP 200; here we surface it per-layer so the operator can see *which*
     layer failed, while the rest of the report still renders.
+
+    ⚠ ``conn.transaction()`` is what makes that last clause TRUE, and the
+    try/except alone did not (#2674).  ``get_conn`` hands out a NON-autocommit
+    pooled connection, so a failed query leaves Postgres' transaction ABORTED;
+    catching the Python exception does not clear it, and every later statement on
+    the same connection raises ``InFailedSqlTransaction``.  So ONE broken layer
+    used to fail all eight — seven of them for a reason unrelated to their own
+    health, which also hides which layer started it — and then took out
+    ``check_job_health`` and ``_build_credential_health_summary`` downstream, i.e.
+    exactly the whole-endpoint failure this containment exists to prevent.
+
+    The general shape, for the next reader: **a try/except around a DB call
+    contains the exception, not the transaction.**  It reads as correct at the
+    call site because the damage lands on an unrelated later statement.
     """
     now = now or _utcnow()
     results: list[LayerHealth] = []
     for layer in ALL_LAYERS:
         try:
-            results.append(check_layer_staleness(conn, layer, now=now))
+            with conn.transaction():
+                results.append(check_layer_staleness(conn, layer, now=now))
         except Exception:
             # Full exception detail goes to the server-side log only.
             # The `detail` field is surfaced verbatim in the API response,
