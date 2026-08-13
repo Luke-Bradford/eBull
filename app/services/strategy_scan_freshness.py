@@ -32,12 +32,15 @@ Spec: ``docs/proposals/ops/2026-08-13-strategy-scan-freshness.md``
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
 
 import psycopg
+
+logger = logging.getLogger(__name__)
 
 ScanFreshnessStatus = Literal[
     "ok",
@@ -266,9 +269,6 @@ def check_scan_freshness(conn: psycopg.Connection[Any]) -> list[StrategyScanFres
     both ways on dev: bare catch → the following ``SELECT 1`` raises; inside a
     savepoint → it succeeds. Raised by Codex at checkpoint 2.
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
     try:
         with conn.transaction():
             current_versions, watermarks, trading_dates = read_scan_freshness_inputs(conn)
