@@ -17,11 +17,10 @@ Redirect to a file and read the file.
 
 THE ARMS
 --------
-``--reconstruct``  R1. Every stored row rebuilds through ``_result_from_row``,
-                   which is the read path ``stored_result_promotion_refusals``
-                   depends on. A row that does not reconstruct RAISES at the
-                   transition and masks the other refusals, so "how many" is the
-                   number that matters and a sample cannot answer it.
+``--reconstruct``  R1. Every stored row survives ``stored_result_promotion_refusals``
+                   without raising. A row that does not reconstruct RAISES at
+                   the transition and masks the other refusals, so "how many" is
+                   the number that matters and a sample cannot answer it.
 ``--refusals``     R2. The refusal census the transition would now produce, over
                    the FULL population. ⚠ The point is the direction: this must
                    only ever ADD refusals to rows that already refuse. A row
@@ -40,7 +39,7 @@ import collections
 import psycopg
 
 from app.config import settings
-from app.services import result_ledger
+from app.services.result_ledger import holdout_access_counts, stored_result_promotion_refusals
 from app.services.strategy_control_plane import (
     StrategyControlError,
     promote_strategy,
@@ -58,18 +57,25 @@ def _result_ids(conn: psycopg.Connection[tuple]) -> list[int]:
 
 
 def reconstruct(conn: psycopg.Connection[tuple]) -> bool:
-    print("R1 — every stored row reconstructs through _result_from_row")
+    """R1 — every stored row survives the transition's own read path.
+
+    ⚠ GOES THROUGH THE PUBLIC ``stored_result_promotion_refusals`` RATHER THAN
+    ``_result_from_row``, and not only to avoid reaching into a private name.
+    The failure this arm is looking for is a row that RAISES at the transition
+    and so masks the other refusals, and the only faithful way to ask that is to
+    call the thing the transition calls. Reconstruction is what raises inside
+    it, so a raise here is a reconstruction failure by construction.
+    """
+    print("R1 — every stored row survives stored_result_promotion_refusals without raising")
     ids = _result_ids(conn)
     failures: dict[str, list[int]] = collections.defaultdict(list)
     for result_id in ids:
-        row = conn.execute(result_ledger._SELECT_RESULT_BY_ID, {"result_id": result_id}).fetchone()
-        assert row is not None
         try:
-            result_ledger._result_from_row(row)
+            stored_result_promotion_refusals(conn, result_id)
         except Exception as exc:  # noqa: BLE001 - the census is the point
             failures[f"{type(exc).__name__}: {exc}"[:160]].append(result_id)
     ok = len(ids) - sum(len(v) for v in failures.values())
-    print(f"    rows {len(ids)}  reconstructed {ok}  failed {sum(len(v) for v in failures.values())}")
+    print(f"    rows {len(ids)}  clean read {ok}  raised {sum(len(v) for v in failures.values())}")
     for message, bad in failures.items():
         print(f"      {len(bad):5}  {message}  e.g. result_id={bad[0]}")
     return not failures
@@ -81,7 +87,7 @@ def refusals(conn: psycopg.Connection[tuple]) -> bool:
     census: collections.Counter[str] = collections.Counter()
     clean = 0
     for result_id in ids:
-        codes = result_ledger.stored_result_promotion_refusals(conn, result_id)
+        codes = stored_result_promotion_refusals(conn, result_id)
         census.update(codes)
         if not codes:
             clean += 1
@@ -103,7 +109,7 @@ def counts(conn: psycopg.Connection[tuple]) -> bool:
     ).fetchall()
     ok = True
     for strategy_id, strategy_version in versions:
-        pair = result_ledger.holdout_access_counts(conn, str(strategy_id), str(strategy_version))
+        pair = holdout_access_counts(conn, str(strategy_id), str(strategy_version))
         codes = holdout_count_promotion_refusals(
             holdout_evaluations=pair.holdout_evaluations,
             recorded_accesses=pair.recorded_accesses,
