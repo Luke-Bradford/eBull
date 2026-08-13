@@ -250,6 +250,10 @@ def evaluate_core_rebalance(
 
     floor = mandate.min_rebalance_amount
     floor_source: Literal["mandate", "broker"] = "mandate"
+    # Strict `>`, so a TIE reports "mandate".  The applied value is identical
+    # either way; the mandate is named because it is the floor that always
+    # exists, and attributing an equal broker minimum would suggest the verdict
+    # would have differed without it.
     if broker_minimum is not None and broker_minimum > floor:
         floor, floor_source = broker_minimum, "broker"
 

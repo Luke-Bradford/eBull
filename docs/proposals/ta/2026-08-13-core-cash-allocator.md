@@ -257,7 +257,7 @@ be the provenance theatre item 1's spec refused. So it is a caller obligation: *
 | `reason_code` | `None` on an **in-band** hold — inside the band is the mandate working, and that is not a refusal. Set on a **suppressed** hold (`below_min_rebalance_amount`) and on every `refused` |
 | `amount` | non-negative `Decimal`, quantised; `0` on `hold`/`refused` |
 | `core_pct`, `target_pct`, `lower_pct`, `upper_pct` | the arithmetic the verdict used; `None` when no weight could be computed |
-| `effective_floor`, `floor_source` | the floor applied and whether `"mandate"` or `"broker"` won |
+| `effective_floor`, `floor_source` | the floor applied and whether `"mandate"` or `"broker"` won. The broker minimum wins on a **strict** `>`, so a **tie reports `"mandate"`** — the applied value is identical either way, and the mandate is named because it is the floor that always exists; attributing an equal broker minimum would suggest the verdict would have differed without it |
 | `reserve_breached` | current-state breach, `None` when no weight could be computed |
 | `reserve_margin_pct` | **the pre-cost margin over the reserve in the state this verdict leaves you in** — post-trade for a trade, current-state for a `hold`, `None` on a refusal or an uncomputable weight. One meaning, stated, because the earlier draft left it ambiguous between three |
 

@@ -211,6 +211,13 @@ def test_a_broker_minimum_below_the_mandate_floor_does_not_lower_it() -> None:
     assert (decision.effective_floor, decision.floor_source) == (Decimal("100"), "mandate")
 
 
+def test_a_tie_reports_the_mandate_as_the_floor_source() -> None:
+    """The applied value is identical either way; the mandate is the floor that
+    always exists."""
+    decision = evaluate_core_rebalance(mandate(floor="100"), sleeve("700", "300"), broker_minimum=Decimal("100"))
+    assert (decision.effective_floor, decision.floor_source) == (Decimal("100"), "mandate")
+
+
 def test_equality_with_the_floor_acts() -> None:
     decision = evaluate_core_rebalance(mandate(floor="50"), sleeve("700", "300"))
     assert (decision.action, decision.amount) == ("sell_core", Decimal("50"))
