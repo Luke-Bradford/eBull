@@ -624,6 +624,13 @@ class LiveGateFactsView(BaseModel):
     forward_days: int
     paper_closed_trades: int
     paper_days: int
+    #: #2612 — the single-entry arrival counts the two windows above are anchored
+    #: on. Mirrored here deliberately: `LiveGateFactsView(**facts.__dict__)`
+    #: splats every field, so a fact absent from this sibling model is dropped
+    #: silently rather than loudly (the #1955 class), and an operator reading
+    #: `forward_window_ambiguous` needs the count that produced it.
+    forward_observation_entries: int
+    paper_enabled_entries: int
     funded_shadow_average_return_pct: Decimal | None
     unfunded_shadow_average_return_pct: Decimal | None
     shadow_alpha_pct: Decimal | None
