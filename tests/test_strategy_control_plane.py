@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 import psycopg
+import psycopg.sql
 import pytest
 
 from app.services.backtest_run import BACKTEST_UNIVERSE
@@ -838,3 +839,105 @@ def test_funding_rechecks_stage_and_aggregate_active_reservations(
             amount=Decimal("1"),
             reason_code="must_fail_while_paused",
         )
+
+
+def test_deployment_currency_is_validated_at_the_capital_authority(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2603 item 4: the currency is refused by the service, not by a request model.
+
+    Before this, ``configure_deployment``'s only currency guard was ``_require_text``
+    (non-empty), and ``strategy_deployments.currency`` was ``TEXT NOT NULL DEFAULT
+    'USD'`` constrained only by ``currency <> ''`` -- the defect
+    ``docs/review-prevention-log.md:720`` (#232) already names.  The ``Literal["USD"]``
+    fields in ``app/api/strategies.py`` are on RESPONSE views and constrain nothing on
+    the write path, so every non-HTTP caller was unguarded.
+    """
+    conn = ebull_test_conn
+    _paper_stage(conn)
+
+    with pytest.raises(StrategyControlError, match="deployment_currency_unsupported"):
+        configure_deployment(
+            conn,
+            strategy_id="S-OWN",
+            strategy_version="v1",
+            mode="paper",
+            capital_limit=Decimal("1000"),
+            enabled=True,
+            changed_by="operator",
+            reason="FX is unmodelled (#2363)",
+            currency="GBP",
+        )
+    assert conn.execute("SELECT count(*) FROM strategy_deployments").fetchone() == (0,)
+
+
+def test_deployment_currency_is_canonicalised_before_it_is_compared_or_stored(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """A supported code in non-canonical form must not read as a currency CHANGE.
+
+    ``is_risk_reducing_deployment_change`` compares the supplied currency to the stored
+    one with ``==``.  Without normalising first, an operator-supplied ``"usd"`` against
+    a stored ``"USD"`` would make an otherwise risk-reducing edit non-risk-reducing --
+    and the returned ``Deployment`` would report a currency the row does not hold.
+    """
+    conn = ebull_test_conn
+    _paper_stage(conn)
+
+    created = configure_deployment(
+        conn,
+        strategy_id="S-OWN",
+        strategy_version="v1",
+        mode="paper",
+        capital_limit=Decimal("1000"),
+        enabled=True,
+        changed_by="operator",
+        reason="initial paper pot",
+        currency=" usd ",
+    )
+    assert created.currency == "USD"
+    assert conn.execute("SELECT currency FROM strategy_deployments").fetchone() == ("USD",)
+    assert conn.execute("SELECT currency FROM strategy_deployment_events").fetchall() == [("USD",)]
+
+
+@pytest.mark.parametrize(
+    ("table", "constraint"),
+    [
+        ("strategy_deployments", "strategy_deployments_currency_supported"),
+        ("strategy_deployment_events", "strategy_deployment_events_currency_supported"),
+    ],
+)
+def test_an_unsupported_currency_is_unrepresentable_at_rest(
+    ebull_test_conn: psycopg.Connection[Any],
+    table: str,
+    constraint: str,
+) -> None:
+    """sql/338, asserted BY CONSTRAINT NAME.
+
+    Asserting only the exception class passes when some bystander constraint fires --
+    the trap recorded on #2634.  Both tables are covered because the event mirror can
+    otherwise record a currency its current-state row could never hold.
+    """
+    conn = ebull_test_conn
+    _paper_stage(conn)
+    deployment = configure_deployment(
+        conn,
+        strategy_id="S-OWN",
+        strategy_version="v1",
+        mode="paper",
+        capital_limit=Decimal("1000"),
+        enabled=True,
+        changed_by="operator",
+        reason="initial paper pot",
+    )
+    with pytest.raises(psycopg.errors.CheckViolation) as excinfo:
+        with conn.transaction():
+            # sql.Identifier, not an f-string: the prevention log's entry on
+            # f"...{_METADATA_COLS}..." applies to a parametrized table name too.
+            conn.execute(
+                psycopg.sql.SQL("UPDATE {} SET currency = 'GBP' WHERE deployment_id = %s").format(
+                    psycopg.sql.Identifier(table)
+                ),
+                (deployment.deployment_id,),
+            )
+    assert excinfo.value.diag.constraint_name == constraint

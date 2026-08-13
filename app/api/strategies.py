@@ -40,6 +40,10 @@ from app.services.runtime_config import (
     get_runtime_config,
     update_runtime_config,
 )
+from app.services.strategy_base_currency import (
+    DEPLOYMENT_CURRENCY_UNSUPPORTED,
+    SUPPORTED_DEPLOYMENT_CURRENCIES,
+)
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -1126,8 +1130,8 @@ def get_strategy_overview(
             allocation_refusals.append("execution_policy_missing")
         if scan.status != "current":
             allocation_refusals.append("scan_not_current")
-        if control.currency != "USD":
-            allocation_refusals.append("deployment_currency_unsupported")
+        if control.currency not in SUPPORTED_DEPLOYMENT_CURRENCIES:
+            allocation_refusals.append(DEPLOYMENT_CURRENCY_UNSUPPORTED)
         if entry.purpose == "capital_candidate" and not allocation_refusals:
             historically_ready_keys.add(key)
         if entry.purpose == "capital_candidate":
@@ -1890,7 +1894,9 @@ def update_strategy_allocation(
         strategy_version=current_version,
         deployment_id=deployment.deployment_id,
         capital_limit=deployment.capital_limit,
-        currency=row.allocation.currency,
+        # The persisted, normalised value -- not the pre-call `row.allocation.currency`,
+        # which could disagree with the row configure_deployment actually wrote.
+        currency=deployment.currency,
         enabled=deployment.enabled,
         revision=deployment.revision,
     )
