@@ -34,6 +34,15 @@ pytestmark = pytest.mark.integration
 
 
 def _seed_trade(conn: psycopg.Connection[Any], *, instrument_id: int = 2451001) -> tuple[int, int]:
+    """Seed a paper-funded strategy trade linked to a submitted order.
+
+    ⚠ Callers MUST request the ``registered_strategy_test_candidates``
+    fixture. ``configure_deployment`` refuses capital authority to any
+    ``strategy_id`` whose ``STRATEGY_MANIFEST`` purpose is not
+    ``capital_candidate``, and every production entry is
+    ``harness_validation`` today — so ``S-REC`` only becomes fundable
+    through that fixture's monkeypatched manifest.
+    """
     conn.execute(
         "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (%s, %s, %s, true)",
         (instrument_id, f"R{instrument_id}", "Reconciliation test"),
@@ -137,6 +146,7 @@ def _detail(
 
 def test_crash_identity_is_stable_and_recovery_is_idempotent(
     ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
 ) -> None:
     conn = ebull_test_conn
     trade_id, order_id = _seed_trade(conn)
@@ -181,6 +191,7 @@ def test_crash_identity_is_stable_and_recovery_is_idempotent(
 
 def test_pending_partial_fill_is_owned_but_remains_in_backlog(
     ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
 ) -> None:
     conn = ebull_test_conn
     trade_id, order_id = _seed_trade(conn)
@@ -202,6 +213,7 @@ def test_pending_partial_fill_is_owned_but_remains_in_backlog(
 
 def test_same_instrument_manual_position_is_observed_but_never_claimed(
     ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
 ) -> None:
     conn = ebull_test_conn
     trade_id, order_id = _seed_trade(conn)
@@ -230,6 +242,7 @@ def test_same_instrument_manual_position_is_observed_but_never_claimed(
 
 def test_not_found_and_overdue_backlog_activate_entry_kill(
     ebull_test_conn: psycopg.Connection[Any],
+    registered_strategy_test_candidates: None,
 ) -> None:
     conn = ebull_test_conn
     _, order_id = _seed_trade(conn)

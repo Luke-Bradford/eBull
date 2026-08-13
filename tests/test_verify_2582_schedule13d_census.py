@@ -42,9 +42,48 @@ def _seed(
             filer_cik,
         ),
     )
+    _seed_manifest(conn, accession=accession, cik=filer_cik, submission_type=submission_type, filed_at=filed_at)
     row = conn.execute("SELECT filer_id FROM blockholder_filers WHERE cik = %s", (filer_cik,)).fetchone()
     assert row is not None
     return int(row[0])
+
+
+def _seed_manifest(
+    conn: psycopg.Connection[tuple],
+    *,
+    accession: str,
+    cik: str,
+    submission_type: str,
+    filed_at: datetime,
+) -> None:
+    """Seed the manifest row ``_CHAIN_SHAPE`` reads the public clock from.
+
+    ``deae7c03`` ("use SEC public filing clock") moved every chain-ordering
+    date off ``blockholder_filings.filed_at`` and onto
+    ``sec_filing_manifest.filed_at``, joined ``USING (accession_number)``. An
+    inner join, so a blockholder filing with no manifest row contributes
+    NOTHING — which is why this fixture must write both sides or the census
+    counts every bucket as zero.
+
+    ``subject_type = 'blockholder_filer'`` forces ``instrument_id IS NULL``
+    (``chk_manifest_issuer_has_instrument``); the census tolerates that via
+    ``max(...) FILTER (WHERE instrument_id IS NOT NULL)``.
+    """
+    conn.execute(
+        """
+        INSERT INTO sec_filing_manifest (
+            accession_number, cik, form, source, subject_type, subject_id, filed_at
+        ) VALUES (%s, %s, %s, %s, 'blockholder_filer', %s, %s)
+        """,
+        (
+            accession,
+            cik,
+            submission_type,
+            "sec_13d" if submission_type.startswith("SCHEDULE 13D") else "sec_13g",
+            cik,
+            filed_at,
+        ),
+    )
 
 
 def test_joint_accession_uses_every_reporter_chain(ebull_test_conn: psycopg.Connection[tuple]) -> None:
