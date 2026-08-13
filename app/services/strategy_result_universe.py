@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -108,23 +109,13 @@ def store_result_universe(conn: psycopg.Connection[Any], *, result_id: int, reco
     )
 
 
-def load_result_universe(conn: psycopg.Connection[Any], result_id: int) -> ResultUniverseRecord | None:
-    """The frozen record, hash-verified, or ``None`` when no record exists.
+_SELECT_UNIVERSE_COLUMNS = "universe_rule_version, evaluated_instrument_ids, validated_universe_ids, payload_sha256"
 
-    ⚠ Corruption RAISES rather than refuses, matching ``load_promotion_evidence``:
-    a record that fails its own hash or canonical form is an integrity failure
-    to surface loudly, not a gate verdict to report politely.
-    """
-    row = conn.execute(
-        """
-        SELECT universe_rule_version, evaluated_instrument_ids, validated_universe_ids, payload_sha256
-        FROM strategy_result_universe
-        WHERE result_id = %s
-        """,
-        (result_id,),
-    ).fetchone()
-    if row is None:
-        return None
+
+def _record_from_row(result_id: int, row: Any) -> ResultUniverseRecord:
+    """Verify and rebuild one row. Shared so the single and batch reads cannot
+    verify differently — a batch that skipped the hash check would be a second
+    door onto the same record with weaker integrity."""
     evaluated = [int(item) for item in row[1]]
     universe = [int(item) for item in row[2]]
     for name, ids in (("evaluated_instrument_ids", evaluated), ("validated_universe_ids", universe)):
@@ -138,6 +129,54 @@ def load_result_universe(conn: psycopg.Connection[Any], result_id: int) -> Resul
     if record_sha256(record) != str(row[3]):
         raise RuntimeError(f"result universe hash mismatch for result {result_id}")
     return record
+
+
+def load_result_universe(conn: psycopg.Connection[Any], result_id: int) -> ResultUniverseRecord | None:
+    """The frozen record, hash-verified, or ``None`` when no record exists.
+
+    ⚠ Corruption RAISES rather than refuses, matching ``load_promotion_evidence``:
+    a record that fails its own hash or canonical form is an integrity failure
+    to surface loudly, not a gate verdict to report politely.
+    """
+    row = conn.execute(
+        f"""
+        SELECT {_SELECT_UNIVERSE_COLUMNS}
+        FROM strategy_result_universe
+        WHERE result_id = %s
+        """,  # noqa: S608 - module-level column literal, no caller input
+        (result_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _record_from_row(result_id, row)
+
+
+def load_result_universes(conn: psycopg.Connection[Any], result_ids: Sequence[int]) -> dict[int, ResultUniverseRecord]:
+    """Every frozen record for ``result_ids``, in ONE statement (#2641).
+
+    Keys are only the results that HAVE a record — an absent record is a state
+    the caller's refusal vocabulary already names (``universe_record_absent``),
+    so returning a partial mapping keeps that distinction rather than inventing
+    a sentinel.
+
+    ⚠ One statement means one snapshot for this record type: every result's
+    record is read at the same instant, where the per-result loop read each at a
+    slightly different one under READ COMMITTED. It does NOT put the universe,
+    ambiguity, evidence and row reads on a single snapshot between them — that
+    would need a repeatable-read transaction, and the tables are immutable by
+    trigger, so the remaining skew is unobservable rather than merely small.
+    """
+    if not result_ids:
+        return {}
+    rows = conn.execute(
+        f"""
+        SELECT result_id, {_SELECT_UNIVERSE_COLUMNS}
+        FROM strategy_result_universe
+        WHERE result_id = ANY(%(result_ids)s::bigint[])
+        """,  # noqa: S608 - module-level column literal, no caller input
+        {"result_ids": list(result_ids)},
+    ).fetchall()
+    return {int(row[0]): _record_from_row(int(row[0]), row[1:]) for row in rows}
 
 
 def universe_promotion_refusals(
