@@ -106,6 +106,25 @@ branches, no unpushed WIP).
    background the review-bot/CI **poll** (the PR already exists at that point).
    Never end a turn with an unpushed commit or an un-opened PR for work you
    intended to ship — verify `git push` succeeded and the PR URL exists first.
+
+   ⚠⚠ **WAIT IN ONE CALL — NEVER RE-POLL `gh pr checks` IN A LOOP OF TURNS.**
+   Measured 2026-08-13 on iteration 70: **64 of ~112 Bash calls were
+   `gh pr checks`**, i.e. over half the turns in the whole iteration. Every one
+   is a full turn that re-reads ~179k tokens of cached context to learn nothing,
+   and turns-per-iteration is what actually drives loop cost ($/turn is flat at
+   0.11-0.18; turns/iter is what doubled 89 → 200 on the expensive days). Block
+   inside a SINGLE Bash call instead, and read the result once:
+
+   ```bash
+   until [ "$(gh pr checks <N> --json bucket --jq '[.[]|select(.bucket=="pending")]|length')" = "0" ]; do sleep 20; done
+   gh pr checks <N>; gh pr view <N> --comments
+   ```
+
+   Same information, same gate, same merge decision — one turn instead of sixty.
+   Use `run_in_background` for the wait when you have other work to do meanwhile;
+   foreground it when the next thing you would do is the merge anyway. ⚠ This is
+   a turn-count fix and nothing else: do NOT weaken the gate itself. The bot must
+   still APPROVE the latest SHA with CI green before `safe_merge`.
 3. **Restart the jobs daemon** onto new main after any jobs/ingest/parser/
    scheduler merge (graceful SIGTERM, confirm old PID gone), `sec_rebuild` the
    affected source only if output changed. FE/API/docs/test/script merges need
