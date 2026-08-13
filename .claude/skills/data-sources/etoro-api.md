@@ -51,6 +51,62 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
   bounded census are wired in `EtoroBrokerProvider` and
   `scripts/verify_2437_trading_preflight.py`; no recurring cost writer is
   justified by this evidence.
+- ⚠⚠ **`value` IS DENOMINATED IN THE ROW'S OWN `currency` — decoded 2026-08-12
+  (#2598), and two of the 2026-08-09 findings above are now WRONG.** Re-verified
+  against the live portal the same day: the documented response still carries
+  `costType` + `amount` ("the monetary value of this cost component, expressed
+  in `currency`") + `currency`, and **`value` still appears nowhere in the
+  documentation**. So the drift is real and unannounced, but its unit is now
+  measured rather than unknown. Three independent lines agree:
+  1. **Scaling** — 1x→10x ticket moves `marketSpread` by 9.93-10.14x and
+     `transactionFee` by exactly 10.00x, at a stable implied bps. A rate would
+     be invariant under scaling.
+  2. **An independent same-quantity measurement** — `value / ticket_amount`
+     lands on the `quotes` panel's separately observed `spread_pct` for the same
+     instrument. `quotes` is written by a feed path that never reads a what-if
+     response, so this is not circular. Stable names match closely and reproduce
+     across all three runs (XLV 0.6 vs 0.59 bps; NUVL 0.8 vs 0.81 bps; SPY 0.9
+     vs 0.91 on the third).
+  3. **The rounding quantum** — costs come back rounded to 0.01 USD, so a $100
+     ticket has a 1.0 bp floor and every tight instrument reads ~1.0 bp there.
+     The agreement appears at $1,000 and vanishes at $100, which is the
+     signature a monetary field must have and a rate must not.
+
+  ⚠ **Do NOT upgrade this to `marketSpread == the quoted spread`.** On the most
+  actively quoted names both sides move between runs minutes apart: AAPL read
+  0.3 → 1.3 → 1.3 bps implied while its own observed quote went 0.33 → 3.63.
+  Consistent with sampling a live book through a 0.01 USD quantum, and far too
+  loose to be an identity. The claim that survives is **order-of-magnitude
+  agreement, tight on stable names and loose on fast ones** — and note the first
+  run alone read as near-exact on all four, which is precisely the overclaim a
+  single sample invites.
+
+  ⚠⚠ **AN ABSENT COST ROW IS NOT A ZERO COST.** At a $100 ticket the
+  `marketSpread` row is omitted entirely rather than sent as `0.0` when the real
+  spread is under the quantum — observed on AAPL and, in a different run, on SPY,
+  so it tracks the live spread rather than the instrument. Coercing a missing row
+  to zero prices the tightest names as free, which is why the "never coerce" rule
+  above is load-bearing rather than defensive. ⚠ **Test row MEMBERSHIP separately
+  from its value** (`"marketSpread" in rows`, not `rows.get(...) is not None`):
+  the two differ exactly when a row is present with a null value, and a probe
+  that conflates them corroborates the absence claim with the wrong observation.
+  Caught by Codex at checkpoint 2; `market_spread_value_null` is `false` on every
+  observation to date, so the claim was safe — but only the corrected instrument
+  can show that.
+
+  ⚠ **`markup` and `overnightFee` read `0.0` on all 28 observations, including
+  x1 short CFDs, and their unit is therefore STILL undecodable** — an all-zero
+  component cannot distinguish "0 dollars" from "0 percent". Do not read that
+  zero as evidence that carry is zero; a CFD short accrues financing by
+  construction (see the risk-posture note in `.claude/CLAUDE.md` and #2363).
+
+  **Freshness is per-instrument, not per-response.** In the same batch AAPL/SPY
+  were seconds old, XLV about 3.6 hours, and NUVL **26 days** (`2026-07-17`).
+  The 2026-08-09 "18/20 at ~41 hours" reading was a property of that cohort, not
+  a contract property; the 2026-08-12 census returned 20/20 `within_24h`.
+  Reproduce both with `scripts/verify_2437_trading_preflight.py --apply` and
+  `scripts/verify_2598_preflight_quote_crosscheck.py`; captured responses are in
+  `tests/fixtures/etoro_preflight_2598/`.
 - **Order-to-position reconciliation exists in v2:**
   `GET /api/v2/trading/info/{demo|real}/orders:lookup` returns
   `positionExecutions[].positionId`. The live detail page verified 2026-08-09

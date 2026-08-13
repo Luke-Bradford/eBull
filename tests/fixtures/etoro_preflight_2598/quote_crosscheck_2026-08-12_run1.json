@@ -1,0 +1,121 @@
+[
+ {
+  "instrument_id": 1001,
+  "symbol": "AAPL",
+  "amount": "100",
+  "cost_rows": {
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": null,
+  "observed_quote_bps": 0.33,
+  "quote_bid": "301.590000",
+  "quote_ask": "301.600000",
+  "last_updated": "2026-08-12T23:41:24.232773+00:00"
+ },
+ {
+  "instrument_id": 1001,
+  "symbol": "AAPL",
+  "amount": "1000",
+  "cost_rows": {
+   "markup": "0.0",
+   "marketSpread": "0.03",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 0.3,
+  "observed_quote_bps": 0.33,
+  "quote_bid": "301.590000",
+  "quote_ask": "301.600000",
+  "last_updated": "2026-08-12T23:41:24.232773+00:00"
+ },
+ {
+  "instrument_id": 3000,
+  "symbol": "SPY",
+  "amount": "100",
+  "cost_rows": {
+   "markup": "0.0",
+   "marketSpread": "0.01",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 1.0,
+  "observed_quote_bps": 0.65,
+  "quote_bid": "772.520000",
+  "quote_ask": "772.570000",
+  "last_updated": "2026-08-12T23:42:01.485412+00:00"
+ },
+ {
+  "instrument_id": 3000,
+  "symbol": "SPY",
+  "amount": "1000",
+  "cost_rows": {
+   "markup": "0.0",
+   "marketSpread": "0.12",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 1.2,
+  "observed_quote_bps": 0.65,
+  "quote_bid": "772.520000",
+  "quote_ask": "772.570000",
+  "last_updated": "2026-08-12T23:42:01.485412+00:00"
+ },
+ {
+  "instrument_id": 3017,
+  "symbol": "XLV",
+  "amount": "100",
+  "cost_rows": {
+   "markup": "0.0",
+   "marketSpread": "0.01",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 1.0,
+  "observed_quote_bps": 0.59,
+  "quote_bid": "168.440000",
+  "quote_ask": "168.450000",
+  "last_updated": "2026-08-12T19:59:54.215069+00:00"
+ },
+ {
+  "instrument_id": 3017,
+  "symbol": "XLV",
+  "amount": "1000",
+  "cost_rows": {
+   "markup": "0.0",
+   "marketSpread": "0.06",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 0.6,
+  "observed_quote_bps": 0.59,
+  "quote_bid": "168.440000",
+  "quote_ask": "168.450000",
+  "last_updated": "2026-08-12T19:59:54.215069+00:00"
+ },
+ {
+  "instrument_id": 9660,
+  "symbol": "NUVL",
+  "amount": "100",
+  "cost_rows": {
+   "markup": "0.0",
+   "marketSpread": "0.01",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 1.0,
+  "observed_quote_bps": 0.81,
+  "quote_bid": "123.940000",
+  "quote_ask": "123.950000",
+  "last_updated": "2026-07-17T12:03:10.387000+00:00"
+ },
+ {
+  "instrument_id": 9660,
+  "symbol": "NUVL",
+  "amount": "1000",
+  "cost_rows": {
+   "markup": "0.0",
+   "marketSpread": "0.08",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 0.8,
+  "observed_quote_bps": 0.81,
+  "quote_bid": "123.940000",
+  "quote_ask": "123.950000",
+  "last_updated": "2026-07-17T12:03:10.387000+00:00"
+ }
+]
