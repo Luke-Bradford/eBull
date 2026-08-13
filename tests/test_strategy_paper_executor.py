@@ -50,6 +50,7 @@ from app.services.strategy_opportunity_forecast import (
 )
 from app.services.strategy_opportunity_ranker import RankableOpportunity, persist_ranking_batch
 from app.services.strategy_paper_executor import (
+    COST_BASIS_BROKER_PREFLIGHT,
     PaperExecutionResult,
     _effective_capital_bases,
     execute_fired_paper_signal,
@@ -594,8 +595,13 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
         (signal_id,),
     ).fetchone()
     assert forecast_id is not None
+    # ⚠ `cost_basis` is asserted HERE rather than in a test of its own because this
+    # is the only place the writer meets the real constraint: `sql/342` makes it NOT
+    # NULL on an allocated row, so a writer that stopped binding it would fail this
+    # insert outright — and a basis that named a path other than the one `_costs`
+    # took would pass the CHECK while lying about provenance (#2598 step 4).
     assert conn.execute(
-        "SELECT verdict, allocated_amount, net_expectancy_pct, forecast_id, ranking_member_id "
+        "SELECT verdict, allocated_amount, net_expectancy_pct, forecast_id, ranking_member_id, cost_basis "
         "FROM strategy_entry_preflights WHERE signal_id=%s",
         (signal_id,),
     ).fetchone() == (
@@ -604,6 +610,7 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
         Decimal("3.00000000"),
         forecast_id[0],
         forecast_id[1],
+        COST_BASIS_BROKER_PREFLIGHT,
     )
     conn.commit()
 
