@@ -102,15 +102,13 @@ def _run_until_evaluation(
     return seen[0]
 
 
-def _run_to_the_write_phase(conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drive a real run through evaluation with the corpus pass stubbed out.
+def _stub_measurement() -> SimpleNamespace:
+    """A measurement carrying no namespace.
 
-    The measurement carries no namespace, so the deflation pass has nothing to
-    group and the run arrives at the write phase with an empty book — which is
-    all these tests need it to do. The caller stubs ``_write_rows`` to raise
-    ``_StopAfterEvaluation`` after recording whatever it is measuring.
+    The deflation pass then has nothing to group and the run arrives at the write
+    phase with an empty book — which is all these tests need it to do.
     """
-    measurement = SimpleNamespace(
+    return SimpleNamespace(
         strategy_id="stub",
         ambiguity_arm=None,
         quarantine_arm="masked",
@@ -119,10 +117,25 @@ def _run_to_the_write_phase(conn: psycopg.Connection[Any], monkeypatch: pytest.M
         namespaces={},
         holdout_positions_discarded=0,
     )
+
+
+def _run_to_the_write_phase(
+    conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    evaluate: Any = None,
+) -> None:
+    """Drive a real run through evaluation with the corpus pass stubbed out.
+
+    The caller stubs ``_write_rows`` to raise ``_StopAfterEvaluation`` after
+    recording whatever it is measuring, and may supply its own ``evaluate`` to
+    observe the connection at each arm.
+    """
+    evaluate = evaluate or (lambda *_args, **_kwargs: _stub_measurement())
     monkeypatch.setattr(backtest_run, "load_corpus", lambda *_args, **_kwargs: _tiny_corpus())
     monkeypatch.setattr(backtest_run, "_assert_ambiguity_contract", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(backtest_run, "evaluate_arm", lambda *_args, **_kwargs: measurement)
-    monkeypatch.setattr(backtest_run, "evaluate_level_arms", lambda *_args, **_kwargs: (measurement,))
+    monkeypatch.setattr(backtest_run, "evaluate_arm", evaluate)
+    monkeypatch.setattr(backtest_run, "evaluate_level_arms", lambda *args, **kwargs: (evaluate(*args, **kwargs),))
 
     strategy_id = next(iter(sorted(STRATEGY_MANIFEST)))
     with pytest.raises(_StopAfterEvaluation):
@@ -229,19 +242,28 @@ def test_every_arm_ends_its_own_read_transaction(
 
     Releasing only before the evaluation phase would still leave one transaction
     open across every arm — holding the corpus tables and pinning ``xmin`` against
-    vacuum for the whole run. The count is the pre-evaluation boundary plus one
-    per quarantine arm, derived from the module's own constant rather than typed
-    in, so adding an arm does not silently stop being checked.
+    vacuum for the whole run.
+
+    ⚠ Asserted through the CONNECTION, not by counting calls to the release
+    helper. The stub reads, exactly as ``load_masked_series`` does, so the arm it
+    stands in for leaves a transaction open behind it; every arm then observing an
+    idle connection is what "each arm ended its own" means, and it stays true if
+    the release ever moves or is spelled differently.
     """
-    calls: list[None] = []
+    at_arm_start: list[int] = []
+
+    def _evaluate(inner_conn: psycopg.Connection[Any], *_args: object, **_kwargs: object) -> object:
+        at_arm_start.append(int(inner_conn.info.transaction_status))
+        inner_conn.execute("SELECT 1").fetchone()
+        return _stub_measurement()
 
     def _stop(*_args: object, **_kwargs: object) -> object:
         raise _StopAfterEvaluation
 
-    monkeypatch.setattr(backtest_run, "_end_read_phase", lambda _conn: calls.append(None))
     monkeypatch.setattr(backtest_run, "_write_rows", _stop)
-    _run_to_the_write_phase(ebull_test_conn, monkeypatch)
-    assert len(calls) == 1 + len(backtest_run.QUARANTINE_ARM_ORDER)
+    _run_to_the_write_phase(ebull_test_conn, monkeypatch, evaluate=_evaluate)
+    assert len(at_arm_start) == len(backtest_run.QUARANTINE_ARM_ORDER)
+    assert at_arm_start == [int(psycopg.pq.TransactionStatus.IDLE)] * len(at_arm_start)
 
 
 def test_release_is_refused_when_the_caller_already_holds_a_transaction(
