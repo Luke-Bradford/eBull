@@ -50,7 +50,7 @@ from app.services.strategy_opportunity_forecast import (
 )
 from app.services.strategy_opportunity_ranker import RankableOpportunity, persist_ranking_batch
 from app.services.strategy_paper_executor import (
-    COST_BASIS_BROKER_PREFLIGHT,
+    COST_BASIS_BROKER_PREFLIGHT_VALUE,
     PaperExecutionResult,
     _effective_capital_bases,
     execute_fired_paper_signal,
@@ -544,10 +544,15 @@ def _broker(
         instrument_id=2449001,
         symbol="TALLOC",
         costs=(
+            # ⚠ THE DEFAULT IS THE LIVE SHAPE, not the documented one (#2598 step 3):
+            # eToro sends `value` and omits `amount` as a key, so the happy path here
+            # exercises what the broker actually returns. `undocumented_cost=True` is
+            # now the shape that REMAINS undocumented -- both fields present, which has
+            # never been observed and has no documented rule for which one wins.
             BrokerCostComponent(
                 cost_type="marketSpread",
-                amount=None if undocumented_cost else Decimal("0.5"),
-                value=Decimal("0.5") if undocumented_cost else None,
+                amount=Decimal("0.5") if undocumented_cost else None,
+                value=Decimal("0.5"),
                 currency=cost_currency,
                 raw_payload={},
             ),
@@ -610,7 +615,7 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
         Decimal("3.00000000"),
         forecast_id[0],
         forecast_id[1],
-        COST_BASIS_BROKER_PREFLIGHT,
+        COST_BASIS_BROKER_PREFLIGHT_VALUE,
     )
     conn.commit()
 
@@ -1259,6 +1264,10 @@ def test_shared_paper_pool_excludes_future_live_reservations(
 def test_undocumented_cost_units_refuse_before_any_order_exists(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
+    """⚠ WHAT COUNTS AS UNDOCUMENTED MOVED (#2598 step 3). A `value`-only row is now
+    priced -- that is the live shape, and its unit was decoded on a 60-instrument
+    census. The refusal remains for a row carrying BOTH fields, which has never been
+    observed and has no documented rule for which one wins."""
     signal_id = _seed(ebull_test_conn)
     broker = _broker(undocumented_cost=True)
 
