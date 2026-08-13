@@ -22,6 +22,7 @@ from psycopg.pq import TransactionStatus
 
 from app.providers.broker import (
     BrokerAccountRiskSnapshot,
+    BrokerCostComponent,
     BrokerEligibilityResponse,
     BrokerOrderSubmissionError,
     BrokerOrderSubmissionUncertain,
@@ -60,22 +61,27 @@ _NY = ZoneInfo("America/New_York")
 _CENT = Decimal("0.01")
 _RECURRING_COSTS = frozenset({"overnightfee", "overweekendfee"})
 
-#: What priced ``strategy_entry_preflights.stressed_cost_amount`` (#2598 step 4).
+#: What priced ``strategy_entry_preflights.stressed_cost_amount`` (#2598 steps 3-4).
 #:
-#: ``_costs`` is the only producer: the broker's own what-if components, summed and
-#: multiplied by the deployment's ``cost_stress_multiplier``. The amount alone cannot
-#: say that, and a row already written can never be repaired to say it.
-COST_BASIS_BROKER_PREFLIGHT = "broker_preflight"
+#: ``_costs`` is the only producer — the broker's own what-if components, summed and
+#: multiplied by the deployment's ``cost_stress_multiplier`` — but WHICH FIELD carried
+#: the money is the audit fact that matters, because one of the two is off-spec.
+#: ``amount`` is documented; ``value`` is not, and is what the live demo response
+#: actually sends. A row already written can never be repaired to say which it was.
+COST_BASIS_BROKER_PREFLIGHT_AMOUNT = "broker_preflight_amount"
+COST_BASIS_BROKER_PREFLIGHT_VALUE = "broker_preflight_value"
 
-#: ⚠ ONE MEMBER, AND ADDING A SECOND IS A COORDINATED CHANGE — `sql/342`'s
+#: ⚠ BOTH MEMBERS ARE REACHABLE — each is returned by its own branch of
+#: ``_component_amount``, and both branches are tested. That is the bar this set is
+#: held to: #2598's scope also names ``static_band_bound`` (the banded static model as
+#: a declared execution bound) and it is deliberately absent, because no code produces
+#: it and the census measurement argues against ever writing one (`sql/342` header).
+#:
+#: ⚠ ADDING A MEMBER IS A COORDINATED CHANGE — `sql/343`'s
 #: ``strategy_entry_preflights_cost_basis_vocabulary`` CHECK does not read this
 #: constant, so a value added here alone fails at INSERT rather than at review.
 #: ``tests/test_2598_preflight_cost_basis.py`` fails when either side moves alone.
-#:
-#: #2598's scope names a second (``static_band_bound``, the banded static model as a
-#: declared execution bound); it is deliberately absent — see `sql/342`'s header for
-#: the census measurement that argues against it.
-COST_BASES: frozenset[str] = frozenset({COST_BASIS_BROKER_PREFLIGHT})
+COST_BASES: frozenset[str] = frozenset({COST_BASIS_BROKER_PREFLIGHT_AMOUNT, COST_BASIS_BROKER_PREFLIGHT_VALUE})
 _ALLOCATOR_ADVISORY_LOCK = PAPER_ALLOCATOR_ADVISORY_LOCK
 
 
@@ -609,13 +615,56 @@ def _eligibility_reason(response: BrokerEligibilityResponse, intent: _Intent, am
     return None
 
 
+@dataclass(frozen=True)
+class _CostAssessment:
+    """A priced preflight, WITH the field its money came out of.
+
+    ⚠ The basis is part of the result rather than re-derived at the INSERT, because
+    the caller cannot see which field each component used and would have to guess.
+    """
+
+    stressed: Decimal
+    net: Decimal
+    basis: str
+
+
+def _component_amount(component: BrokerCostComponent) -> tuple[Decimal, str] | None:
+    """The component's monetary amount and which field carried it, or ``None``.
+
+    ⚠⚠ eToro SHIPS THE DENOMINATOR OF A FIELD IT DOES NOT SHIP. Verified against the
+    live portal 2026-08-13 (`.claude/skills/data-sources/etoro-api.md` protocol): the
+    documented row is ``costType`` + ``amount`` (*"the monetary value of this cost
+    component, expressed in currency"*) + ``currency`` (*"ISO 4217 currency code in
+    which amount is denominated"*), and ``value`` appears NOWHERE in the docs. The
+    live demo response carries keys ``['costType', 'currency', 'value']`` — ``amount``
+    is absent as a KEY, not present-and-null — with ``currency`` returned as ``USD``.
+
+    Accepting ``value`` is #2598 scope 4, and it rests on a measurement rather than on
+    the drift being tolerable: over 60 instruments stratified across the four cost
+    bands, ``value / ticket`` lands on our separately observed quoted spread at a
+    population median of **0.995x** (`--replay
+    tests/fixtures/etoro_preflight_2598/band_census_2026-08-13.json`), the rounding
+    quantum behaves as a monetary field must and a rate cannot, and ``currency`` is
+    present on every observation. ⚠ That decodes the UNIT only — both sides trace to
+    eToro, so it is not corroboration of the spread's LEVEL.
+
+    ⚠ BOTH FIELDS PRESENT IS STILL A REFUSAL. It has never been observed, the two
+    could disagree, and there is no documented rule for which wins.
+    """
+    if component.amount is not None and component.value is None:
+        return component.amount, COST_BASIS_BROKER_PREFLIGHT_AMOUNT
+    if component.amount is None and component.value is not None:
+        return component.value, COST_BASIS_BROKER_PREFLIGHT_VALUE
+    return None
+
+
 def _costs(
     response: BrokerWhatIfCostResponse,
     *,
     intent: _Intent,
     amount: Decimal,
     now: datetime,
-) -> tuple[Decimal, Decimal] | str:
+) -> _CostAssessment | str:
     if response.instrument_id != intent.instrument_id or not _age_ok(
         response.last_updated, now=now, max_seconds=intent.max_cost_age_seconds
     ):
@@ -623,20 +672,36 @@ def _costs(
     total = Decimal("0")
     if not response.costs:
         return "costs_missing"
+    bases: set[str] = set()
     for component in response.costs:
-        if component.amount is None or component.value is not None:
+        resolved = _component_amount(component)
+        if resolved is None:
             return "cost_unit_undocumented"
+        component_amount, basis = resolved
+        bases.add(basis)
         # Equality against the deployment currency for the reason given in
         # `_eligibility_reason`: this is the loop whose `total +=` would otherwise add
         # two currencies together.
-        if component.currency.upper() != intent.currency or component.amount < 0:
+        if component.currency.upper() != intent.currency or component_amount < 0:
             return "cost_currency_or_value_invalid"
-        if component.cost_type.replace("_", "").lower() in _RECURRING_COSTS and component.amount > 0:
+        # ⚠⚠ THIS READS THE RESOLVED AMOUNT, AND THAT IS THE WHOLE CARE IN THIS
+        # FUNCTION. It used to read `component.amount`, which was guaranteed non-NULL
+        # only because the refusal above rejected every row that lacked it. Now that
+        # `value` is accepted, an `overnightFee` carrying its charge in `value` would
+        # compare `None > 0` — a TypeError at best, and at worst a rewrite that
+        # skipped the row and let an unmodelled carry through the gate that exists to
+        # stop it (#2363's standing refusal).
+        if component.cost_type.replace("_", "").lower() in _RECURRING_COSTS and component_amount > 0:
             return "recurring_cost_horizon_unmodelled"
-        total += component.amount
+        total += component_amount
+    if len(bases) != 1:
+        # ⚠ A MIXED response is unobserved and unexplained: summing a documented field
+        # and an off-spec one into a single total assumes they mean the same thing,
+        # which is exactly what has not been established for a response that uses both.
+        return "cost_unit_undocumented"
     stressed = total * intent.cost_stress_multiplier
     net = intent.gross_expectancy_ci_low_pct - (stressed / amount * Decimal("100"))
-    return stressed, net
+    return _CostAssessment(stressed=stressed, net=net, basis=bases.pop())
 
 
 def _observe_local_mandate_risk(
@@ -1043,7 +1108,7 @@ def _execute_fired_paper_signal_locked(
         return _persist_rejection(
             conn, signal_id=signal_id, reason_code=assessed, now=evaluated_at, intent=intent, risk=risk
         )
-    stressed_cost, net_expectancy = assessed
+    stressed_cost, net_expectancy = assessed.stressed, assessed.net
     if net_expectancy < intent.min_net_expectancy_pct:
         return _persist_rejection(
             conn,
@@ -1122,12 +1187,10 @@ def _execute_fired_paper_signal_locked(
                 amount,
                 intent.gross_expectancy_ci_low_pct,
                 stressed_cost,
-                # ⚠ `_costs` is the sole producer of `stressed_cost`, so the basis is
-                # a literal here rather than threaded through the return value. If a
-                # second pricing path is ever added, this line is the one that has to
-                # stop being a constant — the CHECK will not catch it, because both
-                # bases would be in the vocabulary by then.
-                COST_BASIS_BROKER_PREFLIGHT,
+                # ⚠ From the assessment, never re-derived here: this INSERT cannot
+                # see which field each cost component used, so a literal at this line
+                # would be a second, unverifiable claim about the same response.
+                assessed.basis,
                 net_expectancy,
                 stop_rate,
                 take_rate,
