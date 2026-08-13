@@ -128,6 +128,22 @@ def test_a_boolean_true_does_not_prove_x1_eligibility() -> None:
     assert offers_unleveraged((1,))
 
 
+def test_a_boolean_disqualifies_the_whole_arm_not_just_that_entry() -> None:
+    """⚠ ``[1, true]`` must not qualify on its genuine ``1``.
+
+    A qualifying arm's ``leverage_values`` is PROJECTED into storage, and
+    ``int(True)`` is ``1`` -- so an arm admitted on the real entry would store
+    ``[1, 1]`` and assert the broker sent something it never did. Refusing the
+    arm is what stops the projection lying.
+    """
+    assert not offers_unleveraged((1, True))
+    assert not is_underlying_long_arm(arm(leverage_values=(1, True)))
+    assert (
+        evaluate_core_eligibility(response(row(arm(leverage_values=(1, True)))), instrument_id=INSTRUMENT).reason_code
+        == "no_underlying_arm"
+    )
+
+
 def test_zero_and_many_qualifying_arms_are_distinguishable() -> None:
     """The helper returns ALL matches so callers can tell them apart."""
     assert select_underlying_long_arms(row(arm(settlement_type="cfd"))) == ()

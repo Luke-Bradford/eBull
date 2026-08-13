@@ -49,8 +49,19 @@ def offers_unleveraged(leverage_values: Iterable[object]) -> bool:
     true for ``leverageValues: [true]`` -- and the provider parser admits that,
     because ``isinstance(True, int)`` passes its integer check.  Malformed broker
     data must not be able to prove x1 eligibility.
+
+    ⚠⚠ A boolean anywhere in the array disqualifies the WHOLE arm, not just that
+    entry.  Rejecting only the entry would let ``[1, true]`` qualify on its
+    genuine ``1``, and the qualifying arm's ``leverage_values`` is then PROJECTED
+    into storage -- where ``int(True)`` is ``1``, so the stored evidence would
+    claim the broker sent ``[1, 1]``.  Refusing the arm is what keeps a
+    projection from asserting something the response never contained; it also
+    fails closed, which is the right bias for an array we cannot read.
     """
-    return any(value == UNLEVERAGED_LEVERAGE and not isinstance(value, bool) for value in leverage_values)
+    values = list(leverage_values)
+    if any(isinstance(value, bool) for value in values):
+        return False
+    return any(value == UNLEVERAGED_LEVERAGE for value in values)
 
 
 def is_underlying_long_arm(arm: BrokerLeverageConfig) -> bool:
