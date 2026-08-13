@@ -55,7 +55,7 @@ from decimal import Decimal
 from typing import Final, Literal, NoReturn, cast, get_args
 
 import psycopg
-from psycopg.conninfo import make_conninfo
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.prereg_contract import (
@@ -920,9 +920,25 @@ def _audit_conninfo(conn: psycopg.Connection[tuple]) -> str:
     a refusal into a stall. ``lock_timeout`` specifically covers a concurrent
     ``TRUNCATE`` of this table (the DB-test cleanup planner takes ACCESS
     EXCLUSIVE on it).
+
+    ⚠ ``options`` IS APPENDED TO THE CALLER'S, NOT SUBSTITUTED FOR IT.
+    ``make_conninfo`` merges per KEYWORD, not inside a keyword's value, so
+    passing ``options=`` replaces the caller's whole string — measured (psycopg
+    3.3.3): ``make_conninfo("… options='-c application_name=caller -c
+    lock_timeout=99s'", options="-c lock_timeout=2s -c statement_timeout=5s")``
+    renders only the second, dropping ``application_name``. libpq forwards
+    ``options`` as server command-line arguments where a repeated ``-c`` is
+    LAST-WINS (measured against the dev cluster: caller's ``lock_timeout=99s``
+    then ours ``2s`` → ``SHOW lock_timeout`` = ``2s``, and ``application_name``
+    survives as ``caller``), so appending keeps the caller's settings AND keeps
+    these two timeouts binding. Prepending would let a caller disable the guard.
     """
     info = conn.info
-    extras: dict[str, str | int | None] = {"options": "-c lock_timeout=2s -c statement_timeout=5s"}
+    audit_options = "-c lock_timeout=2s -c statement_timeout=5s"
+    caller_options = conninfo_to_dict(info.dsn).get("options")
+    if caller_options:
+        audit_options = f"{caller_options} {audit_options}"
+    extras: dict[str, str | int | None] = {"options": audit_options}
     if info.password:
         extras["password"] = info.password
     return make_conninfo(info.dsn, **extras)

@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from app.services import result_ledger
 from app.services.result_ledger import HoldoutAccess, PreregDeclarationRefused
@@ -226,3 +227,45 @@ class TestTheAuditConninfoComesFromTheCaller:
             info = _WithPassword()
 
         assert "password=secret-value" in result_ledger._audit_conninfo(_Conn())  # type: ignore[arg-type]
+
+    def test_the_callers_own_options_survive_and_the_audit_timeouts_still_win(self) -> None:
+        """``make_conninfo`` merges per KEYWORD, not inside a keyword's value, so
+        naming ``options=`` replaces the caller's whole string rather than adding
+        to it — measured on psycopg 3.3.3, which is how a caller's
+        ``-c application_name=…`` was silently dropped on the audit connection.
+
+        ⚠ ORDER IS THE ASSERTION, not merely presence. libpq forwards ``options``
+        as server command-line arguments and a repeated ``-c`` is LAST-WINS
+        (measured against the dev cluster: caller ``lock_timeout=99s`` then ours
+        ``2s`` → ``SHOW lock_timeout`` = ``2s``). Appending therefore keeps both
+        the caller's settings and this write's timeout guard; prepending would
+        hand a caller the ability to disable the guard, so a test that only
+        checked both substrings were present would pass on the broken order.
+        """
+
+        class _WithOptions:
+            dsn = "dbname=ebull host=localhost user=postgres options='-c application_name=caller -c lock_timeout=99s'"
+            password = None
+
+        class _Conn:
+            info = _WithOptions()
+
+        rendered = result_ledger._audit_conninfo(_Conn())  # type: ignore[arg-type]
+        options = conninfo_to_dict(rendered)["options"]
+        assert isinstance(options, str)
+        assert "-c application_name=caller" in options
+        assert options.index("-c lock_timeout=99s") < options.index("-c lock_timeout=2s")
+        assert options.endswith("-c lock_timeout=2s -c statement_timeout=5s")
+
+    def test_a_caller_with_no_options_gets_only_the_audit_timeouts(self) -> None:
+        """The common case: nothing to merge, and no stray leading whitespace."""
+
+        class _NoOptions:
+            dsn = "dbname=ebull host=localhost user=postgres"
+            password = None
+
+        class _Conn:
+            info = _NoOptions()
+
+        rendered = result_ledger._audit_conninfo(_Conn())  # type: ignore[arg-type]
+        assert conninfo_to_dict(rendered)["options"] == "-c lock_timeout=2s -c statement_timeout=5s"
