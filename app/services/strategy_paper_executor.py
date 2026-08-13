@@ -605,14 +605,20 @@ def _eligibility_reason(response: BrokerEligibilityResponse, intent: _Intent, am
     # inline version it replaces: `bool` is an `int`, so `1 in leverage_values`
     # was true for `leverageValues: [true]`, which the provider parser admits.
     arms = select_underlying_long_arms(matches[0])
-    # ⚠ Zero arms and many arms are DIFFERENT answers -- "not offered as the
-    # underlying" versus "genuinely ambiguous" -- and the shared helper now tells
-    # them apart. Both still map to this one code because `reason_code` is stored
-    # data on `strategy_entry_preflights`; re-labelling it is a data-semantics
-    # change, filed as #2678 rather than folded into #2603 item 2.
-    if len(arms) != 1:
+    # ⚠ Zero arms and many arms are DIFFERENT answers and get different codes
+    # (#2678). Zero means the broker read the request fine and this instrument is
+    # simply not offered as the underlying product on this account -- a fact about
+    # the INSTRUMENT. More than one means the response cannot be read -- a fact
+    # about the RESPONSE. Collapsing them sent triage looking for a parser bug
+    # that does not exist: SPY (3000) returns three arms, all `cfd`, so zero
+    # qualify and it filed as "ambiguous" when nothing was ambiguous.
+    if not arms:
+        return "no_underlying_arm"
+    if len(arms) > 1:
         return "eligibility_arm_ambiguous"
-    arm = arms[0]
+    # `next(iter(...))`, not `arms[0]`: pyright narrows a tuple through the two
+    # length guards above to `tuple[()]` and rejects the subscript.
+    arm = next(iter(arms))
     if arm.allow_stop_loss_take_profit is not True:
         return "fixed_exit_not_allowed"
     minimum = arm.min_position_amount or matches[0].min_position_exposure

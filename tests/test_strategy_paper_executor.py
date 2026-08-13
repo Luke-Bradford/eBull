@@ -498,6 +498,7 @@ def _broker(
     undocumented_cost: bool = False,
     eligibility_currency: str = "USD",
     cost_currency: str = "USD",
+    arm_settlement_types: tuple[str, ...] = ("real",),
 ) -> MagicMock:
     broker = MagicMock(spec=BrokerProvider)
     broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
@@ -521,9 +522,9 @@ def _broker(
                 allow_close_position=True,
                 allow_partial_close_position=True,
                 allow_trailing_stop_loss=False,
-                leverage_configs=(
+                leverage_configs=tuple(
                     BrokerLeverageConfig(
-                        settlement_type="real",
+                        settlement_type=settlement_type,
                         direction="LONG",
                         leverage_values=(1,),
                         min_position_amount=Decimal("10"),
@@ -531,7 +532,8 @@ def _broker(
                         allow_edit_take_profit=True,
                         allow_stop_loss_take_profit=True,
                         raw_payload={},
-                    ),
+                    )
+                    for settlement_type in arm_settlement_types
                 ),
                 raw_payload={},
             ),
@@ -1573,3 +1575,47 @@ def test_widening_the_supported_set_does_not_widen_what_the_broker_may_quote(
 
     assert result.verdict == "rejected"
     assert result.reason_code == "cost_currency_or_value_invalid"
+
+
+@pytest.mark.parametrize(
+    ("arm_settlement_types", "expected"),
+    [
+        # The measured SPY (3000) shape: every arm is a CFD, so zero qualify. The
+        # broker read the request perfectly; this fund is not offered as the
+        # underlying product on this account.
+        (("cfd", "cfd"), "no_underlying_arm"),
+        # Genuinely unreadable: two arms both claiming to be the underlying.
+        (("real", "real"), "eligibility_arm_ambiguous"),
+        (("real",), None),
+    ],
+    ids=["cfd_only_is_not_ambiguous", "two_real_arms_are", "one_real_arm_funds"],
+)
+def test_no_underlying_arm_is_reported_separately_from_a_genuinely_ambiguous_one(
+    ebull_test_conn: psycopg.Connection[Any],
+    arm_settlement_types: tuple[str, ...],
+    expected: str | None,
+) -> None:
+    """#2678 — zero qualifying arms and many are different answers.
+
+    Zero is a fact about the INSTRUMENT (not offered as the underlying); many is a
+    fact about the RESPONSE (we cannot read it). Filing both as
+    ``eligibility_arm_ambiguous`` sent triage looking for a parser bug that does
+    not exist.
+
+    ⚠ Safe to re-label rather than add-and-migrate because the stored vocabulary
+    is open and unread: `strategy_entry_preflights.reason_code` CHECKs only
+    non-empty/≤100 (sql/287), `strategy_funding_decisions.reason_code` is plain
+    TEXT (sql/281), the API passes `funding_reason` through as a free string, and
+    both tables held **0 rows** on dev when this shipped — measured, not assumed.
+    """
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+
+    broker = _broker(arm_settlement_types=arm_settlement_types)
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    if expected is None:
+        assert result.verdict == "submitted"
+    else:
+        assert result.verdict == "rejected"
+        assert result.reason_code == expected
