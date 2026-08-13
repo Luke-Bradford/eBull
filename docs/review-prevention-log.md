@@ -4464,3 +4464,77 @@ with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
   the constant); `sql/344_core_mandate_trigger_reachability.sql` (re-issued `policy_version`
   CHECK + `COMMENT ON`); `tests/test_2603_core_mandate.py::test_the_policy_version_records_which_arithmetic_wrote_the_row`;
   `tests/test_2603_core_mandate_db.py` parametrises a `v1` row as a rejected raw INSERT.
+
+### An output whose EMPTINESS is a legitimate outcome cannot be aged — age the artefact that records the ATTEMPT
+
+- First seen in: #2624 scope 3, whose own ticket text proposed the unbuildable version.
+- Symptom: the ticket asked for an alert on *"current version has no **signal** newer than N
+  days"*. Measured on dev: `s2-cross-sectional-momentum` has **zero** `strategy_signals` rows
+  under any version, while carrying a current-version watermark at `2026-08-11` written the
+  day before. It scans successfully and fires nothing — and the scan job's own docstring says
+  so (*"`row_count` is signals WRITTEN, and zero is a legitimate success"*). A signal-aged
+  check would have alerted on s2 permanently, with no input that could ever clear it: the
+  exact false-positive class the ticket's own text ruled out, one table over from where it
+  looked.
+- The general shape: **a freshness check needs a record of the attempt, not of the result.**
+  Results are allowed to be empty; attempts are not. Where a pipeline writes both — a
+  watermark and a payload, a run row and its rows, a scan and its hits — the payload is a
+  measure of what the world contained and only the attempt is a measure of whether the system
+  ran. Ageing the payload conflates "nothing happened" with "nothing was found".
+- Prevention: before ageing a table, ask what a **healthy empty** looks like in it. If a
+  legitimate run can leave zero rows, that table cannot carry the freshness signal — find the
+  one the run writes unconditionally. Test it with the real empty case, not a synthetic one:
+  s2 exists and would have failed any check written against the ticket as stated.
+- Enforced in: `app/services/strategy_scan_freshness.py` (keyed on
+  `strategy_scan_watermark`, with the s2 measurement in the module docstring);
+  `tests/test_2624_strategy_scan_freshness.py::test_a_strategy_that_emits_no_signals_is_still_healthy`.
+
+### A conjunct on an existing health signal inherits that signal's SEMANTICS, not its name
+
+- First seen in: #2624 scope 3, at Codex checkpoint 1.
+- Symptom: the ticket's condition was *"… while prices are fresh"*, and the obvious build is
+  `and check_layer_staleness(conn, "prices").status == "ok"`. Measured on a healthy system at
+  2026-08-13 19:10 UTC: **that layer reads `stale`**. `_LAYER_QUERIES["prices"]` is
+  `MAX(price_date)::timestamptz` — *midnight of the last trading date* — aged against a
+  **4-hour** threshold, so it is stale from ~04:00 UTC every day and for every weekend. The
+  conjunct would have suppressed the new check essentially always: a control that cannot fire,
+  shipped green, with a plausible-sounding reason in its own docstring.
+- The general shape: **a named health signal is a threshold over a specific column, and the
+  name is a summary of the intent rather than of the semantics.** Reusing it as a term in a
+  new predicate imports the column, the cast and the threshold — which were chosen for a
+  different question. "prices are fresh" and "`prices` layer is ok" are not the same
+  proposition and were never meant to be.
+- Prevention: before ANDing an existing check into a new one, **evaluate it against live data
+  and read its actual distribution**, not its name — one call. If it is not `ok` in normal
+  operation, the conjunct is a suppressor. Then ask whether the guard is needed at all: here
+  it was not, because measuring the lag in *trading days against `price_daily` itself* makes
+  the check self-suppressing by construction — a corpus that stops advancing cannot grow the
+  lag. **A structural suppression beats a conditional one, and removes the term rather than
+  fixing it.**
+- Enforced in: `app/services/strategy_scan_freshness.py` (module docstring records the
+  measurement and the absence of the conjunct);
+  `docs/proposals/ops/2026-08-13-strategy-scan-freshness.md`.
+
+### An index is not automatically the fix for a seq scan — `Unique` over an index still walks every row of each distinct value
+
+- First seen in: #2624 scope 3, Codex checkpoint 2 (which flagged the seq scan correctly and
+  proposed the index).
+- Symptom: `SELECT DISTINCT price_date … ORDER BY price_date DESC LIMIT 30` on a polled health
+  endpoint seq-scanned all 6,755,721 `price_daily` rows (70,183 buffers, 279 ms). Adding the
+  obvious `price_date` index turned it into `Limit -> Unique -> Index Scan Backward`, which
+  **stops after the 30th distinct date and still reads every row of each of them** — ~3,400
+  instruments per date: 93,734 buffers, 57 ms warm and 523 ms cold. It traded a cost that
+  grows with the corpus for one that grows with rows-per-key, which is the same regression a
+  season later. A loose index scan (recursive `max()` walk, one probe per distinct value) is
+  130 buffers and 1.0 ms.
+- The general shape: **an index changes how rows are FOUND, not how many are READ.** For a
+  low-cardinality leading column, `DISTINCT`/`Unique` is O(rows), not O(distinct values),
+  whichever access path serves it.
+- Prevention: `EXPLAIN (ANALYZE, BUFFERS)` the remedy, not just the defect, and compare
+  **buffers** rather than milliseconds — a warm cache hides the read volume that a cold one
+  will not. When the query wants distinct values of a low-cardinality column, reach for the
+  loose index scan; the counter in its recursive term is load-bearing, since an outer `LIMIT`
+  cannot stop a recursive CTE.
+- Enforced in: `sql/345_price_daily_price_date_index.sql` (header carries all three
+  measurements and states that the index alone is insufficient);
+  `app/services/strategy_scan_freshness.py::_RECENT_TRADING_DATES`.
