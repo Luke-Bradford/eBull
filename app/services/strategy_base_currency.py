@@ -36,7 +36,17 @@ DEPLOYMENT_CURRENCY = "USD"
 #   strategy_paper_executor.py:374                 stored-deployment membership gate
 #   strategy_paper_executor.py:555                 broker eligibility currency == intent
 #   strategy_paper_executor.py:593                 cost component currency == intent
-#   app/api/strategies.py:1129                     allocation_refusals membership gate
+#   app/api/strategies.get_strategy_overview       allocation_refusals membership gate
+#
+# ⚠ THAT LAST SITE CANNOT FIRE TODAY and is kept precisely for this widening
+# (#2653).  `control.currency` is 'USD' for every strategy by three routes -- the
+# CHECK above when a deployment row exists, `load_control_state`'s
+# `str(row["currency"] or "USD")` when the LEFT JOIN misses, and
+# `StrategyControlState.currency`'s own default when the key is absent -- so it
+# reads as live protection while being unreachable.  Widen the CHECK past this
+# constant and it becomes the branch that refuses the difference.
+# `test_the_deployment_currency_refusal_and_its_constraint_agree` fails when
+# either side moves alone.
 #
 # The two executor equality sites are equality ON PURPOSE: see `_eligibility_reason`.
 # Also revisit, though they are NOT bound to this constant: sql/290:96 +
