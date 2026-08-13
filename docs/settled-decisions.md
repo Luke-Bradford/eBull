@@ -915,6 +915,56 @@ review event, not either alone.
 
 ---
 
+## Live-gate evidence windows are single-entry (#2612, settled 2026-08-13)
+
+**A `(strategy_id, strategy_version)` pair arrives at `forward_observation` at
+most once, and at `paper_enabled` at most once.** The forward-evidence window and
+the paper window therefore each have exactly one start, and the
+splice-versus-accumulate question #2612 raised **does not currently exist** —
+there is no second arrival to splice from.
+
+⚠ **This is the rule, in place of the one #2612 asked for.** The ticket asked us
+to choose splice or accumulate and implement it. Implementing either would have
+encoded "re-entry is expected" into a lifecycle that forbids it, and left dead
+policy guarding an unreachable state.
+
+**Where it is enforced — two independent barriers, both required:**
+
+- `app/services/strategy_control_plane.py::_NEXT_STAGE` is a DAG with no
+  back-edge. Only `historical_validated` has an edge into `forward_observation`,
+  only `forward_observation` has one into `paper_enabled`, and the exits run
+  `paused` → `retired` → nothing. `promote_strategy` checks it under the
+  per-version advisory lock before any evidence work.
+- The partial UNIQUE index `idx_strategy_promotions_one_successor` on
+  `(strategy_id, strategy_version, from_stage)`
+  (`sql/281_strategy_promotion_ownership.sql:46`) — each stage may be departed
+  exactly once, so the bound holds even when the service check is bypassed. It
+  routinely is: five test modules INSERT into `strategy_promotions` directly.
+
+**What reads it.** `assess_live_gate` anchors both windows on
+`max(promoted_at) FILTER (WHERE to_stage=...)`, which is the true window start
+only under this rule. `strategy_live_gate` cannot see `_NEXT_STAGE`, so the
+coupling is held by `LiveGateFacts.forward_observation_entries` /
+`paper_enabled_entries` (counted in the same scan), the fail-closed refusals
+`forward_window_ambiguous` / `paper_window_ambiguous`, and a pure coupling guard
+in `tests/test_2612_forward_window_single_entry.py`.
+
+**Changing this is a real decision, not a refactor.** Adding a re-entry edge
+(`paused` → `forward_observation` is the plausible one) makes the
+splice-versus-accumulate question live for the first time. The guard test fails
+the moment such an edge is added and names `assess_live_gate` as the thing to
+revisit; #2599's contract-frozen forward-shadow floor reads `forward_days` and
+`forward_decision_dates` off these windows, so the choice binds capital
+authority. Decide it there, and update this entry.
+
+**Blast radius when settled:** `strategy_promotions` held **0 rows** on dev
+(measured 2026-08-13) — no strategy has ever been promoted, so nothing existing
+depends on either reading.
+
+**Refs** #2612, #2599, #2621.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:

@@ -28,8 +28,12 @@ that needs no Postgres — the stage-machine coupling guard and the refusal tabl
 MODULE by substring-matching the connection-fixture name against the raw source
 text.  It does not parse: a mention inside a docstring marks the module just as
 a real fixture would.  Naming the fixture here — to document this very rule —
-is what silently pulled all nine tests below out of the fast tier while this
-file was being written.  Refer to it by description, never by spelling it.
+is what silently pulled every test below out of the fast tier while this file
+was being written.  Refer to it by description, never by spelling it.
+
+Verify with ``pytest <this file> -m "not db" --collect-only -q``, which prints
+``path: N``; exit code 5 means nothing was collected.  Do not verify by reading
+the file — the whole point is that the marking is invisible in the source.
 
 The runtime refusal covered here
 (`forward_window_ambiguous` / `paper_window_ambiguous`) is the fail-closed
@@ -154,3 +158,30 @@ def test_an_ambiguous_window_is_refused_even_when_every_floor_reads_as_met() -> 
     assert "forward_decision_dates_insufficient" not in codes
     assert "forward_calendar_weeks_insufficient" not in codes
     assert "forward_window_ambiguous" in codes
+
+
+# ---------------------------------------------------------------------------
+# The operator-visible mirror
+# ---------------------------------------------------------------------------
+
+
+def test_every_live_gate_fact_survives_into_the_operator_view() -> None:
+    """⚠ NOTHING ELSE COVERS THIS SPLAT, AND IT FAILS SILENTLY.
+
+    `_live_gate_view` builds the response with
+    ``LiveGateFactsView(**report.facts.__dict__)``.  The view does not set
+    ``extra='forbid'``, so pydantic's default is to IGNORE unknown keys: a fact
+    added to the dataclass and not to the view is dropped from the API with no
+    error, no type failure and no test failure.  #2612 added two fields through
+    exactly that splat, and no test constructs `LiveGateResponse` at all.
+
+    Asserted as a set equality over field NAMES rather than by building a
+    response, so it stays a pure test and catches drift in both directions —
+    a view field with no backing fact would raise at construction instead.
+    """
+    from dataclasses import fields
+
+    from app.api.strategies import LiveGateFactsView
+    from app.services.strategy_live_gate import LiveGateFacts
+
+    assert {f.name for f in fields(LiveGateFacts)} == set(LiveGateFactsView.model_fields)
