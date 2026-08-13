@@ -14,11 +14,14 @@ field added later becomes silently mutable through supersession.
 from __future__ import annotations
 
 from dataclasses import fields
+from pathlib import Path
 
 import pytest
 
 from app.services.prereg_contract import (
+    DECLARATION_REFUSALS,
     SUPERSESSION_MUTABLE_FIELDS,
+    SUPERSESSION_REFUSALS,
     ForwardShadowFloor,
     PreregDeclaration,
     Supersession,
@@ -187,3 +190,50 @@ def test_the_mutable_field_partition_covers_every_declaration_field() -> None:
         "PreregDeclaration, decide deliberately which half it belongs in and update this literal — "
         "an unlisted field is compared, which is fail-closed but should still be a choice."
     )
+
+
+def test_every_refusal_code_the_rules_can_emit_is_in_the_declared_vocabulary() -> None:
+    """⚠ The codes are STRING LITERALS inside the functions, so a typo is
+    invisible: a misspelled code still refuses, still reads plausibly in an
+    exception, and matches nothing an operator or a caller filters on.
+
+    This makes ``SUPERSESSION_REFUSALS`` load-bearing rather than decorative
+    (review nitpick, PR #2635) — and it covers ``DECLARATION_REFUSALS`` too,
+    which has been exported without a consumer since #2599.
+    """
+    emitted: set[str] = set()
+    for predecessor, successor in [
+        (_stranded(), _declaration()),
+        (_declaration(), _declaration()),
+        (_stranded(), _declaration(structural_refusal_policy_version=_STALE_POLICY)),
+        (_stranded(), _declaration(prereg_purpose="capital_candidate")),
+        (_stranded(), _declaration(expected_structural_refusals=())),
+    ]:
+        emitted.update(str(code) for code in supersession_refusals(predecessor, successor))
+
+    vocabulary = SUPERSESSION_REFUSALS | DECLARATION_REFUSALS
+    assert emitted <= vocabulary, f"codes outside the declared vocabulary: {sorted(emitted - vocabulary)}"
+    # Every PURE supersession code is reachable from the matrix above; the rest
+    # of the vocabulary is the DB-side half, asserted below.
+    assert {"supersession_not_required", "supersession_policy_not_current", "supersession_terms_changed"} <= emitted
+
+
+def test_the_database_side_refusal_codes_match_what_the_ledger_actually_appends() -> None:
+    """The vocabulary is declared in ``prereg_contract`` and half of it is emitted
+    by ``result_ledger``. Nothing otherwise ties the two together, so a code
+    renamed on one side would leave the other naming a state that never fires.
+
+    ⚠ A quoted-literal match, not a bare substring: these strings appear nowhere
+    else in that module, and the #2631 lesson is that a bare name is satisfied by
+    an import line.
+    """
+    source = (Path(__file__).resolve().parents[1] / "app" / "services" / "result_ledger.py").read_text()
+    db_side = {
+        "supersession_nothing_frozen",
+        "supersession_trial_already_exposed",
+        "supersession_trial_has_holdout_results",
+        "supersession_predecessor_already_superseded",
+    }
+    assert db_side <= SUPERSESSION_REFUSALS
+    missing = {code for code in db_side if f'"{code}"' not in source}
+    assert not missing, f"declared in the vocabulary but never appended by result_ledger: {sorted(missing)}"
