@@ -4569,3 +4569,33 @@ with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
   `_build_credential_health_summary`; `app/services/strategy_scan_freshness.py::check_scan_freshness`;
   `tests/test_2674_status_probe_containment.py`;
   `tests/test_ops_monitor.py::TestCheckAllLayers::test_a_failed_layer_leaves_the_connection_usable`.
+
+### A CHECK constraint passes on NULL, so `col = 'x'` does not require `col = 'x'`
+
+- First seen in: #2603 item 2 (`sql/346_core_eligibility_proofs.sql`), caught by the module's
+  own DB test before review.
+- Symptom: `CONSTRAINT ... CHECK (verdict <> 'underlying' OR (settlement_type = 'real' AND ...))`
+  was written to refuse a row that *looks* like a pass and is not one — a stored eligibility
+  proof asserting `underlying` while carrying no matched arm. It admitted exactly that row.
+  Postgres CHECKs are satisfied unless the expression evaluates to **FALSE**, and
+  `NULL = 'real'` is NULL, not FALSE. Two of the six parametrised cases
+  (`settlement_type=None`, `direction=None`) went straight through the constraint whose entire
+  purpose was to stop them.
+- The general shape: **a completeness constraint on nullable columns must use NULL-safe
+  comparison.** `settlement_type IS NOT DISTINCT FROM 'real'` returns FALSE on NULL and is the
+  fix; `col IS NOT NULL AND col = 'x'` is equivalent and noisier. `col IS TRUE` is already
+  NULL-safe (unlike a bare `col`), and `1 = ANY(arr)` needs an explicit `arr IS NOT NULL`
+  conjunct for the same reason.
+- ⚠ The trap is specific to the constraint direction that matters. On a `verdict <> 'x' OR
+  (...)` shape the NULL leaks through the arm that is supposed to be strict, so the constraint
+  keeps refusing every case you thought to test *except* the omission it exists to catch —
+  which is the case a writer bug actually produces.
+- Prevention: for any CHECK of the form "when this row claims X, these columns must be
+  populated and equal to Y", parametrise a test over **each column set to NULL individually**,
+  not just over wrong values. A wrong value is refused by plain equality; only the NULL case
+  discriminates. If every column in the implication is `NOT NULL`, say so in a comment so the
+  next reader does not have to re-derive that the trap does not apply.
+- Enforced in: this log; `sql/346_core_eligibility_proofs.sql`
+  (`core_eligibility_underlying_is_complete`, with the reasoning inline);
+  `tests/test_2603_core_eligibility_db.py::test_an_underlying_row_cannot_be_incomplete`
+  (revert-probed: swapping `IS NOT DISTINCT FROM` back to `=` turns the two NULL cases red).

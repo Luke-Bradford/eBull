@@ -5,9 +5,13 @@ outside a declared band.  Event-shaped like the other capital authorities in
 ``strategy_control_plane``: one append-only row per operator change.
 
 ⚠ This module AUTHORISES NOTHING.  Nothing reads ``strategy_core_mandate_events``
-yet -- the allocator (#2603 item 3) is its first consumer, the eligibility proof
-(item 2) owns its own evidence shape, and no endpoint is wired.  It is state, not
-a gate, and must not be cited as one until something calls it.
+to act -- the allocator (#2603 item 3) is its first such consumer and no endpoint
+is wired.  It is state, not a gate, and must not be cited as one.
+
+What it now DOES do is refuse to record an unproved authority: as of item 2,
+``configure_core_mandate`` requires a fresh account-specific proof that an
+enabled mandate's core instrument is the underlying product and not a CFD.  That
+is a constraint on WRITES, not a control on trading -- see its docstring.
 
 ``CoreMandateError`` is deliberately standalone rather than a
 ``StrategyControlError`` subclass: no endpoint maps this path yet, so inheriting
@@ -21,8 +25,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
+from uuid import UUID
 
 import psycopg
+
+from app.services.strategy_core_eligibility import require_core_eligibility
 
 # v2 as of #2670, which made both band triggers REACHABLE rather than merely in
 # range.  Bumped even though the table held 0 rows: a version denotes a rule set,
@@ -293,12 +300,32 @@ def configure_core_mandate(
     min_rebalance_amount: Decimal,
     changed_by: str,
     reason: str,
+    operator_id: UUID,
+    provider: str,
+    environment: str,
     base_currency: str = CORE_MANDATE_BASE_CURRENCY,
 ) -> CoreMandate:
     """Append one material core/cash mandate revision.
 
     No parameter can record an eligibility proof: item 2 owns that evidence shape
     and gets its own table, so a mandate cannot claim proof it does not have.
+    What it must do instead is REQUIRE one that exists independently -- an
+    ENABLED mandate is refused unless its ``core_instrument_id`` has a fresh,
+    passing, same-account proof that the instrument is the underlying product and
+    not a CFD (``strategy_core_eligibility.require_core_eligibility``).
+
+    ``operator_id`` / ``provider`` / ``environment`` are required because a gate
+    that cannot name the account cannot select the right proof; eligibility is
+    per-account regulatory state, not an instrument attribute.
+
+    ⚠ A DISABLED mandate is not gated, and MAY still name an instrument --
+    ``strategy_core_mandate_enabled_has_instrument`` is one-directional. It is
+    ungated because it authorises nothing; re-enabling it passes the gate like
+    any other enable.
+
+    ⚠ This is a write-time gate only. It does not keep an already-enabled mandate
+    proved: a stored mandate outlives its proof, and item 3 re-proves at
+    execution time.
     """
     _require_text(changed_by, "changed_by", 200)
     _require_text(reason, "reason", 1000)
@@ -314,6 +341,24 @@ def configure_core_mandate(
     # Serialise revision allocation; the UNIQUE on revision is the backstop, not
     # the mechanism.
     conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORE_MANDATE_ADVISORY_LOCK)
+    if values.enabled:
+        # Inside the lock and inside this transaction, so the freshness test and
+        # the INSERT see the same `now()` -- transaction-start time is constant,
+        # which is what removes the check-then-write window.
+        # ⚠ NOT an `assert`. `validate_core_mandate` does guarantee this, but
+        # `python -O` strips asserts, and the surviving code would then call the
+        # gate with `instrument_id=None` -- which fails closed only because no
+        # proof can match NULL. A check standing between a caller and an
+        # authorisation must not be removable by an interpreter flag.
+        if values.core_instrument_id is None:
+            raise CoreMandateError("an enabled core mandate must name a core instrument")
+        require_core_eligibility(
+            conn,
+            instrument_id=values.core_instrument_id,
+            operator_id=operator_id,
+            provider=provider,
+            environment=environment,
+        )
     current = load_core_mandate(conn)
     if current is not None and not _is_material_change(current, values):
         raise CoreMandateError("core mandate change must alter at least one mandate value")
