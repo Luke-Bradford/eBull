@@ -24,7 +24,12 @@ from typing import Any
 
 import psycopg
 
-CORE_MANDATE_POLICY_VERSION = "core-mandate-v1"
+# v2 as of #2670, which made both band triggers REACHABLE rather than merely in
+# range.  Bumped even though the table held 0 rows: a version denotes a rule set,
+# not a row population, and `CoreMandate` is publicly constructible, so a v1
+# mandate can exist without ever having been stored and changes validity across
+# that tightening.  Leaving the stamp would make one string mean two arithmetics.
+CORE_MANDATE_POLICY_VERSION = "core-mandate-v2"
 
 # Locked to USD by this module's own schema CHECK (sql/336:26), and deliberately NOT
 # bound to `strategy_base_currency.DEPLOYMENT_CURRENCY` (#2603 item 4): the core mandate
@@ -203,8 +208,23 @@ def validate_core_mandate(
     if core_instrument_id is not None and core_instrument_id <= 0:
         raise CoreMandateError("core_instrument_id must be a positive instrument id")
 
-    if core_target_pct - rebalance_band_pct < 0:
-        raise CoreMandateError("rebalance_band_pct wider than core_target_pct leaves the lower trigger unreachable")
+    # Both band bounds are STRICT (#2670).  `core_pct` is bounded to [0,100] for a
+    # non-negative sleeve and the allocator's triggers are strict, so `lower == 0`
+    # and `upper == 100` are comparators that cannot become true -- a declared
+    # two-sided band that is silently one-sided.  Equality is the dead point on
+    # each side, not a boundary case, which is why `<= 0` and `>= PERCENT_BASIS`
+    # rather than `< 0` and `> PERCENT_BASIS`.
+    if core_target_pct - rebalance_band_pct <= 0:
+        raise CoreMandateError("rebalance_band_pct must be below core_target_pct or the lower trigger is unreachable")
+    if core_target_pct + rebalance_band_pct >= PERCENT_BASIS:
+        raise CoreMandateError(
+            "core_target_pct + rebalance_band_pct must be below 100 or the upper trigger is unreachable"
+        )
+    # Kept separate from the bound above and deliberately NOT strict: at equality
+    # the reserve is exactly satisfied at the worst case the band authorises,
+    # which is a legitimate (pre-cost) mandate.  Not implied by the upper bound
+    # either -- that buys only positive worst-case cash, not cash of at least a
+    # positive reserve.
     if PERCENT_BASIS - (core_target_pct + rebalance_band_pct) < liquidity_reserve_pct:
         raise CoreMandateError("rebalance_band_pct would authorise drifting through liquidity_reserve_pct")
 

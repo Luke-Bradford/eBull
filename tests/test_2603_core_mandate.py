@@ -11,6 +11,7 @@ import pytest
 
 from app.services.strategy_core_mandate import (
     CORE_MANDATE_BASE_CURRENCY,
+    CORE_MANDATE_POLICY_VERSION,
     CoreMandate,
     CoreMandateError,
     validate_core_mandate,
@@ -50,10 +51,21 @@ def test_cash_is_the_complement_and_never_a_second_stored_value() -> None:
         liquidity_reserve_pct=Decimal("20"),
         rebalance_band_pct=Decimal("5"),
         min_rebalance_amount=Decimal("25"),
-        policy_version="core-mandate-v1",
+        policy_version=CORE_MANDATE_POLICY_VERSION,
     )
     assert mandate.cash_target_pct == Decimal("40")
     assert mandate.core_target_pct + mandate.cash_target_pct == Decimal("100")
+
+
+def test_the_policy_version_records_which_arithmetic_wrote_the_row() -> None:
+    """#2670 bumped this, and the bump is the point rather than an incident.
+
+    A version denotes a RULE SET, not a row population, so 0 stored rows did not
+    excuse leaving it: ``CoreMandate`` is publicly constructible, so a v1 mandate
+    can exist without ever having been stored and changes validity across the
+    tightening. Pinned so a later invariant change cannot land without one.
+    """
+    assert CORE_MANDATE_POLICY_VERSION == "core-mandate-v2"
 
 
 def test_a_band_that_drifts_through_the_reserve_is_refused() -> None:
@@ -83,7 +95,7 @@ def test_a_band_wider_than_the_target_is_refused() -> None:
     core 4 with a 5pp band puts the lower trigger below zero, unreachable short
     of the core going to nothing. Reserve is 0 here so only the range rule fires.
     """
-    with pytest.raises(CoreMandateError, match="lower trigger unreachable"):
+    with pytest.raises(CoreMandateError, match="lower trigger is unreachable"):
         validate_core_mandate(
             **{
                 **_VALID,
@@ -92,6 +104,86 @@ def test_a_band_wider_than_the_target_is_refused() -> None:
                 "liquidity_reserve_pct": Decimal("0"),
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        # band == target -> lower == 0, and `core_pct < 0` is unreachable for a
+        # non-negative sleeve, INCLUDING by the core going to zero: 0 is not < 0.
+        (
+            {
+                "core_target_pct": Decimal("20"),
+                "rebalance_band_pct": Decimal("20"),
+                "liquidity_reserve_pct": Decimal("0"),
+            },
+            "lower trigger is unreachable",
+        ),
+        # target + band == 100 at reserve 0 -> upper == 100, and `core_pct > 100`
+        # is unreachable for a sleeve whose cash cannot go negative.
+        (
+            {
+                "core_target_pct": Decimal("60"),
+                "rebalance_band_pct": Decimal("40"),
+                "liquidity_reserve_pct": Decimal("0"),
+            },
+            "upper trigger is unreachable",
+        ),
+        # The granularity boundary on the upper side: NUMERIC(8,4) means
+        # 99.9999 + 0.0001 lands exactly on the dead point. Storable under
+        # sql/336, refused by sql/344.
+        (
+            {
+                "core_target_pct": Decimal("99.9999"),
+                "rebalance_band_pct": Decimal("0.0001"),
+                "liquidity_reserve_pct": Decimal("0"),
+            },
+            "upper trigger is unreachable",
+        ),
+    ],
+)
+def test_a_band_whose_trigger_can_never_fire_is_refused(overrides: dict[str, Decimal], message: str) -> None:
+    """#2670. Equality is the DEAD POINT on each side, not a boundary case.
+
+    ``core_pct = 100 * core_mv / (core_mv + cash)`` is bounded to [0,100] for a
+    non-negative sleeve and both allocator triggers are strict, so ``lower == 0``
+    and ``upper == 100`` are comparators that cannot become true. A mandate
+    holding one is weaker than the two-sided band it declares, and nothing
+    downstream can tell it apart from a genuinely one-sided intent.
+    """
+    with pytest.raises(CoreMandateError, match=message):
+        validate_core_mandate(**{**_VALID, **overrides})
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # One quantum inside each dead point, which is what makes the tests above
+        # about REACHABILITY rather than about narrow bands.
+        {
+            "core_target_pct": Decimal("20"),
+            "rebalance_band_pct": Decimal("19.9999"),
+            "liquidity_reserve_pct": Decimal("0"),
+        },
+        {
+            "core_target_pct": Decimal("60"),
+            "rebalance_band_pct": Decimal("39.9999"),
+            "liquidity_reserve_pct": Decimal("0"),
+        },
+        # The smallest mandate NUMERIC(8,4) can express at all: both bounds need
+        # 0.0001 of clearance, so this is target 0.0002 / band 0.0001.
+        {
+            "core_target_pct": Decimal("0.0002"),
+            "rebalance_band_pct": Decimal("0.0001"),
+            "liquidity_reserve_pct": Decimal("0"),
+        },
+    ],
+)
+def test_the_narrowest_mandates_with_both_triggers_live_are_accepted(overrides: dict[str, Decimal]) -> None:
+    """#2670 tightened a bound; it must not have moved it further than one quantum."""
+    values = validate_core_mandate(**{**_VALID, **overrides})
+    assert values.core_target_pct - values.rebalance_band_pct > 0
+    assert values.core_target_pct + values.rebalance_band_pct < Decimal("100")
 
 
 def test_a_zero_band_is_refused() -> None:

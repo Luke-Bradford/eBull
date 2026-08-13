@@ -139,6 +139,138 @@ arm, and that check sits on the active-entry path which item 3 cannot reuse anyw
 execution is `max(declared, broker minimum at the time)` — the broker half, and what to do
 when it is unavailable or has risen, is item 3's to build.
 
+### Amendment (#2670): both band triggers must be REACHABLE, not merely in range
+
+The two CHECKs above were written to keep both triggers inside `[0, 100]`. That is a
+weaker property than the one the first CHECK's own comment claims, and both comparators
+admit a mandate whose declared two-sided band is silently one-sided.
+
+`core_pct = 100 · core_mv / (core_mv + cash)` with both components non-negative (leverage
+is barred, and a negative core value is not a state this sleeve has), so `core_pct` is
+bounded to `[0, 100]`. The triggers are strict (Q2 of the allocator spec). Therefore:
+
+| trigger | fires when | REACHABLE iff |
+| --- | --- | --- |
+| lower | `core_pct < target - band` | `target - band > 0` |
+| upper | `core_pct > target + band` | `target + band < 100` |
+
+Both shipped comparators are non-strict at exactly the dead point:
+
+- `core_target_pct - rebalance_band_pct >= 0` admits `band == target` ⇒ `lower == 0` ⇒
+  the lower trigger is `core_pct < 0`, unreachable — *including* by "the core going to
+  zero", which the comment names as the surviving case. `core_pct = 0` is not `< 0`.
+- `100 - (core_target_pct + rebalance_band_pct) >= liquidity_reserve_pct` admits
+  `band == 100 - target` when `reserve == 0` ⇒ `upper == 100` ⇒ the upper trigger is
+  `core_pct > 100`, unreachable.
+
+Measured on dev — the only database (`sql/338`'s header records the same), and 0 rows in
+this table, so this is the whole population: `t=20, b=20, r=0` and `t=60, b=40, r=0` both
+INSERT successfully today, and `evaluate_core_rebalance` returns `hold` on each at the
+extreme state (core at 0% and core at 100% respectively) — the trigger does not fire even
+where it is arithmetically most able to. `ADD CONSTRAINT` is therefore a plain add with
+nothing to repair; on any database that did hold a degenerate row the migration would fail
+loudly rather than silently drop it, which is the correct outcome.
+
+**Reachable is not actionable, and this amendment only buys the first.** `min_rebalance_amount`
+(and the broker floor item 3 adds) can still suppress every triggering trade on a small
+enough sleeve; the allocator reports that as `hold` + `below_min_rebalance_amount`. What is
+fixed here is a comparator that cannot become true at all, which no floor is involved in.
+
+**Granularity: `NUMERIC(8,4)` makes each bound need `0.0001` of clearance.** The strict
+inequalities are over a discrete lattice, so the smallest feasible mandate is
+`target = 0.0002, band = 0.0001` and the largest feasible upper edge is `99.9999`. That is a
+real representational exclusion, not a rounding artefact — `t = 99.9999, b = 0.0001, r = 0`
+is storable today and gives `upper = 100.0000` exactly, which is the upper-side worked
+example at the boundary.
+
+**The fix is a third constraint, NOT a strictening of the reserve CHECK.** The reserve
+CHECK must stay `>=`: `t=60, b=30, r=10` satisfies it at equality, is a legitimate mandate
+(the reserve is exactly satisfied at the worst case the band authorises), and its upper
+trigger is reachable at `90 < 100`. Strictening it would reject that. The unreachability at
+`r=0` comes from the *combination*, so the reachability property gets its own named
+constraint and the reserve keeps its own:
+
+```
+strategy_core_mandate_band_within_range     : core_target_pct - rebalance_band_pct > 0
+strategy_core_mandate_band_upper_reachable  : core_target_pct + rebalance_band_pct < 100
+strategy_core_mandate_band_respects_reserve : UNCHANGED (>=)
+```
+
+The reserve CHECK stays necessary and is not made redundant by the new upper bound:
+`upper < 100` buys only *positive* cash at the worst case, not cash of at least a positive
+reserve. The implication runs the other way — `reserve > 0` implies `upper < 100`, so the
+new constraint bites only at `reserve == 0`. Kept explicit rather than collapsed into the
+reserve CHECK: two different properties, two different names in
+`CheckViolation.diag.constraint_name`.
+
+⚠ Under the combined strict invariants several of the shipped per-column CHECKs are now
+*implied* — `core_target_pct >= 0`, `core_target_pct <= 100`, `rebalance_band_pct <= 100`
+and `liquidity_reserve_pct < 100` all follow. They are kept: a per-column violation reports
+which column is out of range, which a composite one cannot, and the redundancy costs a
+comparison. Named here so a later reader does not remove one believing it load-bearing, or
+keep one believing it independent.
+
+**Q1's proof is untouched.** It chains through `band_respects_reserve`, which does not
+change; the two new bounds only tighten the set of mandates it quantifies over.
+
+**What this forbids that was previously storable:** `band == target` under any target
+(lower dead), and `target + band == 100` with `reserve == 0` (upper dead). ⚠ It does NOT
+newly forbid `core_target_pct = 100` — the shipped reserve CHECK already rejects that for
+any `band > 0`, since `100 - (100 + band) < 0 <= reserve`. Measured: rejected on
+`strategy_core_mandate_band_respects_reserve`.
+
+Both forbidden shapes are **one-sided intents**, and the case for refusing them is
+structural rather than a judgement about what an operator may want. `rebalance_band_pct` is
+a single symmetric number applied to both sides; a one-sided mandate is not expressible in
+that column at all. Arriving at one by choosing a value that makes a comparator dead is an
+accident of arithmetic, not a declaration — and nothing downstream can tell it apart from a
+two-sided intent. If a genuinely one-sided band (liquidation-only, accumulation-only) is
+ever wanted, it needs its own declared shape, which is a migration and a new policy version.
+
+⚠ Separately: a zero-slack mandate such as `t=60, b=30, r=10` is legitimate **pre-cost**
+only. At the upper edge it has no room for a fee or slippage, which is the allocator spec's
+Q3 problem, not this one — the amendment establishes the trigger can fire, not that the
+resulting trade fits inside the reserve.
+
+**`CORE_MANDATE_POLICY_VERSION` IS bumped to `core-mandate-v2`.** The "Source rule" section
+above says a change to the invariants is "a migration plus a new version, never a
+redefinition of the old one", and this is squarely that. An earlier draft of this amendment
+argued for an exception on the grounds that the table holds 0 rows, so nothing could be
+reinterpreted. That is wrong twice, and Codex checkpoint 1 caught both:
+
+- **A version denotes a rule set, not a row population.** `core-mandate-v2` denotes the
+  stricter admissible set whether or not any row is written under it. The `sql/342`
+  vocabulary-minting caution does not transfer: that declined a state *nothing could
+  produce*, whereas every future mandate is produced under v2.
+- **Persistence is not the only carrier.** `CoreMandate` is a public frozen dataclass and
+  `validate_core_mandate` is a public function, so a v1 mandate can exist without ever
+  having been stored — in a test, a cached input, a retried command, a directly constructed
+  object. Such an object goes from valid to `core_mandate_invalid` across this change. Under
+  an unchanged stamp that is one version string meaning two different arithmetics, which is
+  exactly the silent reinterpretation the stamp exists to prevent.
+
+So `sql/344` re-issues the `policy_version` CHECK as `= 'core-mandate-v2'`. v1 rows become
+unstorable, which is intended: a v1 row is one written under looser arithmetic, and there
+are none to preserve. The allocator's `core_mandate_policy_unsupported` refusal is what a
+directly-constructed v1 object now meets, and it is checked *before* validity precisely so
+the v1 object is reported as stale-policy rather than blamed as invalid
+(`strategy_core_allocator.py::_mandate_refusal`).
+
+⚠ **That CHECK aborts the migration — and boot — on any database holding a v1 revision,
+even one that satisfies the new band bounds.** Codex checkpoint 2 raised this as a P1. The
+abort is intended, so `sql/344` states the precondition as a `DO` block that raises a named
+error with the row count and the remedy, rather than letting it surface as a
+`CheckViolation` on a bookkeeping stamp. Codex's proposed remedy — permit both versions at
+rest so history stays readable — was **measured and rejected**: `load_core_mandate` reads
+only the latest revision and `_mandate_refusal` refuses any version but the current one, so
+a permitted v1 row is storable and refused by the table's only consumer. `sql/311`'s
+legacy-readability carve-out does not transfer either; `sql/336`'s header records that this
+table constrains from row one *because* it has no legacy rows, which is still true.
+
+`sql/336` itself is NOT edited: `app/db/migrations.py:160-172` fails the whole run on a
+content-hash drift for an applied file. The corrected reasoning lives in `sql/344`'s header
+and its re-issued `COMMENT ON`.
+
 ## Denominator: what the percentages are shares of
 
 All three percentages are shares of **one core-sleeve denominator**, and every CHECK above

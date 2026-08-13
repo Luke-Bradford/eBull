@@ -11,13 +11,16 @@ source db-marks the WHOLE module at collection, so mixing these with pure tests
 would drag the fast tier onto Postgres.
 """
 
+import re
 from decimal import Decimal
-from typing import Any
+from pathlib import Path
+from typing import Any, LiteralString, cast
 
 import psycopg
 import pytest
 
 from app.services.strategy_core_mandate import (
+    CORE_MANDATE_POLICY_VERSION,
     CoreMandateError,
     configure_core_mandate,
     load_core_mandate,
@@ -31,7 +34,7 @@ INSERT INTO strategy_core_mandate_events (
 ) VALUES (
     1,%(enabled)s,%(base_currency)s,%(core_instrument_id)s,%(core_target_pct)s,
     %(liquidity_reserve_pct)s,%(rebalance_band_pct)s,%(min_rebalance_amount)s,
-    'core-mandate-v1','test','test'
+    %(policy_version)s,'test','test'
 )
 """
 
@@ -43,7 +46,29 @@ _VALID_ROW: dict[str, Any] = {
     "liquidity_reserve_pct": Decimal("20"),
     "rebalance_band_pct": Decimal("5"),
     "min_rebalance_amount": Decimal("25"),
+    # Parameterised rather than inlined so the #2670 bump is exercised as a
+    # CHECK and not merely assumed: a literal here would make a stale version
+    # untestable at the only layer that can still be handed one.
+    "policy_version": CORE_MANDATE_POLICY_VERSION,
 }
+
+
+def _migration_precondition_block() -> LiteralString:
+    """sql/344's superseded-version guard, read from the SHIPPED file.
+
+    Read rather than re-typed on purpose: a test that restates the SQL it is
+    checking passes when the migration and the copy drift apart, which is the
+    tautology the prevention log already names for constants.
+
+    The ``cast`` is the one thing a file read costs: psycopg's ``execute`` takes
+    a ``LiteralString`` so caller-controlled SQL cannot reach it. Sound here and
+    nowhere near a request path — the source is a repo-controlled migration this
+    process already executes verbatim at boot, and nothing interpolates into it.
+    """
+    sql = Path("sql/344_core_mandate_trigger_reachability.sql").read_text(encoding="utf-8")
+    match = re.search(r"^DO \$\$.*?^END \$\$;$", sql, re.S | re.M)
+    assert match is not None, "sql/344 no longer contains a DO-block precondition"
+    return cast("LiteralString", match.group(0))
 
 
 def _seed_instrument(conn: psycopg.Connection[Any]) -> int:
@@ -66,6 +91,45 @@ def test_the_reference_row_inserts(ebull_test_conn: psycopg.Connection[Any]) -> 
 
 
 @pytest.mark.parametrize(
+    "overrides",
+    [
+        # #2670 tightened two bounds; these pin that it did not tighten a third.
+        # Worst-case cash exactly equal to a POSITIVE reserve stays storable —
+        # band_respects_reserve is deliberately still `>=`, and the upper trigger
+        # is live at 90 < 100.
+        {
+            "core_target_pct": Decimal("60"),
+            "rebalance_band_pct": Decimal("30"),
+            "liquidity_reserve_pct": Decimal("10"),
+        },
+        # One NUMERIC(8,4) quantum inside each dead point.
+        {
+            "core_target_pct": Decimal("20"),
+            "rebalance_band_pct": Decimal("19.9999"),
+            "liquidity_reserve_pct": Decimal("0"),
+        },
+        {
+            "core_target_pct": Decimal("60"),
+            "rebalance_band_pct": Decimal("39.9999"),
+            "liquidity_reserve_pct": Decimal("0"),
+        },
+    ],
+)
+def test_mandates_one_quantum_inside_the_dead_points_still_insert(
+    ebull_test_conn: psycopg.Connection[Any], overrides: dict[str, Any]
+) -> None:
+    """A tightening is only correct if it stops exactly where it says it does.
+
+    Raw SQL on purpose, per this module's contract: these bound the MIGRATION,
+    so a later one that over-corrected to `>=` on the reserve — or moved either
+    strict bound by more than a quantum — fails here rather than silently
+    shrinking what an operator can declare.
+    """
+    ebull_test_conn.execute(_INSERT, {**_VALID_ROW, **overrides})
+    assert load_core_mandate(ebull_test_conn) is not None
+
+
+@pytest.mark.parametrize(
     "overrides,constraint",
     [
         # core 60 + band 25 leaves 15 cash against a 20 reserve.
@@ -82,6 +146,42 @@ def test_the_reference_row_inserts(ebull_test_conn: psycopg.Connection[Any]) -> 
             },
             "strategy_core_mandate_band_within_range",
         ),
+        # #2670, lower dead point: band == target gives lower == 0, and
+        # `core_pct < 0` is unreachable. sql/336 stored this; sql/344 refuses it.
+        (
+            {
+                "core_target_pct": Decimal("20"),
+                "rebalance_band_pct": Decimal("20"),
+                "liquidity_reserve_pct": Decimal("0"),
+            },
+            "strategy_core_mandate_band_within_range",
+        ),
+        # #2670, upper dead point: target + band == 100 at reserve 0 gives
+        # upper == 100, and `core_pct > 100` is unreachable. Note it clears
+        # band_respects_reserve at equality, which is why it needs its own name.
+        (
+            {
+                "core_target_pct": Decimal("60"),
+                "rebalance_band_pct": Decimal("40"),
+                "liquidity_reserve_pct": Decimal("0"),
+            },
+            "strategy_core_mandate_band_upper_reachable",
+        ),
+        # The same dead point at NUMERIC(8,4) granularity.
+        (
+            {
+                "core_target_pct": Decimal("99.9999"),
+                "rebalance_band_pct": Decimal("0.0001"),
+                "liquidity_reserve_pct": Decimal("0"),
+            },
+            "strategy_core_mandate_band_upper_reachable",
+        ),
+        # #2670's version bump, enforced at rest: a row written under the looser
+        # v1 arithmetic is no longer storable.
+        (
+            {"policy_version": "core-mandate-v1"},
+            "strategy_core_mandate_events_policy_version_check",
+        ),
         # Enabled with no instrument to hold.
         ({"enabled": True}, "strategy_core_mandate_enabled_has_instrument"),
     ],
@@ -92,6 +192,43 @@ def test_the_named_checks_reject_raw_inserts(
     with pytest.raises(psycopg.errors.CheckViolation) as caught:
         ebull_test_conn.execute(_INSERT, {**_VALID_ROW, **overrides})
     assert caught.value.diag.constraint_name == constraint
+    ebull_test_conn.rollback()
+
+
+def test_the_migration_precondition_is_a_no_op_on_a_clean_database(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The control: without it, the test below could pass on a broken block."""
+    ebull_test_conn.execute(_migration_precondition_block())
+
+
+def test_the_migration_precondition_names_superseded_rows_rather_than_aborting_opaquely(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2670, raised at Codex checkpoint 2.
+
+    sql/344's `policy_version = 'core-mandate-v2'` CHECK aborts the migration —
+    and boot — on any database holding a v1 revision, even one satisfying the new
+    band bounds. That abort is intended, so the guard exists to make it a named,
+    actionable failure instead of a `CheckViolation` on a bookkeeping stamp.
+
+    Exercised by dropping the CHECK inside this transaction, which is the only
+    way to create the state the guard is for now that the CHECK forbids it. DDL
+    is transactional in Postgres, so the rollback restores it.
+    """
+    ebull_test_conn.execute(
+        "ALTER TABLE strategy_core_mandate_events DROP CONSTRAINT strategy_core_mandate_events_policy_version_check"
+    )
+    ebull_test_conn.execute(_INSERT, {**_VALID_ROW, "policy_version": "core-mandate-v1"})
+
+    with pytest.raises(psycopg.errors.RaiseException) as caught:
+        ebull_test_conn.execute(_migration_precondition_block())
+
+    assert "superseded policy_version" in str(caught.value)
+    # The count, so the operator learns the size of the problem from the message.
+    assert "1 core mandate revision(s)" in str(caught.value)
+    # And the remedy, including the one Codex proposed and the reason it is wrong.
+    assert "storable and unusable" in (caught.value.diag.message_hint or "")
     ebull_test_conn.rollback()
 
 
