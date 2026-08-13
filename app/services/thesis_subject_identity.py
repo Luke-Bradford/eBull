@@ -54,11 +54,21 @@ _STALE_VERDICT_SQL = """
     WHERE t.subject_identity_rule_version IS DISTINCT FROM %(ver)s
 """
 
+#: ⚠⚠ ``::boolean`` AT EVERY OCCURRENCE OF ``%(ok)s`` (#2647). psycopg3 dedups
+#: the repeated named parameter into one ``$n`` and sends a ``None`` untyped
+#: (OID 0); ``CASE WHEN $n IS NULL`` is a NullTest and constrains no type, so
+#: the statement cannot be planned and Postgres raises ``AmbiguousParameter``.
+#: The assignment ``SET subject_identity_ok = $n`` does NOT rescue it — measured,
+#: the UPDATE shape raises exactly as the INSERT one did.
+#:
+#: ⚠ ``ok=None`` is the boot probe's reset direction — a row whose instrument
+#: stopped carrying a checkable name — so untyped, this raised inside the
+#: LIFESPAN self-heal, i.e. at application start rather than in a job.
 _WRITE_VERDICT_SQL = """
     UPDATE theses
-    SET subject_identity_ok           = %(ok)s,
-        subject_identity_rule_version = CASE WHEN %(ok)s IS NULL THEN NULL ELSE %(ver)s END,
-        subject_identity_checked_at   = CASE WHEN %(ok)s IS NULL THEN NULL ELSE now() END
+    SET subject_identity_ok           = %(ok)s::boolean,
+        subject_identity_rule_version = CASE WHEN %(ok)s::boolean IS NULL THEN NULL ELSE %(ver)s END,
+        subject_identity_checked_at   = CASE WHEN %(ok)s::boolean IS NULL THEN NULL ELSE now() END
     WHERE thesis_id = %(id)s
 """
 
@@ -79,11 +89,20 @@ def ensure_subject_identity_verdicts(conn: Any) -> int:
     ``app/main.py`` — self-healing state that a restore-from-snapshot or a
     rule change would otherwise leave wrong with no programmatic recovery.
 
-    Idempotence is VERDICT-EQUIVALENCE: a row is written only when its stored
-    verdict differs from what the rule now produces, so a steady-state boot
-    writes zero rows and no ``subject_identity_checked_at`` is disturbed. Edit
-    the rule (any edit to this file changes its code hash) and the next boot
-    re-verdicts the corpus.
+    ⚠ Idempotence is VERSION-equivalence, not verdict-equivalence (corrected
+    #2647; the prior wording claimed the latter). ``_STALE_VERDICT_SQL`` selects
+    on ``subject_identity_rule_version IS DISTINCT FROM`` and the only skip
+    below is the both-NULL case, so a steady-state boot writes zero rows — but a
+    version bump rewrites every row whose verdict is not NULL, including the
+    ones whose verdict is unchanged, disturbing their
+    ``subject_identity_checked_at``. That is correct, because the row must
+    record WHICH rule decided it and a stale version would be a lie; it is
+    called out because the cost is not what the old wording implied.
+
+    ⚠⚠ The hash covers the FILE, so ANY edit to this module — a comment, this
+    docstring — bumps the version and triggers that corpus-wide rewrite. #2647
+    could not avoid it: the defect being fixed was in ``_WRITE_VERDICT_SQL``
+    itself. Price the rewrite before editing here for cosmetic reasons.
 
     ⚠ NO FALSE-POSITIVE GATE HERE, deliberately, unlike
     ``scripts/backfill_thesis_subject_identity.py``. Refusing to write at boot
