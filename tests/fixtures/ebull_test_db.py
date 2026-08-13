@@ -196,6 +196,15 @@ _PLANNER_TABLES: tuple[str, ...] = (
     # carries yet (the record is written BEFORE the row it authorises), so an FK
     # would refuse the exact ordering the trigger requires.
     "strategy_holdout_accesses",
+    # #2611 (sql/340) — refused outcome-access attempts. STANDALONE for the same
+    # reason its writer needs it to be: no FK to the declaration, because the
+    # audit row is written from a SECOND connection that cannot see a
+    # declaration the caller froze in its own open transaction.
+    # ⚠⚠ LISTED BECAUSE IT IS THE ONE TABLE A DB TEST CANNOT ROLL BACK. Every
+    # other row a test writes dies with the fixture's transaction; this one
+    # commits on its own connection by design, so without this line a refusal
+    # from one test is still there for the next one to count.
+    "strategy_holdout_access_refusals",
     # #2454 — governance roots.  Their children are discovered through inbound
     # FKs, but neither root has an FK path from instruments.  Keeping them here
     # prevents a promotion/deployment in one DB test becoming another test's

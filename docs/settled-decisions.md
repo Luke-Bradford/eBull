@@ -1092,6 +1092,67 @@ Criterion 5's clause passes on all eight `(strategy_id, strategy_version)` pairs
 
 ---
 
+## A refused outcome-access attempt is audited from a SEPARATE transaction (#2611)
+
+`record_holdout_access` / `require_outcome_access` used to raise
+`PreregDeclarationRefused` and write nothing. `sql/340`
+(`strategy_holdout_access_refusals`) records the attempt; `_refuse_access` is the
+single exit that writes it.
+
+**The rule, and it is an asymmetry — not an inconsistency with #2599:**
+
+- An **access** record is a claim about DATA. It stays in the caller's
+  transaction, because `sql/264`'s trigger must see it alongside the hold-out row
+  it authorises and a rolled-back evaluation did not happen.
+  `record_holdout_access`'s docstring is unchanged and still correct.
+- A **refusal** record is a claim about an ACT OF THE CALLER. It completes when
+  the exception is constructed; the caller rolling back does not un-attempt it,
+  and a caller that retries N times attempted N times. Postgres has no autonomous
+  transaction, so it is written on a second connection — otherwise it would be
+  lost in every case it exists for, the refusal being an exception.
+
+**Consequences, each load-bearing and none of them cosmetic:**
+
+- ⚠⚠ **Its own relation, never `strategy_holdout_accesses`.** That table is read
+  as *looks that happened* by `holdout_access_counts` (criterion 5),
+  `supersede_preregistration` (`supersession_trial_already_exposed`),
+  `app/api/strategies.py`, `trial_register`, `scripts/sealed_rerun_gate.py` and
+  `sql/264`'s own write trigger. A refusal row there would inflate criterion 5
+  AND permanently strand the trial from #2634's repair over a look that returned
+  nothing.
+- ⚠⚠ **No advisory lock in the audit write, and no FK on `declaration_id`.**
+  Measured 2026-08-13: `pg_advisory_xact_lock` **blocks across connections**.
+  `record_holdout_access` holds the trial lock when it refuses, so an audit that
+  took it would block until the caller's transaction ended. An FK is the same
+  hazard quieter: it locks the parent row and cannot see a declaration the caller
+  froze in its own open transaction.
+- ⚠ **The audit DSN is derived from the caller's connection**
+  (`make_conninfo(conn.info.dsn, password=conn.info.password)` — `dsn` strips the
+  password, measured on psycopg 3.3.3), never from the process settings. The
+  settings URL would write a DB test's refusal into the operator's dev database.
+- ⚠ **Best effort, and it never masks the refusal.** A failed audit logs at ERROR
+  **with the codes inline** and the refusal still raises. A gate that can be
+  disabled by breaking its audit is not a gate.
+- **Out of scope on purpose:** `freeze_preregistration` /
+  `supersede_preregistration` refusals (attempts to WRITE a declaration, which
+  open nothing), `_refuse_declared_stamp_substitution` (a result-write refusal),
+  and `verify_outcome_access_provenance` (already requires a real `access_id`, so
+  the attempt it re-checks is recorded). A `RuntimeError` from a malformed
+  declaration chain also denies access and is deliberately NOT audited — this
+  table records POLICY refusals, not every way a look can fail.
+
+**Blast radius, measured on dev over the full population with
+`PYTHONPATH=. uv run python scripts/verify_2611_refusal_audit.py`:** 8 trials,
+304 access rows, 324 results (300 `hold_out`), **0 declarations** and 0 refusal
+rows. All 8 trials refuse `preregistration_not_frozen` at `require_outcome_access`
+and are permitted at `record_holdout_access` — **the same decision this branch and
+`origin/main` both make.** The PR adds a row after the decision and changes no
+decision.
+
+**Refs** #2611, #2599, #2634, #2614, #2437.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
