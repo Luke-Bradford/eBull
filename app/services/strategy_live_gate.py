@@ -93,6 +93,21 @@ class LiveGateFacts:
     forward_days: int
     paper_closed_trades: int
     paper_days: int
+    #: #2612 — how many times this version ARRIVED at each window anchor.
+    #: Both windows are anchored on `max(promoted_at)` for their stage, which is
+    #: only the true window start because a version reaches each stage AT MOST
+    #: ONCE. That is not an assumption this module makes; it is enforced twice
+    #: over, in `strategy_control_plane._NEXT_STAGE` (a DAG whose only edge into
+    #: `forward_observation` leaves `historical_validated`, with no back-edge —
+    #: `paused` goes only to `retired`) and by the partial UNIQUE index
+    #: `idx_strategy_promotions_one_successor` on
+    #: `(strategy_id, strategy_version, from_stage)`.
+    #: ⚠ CARRIED AS A FACT, NOT ASSERTED, because if either enforcement is ever
+    #: relaxed the failure is SILENT: `max` would quietly re-anchor on the second
+    #: arrival, discarding the whole first observation period and restarting
+    #: `forward_days` — the exact quantities #2599's contract-frozen floor reads.
+    forward_observation_entries: int
+    paper_enabled_entries: int
     funded_shadow_average_return_pct: Decimal | None
     unfunded_shadow_average_return_pct: Decimal | None
     shadow_alpha_pct: Decimal | None
@@ -340,7 +355,11 @@ def assess_live_gate(
             """
             SELECT
               max(promoted_at) FILTER (WHERE to_stage='forward_observation') AS forward_at,
-              max(promoted_at) FILTER (WHERE to_stage='paper_enabled') AS paper_at
+              max(promoted_at) FILTER (WHERE to_stage='paper_enabled') AS paper_at,
+              -- #2612 — the arrival counts these two anchors rest on. Same scan,
+              -- so measuring the assumption costs nothing.
+              count(*) FILTER (WHERE to_stage='forward_observation') AS forward_entries,
+              count(*) FILTER (WHERE to_stage='paper_enabled') AS paper_entries
             FROM strategy_promotions
             WHERE strategy_id=%s AND strategy_version=%s
             """,
@@ -525,6 +544,8 @@ def assess_live_gate(
         forward_days=max(((paper_at or observed_at) - forward_at).days, 0) if forward_at else 0,
         paper_closed_trades=int(evidence["paper_closed"] or 0),
         paper_days=max((observed_at - paper_at).days, 0) if paper_at else 0,
+        forward_observation_entries=int(stages["forward_entries"]),
+        paper_enabled_entries=int(stages["paper_entries"]),
         funded_shadow_average_return_pct=funded_avg,
         unfunded_shadow_average_return_pct=unfunded_avg,
         shadow_alpha_pct=shadow_alpha,
@@ -631,6 +652,24 @@ def live_gate_refusals(
         refusals.append("live_gate_policy_missing")
     if facts.stage != "paper_enabled":
         refusals.append("paper_stage_required")
+    # #2612 — TWO CODES, NOT ONE: a second `forward_observation` arrival corrupts
+    # `forward_days` + `forward_decision_dates` (what #2599's frozen floor reads),
+    # a second `paper_enabled` arrival corrupts every paper metric below. They are
+    # different emergencies and collapsing them would hide one, per this
+    # function's own three-codes convention above.
+    #
+    # ⚠ These do not breach the ORDER contract in the docstring. Both anchors are
+    # single-entry by construction (see `LiveGateFacts`), so on every REACHABLE
+    # input these counts are 0 or 1 and neither code is emitted — the position
+    # cannot move `refusal_codes[0]` for any input the stage machine can produce.
+    # They sit here, rather than appended at the end, because a corrupt window
+    # invalidates the forward and paper clauses that follow: the floor checks
+    # below can PASS spuriously on a spliced window, so the reason this strategy
+    # is refused must not be buried beneath them.
+    if facts.forward_observation_entries > 1:
+        refusals.append("forward_window_ambiguous")
+    if facts.paper_enabled_entries > 1:
+        refusals.append("paper_window_ambiguous")
     if requested_capital <= 0:
         refusals.append("live_capital_must_be_positive")
     # #2599's forward-shadow floor. ⚠ DUAL ENFORCEMENT, NOT REPLACEMENT: the

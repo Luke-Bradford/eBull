@@ -267,6 +267,8 @@ def _facts(**overrides: object) -> LiveGateFacts:
         "forward_days": 84,
         "paper_closed_trades": 100,
         "paper_days": 100,
+        "forward_observation_entries": 1,
+        "paper_enabled_entries": 1,
         "funded_shadow_average_return_pct": Decimal("1"),
         "unfunded_shadow_average_return_pct": Decimal("0"),
         "shadow_alpha_pct": Decimal("1"),
