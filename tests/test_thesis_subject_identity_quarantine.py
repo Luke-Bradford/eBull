@@ -92,7 +92,15 @@ class TestRuleSetVersion:
 
 class _FakeConn:
     """Minimal ``conn.execute`` stand-in: first call returns the SELECT rows,
-    every later call is an UPDATE and is recorded."""
+    every later call is an UPDATE and is recorded.
+
+    ⚠⚠ IT RECORDS PARAMETERS AND SENDS NOTHING, so it proves what the probe
+    DECIDES and nothing about whether Postgres can plan the write. #2647 was
+    invisible here for exactly that reason: ``_WRITE_VERDICT_SQL`` raised
+    ``AmbiguousParameter`` on the ``ok=None`` path these tests assert, while
+    these tests stayed green. The real-backend twins live in
+    ``tests/test_thesis_subject_identity_null_verdict_db.py`` — keep both.
+    """
 
     def __init__(self, rows: list[tuple[Any, ...]]) -> None:
         self._rows = rows

@@ -1913,9 +1913,18 @@ def _insert_thesis_atomic(
             %(base_value)s, %(bull_value)s, %(bear_value)s,
             %(break_conditions_json)s, %(break_predicates_json)s, %(memo_markdown)s, %(critic_json)s,
             %(model)s, %(provider)s, %(prompt_version)s,
-            %(subject_identity_ok)s,
-            CASE WHEN %(subject_identity_ok)s IS NULL THEN NULL ELSE %(subject_identity_rule_version)s END,
-            CASE WHEN %(subject_identity_ok)s IS NULL THEN NULL ELSE now() END
+            -- ⚠⚠ ::boolean AT EVERY OCCURRENCE, and the CASE arms are why (#2647).
+            -- psycopg3 dedups a repeated named parameter into one $n, and a
+            -- ``None`` is sent untyped (OID 0). ``CASE WHEN $n IS NULL`` is a
+            -- NullTest, which constrains no type — and Postgres transforms the
+            -- whole VALUES list BEFORE coercing it to the target columns, so
+            -- the bare bind into the boolean column below does NOT rescue it.
+            -- Measured: bare-only plans, CASE-only raises, and both together
+            -- raise. Untyped, the NULL triple — the deliberate fail-closed
+            -- state this function's docstring stores — aborted the insert.
+            %(subject_identity_ok)s::boolean,
+            CASE WHEN %(subject_identity_ok)s::boolean IS NULL THEN NULL ELSE %(subject_identity_rule_version)s END,
+            CASE WHEN %(subject_identity_ok)s::boolean IS NULL THEN NULL ELSE now() END
         )
         RETURNING thesis_id, thesis_version
         """,
