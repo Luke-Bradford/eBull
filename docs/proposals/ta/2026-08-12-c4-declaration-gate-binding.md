@@ -234,6 +234,32 @@ the one it would have frozen: equal exits 0 reporting `already_frozen_identical`
 different exits non-zero naming both digests. Same failure, two very different
 operator actions.
 
+⚠⚠ **CORRECTION (2026-08-13, #2631): this script cannot be run "anytime", and
+the operator was told in session that it could.** The frozen row records
+`STRUCTURAL_REFUSAL_POLICY_VERSION`, and `prereg_contract.declaration_refusals`
+returns `structural_refusal_policy_superseded` the moment that string stops
+matching the current constant — for good, because `sql/333` bars UPDATE and
+DELETE and holds the identity key, so no corrected row can replace it. Main
+moved v1 → v2 on 2026-08-12 while C-4's freeze sat one command away, and nothing
+in the script, its `--dry-run` output or this doc mentioned the coupling.
+
+**Recovery cost, in full — it is not just a rename.** A new `strategy_version`
+changes the trial's identity, leaves the old trial permanently inaccessible, and
+charges the shared trial register a second time (#2600), raising the
+deflated-Sharpe bar for every other candidate. There is no cheaper path.
+
+So the runbook line is: **run `--dry-run` first and read
+`structural_refusal_policy_version` in its output** (every digest input is
+printed there now, by construction from `PreregDeclaration.digest_payload`), and
+freeze only when no change to the structural refusal policy is in flight.
+`scripts/_prereg_freeze_guard.assert_policy_version_merged` refuses
+automatically when this tree's constant is not the one on `origin/main` — after
+`git fetch origin main`, because an unfetched tracking ref would compare the
+repository to a stale copy of itself and match for the wrong reason. ⚠ It
+does **not** see the case that actually occurred — a bump on an unpushed branch
+in another worktree — because no check that reads this repository can see a
+commit that is not in it. There the dry-run and this paragraph are the control.
+
 ### 2. Gate wiring — one committed access, then a read-only re-check
 
 `require_outcome_gate` gains a `conn` and becomes the boundary crossing:

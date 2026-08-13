@@ -18,6 +18,26 @@ contract, the refusal list is COMPUTED by ``structural_promotion_refusals``
 rather than spelled out, and the forward-shadow floor is derived by construction
 from the contract's own power calculation and a measured, outcome-free arrival
 rate — see ``_FORWARD_SHADOW_DERIVATION`` and the test that re-derives it.
+
+⚠⚠ THIS CANNOT BE RUN "ANYTIME" — THE FREEZE IS COUPLED TO THE POLICY VERSION
+---------------------------------------------------------------------------
+That advice was given to the operator in session on 2026-08-12 and was wrong
+(#2631). The row records ``STRUCTURAL_REFUSAL_POLICY_VERSION``, and
+``declaration_refusals`` returns ``structural_refusal_policy_superseded`` the
+moment that string stops matching the current constant — permanently, because
+``sql/333`` bars UPDATE and DELETE and holds the identity key, so no corrected
+row can replace it.
+
+**Recovery cost, in full**: a new ``strategy_version``. That is not merely a
+rename — it changes the trial's identity, the old trial stays inaccessible
+forever, and re-running charges the shared trial register again (#2600), raising
+the deflated-Sharpe bar for every other candidate. There is no cheaper path.
+
+So: run ``--dry-run`` first, read ``structural_refusal_policy_version`` in its
+output, and freeze only when no change to the structural refusal policy is in
+flight. ``scripts/_prereg_freeze_guard.py`` refuses automatically when this
+tree's constant is not the one on ``origin/main`` — and states plainly which
+case it cannot see.
 """
 
 from __future__ import annotations
@@ -34,6 +54,7 @@ from app.config import settings
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.result_ledger import PreregDeclarationRefused, freeze_preregistration, load_preregistration
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION, structural_promotion_refusals
+from scripts._prereg_freeze_guard import assert_policy_version_merged, policy_version_report
 from scripts.evaluate_2582_schedule13d_outcomes import STRATEGY_ID, STRATEGY_VERSION
 from scripts.verify_2582_schedule13d_preregistration import load_and_verify
 
@@ -155,21 +176,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="build and print the declaration and its digest without writing it",
     )
+    parser.add_argument(
+        "--allow-policy-divergence",
+        action="store_true",
+        help=(
+            "freeze even though this tree's STRUCTURAL_REFUSAL_POLICY_VERSION is not the one on "
+            "origin/main, or that ref could not be refreshed. The override is recorded in the output; "
+            "see scripts/_prereg_freeze_guard.py for why the default refuses."
+        ),
+    )
     args = parser.parse_args(argv)
     declaration = build_declaration()
-    summary = {
-        "strategy_id": declaration.strategy_id,
-        "strategy_version": declaration.strategy_version,
-        "prereg_purpose": declaration.prereg_purpose,
-        "expected_structural_refusals": list(declaration.expected_structural_refusals),
-        "min_forward_decision_dates": declaration.forward_shadow.min_independent_decision_dates,
-        "min_forward_calendar_weeks": declaration.forward_shadow.min_calendar_weeks,
-        "declaration_sha256": declaration.sha256,
-    }
+    # ⚠ THE FULL DIGEST PAYLOAD, NOT A HAND-PICKED SUBSET (#2631). The subset
+    # this replaced omitted `structural_refusal_policy_version`, which is the
+    # field that decides whether the freeze is still valid tomorrow.
+    summary: dict[str, object] = {**declaration.digest_payload, "declaration_sha256": declaration.sha256}
     if args.dry_run:
-        sys.stdout.write(json.dumps({**summary, "outcome": "dry_run"}, sort_keys=True) + "\n")
+        sys.stdout.write(json.dumps({**summary, **policy_version_report(), "outcome": "dry_run"}, sort_keys=True))
+        sys.stdout.write("\n")
         return 0
 
+    summary.update(assert_policy_version_merged(allow_divergence=args.allow_policy_divergence))
     with psycopg.connect(settings.database_url) as conn:
         try:
             declaration_id = freeze_preregistration(conn, declaration)

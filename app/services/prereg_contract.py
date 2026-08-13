@@ -151,16 +151,26 @@ class PreregDeclaration:
         )
 
     @property
-    def sha256(self) -> str:
-        """Digest over canonical JSON of the declared fields.
+    def digest_payload(self) -> dict[str, object]:
+        """Exactly what ``sha256`` hashes — every declared field, nothing else.
 
-        ⚠ Canonical means ``sort_keys`` and compact separators, and the refusal
-        list is SORTED here — so two declarations that differ only in key or
-        list order hash the same, which is what stops a re-ordered copy reading
-        as a different declaration. Same freezing pattern
-        ``scripts/verify_2582_schedule13d_preregistration.py`` uses on a file.
+        ⚠ A PROPERTY RATHER THAN AN INLINE DICT SO THE FREEZE SCRIPTS CAN PRINT
+        IT (#2631). Their ``--dry-run`` is the operator's only look at an
+        irreversible write, and it used to hand-list a SUBSET: the policy
+        version — the one field that decides whether the freeze is still valid
+        tomorrow — was absent from both. Printing this payload makes the
+        dry-run's coverage a consequence of the digest's rather than a second
+        list to maintain.
+
+        ⚠ That is not self-enforcing on its own: a field added to the dataclass
+        and forgotten here would be missing from the digest AND the dry-run
+        together. ``tests/test_2631_freeze_policy_guard.py`` compares the
+        dataclass's fields against these keys for that reason.
+
+        A fresh dict each call — a cached one a caller mutated would make the
+        printed payload and the hashed payload disagree.
         """
-        payload = {
+        return {
             "strategy_id": self.strategy_id,
             "strategy_version": self.strategy_version,
             "contract_version": self.contract_version,
@@ -175,7 +185,21 @@ class PreregDeclaration:
             "forward_shadow_derivation": self.forward_shadow.derivation,
             "declared_by": self.declared_by,
         }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    @property
+    def sha256(self) -> str:
+        """Digest over canonical JSON of the declared fields.
+
+        ⚠ Canonical means ``sort_keys`` and compact separators, and the refusal
+        list is SORTED in ``digest_payload`` — so two declarations that differ
+        only in key or list order hash the same, which is what stops a
+        re-ordered copy reading as a different declaration. Same freezing
+        pattern ``scripts/verify_2582_schedule13d_preregistration.py`` uses on a
+        file.
+        """
+        return hashlib.sha256(
+            json.dumps(self.digest_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
 
 def declaration_refusals(declaration: PreregDeclaration) -> tuple[DeclarationRefusal, ...]:
