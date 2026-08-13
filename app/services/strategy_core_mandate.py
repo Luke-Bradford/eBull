@@ -38,15 +38,21 @@ CORE_MANDATE_BASE_CURRENCY = "USD"
 # (ticket, sub) per strategy_control_plane's PAPER_ALLOCATOR_ADVISORY_LOCK.
 CORE_MANDATE_ADVISORY_LOCK = (2603, 1)
 
-_HUNDRED = Decimal("100")
+PERCENT_BASIS = Decimal("100")
 # NUMERIC(8,4) percentages and NUMERIC(18,6) amounts, matching sql/311.  Both
 # halves of each column type are enforced: scale, so a value cannot be silently
 # rounded, and precision, so an oversized one raises CoreMandateError instead of
 # Postgres' NumericValueOutOfRange.
+#
+# The amount pair and the two validators below are PUBLIC because
+# `strategy_core_allocator` sizes a rebalance in the same NUMERIC(18,6) shape
+# (#2603 item 3).  Re-declaring `6` and `18` there would be two constants that
+# must agree and nothing making them.  The percentage pair stays private: no
+# second consumer writes a NUMERIC(8,4) column.
 _PCT_PLACES = 4
 _PCT_PRECISION = 8
-_AMOUNT_PLACES = 6
-_AMOUNT_PRECISION = 18
+AMOUNT_PLACES = 6
+AMOUNT_PRECISION = 18
 
 
 class CoreMandateError(ValueError):
@@ -76,7 +82,7 @@ class CoreMandate:
     @property
     def cash_target_pct(self) -> Decimal:
         """Cash is the complement, never a stored second column."""
-        return _HUNDRED - self.core_target_pct
+        return PERCENT_BASIS - self.core_target_pct
 
 
 @dataclass(frozen=True)
@@ -99,7 +105,7 @@ def _require_text(value: str, field: str, limit: int) -> None:
         raise CoreMandateError(f"{field} exceeds {limit} characters")
 
 
-def _require_finite(value: Decimal, field: str) -> None:
+def require_finite(value: Decimal, field: str) -> None:
     """Reject NaN/Infinity before anything compares the value.
 
     Ordering constraint, not style: ``Decimal("NaN") < 0`` raises
@@ -110,7 +116,7 @@ def _require_finite(value: Decimal, field: str) -> None:
         raise CoreMandateError(f"{field} must be a finite decimal")
 
 
-def _require_storable(value: Decimal, field: str, places: int, precision: int) -> None:
+def require_storable(value: Decimal, field: str, places: int, precision: int) -> None:
     """Reject a value the column cannot hold exactly, in either direction.
 
     Scale: Postgres rounds silently to the column scale, which would store a
@@ -122,7 +128,7 @@ def _require_storable(value: Decimal, field: str, places: int, precision: int) -
     raises ``NumericValueOutOfRange`` from the driver.  Bounding it here is what
     keeps every rejection a named ``CoreMandateError``.
 
-    ⚠ Assumes ``_require_finite`` has already run: ``quantize`` on a NaN raises
+    ⚠ Assumes ``require_finite`` has already run: ``quantize`` on a NaN raises
     ``InvalidOperation``, which this would report as "too large to store".
 
     For the percentages the precision half is unreachable through
@@ -174,14 +180,14 @@ def validate_core_mandate(
     # compare a NaN; then ranges, so an out-of-range percentage reports its range
     # rather than its digit count; then storability.
     for field, value in percentages:
-        _require_finite(value, field)
-    _require_finite(min_rebalance_amount, "min_rebalance_amount")
+        require_finite(value, field)
+    require_finite(min_rebalance_amount, "min_rebalance_amount")
 
-    if core_target_pct < 0 or core_target_pct > _HUNDRED:
+    if core_target_pct < 0 or core_target_pct > PERCENT_BASIS:
         raise CoreMandateError("core_target_pct must be between 0 and 100")
-    if liquidity_reserve_pct < 0 or liquidity_reserve_pct >= _HUNDRED:
+    if liquidity_reserve_pct < 0 or liquidity_reserve_pct >= PERCENT_BASIS:
         raise CoreMandateError("liquidity_reserve_pct must be at least 0 and below 100")
-    if rebalance_band_pct <= 0 or rebalance_band_pct > _HUNDRED:
+    if rebalance_band_pct <= 0 or rebalance_band_pct > PERCENT_BASIS:
         # Zero authorises a rebalance on any drift at all, and turnover is the
         # first-order cost filter.
         raise CoreMandateError("rebalance_band_pct must be above 0 and at most 100")
@@ -189,8 +195,8 @@ def validate_core_mandate(
         raise CoreMandateError("min_rebalance_amount must be above 0")
 
     for field, value in percentages:
-        _require_storable(value, field, _PCT_PLACES, _PCT_PRECISION)
-    _require_storable(min_rebalance_amount, "min_rebalance_amount", _AMOUNT_PLACES, _AMOUNT_PRECISION)
+        require_storable(value, field, _PCT_PLACES, _PCT_PRECISION)
+    require_storable(min_rebalance_amount, "min_rebalance_amount", AMOUNT_PLACES, AMOUNT_PRECISION)
 
     if enabled and core_instrument_id is None:
         raise CoreMandateError("an enabled core mandate requires a core instrument")
@@ -199,7 +205,7 @@ def validate_core_mandate(
 
     if core_target_pct - rebalance_band_pct < 0:
         raise CoreMandateError("rebalance_band_pct wider than core_target_pct leaves the lower trigger unreachable")
-    if _HUNDRED - (core_target_pct + rebalance_band_pct) < liquidity_reserve_pct:
+    if PERCENT_BASIS - (core_target_pct + rebalance_band_pct) < liquidity_reserve_pct:
         raise CoreMandateError("rebalance_band_pct would authorise drifting through liquidity_reserve_pct")
 
     return CoreMandateValues(
@@ -332,13 +338,18 @@ def configure_core_mandate(
 
 
 __all__ = [
+    "AMOUNT_PLACES",
+    "AMOUNT_PRECISION",
     "CORE_MANDATE_ADVISORY_LOCK",
     "CORE_MANDATE_BASE_CURRENCY",
     "CORE_MANDATE_POLICY_VERSION",
+    "PERCENT_BASIS",
     "CoreMandate",
     "CoreMandateError",
     "CoreMandateValues",
     "configure_core_mandate",
     "load_core_mandate",
+    "require_finite",
+    "require_storable",
     "validate_core_mandate",
 ]
