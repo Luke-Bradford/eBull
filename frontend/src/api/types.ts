@@ -2580,6 +2580,7 @@ export interface StrategyOverviewResponse {
     days_collected: number;
     snapshot_date: string | null;
     observed_at: string | null;
+    account_currency_id: number | null;
     currency: string | null;
     official_equity: string | null;
     official_available_cash: string | null;

@@ -233,6 +233,31 @@ under the required `clientPortfolio` object and available cash starts from its
 singular `credit` field. The provider rejects an absent/malformed envelope or
 missing component array; it does not interpret response drift as a zero balance.
 
+### Account base currency — `clientPortfolio.accountCurrencyId`
+
+The same P&L response carries the account's own base currency. The portal schema
+for `api-reference/trading--demo/get-account-pnl-and-portfolio-details` (fetched
+2026-08-13) documents `accountCurrencyId` as *"Currency ID of the account
+(1 = USD)"*, and **1 is the only id it documents** — there is no published
+id → ISO-4217 table. So an id other than 1 is stored as an id with a NULL code
+and refused by name (`account_currency_not_documented`); it is never mapped to a
+code eBull inferred. Adding a member to `DOCUMENTED_ACCOUNT_CURRENCIES`
+(`app/services/account_equity_evidence.py`) requires a portal citation.
+
+Before #2602 item 2 the provider discarded this field and
+`record_account_equity_snapshot` bound a `'USD'` SQL literal against
+`sql/324`'s `CHECK (currency = 'USD')`, so eBull's one table of *official broker
+evidence* recorded its own assumption — the gap #2363 named as "nobody has
+checked the account currency". It is now carried on
+`BrokerAccountRiskSnapshot.account_currency_id` and persisted beside the code
+(`sql/341`).
+
+Do not substitute `GET /api/v1/balances` for this. That endpoint takes a
+`displayCurrency` **conversion** parameter defaulting to USD and returns both a
+per-account `currency` and a converted `displayCurrency`, so a naive read there
+returns the display currency requested rather than the account's own. Its
+history sibling is 403 on this demo connection (below).
+
 ### Account-balance history — documented, demo access refused
 
 The live portal documented `GET /api/v1/balances/history` on 2026-08-11. It

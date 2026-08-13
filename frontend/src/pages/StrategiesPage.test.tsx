@@ -83,6 +83,7 @@ const OVERVIEW: StrategyOverviewResponse = {
     days_collected: 0,
     snapshot_date: null,
     observed_at: null,
+    account_currency_id: null,
     currency: null,
     official_equity: null,
     official_available_cash: null,
@@ -332,6 +333,7 @@ describe("StrategiesPage", () => {
         days_collected: 3,
         snapshot_date: "2026-08-11",
         observed_at: "2026-08-11T19:00:00Z",
+        account_currency_id: 1,
         currency: "USD",
         official_equity: "1025.00",
         official_available_cash: "525.00",
@@ -350,6 +352,34 @@ describe("StrategiesPage", () => {
     expect(within(performance).getByText("US$1,025.00")).toBeInTheDocument();
     expect(within(performance).getByText("Reconciliation collecting")).toBeInTheDocument();
     expect(within(performance).getByText("No automated P&L yet")).toBeInTheDocument();
+  });
+
+  it("never paints a currency symbol on an account whose currency the broker did not name", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      account_equity_evidence: {
+        status: "collecting",
+        days_collected: 3,
+        snapshot_date: "2026-08-11",
+        observed_at: "2026-08-11T19:00:00Z",
+        account_currency_id: 7,
+        currency: null,
+        official_equity: "1025.00",
+        official_available_cash: "525.00",
+        official_total_invested: "400.00",
+        official_unrealised_pnl: "100.00",
+        local_eod_currency: null,
+        local_eod_value: null,
+        difference: null,
+        comparable: false,
+        incomplete_reasons: ["account_currency_not_documented"],
+      },
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const performance = (await screen.findByText("Portfolio performance")).closest("section")!;
+    expect(within(performance).getByText("Currency unverified")).toBeInTheDocument();
+    expect(within(performance).queryByText("US$1,025.00")).not.toBeInTheDocument();
+    expect(within(performance).queryByText(/1,025\.00/)).not.toBeInTheDocument();
   });
 
   it("separates unapproved research from selectable strategies", async () => {

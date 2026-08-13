@@ -156,6 +156,8 @@ FIXTURE_WHAT_IF_COST_RESPONSE = {
 
 FIXTURE_ACCOUNT_PNL_RESPONSE = {
     "clientPortfolio": {
+        # Portal schema: "Currency ID of the account (1 = USD)".
+        "accountCurrencyId": 1,
         "credit": 1000,
         "positions": [
             {"instrumentID": 1001, "amount": 200, "unrealizedPnL": {"pnL": 20}},
@@ -326,6 +328,46 @@ class TestStrategyAccountRisk:
             (1001, Decimal("266")),
             (1002, Decimal("130")),
         ]
+
+    def test_account_currency_id_is_read_from_the_payload(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_ACCOUNT_PNL_RESPONSE
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            assert broker.get_account_risk_snapshot().account_currency_id == 1
+
+    def test_absent_account_currency_id_is_none_not_usd(self) -> None:
+        """Absence must reach the evidence writer as absence (#2602 item 2)."""
+        payload = {
+            "clientPortfolio": {
+                key: value
+                for key, value in FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"].items()
+                if key != "accountCurrencyId"
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = payload
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            assert broker.get_account_risk_snapshot().account_currency_id is None
+
+    @pytest.mark.parametrize("value", ["1", 1.0, True, None])
+    def test_malformed_account_currency_id_fails_closed(self, value: object) -> None:
+        """A present-but-wrong-typed id is response drift, not absence."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "clientPortfolio": {
+                **FIXTURE_ACCOUNT_PNL_RESPONSE["clientPortfolio"],
+                "accountCurrencyId": value,
+            }
+        }
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            with pytest.raises(TradingPreflightParseError, match="accountCurrencyId"):
+                broker.get_account_risk_snapshot()
 
     def test_account_risk_fails_closed_on_partial_pnl_shape(self) -> None:
         mock_resp = MagicMock()

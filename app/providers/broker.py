@@ -370,7 +370,13 @@ class BrokerInstrumentInvestment:
 
 @dataclass(frozen=True)
 class BrokerAccountRiskSnapshot:
-    """Decision-bearing account totals derived from eToro's P&L endpoint."""
+    """Decision-bearing account totals derived from eToro's P&L endpoint.
+
+    Every money field is denominated in ``account_currency_id`` -- the id the
+    broker reported for this account, not one we chose.  ``None`` means the
+    payload did not carry it, which is an absence to refuse on (#2602 item 2),
+    never a licence to assume USD.
+    """
 
     available_cash: Decimal
     total_invested: Decimal
@@ -379,6 +385,7 @@ class BrokerAccountRiskSnapshot:
     instrument_investments: tuple[BrokerInstrumentInvestment, ...]
     observed_at: datetime
     raw_payload: dict[str, Any]
+    account_currency_id: int | None = None
 
 
 @dataclass(frozen=True)

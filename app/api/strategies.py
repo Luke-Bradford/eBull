@@ -364,6 +364,7 @@ class AccountEquityEvidenceView(BaseModel):
     days_collected: int
     snapshot_date: date | None
     observed_at: datetime | None
+    account_currency_id: int | None
     currency: str | None
     official_equity: Decimal | None
     official_available_cash: Decimal | None
@@ -1346,6 +1347,7 @@ def get_strategy_overview(
             days_collected=account_equity.days_collected,
             snapshot_date=account_equity.snapshot_date,
             observed_at=account_equity.observed_at,
+            account_currency_id=account_equity.account_currency_id,
             currency=account_equity.currency,
             official_equity=account_equity.official_equity,
             official_available_cash=account_equity.official_available_cash,
