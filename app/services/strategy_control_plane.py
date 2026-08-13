@@ -451,8 +451,9 @@ def promote_strategy(
     quarantine-arm comparison, and the deflation / effective-sample-size /
     synthetic-control clauses. Each is classified — with its reason and its
     temporal rule — in ``app.services.strategy_promotion_replay``, and
-    ``unenforced_candidate_fields`` returns the current set. Do not add an input
-    here without classifying it there; a test enforces that.
+    ``unenforced_candidate_fields`` returns the current set, and #2639 tracks
+    closing it. Do not add an input here without classifying it there; a test
+    enforces that.
     """
     for value, field in (
         (strategy_id, "strategy_id"),

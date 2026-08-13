@@ -29,7 +29,7 @@ The vocabulary is three rules and no more:
     rule, which is how a passing historical result silently stops passing.
 
 ``not_re_read``
-    Neither persisted nor re-derived. ⚠⚠ THIS IS A GAP, NOT A SOLUTION: the
+    Neither persisted nor re-derived. Tracked by #2639. ⚠⚠ THIS IS A GAP, NOT A SOLUTION: the
     transition does not enforce that clause at all, and is still trusting a
     write-time verdict that died with ``WrittenRow``. It is spelled out as its
     own rule rather than left off the table so that it cannot be mistaken for

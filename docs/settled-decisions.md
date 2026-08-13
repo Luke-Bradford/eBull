@@ -992,7 +992,7 @@ Three rules, and no fourth:
   trusts a write-time verdict that died with `WrittenRow`. Currently
   `holdout_evaluations`, `recorded_accesses` and `quarantine_arms_compared`;
   `unenforced_candidate_fields()` returns the set and a test pins it so it
-  cannot grow unnoticed.
+  cannot grow unnoticed. Closing it is #2639.
 
 The policy lives in `app/services/strategy_promotion_replay.py` with a reason on
 every entry. **Do not add an input to the transition without classifying it
