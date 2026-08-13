@@ -2901,6 +2901,9 @@ def _write_rows(
     # same pair, so they are cached rather than re-queried 8 times per strategy.
     written: list[WrittenRow] = []
     counts_cache: dict[tuple[str, str], tuple[int, int]] = {}
+    #: One §3.4 comparison per (strategy_id, quarantine_arm, namespace); both
+    #: ambiguity arms of that key must freeze the same record. See the check below.
+    ambiguity_by_comparison: dict[tuple[str, str, str], AmbiguityRecord] = {}
     for result_id, result, folds_written in stored:
         identity = result.identity
         key = (identity.strategy_id, identity.strategy_version)
@@ -2919,6 +2922,21 @@ def _write_rows(
             raise RuntimeError(
                 f"{identity.strategy_id} {identity.namespace}/{identity.quarantine_arm} stored without its frozen "
                 "ambiguity record — the writer must freeze the gate's inputs in the pair's own transaction"
+            )
+        # ⚠⚠ SIBLING CONSISTENCY, ENFORCED AT WRITE TIME AND NOT ONLY IN A TEST.
+        # The verdict is a function of (strategy_id, quarantine_arm, namespace)
+        # and NOT of `ambiguity_arm`, so the two rows differing solely in their
+        # ambiguity arm are two views of ONE §3.4 comparison. If they ever froze
+        # different records, `promote_strategy` would admit whichever of the pair
+        # happened to pass — so the divergence must fail the run that caused it,
+        # not wait to be noticed at a promotion months later.
+        comparison_key = (identity.strategy_id, identity.quarantine_arm, identity.namespace)
+        seen_record = ambiguity_by_comparison.setdefault(comparison_key, ambiguity_record)
+        if seen_record != ambiguity_record:
+            raise RuntimeError(
+                f"{identity.strategy_id} {identity.namespace}/{identity.quarantine_arm} froze ambiguity record "
+                f"{ambiguity_record} against {seen_record} for the same comparison — the two ambiguity arms of one "
+                "quarantine arm share a §3.4 verdict and cannot disagree"
             )
         ambiguity_material = ambiguity_verdict(ambiguity_record)
         # ⚠ The universe inputs are READ BACK from the frozen record, not taken
@@ -3096,10 +3114,12 @@ def _store_ambiguity_record(
     ⚠ THE RECORD IS A FUNCTION OF (strategy_id, quarantine_arm, namespace) AND
     NOT OF ``ambiguity_arm`` — ``_ambiguity_record_for`` filters on the first
     three only. So the two result rows that differ solely in their ambiguity arm
-    MUST receive identical records, and do, by construction. Nothing enforced
-    that, so ``tests/test_backtest_run.py`` pins it: a future edit that made the
-    record depend on the arm would give one pair two verdicts and silently
-    promote the half that happened to pass.
+    MUST receive identical records, and do, by construction. That is enforced
+    twice, because the consequence of divergence is a promotion: the criterion-8
+    loop in ``_write_rows`` compares every pair it reads back and raises, and
+    ``tests/test_backtest_run.py`` pins the purity property that makes it hold.
+    A future edit making the record depend on the arm would give one comparison
+    two verdicts, and ``promote_strategy`` would admit whichever half passed.
     """
     store_result_ambiguity(
         conn,

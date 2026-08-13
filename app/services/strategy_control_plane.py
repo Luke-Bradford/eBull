@@ -505,8 +505,23 @@ def promote_strategy(
         if to_stage in _RESULT_EVIDENCE_STAGES:
             profit_factor_by_result = {int(row[0]): None if row[1] is None else Decimal(str(row[1])) for row in rows}
             evaluated_count_by_result = {int(row[0]): int(row[2]) for row in rows}
+            # ⚠ A NULL COST STAMP READS AS *UNMODELLED*, NEVER AS MODELLED.
+            # `bool(None)` is False, and False means "carry is modelled" — so the
+            # obvious coercion turns an unset stamp into a PASS on the clause it
+            # exists to enforce, which is fail-open on the Tier 1 refusals. Both
+            # columns are NOT NULL today (verified against dev, 2026-08-13), so
+            # this is defence in depth rather than a live bug; it is written this
+            # way because the failure direction is silent and the schema is one
+            # migration away from changing. `universe_basis` needs no such care —
+            # it preserves None, which `structural_promotion_refusals` already
+            # refuses as `universe_basis_absent`.
             stamps_by_result = {
-                int(row[0]): (None if row[3] is None else str(row[3]), bool(row[4]), bool(row[5])) for row in rows
+                int(row[0]): (
+                    None if row[3] is None else str(row[3]),
+                    True if row[4] is None else bool(row[4]),
+                    True if row[5] is None else bool(row[5]),
+                )
+                for row in rows
             }
             for result_id in result_ids:
                 # #2621 — the transition REPLAYS the universe check from the
