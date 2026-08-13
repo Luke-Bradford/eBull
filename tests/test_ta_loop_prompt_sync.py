@@ -79,9 +79,7 @@ def loop(tmp_path: Path):
     capture = worktree / "handed-to-agent.txt"
     stub = stub_dir / "claude"
     stub.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s" "$2" > "{capture}"\n'
-        'printf \'%s\\n\' \'{"type":"result","is_error":false}\'\n'
+        f'#!/bin/sh\nprintf "%s" "$2" > "{capture}"\nprintf \'%s\\n\' \'{{"type":"result","is_error":false}}\'\n'
     )
     stub.chmod(0o755)
 
@@ -137,9 +135,7 @@ def test_a_stale_installed_prompt_is_replaced_before_the_agent_sees_it(loop):
     canonical_sha = subprocess.run(
         ["shasum", "-a", "256", str(loop.prompt)], capture_output=True, text=True
     ).stdout.split()[0]
-    assert f"- prompt: in sync with origin/main:{CANONICAL_PATH} ({canonical_sha[:12]})" in (
-        loop.status.read_text()
-    )
+    assert f"- prompt: in sync with origin/main:{CANONICAL_PATH} ({canonical_sha[:12]})" in (loop.status.read_text())
 
 
 def test_an_absent_installed_prompt_is_bootstrapped_rather_than_fatal(loop):
