@@ -56,6 +56,7 @@ from app.providers.broker import (
     OrderStatus,
 )
 from app.providers.resilient_client import ResilientClient
+from app.security.unattended_guard import refuse_broker_mutation_if_unattended
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,7 @@ class EtoroBrokerProvider(BrokerProvider):
         *,
         request_id: UUID | None = None,
     ) -> BrokerOrderResult:
+        refuse_broker_mutation_if_unattended("place_order")
         # Reject unrecognised actions before any HTTP call.
         if action not in _ALLOWED_PLACE_ORDER_ACTIONS:
             logger.error(
@@ -344,6 +346,7 @@ class EtoroBrokerProvider(BrokerProvider):
         code must call this method and cannot inherit ``self._env`` into a real
         path by mistake.
         """
+        refuse_broker_mutation_if_unattended("place_demo_strategy_order")
         if self._env != "demo":
             raise BrokerOrderSubmissionError("strategy paper orders require demo credentials")
         body: dict[str, Any] = {
@@ -397,6 +400,7 @@ class EtoroBrokerProvider(BrokerProvider):
         position_id: int,
         units_to_deduct: Decimal | None = None,
     ) -> BrokerOrderResult:
+        refuse_broker_mutation_if_unattended("close_position")
         body: dict[str, Any] = {
             "UnitsToDeduct": float(units_to_deduct) if units_to_deduct is not None else None,
         }
@@ -457,6 +461,7 @@ class EtoroBrokerProvider(BrokerProvider):
         persist_response: Callable[[dict[str, Any]], None] | None = None,
     ) -> BrokerPositionEditSubmission:
         """Strict v2 adapter for automated demo-only position edits."""
+        refuse_broker_mutation_if_unattended("edit_demo_strategy_position")
         if self._env != "demo":
             raise BrokerPositionMutationError("strategy position edits require demo credentials")
         if position_id <= 0 or stop_loss_rate <= 0:
@@ -516,6 +521,7 @@ class EtoroBrokerProvider(BrokerProvider):
         persist_response: Callable[[dict[str, Any]], None] | None = None,
     ) -> BrokerPositionCloseSubmission:
         """Strict v1 adapter for an exact, whole demo-position close."""
+        refuse_broker_mutation_if_unattended("close_demo_strategy_position")
         if self._env != "demo":
             raise BrokerPositionMutationError("strategy position closes require demo credentials")
         if position_id <= 0 or instrument_id <= 0:

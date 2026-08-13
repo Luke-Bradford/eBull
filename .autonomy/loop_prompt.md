@@ -44,13 +44,18 @@ branches, no unpushed WIP).
    finished unattended however actionable they look. Note why on the issue if it is not
    already stated, and move to the next queue item:
 
-   - **anything needing broker credentials.** This worktree has no `.env` and no eToro
-     credentials by design, so eligibility/cost preflight calls fail closed. #2598 is
-     the current example — its whole deliverable is live preflight decode.
    - **anything whose acceptance is a trade, a fill, a position close or a kill-switch
      drill.** #2603's acceptance is an operator-attended demo session for exactly this
      reason. Building its schema and allocator logic IS in scope; running its acceptance
      is not.
+     ⚠ **This is the whole of the broker-related ineligible class, and it is narrower
+     than it used to read.** An earlier version of this list also skipped "anything
+     needing broker credentials", on the premise that the worktree has no `.env` and so
+     preflight calls fail closed. That premise was false (#2645) and it wrongly
+     classified #2598 as unreachable; #2644 then read demo credentials and completed a
+     live informational preflight decode from this worktree, correctly. **Touching
+     broker credentials is not by itself disqualifying — only an acceptance that
+     mutates broker state is.**
    - **settled-decision reversals and irreversible-loss calls** (already covered under
      "When to stop").
 2. **Execute the full workflow** from `.claude/CLAUDE.md` for that ticket:
@@ -169,9 +174,41 @@ added — no code change. Until activated, the flow is In Review → Done direct
   endpoints (`/portfolio/orders`, `/positions/{id}/close`), do not approve
   recommendations, do not touch the kill-switch, do **not close any position** —
   demo fills are still persisted writes. Trade execution is human-gated by
-  design. If a ticket's only path forward is executing a trade, skip it. (The
-  loop is also run with NO broker credentials configured, so the order client
-  fails closed — see setup.md; this rule is the second layer.)
+  design. If a ticket's only path forward is executing a trade, skip it.
+
+  ⚠ **This rule is the FIRST layer, not the second. There is no credential-absence
+  layer beneath it.** An earlier version of this line claimed the loop runs with no
+  broker credentials configured, so the order client fails closed. That is false
+  (#2645). Measured on 2026-08-13 from this worktree: `.env` is indeed absent, but
+  neither half of the credential path lives in it. `settings.database_url` defaults to
+  the shared dev Postgres (`app/config.py`), which holds two valid `etoro` rows in
+  `broker_credentials`; and the decryption root secret resolves to
+  `platformdirs.user_data_dir("eBull")` — a machine-wide OS directory, not a repo path
+  (`app/security/master_key.py::root_secret_path`). Every worktree on this box reaches
+  both. #2644 read demo credentials and made informational preflight calls from here.
+
+  What actually protects the order path, in order:
+
+  1. **This prohibition.** Rule-shaped, and still the layer that matters most.
+  2. **An execution-time refusal**, added by #2645 —
+     `app/security/unattended_guard.py::refuse_broker_mutation_if_unattended` raises
+     from every `EtoroBrokerProvider` method that mutates order or position state,
+     before any network I/O, whenever the checkout is a linked `git worktree` (its
+     `.git` is a file, not a directory — which is true here and false in
+     `~/Dev/eBull`). ⚠ It does **not** fire on informational calls: eligibility and
+     what-if costs stay reachable, because ruling that work out was the other half of
+     the #2645 error. ⚠ It is an ACCIDENT control. It lives in a repo you can edit, so
+     it constrains a confused run, not a determined one — which is why it is layer 2
+     and not layer 1.
+  3. `tests/test_unattended_broker_mutation_guard.py`, which keeps layer 2 wired and
+     asserts no file under `scripts/` reaches a mutating method. A push-time check is
+     not a runtime control — it could not have stopped #2644's probe, which ran long
+     before anything was pushed — so treat it as drift detection, not protection.
+  4. `broker_credentials` currently holds `environment = 'demo'` rows only. ⚠ Safety
+     **by absence**: nothing prevents a `real` row being added later, and demo fills
+     are forbidden anyway. Not a guarantee.
+
+  Never assume a mechanical layer is catching you.
 - **Never open a sealed research outcome outside the #2599 declaration contract.** A
   preregistration whose stamps guarantee it cannot promote (survivor-only universe,
   unmodelled carry) may only be opened when it declares itself a falsification run. The

@@ -50,6 +50,7 @@ import pytest  # noqa: E402
 
 from app.api.auth import require_session_or_service_token  # noqa: E402
 from app.main import app  # noqa: E402
+from app.security import unattended_guard  # noqa: E402
 from tests.fixtures.ebull_test_db import (  # noqa: E402, F401
     _force_drop_invalid_test_dbs,  # noqa: E402 — #1455 session-start corpse sweep
     _run_id,  # noqa: E402
@@ -131,6 +132,33 @@ app.dependency_overrides[require_session_or_service_token] = _noop_auth
 @pytest.fixture(autouse=True)
 def _reassert_auth_bypass() -> None:
     app.dependency_overrides[require_session_or_service_token] = _noop_auth
+
+
+@pytest.fixture(autouse=True)
+def _disarm_unattended_broker_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2645 — pin the unattended-worktree refusal OFF for the suite.
+
+    ``refuse_broker_mutation_if_unattended`` raises when the checkout is a
+    linked ``git worktree``, which is where the autonomy loop runs. Long-running
+    and experimental work is *supposed* to happen in worktrees (see
+    ``.claude/CLAUDE.md``), so without this the ~25 broker tests that drive
+    ``place_order`` / ``close_position`` against a mocked transport would pass in
+    ``~/Dev/eBull`` and fail in every worktree. A suite whose result depends on
+    which checkout it runs in is worse than the flaky timing assertion #2610
+    removed: it is deterministic per-environment and inconsistent across them.
+
+    Those tests mock ``_http_write``, so no request can reach a broker and the
+    refusal has nothing to protect there.
+
+    ⚠ PINNED FALSE, NOT LEFT AMBIENT. Both branches are still proved — the
+    detection itself is table-tested against a real temp directory in
+    ``tests/test_unattended_broker_mutation_guard.py``, and one test there
+    re-arms this explicitly and drives ``EtoroBrokerProvider.place_order`` to
+    show the refusal fires through the shipped method. Disarming without that
+    re-arming test would be the fail-open default that disarms an
+    absence-asserting test (#2647).
+    """
+    monkeypatch.setattr(unattended_guard, "is_linked_worktree", lambda *_a, **_k: False)
 
 
 @pytest.fixture(autouse=True)
