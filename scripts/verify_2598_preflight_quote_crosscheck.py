@@ -133,8 +133,15 @@ def _observed_quotes(conn: psycopg.Connection[Any], targets: tuple[int, ...]) ->
     return {int(row[0]): row for row in rows}
 
 
-def _census_targets(conn: psycopg.Connection[Any], *, per_band: int) -> tuple[int, ...]:
+def _census_targets(quotes: dict[int, tuple[Any, ...]], *, per_band: int) -> tuple[int, ...]:
     """Up to ``per_band`` instruments from EACH frozen cost band (#2598 step 2).
+
+    ⚠ TAKES THE QUOTES, NOT THE CONNECTION (review NITPICK, round 2). Reading
+    them inside meant the panel was fetched twice on one connection — and the
+    version that mattered was the caller's, so the selection was being made from
+    one read and annotated from another. Passing them in removes the duplicate
+    AND makes this function pure, which is what lets the selection rule be
+    table-tested instead of only exercised against a live database.
 
     ⚠ THE SELECTION RULE IS THE MEASUREMENT'S WEAKEST POINT, so it is stated
     rather than left in the SQL. Within a band the instruments are ordered by id
@@ -163,8 +170,6 @@ def _census_targets(conn: psycopg.Connection[Any], *, per_band: int) -> tuple[in
     usable price or spread is dropped, because it can neither be banded nor
     compared.
     """
-    universe = load_validated_universe(conn)
-    quotes = _observed_quotes(conn, tuple(universe))
     by_band: dict[str, list[int]] = {band.label: [] for band in BANDS}
     for instrument_id, row in sorted(quotes.items()):
         spread_pct, last = row[4], row[6]
@@ -429,10 +434,15 @@ def main(argv: list[str] | None = None) -> int:
     with psycopg.connect(settings.database_url) as conn:
         api_key, user_key = _load_demo_credentials(conn)
         if args.census is not None:
-            targets = _census_targets(conn, per_band=args.census)
+            # ⚠ ONE read of the panel, reused for selection AND annotation — see
+            # ``_census_targets``. It is the whole §4.0 validated universe, so
+            # `quotes` here is a superset of the targets; every consumer looks
+            # up by instrument id.
+            quotes = _observed_quotes(conn, tuple(load_validated_universe(conn)))
+            targets = _census_targets(quotes, per_band=args.census)
         else:
             targets = tuple(args.instrument_id) if args.instrument_id else DEFAULT_TARGETS
-        quotes = _observed_quotes(conn, targets)
+            quotes = _observed_quotes(conn, targets)
         conn.rollback()
 
     missing = [instrument_id for instrument_id in targets if instrument_id not in quotes]

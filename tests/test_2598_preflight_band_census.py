@@ -16,6 +16,7 @@ shape, which is also what ``--replay`` feeds it.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from app.services.cost_model import BANDS
@@ -24,6 +25,7 @@ from scripts.verify_2598_preflight_quote_crosscheck import (
     COST_QUANTUM_USD,
     DECIDABLE_MIN_QUANTA,
     _census_statistics,
+    _census_targets,
     _even_positions,
 )
 
@@ -162,3 +164,35 @@ class TestTheSelectionPositions:
 
     def test_an_empty_band_selects_nothing(self) -> None:
         assert _even_positions([], count=15) == []
+
+
+def _quote_row(instrument_id: int, *, last: str) -> tuple[Any, ...]:
+    """``_observed_quotes``' row shape: id, symbol, bid, ask, spread_pct, quoted_at, last."""
+    return (instrument_id, f"T{instrument_id}", None, None, Decimal("0.5"), None, Decimal(last))
+
+
+class TestCensusTargets:
+    """Pure since review round 2 — the selection no longer needs a connection."""
+
+    def test_it_takes_from_every_band_a_priced_quote_lands_in(self) -> None:
+        quotes = {
+            1: _quote_row(1, last="2"),
+            2: _quote_row(2, last="10"),
+            3: _quote_row(3, last="50"),
+            4: _quote_row(4, last="500"),
+        }
+        assert set(_census_targets(quotes, per_band=1)) == {1, 2, 3, 4}
+
+    def test_a_row_with_no_usable_price_or_spread_is_dropped(self) -> None:
+        """It can be neither banded nor compared, so it is not a target."""
+        quotes = {
+            1: _quote_row(1, last="10"),
+            2: (2, "T2", None, None, Decimal("0.5"), None, None),
+            3: (3, "T3", None, None, None, None, Decimal("10")),
+            4: (4, "T4", None, None, Decimal("0.5"), None, Decimal("0")),
+        }
+        assert _census_targets(quotes, per_band=5) == (1,)
+
+    def test_it_asks_for_no_more_than_the_band_holds(self) -> None:
+        quotes = {1: _quote_row(1, last="10"), 2: _quote_row(2, last="10")}
+        assert len(_census_targets(quotes, per_band=15)) == 2
