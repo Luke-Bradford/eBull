@@ -1113,10 +1113,11 @@ def build_prior_versions(
         counts[key] += int(cast(int, group["count"]))
         reasons[key].update(name for name, expected in pins.items() if group.get(name) != expected)
 
-    scans: dict[tuple[str, str], Mapping[str, object]] = {}
-    for row in scan_rows:
-        # Newest frontier first from the query; keep the first row per version.
-        scans.setdefault((str(row["strategy_id"]), str(row["strategy_version"])), row)
+    # One row per pair: `(strategy_id, strategy_version)` is the PRIMARY KEY of
+    # `strategy_scan_watermark` (sql/272:59), so this is a lookup, not a dedup.
+    scans: dict[tuple[str, str], Mapping[str, object]] = {
+        (str(row["strategy_id"]), str(row["strategy_version"])): row for row in scan_rows
+    }
 
     by_strategy: dict[str, list[PriorVersionTrackRecord]] = defaultdict(list)
     for strategy_id, version in sorted(counts):
@@ -1171,7 +1172,12 @@ def get_strategy_overview(
         scan_rows = list(cur.fetchall())
         cur.execute(_EXCLUSIONS_SQL, params)
         exclusion_rows = list(cur.fetchall())
-        prior_params = {"strategy_ids": list(versions), "versions": [versions[k] for k in versions]}
+        # Two parallel arrays `unnest`ed into current `(id, version)` pairs. Built
+        # from one `items()` pass so the pairing cannot drift on a later edit.
+        prior_params = {
+            "strategy_ids": [strategy_id for strategy_id, _ in versions.items()],
+            "versions": [version for _, version in versions.items()],
+        }
         cur.execute(_PRIOR_VERSION_RESULTS_SQL, prior_params)
         prior_result_rows = list(cur.fetchall())
         cur.execute(_PRIOR_VERSION_SCANS_SQL, prior_params)
