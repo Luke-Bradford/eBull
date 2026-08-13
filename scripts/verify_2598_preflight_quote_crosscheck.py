@@ -37,11 +37,12 @@ import sys
 from decimal import Decimal
 from typing import Any, Final
 
+import httpx
 import psycopg
 
 from app.config import settings
 from app.providers.broker import BrokerWhatIfOrder
-from app.providers.implementations.etoro_broker import EtoroBrokerProvider
+from app.providers.implementations.etoro_broker import EtoroBrokerProvider, TradingPreflightParseError
 from app.security.master_key import ensure_broker_key_loaded
 from app.services.broker_credentials import load_credential_for_provider_use
 from app.services.operators import sole_operator_id
@@ -114,8 +115,15 @@ def _probe(broker: EtoroBrokerProvider, quotes: dict[int, tuple[Any, ...]], targ
                         amount=ticket,
                     )
                 )
-            except Exception as exc:  # noqa: BLE001 - one bad arm must not destroy the census
+            # ⚠ Narrowed to the set the sibling census already established
+            # (``verify_2437_trading_preflight._fetch_cost``) rather than a bare
+            # ``Exception``: one malformed arm must not destroy the run, but an
+            # unexpected failure class should surface rather than be recorded as
+            # a data point. The MESSAGE is retained alongside the type — a type
+            # name alone cannot tell a 429 from a 400 after the fact.
+            except (httpx.HTTPError, TradingPreflightParseError, json.JSONDecodeError) as exc:
                 record["error"] = type(exc).__name__
+                record["error_detail"] = str(exc)[:300]
                 observations.append(record)
                 continue
 
