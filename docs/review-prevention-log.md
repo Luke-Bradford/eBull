@@ -4376,3 +4376,32 @@ with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
    Only observations at or above 10 rounding quanta count: at a $1,000 ticket SPY read
    0.4 bp against a 0.13 bp quote (3.08x), entirely rounding.
 4. **The comparison is not cross-source** — see the "independent cross-check" entry above.
+
+### A magnitude guard that bounds an AGGREGATE can be escaped by an overflow in the aggregation itself
+
+- First seen in: #2603 item 3 (PR for `app/services/strategy_core_allocator.py`), Codex
+  checkpoint 2, by probe rather than by reading.
+- Symptom: `_state_refusal` checked each component finite and non-negative, then bounded the
+  **sum** (`core_market_value + cash_balance >= _MAX_AMOUNT`) — reasoning, correctly as far as
+  it went, that two non-negative components under a bounded sum are each under it too, so a
+  per-component check was redundant. It is not redundant, because the guard has to *compute*
+  the sum to test it: two finite components near `Decimal`'s `Emax` raise `decimal.Overflow`
+  **on the addition**, before the comparison the refusal depends on ever runs.
+  `Decimal("9e999999") + Decimal("9e999999")` raises; `Decimal("1e999999") + Decimal("1e999999")`
+  does not — so the failure is reachable only in part of the input space, which is why reading
+  the code did not surface it and executing it did.
+- The general shape: **the guard's own arithmetic is unguarded.** Any refusal of the form
+  "combine these inputs, then check the combination" runs the combination on inputs nothing has
+  bounded yet. Same class as the ordering rule already logged for `Decimal("NaN") < 0` raising
+  rather than returning False — a validator whose steps are in the wrong order does not fail
+  loudly, it fails *past* its own refusal.
+- Prevention: when a validator bounds a derived quantity (a sum, product, ratio or difference),
+  bound **each input first**, then the derived quantity. Both checks stay: the per-input one
+  exists to make the derivation safe to perform, the derived one to enforce the contract, and
+  neither implies the other (two inputs at 60% of a bound each pass individually and sum past
+  it). Self-review prompt: for every comparison in a validator, ask what would happen if the
+  expression on the left *raised* — if the answer is "the caller gets an exception instead of
+  the named refusal", the operands need bounding above it.
+- Enforced in: `app/services/strategy_core_allocator.py::_state_refusal` (per-component check
+  documented as overflow-safety, not as a shortcut); `tests/test_2603_core_allocator.py`
+  parametrises `9e999999 + 9e999999` and a pair that clears the component bound but sums past it.
