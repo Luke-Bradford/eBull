@@ -1138,6 +1138,22 @@ def get_strategy_overview(
             allocation_refusals.append("execution_policy_missing")
         if scan.status != "current":
             allocation_refusals.append("scan_not_current")
+        # ⚠ CANNOT FIRE TODAY, DELIBERATELY KEPT (#2653). `control.currency` is
+        # 'USD' for every strategy, by three independent routes: `sql/338`'s
+        # `CHECK (currency = 'USD')` on `strategy_deployments` when a row exists,
+        # `load_control_state`'s `str(row["currency"] or "USD")` when the LEFT
+        # JOIN misses, and `StrategyControlState.currency`'s own default when the
+        # key is absent entirely. So this reads as live protection in the
+        # refusal vocabulary while being unreachable — which is the cost #2653
+        # filed, and the reason it is named here rather than left to be
+        # rediscovered.
+        #
+        # It stays because it is the chokepoint a WIDENING is supposed to trip.
+        # `strategy_base_currency` lists this line among the sites to revisit
+        # when support grows; widen the CHECK to two currencies while the
+        # constant names one and this is the branch that refuses the third.
+        # `test_the_deployment_currency_refusal_and_its_constraint_agree` fails
+        # the moment either side moves alone.
         if control.currency not in SUPPORTED_DEPLOYMENT_CURRENCIES:
             allocation_refusals.append(DEPLOYMENT_CURRENCY_UNSUPPORTED)
         if entry.purpose == "capital_candidate" and not allocation_refusals:

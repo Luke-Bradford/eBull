@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Any, cast
@@ -10,6 +11,7 @@ import psycopg
 import psycopg.sql
 import pytest
 
+from app.api.strategies import get_strategy_overview
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.result_ledger import (
@@ -20,6 +22,10 @@ from app.services.result_ledger import (
     stored_result_promotion_refusals_for,
 )
 from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
+from app.services.strategy_base_currency import (
+    DEPLOYMENT_CURRENCY_UNSUPPORTED,
+    SUPPORTED_DEPLOYMENT_CURRENCIES,
+)
 from app.services.strategy_control_plane import (
     StrategyControlError,
     StrategyOwnershipError,
@@ -1366,6 +1372,65 @@ def test_an_unsupported_currency_is_unrepresentable_at_rest(
                 (deployment.deployment_id,),
             )
     assert excinfo.value.diag.constraint_name == constraint
+
+
+@pytest.mark.parametrize(
+    ("table", "constraint"),
+    [
+        ("strategy_deployments", "strategy_deployments_currency_supported"),
+        ("strategy_deployment_events", "strategy_deployment_events_currency_supported"),
+    ],
+)
+def test_the_deployment_currency_refusal_and_its_constraint_agree(
+    ebull_test_conn: psycopg.Connection[Any],
+    table: str,
+    constraint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2653 — the CHECK and ``SUPPORTED_DEPLOYMENT_CURRENCIES`` must move together.
+
+    ``deployment_currency_unsupported`` on ``/strategies/overview`` cannot fire
+    while the CHECK admits exactly the one currency the constant names: the
+    predicate is false for every row that can exist. The branch is kept as the
+    chokepoint a WIDENING trips, and this is what stops the two sides drifting —
+    widen the constraint alone and the refusal quietly becomes live for a state
+    nobody meant to allow; widen the constant alone and the refusal is dead
+    again for the currency that was just added.
+
+    ⚠ Reads the constraint's own text from ``pg_constraint`` rather than probing
+    an insert. A probe can only show that ONE currency is refused; the drift this
+    guards against is the admitted SET changing, which the definition states and
+    a probe cannot.
+    """
+    conn = ebull_test_conn
+    row = conn.execute(
+        """
+        SELECT pg_get_constraintdef(c.oid)
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        WHERE t.relname = %s AND c.conname = %s
+        """,
+        (table, constraint),
+    ).fetchone()
+    assert row is not None, f"{constraint} is missing from {table} — sql/338 did not apply"
+
+    definition = str(row[0])
+    admitted = {code for code in re.findall(r"'([^']*)'", definition)}
+    assert admitted == set(SUPPORTED_DEPLOYMENT_CURRENCIES), (
+        f"{constraint} admits {sorted(admitted)} but SUPPORTED_DEPLOYMENT_CURRENCIES is "
+        f"{sorted(SUPPORTED_DEPLOYMENT_CURRENCIES)}; see the branch in app/api/strategies.py "
+        "that refuses the difference"
+    )
+
+    # ⚠ And the branch is live WIRING, not decoration. Without this the test
+    # above would pass just as well against a deleted branch — which is the one
+    # outcome #2653 weighed and rejected. Widening the constant is the only way
+    # to reach it from a test, because the state it refuses is unrepresentable
+    # at rest by the very constraint just asserted.
+    monkeypatch.setattr("app.api.strategies.SUPPORTED_DEPLOYMENT_CURRENCIES", frozenset({"CHF"}))
+    overview = get_strategy_overview(conn)
+    assert overview.strategies, "no strategies in the overview — the assertion below would be vacuous"
+    assert all(DEPLOYMENT_CURRENCY_UNSUPPORTED in row.allocation_refusals for row in overview.strategies)
 
 
 class _CountingConn:
