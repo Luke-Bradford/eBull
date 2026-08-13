@@ -19,7 +19,7 @@ Detection is the git worktree layout itself, which needs no cooperation from the
 separate autonomy-engine repo and no environment variable anyone has to
 remember to set. A linked worktree's `.git` is a FILE containing a `gitdir:`
 pointer; the main checkout's `.git` is a DIRECTORY. Verified 2026-08-13:
-`/Users/lukebradford/Dev/eBull/.git` is a directory and is the main worktree in
+the operator's main checkout has a `.git` DIRECTORY and is listed first by
 `git worktree list`, so the operator's trading checkout cannot trip this.
 
 ⚠ ONLY POSITIVE DETECTION REFUSES. A checkout with no `.git` at all (an

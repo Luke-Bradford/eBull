@@ -134,7 +134,7 @@ def test_guard_allows_the_main_checkout(tmp_path: Path) -> None:
     """The main checkout's `.git` is a DIRECTORY.
 
     Verified against the operator's real trading checkout on 2026-08-13:
-    `/Users/lukebradford/Dev/eBull/.git` is a directory, and `git worktree list`
+    the main checkout's `.git` is a directory, and `git worktree list`
     names it the main worktree — so this guard cannot brick the order path there.
     """
     (tmp_path / ".git").mkdir()
