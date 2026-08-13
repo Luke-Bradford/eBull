@@ -25,6 +25,15 @@ document. Both sealed runs FAILED that gate, so both floors are enormous; that
 is the arithmetic's verdict, recorded rather than smoothed — a forward shadow
 that could not detect the claimed effect validates nothing, and both trials are
 ``falsification_only`` regardless.
+
+⚠⚠ THIS CANNOT BE RUN "ANYTIME" — see the same section in
+``scripts/freeze_2582_schedule13d_declaration.py`` (#2631). The frozen row
+records ``STRUCTURAL_REFUSAL_POLICY_VERSION``; when that constant moves, the
+declaration is refused ``structural_refusal_policy_superseded`` forever and
+``sql/333`` permits no repair. Recovery is a new ``strategy_version`` — a new
+trial identity, the old one inaccessible, and another charge against the shared
+trial register. Read the ``--dry-run`` output's ``structural_refusal_policy_version``
+before committing to a freeze.
 """
 
 from __future__ import annotations
@@ -41,6 +50,7 @@ from app.config import settings
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.result_ledger import PreregDeclarationRefused, freeze_preregistration, load_preregistration
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION, structural_promotion_refusals
+from scripts._prereg_freeze_guard import assert_policy_version_merged, policy_version_report
 from scripts.sealed_rerun_gate import SealedTrialIdentity, verify_preregistration_document
 from scripts.verify_2476_pead_outcomes import SEALED_TRIAL as PEAD_SEALED_TRIAL
 from scripts.verify_2480_insider_outcomes import SEALED_TRIAL as INSIDER_SEALED_TRIAL
@@ -218,15 +228,9 @@ def build_insider_declaration() -> PreregDeclaration:
 def _freeze_one(conn: psycopg.Connection[tuple], declaration: PreregDeclaration) -> tuple[dict[str, object], bool]:
     """Freeze one declaration; returns (report, ok). Same outcomes as #2614's script."""
 
-    summary: dict[str, object] = {
-        "strategy_id": declaration.strategy_id,
-        "strategy_version": declaration.strategy_version,
-        "prereg_purpose": declaration.prereg_purpose,
-        "expected_structural_refusals": list(declaration.expected_structural_refusals),
-        "min_forward_decision_dates": declaration.forward_shadow.min_independent_decision_dates,
-        "min_forward_calendar_weeks": declaration.forward_shadow.min_calendar_weeks,
-        "declaration_sha256": declaration.sha256,
-    }
+    # ⚠ The full digest payload, not a hand-picked subset (#2631) — same reason
+    # as scripts/freeze_2582_schedule13d_declaration.py.
+    summary: dict[str, object] = {**declaration.digest_payload, "declaration_sha256": declaration.sha256}
     try:
         declaration_id = freeze_preregistration(conn, declaration)
     except psycopg.errors.UniqueViolation:
@@ -255,17 +259,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run", action="store_true", help="build and print both declarations without writing either"
     )
+    parser.add_argument(
+        "--allow-policy-divergence",
+        action="store_true",
+        help=(
+            "freeze even though this tree's STRUCTURAL_REFUSAL_POLICY_VERSION is not the one on "
+            "origin/main. The override is recorded in the output; see scripts/_prereg_freeze_guard.py "
+            "for why the default refuses."
+        ),
+    )
     args = parser.parse_args(argv)
     declarations = (build_pead_declaration(), build_insider_declaration())
     if args.dry_run:
+        report = policy_version_report()
         for declaration in declarations:
             sys.stdout.write(
                 json.dumps(
                     {
-                        "strategy_id": declaration.strategy_id,
+                        **declaration.digest_payload,
                         "declaration_sha256": declaration.sha256,
-                        "min_forward_decision_dates": declaration.forward_shadow.min_independent_decision_dates,
-                        "min_forward_calendar_weeks": declaration.forward_shadow.min_calendar_weeks,
+                        **report,
                         "outcome": "dry_run",
                     },
                     sort_keys=True,
@@ -274,12 +287,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
 
+    # ⚠ ONCE, BEFORE EITHER WRITE. Both declarations carry the same constant, so
+    # a per-declaration check would refuse the second having already frozen the
+    # first — half a batch under a policy version the guard rejects.
+    policy = assert_policy_version_merged(allow_divergence=args.allow_policy_divergence)
     all_ok = True
     with psycopg.connect(settings.database_url) as conn:
         for declaration in declarations:
             report, ok = _freeze_one(conn, declaration)
             all_ok = all_ok and ok
-            (sys.stdout if ok else sys.stderr).write(json.dumps(report, sort_keys=True) + "\n")
+            (sys.stdout if ok else sys.stderr).write(json.dumps({**report, **policy}, sort_keys=True) + "\n")
     return 0 if all_ok else 1
 
 
