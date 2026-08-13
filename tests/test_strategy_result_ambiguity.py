@@ -126,9 +126,19 @@ class TestVerdict:
         assert ambiguity_verdict(_arms(0.6, 0.4, 0.1)) is True
 
     def test_the_comparison_is_strict_at_the_boundary(self) -> None:
-        # §3.4 says "differ by MORE than", so a gap exactly equal to the
-        # threshold is not material.
-        assert ambiguity_verdict(_arms(0.6, 0.4, 0.2)) is False
+        """§3.4 says "differ by MORE than", so a gap exactly equal to the
+        threshold is not material.
+
+        ⚠⚠ THE VALUES ARE BINARY-EXACT ON PURPOSE, and the obvious ones are
+        not. This assertion was first written as ``_arms(0.6, 0.4, 0.2)``, which
+        proves nothing: ``abs(0.6 - 0.4)`` is ``0.19999999999999996``, so the
+        gap never reaches the threshold and BOTH ``>`` and ``>=`` return False.
+        A revert-probe flipping the operator left the test passing. 0.5, 0.25
+        and 0.25 are exactly representable, so the comparison really is made at
+        equality.
+        """
+        assert abs(0.5 - 0.25) == 0.25, "the boundary values must be binary-exact or this test is vacuous"
+        assert ambiguity_verdict(_arms(0.5, 0.25, 0.25)) is False
 
     def test_the_gap_is_absolute(self) -> None:
         # Which arm is larger is not a §3.4 question; the two orderings must
