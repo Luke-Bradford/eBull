@@ -145,11 +145,23 @@ subsystem is dead, confirm it in-process before writing it into a ticket.**
 
 Missing critical source data, stale timestamps beyond threshold, or
 contradictory evidence must surface as an EXPLICIT signal — never a neutral
-default. `check_all_layers` wraps each layer query in try/except and emits
-`LayerHealth(status="error", detail=<fixed string>)` per broken layer rather
-than 500-ing the whole report or silently reporting "fresh" (prevention-log #70:
-never let an infra fault degrade into a silent HTTP 200). Treat silent failure as
-failure; prefer noisy ops to false confidence; record enough detail to debug.
+default. `check_all_layers` runs each layer query in its own **SAVEPOINT**
+(`with conn.transaction():`) and emits `LayerHealth(status="error",
+detail=<fixed string>)` per broken layer rather than 500-ing the whole report or
+silently reporting "fresh" (prevention-log #70: never let an infra fault degrade
+into a silent HTTP 200). Treat silent failure as failure; prefer noisy ops to
+false confidence; record enough detail to debug.
+
+⚠ **The savepoint is the containment; a bare try/except is NOT** (#2674, fixed
+2026-08-13). `get_conn` hands out a non-autocommit pooled connection, so a failed
+query leaves the transaction ABORTED and every later statement raises
+`InFailedSqlTransaction` — one broken layer used to fail all eight and then 503
+the endpoint (measured on dev: the poisoned `_read_jobs_boot_error` trips the
+handler's guard), or 500 it via `_build_credential_health_summary`, which runs
+outside that guard. The same rule binds every best-effort probe sharing the
+connection (`_stalled_job_names`, `_jobs_process_down`, `check_scan_freshness`).
+When testing one, the post-condition must be a SUBSEQUENT statement — asserting
+the `error` row alone passes against the broken version.
 
 ## Orchestrator / sync health signals — real failure vs expected noise
 
