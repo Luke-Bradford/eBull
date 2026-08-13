@@ -47,12 +47,15 @@ check somebody has to remember to run.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import Decimal
-from typing import Final, Literal, cast, get_args
+from typing import Final, Literal, NoReturn, cast, get_args
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.prereg_contract import (
@@ -88,6 +91,8 @@ from app.services.walk_forward import (
 #: more than once"* is about the second.
 HoldoutAccessKind = Literal["evaluate", "read"]
 HOLDOUT_ACCESS_KINDS: Final[frozenset[str]] = frozenset(get_args(HoldoutAccessKind))
+
+_LOG = logging.getLogger(__name__)
 
 
 class PreregDeclarationRefused(RuntimeError):
@@ -189,6 +194,29 @@ class HoldoutAccess:
 
 
 @dataclass(frozen=True)
+class RefusedAccess:
+    """#2611 — one refused outcome-access attempt, as ``sql/340`` stored it.
+
+    ⚠ NOT AN ACCESS RECORD, and the type is separate from ``HoldoutAccess`` so
+    the two cannot be mixed up at a call site. Nothing was returned to the
+    caller, so a row of these is neither a criterion-5 evaluation nor exposure
+    for #2634's supersession check — see ``sql/340``'s header for why that
+    distinction is load-bearing rather than tidy.
+    """
+
+    refusal_id: int
+    strategy_id: str
+    strategy_version: str
+    result_version: str | None
+    access_kind: HoldoutAccessKind
+    accessed_by: str
+    purpose: str
+    refusals: tuple[str, ...]
+    declaration_id: int | None
+    refused_at: datetime
+
+
+@dataclass(frozen=True)
 class HoldoutAccessCounts:
     """``check_promotable``'s two hold-out inputs, read off the database.
 
@@ -254,6 +282,32 @@ _RECORD_ACCESS = """
         %(declaration_id)s
     )
     RETURNING access_id
+"""
+
+#: #2611 — the refused-attempt audit row. ⚠ NAMES A DIFFERENT RELATION FROM
+#: ``_RECORD_ACCESS`` ON PURPOSE, and sql/340's header carries the two reasons:
+#: ``holdout_access_counts`` feeds criterion 5 off the access log, and
+#: ``supersede_preregistration`` reads it as exposure. Nothing was returned by a
+#: refused look, so it is neither.
+_RECORD_ACCESS_REFUSAL = """
+    INSERT INTO strategy_holdout_access_refusals (
+        strategy_id, strategy_version, result_version, access_kind, accessed_by, purpose,
+        refusals, declaration_id
+    ) VALUES (
+        %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(access_kind)s, %(accessed_by)s, %(purpose)s,
+        %(refusals)s, %(declaration_id)s
+    )
+"""
+
+#: The governance read. ⚠ Most recent first and BOUNDED — an audit table nothing
+#: prunes is exactly the shape whose read grows without anybody noticing.
+_SELECT_ACCESS_REFUSALS = """
+    SELECT refusal_id, strategy_id, strategy_version, result_version, access_kind,
+           accessed_by, purpose, refusals, declaration_id, refused_at
+    FROM strategy_holdout_access_refusals
+    WHERE strategy_id = %(strategy_id)s AND strategy_version = %(strategy_version)s
+    ORDER BY refusal_id DESC
+    LIMIT %(limit)s
 """
 
 #: #2634 — the per-trial mutex freeze, access and supersession all take.
@@ -844,8 +898,158 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
 # ---------------------------------------------------------------------------
 
 
-def _refuse_incoherent_declaration(
+def _audit_conninfo(conn: psycopg.Connection[tuple]) -> str:
+    """The connection string for #2611's audit write, derived from the caller's.
+
+    ⚠⚠ DERIVED FROM ``conn``, NEVER FROM ``settings.database_url``. The refusal
+    belongs in the same database as the transaction that was refused — which for
+    a DB test is the 5433 test cluster. Reading the settings URL would write a
+    test's refusal into the operator's dev DB and trip ``tests/conftest.py``'s
+    dev-DB tripwire, and in an environment with more than one database it would
+    silently audit the wrong one.
+
+    ⚠ ``conn.info.dsn`` STRIPS THE PASSWORD (measured, psycopg 3.3.3: it returns
+    ``user=… connect_timeout=10 dbname=… host=…`` and no ``password=``), so it
+    is re-attached from ``conn.info.password`` — and only when there is one, so a
+    trust / passfile / service-file deployment still connects.
+
+    ⚠ The connect phase is already bounded everywhere by ``PGCONNECT_TIMEOUT``
+    (``app/config.py``), which is why the derived DSN carries
+    ``connect_timeout=10``. The two server-side timeouts below bound the rest:
+    this write sits on an EXCEPTION path, and an audit that hangs would convert
+    a refusal into a stall. ``lock_timeout`` specifically covers a concurrent
+    ``TRUNCATE`` of this table (the DB-test cleanup planner takes ACCESS
+    EXCLUSIVE on it).
+
+    ⚠ ``options`` IS APPENDED TO THE CALLER'S, NOT SUBSTITUTED FOR IT.
+    ``make_conninfo`` merges per KEYWORD, not inside a keyword's value, so
+    passing ``options=`` replaces the caller's whole string — measured (psycopg
+    3.3.3): ``make_conninfo("… options='-c application_name=caller -c
+    lock_timeout=99s'", options="-c lock_timeout=2s -c statement_timeout=5s")``
+    renders only the second, dropping ``application_name``. libpq forwards
+    ``options`` as server command-line arguments where a repeated ``-c`` is
+    LAST-WINS (measured against the dev cluster: caller's ``lock_timeout=99s``
+    then ours ``2s`` → ``SHOW lock_timeout`` = ``2s``, and ``application_name``
+    survives as ``caller``), so appending keeps the caller's settings AND keeps
+    these two timeouts binding. Prepending would let a caller disable the guard.
+    """
+    info = conn.info
+    audit_options = "-c lock_timeout=2s -c statement_timeout=5s"
+    caller_options = conninfo_to_dict(info.dsn).get("options")
+    if caller_options:
+        audit_options = f"{caller_options} {audit_options}"
+    extras: dict[str, str | int | None] = {"options": audit_options}
+    if info.password:
+        extras["password"] = info.password
+    return make_conninfo(info.dsn, **extras)
+
+
+def _record_access_refusal(
+    conn: psycopg.Connection[tuple],
+    access: HoldoutAccess,
+    refusals: tuple[str, ...],
+    declaration_id: int | None,
+) -> None:
+    """Write one ``sql/340`` row on its OWN connection. Best effort.
+
+    ⚠⚠ A SECOND CONNECTION, AND THE ARGUMENT IS AN ASYMMETRY #2599's docstring
+    did not draw. ``record_holdout_access`` writes in the caller's transaction
+    deliberately: an access record is a claim about DATA, ``sql/264``'s trigger
+    must see it alongside the row it authorises, and a rolled-back evaluation did
+    not happen. A refusal record is a claim about an ACT OF THE CALLER — it
+    completes when ``PreregDeclarationRefused`` is constructed, the caller
+    rolling back does not un-attempt it, and a caller that retries N times really
+    did attempt N times. Postgres has no autonomous transaction, and in the
+    caller's transaction this row would be lost in every case it exists for,
+    because the refusal is an exception.
+
+    ⚠⚠ NO ADVISORY LOCK HERE, AND SQL/340 CARRIES NO FK. Measured 2026-08-13:
+    ``pg_advisory_xact_lock`` blocks across connections. ``record_holdout_access``
+    takes the trial lock and still holds it when it refuses, so an audit write
+    that took the same lock would block until the caller's transaction ended.
+
+    ⚠⚠ BEST EFFORT, AND IT NEVER MASKS THE REFUSAL. The caller raises regardless.
+    A gate that can be disabled by breaking its audit is not a gate — so a
+    failure here is logged at ERROR **with the refusal codes inline**, which is
+    what stops a failed write being a silent no-op (the "reports success and
+    writes nothing" shape this repo has been bitten by).
+    """
+    try:
+        with psycopg.connect(_audit_conninfo(conn), autocommit=True) as audit:
+            audit.execute(
+                _RECORD_ACCESS_REFUSAL,
+                {
+                    "strategy_id": access.strategy_id,
+                    "strategy_version": access.strategy_version,
+                    "result_version": access.result_version,
+                    "access_kind": access.access_kind,
+                    "accessed_by": access.accessed_by,
+                    "purpose": access.purpose,
+                    "refusals": list(refusals),
+                    "declaration_id": declaration_id,
+                },
+            )
+    except Exception:
+        _LOG.exception(
+            "#2611 audit write failed; the refusal itself still stands. "
+            "trial=%s/%s kind=%s by=%s purpose=%r refusals=%s declaration_id=%s",
+            access.strategy_id,
+            access.strategy_version,
+            access.access_kind,
+            access.accessed_by,
+            access.purpose,
+            ",".join(refusals),
+            declaration_id,
+        )
+
+
+def _refuse_access(
+    conn: psycopg.Connection[tuple],
+    access: HoldoutAccess,
+    refusals: tuple[str, ...],
+    declaration_id: int | None = None,
+) -> NoReturn:
+    """#2611's single exit from a refused outcome-access attempt. Never returns.
+
+    ⚠ THE ONE PLACE THE ACCESS PATH MAY CONSTRUCT ``PreregDeclarationRefused``.
+    A convention would rot the way every other one in M9 has ("the control
+    exists and sits on a path the decision does not take"), so
+    ``tests/test_2611_refused_access_audit.py`` walks this module's AST and fails
+    if any access-path function raises it directly. AST rather than a substring
+    grep, which an import line satisfies (#2631).
+    """
+    _record_access_refusal(conn, access, refusals, declaration_id)
+    raise PreregDeclarationRefused(access.strategy_id, access.strategy_version, refusals)
+
+
+def _declaration_refusal_codes(
     conn: psycopg.Connection[tuple], strategy_id: str, strategy_version: str
+) -> tuple[FrozenPreregistration | None, tuple[str, ...]]:
+    """The trial's current declaration and every reason it may not authorise a look.
+
+    ⚠ SPLIT OUT BY #2611 SO THE TWO CALLERS CAN REFUSE DIFFERENTLY. The access
+    door audits its refusal (``_refuse_access``); ``verify_outcome_access_provenance``
+    does not, because it is a RE-CHECK — it requires an ``access_id`` that a
+    committed access row already accounts for, so auditing there would record a
+    second attempt for one look. Returning the codes rather than raising is what
+    lets each caller make that choice explicitly instead of inheriting one.
+
+    ⚠ Empty codes with a non-None declaration means coherent. Empty codes with
+    ``None`` means the trial froze nothing — NOT a refusal here (#2599 does not
+    retroactively invalidate), and the callers that require one say so
+    themselves.
+    """
+    frozen = load_preregistration(conn, strategy_id, strategy_version)
+    if frozen is None:
+        return None, ()
+    codes = [str(code) for code in declaration_refusals(frozen.declaration)]
+    if not frozen.digest_intact:
+        codes.append("declaration_digest_mismatch")
+    return frozen, tuple(codes)
+
+
+def _refuse_incoherent_declaration(
+    conn: psycopg.Connection[tuple], access: HoldoutAccess
 ) -> FrozenPreregistration | None:
     """Re-check a frozen declaration, or pass when the trial froze none.
 
@@ -857,15 +1061,15 @@ def _refuse_incoherent_declaration(
     ⚠ The stored digest is verified too. A row edited around the immutability
     trigger (a superuser can disable one) no longer matches the bytes it was
     frozen over, and a declaration that has been rewritten is not a declaration.
+
+    ⚠ #2611 — TAKES THE WHOLE ``HoldoutAccess`` RATHER THAN THE IDENTITY PAIR.
+    The audit row records who attempted what and why, and none of that is
+    derivable from ``(strategy_id, strategy_version)``. The refusal exits through
+    ``_refuse_access``.
     """
-    frozen = load_preregistration(conn, strategy_id, strategy_version)
-    if frozen is None:
-        return None
-    refusals = [str(code) for code in declaration_refusals(frozen.declaration)]
-    if not frozen.digest_intact:
-        refusals.append("declaration_digest_mismatch")
+    frozen, refusals = _declaration_refusal_codes(conn, access.strategy_id, access.strategy_version)
     if refusals:
-        raise PreregDeclarationRefused(strategy_id, strategy_version, tuple(refusals))
+        _refuse_access(conn, access, refusals, None if frozen is None else frozen.declaration_id)
     return frozen
 
 
@@ -1144,7 +1348,7 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
     than no attribution at all.
     """
     _lock_trial(conn, access.strategy_id, access.strategy_version)
-    frozen = _refuse_incoherent_declaration(conn, access.strategy_id, access.strategy_version)
+    frozen = _refuse_incoherent_declaration(conn, access)
     row = conn.execute(
         _RECORD_ACCESS,
         {
@@ -1215,9 +1419,16 @@ def require_outcome_access(conn: psycopg.Connection[tuple], access: HoldoutAcces
     result through ``verify_outcome_access_provenance``; the general rule is that
     a second path needs its own gate, and
     ``tests/test_sealed_outcome_scripts_are_gated.py`` is what notices a new one.
+
+    ⚠ #2611 — THE REFUSAL IS NOW RECORDED (``sql/340``), on its own connection so
+    it survives the caller's rollback. ⚠ What it records is a SNAPSHOT-RELATIVE
+    observation: this check runs before the trial lock is taken, so a concurrent
+    freeze that commits a moment later leaves a
+    ``preregistration_not_frozen`` row that is nonetheless a true statement about
+    what this look saw. The audit is of the attempt, not of the trial.
     """
     if load_preregistration(conn, access.strategy_id, access.strategy_version) is None:
-        raise PreregDeclarationRefused(access.strategy_id, access.strategy_version, ("preregistration_not_frozen",))
+        _refuse_access(conn, access, ("preregistration_not_frozen",))
     return record_holdout_access(conn, access)
 
 
@@ -1290,7 +1501,14 @@ def verify_outcome_access_provenance(
 
     Raises ``PreregDeclarationRefused`` carrying every code that fired.
     """
-    frozen = _refuse_incoherent_declaration(conn, strategy_id, strategy_version)
+    # ⚠ #2611 — RAISES HERE WITHOUT AN AUDIT ROW, DELIBERATELY, and the
+    # behaviour is byte-identical to what `_refuse_incoherent_declaration` did
+    # before it grew one. This is a RE-CHECK: it requires an `access_id` whose
+    # committed row already records the attempt, so auditing here would file a
+    # second refusal for a single look. See `_declaration_refusal_codes`.
+    frozen, declaration_codes = _declaration_refusal_codes(conn, strategy_id, strategy_version)
+    if declaration_codes:
+        raise PreregDeclarationRefused(strategy_id, strategy_version, declaration_codes)
     refusals: list[str] = []
     if frozen is None:
         refusals.append("preregistration_not_frozen")
@@ -1450,6 +1668,46 @@ def read_holdout_results(
         {"strategy_id": strategy_id, "strategy_version": strategy_version},
     ).fetchall()
     return tuple(_result_from_row(row) for row in rows)
+
+
+def read_access_refusals(
+    conn: psycopg.Connection[tuple],
+    strategy_id: str,
+    strategy_version: str,
+    *,
+    limit: int = 100,
+) -> tuple[RefusedAccess, ...]:
+    """#2611's governance read: what was refused on this trial, newest first.
+
+    ⚠ RECORDS NOTHING AND IS NOT AN ACCESS. Reading the list of looks that were
+    DENIED exposes no hold-out number, so it needs no access record of its own —
+    which is the whole reason the refusals live in their own relation rather than
+    behind ``read_holdout_results``' door.
+
+    ⚠ BOUNDED. Nothing prunes this table, and an unbounded read of an audit log
+    is a resource problem that arrives quietly and late.
+    """
+    if limit <= 0:
+        raise ValueError("limit must be positive — a zero-row governance read reports 'nothing was refused'")
+    rows = conn.execute(
+        _SELECT_ACCESS_REFUSALS,
+        {"strategy_id": strategy_id, "strategy_version": strategy_version, "limit": limit},
+    ).fetchall()
+    return tuple(
+        RefusedAccess(
+            refusal_id=int(row[0]),
+            strategy_id=str(row[1]),
+            strategy_version=str(row[2]),
+            result_version=None if row[3] is None else str(row[3]),
+            access_kind=cast(HoldoutAccessKind, str(row[4])),
+            accessed_by=str(row[5]),
+            purpose=str(row[6]),
+            refusals=tuple(str(code) for code in (row[7] or ())),
+            declaration_id=None if row[8] is None else int(row[8]),
+            refused_at=cast(datetime, row[9]),
+        )
+        for row in rows
+    )
 
 
 def holdout_access_counts(
@@ -1894,11 +2152,13 @@ __all__ = [
     "HoldoutAccessCounts",
     "HoldoutAccessKind",
     "PreregDeclarationRefused",
+    "RefusedAccess",
     "freeze_preregistration",
     "holdout_access_counts",
     "load_preregistration",
     "quarantine_arm_pair_present",
     "quarantine_arms_compared",
+    "read_access_refusals",
     "read_holdout_results",
     "read_walk_forward_folds",
     "record_holdout_access",
