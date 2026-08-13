@@ -26,6 +26,13 @@ the frozen one. Session membership comes from ``market_calendar``, never from
   OPTIMISTIC (charging less than today's measurement) so a real recalibration
   decision has the number in front of it.
 
+  ⚠ It also prints a SECOND, bounding table — p95 and the sample max, with the
+  freeze-ready (ROUND_CEILING, 0.001 pp) form of each. #2598 scope 5 asks for
+  the banded model to become the declared execution-side conservative bound,
+  and a p75 cannot be one: a quarter of its population exceeds it by
+  construction. Reported, never adopted — adopting a column is a new
+  ``COST_MODEL_ID``. See ``_report_bounding_statistics``.
+
 ``--positions`` — cost every position S-1 and S-3 produce over the §4.0
 validated universe, through the real path (``s1_signals`` / ``s3_signals`` →
 ``signal_ledger.resolve_fills`` → ``build_positions`` → ``cost_positions``), and
@@ -60,7 +67,7 @@ from collections import Counter
 from collections.abc import Sequence
 from datetime import date, datetime
 from datetime import time as clock_time
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -149,18 +156,97 @@ def _in_session(quoted_at: datetime) -> bool:
     return SESSION_OPEN <= local.time() < close
 
 
-def _p75_disc(values: Sequence[Decimal]) -> Decimal:
-    """The discrete p75 — an OBSERVED spread, never an interpolation.
+def _percentile_disc(values: Sequence[Decimal], *, percentile: int) -> Decimal:
+    """A discrete percentile — an OBSERVED spread, never an interpolation.
 
     ⚠ Stated because it is a choice with no published rule, so it is fixed by
     construction and frozen with the model: ``percentile_disc`` semantics, the
-    smallest observed value whose cumulative share reaches 0.75. An interpolated
-    p75 is a number no instrument was ever quoted at, and the model claims to
-    charge a spread somebody actually saw.
+    smallest observed value whose cumulative share reaches ``percentile/100``.
+    An interpolated percentile is a number no instrument was ever quoted at, and
+    the model claims to charge a spread somebody actually saw.
+
+    ⚠ INTEGER ARITHMETIC, not ``q * n`` in float. ``ceil(n × p / 100)`` is exact
+    here; the float form is off by one wherever ``q * n`` lands a ulp below an
+    integer, and the value it then selects is the neighbouring observation
+    rather than an approximation of the right one. ``percentile=100`` is the
+    sample maximum, which is the same rule at its limit rather than a special
+    case.
     """
+    if not 1 <= percentile <= 100:
+        raise ValueError(f"percentile must be in 1..100, got {percentile}")
+    if not values:
+        # ⚠ Explicit, because the index arithmetic below lands on -1 for an
+        # empty sequence and would return the LAST element of nothing — i.e.
+        # IndexError, from a function whose job is to answer a question about a
+        # sample that does not exist. Callers band their quotes first and must
+        # report "no sample" themselves.
+        raise ValueError(f"cannot take the p{percentile} of an empty sample")
     ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, -(-len(ordered) * 3 // 4) - 1))
+    index = min(len(ordered) - 1, max(0, -(-len(ordered) * percentile // 100) - 1))
     return ordered[index]
+
+
+#: The freeze quantum and its direction, restated from ``cost_model``'s BANDS
+#: note so a recalibration candidate is printed in the form it would be frozen
+#: in: 0.001 percentage points (0.1 bp), ROUND_CEILING, so the frozen model is
+#: never CHEAPER than the measurement it came from.
+_FREEZE_QUANTUM = Decimal("0.001")
+
+
+def _freeze_ready(value: Decimal) -> Decimal:
+    """The value as it would enter ``BANDS`` — quantised AWAY from zero cost."""
+    return value.quantize(_FREEZE_QUANTUM, rounding=ROUND_CEILING)
+
+
+def _report_bounding_statistics(
+    by_band: dict[str, list[Decimal]], *, top_hour: int | None, top_count: int
+) -> None:
+    """Print the BOUNDING statistics beside the frozen p75 (#2598 scope 5, step 1).
+
+    ⚠⚠ WHY THIS TABLE EXISTS, IN ONE LINE: **a p75 is not a bound.** #2598 scope
+    5 asks for the banded model to become *"the declared execution-side
+    conservative bound"* for unleveraged long stock, and a 75th percentile is
+    exceeded by a quarter of its own population BY CONSTRUCTION. That is a
+    property of the statistic, not of the sample, so no amount of extra
+    calibration data repairs it — only a different statistic does. This arm
+    computes the two candidates the ticket names (p95, or the sample max) over
+    the same population, the same session rule and the same freeze discipline,
+    so the recalibration decision has its numbers in front of it.
+
+    ⚠ NOTHING IS FROZEN HERE. Adopting a column ships a NEW ``COST_MODEL_ID``
+    (``cost_model``'s own rule — a change to what is charged is a new model, not
+    a silent improvement), which moves every strategy version and supersedes
+    every stored result under the current id. The freeze-ready column is printed
+    so that decision is a copy, not a hand-quantisation.
+
+    ⚠ THE MAX IS A SAMPLE MAX. ``quotes`` holds one row per instrument,
+    overwritten on every refresh, so this is the widest spread in ONE snapshot
+    of a fraction of the universe — an upper bound on what was observed, never
+    on what can occur. The caveat line prints the n and the capture-hour
+    concentration it rests on, because that is what decides how much of the
+    trading day it has ever seen.
+    """
+    print("\n  ⚠ p75 is not a bound — a quarter of the population exceeds it by construction (#2598 scope 5).")
+    print("  band          n   p75 today   p95 today   max today   p95 frozen-ready   max frozen-ready   p95/frozen")
+    for band in BANDS:
+        values = by_band[band.label]
+        if not values:
+            print(f"  {band.label:<10} {0:>4}   {'—':>9}   {'—':>9}   {'—':>9}   {'—':>16}   {'—':>16}   {'—':>10}")
+            continue
+        p75 = _percentile_disc(values, percentile=75)
+        p95 = _percentile_disc(values, percentile=95)
+        widest = _percentile_disc(values, percentile=100)
+        uplift = (p95 / band.p75_spread_pct).quantize(Decimal("0.01"))
+        print(
+            f"  {band.label:<10} {len(values):>4}   {p75:>9}   {p95:>9}   {widest:>9}   "
+            f"{_freeze_ready(p95):>16}   {_freeze_ready(widest):>16}   {uplift:>9}x"
+        )
+    priced = sum(len(values) for values in by_band.values())
+    hour = f"UTC {top_hour}" if top_hour is not None else "—"
+    print(
+        f"  ⚠ sample max over {priced:,} priced in-session quotes, {top_count:,} of them at {hour} — "
+        "one hour of one snapshot, not a population maximum"
+    )
 
 
 def calibrate() -> int:
@@ -223,12 +309,14 @@ def calibrate() -> int:
                 f"{band.half_spread_pct:>11}   NO SAMPLE"
             )
             continue
-        today = _p75_disc(values)
+        today = _percentile_disc(values, percentile=75)
         verdict = "OPTIMISTIC" if band.p75_spread_pct < today else "conservative"
         print(
             f"  {band.label:<10} {len(values):>7}   {today:>10}   {band.p75_spread_pct:>10}   "
             f"{band.half_spread_pct:>11}   {verdict}"
         )
+
+    _report_bounding_statistics(by_band, top_hour=top_hour, top_count=top_count)
 
     print(
         f"\n  carry_bps {CARRY_BPS}   fx_bps {FX_BPS}   "
