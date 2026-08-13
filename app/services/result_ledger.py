@@ -59,7 +59,10 @@ from app.services.prereg_contract import (
     ForwardShadowFloor,
     PreregDeclaration,
     PreregPurpose,
+    Supersession,
+    changed_supersession_terms,
     declaration_refusals,
+    supersession_refusals,
 )
 from app.services.random_entry_cohort import SyntheticControl
 from app.services.strategy_result import (
@@ -112,11 +115,25 @@ class FrozenPreregistration:
     ⚠ The ``declaration_sha256`` is the STORED digest, kept separate from
     ``declaration.sha256`` (which recomputes it) precisely so the two can be
     compared. Equal means the row still says what it said when it was frozen.
+
+    ⚠ #2634 — THIS IS THE *CURRENT* REVISION OF A CHAIN, not the only row. A
+    declaration stranded by a structural-refusal policy bump is repaired by a
+    superseding row rather than an edit, so a trial may hold several, of which
+    exactly one is current. ``chain_declaration_ids`` is every revision oldest
+    first, and it exists because ``assess_live_gate`` has to recognise a policy
+    that binds an EARLIER revision — every row in a chain carries identical
+    terms, so honouring an ancestor cannot loosen anything.
     """
 
     declaration_id: int
     declaration: PreregDeclaration
     declaration_sha256: str
+    #: Every revision for this trial, oldest first, ending at ``declaration_id``.
+    #: A trial with no supersession has exactly one entry.
+    chain_declaration_ids: tuple[int, ...] = ()
+    supersedes_declaration_id: int | None = None
+    supersession_reason: str | None = None
+    supersession_attestation: str | None = None
 
     @property
     def digest_intact(self) -> bool:
@@ -227,11 +244,40 @@ def _as_float(value: Decimal | None) -> float | None:
 #: chokepoint lint catches the f-string form — correctly.
 _RECORD_ACCESS = """
     INSERT INTO strategy_holdout_accesses (
-        strategy_id, strategy_version, result_version, access_kind, accessed_by, purpose
+        strategy_id, strategy_version, result_version, access_kind, accessed_by, purpose, declaration_id
     ) VALUES (
-        %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(access_kind)s, %(accessed_by)s, %(purpose)s
+        %(strategy_id)s, %(strategy_version)s, %(result_version)s, %(access_kind)s, %(accessed_by)s, %(purpose)s,
+        %(declaration_id)s
     )
     RETURNING access_id
+"""
+
+#: #2634 — the per-trial mutex freeze, access and supersession all take.
+#:
+#: ⚠⚠ AN ADVISORY LOCK AND NOT ``FOR SHARE``/``FOR UPDATE``, for three measured
+#: reasons. Row locks are barred inside a ``READ ONLY`` transaction, which is
+#: where ``verify_outcome_access_provenance`` runs; they lock ZERO rows for a
+#: trial that has not frozen anything yet, so they cannot order an access
+#: against a concurrent FIRST freeze; and "every row of the trial" has no
+#: deterministic lock order across plans, which is a deadlock shape. One lock on
+#: the trial identity has none of those. A hash collision merely over-serialises
+#: two unrelated trials, which costs nothing here.
+#:
+#: Pattern: ``app/api/strategies.py:1384``.
+_LOCK_TRIAL = "SELECT pg_advisory_xact_lock(hashtext(%(trial)s))"
+
+#: The exposure disqualifiers, counted together so a refusal names both.
+#:
+#: ⚠ TWO COUNTS, NOT ONE. The access ledger and the result rows can disagree: a
+#: ``hold_out`` row written before #2599's chokepoint existed, or by a path that
+#: bypassed it, is exposure with no access row to count.
+_COUNT_TRIAL_EXPOSURE = """
+    SELECT
+        (SELECT count(*) FROM strategy_holdout_accesses
+          WHERE strategy_id = %(strategy_id)s AND strategy_version = %(strategy_version)s) AS access_count,
+        (SELECT count(*) FROM strategy_results_store
+          WHERE strategy_id = %(strategy_id)s AND strategy_version = %(strategy_version)s
+            AND namespace = 'hold_out') AS holdout_result_count
 """
 
 _FREEZE_DECLARATION = """
@@ -240,25 +286,35 @@ _FREEZE_DECLARATION = """
         structural_refusal_policy_version, declared_universe_basis, declared_carry_unmodelled,
         declared_fx_unmodelled,
         expected_structural_refusals, min_forward_decision_dates, min_forward_calendar_weeks,
-        forward_shadow_derivation, declared_by, declaration_sha256
+        forward_shadow_derivation, declared_by, declaration_sha256,
+        supersedes_declaration_id, supersession_reason, supersession_attestation
     ) VALUES (
         %(strategy_id)s, %(strategy_version)s, %(contract_version)s, %(prereg_purpose)s,
         %(structural_refusal_policy_version)s, %(declared_universe_basis)s, %(declared_carry_unmodelled)s,
         %(declared_fx_unmodelled)s,
         %(expected_structural_refusals)s, %(min_forward_decision_dates)s, %(min_forward_calendar_weeks)s,
-        %(forward_shadow_derivation)s, %(declared_by)s, %(declaration_sha256)s
+        %(forward_shadow_derivation)s, %(declared_by)s, %(declaration_sha256)s,
+        %(supersedes_declaration_id)s, %(supersession_reason)s, %(supersession_attestation)s
     )
     RETURNING declaration_id
 """
 
+#: ⚠ EVERY REVISION FOR THE TRIAL, oldest first — not one row. #2634 made a
+#: trial's declarations a chain, and ``sql/337``'s constraints (one root, no
+#: branching, no cycles) mean the rows come back as a single acyclic list whose
+#: last entry is the current declaration. Ordering by ``declaration_id`` is the
+#: chain order because the same CHECK that bars cycles requires every edge to
+#: point at a smaller id.
 _SELECT_DECLARATION = """
     SELECT declaration_id, strategy_id, strategy_version, contract_version, prereg_purpose,
            structural_refusal_policy_version, declared_universe_basis, declared_carry_unmodelled,
            declared_fx_unmodelled,
            expected_structural_refusals, min_forward_decision_dates, min_forward_calendar_weeks,
-           forward_shadow_derivation, declared_by, declaration_sha256
+           forward_shadow_derivation, declared_by, declaration_sha256,
+           supersedes_declaration_id, supersession_reason, supersession_attestation
     FROM strategy_preregistration_declarations
     WHERE strategy_id = %(strategy_id)s AND strategy_version = %(strategy_version)s
+    ORDER BY declaration_id
 """
 
 #: #2614 — the provenance re-check for an evaluator that stores no result row.
@@ -279,7 +335,7 @@ _SELECT_ACCESS_PROVENANCE = """
            ) AS is_latest_read
     FROM strategy_holdout_accesses a
     JOIN strategy_preregistration_declarations d
-      ON d.strategy_id = a.strategy_id AND d.strategy_version = a.strategy_version
+      ON d.declaration_id = a.declaration_id
     WHERE a.access_id = %(access_id)s AND d.declaration_id = %(declaration_id)s
 """
 
@@ -810,12 +866,18 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
     ⚠ A ``falsification_only`` declaration over survivor-only stamps is COHERENT
     and is accepted. It still charges the trial register, as any look must; what
     it cannot do is happen silently.
+
+    ⚠ #2634 — the row is no longer the trial's ONLY declaration; it is the ROOT
+    of a chain a later supersession may extend. What stays true is that a trial
+    has exactly one root (``sql/337``'s partial unique index), so a second call
+    here still raises ``UniqueViolation``.
     """
     refusals = declaration_refusals(declaration)
     if refusals:
         raise PreregDeclarationRefused(
             declaration.strategy_id, declaration.strategy_version, tuple(str(code) for code in refusals)
         )
+    _lock_trial(conn, declaration.strategy_id, declaration.strategy_version)
     row = conn.execute(
         _FREEZE_DECLARATION,
         {
@@ -833,6 +895,11 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
             "forward_shadow_derivation": declaration.forward_shadow.derivation,
             "declared_by": declaration.declared_by,
             "declaration_sha256": declaration.sha256,
+            # A root declaration supersedes nothing. `sql/337` CHECKs that the
+            # three move together, so a half-filled root is not a state.
+            "supersedes_declaration_id": None,
+            "supersession_reason": None,
+            "supersession_attestation": None,
         },
     ).fetchone()
     if row is None:  # pragma: no cover - RETURNING on a successful INSERT always yields a row
@@ -846,16 +913,26 @@ def load_preregistration(
     """The frozen declaration for one trial, or ``None`` if nothing is frozen.
 
     ⚠ ``None`` is NOT a refusal here. A trial that never froze one behaves as it
-    did before #2599 — no retroactive invalidation, which is what keeps the 224
+    did before #2599 — no retroactive invalidation, which is what keeps the 304
     existing access rows and every current evaluator working. The paths that
     REQUIRE a declaration say so themselves (``require_outcome_access``).
+
+    ⚠⚠ #2634 — RETURNS THE CURRENT REVISION OF THE CHAIN. Before supersession
+    existed this read one row and `.fetchone()` was the whole answer; with
+    several rows possible per trial, an arbitrary one would be a coin flip
+    between a stranded declaration and its repair. The current revision is the
+    row nothing supersedes, which ``sql/337``'s constraints make unique — and
+    ``_current_of_chain`` asserts that rather than trusting it, because a
+    disagreement here means the constraints are not doing what this function
+    claims they do.
     """
-    row = conn.execute(
+    rows = conn.execute(
         _SELECT_DECLARATION,
         {"strategy_id": strategy_id, "strategy_version": strategy_version},
-    ).fetchone()
-    if row is None:
+    ).fetchall()
+    if not rows:
         return None
+    row = _current_of_chain(rows, strategy_id, strategy_version)
     return FrozenPreregistration(
         declaration_id=int(row[0]),
         declaration=PreregDeclaration(
@@ -876,7 +953,148 @@ def load_preregistration(
             declared_by=str(row[13]),
         ),
         declaration_sha256=str(row[14]),
+        chain_declaration_ids=tuple(int(candidate[0]) for candidate in rows),
+        supersedes_declaration_id=None if row[15] is None else int(row[15]),
+        supersession_reason=None if row[16] is None else str(row[16]),
+        supersession_attestation=None if row[17] is None else str(row[17]),
     )
+
+
+def _current_of_chain(
+    rows: Sequence[tuple], strategy_id: str, strategy_version: str
+) -> tuple:  # pragma: no mutate - shape is asserted below
+    """The one revision no other supersedes.
+
+    ⚠ ASSERTED, NOT ASSUMED. ``sql/337`` gives exactly one current row per trial
+    — one root, no branching, and no cycles because every edge must point at a
+    smaller ``declaration_id``. If this ever finds zero or two, the constraints
+    are not holding and the honest response is to refuse rather than to pick
+    one: picking would silently answer an outcome look from a revision nobody
+    can name.
+    """
+    superseded = {int(row[15]) for row in rows if row[15] is not None}
+    current = [row for row in rows if int(row[0]) not in superseded]
+    if len(current) != 1:
+        raise RuntimeError(
+            f"preregistration chain for {strategy_id}/{strategy_version} has {len(current)} current declarations, "
+            f"not 1 — sql/337's one-root/no-branch/no-cycle constraints are not holding"
+        )
+    return current[0]
+
+
+def _lock_trial(conn: psycopg.Connection[tuple], strategy_id: str, strategy_version: str) -> None:
+    """Serialise freeze, access and supersession for one trial. See ``_LOCK_TRIAL``."""
+    conn.execute(_LOCK_TRIAL, {"trial": f"{strategy_id}/{strategy_version}"})
+
+
+def supersede_preregistration(
+    conn: psycopg.Connection[tuple],
+    successor: PreregDeclaration,
+    supersession: Supersession,
+) -> int:
+    """#2634 — repair a declaration stranded by a policy bump. Returns the new id.
+
+    ⚠⚠ WHAT MAKES THIS SAFE IS THAT IT CAN EXPRESS ALMOST NOTHING. A
+    re-declaration path is an obvious adaptivity vector: an author who has seen
+    sample counts, missingness or corpus composition re-declares more
+    favourably. ``supersession_refusals`` permits the successor to differ from
+    its predecessor in the policy version, the refusal list recomputed from it,
+    and the declarer's name — and in nothing else. Purpose, both cost stamps,
+    the universe basis and both forward-shadow floors are compared field by
+    field. A trial that wants different terms is a different trial, and the new
+    ``strategy_version`` remains the identity boundary it always was.
+
+    ⚠⚠ "NO ACCESS ROWS" IS NECESSARY AND NOT SUFFICIENT, AND THIS FUNCTION DOES
+    NOT PRETEND OTHERWISE. ``strategy_holdout_accesses`` records committed
+    paved-path looks. A direct ``SELECT`` against ``strategy_results_store``
+    leaves no row (``sql/264``'s header measured that RLS does not bind this
+    app's superuser connection), a rolled-back transaction removes its own
+    record, and outcomes may already sit in a signed artifact, an export, a log
+    or another database. The counts are a cheap automatic disqualifier; the
+    ``Supersession.attestation`` is what carries the rest, and an attestation is
+    a claim rather than a proof. It is frozen with the row, where ``sql/333``'s
+    immutability trigger makes it unrewritable.
+
+    ⚠ REQUIRES ``READ COMMITTED``. The concurrency argument is that a caller
+    which loses the advisory-lock race re-reads and finds the winner's row —
+    which needs a fresh snapshot per statement. Under ``REPEATABLE READ`` the
+    post-lock read returns the pre-lock snapshot and the check silently
+    regresses to the race it exists to close, so the isolation level is checked
+    rather than assumed.
+    """
+    isolation = conn.execute("SELECT current_setting('transaction_isolation')").fetchone()
+    if isolation is not None and str(isolation[0]).lower() != "read committed":
+        raise RuntimeError(
+            f"supersede_preregistration needs READ COMMITTED and this transaction is {isolation[0]!r}: the "
+            "post-lock re-read would return the pre-lock snapshot, so a losing racer would not see the "
+            "supersession that beat it"
+        )
+
+    _lock_trial(conn, successor.strategy_id, successor.strategy_version)
+
+    frozen = load_preregistration(conn, successor.strategy_id, successor.strategy_version)
+    if frozen is None:
+        raise PreregDeclarationRefused(
+            successor.strategy_id, successor.strategy_version, ("supersession_nothing_frozen",)
+        )
+
+    refusals = [str(code) for code in supersession_refusals(frozen.declaration, successor)]
+    changed = changed_supersession_terms(frozen.declaration, successor)
+
+    exposure = conn.execute(
+        _COUNT_TRIAL_EXPOSURE,
+        {"strategy_id": successor.strategy_id, "strategy_version": successor.strategy_version},
+    ).fetchone()
+    access_count = 0 if exposure is None else int(exposure[0])
+    holdout_result_count = 0 if exposure is None else int(exposure[1])
+    if access_count:
+        refusals.append("supersession_trial_already_exposed")
+    if holdout_result_count:
+        refusals.append("supersession_trial_has_holdout_results")
+
+    if refusals:
+        detail = tuple(refusals)
+        if changed:
+            # The code vocabulary is closed, so the field names travel in the
+            # message — five more codes would all mean the same operator action.
+            detail = (*detail, f"changed_terms={','.join(changed)}")
+        raise PreregDeclarationRefused(successor.strategy_id, successor.strategy_version, detail)
+
+    try:
+        row = conn.execute(
+            _FREEZE_DECLARATION,
+            {
+                "strategy_id": successor.strategy_id,
+                "strategy_version": successor.strategy_version,
+                "contract_version": successor.contract_version,
+                "prereg_purpose": successor.prereg_purpose,
+                "structural_refusal_policy_version": successor.structural_refusal_policy_version,
+                "declared_universe_basis": successor.declared_universe_basis,
+                "declared_carry_unmodelled": successor.declared_carry_unmodelled,
+                "declared_fx_unmodelled": successor.declared_fx_unmodelled,
+                "expected_structural_refusals": list(successor.expected_structural_refusals),
+                "min_forward_decision_dates": successor.forward_shadow.min_independent_decision_dates,
+                "min_forward_calendar_weeks": successor.forward_shadow.min_calendar_weeks,
+                "forward_shadow_derivation": successor.forward_shadow.derivation,
+                "declared_by": successor.declared_by,
+                "declaration_sha256": successor.sha256,
+                "supersedes_declaration_id": frozen.declaration_id,
+                "supersession_reason": supersession.reason,
+                "supersession_attestation": supersession.attestation,
+            },
+        ).fetchone()
+    except psycopg.errors.UniqueViolation as exc:
+        # ⚠ THE BACKSTOP FOR A WRITER THAT SKIPPED THE LOCK. Two supersessions
+        # that both take it cannot reach here — the loser re-reads and refuses
+        # with `supersession_not_required`. `UNIQUE (supersedes_declaration_id)`
+        # is what catches the one that did not, and a raw driver error escaping
+        # would be a refusal nobody can act on.
+        raise PreregDeclarationRefused(
+            successor.strategy_id, successor.strategy_version, ("supersession_predecessor_already_superseded",)
+        ) from exc
+    if row is None:  # pragma: no cover - RETURNING on a successful INSERT always yields a row
+        raise RuntimeError("superseding declaration INSERT returned no declaration_id")
+    return int(row[0])
 
 
 def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess) -> int:
@@ -895,8 +1113,24 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
     through this function, so one check covers every one of them and no future
     door has to remember a convention. A trial with no frozen declaration is
     unaffected; a trial that HAS frozen one cannot escape through the old door.
+
+    ⚠⚠ #2634 — THE LOCK COMES FIRST, AND IT IS WHAT ORDERS THIS AGAINST A
+    SUPERSESSION. Without it, a re-declaration can count zero accesses, this can
+    insert one, and both commit: a trial re-declared after it was looked at,
+    which is the fabrication the whole arrangement exists to prevent. With it,
+    whichever side gets there first wins cleanly — an access first makes the
+    supersession refuse ``supersession_trial_already_exposed``, and a
+    supersession first makes this re-read and authorise against the new
+    revision. ⚠ It also covers the case row locks cannot: a trial with no
+    declaration yet locks no rows but does lock its identity.
+
+    ⚠ The ``declaration_id`` written is the one this call CHECKED, not a second
+    load. Two loads could resolve differently under a concurrent supersession,
+    and an access attributed to a revision that did not authorise it is worse
+    than no attribution at all.
     """
-    _refuse_incoherent_declaration(conn, access.strategy_id, access.strategy_version)
+    _lock_trial(conn, access.strategy_id, access.strategy_version)
+    frozen = _refuse_incoherent_declaration(conn, access.strategy_id, access.strategy_version)
     row = conn.execute(
         _RECORD_ACCESS,
         {
@@ -906,6 +1140,7 @@ def record_holdout_access(conn: psycopg.Connection[tuple], access: HoldoutAccess
             "access_kind": access.access_kind,
             "accessed_by": access.accessed_by,
             "purpose": access.purpose,
+            "declaration_id": None if frozen is None else frozen.declaration_id,
         },
     ).fetchone()
     if row is None:  # pragma: no cover - RETURNING on a successful INSERT always yields a row
@@ -990,6 +1225,22 @@ def verify_outcome_access_provenance(
     from decoration into enforcement — and because a rolled-back INSERT leaves no
     visible row, the same lookup is what proves the access COMMITTED.
 
+    ⚠⚠ #2634 — THE JOIN IS ON ``a.declaration_id``, NOT ON TRIAL IDENTITY. With
+    a chain of revisions per trial, joining on the trial proved only that SOME
+    declaration for it predates the look; equality on the access row's own
+    column proves the named revision is the one that authorised THIS access.
+    That is a tightening rather than a break: with 0 declarations stored, the
+    old join produced no rows for any existing access either.
+
+    ⚠ It deliberately does NOT require the declaration to be current *now*.
+    Provenance is "was current when the access happened"; authorisation is
+    ``record_holdout_access``'s job, one call earlier. Requiring current-now
+    would also break every caller that persists a ``declaration_id`` into a
+    signed artifact and verifies later — which
+    ``scripts/evaluate_2582_schedule13d_outcomes.py``,
+    ``scripts/schedule13d_artifact.py`` and ``scripts/sealed_rerun_gate.py`` all
+    do.
+
     ⚠ ``frozen_at < accessed_at`` is ASSERTED, not assumed. Statement ordering
     gives it for free in the normal case, which is precisely why it is worth
     stating: "the declaration predates the look" is the entire property #2599
@@ -1029,7 +1280,20 @@ def verify_outcome_access_provenance(
     refusals: list[str] = []
     if frozen is None:
         refusals.append("preregistration_not_frozen")
-    elif frozen.declaration_id != declaration_id:
+    elif declaration_id not in frozen.chain_declaration_ids:
+        # ⚠⚠ #2634 — MEMBERSHIP IN THE CHAIN, NOT EQUALITY WITH THE CURRENT
+        # REVISION, and the two disagree the moment a supersession lands. Codex
+        # checkpoint 2 caught the equality form still standing while the
+        # docstring above already promised historical revisions were accepted —
+        # a doc and its code disagreeing, which is the shape #2614 was filed
+        # for. Equality here would refuse every signed artifact naming the
+        # predecessor, which is precisely the wedge #2634 exists to remove.
+        #
+        # It does not weaken the check: `_SELECT_ACCESS_PROVENANCE` joins on
+        # `a.declaration_id`, so the named revision must be the one recorded on
+        # the access row itself. Chain membership adds only that the revision
+        # belongs to THIS trial — which is what `declaration_identity_mismatch`
+        # has always meant.
         refusals.append("declaration_identity_mismatch")
     row = conn.execute(
         _SELECT_ACCESS_PROVENANCE,
@@ -1510,5 +1774,6 @@ __all__ = [
     "store_in_sample_arm_pair",
     "store_in_sample_result",
     "store_walk_forward_folds",
+    "supersede_preregistration",
     "verify_outcome_access_provenance",
 ]

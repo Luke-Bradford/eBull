@@ -552,11 +552,24 @@ def assess_live_gate(
     # against one declaration must keep answering to that one — otherwise
     # freezing a second, laxer declaration would retro-loosen a policy that is
     # supposed to be immutable.
+    #
+    # ⚠⚠ #2634 WIDENED THAT TO THE POLICY'S DECLARATION *CHAIN*, and the reason
+    # is that the narrow form re-created the wedge one level up. A supersession
+    # inserts a new revision, so `policy.declaration_id` stops equalling the
+    # current one — and because the policy is itself immutable and cannot be
+    # re-registered, the trial would sit at `forward_shadow_floor_missing`
+    # forever. Honouring an ancestor cannot loosen anything: a supersession may
+    # not change the purpose, the stamps or either floor (`sql/337`,
+    # `prereg_contract.SUPERSESSION_MUTABLE_FIELDS`), so every revision in a
+    # chain carries identical terms. A genuinely laxer declaration cannot be a
+    # supersession at all — it needs a new `strategy_version`, which is a
+    # different trial and a different policy. The digest and coherence checks
+    # below still run against the CURRENT revision.
     frozen = load_preregistration(conn, strategy_id, strategy_version)
     declaration: PreregDeclaration | None = None
     digest_intact = True
     coherent = True
-    if frozen is not None and policy is not None and policy.declaration_id == frozen.declaration_id:
+    if frozen is not None and policy is not None and policy.declaration_id in frozen.chain_declaration_ids:
         declaration = frozen.declaration
         digest_intact = frozen.digest_intact
         # ⚠ RE-CHECKED ON EVERY ASSESSMENT, not only at registration. The policy

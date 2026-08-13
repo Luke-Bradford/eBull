@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Final, Literal, get_args
 
 from app.services.strategy_result import (
@@ -63,6 +63,56 @@ DeclarationRefusal = Literal[
     "forward_shadow_derivation_missing",
 ]
 DECLARATION_REFUSALS: Final[frozenset[str]] = frozenset(get_args(DeclarationRefusal))
+
+#: #2634 — the ONLY thing a supersession is permitted to repair. Other reasons
+#: to re-declare are exactly the adaptivity supersession exists to forbid, so
+#: widening this is a migration (``sql/337`` CHECKs the same value) and a
+#: visible act rather than a free-text field nobody reads.
+SupersessionReason = Literal["structural_refusal_policy_superseded"]
+SUPERSESSION_REASONS: Final[frozenset[str]] = frozenset(get_args(SupersessionReason))
+
+SupersessionRefusal = Literal[
+    #: The predecessor already names the current policy version. Nothing is
+    #: stranded, so the chain link would be a row nobody needs — and every extra
+    #: revision is another thing an auditor has to read.
+    "supersession_not_required",
+    #: The successor does not name the current policy version. Superseding into
+    #: another stale version repairs nothing and hides that it repaired nothing.
+    "supersession_policy_not_current",
+    #: ⚠ THE SUBSTANTIVE RULE. The declared terms moved. A trial that wants
+    #: different terms is a different trial — a new ``strategy_version``.
+    "supersession_terms_changed",
+    #: No declaration exists for the trial; there is nothing to supersede.
+    "supersession_nothing_frozen",
+    #: The trial has already been looked at, by the access ledger's reckoning.
+    "supersession_trial_already_exposed",
+    #: A ``hold_out`` result row exists with or without an access row — exposure
+    #: the ledger cannot see, because it predates the chokepoint or bypassed it.
+    "supersession_trial_has_holdout_results",
+    #: Lost a concurrent race: another supersession linked to the same
+    #: predecessor first. The UNIQUE backstop fired rather than a raw driver
+    #: error escaping.
+    "supersession_predecessor_already_superseded",
+]
+SUPERSESSION_REFUSALS: Final[frozenset[str]] = frozenset(get_args(SupersessionRefusal))
+
+#: The ONLY declared fields a superseding declaration may change.
+#:
+#: ⚠⚠ THE PARTITION MUST STAY EXHAUSTIVE OR IT ROTS. A field added to
+#: ``PreregDeclaration`` and named in neither half would become silently mutable
+#: through supersession — the same defect shape as a digest input nobody added
+#: to ``digest_payload`` (#2631). ``tests/test_2634_prereg_supersession.py``
+#: compares this set against the dataclass's own fields for that reason.
+#:
+#: - ``structural_refusal_policy_version`` is the field being repaired;
+#: - ``expected_structural_refusals`` is recomputed under the new policy, and
+#:   ``expected_structural_refusals_mismatch`` already pins it to the declared
+#:   stamps — which terms-identity holds fixed;
+#: - ``declared_by`` names whoever re-declared. The original declarer is not
+#:   lost: the predecessor row is immutable and still in the chain.
+SUPERSESSION_MUTABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {"structural_refusal_policy_version", "expected_structural_refusals", "declared_by"}
+)
 
 
 @dataclass(frozen=True)
@@ -237,6 +287,98 @@ def declaration_refusals(declaration: PreregDeclaration) -> tuple[DeclarationRef
     return tuple(refusals)
 
 
+@dataclass(frozen=True)
+class Supersession:
+    """#2634 — the terms under which one declaration replaces another.
+
+    ⚠ SEPARATE FROM ``PreregDeclaration`` AND DELIBERATELY OUTSIDE THE DIGEST.
+    The digest freezes the DECLARED TERMS, and those are byte-identical across a
+    chain by construction (``SUPERSESSION_MUTABLE_FIELDS``) — folding the repair
+    metadata in would make two revisions of the same terms hash differently and
+    turn ``digest_intact`` into a check on the wrong thing. The attestation is
+    protected instead by ``sql/333``'s immutability trigger, which bars UPDATE
+    and DELETE on the row it is written to.
+    """
+
+    reason: SupersessionReason
+    #: ⚠ A CLAIM, NOT A PROOF, and the spec says so out loud. A zero count in
+    #: ``strategy_holdout_accesses`` is a cheap disqualifier that can never
+    #: establish non-access: a direct ``SELECT`` leaves no row, a rolled-back
+    #: transaction removes its own, and outcomes may already sit in a signed
+    #: artifact, an export, a log or another database. This sentence is what
+    #: carries the rest of the weight, and naming a person is the point of it.
+    attestation: str
+
+    def __post_init__(self) -> None:
+        if self.reason not in SUPERSESSION_REASONS:
+            raise ValueError(
+                f"unknown supersession reason {self.reason!r}; must be one of {sorted(SUPERSESSION_REASONS)}"
+            )
+        # ⚠ ``strip``, not truthiness: an attestation of three spaces is
+        # non-empty and says nothing. ``sql/337`` CHECKs ``btrim`` for the same
+        # reason — this one names the field, that one binds a writer that
+        # bypasses this class.
+        if not self.attestation.strip():
+            raise ValueError("supersession_attestation must be a non-empty statement of no exposure")
+        if len(self.attestation) > 2000:
+            raise ValueError("supersession_attestation is longer than the 2000 characters sql/337 permits")
+
+
+def supersession_refusals(
+    predecessor: PreregDeclaration, successor: PreregDeclaration
+) -> tuple[SupersessionRefusal | DeclarationRefusal, ...]:
+    """Every reason this re-declaration may not replace that one. Pure.
+
+    Returns ALL refusals rather than the first, and empty means the pair is a
+    legal supersession — subject to the database-side checks
+    (``supersession_nothing_frozen``, exposure) that ``result_ledger`` owns
+    because they read rows.
+
+    ⚠⚠ TERMS-IDENTITY IS THE WHOLE SAFETY ARGUMENT. The worry a re-declaration
+    path raises is an author who has seen sample counts, missingness or corpus
+    composition re-declaring more favourably. Under this rule there is nothing
+    to re-declare: purpose, stamps and both floors are exactly the
+    predecessor's, so a supersession can repair the policy-version string and
+    can express nothing else. What wants different terms is a different trial.
+
+    ⚠ The successor's own coherence is checked here too, so a successor that is
+    malformed in its own right fails naming why rather than being accepted into
+    a chain and refused at the next look.
+    """
+    refusals: list[SupersessionRefusal | DeclarationRefusal] = []
+
+    if predecessor.structural_refusal_policy_version == STRUCTURAL_REFUSAL_POLICY_VERSION:
+        refusals.append("supersession_not_required")
+    if successor.structural_refusal_policy_version != STRUCTURAL_REFUSAL_POLICY_VERSION:
+        refusals.append("supersession_policy_not_current")
+
+    if _changed_terms(predecessor, successor):
+        refusals.append("supersession_terms_changed")
+
+    refusals.extend(declaration_refusals(successor))
+    return tuple(refusals)
+
+
+def changed_supersession_terms(predecessor: PreregDeclaration, successor: PreregDeclaration) -> tuple[str, ...]:
+    """The invariant fields that differ, for the refusal's message.
+
+    Public because "the terms changed" with no field name gives an operator
+    nothing to act on, and the code vocabulary is closed — so the detail travels
+    in the exception text instead of as five more codes that all mean *mint a
+    new strategy_version*.
+    """
+    return _changed_terms(predecessor, successor)
+
+
+def _changed_terms(predecessor: PreregDeclaration, successor: PreregDeclaration) -> tuple[str, ...]:
+    return tuple(
+        field.name
+        for field in fields(PreregDeclaration)
+        if field.name not in SUPERSESSION_MUTABLE_FIELDS
+        and getattr(predecessor, field.name) != getattr(successor, field.name)
+    )
+
+
 def is_coherent(declaration: PreregDeclaration) -> bool:
     """``declaration_refusals`` with the reasons discarded.
 
@@ -250,10 +392,18 @@ def is_coherent(declaration: PreregDeclaration) -> bool:
 __all__ = [
     "DECLARATION_REFUSALS",
     "PREREG_PURPOSES",
+    "SUPERSESSION_MUTABLE_FIELDS",
+    "SUPERSESSION_REASONS",
+    "SUPERSESSION_REFUSALS",
     "DeclarationRefusal",
     "ForwardShadowFloor",
     "PreregDeclaration",
     "PreregPurpose",
+    "Supersession",
+    "SupersessionReason",
+    "SupersessionRefusal",
+    "changed_supersession_terms",
     "declaration_refusals",
     "is_coherent",
+    "supersession_refusals",
 ]
