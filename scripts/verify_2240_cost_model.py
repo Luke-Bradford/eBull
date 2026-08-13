@@ -198,9 +198,7 @@ def _freeze_ready(value: Decimal) -> Decimal:
     return value.quantize(_FREEZE_QUANTUM, rounding=ROUND_CEILING)
 
 
-def _report_bounding_statistics(
-    by_band: dict[str, list[Decimal]], *, top_hour: int | None, top_count: int
-) -> None:
+def _report_bounding_statistics(by_band: dict[str, list[Decimal]], *, top_hour: int | None, top_count: int) -> None:
     """Print the BOUNDING statistics beside the frozen p75 (#2598 scope 5, step 1).
 
     ⚠⚠ WHY THIS TABLE EXISTS, IN ONE LINE: **a p75 is not a bound.** #2598 scope
