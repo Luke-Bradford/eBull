@@ -54,10 +54,14 @@ from app.services.strategy_result import (
     ResultIdentity,
     StrategyResult,
     check_promotable,
+    deflation_promotion_refusals,
+    holdout_count_promotion_refusals,
     is_promotable,
     namespace_for_bar,
     namespace_for_position,
     namespace_for_signal,
+    purpose_promotion_refusals,
+    synthetic_control_promotion_refusals,
 )
 from app.services.strategy_statistics import StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -1049,3 +1053,209 @@ class TestPromotionGateReportsEverything:
         before = replace(candidate)
         check_promotable(candidate)
         assert candidate == before
+
+
+# ---------------------------------------------------------------------------
+# #2639 — the shared clause helpers
+# ---------------------------------------------------------------------------
+
+
+def _contains_in_order(whole: tuple[str, ...], part: tuple[str, ...]) -> bool:
+    """``part`` appears in ``whole`` as a CONTIGUOUS run, in the same order."""
+    if not part:
+        return True
+    return any(whole[i : i + len(part)] == part for i in range(len(whole) - len(part) + 1))
+
+
+#: Which codes each extracted helper OWNS. ⚠ Written out rather than derived
+#: from the helper's own output: a derivation would agree with whatever the
+#: helper does, including emitting nothing, and the equivalence test below needs
+#: an independent statement of what the gate is expected to delegate.
+_HELPER_CODES: dict[str, frozenset[str]] = {
+    "purpose": frozenset({"harness_validation_only"}),
+    "holdout": frozenset({"holdout_never_evaluated", "holdout_accesses_unrecorded"}),
+    "deflation": frozenset(
+        {
+            "deflated_sharpe_not_computed",
+            "trial_count_undeclared",
+            "trial_register_superseded",
+            "effective_sample_size_not_computed",
+        }
+    ),
+    "synthetic": frozenset(
+        {
+            "synthetic_control_not_run",
+            "synthetic_control_cohort_shows_edge",
+            "synthetic_control_sharpe_below_cohort",
+        }
+    ),
+}
+
+
+def _helper_outputs(candidate: PromotionCandidate) -> dict[str, tuple[str, ...]]:
+    result = candidate.result
+    return {
+        "purpose": purpose_promotion_refusals(result.purpose),
+        "holdout": holdout_count_promotion_refusals(
+            holdout_evaluations=candidate.holdout_evaluations,
+            recorded_accesses=candidate.recorded_accesses,
+        ),
+        "deflation": deflation_promotion_refusals(
+            deflated_sharpe=result.deflated_sharpe,
+            trial_count=result.trial_count,
+            deflated=result.deflated,
+            effective_sample_size=result.metrics.effective_sample_size,
+        ),
+        "synthetic": synthetic_control_promotion_refusals(result.synthetic_control),
+    }
+
+
+def _equivalence_candidates() -> list[PromotionCandidate]:
+    """One candidate per state the extracted clauses can reach, plus the extremes."""
+    superseded = _deflated_result(trial_register_version="trial-register-v0-superseded")
+    # ⚠ Only the COHORT side may be varied here. ``StrategyResult`` binds the
+    # control's strategy_sharpe / strategy_return_pct to ``metrics``, so moving
+    # them raises at construction instead of producing the refusal under test.
+    edge_control = _passing_control(mean_return_ci_low_pct=0.5, mean_return_ci_high_pct=1.5)
+    weak_control = _passing_control(cohort_sharpe_threshold=9.0)
+    return [
+        _clean_candidate(),
+        _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=None)),
+        _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=edge_control)),
+        _clean_candidate(result=_result(**_CLEAN_RESULT_FIELDS, synthetic_control=weak_control)),
+        _clean_candidate(holdout_evaluations=0, recorded_accesses=0),
+        _clean_candidate(holdout_evaluations=3, recorded_accesses=2),
+        _clean_candidate(
+            result=_result(
+                **{**_CLEAN_RESULT_FIELDS, "deflated": superseded},
+                synthetic_control=_passing_control(),
+            )
+        ),
+        _clean_candidate(
+            result=_result(
+                **{
+                    **_CLEAN_RESULT_FIELDS,
+                    "purpose": "harness_validation",
+                    "deflated_sharpe": None,
+                    "trial_count": None,
+                    "deflated": None,
+                    # ⚠ The whole bootstrap set, not the ESS alone —
+                    # `StrategyMetrics` refuses a partial one.
+                    "metrics": _metrics_without_bootstrap(),
+                },
+                synthetic_control=None,
+            )
+        ),
+        # The everything-broken shape: no clause is masked by another.
+        PromotionCandidate(
+            result=_result(purpose="harness_validation", universe_basis="", carry_unmodelled=True),
+            evaluated_instrument_ids=frozenset(),
+            validated_universe_ids=frozenset(),
+        ),
+    ]
+
+
+class TestTheExtractedClauseHelpersAreTheGate:
+    """⚠⚠ #2639 EXTRACTED FOUR CLAUSE BLOCKS SO THE PROMOTION TRANSITION CAN
+    REPLAY THEM OFF A STORED ROW — and an extraction is only safe while it is
+    provably the same rule.
+
+    ``promote_strategy`` holds a ``result_id``, not a ``StrategyResult``, so it
+    cannot call ``check_promotable``; it calls these helpers instead. A second
+    hand-written copy is exactly what ``structural_promotion_refusals`` was
+    extracted to prevent, and the failure would be silent in the worst
+    direction — the transition passing a result the gate refuses.
+
+    Two properties, and both are needed. Membership alone would tolerate the
+    blocks being reordered (the spec's order is what makes a missing check
+    visible as a missing block); order alone would tolerate the gate dropping a
+    code the helper still emits.
+    """
+
+    @pytest.mark.parametrize("candidate", _equivalence_candidates())
+    def test_each_helper_emits_exactly_the_codes_the_gate_emits(self, candidate: PromotionCandidate) -> None:
+        gate = set(check_promotable(candidate))
+        for name, output in _helper_outputs(candidate).items():
+            assert set(output) == gate & _HELPER_CODES[name], (
+                f"{name}: the helper and check_promotable disagree about this candidate — the transition "
+                "would reach a different verdict from the gate"
+            )
+
+    @pytest.mark.parametrize("candidate", _equivalence_candidates())
+    def test_each_helper_s_output_is_a_contiguous_run_of_the_gate_s(self, candidate: PromotionCandidate) -> None:
+        gate = check_promotable(candidate)
+        for name, output in _helper_outputs(candidate).items():
+            assert _contains_in_order(gate, output), (
+                f"{name}: {output} is not a contiguous in-order run of {gate} — the extraction has "
+                "reordered the spec's blocks"
+            )
+
+    def test_no_code_is_owned_by_two_helpers(self) -> None:
+        seen: set[str] = set()
+        for codes in _HELPER_CODES.values():
+            assert not (seen & codes)
+            seen |= codes
+
+    def test_every_owned_code_is_in_the_closed_vocabulary(self) -> None:
+        for codes in _HELPER_CODES.values():
+            assert codes <= PROMOTION_REFUSALS
+
+    def test_the_deflation_clauses_are_independent_and_all_fire_together(self) -> None:
+        """⚠ FOUR ``if``s, never an ``elif``. A DSR with no trial count is as
+        refused as no DSR at all, and an ``elif`` chain would report one reason
+        where four apply — which is the "how far is this from promotable"
+        number an operator actually reads."""
+        assert set(
+            deflation_promotion_refusals(
+                deflated_sharpe=0.9,
+                trial_count=None,
+                deflated=None,
+                effective_sample_size=None,
+            )
+        ) == {"trial_count_undeclared", "trial_register_superseded", "effective_sample_size_not_computed"}
+
+    def test_trial_register_supersession_is_guarded_on_the_probability_not_the_object(self) -> None:
+        """⚠ A row with a stored ``deflated_sharpe`` and no reconstructed object
+        is exactly the state the clause is for. Guarding on ``deflated`` instead
+        would let it through."""
+        assert "trial_register_superseded" in deflation_promotion_refusals(
+            deflated_sharpe=0.9, trial_count=11, deflated=None, effective_sample_size=1000.0
+        )
+        assert "trial_register_superseded" not in deflation_promotion_refusals(
+            deflated_sharpe=None, trial_count=11, deflated=None, effective_sample_size=1000.0
+        )
+
+    def test_a_decimal_deflated_sharpe_is_accepted_as_a_presence(self) -> None:
+        """⚠ Off a stored row the probability arrives as psycopg's NUMERIC →
+        ``Decimal``, not a float. The clause is a ``None`` test and must not
+        narrow the type into a conversion that could raise where the gate
+        refuses."""
+        assert "deflated_sharpe_not_computed" not in deflation_promotion_refusals(
+            deflated_sharpe=Decimal("0.9"), trial_count=11, deflated=None, effective_sample_size=1000.0
+        )
+
+    def test_both_synthetic_control_thresholds_can_fail_at_once(self) -> None:
+        """⚠ Derived from the control's own properties, never from the row's
+        stored ``synthetic_control_passed`` — that column is the CONJUNCTION, so
+        reading it would collapse the two codes and lose which threshold failed."""
+        control = _passing_control(
+            mean_return_ci_low_pct=0.5,
+            mean_return_ci_high_pct=1.5,
+            strategy_sharpe=0.01,
+            cohort_sharpe_threshold=9.0,
+        )
+        assert synthetic_control_promotion_refusals(control) == (
+            "synthetic_control_cohort_shows_edge",
+            "synthetic_control_sharpe_below_cohort",
+        )
+
+    def test_a_single_unrecorded_holdout_evaluation_refuses(self) -> None:
+        """⚠ Criterion 5 read literally would allow one unrecorded look. The rule
+        applied is that EVERY evaluation carries a record."""
+        assert holdout_count_promotion_refusals(holdout_evaluations=1, recorded_accesses=0) == (
+            "holdout_accesses_unrecorded",
+        )
+        assert holdout_count_promotion_refusals(holdout_evaluations=0, recorded_accesses=0) == (
+            "holdout_never_evaluated",
+        )
+        assert holdout_count_promotion_refusals(holdout_evaluations=2, recorded_accesses=2) == ()

@@ -66,8 +66,12 @@ from app.services.prereg_contract import (
 )
 from app.services.random_entry_cohort import SyntheticControl
 from app.services.strategy_result import (
+    PromotionRefusal,
     ResultIdentity,
     StrategyResult,
+    deflation_promotion_refusals,
+    purpose_promotion_refusals,
+    synthetic_control_promotion_refusals,
 )
 from app.services.strategy_statistics import StrategyMetrics
 from app.services.walk_forward import (
@@ -411,20 +415,30 @@ _SELECT_HOLDOUT = f"""
     ORDER BY result_version, result_scope, ambiguity_arm, quarantine_arm
 """  # noqa: S608 - as above
 
-_COUNT_HOLDOUT_RESULTS = """
-    SELECT count(*)
-    FROM strategy_results_store
-    WHERE strategy_id = %(strategy_id)s
-      AND strategy_version = %(strategy_version)s
-      AND namespace = 'hold_out'
-"""
-
-_COUNT_EVALUATE_ACCESSES = """
-    SELECT count(*)
-    FROM strategy_holdout_accesses
-    WHERE strategy_id = %(strategy_id)s
-      AND strategy_version = %(strategy_version)s
-      AND access_kind = 'evaluate'
+#: ⚠⚠ ONE STATEMENT, TWO SCALAR SUBQUERIES, AND THAT IS THE POINT (#2639). The
+#: two counts used to run as separate statements, which under READ COMMITTED is
+#: two snapshots — so a ``store_holdout_result`` committing between them could
+#: return a pair that never simultaneously existed. The direction that matters
+#: is ``accesses < evaluations``, a false ``holdout_accesses_unrecorded``, and
+#: it fires exactly when a hold-out row lands between the two reads.
+#:
+#: ⚠ This buys ONE snapshot for the pair, not atomicity with whatever the caller
+#: does next. ``promote_strategy`` decides on counts that were true when read;
+#: the hold-out writers do not take its advisory lock, so a write may still
+#: commit between the count and the promotion INSERT. Named as a bound on #2639
+#: rather than assumed away.
+_COUNT_HOLDOUT_EVALUATIONS_AND_ACCESSES = """
+    SELECT
+        (SELECT count(*)
+           FROM strategy_results_store
+          WHERE strategy_id = %(strategy_id)s
+            AND strategy_version = %(strategy_version)s
+            AND namespace = 'hold_out'),
+        (SELECT count(*)
+           FROM strategy_holdout_accesses
+          WHERE strategy_id = %(strategy_id)s
+            AND strategy_version = %(strategy_version)s
+            AND access_kind = 'evaluate')
 """
 
 #: ⚠ Counts BOTH sibling versions in one statement rather than probing twice —
@@ -1443,13 +1457,22 @@ def holdout_access_counts(
     strategy_id: str,
     strategy_version: str,
 ) -> HoldoutAccessCounts:
-    """``PromotionCandidate``'s two hold-out inputs. See ``HoldoutAccessCounts``."""
-    params = {"strategy_id": strategy_id, "strategy_version": strategy_version}
-    evaluations = conn.execute(_COUNT_HOLDOUT_RESULTS, params).fetchone()
-    accesses = conn.execute(_COUNT_EVALUATE_ACCESSES, params).fetchone()
-    if evaluations is None or accesses is None:  # pragma: no cover - count() always returns a row
+    """``PromotionCandidate``'s two hold-out inputs. See ``HoldoutAccessCounts``.
+
+    ⚠ RECORDS NOTHING — two pure ``COUNT``s, so it is safe to call from the
+    promotion transition. #2639's inventory originally said otherwise; the
+    function that records is ``quarantine_arms_compared``, and only on a
+    ``hold_out`` identity.
+
+    ⚠ ONE STATEMENT, ONE SNAPSHOT. See ``_COUNT_HOLDOUT_EVALUATIONS_AND_ACCESSES``.
+    """
+    row = conn.execute(
+        _COUNT_HOLDOUT_EVALUATIONS_AND_ACCESSES,
+        {"strategy_id": strategy_id, "strategy_version": strategy_version},
+    ).fetchone()
+    if row is None:  # pragma: no cover - count() always returns a row
         raise RuntimeError("count query returned no row")
-    return HoldoutAccessCounts(holdout_evaluations=int(evaluations[0]), recorded_accesses=int(accesses[0]))
+    return HoldoutAccessCounts(holdout_evaluations=int(row[0]), recorded_accesses=int(row[1]))
 
 
 # ---------------------------------------------------------------------------
@@ -1571,7 +1594,6 @@ def quarantine_arms_compared(
     namespace, and an optional audit field is one a caller learns it needed at
     the moment it cannot supply one.
     """
-    sibling = replace(identity, quarantine_arm=("admitted" if identity.quarantine_arm == "masked" else "masked"))
     if identity.namespace == "hold_out":
         record_holdout_access(
             conn,
@@ -1584,6 +1606,37 @@ def quarantine_arms_compared(
                 purpose=purpose,
             ),
         )
+    return quarantine_arm_pair_present(conn, identity)
+
+
+def quarantine_arm_pair_present(conn: psycopg.Connection[tuple], identity: ResultIdentity) -> bool:
+    """The same count as ``quarantine_arms_compared``, RECORDING NOTHING (#2639).
+
+    ⚠⚠ THE ONLY DIFFERENCE IS THE ACCESS RECORD, AND THAT IS WHY IT IS SPLIT
+    OUT RATHER THAN COPIED. ``quarantine_arms_compared`` is the door for a
+    caller ASKING THE DATABASE ABOUT THE WITHHELD SIDE, where *looking is the
+    event criterion 5 governs*. The promotion transition is not such a caller:
+    it holds a result it has already pinned, it already reads that row's own
+    columns, and promotion is not an evaluation. A transition that recorded here
+    would write one ``read`` row per promotion attempt into the log it is
+    auditing — the prevention-log rule *"it must not ask the database a question
+    it is the answer to"*, one layer further out. The verdict is identical
+    either way, so a second copy of the count would be a second thing to keep in
+    step for no gain.
+
+    ⚠ THE SIBLING IS DERIVED, NEVER NAMED. ``ResultIdentity.version`` is a hash
+    of the whole identity, so the flipped-arm version is the ONLY row that can
+    satisfy the pair — which is what a stored ``sibling_result_id`` pointer
+    (#2639's first draft, killed at Codex checkpoint 1) would have given up: a
+    pointer is chosen by the writer and can name a compatible row that is not
+    the one the identity admits.
+
+    ⚠ MONOTONE, WHICH IS WHY THE POLICY CALLS THIS ``frozen`` rather than
+    ``today``. Both arms are rows written at result time and the store has no
+    delete path, so the answer moves only from "one arm" to "both arms". Nothing
+    about today's world enters it.
+    """
+    sibling = replace(identity, quarantine_arm=("admitted" if identity.quarantine_arm == "masked" else "masked"))
     row = conn.execute(
         _COUNT_ARM_PAIR,
         {
@@ -1595,6 +1648,86 @@ def quarantine_arms_compared(
     if row is None:  # pragma: no cover - count() always returns a row
         raise RuntimeError("arm-pair count query returned no row")
     return int(row[0]) == 2
+
+
+_SELECT_RESULT_BY_ID = f"""
+    SELECT {_RESULT_COLUMNS}
+    FROM strategy_results_store
+    WHERE result_id = %(result_id)s
+"""  # noqa: S608 - a module-level literal, no caller input reaches the fragment
+
+
+def stored_result_promotion_refusals(conn: psycopg.Connection[tuple], result_id: int) -> tuple[PromotionRefusal, ...]:
+    """Every refusal the STORED ROW itself decides, for the transition (#2639).
+
+    ``promote_strategy`` cannot call ``check_promotable`` — it holds a
+    ``result_id``, not a ``StrategyResult`` — so #2625 replayed the structural
+    stamps and left the purpose, deflation, effective-sample-size and
+    synthetic-control clauses trusting a write-time verdict that died with
+    ``WrittenRow``. All of them are columns on the row the caller has already
+    pinned. This rebuilds the row through the existing ``_result_from_row`` and
+    applies the SAME pure functions ``check_promotable`` applies, in its order.
+
+    ⚠⚠ IT RETURNS CODES AND NEVER A ``StrategyResult``, DELIBERATELY. A public
+    ``load_result_by_id`` would be a new UNAUDITED DOOR TO THE WITHHELD SIDE —
+    ``read_holdout_results`` is the sanctioned one and it records the access
+    first, and 300 of the 324 stored rows are ``hold_out``. Keeping the withheld
+    numbers inside this module and handing the transition a refusal list means
+    this function cannot become that door.
+
+    ⚠ Reading a pinned row's own columns is not a new governance cost:
+    ``promote_strategy`` already selects six of them, and
+    ``holdout_access_counts`` already counts these rows, neither recording an
+    access.
+
+    ⚠ ``_result_from_row`` RAISES where the gate refuses — on a ``result_version``
+    that does not match the identity it carries, on a stored
+    ``synthetic_control_passed`` that disagrees with its own inputs, and on a
+    partially-written DSR or control block. That is ``load_result_ambiguity``'s
+    precedent (corruption is an integrity failure to surface loudly, not a gate
+    verdict to report politely) and it carries the same named cost: the raise
+    aborts before the other refusals are gathered, so it MASKS them. Verified on
+    the full population 2026-08-13 — 324 of 324 stored rows reconstruct, so no
+    stored row takes that path today.
+
+    ⚠ THE STRUCTURAL STAMPS ARE NOT RETURNED HERE. ``promote_strategy`` keeps its
+    own read of ``universe_basis`` / ``carry_unmodelled`` / ``fx_unmodelled``
+    because it coerces a NULL cost stamp to ``True`` (unmodelled), while
+    ``_result_from_row`` coerces with ``bool(...)``, which reads NULL as
+    *modelled* — fail-open on a Tier 1 refusal. Both columns are ``NOT NULL``
+    (``sql/262``, ``sql/335``), so this is defence in depth; the two coercions
+    must not be collapsed onto the weaker one.
+    """
+    row = conn.execute(_SELECT_RESULT_BY_ID, {"result_id": result_id}).fetchone()
+    if row is None:
+        # ⚠ RAISES, does not refuse. `PromotionRefusal` is a closed vocabulary
+        # of reasons a REAL result may not be promoted; "the row does not exist"
+        # is a caller error, and `promote_strategy` has already refused an
+        # unknown result_id with its own message before reaching here. Inventing
+        # a refusal code for it would put a programming error into the operator's
+        # list of things to fix about a strategy.
+        raise RuntimeError(f"no stored result row for result_id {result_id}")
+    result = _result_from_row(row)
+    refusals: list[PromotionRefusal] = []
+    # `check_promotable`'s order, minus the blocks the transition replays from
+    # their own frozen records (universe, ambiguity) or reads separately (the
+    # structural stamps, the #2505 evidence).
+    refusals.extend(purpose_promotion_refusals(result.purpose))
+    refusals.extend(
+        deflation_promotion_refusals(
+            deflated_sharpe=result.deflated_sharpe,
+            trial_count=result.trial_count,
+            deflated=result.deflated,
+            effective_sample_size=result.metrics.effective_sample_size,
+        )
+    )
+    # Criterion 9 — re-derived from the two arms' rows rather than from a
+    # recorded boolean. See `quarantine_arm_pair_present` for why the recording
+    # door is not the one the transition uses.
+    if not quarantine_arm_pair_present(conn, result.identity):
+        refusals.append("quarantine_arms_not_compared")
+    refusals.extend(synthetic_control_promotion_refusals(result.synthetic_control))
+    return tuple(refusals)
 
 
 # ---------------------------------------------------------------------------
@@ -1764,6 +1897,7 @@ __all__ = [
     "freeze_preregistration",
     "holdout_access_counts",
     "load_preregistration",
+    "quarantine_arm_pair_present",
     "quarantine_arms_compared",
     "read_holdout_results",
     "read_walk_forward_folds",
@@ -1774,6 +1908,7 @@ __all__ = [
     "store_in_sample_arm_pair",
     "store_in_sample_result",
     "store_walk_forward_folds",
+    "stored_result_promotion_refusals",
     "supersede_preregistration",
     "verify_outcome_access_provenance",
 ]
