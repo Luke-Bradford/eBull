@@ -139,6 +139,10 @@ def test_a_stale_installed_prompt_is_replaced_before_the_agent_sees_it(loop):
     assert loop.handed_to_agent.read_text().strip() == CANONICAL_TEXT.strip()
     assert loop.prompt.read_text() == CANONICAL_TEXT
     assert "prompt RESYNCED" in loop.log.read_text()
+    # No scratch file survives the run. This pins the normal path only — the
+    # EXIT trap that covers a crash mid-sync is not reachable from here without
+    # killing the driver at a chosen instruction.
+    assert not list(loop.prompt.parent.glob("*.canonical.*"))
     # status.md carries the CURRENT verdict, which by the end of the iteration is
     # "in sync" — the resync happened at startup and the per-iteration check then
     # found nothing to do. The hash is what a human needs there: it answers

@@ -261,7 +261,15 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   mkdir "$LOCK" || { log "FATAL cannot take lock $LOCK"; exit 1; }
 fi
 echo "$$" > "$LOCK/pid"
-trap 'rm -rf "$LOCK"' EXIT
+# ⚠ The sync's scratch files are pid-suffixed and must go with the lock: a crash
+# between `git_show_to` and the `mv` otherwise leaves a stray `*.canonical.<pid>`
+# next to the prompt forever. Only THIS pid's files — a concurrent loop in
+# another worktree owns its own, and a glob here would delete them.
+cleanup() {
+  rm -rf "$LOCK"
+  rm -f "$PROMPT.canonical.$$" "$STATE_DIR/.driver.canonical.$$"
+}
+trap cleanup EXIT
 
 log "=== ta_loop start (worktree=$WORKTREE, max=$MAX_ITERATIONS, cooldown=${COOLDOWN_SECONDS}s, pid=$$) ==="
 
