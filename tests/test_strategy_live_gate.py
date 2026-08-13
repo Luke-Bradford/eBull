@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -21,9 +22,13 @@ from app.api.strategies import (
 from app.security.sessions import SessionRow
 from app.services import prereg_contract
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
-from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
+from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration, Supersession
 from app.services.price_quarantine import RULE_SET_VERSION as QUARANTINE_RULE_SET_VERSION
-from app.services.result_ledger import freeze_preregistration, load_preregistration
+from app.services.result_ledger import (
+    freeze_preregistration,
+    load_preregistration,
+    supersede_preregistration,
+)
 from app.services.strategy_control_plane import (
     StrategyControlError,
     configure_deployment,
@@ -623,3 +628,60 @@ def test_assessment_stops_honouring_a_declaration_whose_policy_was_superseded(
     assert "declaration_digest_mismatch" not in after.refusal_codes
     assert after.forward_shadow_floor is None
     assert not after.passed
+
+
+def test_a_superseded_declaration_still_supplies_the_floor_to_its_policy(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2634 — the wedge one level up, and the reason the identity test widened.
+
+    A live-gate policy binds ONE ``declaration_id`` and is itself immutable. So
+    when #2634's supersession inserts a new revision, the old
+    ``policy.declaration_id == frozen.declaration_id`` test stops matching and
+    the trial sits at ``forward_shadow_floor_missing`` forever — the same
+    permanent wedge #2634 exists to remove, moved from the research side to the
+    capital side.
+
+    ⚠ HONOURING AN ANCESTOR CANNOT LOOSEN ANYTHING, which is the whole licence
+    for widening it. A supersession may not change the purpose, the stamps or
+    either floor, so every revision in a chain carries identical terms; a
+    genuinely laxer declaration is not a supersession at all, it is a new
+    ``strategy_version`` and therefore a different policy.
+    """
+    _forward_stage(ebull_test_conn)
+    _policy(ebull_test_conn)
+    stranded = load_preregistration(ebull_test_conn, _STRATEGY_ID, _VERSION)
+    assert stranded is not None
+
+    bumped = "structural-refusal-policy-2099-01-01-v9"
+    monkeypatch.setattr(prereg_contract, "STRUCTURAL_REFUSAL_POLICY_VERSION", bumped)
+
+    stranded_report = assess_live_gate(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        requested_capital=Decimal("100"),
+    )
+    assert "declaration_no_longer_coherent" in stranded_report.refusal_codes
+
+    successor_id = supersede_preregistration(
+        ebull_test_conn,
+        replace(stranded.declaration, structural_refusal_policy_version=bumped, declared_by="operator-repair"),
+        Supersession(
+            reason="structural_refusal_policy_superseded",
+            attestation="no outcome of this trial has been opened; repairing the policy version only",
+        ),
+    )
+
+    repaired = assess_live_gate(
+        ebull_test_conn,
+        strategy_id=_STRATEGY_ID,
+        strategy_version=_VERSION,
+        requested_capital=Decimal("100"),
+    )
+    # The policy still points at the PREDECESSOR — that is the whole point.
+    assert successor_id != stranded.declaration_id
+    assert "declaration_no_longer_coherent" not in repaired.refusal_codes
+    assert repaired.forward_shadow_floor is not None
+    assert repaired.forward_shadow_floor.min_independent_decision_dates == 2
