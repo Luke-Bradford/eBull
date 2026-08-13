@@ -160,6 +160,27 @@ def test_trailing_zeros_are_not_mistaken_for_precision() -> None:
     assert values.core_target_pct == Decimal("60")
 
 
+def test_an_out_of_range_percentage_reports_its_range_not_its_digit_count() -> None:
+    """Check ORDER, which is the reason the range checks precede storability.
+
+    `10000` violates both the [0,100] range and NUMERIC(8,4)'s four integer
+    digits. The range is the apter message, so it must win. Review round 1 read
+    the precision bound as dead code for percentages; it is reachable, and this
+    ordering is what makes it unreachable *through this function* — deliberately,
+    since the bound stays as a generic backstop in the shared helper.
+    """
+    with pytest.raises(CoreMandateError, match="core_target_pct must be between 0 and 100"):
+        validate_core_mandate(**{**_VALID, "core_target_pct": Decimal("10000")})
+
+
+def test_a_non_finite_percentage_is_caught_before_any_comparison() -> None:
+    """`Decimal("NaN") < 0` raises InvalidOperation rather than returning False,
+    so finiteness must precede every range check or a NaN escapes as a raw
+    arithmetic error instead of a named one."""
+    with pytest.raises(CoreMandateError, match="must be a finite decimal"):
+        validate_core_mandate(**{**_VALID, "core_target_pct": Decimal("NaN")})
+
+
 def test_an_amount_too_large_for_the_column_is_a_named_error() -> None:
     """NUMERIC(18,6) holds 12 integer digits.
 

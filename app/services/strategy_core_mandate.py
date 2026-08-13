@@ -95,6 +95,17 @@ def _require_text(value: str, field: str, limit: int) -> None:
         raise CoreMandateError(f"{field} exceeds {limit} characters")
 
 
+def _require_finite(value: Decimal, field: str) -> None:
+    """Reject NaN/Infinity before anything compares the value.
+
+    Ordering constraint, not style: ``Decimal("NaN") < 0`` raises
+    ``InvalidOperation`` rather than returning False, so every range check below
+    is only safe once this has run over all four fields.
+    """
+    if not value.is_finite():
+        raise CoreMandateError(f"{field} must be a finite decimal")
+
+
 def _require_storable(value: Decimal, field: str, places: int, precision: int) -> None:
     """Reject a value the column cannot hold exactly, in either direction.
 
@@ -106,9 +117,16 @@ def _require_storable(value: Decimal, field: str, places: int, precision: int) -
     Precision: ``NUMERIC(p,s)`` holds ``p - s`` integer digits, and exceeding that
     raises ``NumericValueOutOfRange`` from the driver.  Bounding it here is what
     keeps every rejection a named ``CoreMandateError``.
+
+    ⚠ Assumes ``_require_finite`` has already run: ``quantize`` on a NaN raises
+    ``InvalidOperation``, which this would report as "too large to store".
+
+    For the percentages the precision half is unreachable through
+    ``validate_core_mandate``, whose range checks bound them to [0,100] first.  It
+    stays because this helper is generic over ``NUMERIC(p,s)`` and coupling it to
+    one caller's ranges would be the worse trade -- a backstop that costs a
+    comparison.
     """
-    if not value.is_finite():
-        raise CoreMandateError(f"{field} must be a finite decimal")
     try:
         rounded = value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_DOWN)
     except InvalidOperation as exc:
@@ -143,13 +161,17 @@ def validate_core_mandate(
             "non-USD support lifts six sites in one change"
         )
 
-    for field, value in (
+    percentages = (
         ("core_target_pct", core_target_pct),
         ("liquidity_reserve_pct", liquidity_reserve_pct),
         ("rebalance_band_pct", rebalance_band_pct),
-    ):
-        _require_storable(value, field, _PCT_PLACES, _PCT_PRECISION)
-    _require_storable(min_rebalance_amount, "min_rebalance_amount", _AMOUNT_PLACES, _AMOUNT_PRECISION)
+    )
+    # Finiteness first over every field, because the range checks below cannot
+    # compare a NaN; then ranges, so an out-of-range percentage reports its range
+    # rather than its digit count; then storability.
+    for field, value in percentages:
+        _require_finite(value, field)
+    _require_finite(min_rebalance_amount, "min_rebalance_amount")
 
     if core_target_pct < 0 or core_target_pct > _HUNDRED:
         raise CoreMandateError("core_target_pct must be between 0 and 100")
@@ -161,6 +183,10 @@ def validate_core_mandate(
         raise CoreMandateError("rebalance_band_pct must be above 0 and at most 100")
     if min_rebalance_amount <= 0:
         raise CoreMandateError("min_rebalance_amount must be above 0")
+
+    for field, value in percentages:
+        _require_storable(value, field, _PCT_PLACES, _PCT_PRECISION)
+    _require_storable(min_rebalance_amount, "min_rebalance_amount", _AMOUNT_PLACES, _AMOUNT_PRECISION)
 
     if enabled and core_instrument_id is None:
         raise CoreMandateError("an enabled core mandate requires a core instrument")
