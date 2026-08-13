@@ -59,6 +59,23 @@ from app.services.strategy_order_reconciliation import (
 _NY = ZoneInfo("America/New_York")
 _CENT = Decimal("0.01")
 _RECURRING_COSTS = frozenset({"overnightfee", "overweekendfee"})
+
+#: What priced ``strategy_entry_preflights.stressed_cost_amount`` (#2598 step 4).
+#:
+#: ``_costs`` is the only producer: the broker's own what-if components, summed and
+#: multiplied by the deployment's ``cost_stress_multiplier``. The amount alone cannot
+#: say that, and a row already written can never be repaired to say it.
+COST_BASIS_BROKER_PREFLIGHT = "broker_preflight"
+
+#: ⚠ ONE MEMBER, AND ADDING A SECOND IS A COORDINATED CHANGE — `sql/342`'s
+#: ``strategy_entry_preflights_cost_basis_vocabulary`` CHECK does not read this
+#: constant, so a value added here alone fails at INSERT rather than at review.
+#: ``tests/test_2598_preflight_cost_basis.py`` fails when either side moves alone.
+#:
+#: #2598's scope names a second (``static_band_bound``, the banded static model as a
+#: declared execution bound); it is deliberately absent — see `sql/342`'s header for
+#: the census measurement that argues against it.
+COST_BASES: frozenset[str] = frozenset({COST_BASIS_BROKER_PREFLIGHT})
 _ALLOCATOR_ADVISORY_LOCK = PAPER_ALLOCATOR_ADVISORY_LOCK
 
 
@@ -1078,11 +1095,11 @@ def _execute_fired_paper_signal_locked(
                 eligibility_checked_at, costs_at, broker_available_cash,
                 account_equity, account_invested, instrument_invested,
                 account_drawdown_pct, allocated_amount,
-                gross_expectancy_ci_low_pct, stressed_cost_amount,
+                gross_expectancy_ci_low_pct, stressed_cost_amount, cost_basis,
                 net_expectancy_pct, stop_loss_rate, take_profit_rate
             ) VALUES (
                 %s, %s, %s, %s, %s, 'allocated', 'all_paper_entry_gates_passed',
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
@@ -1105,6 +1122,12 @@ def _execute_fired_paper_signal_locked(
                 amount,
                 intent.gross_expectancy_ci_low_pct,
                 stressed_cost,
+                # ⚠ `_costs` is the sole producer of `stressed_cost`, so the basis is
+                # a literal here rather than threaded through the return value. If a
+                # second pricing path is ever added, this line is the one that has to
+                # stop being a constant — the CHECK will not catch it, because both
+                # bases would be in the vocabulary by then.
+                COST_BASIS_BROKER_PREFLIGHT,
                 net_expectancy,
                 stop_rate,
                 take_rate,
