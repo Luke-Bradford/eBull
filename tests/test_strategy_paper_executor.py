@@ -492,7 +492,12 @@ def test_unregistered_signal_is_rejected_before_runtime_or_broker_checks(
     broker.place_demo_strategy_order.assert_not_called()
 
 
-def _broker(*, undocumented_cost: bool = False) -> MagicMock:
+def _broker(
+    *,
+    undocumented_cost: bool = False,
+    eligibility_currency: str = "USD",
+    cost_currency: str = "USD",
+) -> MagicMock:
     broker = MagicMock(spec=BrokerProvider)
     broker.get_account_risk_snapshot.return_value = BrokerAccountRiskSnapshot(
         available_cash=Decimal("600"),
@@ -504,7 +509,7 @@ def _broker(*, undocumented_cost: bool = False) -> MagicMock:
         raw_payload={},
     )
     broker.check_instrument_eligibility.return_value = BrokerEligibilityResponse(
-        currency="USD",
+        currency=eligibility_currency,
         eligibilities=(
             BrokerInstrumentEligibility(
                 instrument_id=2449001,
@@ -542,7 +547,7 @@ def _broker(*, undocumented_cost: bool = False) -> MagicMock:
                 cost_type="marketSpread",
                 amount=None if undocumented_cost else Decimal("0.5"),
                 value=Decimal("0.5") if undocumented_cost else None,
-                currency="USD",
+                currency=cost_currency,
                 raw_payload={},
             ),
         ),
@@ -1474,3 +1479,81 @@ def test_concurrent_same_signal_callers_submit_exactly_once(
     assert results[0].order_id == results[1].order_id
     assert {result.verdict for result in results} == {"submitted"}
     assert broker.place_demo_strategy_order.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("broker_kwargs", "expected"),
+    [
+        ({"eligibility_currency": "GBP"}, "eligibility_unresolved"),
+        ({"cost_currency": "GBP"}, "cost_currency_or_value_invalid"),
+        # `.upper()` is preserved at both sites, so a lowercase response still passes.
+        ({"eligibility_currency": "usd", "cost_currency": "usd"}, None),
+        # ...and `strip()` is deliberately NOT added, so a padded one still fails.
+        ({"eligibility_currency": " USD "}, "eligibility_unresolved"),
+    ],
+    ids=["eligibility_gbp", "cost_gbp", "lowercase_ok", "padded_rejected"],
+)
+def test_a_broker_response_must_match_the_deployment_currency(
+    ebull_test_conn: psycopg.Connection[Any],
+    broker_kwargs: dict[str, str],
+    expected: str | None,
+) -> None:
+    """#2603 item 4: the broker must answer in the DEPLOYMENT's currency.
+
+    The comparison is equality against ``intent.currency``, not membership of
+    ``SUPPORTED_DEPLOYMENT_CURRENCIES``.  Membership is the shape that breaks on
+    widening: with ``{"USD","GBP"}`` a GBP-quoted response would satisfy a membership
+    test on a USD deployment, and ``_costs`` would then add a USD component and a GBP
+    one into one total with no FX -- the arithmetic #2363 refused to perform.  The
+    eligibility and cost currencies arrive on separate responses, so tying each to
+    ``intent.currency`` is also what ties them to each other.
+
+    The last two cases pin the swap from a ``"USD"`` literal to ``intent.currency`` as
+    behaviour-preserving: ``.upper()`` stays, ``strip()`` is not added.  What the
+    broker may put in this field is governed by its contract, not by ISO 4217, so the
+    operator-input normaliser is deliberately not reused here.
+    """
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+
+    broker = _broker(
+        eligibility_currency=broker_kwargs.get("eligibility_currency", "USD"),
+        cost_currency=broker_kwargs.get("cost_currency", "USD"),
+    )
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    if expected is None:
+        assert result.verdict == "submitted"
+    else:
+        assert result.verdict == "rejected"
+        assert result.reason_code == expected
+
+
+def test_widening_the_supported_set_does_not_widen_what_the_broker_may_quote(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The equality-vs-membership distinction, tested where it actually differs.
+
+    The cases above pass under either shape while the supported set has one member --
+    GBP is refused by equality against a USD deployment AND by membership of
+    ``{"USD"}``.  So they pin behaviour-preservation, not the property.
+
+    Widening the set separates them.  The deployment stays USD (sql/338 makes anything
+    else unrepresentable anyway); only the set moves.  Under equality the GBP cost
+    component is still refused.  Under membership it would be ACCEPTED, and ``_costs``
+    would then add a GBP amount to a USD total with no FX -- #2603 item 4's "never a
+    partial lift", made a failing test rather than a sentence.
+    """
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    monkeypatch.setattr(
+        "app.services.strategy_paper_executor.SUPPORTED_DEPLOYMENT_CURRENCIES",
+        frozenset({"USD", "GBP"}),
+    )
+
+    result = execute_fired_paper_signal(conn, broker=_broker(cost_currency="GBP"), signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "cost_currency_or_value_invalid"

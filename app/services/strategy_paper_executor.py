@@ -34,6 +34,10 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.market_calendar import us_market_status
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
+from app.services.strategy_base_currency import (
+    DEPLOYMENT_CURRENCY_UNSUPPORTED,
+    SUPPORTED_DEPLOYMENT_CURRENCIES,
+)
 from app.services.strategy_control_plane import (
     PAPER_ALLOCATOR_ADVISORY_LOCK,
     StrategyControlError,
@@ -80,6 +84,11 @@ class _Intent:
     instrument_id: int
     symbol: str
     deployment_id: int
+    # The deployment's own currency, already proven supported by the `checks` tuple
+    # (which short-circuits before this dataclass is built). Broker responses are
+    # compared for EQUALITY against this, never for membership of the supported set --
+    # see `_eligibility_reason`.
+    currency: str
     deployment_limit: Decimal
     pool_limit: Decimal
     capital_mode: Literal["fixed", "compound"]
@@ -371,7 +380,7 @@ def _load_intent(
             "portfolio_mandate_incomplete",
         ),
         (bool(row["enabled"]), "paper_deployment_disabled"),
-        (row["currency"] == "USD", "deployment_currency_unsupported"),
+        (row["currency"] in SUPPORTED_DEPLOYMENT_CURRENCIES, DEPLOYMENT_CURRENCY_UNSUPPORTED),
         (row["policy_revision"] is not None, "execution_policy_missing"),
         (row["forecast_id"] is not None, "opportunity_forecast_missing"),
         (row["forecast_policy_version"] == FORECAST_POLICY_VERSION, "opportunity_forecast_policy_stale"),
@@ -460,6 +469,7 @@ def _load_intent(
         instrument_id=int(row["instrument_id"]),
         symbol=str(row["symbol"]),
         deployment_id=int(row["deployment_id"]),
+        currency=str(row["currency"]),
         deployment_limit=Decimal(str(row["capital_limit"])),
         pool_limit=Decimal(str(row["pool_limit"])),
         capital_mode=cast(Literal["fixed", "compound"], row["capital_mode"]),
@@ -552,7 +562,16 @@ def _persist_rejection(
 
 
 def _eligibility_reason(response: BrokerEligibilityResponse, intent: _Intent, amount: Decimal) -> str | None:
-    if response.currency.upper() != "USD" or intent.instrument_id in response.not_found_instrument_ids:
+    # EQUALITY against the deployment's currency, not membership of the supported set.
+    # The two coincide while only USD is supported, but membership is the shape that
+    # breaks on widening: with {"USD","GBP"} a response quoted in GBP would satisfy a
+    # membership test on a USD deployment, and `_costs` would then sum a USD component
+    # and a GBP one into a single total with no FX -- the arithmetic #2363 refused.
+    # Equality here and in `_costs` also ties eligibility and costs to each other.
+    #
+    # `.upper()` only, no strip(): what the broker may put in this field is its
+    # contract's business, not ISO's, and `" USD "` is rejected today.
+    if response.currency.upper() != intent.currency or intent.instrument_id in response.not_found_instrument_ids:
         return "eligibility_unresolved"
     matches = [row for row in response.eligibilities if row.instrument_id == intent.instrument_id]
     if len(matches) != 1 or not matches[0].allow_open_position:
@@ -590,7 +609,10 @@ def _costs(
     for component in response.costs:
         if component.amount is None or component.value is not None:
             return "cost_unit_undocumented"
-        if component.currency.upper() != "USD" or component.amount < 0:
+        # Equality against the deployment currency for the reason given in
+        # `_eligibility_reason`: this is the loop whose `total +=` would otherwise add
+        # two currencies together.
+        if component.currency.upper() != intent.currency or component.amount < 0:
             return "cost_currency_or_value_invalid"
         if component.cost_type.replace("_", "").lower() in _RECURRING_COSTS and component.amount > 0:
             return "recurring_cost_horizon_unmodelled"

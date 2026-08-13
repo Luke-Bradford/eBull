@@ -26,9 +26,13 @@ import psycopg
 
 CORE_MANDATE_POLICY_VERSION = "core-mandate-v1"
 
-# Locked to USD.  Lifting this lifts five other sites in the same change
-# (sql/290:96, strategy_control_plane.py:313, strategy_paper_executor.py
-# :374/:555/:593) -- #2603 item 4 forbids a partial lift.
+# Locked to USD by this module's own schema CHECK (sql/336:26), and deliberately NOT
+# bound to `strategy_base_currency.DEPLOYMENT_CURRENCY` (#2603 item 4): the core mandate
+# and the paper deployment are separate capital authorities behind separate constraints,
+# so aliasing would let one widen and silently drive the other past its own CHECK.
+# Lifting THIS one lifts sql/336:26 with it. The deployment side's coordinated site list
+# lives on `SUPPORTED_DEPLOYMENT_CURRENCIES`; the pool's is sql/290:96 +
+# strategy_control_plane.py:313. Three locks, three lists, none of them one edit.
 CORE_MANDATE_BASE_CURRENCY = "USD"
 
 # (ticket, sub) per strategy_control_plane's PAPER_ALLOCATOR_ADVISORY_LOCK.

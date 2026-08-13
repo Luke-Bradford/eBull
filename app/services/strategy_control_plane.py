@@ -17,6 +17,12 @@ from typing import Any, Literal, cast
 import psycopg
 import psycopg.rows
 
+from app.services.strategy_base_currency import (
+    DEPLOYMENT_CURRENCY,
+    DEPLOYMENT_CURRENCY_UNSUPPORTED,
+    canonical_currency_code,
+    normalise_deployment_currency,
+)
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
 from app.services.strategy_promotion_evidence import evidence_refusals
 from app.services.strategy_promotion_evidence_store import load_promotion_evidence
@@ -92,6 +98,9 @@ class Deployment:
     capital_limit: Decimal
     enabled: bool
     revision: int
+    # The currency actually PERSISTED, post-normalisation. Callers echoed their own
+    # pre-call value before this existed, so a response could disagree with the row.
+    currency: str = DEPLOYMENT_CURRENCY
 
 
 @dataclass(frozen=True)
@@ -555,7 +564,7 @@ def configure_deployment(
     enabled: bool,
     changed_by: str,
     reason: str,
-    currency: str = "USD",
+    currency: str = DEPLOYMENT_CURRENCY,
 ) -> Deployment:
     """Create/update one operator capital ceiling and append its audit event."""
     for value, field in (
@@ -568,6 +577,22 @@ def configure_deployment(
         _require_text(value, field)
     if capital_limit < 0:
         raise StrategyControlError("capital_limit must be non-negative")
+    # Normalise ONCE, by rebinding, so every downstream use reads the canonical code:
+    # the is_risk_reducing_deployment_change comparison below, both INSERTs and the
+    # UPDATE. Four comparisons kept in step by hand is how the #2634 wedge happened.
+    #
+    # No risk-reducing exemption, and none is needed: sql/338 forces the stored
+    # currency to be supported, so `existing[4]` is always canonical and a DISABLE
+    # (which echoes the stored value back -- app/api/strategies.py:2162) can never be
+    # the call that trips this. A guard that could block an operator from reducing
+    # exposure would fail open; this one provably cannot reach that state.
+    supported = normalise_deployment_currency(currency)
+    if supported is None:
+        raise StrategyControlError(
+            f"{DEPLOYMENT_CURRENCY_UNSUPPORTED}: {canonical_currency_code(currency)!r} is not a "
+            f"supported deployment currency (FX is unmodelled -- #2363)"
+        )
+    currency = supported
 
     _lock_strategy(conn, strategy_id, strategy_version)
     stage = current_stage(conn, strategy_id, strategy_version)
@@ -653,6 +678,7 @@ def configure_deployment(
         capital_limit,
         enabled,
         revision,
+        currency,
     )
 
 
