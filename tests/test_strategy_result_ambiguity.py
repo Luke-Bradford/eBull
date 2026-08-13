@@ -99,12 +99,36 @@ class TestVerdict:
         assert ambiguity_verdict(_SHARED) is False
 
     def test_the_basis_outranks_the_sharpes(self) -> None:
-        # ⚠ THE PRECEDENCE IS THE ASSERTION. `_ambiguity_material_for` returns
-        # False on a shared measurement BEFORE reading a Sharpe, so a record
-        # whose basis is shared cannot be made material by any number. A
-        # derivation that checked the Sharpes first would disagree with the
-        # write-time gate on exactly the rows a non-level strategy produces.
-        assert ambiguity_verdict(_SHARED) is False
+        """The basis decides BEFORE a Sharpe is read, on a record neither
+        validator would let you build.
+
+        ⚠ THE PRECEDENCE IS THE ASSERTION, and asserting it needs the state two
+        layers forbid: ``__post_init__`` refuses a ``shared_measurement`` record
+        carrying Sharpes (``test_a_shared_measurement_carries_no_numbers``), and
+        so does the table's ``strategy_result_ambiguity_shared_carries_no_
+        measurements`` CHECK, so ``load_result_ambiguity`` cannot surface one
+        either. Written the obvious way — `ambiguity_verdict(_SHARED)` — this
+        test asserts the same expression as the one above it and exercises no
+        ordering at all.
+
+        So the invalid record is forced past the frozen dataclass with
+        ``object.__setattr__``. The Sharpes chosen are material under every
+        other branch (gap 0.8 > threshold 0.1), which is what makes the
+        assertion fail if the basis check ever moves below them. Same reasoning
+        as the NULL-coercion fix on this branch: the defence is unreachable
+        today and one relaxed validator from mattering, and the honest way to
+        keep it is to test it deliberately rather than to claim coverage the
+        valid path cannot give.
+        """
+        forced = AmbiguityRecord(
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            comparison_basis="shared_measurement",
+        )
+        object.__setattr__(forced, "best_case_sharpe", 0.9)
+        object.__setattr__(forced, "worst_case_sharpe", 0.1)
+        object.__setattr__(forced, "cohort_gap_threshold", 0.1)
+
+        assert ambiguity_verdict(forced) is False
 
     def test_equal_arms_prove_a_zero_gap_without_a_threshold(self) -> None:
         assert ambiguity_verdict(_arms(0.5, 0.5)) is False
