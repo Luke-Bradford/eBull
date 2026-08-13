@@ -46,10 +46,94 @@ function pctPoints(value: string | null): string {
   return formatPct(parsed === null ? null : parsed / 100);
 }
 
+/** The declared id is `primary-2022-plus`, not `primary` (#2624).
+ *
+ * `app/services/strategy_recent_evidence.py` declares exactly eight ids and
+ * `primary` is not among them, so this lookup used to be dead and the function
+ * always fell through to "first window with status complete". That is
+ * order-dependent: whenever the primary window is `partial` while a calendar-year
+ * window is `complete`, the headline "Expected / trade" silently described 2022
+ * alone under a label that said primary. */
+const PRIMARY_WINDOW_ID = "primary-2022-plus";
+
 function primaryEvidence(strategy: StrategyOverview): StrategyEvidenceWindow | null {
-  return strategy.evidence_windows.find((window) => window.window_id === "primary")
+  return strategy.evidence_windows.find((window) => window.window_id === PRIMARY_WINDOW_ID)
     ?? strategy.evidence_windows.find((window) => window.status === "complete")
     ?? null;
+}
+
+/** Scope 2: say a version rotated, never "never run".
+ *
+ * A registry-touching merge mints a new `strategy_version` and the watermark is
+ * keyed on it, so the new version starts a track record beside the old one. The
+ * page used to show only the current version, so the operator saw an empty card
+ * — indistinguishable from a broken system. */
+function ScanRotationNote({ strategy }: { strategy: StrategyOverview }) {
+  const rotation = strategy.scan.rotation;
+  if (strategy.scan.status !== "rotated" || !rotation) return null;
+  const scannedThrough = rotation.previous_frontier_date
+    ? ` scanned through ${formatDate(rotation.previous_frontier_date)} under the previous version`
+    : " scanned under the previous version";
+  return (
+    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
+      <strong className="font-semibold text-slate-700 dark:text-slate-200">Version rotated.</strong>
+      {` This strategy${scannedThrough} (${shortVersion(rotation.previous_version)}). A new track record is starting; it has not scanned yet.`}
+    </p>
+  );
+}
+
+function shortVersion(version: string): string {
+  const suffix = version.split("+").pop() ?? version;
+  return suffix.slice(0, 8);
+}
+
+/** Scope 1: where the track record went, and why its numbers are not shown.
+ *
+ * Deliberately no metrics. Every version replaced before today sits on a
+ * different `cost_model_id` / `return_basis`, and those pins are the result
+ * identity — so the honest render names the difference rather than splicing an
+ * old expectancy in beside a new one. */
+function PriorVersionsBlock({ strategy }: { strategy: StrategyOverview }) {
+  if (strategy.prior_versions.length === 0) return null;
+  return (
+    <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
+      {/* One short line, not a paragraph: this block repeats on every card, and
+          the per-row reason already carries the detail. */}
+      <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+        Previous versions <span className="font-normal normal-case tracking-normal">· figures not shown, measured on another basis</span>
+      </h4>
+      <ul className="mt-2 space-y-1 text-xs text-slate-600 dark:text-slate-300">
+        {strategy.prior_versions.map((prior) => (
+          <li key={prior.strategy_version} className="tabular-nums">
+            <span className="font-mono">{shortVersion(prior.strategy_version)}</span>
+            {` · ${prior.result_count} stored result${prior.result_count === 1 ? "" : "s"}`}
+            {prior.last_scan_frontier_date ? ` · scanned through ${formatDate(prior.last_scan_frontier_date)}` : " · never scanned"}
+            {prior.comparable
+              ? " · same measurement basis"
+              : prior.incomparable_reasons.length
+                ? ` · different ${prior.incomparable_reasons.map(pinLabel).join(", ")}`
+                : " · no stored results to compare"}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+const PIN_LABELS: Record<string, string> = {
+  namespace: "sample",
+  corpus_version: "corpus",
+  cost_model_id: "cost model",
+  sizing_rule: "sizing rule",
+  benchmark_rule: "benchmark",
+  return_basis: "return basis",
+  position_rule_set_version: "position rules",
+  outcome_rule_set_version: "outcome rules",
+  input_rule_set_version: "input rules",
+};
+
+function pinLabel(pin: string): string {
+  return PIN_LABELS[pin] ?? pin.replace(/_/g, " ");
 }
 
 function representativeArm(strategy: StrategyOverview): StrategyResultArm | null {
@@ -849,9 +933,16 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
   const failures = strategy.allocation_refusals.map(refusalLabel);
   const failedOutcomes = Math.max(0, strategy.attribution.resolved_entries - strategy.attribution.winning_entries);
   if (!window || !arm) {
+    // The blank card #2624 is about. A rotation lands here with EVERY window
+    // `missing`, so this branch has to explain the rotation rather than imply
+    // the research never ran.
     return (
       <div className="border-t border-slate-200 px-4 py-4 text-sm text-slate-500 dark:border-slate-800">
-        No completed valid evidence is available. {failures[0] ?? "The research run has not finished."}
+        <ScanRotationNote strategy={strategy} />
+        <p className={strategy.scan.status === "rotated" ? "mt-2" : undefined}>
+          No completed valid evidence is available under the current version. {failures[0] ?? "The research run has not finished."}
+        </p>
+        <PriorVersionsBlock strategy={strategy} />
       </div>
     );
   }
@@ -883,6 +974,7 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
         <span>Completed outcomes: <strong className="text-slate-700 dark:text-slate-200">{strategy.attribution.resolved_entries}</strong></span>
         <span>Successful / unsuccessful: <strong className="text-slate-700 dark:text-slate-200">{strategy.attribution.winning_entries} / {failedOutcomes}</strong></span>
       </div>
+      <PriorVersionsBlock strategy={strategy} />
     </div>
   );
 }
@@ -915,21 +1007,30 @@ function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
 
 function ValidationControl({ strategy }: { strategy: StrategyOverview }) {
   const arm = representativeArm(strategy);
+  // ⚠ This — NOT `EvidenceDetail` — is where the four strategies that exist are
+  // rendered, because all of them are `harness_validation` (#2624). Putting the
+  // rotation notice only on the capital-candidate path would have shipped a
+  // payload nothing displays; caught by walking the real page, not by the
+  // component tests, whose fixture is a candidate.
   return (
-    <article className="grid gap-3 border-t border-slate-200 py-3 dark:border-slate-800 sm:grid-cols-[minmax(14rem,1.5fr)_repeat(3,minmax(6rem,0.6fr))] sm:items-center">
-      <div>
-        <div className="flex flex-wrap items-center gap-2">
-          <h3 className="text-sm font-semibold">{strategy.title}</h3>
-          <Badge tone="neutral">Control</Badge>
+    <article className="border-t border-slate-200 py-3 dark:border-slate-800">
+      <div className="grid gap-3 sm:grid-cols-[minmax(14rem,1.5fr)_repeat(3,minmax(6rem,0.6fr))] sm:items-center">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold">{strategy.title}</h3>
+            <Badge tone="neutral">Control</Badge>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            Harness evidence only · never eligible for capital
+            {strategy.forward_outcome_supported ? " · forward outcomes measured" : " · backtest only"}
+          </p>
         </div>
-        <p className="mt-1 text-xs text-slate-500">
-          Harness evidence only · never eligible for capital
-          {strategy.forward_outcome_supported ? " · forward outcomes measured" : " · backtest only"}
-        </p>
+        <div><span className="text-xs text-slate-500">Expected / trade</span><strong className="block tabular-nums">{pctPoints(arm?.expectancy_per_trade_pct ?? null)}</strong></div>
+        <div><span className="text-xs text-slate-500">Worst drawdown</span><strong className="block tabular-nums">{pctPoints(arm?.max_drawdown_pct ?? null)}</strong></div>
+        <div><span className="text-xs text-slate-500">Evidence windows</span><strong className="block tabular-nums">{completedEvidenceCount(strategy)}/{strategy.evidence_windows.length}</strong></div>
       </div>
-      <div><span className="text-xs text-slate-500">Expected / trade</span><strong className="block tabular-nums">{pctPoints(arm?.expectancy_per_trade_pct ?? null)}</strong></div>
-      <div><span className="text-xs text-slate-500">Worst drawdown</span><strong className="block tabular-nums">{pctPoints(arm?.max_drawdown_pct ?? null)}</strong></div>
-      <div><span className="text-xs text-slate-500">Evidence windows</span><strong className="block tabular-nums">{completedEvidenceCount(strategy)}/{strategy.evidence_windows.length}</strong></div>
+      <ScanRotationNote strategy={strategy} />
+      <PriorVersionsBlock strategy={strategy} />
     </article>
   );
 }

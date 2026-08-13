@@ -186,11 +186,16 @@ const OVERVIEW: StrategyOverviewResponse = {
     runnable: true,
     forward_outcome_supported: false,
     exclusion_reason: null,
-    scan: { frontier_date: "2026-08-07", updated_at: "2026-08-08T06:45:00Z", status: "current", fired_entries: 12, fired_exits: 0, not_fired: 100, not_evaluable: 0, exclusions_by_reason: {} },
+    scan: { frontier_date: "2026-08-07", updated_at: "2026-08-08T06:45:00Z", status: "current", rotation: null, fired_entries: 12, fired_exits: 0, not_fired: 100, not_evaluable: 0, exclusions_by_reason: {} },
+    // ⚠ The declared ids, from app/services/strategy_recent_evidence.py. This
+    // fixture used to say `primary` / `holdout`, neither of which the API can
+    // emit — which is why `primaryEvidence()` matching a dead id went unnoticed
+    // (#2624): the fallback branch covered for it in prod and in the test alike.
     evidence_windows: [
-      { window_id: "primary", label: "2022 onward", window_start: "2022-01-01", window_end: "2026-07-08", status: "complete", arms: [ARM] },
-      { window_id: "holdout", label: "Holdout", window_start: "2025-01-01", window_end: "2026-07-08", status: "missing", arms: [] },
+      { window_id: "primary-2022-plus", label: "Primary: 2022 onward", window_start: "2022-01-01", window_end: "2026-07-08", status: "complete", arms: [ARM] },
+      { window_id: "year-2022", label: "Calendar 2022", window_start: "2022-01-01", window_end: "2022-12-31", status: "missing", arms: [] },
     ],
+    prior_versions: [],
     legacy_result_count: 0,
     all_recent_evidence_complete: false,
     stage: null,
@@ -666,6 +671,120 @@ describe("StrategiesPage", () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     await userEvent.click(await screen.findByRole("checkbox", { name: "Enabled" }));
     await waitFor(() => expect(update).toHaveBeenCalledWith("s1-time-series-momentum", expect.objectContaining({ enabled: false, reason: "Paused from automated strategy workspace" })));
+  });
+
+  it("keeps the primary label on the primary window when a calendar year is the only complete one", async () => {
+    // #2624: primaryEvidence() matched window_id === "primary", which the API
+    // cannot emit (the declared id is "primary-2022-plus"), so it always fell
+    // through to "first complete window". With the primary window partial and a
+    // calendar year complete, the headline described 2022 alone under a label
+    // that said primary. The fixture's own ids hid this — they were wrong too.
+    const mixed = structuredClone(OVERVIEW);
+    const strategy = mixed.strategies[0]!;
+    strategy.evidence_windows = [
+      { ...strategy.evidence_windows[0]!, window_id: "primary-2022-plus", label: "Primary: 2022 onward", status: "partial", arms: [{ ...ARM, trade_count: 111, open_trade_count: 0, unpriced_trade_count: 0 }] },
+      { ...strategy.evidence_windows[0]!, window_id: "year-2022", label: "Calendar 2022", window_end: "2022-12-31", status: "complete", arms: [{ ...ARM, trade_count: 222, open_trade_count: 0, unpriced_trade_count: 0 }] },
+    ];
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(mixed);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(screen.getByText(/Primary: 2022 onward/)).toBeInTheDocument();
+    expect(screen.getByText("111")).toBeInTheDocument();
+    expect(screen.queryByText("222")).not.toBeInTheDocument();
+  });
+
+  it("says a version rotated instead of claiming the strategy never ran", async () => {
+    // #2624: a registry-touching merge mints a new strategy_version, the
+    // watermark is keyed on it, so the CURRENT version has no scan and every
+    // evidence window reads `missing`. The page used to render that as a blank
+    // card — indistinguishable from a broken system.
+    const rotated = structuredClone(OVERVIEW);
+    const strategy = rotated.strategies[0]!;
+    strategy.scan = {
+      ...strategy.scan,
+      frontier_date: null,
+      updated_at: null,
+      status: "rotated",
+      rotation: {
+        previous_version: "strategy-registry-v1+67dbf07c9d72",
+        previous_frontier_date: "2026-08-11",
+        previous_scanned_at: "2026-08-12T18:59:01Z",
+      },
+    };
+    strategy.evidence_windows = strategy.evidence_windows.map((window) => ({ ...window, status: "missing", arms: [] }));
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(rotated);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(screen.getByText("Version rotated.")).toBeInTheDocument();
+    expect(screen.getByText(/scanned through 11 Aug 2026 under the previous version/)).toBeInTheDocument();
+    expect(screen.getByText(/A new track record is starting/)).toBeInTheDocument();
+  });
+
+  it("names the basis a previous version was measured on rather than splicing its figures in", async () => {
+    // The prior version's numbers are deliberately absent: measured on a
+    // different cost model and return basis, which ARE the result identity.
+    const withHistory = structuredClone(OVERVIEW);
+    withHistory.strategies[0]!.prior_versions = [
+      {
+        strategy_version: "strategy-registry-v1+2307ee566d7b",
+        result_count: 60,
+        last_scan_frontier_date: "2026-08-07",
+        last_scan_at: "2026-08-09T06:46:00Z",
+        comparable: false,
+        incomparable_reasons: ["cost_model_id", "return_basis"],
+      },
+    ];
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(withHistory);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(screen.getByText("Previous versions")).toBeInTheDocument();
+    expect(screen.getByText(/2307ee56/)).toBeInTheDocument();
+    expect(screen.getByText(/60 stored results/)).toBeInTheDocument();
+    expect(screen.getByText(/different cost model, return basis/)).toBeInTheDocument();
+  });
+
+  it("shows version history on a validation control, which is where every strategy actually renders", async () => {
+    // All four strategies are harness_validation, so ValidationControl — not
+    // EvidenceDetail — is the surface the operator sees (#2624). A candidate-only
+    // fixture cannot catch a block that is missing there.
+    const control = structuredClone(OVERVIEW);
+    const strategy = control.strategies[0]!;
+    strategy.purpose = "harness_validation";
+    strategy.scan = {
+      ...strategy.scan,
+      frontier_date: null,
+      updated_at: null,
+      status: "rotated",
+      rotation: { previous_version: "strategy-registry-v1+67dbf07c9d72", previous_frontier_date: "2026-08-11", previous_scanned_at: "2026-08-12T18:59:01Z" },
+    };
+    strategy.prior_versions = [
+      { strategy_version: "strategy-registry-v1+2307ee566d7b", result_count: 60, last_scan_frontier_date: "2026-08-07", last_scan_at: "2026-08-09T06:46:00Z", comparable: false, incomparable_reasons: ["cost_model_id"] },
+    ];
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(control);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+
+    expect(await screen.findByText("Version rotated.")).toBeInTheDocument();
+    expect(screen.getByText("Previous versions")).toBeInTheDocument();
+    expect(screen.getByText(/different cost model/)).toBeInTheDocument();
+  });
+
+  it("shows no previous-versions block when there is no history", async () => {
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    expect(screen.queryByText("Previous versions")).not.toBeInTheDocument();
   });
 
   it("does not enable an approved strategy without assigned capital", async () => {

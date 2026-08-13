@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
@@ -124,15 +125,66 @@ _PRESENTATION = {
 }
 
 
+class ScanRotation(BaseModel):
+    """The scan that belongs to the version this one replaced (#2624 scope 2).
+
+    Present exactly when ``ScanHealth.status == "rotated"``. Both dates come from
+    the same ``strategy_scan_watermark`` row, so neither can be null in practice;
+    they stay optional only because the column types are.
+    """
+
+    previous_version: str
+    previous_frontier_date: date | None
+    previous_scanned_at: datetime | None
+
+
 class ScanHealth(BaseModel):
     frontier_date: date | None
     updated_at: datetime | None
-    status: Literal["never_run", "current", "stale"]
+    # ``rotated`` (#2624 scope 2): the CURRENT version has never scanned but a
+    # previous one did. Previously indistinguishable from ``never_run``, which
+    # is the operator-facing lie — after any registry-touching merge the page
+    # said a strategy with a full history had never run.
+    status: Literal["never_run", "rotated", "current", "stale"]
+    rotation: ScanRotation | None = None
     fired_entries: int = 0
     fired_exits: int = 0
     not_fired: int = 0
     not_evaluable: int = 0
     exclusions_by_reason: dict[str, int] = Field(default_factory=dict)
+
+
+class PriorVersionTrackRecord(BaseModel):
+    """A version this strategy used to run under, and why its numbers are absent.
+
+    ⚠ Deliberately carries NO ``ResultArm``, and that is a measurement, not a
+    simplification (#2624 scope 1, spec
+    ``docs/proposals/ta/2026-08-13-prior-version-track-records.md``):
+
+    * **A prior version need not be on the current measurement basis, and today
+      none is.** Grouping every stored row by its identity pins, the ones that
+      match today's constants are exactly the four CURRENT versions; each version
+      they replaced differs on at least ``cost_model_id`` and ``return_basis``.
+      Those pins ARE the result identity, so putting an old expectancy beside a
+      new one is a cross-basis splice. ⚠ This is a property of the data, not of
+      rotation: immediately after a registry-only merge the version just replaced
+      IS comparable, which is why ``comparable`` is computed per version rather
+      than assumed.
+    * **``promotion_refusals`` cannot be reconstructed.** ``_promotion_refusals``
+      computes it at read time from TODAY's gate, and what was true when the row
+      was written is not stored — so reusing ``ResultArm`` would re-judge history
+      under rules it never faced.
+
+    So this answers "where did my track record go?" and names the refusal, in the
+    posture #2602 item 5 sets for benchmark fields: never substitute.
+    """
+
+    strategy_version: str
+    result_count: int
+    last_scan_frontier_date: date | None
+    last_scan_at: datetime | None
+    comparable: bool
+    incomparable_reasons: list[str]
 
 
 class ResultArm(BaseModel):
@@ -191,6 +243,10 @@ class StrategyOverview(BaseModel):
     exclusion_reason: str | None
     scan: ScanHealth
     evidence_windows: list[EvidenceWindow]
+    prior_versions: list[PriorVersionTrackRecord]
+    # ⚠ NOT a prior-version summary, despite the name: `_RESULT_COUNTS_SQL`
+    # filters on the CURRENT versions, so this counts rows under the current
+    # version that match no declared window. Reads 0 for all four strategies.
     legacy_result_count: int
     all_recent_evidence_complete: bool
     stage: str | None
@@ -846,6 +902,53 @@ _SCAN_SQL = """
     GROUP BY w.strategy_id, w.strategy_version, w.frontier_date, w.updated_at
 """
 
+# Every stored result row for a manifest strategy that is NOT under its current
+# version, grouped by the identity pins so the reader can say WHICH pins differ
+# rather than silently dropping the row (#2624 scope 1).
+#
+# ⚠ Keyed on the PAIR `(strategy_id, strategy_version)`, not on version alone.
+# The identity hash is over registry bytes, so nothing structurally prevents two
+# strategies sharing one; `= ANY(versions)` would then leak rows across cards.
+#
+# Cheap by construction, not by luck: `strategy_results_store` is written only
+# through `result_ledger` (`:460`), i.e. once per deliberate, trial-register
+# charged run — 324 rows on dev in total, against 6.7M in `price_daily`.
+_PRIOR_VERSION_RESULTS_SQL = """
+    SELECT
+        r.strategy_id,
+        r.strategy_version,
+        r.namespace,
+        r.corpus_version,
+        r.cost_model_id,
+        r.sizing_rule,
+        r.benchmark_rule,
+        r.return_basis,
+        r.position_rule_set_version,
+        r.outcome_rule_set_version,
+        r.input_rule_set_version,
+        COUNT(*) AS count
+    FROM strategy_results_store r
+    WHERE r.strategy_id = ANY(%(strategy_ids)s)
+      AND NOT EXISTS (
+          SELECT 1 FROM unnest(%(strategy_ids)s::text[], %(versions)s::text[]) AS cur(id, version)
+          WHERE cur.id = r.strategy_id AND cur.version = r.strategy_version
+      )
+    GROUP BY 1,2,3,4,5,6,7,8,9,10,11
+"""
+
+# Watermarks for versions OTHER than the current one, newest frontier first.
+# Same pair-keying rationale as above.
+_PRIOR_VERSION_SCANS_SQL = """
+    SELECT w.strategy_id, w.strategy_version, w.frontier_date, w.updated_at
+    FROM strategy_scan_watermark w
+    WHERE w.strategy_id = ANY(%(strategy_ids)s)
+      AND NOT EXISTS (
+          SELECT 1 FROM unnest(%(strategy_ids)s::text[], %(versions)s::text[]) AS cur(id, version)
+          WHERE cur.id = w.strategy_id AND cur.version = w.strategy_version
+      )
+    ORDER BY w.strategy_id, w.frontier_date DESC, w.strategy_version DESC
+"""
+
 _EXCLUSIONS_SQL = """
     SELECT strategy_id, strategy_version, reason_code AS not_evaluable_reason,
            SUM(row_count) AS count
@@ -947,6 +1050,100 @@ def _evidence_window_counts(strategies: list[StrategyOverview]) -> tuple[int, in
     return completed, partial
 
 
+def _current_identity_pins() -> dict[str, str]:
+    """The pins a stored row must match to sit on today's measurement basis.
+
+    Exactly the equality predicates ``_RESULTS_SQL`` applies, named once so the
+    prior-version reader cannot drift from the current-version one. These ARE the
+    result identity — differing on any of them means the numbers are not
+    comparable, which is why the reader reports the difference instead of either
+    hiding the version or splicing its figures in.
+    """
+    return {
+        "namespace": "hold_out",
+        "corpus_version": CORPUS_VERSION,
+        "cost_model_id": COST_MODEL_ID,
+        "sizing_rule": SIZING_RULE_ID,
+        "benchmark_rule": BENCHMARK_RULE_ID,
+        "return_basis": TOTAL_RETURN_BASIS,
+        "position_rule_set_version": POSITION_RULE_SET_VERSION,
+        "outcome_rule_set_version": OUTCOME_RULE_SET_VERSION,
+        "input_rule_set_version": QUARANTINE_RULE_SET_VERSION,
+    }
+
+
+def build_prior_versions(
+    *,
+    result_groups: Sequence[Mapping[str, object]],
+    scan_rows: Sequence[Mapping[str, object]],
+    pins: Mapping[str, str],
+) -> dict[str, list[PriorVersionTrackRecord]]:
+    """Group prior-version evidence into one record per ``(strategy_id, version)``.
+
+    Pure so it can be table-tested without Postgres. ``result_groups`` is
+    ``_PRIOR_VERSION_RESULTS_SQL``'s output (one row per identity-pin combination),
+    ``scan_rows`` is ``_PRIOR_VERSION_SCANS_SQL``'s.
+
+    ⚠ **Stored results are the qualifier; a watermark is not.** A version that
+    scanned and stored nothing has no track record — it has a scan, and the scan
+    is what ``ScanHealth.rotation`` carries. This is also what BOUNDS the list:
+    ``strategy_results_store`` gains rows once per deliberate, trial-register
+    charged run, whereas ``strategy_scan_watermark`` gains one per scan-day per
+    version, so admitting watermark-only versions would grow the payload with
+    every registry version ever scanned. ``scan_rows`` therefore only ENRICHES a
+    result-bearing version (and separately selects the rotation at the call site).
+    Measured on dev: ``+6c7cff76dcde`` is exactly this case — scanned 2026-08-07,
+    zero stored rows.
+
+    ``comparable`` is conservative: true only when the version HAS stored rows and
+    every one of them matches every pin. A version with a mix is reported
+    incomparable, because "partly on the current basis" is not a state an operator
+    can act on. The ``has rows`` half of that is belt-and-braces given the
+    qualifier above — "comparable" over an empty set is vacuously true, and that
+    would read on the page as a track record that exists.
+
+    Ordering is ``(last_scan_at, strategy_version)`` descending, nulls last, so
+    the list is deterministic when two versions share a scan time or neither ever
+    scanned — a bare date sort is not (Codex checkpoint 1).
+    """
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    reasons: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for group in result_groups:
+        key = (str(group["strategy_id"]), str(group["strategy_version"]))
+        counts[key] += int(cast(int, group["count"]))
+        reasons[key].update(name for name, expected in pins.items() if group.get(name) != expected)
+
+    scans: dict[tuple[str, str], Mapping[str, object]] = {}
+    for row in scan_rows:
+        # Newest frontier first from the query; keep the first row per version.
+        scans.setdefault((str(row["strategy_id"]), str(row["strategy_version"])), row)
+
+    by_strategy: dict[str, list[PriorVersionTrackRecord]] = defaultdict(list)
+    for strategy_id, version in sorted(counts):
+        scan = scans.get((strategy_id, version))
+        by_strategy[strategy_id].append(
+            PriorVersionTrackRecord(
+                strategy_version=version,
+                result_count=counts.get((strategy_id, version), 0),
+                last_scan_frontier_date=None if scan is None else cast(date | None, scan["frontier_date"]),
+                last_scan_at=None if scan is None else cast(datetime | None, scan["updated_at"]),
+                comparable=bool(counts.get((strategy_id, version), 0)) and not reasons.get((strategy_id, version)),
+                incomparable_reasons=sorted(reasons.get((strategy_id, version), set())),
+            )
+        )
+
+    for records in by_strategy.values():
+        records.sort(
+            key=lambda record: (
+                record.last_scan_at is not None,
+                record.last_scan_at or datetime.min.replace(tzinfo=UTC),
+                record.strategy_version,
+            ),
+            reverse=True,
+        )
+    return by_strategy
+
+
 @router.get("/overview", response_model=StrategyOverviewResponse)
 def get_strategy_overview(
     conn: psycopg.Connection[object] = Depends(get_conn),
@@ -974,6 +1171,11 @@ def get_strategy_overview(
         scan_rows = list(cur.fetchall())
         cur.execute(_EXCLUSIONS_SQL, params)
         exclusion_rows = list(cur.fetchall())
+        prior_params = {"strategy_ids": list(versions), "versions": [versions[k] for k in versions]}
+        cur.execute(_PRIOR_VERSION_RESULTS_SQL, prior_params)
+        prior_result_rows = list(cur.fetchall())
+        cur.execute(_PRIOR_VERSION_SCANS_SQL, prior_params)
+        prior_scan_rows = list(cur.fetchall())
         cur.execute(_LATEST_CORPUS_SQL)
         latest_row = cur.fetchone()
         latest_corpus_date = None if latest_row is None else latest_row["max"]
@@ -1018,6 +1220,19 @@ def get_strategy_overview(
     exclusions: dict[str, Counter[str]] = defaultdict(Counter)
     for row in exclusion_rows:
         exclusions[str(row["strategy_id"])][str(row["not_evaluable_reason"])] += int(row["count"])
+
+    prior_versions_by_strategy = build_prior_versions(
+        result_groups=prior_result_rows,
+        scan_rows=prior_scan_rows,
+        pins=_current_identity_pins(),
+    )
+    # The rotation SELECTION rule is scope 3's, not a second one: the greatest
+    # frontier date wins, which is what `assess_scan_freshness` computes into its
+    # `fallback` basis. `_PRIOR_VERSION_SCANS_SQL` orders to match, and breaks a
+    # frontier tie on the version so the choice is deterministic.
+    previous_scan_by_strategy: dict[str, Mapping[str, object]] = {}
+    for row in prior_scan_rows:
+        previous_scan_by_strategy.setdefault(str(row["strategy_id"]), row)
 
     runnable, excluded = runnable_strategies()
     excluded_by_id = {item.strategy_id: item.reason for item in excluded}
@@ -1088,8 +1303,24 @@ def get_strategy_overview(
 
         scan_row = scan_by_strategy.get(strategy_id)
         frontier = None if scan_row is None else scan_row["frontier_date"]
-        scan_status: Literal["never_run", "current", "stale"] = (
-            "never_run"
+        # #2624 scope 2 — `rotated` splits the two states that both used to read
+        # `never_run`: the current version has no watermark, but a previous one
+        # does, so the strategy HAS run and its track record started over. The
+        # discriminator is the WATERMARK and not stored results, because results
+        # and watermarks are independent (a version can hold one without the
+        # other) and it is the scan this field describes.
+        previous_scan = previous_scan_by_strategy.get(strategy_id)
+        rotation = (
+            ScanRotation(
+                previous_version=str(previous_scan["strategy_version"]),
+                previous_frontier_date=cast(date | None, previous_scan["frontier_date"]),
+                previous_scanned_at=cast(datetime | None, previous_scan["updated_at"]),
+            )
+            if frontier is None and previous_scan is not None
+            else None
+        )
+        scan_status: Literal["never_run", "rotated", "current", "stale"] = (
+            ("rotated" if rotation is not None else "never_run")
             if frontier is None
             else "current"
             if latest_corpus_date is not None and frontier >= latest_corpus_date
@@ -1099,6 +1330,7 @@ def get_strategy_overview(
             frontier_date=frontier,
             updated_at=None if scan_row is None else scan_row["updated_at"],
             status=scan_status,
+            rotation=rotation,
             fired_entries=0 if scan_row is None else int(scan_row["fired_entries"]),
             fired_exits=0 if scan_row is None else int(scan_row["fired_exits"]),
             not_fired=0 if scan_row is None else int(scan_row["not_fired"]),
@@ -1189,6 +1421,7 @@ def get_strategy_overview(
                 exclusion_reason=excluded_by_id.get(strategy_id),
                 scan=scan,
                 evidence_windows=windows,
+                prior_versions=prior_versions_by_strategy.get(strategy_id, []),
                 legacy_result_count=result_counts.get(strategy_id, 0) - sum(len(rows) for rows in exact.values()),
                 all_recent_evidence_complete=all_complete,
                 stage=control.stage,

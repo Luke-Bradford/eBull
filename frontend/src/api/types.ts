@@ -2443,6 +2443,31 @@ export interface StrategyEvidenceWindow {
   arms: StrategyResultArm[];
 }
 
+/** The scan belonging to the version this one replaced (#2624 scope 2). */
+export interface StrategyScanRotation {
+  previous_version: string;
+  previous_frontier_date: string | null;
+  previous_scanned_at: string | null;
+}
+
+/** A version this strategy used to run under, and why its numbers are absent.
+ *
+ * ⚠ Deliberately carries no result arms. Measured across every stored result
+ * row: each version replaced before today differs from the current measurement
+ * basis on at least `cost_model_id` and `return_basis`, and those pins ARE the
+ * result identity — so showing an old expectancy beside a new one would be a
+ * cross-basis splice. `promotion_refusals` is also computed from TODAY's gate
+ * and was never stored, so it cannot be reconstructed for a historical row.
+ * This names the refusal instead, per #2602 item 5's posture. */
+export interface StrategyPriorVersion {
+  strategy_version: string;
+  result_count: number;
+  last_scan_frontier_date: string | null;
+  last_scan_at: string | null;
+  comparable: boolean;
+  incomparable_reasons: string[];
+}
+
 export interface StrategyOverview {
   strategy_id: string;
   strategy_version: string;
@@ -2456,7 +2481,12 @@ export interface StrategyOverview {
   scan: {
     frontier_date: string | null;
     updated_at: string | null;
-    status: "never_run" | "current" | "stale";
+    /** `rotated` (#2624): the CURRENT version has never scanned but a previous
+     *  one did — the strategy HAS run and its track record started over. Used
+     *  to be reported as `never_run`, which is the operator-facing lie. */
+    status: "never_run" | "rotated" | "current" | "stale";
+    /** Non-null iff `status === "rotated"`. */
+    rotation: StrategyScanRotation | null;
     fired_entries: number;
     fired_exits: number;
     not_fired: number;
@@ -2464,6 +2494,9 @@ export interface StrategyOverview {
     exclusions_by_reason: Record<string, number>;
   };
   evidence_windows: StrategyEvidenceWindow[];
+  prior_versions: StrategyPriorVersion[];
+  /** ⚠ NOT a prior-version summary despite the name — counts rows under the
+   *  CURRENT version matching no declared window. Use `prior_versions`. */
   legacy_result_count: number;
   all_recent_evidence_complete: boolean;
   stage: string | null;
