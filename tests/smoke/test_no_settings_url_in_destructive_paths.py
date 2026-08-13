@@ -66,6 +66,7 @@ If you are a future test author hitting this guard
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 # Concrete bug-shape patterns. Each entry is a substring search;
@@ -256,6 +257,73 @@ def test_no_test_writes_to_dev_database_url() -> None:
         + "\n\nDestructive tests must connect to the isolated ebull_test "
         "database, not the dev DB. See tests/test_operator_setup_race.py "
         "for the pattern, and the docstring of this file for guidance."
+    )
+
+
+# #2629 — the third occurrence of the #1887 class (see
+# docs/review-prevention-log.md, "A mocked-module rename after a
+# connection-helper migration leaves the mock patching a name nobody calls").
+#
+# The guard above catches a test that CONNECTS to the dev DB. It cannot catch a
+# test that patches a module-local ``settings`` alias and hands the mock a
+# REACHABLE url, because the leak happens inside production code:
+#
+#     with patch("app.workers.scheduler.settings") as mock_settings:
+#         mock_settings.database_url = _test_database_url()   # real, reachable
+#
+# ``_tracked_job``'s write had migrated to
+# ``app.db.background_write.background_write_connection``, which resolves
+# ``settings`` through its OWN module import — so the patch rebound a name the
+# write path no longer reads, every ``job_runs`` row landed in the operator's
+# dev ``ebull``, and the assertions read an empty test DB. Measured on 2026-08-13:
+# 40 such rows had accumulated there since 2026-08-10.
+#
+# What makes this shape uniquely dangerous is the REACHABILITY of the url, not
+# the patch. The 29 other ``*.database_url = ...`` assignments in tests/ all
+# assign a bogus literal (``"postgresql://test"``, ``"postgresql://stub/"``): if
+# production code ever does consult them the connection FAILS LOUDLY, which is
+# a correct-by-construction outcome. Only a real url fails silently.
+#
+# So the rule is narrow and has zero offenders tree-wide as of #2629: assign a
+# STRING LITERAL to a mocked ``database_url``, or redirect the shared object via
+# ``monkeypatch.setattr(settings, "database_url", test_database_url())`` /
+# ``patch.object(settings, "database_url", ...)``, which keeps every consumer in
+# step however many modules the write path crosses.
+# The right-hand side is captured and tested in Python rather than excluded in
+# the pattern: `\s*(?!["'])` READS like "the RHS must not start with a quote"
+# and constrains nothing, because the engine backtracks `\s*` until the
+# lookahead is satisfied. A lookahead placed after a backtrackable quantifier
+# is always satisfiable.
+_MOCK_DB_URL_ASSIGNMENT = re.compile(r"^[ \t]*(\w+\.database_url[ \t]*=[ \t]*)(.+)$", re.MULTILINE)
+
+
+def test_no_reachable_url_assigned_onto_a_mocked_settings_alias() -> None:
+    """Fail if a test assigns a non-literal url to a ``.database_url`` attribute.
+
+    Patching a module-local ``settings`` name only redirects the modules that
+    happen to read THAT name. Handing such a mock a reachable url therefore
+    fails OPEN when production code moves its connection site — the exact
+    #1887 / #2629 failure, silent in the direction that writes to the dev DB.
+    """
+    offenders: list[tuple[str, str]] = []
+    for path in sorted(_TESTS_DIR.rglob("*.py")):
+        rel = path.relative_to(_TESTS_DIR).as_posix()
+        if rel == "smoke/test_no_settings_url_in_destructive_paths.py":
+            continue  # the guard itself carries the shape as documentation
+        for match in _MOCK_DB_URL_ASSIGNMENT.finditer(path.read_text(encoding="utf-8")):
+            if match.group(2).lstrip().startswith(('"', "'")):
+                continue  # bogus literal — a leak through it fails loudly
+            offenders.append((rel, match.group(0).strip()))
+
+    assert not offenders, (
+        "These tests assign a non-literal (i.e. potentially REACHABLE) url to a "
+        "mocked `.database_url`. A module-scoped settings patch only redirects "
+        "the module it names, so when production code moves its connection site "
+        "the write escapes to the operator's dev DB and nothing fails:\n"
+        + "\n".join(f"  {f}: {m}" for f, m in offenders)
+        + "\n\nEither assign a bogus string literal (a leak then fails loudly), or "
+        "redirect the shared object: "
+        'monkeypatch.setattr(settings, "database_url", test_database_url()).'
     )
 
 

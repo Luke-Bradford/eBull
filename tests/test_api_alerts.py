@@ -1994,12 +1994,19 @@ def _thesis_change_row(
     prev_stance: str = "hold",
     base_value: float | None = 100.0,
     prev_base_value: float | None = 100.0,
+    subject_identity_ok: bool | None = True,
+    prev_subject_identity_ok: bool | None = True,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "thesis_id": thesis_id,
         "instrument_id": instrument_id,
         "symbol": symbol,
         "thesis_version": thesis_version,
+        # #2436 — the handler reads BOTH sides before diffing, so the fixture
+        # has to carry both. Defaults are the trustworthy case; the quarantine
+        # test below overrides them.
+        "subject_identity_ok": subject_identity_ok,
+        "prev_subject_identity_ok": prev_subject_identity_ok,
         "created_at": datetime(2026, 7, 15, 10, 0, 0, tzinfo=UTC),
         "stance": stance,
         "thesis_type": "value",
@@ -2055,6 +2062,37 @@ def test_thesis_changes_get_filters_non_material_and_counts_unseen_above_cursor(
     assert listed["LGND"]["summary"] == "stance hold→avoid"
     assert listed["LGND"]["stance_from"] == "hold"
     assert listed["LGND"]["stance_to"] == "avoid"
+
+
+def test_thesis_changes_get_suppresses_when_either_side_is_not_identity_ok(
+    client: TestClient,
+) -> None:
+    """#2436 — the diff needs BOTH sides trustworthy, and ``is not True``.
+
+    A ``None`` verdict (never checked) suppresses exactly like ``False``:
+    diffing an unchecked row against a checked one still reports a target
+    "move" between numbers that may belong to a different company.
+    """
+    rows = [
+        _thesis_change_row(thesis_id=320),  # both sides OK → listed
+        _thesis_change_row(thesis_id=319, instrument_id=47, symbol="AAPL", subject_identity_ok=False),
+        _thesis_change_row(thesis_id=318, instrument_id=48, symbol="GME", prev_subject_identity_ok=False),
+        _thesis_change_row(thesis_id=317, instrument_id=49, symbol="MSFT", subject_identity_ok=None),
+        _thesis_change_row(thesis_id=316, instrument_id=50, symbol="JPM", prev_subject_identity_ok=None),
+    ]
+    with patch("app.api.alerts.sole_operator_id", return_value=_OP_ID):
+        _install_conn(
+            fetchone_returns=[{"alerts_last_seen_thesis_change_id": None}],
+            fetchall_returns=rows,
+        )
+        resp = client.get("/alerts/thesis-changes")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["suppressed_quarantined"] == 4
+    assert [c["symbol"] for c in body["changes"]] == ["LGND"]
+    # A suppressed row must not be counted as unseen either — it never
+    # reaches the cursor comparison.
+    assert body["unseen_count"] == 1
 
 
 def test_thesis_changes_get_null_cursor_counts_all_material(client: TestClient) -> None:

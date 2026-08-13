@@ -77,7 +77,7 @@ def registered_strategy_test_candidates(monkeypatch: pytest.MonkeyPatch) -> None
     from app.services import strategy_control_plane
 
     manifest = dict(strategy_control_plane.STRATEGY_MANIFEST)
-    for strategy_id in ("S-ALLOC", "S-GOV", "S-LIVE-GATE", "S-OWN"):
+    for strategy_id in ("S-ALLOC", "S-GOV", "S-LIVE-GATE", "S-OWN", "S-REC"):
         manifest[strategy_id] = cast(Any, SimpleNamespace(purpose="capital_candidate"))
     monkeypatch.setattr(strategy_control_plane, "STRATEGY_MANIFEST", manifest)
 

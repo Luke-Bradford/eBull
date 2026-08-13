@@ -8,6 +8,7 @@ single-current — and the backfill helper's idempotency.
 from __future__ import annotations
 
 from datetime import date
+from typing import cast
 
 import psycopg
 import pytest
@@ -16,6 +17,18 @@ from app.services import instrument_history
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 
 pytestmark = pytest.mark.integration
+
+
+def _db_today(conn: psycopg.Connection[tuple]) -> date:
+    """``CURRENT_DATE`` as the SERVER sees it.
+
+    Anything this module asserts about a date the service layer wrote with SQL
+    ``CURRENT_DATE`` has to be compared against the same clock. ``date.today()``
+    is the runner's local zone and the two diverge daily (#2629).
+    """
+    row = conn.execute("SELECT CURRENT_DATE").fetchone()
+    assert row is not None
+    return cast(date, row[0])
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple], *, iid: int, symbol: str) -> None:
@@ -275,7 +288,13 @@ class TestReconcileSymbolHistory:
         chain = self._chain(conn, 794001)
         assert len(chain) == 2
         assert chain[0][0] == "FB"
-        assert chain[0][2] == date.today()  # closed at rename date
+        # Closed at the rename date, read off the SERVER clock. The writer
+        # closes with SQL ``CURRENT_DATE`` (app/services/instrument_history.py),
+        # which resolves in the database's TimeZone — ``Etc/UTC`` here — while
+        # ``date.today()`` resolves in the runner's local zone. Under BST
+        # (UTC+1) those disagree for the hour 23:00-00:00 UTC every day, which
+        # is exactly when this assertion started failing (#2629).
+        assert chain[0][2] == _db_today(conn)
         assert chain[1][0] == "META"
         assert chain[1][2] is None  # current
         assert chain[1][3] == "rebrand"
