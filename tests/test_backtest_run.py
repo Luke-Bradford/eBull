@@ -32,6 +32,7 @@ from app.services.backtest_run import (
     WrittenRow,
     _absorb,
     _ambiguity_material_for,
+    _ambiguity_record_for,
     _assert_ambiguity_contract,
     _assert_every_runnable_produced_rows,
     _benchmark_book,
@@ -1123,6 +1124,50 @@ class TestAmbiguityMateriality:
             deflated=True,
             ambiguity_material=None,
         )
+
+    def test_a_non_finite_sharpe_reads_as_unpriced_rather_than_crashing(self) -> None:
+        # ⚠ The old code reached `None` here BY ACCIDENT — `nan == nan` is
+        # False, so it fell through to "not compared". `AmbiguityRecord` refuses
+        # a non-finite value, so without the explicit branch in
+        # `_ambiguity_record_for` a degenerate zero-volatility measurement would
+        # turn a verdict into a crashed run.
+        arms = (self._arm("best_case", float("nan")), self._arm("worst_case", 0.4))
+        assert _ambiguity_material_for(arms, self._result()) is None
+
+    def test_the_frozen_record_does_not_depend_on_the_ambiguity_arm(self) -> None:
+        """⚠⚠ SIBLING CONSISTENCY — the two rows of one comparison must agree.
+
+        The verdict is a function of (strategy_id, quarantine_arm, namespace)
+        and NOT of `ambiguity_arm`: `_ambiguity_record_for` filters on the first
+        three only. So the two result rows that differ solely in their ambiguity
+        arm are two views of ONE comparison and must freeze identical records.
+
+        That holds by construction today and nothing enforced it. An edit that
+        made the record depend on the arm would give a single §3.4 comparison
+        two stored verdicts, and `promote_strategy` would then admit whichever
+        of the pair happened to pass.
+        """
+        arms = (self._arm("best_case", 0.6), self._arm("worst_case", 0.4))
+        best = build_result(
+            _measurement(),
+            strategy_id="s4",
+            strategy_version="v1",
+            purpose="capital_candidate",
+            ambiguity_arm="best_case",
+            quarantine_arm="masked",
+            deflated=None,
+        )
+        worst = build_result(
+            _measurement(),
+            strategy_id="s4",
+            strategy_version="v1",
+            purpose="capital_candidate",
+            ambiguity_arm="worst_case",
+            quarantine_arm="masked",
+            deflated=None,
+        )
+        assert best.identity.ambiguity_arm != worst.identity.ambiguity_arm
+        assert _ambiguity_record_for(arms, best) == _ambiguity_record_for(arms, worst)
 
 
 class TestRowCompleteness:
