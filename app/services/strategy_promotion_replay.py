@@ -23,17 +23,37 @@ The vocabulary is three rules and no more:
     describes a measurement rather than a live condition.
 
 ``today``
-    Deliberately re-evaluated against the current world — and legitimate ONLY
-    where the stored record DECLARES a validity window or is explicitly
-    supersedable. A today-check on anything else is an undeclared freshness
-    rule, which is how a passing historical result silently stops passing.
+    Deliberately re-evaluated against the current world. Legitimate ONLY in one
+    of THREE declared shapes; anywhere else it is an undeclared freshness rule,
+    which is how a passing historical result silently stops passing.
+
+    1. the stored record DECLARES its own validity window
+       (``promotion_evidence``: ``cost_observed_on`` / ``cost_valid_through``);
+    2. the stored record is explicitly supersedable;
+    3. the record is an append-only AUDIT LOG, the clause is a comparison
+       between that log and the rows it audits, and the criterion the clause
+       serves requires the comparison to be CURRENT (the two hold-out counts
+       against ``strategy_holdout_accesses``).
+
+    ⚠ Shape 3 was added by #2639 and is worded this narrowly on purpose. The
+    draft form — "a ledger of our own conduct" — would admit any mutable
+    operational counter, which is most of the database. All three clauses
+    together are the restriction, and ``TestTodayIsRestricted`` still pins the
+    exact member set, so a fourth today-check fails the test whatever it claims
+    about itself.
 
 ``not_re_read``
-    Neither persisted nor re-derived. Tracked by #2639. ⚠⚠ THIS IS A GAP, NOT A SOLUTION: the
+    Neither persisted nor re-derived. ⚠⚠ THIS IS A GAP, NOT A SOLUTION: the
     transition does not enforce that clause at all, and is still trusting a
     write-time verdict that died with ``WrittenRow``. It is spelled out as its
     own rule rather than left off the table so that it cannot be mistaken for
     coverage.
+
+    ⚠ NO INPUT CARRIES IT TODAY — #2639 closed the last three, and
+    ``unenforced_candidate_fields()`` returns an empty set. The rule stays in the
+    vocabulary because the next unclassifiable input needs an honest label to
+    land on, and deleting it would leave the alternative of mislabelling that
+    input ``frozen``, which reads as coverage.
 
 ⚠ ``replayed_at_transition`` is a SEPARATE axis from the rule, and the two must
 not be conflated: "this input's temporal rule is frozen" and "the transition
@@ -76,14 +96,22 @@ REPLAY_TEMPORAL_POLICY: Final[Mapping[str, ReplayPolicyEntry]] = {
     "result": ReplayPolicyEntry(
         rule="frozen",
         replayed_at_transition=True,
-        source="strategy_results_store columns (universe_basis, carry_unmodelled, fx_unmodelled)",
+        source=(
+            "strategy_results_store — the structural stamps read directly by promote_strategy, the rest "
+            "through result_ledger.stored_result_promotion_refusals (#2639)"
+        ),
         reason=(
             "The row's stamps are immutable once written, so replaying them needs no record beyond the row. "
-            "#2625 wires the three STRUCTURAL stamps through the shared structural_promotion_refusals — the "
+            "⚠ ONE FIELD, EIGHT CLAUSES, so 'replayed' is enumerated rather than asserted: universe_basis / "
+            "carry_unmodelled / fx_unmodelled through the shared structural_promotion_refusals (#2625, the "
             "same single copy #2599's preregistration freeze calls, so the transition and the freeze cannot "
-            "drift. ⚠ PARTIAL: the deflation, effective-sample-size and synthetic-control clauses are "
-            "columns on the same row and are still NOT replayed; they need their model objects rebuilt, "
-            "which is follow-up work, not a different temporal rule."
+            "drift); purpose through purpose_promotion_refusals; deflated_sharpe / trial_count / "
+            "trial_register_superseded / effective_sample_size through deflation_promotion_refusals; the two "
+            "§9 verdicts through synthetic_control_promotion_refusals (#2639). Every one of those functions "
+            "is the copy check_promotable itself calls. ⚠ trial_register_superseded compares a frozen column "
+            "against the CURRENT TRIAL_REGISTER constant, which does not make the field 'today' — see "
+            "promotion_evidence, where it is the current DATE that does. A register supersession "
+            "invalidating older results is deliberate."
         ),
     ),
     "evaluated_instrument_ids": ReplayPolicyEntry(
@@ -126,38 +154,51 @@ REPLAY_TEMPORAL_POLICY: Final[Mapping[str, ReplayPolicyEntry]] = {
         ),
     ),
     "holdout_evaluations": ReplayPolicyEntry(
-        rule="not_re_read",
-        replayed_at_transition=False,
-        source="none — strategy_holdout_accesses is not consulted by the transition",
+        rule="today",
+        replayed_at_transition=True,
+        source="result_ledger.holdout_access_counts (#2639), read live at the transition",
         reason=(
-            "⚠ A GAP. result_ledger.holdout_access_counts is two pure COUNT statements and records nothing, "
-            "so re-reading is SAFE — the issue's inventory table said otherwise and was wrong (the function "
-            "that records is quarantine_arms_compared, and only on a hold_out identity). What blocks it is "
-            "not safety but an undecided temporal rule: both counts are scoped to "
-            "(strategy_id, strategy_version) rather than to a result, so a later hold-out evaluation "
-            "retroactively changes what a replay of an OLDER pinned result would see. Frozen-at-result-time "
-            "and today's-count genuinely differ, and neither is obviously right. Left explicitly undecided "
-            "rather than answered silently."
+            "⚠⚠ TODAY BECAUSE FROZEN DEFEATS CRITERION 5, not because today is convenient. Both counts are "
+            "scoped to (strategy_id, strategy_version), so a pair frozen when result #1 was written records "
+            "the hold-out looks that had happened BY THEN: a strategy that later evaluates its hold-out four "
+            "more times without recording an access would replay result #1 as (1, 1) — consistent, "
+            "promotable, and blind to precisely the repeated unlogged look the criterion exists to catch. "
+            "The retroactivity #2621 rejected for the universe is the DESIRED behaviour here, because the "
+            "later event is our own conduct on this strategy version and not a change in the outside world. "
+            "Qualifies under today-shape 3: an append-only audit log, a clause comparing that log against "
+            "the rows it audits, and a criterion that requires the comparison to be current. ⚠ Re-reading "
+            "is SAFE — holdout_access_counts is pure COUNTs and records nothing; #2639's inventory said "
+            "otherwise and was wrong. ⚠ The clause is strategy-version-wide, so one unrecorded evaluation "
+            "blocks every result of that version — check_promotable's own behaviour, inherited not invented "
+            "— and it heals as well as blocks, since a record written later moves the answer back."
         ),
     ),
     "recorded_accesses": ReplayPolicyEntry(
-        rule="not_re_read",
-        replayed_at_transition=False,
-        source="none — strategy_holdout_accesses is not consulted by the transition",
-        reason="The other half of the same undecided count; see holdout_evaluations.",
+        rule="today",
+        replayed_at_transition=True,
+        source="result_ledger.holdout_access_counts (#2639), read live at the transition",
+        reason=(
+            "The other half of the same comparison; see holdout_evaluations. ⚠ Both sides move: an access "
+            "inserted later changes the answer as surely as an evaluation does, which is what makes the "
+            "clause a self-consistency check on the log rather than a freshness rule about the world."
+        ),
     ),
     "quarantine_arms_compared": ReplayPolicyEntry(
-        rule="not_re_read",
-        replayed_at_transition=False,
-        source="none — result_ledger.quarantine_arms_compared is not called by the transition",
+        rule="frozen",
+        replayed_at_transition=True,
+        source="strategy_results_store — both arms' rows, via result_ledger.quarantine_arm_pair_present (#2639)",
         reason=(
-            "⚠ A GAP, and the one input where re-reading has a real governance cost. On a hold_out identity "
-            "that function RECORDS a 'read' access, because looking is the event criterion 5 governs — and "
-            "300 of the 324 stored results are hold_out. A transition that called it would write one audit "
-            "row per promotion attempt into the log it is auditing. ⚠ It would NOT change the verdict: the "
-            "recorded kind is 'read' and _COUNT_EVALUATE_ACCESSES filters access_kind = 'evaluate'. The "
-            "argument is that the trail becomes a count of our own automation, not that the arithmetic "
-            "breaks. Closing this means persisting the comparison at result time, the #2621 move."
+            "⚠ FROZEN AND NOT TODAY: both arms are rows written at result time and the store has no delete "
+            "path, so the derived answer is monotone — it moves only from 'one arm' to 'both arms' when a "
+            "sibling with the identical identity-minus-arm is stored. Nothing about today's world enters it. "
+            "⚠⚠ THE TRANSITION DOES NOT CALL quarantine_arms_compared, which RECORDS a 'read' access on a "
+            "hold_out identity (300 of 324 stored rows) and would turn the audit trail into a count of our "
+            "own automation — 'it must not ask the database a question it is the answer to', one layer out. "
+            "The counting half is split into quarantine_arm_pair_present, which records nothing; the "
+            "recording door stays the one criterion 5 governs, and promotion is not an evaluation. ⚠ The "
+            "sibling is DERIVED from the identity hash, never named by a stored pointer: a pointer is chosen "
+            "by the writer and can name a compatible row that is not the one the identity admits. #2639's "
+            "first draft proposed that pointer table; Codex checkpoint 1 killed it."
         ),
     ),
 }
@@ -178,6 +219,11 @@ def unenforced_candidate_fields() -> frozenset[str]:
 
     Not a failure — it is the honest inventory of what ``promote_strategy``
     still takes on trust, and a test pins it so the set cannot grow unnoticed.
+
+    ⚠ EMPTY SINCE #2639, and the function stays because the invariant it pins is
+    the useful part: an input added to ``PromotionCandidate`` and classified
+    without being wired lands here and fails a test, instead of arriving as a
+    gate clause nobody applies.
     """
     return frozenset(name for name, entry in REPLAY_TEMPORAL_POLICY.items() if not entry.replayed_at_transition)
 

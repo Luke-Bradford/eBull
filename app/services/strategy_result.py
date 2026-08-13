@@ -843,6 +843,125 @@ def structural_promotion_refusals(
     return tuple(refusals)
 
 
+def purpose_promotion_refusals(purpose: str | None) -> tuple[PromotionRefusal, ...]:
+    """A harness-validation control is never promotable, whatever it measured.
+
+    ⚠ EXTRACTED SO THE TRANSITION CAN REPLAY IT (#2639). ``promote_strategy``
+    refuses on ``registered_strategy_purpose`` — the MANIFEST's purpose — while
+    the pinned ROW carries its own stamped one, and nothing compared them. They
+    agree today (all 324 stored rows and all four registered strategies are
+    ``harness_validation``, measured 2026-08-13), but the moment a manifest entry
+    becomes ``capital_candidate`` its older harness rows are pinnable and the
+    transition would not notice.
+    """
+    return ("harness_validation_only",) if purpose == "harness_validation" else ()
+
+
+def holdout_count_promotion_refusals(
+    *, holdout_evaluations: int, recorded_accesses: int
+) -> tuple[PromotionRefusal, ...]:
+    """Criterion 5, from the two counts ``holdout_access_counts`` returns (#2639).
+
+    ⚠ IMPLEMENTED STRICTER THAN THE LITERAL WORDING, deliberately. Read
+    literally, "more than once" would let a SINGLE unrecorded evaluation pass —
+    and a single unrecorded look at the hold-out is exactly the governance
+    failure criterion 5 describes, just the first one. The rule applied is that
+    every evaluation must have an access record.
+
+    ⚠⚠ THE TRANSITION REPLAYS THIS AGAINST TODAY'S COUNTS, NOT AGAINST A FROZEN
+    PAIR, and freezing would DEFEAT the criterion. Both counts are scoped to
+    ``(strategy_id, strategy_version)``, so a pair frozen when result #1 was
+    written records the looks that had happened by then: a strategy that later
+    evaluates its hold-out four more times without recording would replay
+    result #1 as ``(1, 1)`` — consistent, promotable, and blind to precisely the
+    repeated unlogged look this clause exists to catch. The reasoning is
+    recorded in full in ``app.services.strategy_promotion_replay``.
+    """
+    if holdout_evaluations < 1:
+        return ("holdout_never_evaluated",)
+    if recorded_accesses < holdout_evaluations:
+        return ("holdout_accesses_unrecorded",)
+    return ()
+
+
+def deflation_promotion_refusals(
+    *,
+    deflated_sharpe: object | None,
+    trial_count: int | None,
+    deflated: DeflatedSharpeResult | None,
+    effective_sample_size: float | None,
+) -> tuple[PromotionRefusal, ...]:
+    """Criteria 6 and 3, from the values a stored row also carries (#2639).
+
+    ⚠ THE ONE COPY, called by ``check_promotable`` and by the transition's
+    ``result_ledger.stored_result_promotion_refusals`` — the extraction argument
+    ``structural_promotion_refusals`` makes. A second hand-written copy would
+    drift the first time the deflation rule changed.
+
+    ⚠ FOUR INDEPENDENT ``if``s, never an ``elif`` and never an early return. A
+    DSR with no trial count is as refused as no DSR at all, and both may fire at
+    once; the gate's contract is that every reason is returned.
+
+    ⚠ ``trial_register_superseded`` is guarded on ``deflated_sharpe is not
+    None``, NOT on ``deflated``. A row with a probability but no reconstructed
+    object is exactly the state the clause is for, and guarding on the object
+    would let it pass.
+
+    ⚠ ``deflated_sharpe`` is typed ``object`` because the only thing done with
+    it is a ``None`` test: in memory it is a float, off a stored row it is a
+    psycopg ``Decimal``, and narrowing the type here would force a conversion
+    that the clause does not need and that could raise where the gate refuses.
+    """
+    refusals: list[PromotionRefusal] = []
+
+    # Criterion 6 — "DSR not computed, or computed on an undeclared trial
+    # count". Independent checks: a DSR with no trial count is as refused as no
+    # DSR at all, because the count is what the deflation divides by.
+    if deflated_sharpe is None:
+        refusals.append("deflated_sharpe_not_computed")
+    if trial_count is None:
+        refusals.append("trial_count_undeclared")
+    if deflated_sharpe is not None and (
+        deflated is None
+        or deflated.trial_register_version != TRIAL_REGISTER_VERSION
+        or deflated.declared_trials != TRIAL_REGISTER.declared_count
+    ):
+        refusals.append("trial_register_superseded")
+
+    # Criterion 3 — the effective sample size that criterion 6's deflation
+    # consumes. ⚠ Checked SEPARATELY from the DSR: a DSR present with no
+    # effective sample size is a DSR deflated on a nominal n, and criterion 3
+    # forbids reporting a nominal n anywhere. Stage 5e's block bootstrap fills
+    # it; until then this refusal fires on every result.
+    if effective_sample_size is None:
+        refusals.append("effective_sample_size_not_computed")
+
+    return tuple(refusals)
+
+
+def synthetic_control_promotion_refusals(control: SyntheticControl | None) -> tuple[PromotionRefusal, ...]:
+    """§9's acceptance, from the control a stored row also carries (#2639).
+
+    ⚠ THE COHORT-LEVEL AND STRATEGY-LEVEL FAILURES ARE REPORTED SEPARATELY AND
+    BOTH CAN FIRE: a cohort that shows edge invalidates the scale, and a Sharpe
+    below the threshold is not evidence on any scale. Returning only the first
+    would hide from an operator that one broken cohort is blocking every
+    strategy.
+
+    ⚠ DERIVED FROM THE CONTROL'S OWN PROPERTIES, never from the row's stored
+    ``synthetic_control_passed``. That column is the CONJUNCTION, so reading it
+    would collapse the two codes into one and lose which threshold failed.
+    """
+    if control is None:
+        return ("synthetic_control_not_run",)
+    refusals: list[PromotionRefusal] = []
+    if not control.mean_return_ci_contains_zero:
+        refusals.append("synthetic_control_cohort_shows_edge")
+    if not control.sharpe_exceeds_cohort:
+        refusals.append("synthetic_control_sharpe_below_cohort")
+    return tuple(refusals)
+
+
 def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, ...]:
     """Every reason this result may not be promoted. Empty means promotable.
 
@@ -858,8 +977,7 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
     refusals: list[PromotionRefusal] = []
     result = candidate.result
 
-    if result.purpose == "harness_validation":
-        refusals.append("harness_validation_only")
+    refusals.extend(purpose_promotion_refusals(result.purpose))
 
     # §6 clause 2 (universe basis) and §5.1 (carry). Both are decided by the
     # stamps alone, so they live in `structural_promotion_refusals` — the same
@@ -885,39 +1003,26 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
         refusals.append("instrument_outside_validated_universe")
 
     # Criterion 5 — "hold-out never evaluated, or evaluated more than once
-    # without a recorded access".
-    #
-    # ⚠ IMPLEMENTED STRICTER THAN THE LITERAL WORDING, deliberately. Read
-    # literally, "more than once" would let a SINGLE unrecorded evaluation
-    # pass — and a single unrecorded look at the hold-out is exactly the
-    # governance failure criterion 5 describes, just the first one. The rule
-    # applied is that every evaluation must have an access record.
-    if candidate.holdout_evaluations < 1:
-        refusals.append("holdout_never_evaluated")
-    elif candidate.recorded_accesses < candidate.holdout_evaluations:
-        refusals.append("holdout_accesses_unrecorded")
+    # without a recorded access", in `holdout_count_promotion_refusals` so the
+    # promotion transition applies the same single copy (#2639).
+    refusals.extend(
+        holdout_count_promotion_refusals(
+            holdout_evaluations=candidate.holdout_evaluations,
+            recorded_accesses=candidate.recorded_accesses,
+        )
+    )
 
-    # Criterion 6 — "DSR not computed, or computed on an undeclared trial
-    # count". Independent checks: a DSR with no trial count is as refused as no
-    # DSR at all, because the count is what the deflation divides by.
-    if result.deflated_sharpe is None:
-        refusals.append("deflated_sharpe_not_computed")
-    if result.trial_count is None:
-        refusals.append("trial_count_undeclared")
-    if result.deflated_sharpe is not None and (
-        result.deflated is None
-        or result.deflated.trial_register_version != TRIAL_REGISTER_VERSION
-        or result.deflated.declared_trials != TRIAL_REGISTER.declared_count
-    ):
-        refusals.append("trial_register_superseded")
-
-    # Criterion 3 — the effective sample size that criterion 6's deflation
-    # consumes. ⚠ Checked SEPARATELY from the DSR: a DSR present with no
-    # effective sample size is a DSR deflated on a nominal n, and criterion 3
-    # forbids reporting a nominal n anywhere. Stage 5e's block bootstrap fills
-    # it; until then this refusal fires on every result.
-    if result.metrics.effective_sample_size is None:
-        refusals.append("effective_sample_size_not_computed")
+    # Criteria 6 and 3, in `deflation_promotion_refusals` — the same single copy
+    # the promotion transition replays off the stored row (#2639), for the
+    # reason `structural_promotion_refusals` above is shared.
+    refusals.extend(
+        deflation_promotion_refusals(
+            deflated_sharpe=result.deflated_sharpe,
+            trial_count=result.trial_count,
+            deflated=result.deflated,
+            effective_sample_size=result.metrics.effective_sample_size,
+        )
+    )
 
     # §3.4 — the ambiguity arms. ⚠ NOT one of §6's five bullets; its source is
     # §3.4's "the result is `ambiguity_material` and is not promotable", and it
@@ -935,19 +1040,9 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
     if not candidate.quarantine_arms_compared:
         refusals.append("quarantine_arms_not_compared")
 
-    # §9 — the harness's own acceptance, read per result. ⚠ THE COHORT-LEVEL
-    # AND STRATEGY-LEVEL FAILURES ARE REPORTED SEPARATELY AND BOTH CAN FIRE:
-    # a cohort that shows edge invalidates the scale, and a Sharpe below the
-    # threshold is not evidence on any scale. Returning only the first would
-    # hide from an operator that one broken cohort is blocking every strategy.
-    control = result.synthetic_control
-    if control is None:
-        refusals.append("synthetic_control_not_run")
-    else:
-        if not control.mean_return_ci_contains_zero:
-            refusals.append("synthetic_control_cohort_shows_edge")
-        if not control.sharpe_exceeds_cohort:
-            refusals.append("synthetic_control_sharpe_below_cohort")
+    # §9 — the harness's own acceptance, read per result. Shared with the
+    # transition's replay (#2639); the two-code split is argued there.
+    refusals.extend(synthetic_control_promotion_refusals(result.synthetic_control))
 
     # #2505 — positive mean return is not enough. The candidate must have a
     # positive clustered lower bound, measured tails/concentration, complete
@@ -1032,8 +1127,12 @@ __all__ = [
     "StrategyResult",
     "UniverseBasis",
     "check_promotable",
+    "deflation_promotion_refusals",
+    "holdout_count_promotion_refusals",
     "is_promotable",
+    "purpose_promotion_refusals",
     "structural_promotion_refusals",
+    "synthetic_control_promotion_refusals",
     "namespace_for_bar",
     "namespace_for_position",
     "namespace_for_signal",

@@ -965,7 +965,7 @@ depends on either reading.
 
 ---
 
-## The promotion transition's replay policy (#2625, settled 2026-08-13)
+## The promotion transition's replay policy (#2625, settled 2026-08-13; completed by #2639)
 
 `check_promotable` runs at RESULT PRODUCTION. `promote_strategy` cannot call it
 — it has no `StrategyResult` to hand it, and two of the gate's inputs cost an
@@ -981,18 +981,27 @@ Three rules, and no fourth:
   from today's world. The default. Covers the universe (#2621), the §3.4
   ambiguity comparison (#2625) and the row's own structural stamps.
 - **`today`** — re-evaluated against the current world, and legitimate **ONLY**
-  where the stored record DECLARES a validity window or is explicitly
-  supersedable. Exactly one input qualifies: `promotion_evidence`, whose
-  `cost_observed_on` / `cost_valid_through` say when executable costs go stale.
-  A today-check on anything else is an undeclared freshness rule — the reason
-  #2621 froze the universe instead of re-loading it. **A test pins this set to
-  one member**, so a second today-check cannot be added quietly.
+  in one of **three declared shapes**. A today-check outside them is an
+  undeclared freshness rule — the reason #2621 froze the universe instead of
+  re-loading it. **A test pins the exact member set**, so a fourth cannot be
+  added quietly.
+  1. the record DECLARES its own validity window — `promotion_evidence`, whose
+     `cost_observed_on` / `cost_valid_through` say when executable costs go stale;
+  2. the record is explicitly supersedable;
+  3. **(#2639)** the record is an append-only AUDIT LOG, the clause is a
+     comparison between that log and the rows it audits, and the criterion the
+     clause serves requires the comparison to be CURRENT — criterion 5's
+     `holdout_evaluations` / `recorded_accesses` against
+     `strategy_holdout_accesses`. ⚠ Worded this narrowly on purpose: the draft
+     form "a ledger of our own conduct" would admit any mutable operational
+     counter, which is most of the database.
 - **`not_re_read`** — neither persisted nor re-derived. ⚠⚠ **THIS NAMES A GAP,
   NOT COVERAGE.** The transition does not enforce that clause at all and still
-  trusts a write-time verdict that died with `WrittenRow`. Currently
-  `holdout_evaluations`, `recorded_accesses` and `quarantine_arms_compared`;
-  `unenforced_candidate_fields()` returns the set and a test pins it so it
-  cannot grow unnoticed. Closing it is #2639.
+  trusts a write-time verdict that died with `WrittenRow`. ⚠ **The set is EMPTY
+  since #2639** and `unenforced_candidate_fields()` returns `frozenset()`; the
+  rule stays in the vocabulary so the next unclassifiable input has an honest
+  label to land on, and the assertion stays so a newly-classified-but-unwired
+  input fails a test rather than arriving as a clause nobody applies.
 
 The policy lives in `app/services/strategy_promotion_replay.py` with a reason on
 every entry. **Do not add an input to the transition without classifying it
@@ -1007,19 +1016,79 @@ second is false. Before #2625, `grep` for
 returned **nothing** — the stamps were persisted and never read, so Tier 1's
 refusals could all close and promotion still would not consult them.
 
-⚠ Why not just replay the whole gate: the only code that rebuilds a
-`StrategyResult` from the store is `result_ledger._result_from_row`, reachable
-only through `read_holdout_results`, which RECORDS an access before it reads.
-300 of the 324 stored results are `hold_out`. And the gate has no single as-of —
-some inputs are frozen and one is today, which one `check_promotable(candidate)`
-call cannot express.
+⚠ Why not just replay the whole gate: the gate has no single as-of — most
+inputs are frozen and three are today — which one `check_promotable(candidate)`
+call cannot express. #2639 does rebuild the row through
+`result_ledger._result_from_row`, but behind
+`stored_result_promotion_refusals`, which returns **refusal codes and never a
+`StrategyResult`**: a public `load_result_by_id` would be a new unaudited door
+to the withheld side, and 300 of the 324 stored results are `hold_out`.
+`read_holdout_results` stays the sanctioned door and still records first.
+
+### What #2639 added (2026-08-13)
+
+- **Criterion 5's two counts replay against TODAY**, because **frozen defeats
+  the criterion**: both counts are scoped to `(strategy_id, strategy_version)`,
+  so a pair frozen at result time is blind to a later unrecorded look at the
+  same version's hold-out — which is the leak criterion 5 exists to catch. The
+  clause is strategy-version-wide (one unrecorded evaluation blocks every result
+  of that version) and it heals as well as blocks. `holdout_access_counts` is
+  now ONE statement with two scalar subqueries, so the pair comes from one
+  snapshot. ⚠ It is **not** atomic with the promotion INSERT — the hold-out
+  writers do not take `promote_strategy`'s advisory lock — and that bound is
+  stated rather than assumed away.
+- **Criterion 9's arm pair is RE-DERIVED from the identity hash**, not recorded.
+  `result_ledger.quarantine_arm_pair_present` does the count and records
+  nothing; `quarantine_arms_compared` records and then calls it, so the door
+  that writes a `read` access stays the one criterion 5 governs and the
+  transition does not write into the log it is auditing. ⚠ **A stored
+  `sibling_result_id` pointer was the first design and was killed at Codex
+  checkpoint 1**: a pointer is chosen by the writer and can name a compatible
+  row that is not the one the identity admits, whereas
+  `ResultIdentity.version` is a hash and admits exactly one sibling.
+- **The row's own purpose, deflation, effective-sample-size and §9 clauses**
+  replay through four pure functions — `purpose_promotion_refusals`,
+  `holdout_count_promotion_refusals`, `deflation_promotion_refusals`,
+  `synthetic_control_promotion_refusals` — which are the copies
+  `check_promotable` itself calls, the `structural_promotion_refusals` move.
+- ⚠ **The row's own `purpose` was a latent gap.** `promote_strategy` refuses on
+  `registered_strategy_purpose` — the MANIFEST's — and never compared it to the
+  row's stamp. Measured 2026-08-13: all 324 stored rows and all four registered
+  strategies are `harness_validation`, so they agree today; the moment a
+  manifest entry becomes `capital_candidate`, its older harness-stamped rows
+  become pinnable. Same M9 shape — the control exists on a path the decision
+  does not take.
+- ⚠ **`result` stays `frozen`.** `trial_register_superseded` compares a frozen
+  column against the CURRENT `TRIAL_REGISTER` constant; a frozen-field-versus-
+  constant comparison does not make a field `today` (what makes
+  `promotion_evidence` today is the current DATE).
+- ⚠ **The transition keeps its OWN read of the structural stamps.**
+  `_result_from_row` coerces `carry_unmodelled` with `bool(...)`, so a NULL
+  would read as *modelled* — fail-open on a Tier 1 refusal — while the
+  transition's read coerces NULL to `True`. Both columns are `NOT NULL`
+  (`sql/262`, `sql/335`), so this is defence in depth; the two coercions must
+  not be collapsed onto the weaker one.
+- ⚠ **A corrupt row RAISES rather than refusing**, per `load_result_ambiguity`'s
+  precedent, which aborts before the remaining refusals are gathered and so
+  MASKS them. Verified on the full population: 324 of 324 rows reconstruct.
 
 **Blast radius when settled:** `strategy_promotions` held **0 rows** and
 `strategy_result_ambiguity` **0 rows** against 324 results (measured 2026-08-13),
 so all 324 refuse `ambiguity_verdict_unrecorded` and nothing existing was
 promotable to begin with.
 
-**Refs** #2625, #2621, #2505, #2599, #2437.
+**Blast radius of #2639**, measured on dev over the full population with
+`PYTHONPATH=. uv run python scripts/verify_2639_promotion_replay.py --all`:
+324 of 324 rows reconstruct; the new row-level census is 324
+`harness_validation_only`, 324 `synthetic_control_not_run`, 204
+`trial_register_superseded`, 56 `deflated_sharpe_not_computed`, 56
+`trial_count_undeclared`, and **0 `quarantine_arms_not_compared`** — every row's
+flipped-arm sibling is stored. **0 of 324 rows become less refused**, which is
+the direction that matters: a replay closing a gap must only ever ADD refusals.
+Criterion 5's clause passes on all eight `(strategy_id, strategy_version)` pairs
+(evaluations equal accesses on every one).
+
+**Refs** #2639, #2625, #2621, #2505, #2599, #2437.
 
 ---
 

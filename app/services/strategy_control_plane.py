@@ -17,6 +17,7 @@ from typing import Any, Literal, cast
 import psycopg
 import psycopg.rows
 
+from app.services.result_ledger import holdout_access_counts, stored_result_promotion_refusals
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY,
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
@@ -26,7 +27,7 @@ from app.services.strategy_base_currency import (
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
 from app.services.strategy_promotion_evidence import evidence_refusals
 from app.services.strategy_promotion_evidence_store import load_promotion_evidence
-from app.services.strategy_result import structural_promotion_refusals
+from app.services.strategy_result import holdout_count_promotion_refusals, structural_promotion_refusals
 from app.services.strategy_result_ambiguity import ambiguity_promotion_refusals, load_result_ambiguity
 from app.services.strategy_result_universe import load_result_universe, universe_promotion_refusals
 
@@ -446,14 +447,23 @@ def promote_strategy(
     replacement for trusting that the sole writer ran ``check_promotable`` at
     write time.
 
-    ⚠ WHAT IS STILL *NOT* REPLAYED, because a partial gate read as a whole one
-    is how #2621 happened: the hold-out evaluation/access counts, criterion 9's
-    quarantine-arm comparison, and the deflation / effective-sample-size /
-    synthetic-control clauses. Each is classified — with its reason and its
-    temporal rule — in ``app.services.strategy_promotion_replay``, and
-    ``unenforced_candidate_fields`` returns the current set, and #2639 tracks
-    closing it. Do not add an input here without classifying it there; a test
-    enforces that.
+    #2639 closed the remainder: criterion 5's two counts (against TODAY's
+    ledger, because a frozen pair is blind to a later unrecorded look),
+    criterion 9's arm pair (re-derived from the identity hash, not from a
+    recorded boolean), and the row's own purpose / deflation /
+    effective-sample-size / §9 clauses. ``unenforced_candidate_fields()`` is now
+    empty.
+
+    ⚠ WHAT THIS STILL DOES NOT DO. The counts are read once and are not atomic
+    with the INSERT below — the hold-out writers do not take this function's
+    advisory lock, so a hold-out row may commit between the read and the
+    promotion. And a corrupt stored row RAISES out of
+    ``stored_result_promotion_refusals`` rather than refusing, which aborts
+    before the remaining refusals are gathered and therefore masks them.
+
+    Every input's temporal rule and whether the transition applies it are
+    declared in ``app.services.strategy_promotion_replay``. Do not add an input
+    here without classifying it there; a test enforces that.
     """
     for value, field in (
         (strategy_id, "strategy_id"),
@@ -503,6 +513,23 @@ def promote_strategy(
                 f"result_ids do not belong to {strategy_id}@{strategy_version}: {sorted(missing)}"
             )
         if to_stage in _RESULT_EVIDENCE_STAGES:
+            # #2639 — criterion 5's two counts, read ONCE for the whole
+            # transition. They are scoped to (strategy_id, strategy_version),
+            # which is exactly what this call promotes, so they are a property
+            # of the promotion rather than of any one pinned result — and every
+            # result's refusal list carries them so that the raise names them.
+            #
+            # ⚠ AGAINST TODAY'S COUNTS, NOT A FROZEN PAIR. Freezing defeats the
+            # criterion: a pair frozen at result time is blind to a later
+            # unrecorded look at the same version's hold-out, which is the leak
+            # criterion 5 exists to catch. `holdout_access_counts` records
+            # nothing, so asking is safe. Reasoning in
+            # `app.services.strategy_promotion_replay`.
+            counts = holdout_access_counts(conn, strategy_id, strategy_version)
+            holdout_refusals = holdout_count_promotion_refusals(
+                holdout_evaluations=counts.holdout_evaluations,
+                recorded_accesses=counts.recorded_accesses,
+            )
             profit_factor_by_result = {int(row[0]): None if row[1] is None else Decimal(str(row[1])) for row in rows}
             evaluated_count_by_result = {int(row[0]): int(row[2]) for row in rows}
             # ⚠ A NULL COST STAMP READS AS *UNMODELLED*, NEVER AS MODELLED.
@@ -560,6 +587,16 @@ def promote_strategy(
                         fx_unmodelled=fx_unmodelled,
                     )
                 )
+                # #2639 — the row's OWN remaining clauses: its stamped purpose,
+                # criteria 6 and 3, criterion 9's arm pair and §9's acceptance.
+                # Every one is a column on the row already pinned above, and
+                # every one was trusting the write-time verdict that died with
+                # `WrittenRow`. ⚠ Deliberately does NOT return the structural
+                # stamps — see `stored_result_promotion_refusals` for why the
+                # read directly above is kept rather than sourced from the
+                # rebuilt object.
+                refusals.extend(stored_result_promotion_refusals(conn, result_id))
+                refusals.extend(holdout_refusals)
                 evidence = load_promotion_evidence(conn, result_id)
                 if evidence is None:
                     refusals.append("promotion_evidence_missing")

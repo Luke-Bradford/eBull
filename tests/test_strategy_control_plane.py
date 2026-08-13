@@ -12,7 +12,11 @@ import pytest
 
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
-from app.services.result_ledger import store_in_sample_result
+from app.services.result_ledger import (
+    store_holdout_result,
+    store_in_sample_arm_pair,
+    store_in_sample_result,
+)
 from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
 from app.services.strategy_control_plane import (
     StrategyControlError,
@@ -42,13 +46,21 @@ from app.services.strategy_promotion_evidence import (
     RecentYearEvidence,
 )
 from app.services.strategy_promotion_evidence_store import store_promotion_evidence
+from app.services.strategy_result import StrategyResult
 from app.services.strategy_result_ambiguity import (
     AMBIGUITY_RULE_VERSION,
     AmbiguityRecord,
     store_result_ambiguity,
 )
 from app.services.strategy_result_universe import ResultUniverseRecord, store_result_universe
-from tests.test_result_ledger import build_metrics, build_result
+from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
+from tests.test_result_ledger import (
+    BOOTSTRAP_BLOCK,
+    build_control,
+    build_deflated,
+    build_metrics,
+    build_result,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
 
@@ -168,6 +180,109 @@ _PROMOTABLE_STAMPS: dict[str, Any] = {
     "carry_unmodelled": False,
     "fx_unmodelled": False,
 }
+
+
+def _promotable_row(**overrides: Any) -> StrategyResult:
+    """A row that clears the clauses #2639 taught the transition to replay.
+
+    ⚠ THE OPT-IN GOT WIDER, and every part of it is a real refusal the shared
+    helpers now apply at the transition rather than only at result production:
+
+    - the DSR must name TODAY's register — ``build_deflated`` defaults to
+      ``declared_trials=11`` under ``trial-register-2026-08-07``, both
+      superseded, which is ``trial_register_superseded``;
+    - the criterion-3 block must be present, or ``effective_sample_size_not_computed``;
+    - §9's control must clear BOTH thresholds — ``build_control`` deliberately
+      builds one that fails, because that is the shape today's pipeline
+      produces, so a promotable fixture has to move the cohort side. ⚠ Only the
+      COHORT side: ``StrategyResult`` binds the two strategy-side figures to
+      ``metrics``.
+    """
+    deflated = build_deflated(
+        declared_trials=TRIAL_REGISTER.declared_count,
+        trial_register_version=TRIAL_REGISTER_VERSION,
+    )
+    metrics = build_metrics(profit_factor=1.2, **BOOTSTRAP_BLOCK)
+    base: dict[str, Any] = {
+        "metrics": metrics,
+        "deflated": deflated,
+        "trial_count": deflated.declared_trials,
+        "deflated_sharpe": Decimal(repr(deflated.deflated_sharpe)),
+        "synthetic_control": build_control(
+            metrics,
+            mean_return_ci_low_pct=-1.0,
+            mean_return_ci_high_pct=1.0,
+            cohort_sharpe_threshold=-9.0,
+        ),
+        "evaluated_instrument_count": 3,
+        **_PROMOTABLE_STAMPS,
+    }
+    base.update(overrides)
+    return build_result(**base)
+
+
+def _promotable_pair(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    ambiguity_arm: str = "worst_case",
+    **overrides: Any,
+) -> int:
+    """Store BOTH quarantine arms and return the masked one's ``result_id``.
+
+    ⚠ #2639 — criterion 9 is satisfied by the COMPARISON, and the transition now
+    re-derives it from the flipped-arm identity hash. A lone arm refuses
+    ``quarantine_arms_not_compared`` however clean it is otherwise, so a fixture
+    that means to promote must write the pair.
+
+    ⚠ ``result_scope="portfolio"`` BY DEFAULT, and it is load-bearing rather
+    than arbitrary: the tests that call this also write single-armed rows to
+    isolate a refusal, and neither the metrics, the DSR nor the control is part
+    of ``ResultIdentity`` — so a pair sharing the callers' arms would hash to an
+    existing ``result_version`` and hit ``strategy_results_unique``. The scope
+    is an identity member and separates them.
+    """
+    shared: dict[str, Any] = {
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "namespace": "in_sample",
+        "result_scope": "portfolio",
+        "ambiguity_arm": ambiguity_arm,
+        **overrides,
+    }
+    masked = _promotable_row(quarantine_arm="masked", **shared)
+    admitted = _promotable_row(quarantine_arm="admitted", **shared)
+    masked_id, _ = store_in_sample_arm_pair(conn, masked, admitted)
+    return masked_id
+
+
+def _recorded_holdout_evaluation(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+) -> None:
+    """One hold-out evaluation WITH its ``evaluate`` access, for criterion 5.
+
+    ⚠ #2639 — the transition now reads ``holdout_access_counts`` live, so a
+    strategy version whose hold-out was never evaluated refuses
+    ``holdout_never_evaluated``. That is ``check_promotable``'s own rule; the
+    transition had simply never applied it. ``store_holdout_result`` writes the
+    access first because ``sql/264``'s trigger requires it.
+    """
+    store_holdout_result(
+        conn,
+        _promotable_row(
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            namespace="hold_out",
+            ambiguity_arm="best_case",
+            quarantine_arm="admitted",
+        ),
+        accessed_by="tests/test_strategy_control_plane.py",
+        purpose="#2639 criterion 5 fixture",
+    )
 
 
 def _instrument(conn: psycopg.Connection[Any], instrument_id: int = 2454001) -> None:
@@ -372,16 +487,17 @@ def test_historical_validation_requires_passing_edge_evidence(
             result_ids=(result_id,),
         )
 
-    passing_result = build_result(
+    # ⚠ The passing row also has to clear #2639's replays now — the arm pair,
+    # criterion 5's live counts, the DSR against today's register and §9's
+    # control. The failing rows above stay single-armed on purpose: they isolate
+    # the #2505 evidence refusal this test is about.
+    _recorded_holdout_evaluation(conn, strategy_id="S-GOV", strategy_version="v1")
+    passing_result_id = _promotable_pair(
+        conn,
         strategy_id="S-GOV",
         strategy_version="v1",
-        namespace="in_sample",
         ambiguity_arm="best_case",
-        metrics=build_metrics(profit_factor=1.2),
-        evaluated_instrument_count=3,
-        **_PROMOTABLE_STAMPS,
     )
-    passing_result_id = store_in_sample_result(conn, passing_result)
     _universe_record(conn, passing_result_id)
     _ambiguity_record(conn, passing_result_id)
     store_promotion_evidence(
@@ -474,8 +590,21 @@ def test_promotion_replays_the_frozen_universe_check(
     _universe_record(conn, mismatched_id, evaluated=frozenset({1, 2, 3}), universe=frozenset({1, 2, 3}))
     _refuses(mismatched_id, "evaluated_universe_count_mismatch")
 
-    # A consistent subset record plus passing evidence promotes.
-    passing_id = _result_id("best_case", "admitted")
+    # A consistent subset record plus passing evidence promotes. ⚠ The passing
+    # row must now also clear #2639's replays — the arm pair, criterion 5's
+    # counts, the DSR against today's register and §9's control — so it is built
+    # through `_promotable_pair` rather than the single-row `_result_id` above,
+    # which exists to isolate the universe refusals.
+    _recorded_holdout_evaluation(conn, strategy_id="S-GOV", strategy_version="v1")
+    passing_id = _promotable_pair(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        ambiguity_arm="best_case",
+        evaluated_instrument_count=2,
+    )
+    store_promotion_evidence(conn, result_id=passing_id, evidence=_passing_promotion_evidence())
+    _ambiguity_record(conn, passing_id)
     _universe_record(conn, passing_id, evaluated=frozenset({1, 2}), universe=frozenset({1, 2, 3}))
     promotion = promote_strategy(
         conn,
@@ -560,7 +689,15 @@ def test_promotion_replays_the_ambiguity_record_and_the_structural_stamps(
     # ⚠ Routed through the SHARED `structural_promotion_refusals`, so this also
     # pins that the transition and #2599's preregistration freeze read one copy
     # of the rule rather than two that can drift.
-    passing = _result_id("best_case", "admitted")
+    _recorded_holdout_evaluation(conn, strategy_id="S-GOV", strategy_version="v1")
+    passing = _promotable_pair(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        ambiguity_arm="best_case",
+    )
+    _universe_record(conn, passing)
+    store_promotion_evidence(conn, result_id=passing, evidence=_passing_promotion_evidence())
     _ambiguity_record(conn, passing)
     promotion = promote_strategy(
         conn,
@@ -570,6 +707,156 @@ def test_promotion_replays_the_ambiguity_record_and_the_structural_stamps(
         promoted_by="operator",
         reason="ambiguity and structural replays pass",
         evidence_ref="result:test-2625-passing",
+        result_ids=(passing,),
+    )
+    assert promotion.to_stage == "historical_validated"
+
+
+def test_promotion_replays_the_rows_own_clauses_and_the_holdout_counts(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2639 — the last inputs `promote_strategy` took on trust.
+
+    ⚠⚠ EVERY REFUSAL BELOW WAS ALREADY IN `check_promotable` AND THE TRANSITION
+    SIMPLY NEVER APPLIED IT. That is the #2621 defect surviving in the clauses
+    #2625 stopped short of: a result stamped `harness_validation`, carrying no
+    DSR, deflated against a superseded register, missing its criterion-3 sample
+    size, missing §9's control, missing criterion 9's second arm, or belonging
+    to a version whose hold-out was never evaluated, could all be pinned to a
+    promotion without the transition looking.
+
+    ⚠ The clean row is built ONCE and each case breaks exactly one thing, so a
+    refusal is attributable. ⚠ Each case carries its own
+    `input_rule_set_version` because neither the metrics, the DSR nor the
+    control is part of `ResultIdentity` — two cases differing only in those hash
+    to the SAME `result_version` and collide on `strategy_results_unique`.
+    """
+    conn = ebull_test_conn
+    promote_strategy(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="research_candidate",
+        promoted_by="operator",
+        reason="register candidate",
+    )
+
+    def _records(result_id: int) -> int:
+        _universe_record(conn, result_id, evaluated=frozenset({1, 2, 3}))
+        _ambiguity_record(conn, result_id)
+        store_promotion_evidence(conn, result_id=result_id, evidence=_passing_promotion_evidence())
+        return result_id
+
+    def _refuses(result_id: int, code: str) -> None:
+        with pytest.raises(StrategyControlError, match=code):
+            promote_strategy(
+                conn,
+                strategy_id="S-GOV",
+                strategy_version="v1",
+                to_stage="historical_validated",
+                promoted_by="operator",
+                reason="the row's own clauses must refuse",
+                evidence_ref="result:test-2639",
+                result_ids=(result_id,),
+            )
+        assert current_stage(conn, "S-GOV", "v1") == "research_candidate"
+
+    # Criterion 9 — one arm is not a comparison, however clean the row is.
+    lone = _records(
+        store_in_sample_result(
+            conn,
+            _promotable_row(
+                strategy_id="S-GOV",
+                strategy_version="v1",
+                namespace="in_sample",
+                ambiguity_arm="worst_case",
+                quarantine_arm="masked",
+                input_rule_set_version="price-quarantine-v1+2639lone000",
+            ),
+        )
+    )
+    _refuses(lone, "quarantine_arms_not_compared")
+
+    # The row's OWN purpose, which the transition never read: it refuses on
+    # `registered_strategy_purpose` — the MANIFEST's — and S-GOV is a
+    # capital_candidate, so a harness-stamped row reached the gate untouched.
+    harness = _records(
+        _promotable_pair(
+            conn,
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            ambiguity_arm="worst_case",
+            purpose="harness_validation",
+            input_rule_set_version="price-quarantine-v1+2639harness",
+        )
+    )
+    _refuses(harness, "harness_validation_only")
+
+    # Criterion 6 — deflated against a register that has since moved on.
+    superseded_dsr = build_deflated(
+        declared_trials=TRIAL_REGISTER.declared_count,
+        trial_register_version="trial-register-2026-08-07",
+    )
+    superseded = _records(
+        _promotable_pair(
+            conn,
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            ambiguity_arm="best_case",
+            input_rule_set_version="price-quarantine-v1+2639stale00",
+            deflated=superseded_dsr,
+            trial_count=superseded_dsr.declared_trials,
+            deflated_sharpe=Decimal(repr(superseded_dsr.deflated_sharpe)),
+        )
+    )
+    _refuses(superseded, "trial_register_superseded")
+
+    # Criteria 6, 3 and §9 together — the shape today's pipeline writes.
+    bare = _records(
+        _promotable_pair(
+            conn,
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            ambiguity_arm="best_case",
+            input_rule_set_version="price-quarantine-v1+2639bare000",
+            deflated=None,
+            trial_count=None,
+            deflated_sharpe=None,
+            metrics=build_metrics(profit_factor=1.2),
+            synthetic_control=None,
+        )
+    )
+    _refuses(bare, "deflated_sharpe_not_computed")
+    _refuses(bare, "effective_sample_size_not_computed")
+    _refuses(bare, "synthetic_control_not_run")
+
+    # Criterion 5 — read LIVE, so a version whose hold-out was never evaluated
+    # refuses even with every frozen record in place.
+    passing = _records(
+        _promotable_pair(
+            conn,
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            ambiguity_arm="worst_case",
+            input_rule_set_version="price-quarantine-v1+2639pass000",
+        )
+    )
+    _refuses(passing, "holdout_never_evaluated")
+
+    # ⚠⚠ THE SAME PINNED RESULT, UNCHANGED, NOW PROMOTES — because the count it
+    # depends on is a property of the STRATEGY VERSION and is read at the
+    # transition, not frozen into the row. That is the whole content of the
+    # `today` classification: a hold-out evaluation recorded afterwards moves
+    # the verdict, and so would an unrecorded one, in the other direction.
+    _recorded_holdout_evaluation(conn, strategy_id="S-GOV", strategy_version="v1")
+    promotion = promote_strategy(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="historical_validated",
+        promoted_by="operator",
+        reason="every replayed clause passes",
+        evidence_ref="result:test-2639-passing",
         result_ids=(passing,),
     )
     assert promotion.to_stage == "historical_validated"

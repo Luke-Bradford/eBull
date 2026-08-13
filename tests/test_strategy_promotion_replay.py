@@ -63,26 +63,40 @@ class TestTodayIsRestricted:
         a future author cannot quietly add a second today-check.
         """
         today = {name for name, entry in REPLAY_TEMPORAL_POLICY.items() if entry.rule == "today"}
-        assert today == {"promotion_evidence"}, (
-            "a new input replays against TODAY — justify it by naming the validity window the stored record "
-            "declares (promotion_evidence declares cost_observed_on / cost_valid_through), or classify it frozen"
+        assert today == {
+            # shape 1 — the record declares its own validity window
+            # (cost_observed_on / cost_valid_through).
+            "promotion_evidence",
+            # shape 3 (#2639) — an append-only audit log, a clause comparing it
+            # against the rows it audits, and a criterion (5) that requires the
+            # comparison to be current. Frozen here would be blind to a later
+            # unrecorded look at the same version's hold-out.
+            "holdout_evaluations",
+            "recorded_accesses",
+        }, (
+            "a new input replays against TODAY — justify it under one of the three shapes in "
+            "app/services/strategy_promotion_replay.py's module docstring (a declared validity window, "
+            "explicit supersession, or an append-only audit log whose self-consistency is the clause), "
+            "or classify it frozen"
         )
 
 
 class TestTheGapIsCounted:
-    def test_the_unenforced_set_is_exactly_the_known_gap(self) -> None:
+    def test_the_unenforced_set_is_empty(self) -> None:
         """⚠⚠ NOT_RE_READ IS A GAP, NOT COVERAGE — and this pins its size.
 
-        These three inputs are neither persisted nor re-derived, so
-        ``promote_strategy`` still trusts a write-time verdict that died with
-        ``WrittenRow`` — the exact defect #2621 was filed about, surviving where
-        re-reading has a governance cost. The set is asserted rather than
-        described so that it cannot GROW unnoticed: a new unenforced input is a
-        test failure, and shrinking it is the follow-up work.
+        It was ``{holdout_evaluations, recorded_accesses,
+        quarantine_arms_compared}`` under #2625 and is EMPTY since #2639: the
+        counts replay against today's ledger, the arm pair is re-derived from the
+        identity hash, and the row's own clauses go through the same pure
+        functions ``check_promotable`` calls.
+
+        ⚠ The assertion stays after the set emptied, and that is the point — an
+        input added to ``PromotionCandidate`` and classified without being wired
+        lands in this set and fails HERE, rather than arriving as a gate clause
+        nobody applies. Edit it deliberately; do not delete it.
         """
-        assert unenforced_candidate_fields() == frozenset(
-            {"holdout_evaluations", "recorded_accesses", "quarantine_arms_compared"}
-        )
+        assert unenforced_candidate_fields() == frozenset()
 
     def test_every_unenforced_field_is_classified_not_re_read(self) -> None:
         # The two axes must agree: an input the transition does not replay is
