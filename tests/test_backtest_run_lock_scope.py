@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -124,12 +125,14 @@ def _run_to_the_write_phase(
     monkeypatch: pytest.MonkeyPatch,
     *,
     evaluate: Any = None,
+    stops: bool = True,
 ) -> None:
     """Drive a real run through evaluation with the corpus pass stubbed out.
 
-    The caller stubs ``_write_rows`` to raise ``_StopAfterEvaluation`` after
-    recording whatever it is measuring, and may supply its own ``evaluate`` to
-    observe the connection at each arm.
+    The caller stubs ``_write_rows`` — usually to raise ``_StopAfterEvaluation``
+    after recording whatever it is measuring — and may supply its own
+    ``evaluate`` to observe the connection at each arm. Pass ``stops=False``
+    where the stub is expected to let the run continue past the write phase.
     """
     evaluate = evaluate or (lambda *_args, **_kwargs: _stub_measurement())
     monkeypatch.setattr(backtest_run, "load_corpus", lambda *_args, **_kwargs: _tiny_corpus())
@@ -138,13 +141,18 @@ def _run_to_the_write_phase(
     monkeypatch.setattr(backtest_run, "evaluate_level_arms", lambda *args, **kwargs: (evaluate(*args, **kwargs),))
 
     strategy_id = next(iter(sorted(STRATEGY_MANIFEST)))
+    call = partial(
+        run_backtest,
+        conn,
+        strategy_id=strategy_id,
+        manifest={strategy_id: STRATEGY_MANIFEST[strategy_id]},
+        release_read_locks=True,
+    )
+    if not stops:
+        call()
+        return
     with pytest.raises(_StopAfterEvaluation):
-        run_backtest(
-            conn,
-            strategy_id=strategy_id,
-            manifest={strategy_id: STRATEGY_MANIFEST[strategy_id]},
-            release_read_locks=True,
-        )
+        call()
 
 
 @pytest.fixture
@@ -232,6 +240,41 @@ def test_the_write_phase_runs_inside_one_transaction_even_after_a_release(
     monkeypatch.setattr(backtest_run, "_write_rows", _write)
     _run_to_the_write_phase(ebull_test_conn, monkeypatch)
     assert seen == [int(psycopg.pq.TransactionStatus.INTRANS)]
+
+
+def test_a_failed_completeness_check_discards_what_the_write_phase_wrote(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wrapper is only worth anything if it actually unwinds real rows.
+
+    Asserting that ``_write_rows`` is *entered* inside a transaction leaves the
+    claim one step short — it does not show that work already done there is
+    discarded when a later step refuses. So this stub WRITES, and then returns no
+    rows, which is what ``_assert_every_runnable_produced_rows`` exists to catch:
+    a runnable strategy that produced nothing. The row must not survive.
+
+    ⚠ A session-scoped ``TEMP`` table, committed before the run, so the write is
+    real and rolled back by the real boundary while leaving nothing behind in the
+    worker's database.
+    """
+    ebull_test_conn.execute("CREATE TEMP TABLE _write_phase_probe (id int)")
+    ebull_test_conn.commit()
+
+    def _write(inner_conn: psycopg.Connection[Any], **_kwargs: object) -> tuple[object, ...]:
+        inner_conn.execute("INSERT INTO _write_phase_probe (id) VALUES (1)")
+        return ()
+
+    monkeypatch.setattr(backtest_run, "_write_rows", _write)
+    with pytest.raises(RuntimeError):
+        _run_to_the_write_phase(ebull_test_conn, monkeypatch, stops=False)
+
+    surviving = ebull_test_conn.execute("SELECT count(*) FROM _write_phase_probe").fetchone()
+    assert surviving is not None
+    assert surviving[0] == 0
+    ebull_test_conn.rollback()
+    ebull_test_conn.execute("DROP TABLE _write_phase_probe")
+    ebull_test_conn.commit()
 
 
 def test_every_arm_ends_its_own_read_transaction(
