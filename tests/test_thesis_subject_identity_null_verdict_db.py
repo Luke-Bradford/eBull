@@ -70,8 +70,7 @@ def _seed_instrument(
     instrument is one carrying EMPTY STRINGS, not NULLs — which is exactly what
     ``subject_is_checkable`` strips-and-tests for."""
     conn.execute(
-        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable)"
-        " VALUES (%s, %s, %s, TRUE)",
+        "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (%s, %s, %s, TRUE)",
         (instrument_id, symbol, company_name),
     )
     conn.commit()
@@ -89,9 +88,7 @@ def _read_triple(conn: psycopg.Connection[Any], thesis_id: int) -> tuple[Any, An
 
 
 class TestInsertThesisAtomic:
-    def test_unverdictable_subject_stores_the_whole_triple_null(
-        self, conn: psycopg.Connection[Any]
-    ) -> None:
+    def test_unverdictable_subject_stores_the_whole_triple_null(self, conn: psycopg.Connection[Any]) -> None:
         """The defect: this path ABORTED the insert rather than degrading to it.
 
         ``_insert_thesis_atomic``'s docstring makes the NULL triple the
@@ -115,9 +112,7 @@ class TestInsertThesisAtomic:
 
         assert _read_triple(conn, thesis_id) == (None, None, None)
 
-    def test_empty_subject_dict_is_also_unverdictable(
-        self, conn: psycopg.Connection[Any]
-    ) -> None:
+    def test_empty_subject_dict_is_also_unverdictable(self, conn: psycopg.Connection[Any]) -> None:
         """``_build_context`` yields ``{}`` when the instruments row is missing,
         and that is the production shape of this path — not the ``None`` above.
         Scored as False it would read as "checked and failed"; it must be NULL.
@@ -125,15 +120,11 @@ class TestInsertThesisAtomic:
         iid = _seed_instrument(conn, 9202, "TNW", "Thesis Null Verdict Test Co Two")
 
         with conn.transaction():
-            thesis_id, _version = _insert_thesis_atomic(
-                conn, iid, _WRITER, None, model="m", provider="p", subject={}
-            )
+            thesis_id, _version = _insert_thesis_atomic(conn, iid, _WRITER, None, model="m", provider="p", subject={})
 
         assert _read_triple(conn, thesis_id) == (None, None, None)
 
-    def test_checkable_subject_stores_the_whole_triple_set(
-        self, conn: psycopg.Connection[Any]
-    ) -> None:
+    def test_checkable_subject_stores_the_whole_triple_set(self, conn: psycopg.Connection[Any]) -> None:
         """The other side of sql/332's all-or-nothing CHECK. Without this a fix
         that binds NULL unconditionally would pass the two tests above."""
         iid = _seed_instrument(conn, 9203, "OTEX", "Open Text Corp")
@@ -159,9 +150,7 @@ class TestEnsureSubjectIdentityVerdictsAgainstPostgres:
     """⚠ This runs at LIFESPAN. Untyped, the reset direction raised at
     application start, not in a background job."""
 
-    def test_a_row_that_became_unverdictable_is_reset_to_null(
-        self, conn: psycopg.Connection[Any]
-    ) -> None:
+    def test_a_row_that_became_unverdictable_is_reset_to_null(self, conn: psycopg.Connection[Any]) -> None:
         """Real-backend twin of the ``_FakeConn`` test of the same name in
         ``tests/test_thesis_subject_identity_quarantine.py``. That one asserts
         the probe DECIDES ``ok=None``; this one asserts the decision can be
@@ -206,9 +195,7 @@ class TestEnsureSubjectIdentityVerdictsAgainstPostgres:
         iid = _seed_instrument(conn, 9205, "OTEX", "Open Text Corp")
 
         with conn.transaction():
-            thesis_id, _version = _insert_thesis_atomic(
-                conn, iid, _WRITER, None, model="m", provider="p", subject=None
-            )
+            thesis_id, _version = _insert_thesis_atomic(conn, iid, _WRITER, None, model="m", provider="p", subject=None)
         assert _read_triple(conn, thesis_id) == (None, None, None)
 
         with conn.transaction():
