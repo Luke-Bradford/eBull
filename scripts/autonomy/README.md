@@ -68,10 +68,25 @@ touch  <worktree>/var/autonomy/PAUSE         # graceful stop after this iteratio
 tail -f <worktree>/var/autonomy/loop.log
 ```
 
-| loop | worktree | launchd label | prompt |
-| --- | --- | --- | --- |
-| TA (#2240) | `~/Dev/.ebull-autonomy` | `com.ebull.ta-loop` | `ta_loop_prompt.md` |
-| ownership / filings | `~/Dev/.ebull-ownership` | `com.ebull.ownership-loop` | `ownership_loop_prompt.md` |
+| loop | worktree | launchd label | canonical prompt (tracked) | installed as |
+| --- | --- | --- | --- | --- |
+| TA (#2240) | `~/Dev/.ebull-autonomy` | `com.ebull.ta-loop` | `.autonomy/loop_prompt.md` | `var/autonomy/bin/ta_loop_prompt.md` |
+| ownership / filings | `~/Dev/.ebull-ownership` | `com.ebull.ownership-loop` | `scripts/autonomy/ownership_loop_prompt.md` | `var/autonomy/bin/ownership_loop_prompt.md` |
+
+⚠ **The installed prompt is DERIVED, never copied by hand (#2658).** Every
+iteration the driver runs `git show $TA_LOOP_PROMPT_REF:$TA_LOOP_PROMPT_SOURCE`
+(defaults: `origin/main` and the canonical column above, chosen from the
+installed prompt's filename) and replaces the installed copy when the hashes
+differ, logging the outcome into `loop.log` and `status.md` either way. Before
+this there were two tracked prompt files and the loop read the one nobody
+maintained: #2604 re-aimed `.autonomy/loop_prompt.md`, the driver read
+`var/autonomy/bin/ta_loop_prompt.md` sourced from a now-deleted
+`scripts/autonomy/ta_loop_prompt.md`, and the loop ran a week of completed
+marching orders reporting `OK` every iteration.
+
+It reads the git object store rather than the checked-out file on purpose: the
+worktree changes branch every iteration, so the tracked path holds whatever that
+branch holds — `origin/main:` is branch-independent and is reviewed, merged text.
 
 **One driver, two configurations.** `ta_loop.sh` is loop-agnostic: worktree,
 state directory and prompt are env-driven and the single-instance lock lives at
@@ -95,6 +110,14 @@ branches off an older commit. `/var/*` is gitignored. Re-copy after any change:
 ```bash
 cp scripts/autonomy/ta_loop.sh <worktree>/var/autonomy/bin/
 ```
+
+The **driver** is the one thing still copied by hand, and the reason it is not
+auto-replaced like the prompt is that the running process is already executing
+the old bytes: swapping the file would change what a reader sees without
+changing what ran. So the driver instead **checks itself** at startup against
+`origin/main:scripts/autonomy/ta_loop.sh` and logs `WARN driver STALE …` with
+both hashes when the copy is behind — the check that would have caught #2658's
+sibling before anyone went looking.
 
 ⚠ **Deliberately dumb, and that is the design.** The previous eBull loop ran
 through the autonomy-engine supervisor and died on 2026-07-23 spinning on

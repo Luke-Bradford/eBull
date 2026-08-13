@@ -22,8 +22,12 @@
 #
 # INSTALLED COPY — what launchd actually runs
 #   mkdir -p <worktree>/var/autonomy/bin
-#   cp scripts/autonomy/ta_loop.sh scripts/autonomy/ta_loop_prompt.md \
-#      <worktree>/var/autonomy/bin/
+#   cp scripts/autonomy/ta_loop.sh <worktree>/var/autonomy/bin/
+#
+# ⚠ The DRIVER is the only thing you copy. The prompt installs itself: every
+# iteration the driver materialises it from git (see PROMPT_SOURCE below) and
+# replaces the installed copy when it differs. Copying a prompt by hand is what
+# broke for seven days (#2658) — one existed, nothing compared it to anything.
 #
 # ⚠ Run the INSTALLED copy, never the tracked one, for anything unattended.
 # The driver drives a worktree that changes branch every iteration; a driver
@@ -49,6 +53,28 @@ STATE_DIR="${TA_LOOP_STATE:-$WORKTREE/var/autonomy}"
 # in .gitignore keeps out of git's reach entirely.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROMPT="${TA_LOOP_PROMPT:-$SELF_DIR/ta_loop_prompt.md}"
+
+# ⚠ #2658: the installed prompt is a COPY, and for seven days nothing compared
+# it to anything. `.autonomy/loop_prompt.md` is the file everyone maintains and
+# reviews; `var/autonomy/bin/ta_loop_prompt.md` is the file the loop reads. A
+# merge to the first changed nothing about the second, silently, for 33
+# iterations and ~$543. So the copy is now DERIVED every iteration instead of
+# installed by hand.
+#
+# Read from the git OBJECT STORE, not the worktree's filesystem: the branch
+# changes every iteration, so `$WORKTREE/.autonomy/loop_prompt.md` is whatever
+# the current branch happens to hold (or absent, on a branch older than the
+# file). `origin/main:` is branch-independent AND is the merged, reviewed text —
+# never a local edit that has not been through the bot.
+PROMPT_REF="${TA_LOOP_PROMPT_REF:-origin/main}"
+# Defaulted from the installed prompt's NAME so the fix binds with no plist
+# change and no launchd re-bootstrap — needing an operator step is how #2658
+# survived being "fixed" once already (#2604 re-aimed a file nothing read).
+case "$(basename "$PROMPT")" in
+  ownership_loop_prompt.md) _default_prompt_source="scripts/autonomy/ownership_loop_prompt.md" ;;
+  *)                        _default_prompt_source=".autonomy/loop_prompt.md" ;;
+esac
+PROMPT_SOURCE="${TA_LOOP_PROMPT_SOURCE:-$_default_prompt_source}"
 PAUSE="$STATE_DIR/PAUSE"
 LOG="$STATE_DIR/loop.log"
 STATUS="$STATE_DIR/status.md"
@@ -96,10 +122,76 @@ if [[ ! -d "$WORKTREE/.git" && ! -f "$WORKTREE/.git" ]]; then
   log "FATAL worktree $WORKTREE is not a git checkout"
   exit 1
 fi
-if [[ ! -f "$PROMPT" ]]; then
-  log "FATAL prompt not found at $PROMPT"
-  exit 1
-fi
+
+# sha256 of a file, or the empty string when it cannot be read. Not piped into
+# anything whose status is then read — `cut` is the downstream command here.
+file_sha() { shasum -a 256 < "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# Extract "<ref>:<path>" into $2. Returns non-zero (and leaves nothing behind)
+# when git cannot produce it. `>` is a redirect, not a pipe, so $? is git's.
+git_show_to() {
+  git -C "$WORKTREE" show "$1" > "$2" 2>/dev/null || { rm -f "$2"; return 1; }
+  [[ -s "$2" ]] || { rm -f "$2"; return 1; }
+}
+
+# One line, rewritten every iteration and echoed into status.md — the whole
+# point of #2658 is that a human opening status.md can see WHICH prompt ran.
+prompt_status="not yet checked"
+
+sync_prompt() {
+  local tmp canon_sha installed_sha
+  installed_sha="$(file_sha "$PROMPT")"
+  # Same directory as $PROMPT so the replacement below is a rename, not a copy:
+  # an iteration must never read a half-written prompt.
+  tmp="$PROMPT.canonical.$$"
+  if ! git_show_to "$PROMPT_REF:$PROMPT_SOURCE" "$tmp"; then
+    # Not fatal. A missing remote-tracking ref or an unfetched repo is an
+    # environment problem, and halting the loop over it is a self-inflicted
+    # outage — but it is announced, because running an UNVERIFIED prompt is
+    # exactly the state this function exists to make visible.
+    prompt_status="UNVERIFIED against $PROMPT_REF:$PROMPT_SOURCE — ran installed ${installed_sha:0:12}"
+    log "WARN prompt $prompt_status"
+    return
+  fi
+  canon_sha="$(file_sha "$tmp")"
+  if [[ -n "$installed_sha" && "$canon_sha" == "$installed_sha" ]]; then
+    rm -f "$tmp"
+    prompt_status="in sync with $PROMPT_REF:$PROMPT_SOURCE (${canon_sha:0:12})"
+    log "prompt $prompt_status"
+    return
+  fi
+  if mv "$tmp" "$PROMPT"; then
+    prompt_status="RESYNCED from $PROMPT_REF:$PROMPT_SOURCE — ${installed_sha:0:12} -> ${canon_sha:0:12}"
+    log "prompt $prompt_status"
+  else
+    rm -f "$tmp"
+    prompt_status="STALE ${installed_sha:0:12} != $PROMPT_REF ${canon_sha:0:12}, and $PROMPT could not be replaced"
+    log "WARN prompt $prompt_status"
+  fi
+}
+
+# #2658 item 4: the prompt was not the only thing installed once and never
+# looked at again. The driver is checked but NEVER auto-replaced — this process
+# is already running the old bytes, so swapping the file would change what a
+# reader sees without changing what ran, which is worse than being stale.
+check_driver_freshness() {
+  local tmp installed tracked
+  tmp="$STATE_DIR/.driver.canonical.$$"
+  if ! git_show_to "$PROMPT_REF:scripts/autonomy/ta_loop.sh" "$tmp"; then
+    log "WARN driver UNVERIFIED against $PROMPT_REF:scripts/autonomy/ta_loop.sh"
+    return
+  fi
+  installed="$(file_sha "${BASH_SOURCE[0]}")"
+  tracked="$(file_sha "$tmp")"
+  rm -f "$tmp"
+  if [[ "$installed" == "$tracked" ]]; then
+    log "driver in sync with $PROMPT_REF (${installed:0:12})"
+  else
+    log "WARN driver STALE — installed ${installed:0:12} != $PROMPT_REF ${tracked:0:12};"
+    log "WARN   re-copy scripts/autonomy/ta_loop.sh into $SELF_DIR and restart (a running driver is not auto-replaced)"
+  fi
+}
+
 
 # ⚠ ONE driver per worktree. The dedicated worktree stops this loop clobbering
 # ~/Dev/eBull; it does nothing about a second copy of the loop itself, and
@@ -146,6 +238,20 @@ trap 'rm -rf "$LOCK"' EXIT
 
 log "=== ta_loop start (worktree=$WORKTREE, max=$MAX_ITERATIONS, cooldown=${COOLDOWN_SECONDS}s, pid=$$) ==="
 
+# ⚠ AFTER the lock. A second driver that is about to ABORT must not rewrite the
+# live one's prompt on its way out — the sync is a state mutation, and only the
+# lock holder may make it.
+#
+# The prompt sync runs before the existence check on purpose: a fresh install is
+# now one `cp` of the driver, and the first sync writes the prompt beside it.
+check_driver_freshness
+sync_prompt
+
+if [[ ! -f "$PROMPT" ]]; then
+  log "FATAL prompt not found at $PROMPT and none recoverable from $PROMPT_REF:$PROMPT_SOURCE"
+  exit 1
+fi
+
 iteration=0
 consecutive_failures=0
 
@@ -173,6 +279,11 @@ while true; do
   transcript="$STATE_DIR/iteration-$(date -u +%Y%m%dT%H%M%SZ)-$$.$iteration.log"
   log "--- iteration $iteration start"
 
+  # ⚠ EVERY iteration, not once at startup. This loop stays up for days; a
+  # prompt merged on day three has to reach the iteration after it, and the
+  # seven-day #2658 stall is what happens when nothing re-reads the source.
+  sync_prompt
+
   # ⚠ status.md is written BEFORE the iteration as well as after. Written only
   # at the end, the file a human is told to open does not exist at all during
   # the first run — which is the same "instrumentation is silent exactly when
@@ -184,6 +295,7 @@ while true; do
     echo "- started: $started"
     echo "- pid: $$"
     echo "- transcript: \`$transcript\`"
+    echo "- prompt: $prompt_status"
   } > "$STATUS"
 
   # ⚠ NOT piped into head/tail. A pipe returns the pipe's status and buffers
@@ -255,6 +367,7 @@ while true; do
     echo "- result event ok: $result_ok"
     echo "- consecutive failures: $consecutive_failures"
     echo "- transcript: \`$transcript\`"
+    echo "- prompt: $prompt_status"
     echo
     echo "## Last 40 lines"
     echo '```'

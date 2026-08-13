@@ -4,10 +4,15 @@
 
   Install (once) — driver copy FIRST, then the agent:
     mkdir -p /Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/bin
-    cp scripts/autonomy/ta_loop.sh scripts/autonomy/ta_loop_prompt.md \
+    cp scripts/autonomy/ta_loop.sh \
        /Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/bin/
     cp scripts/autonomy/com.ebull.ta-loop.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ebull.ta-loop.plist
+
+  ⚠ The DRIVER is the only file copied. The prompt installs itself: the driver
+  materialises it from `origin/main:.autonomy/loop_prompt.md` every iteration
+  and replaces the installed copy when the hashes differ (#2658). No plist
+  change and no re-bootstrap is needed to re-aim the loop — merge the prompt.
 
   ⚠ launchd runs the copy under var/autonomy/bin/, NOT the tracked script.
   The driver drives a worktree whose branch changes every iteration, so a

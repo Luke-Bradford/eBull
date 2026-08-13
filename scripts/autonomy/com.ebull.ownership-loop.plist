@@ -4,8 +4,14 @@
 
   Install (once) — driver copy FIRST, then the agent:
     mkdir -p /Users/lukebradford/Dev/.ebull-ownership/var/autonomy/bin
-    cp scripts/autonomy/ta_loop.sh scripts/autonomy/ownership_loop_prompt.md \
+    cp scripts/autonomy/ta_loop.sh \
        /Users/lukebradford/Dev/.ebull-ownership/var/autonomy/bin/
+
+  ⚠ The DRIVER is the only file copied. `TA_LOOP_PROMPT` below names the
+  installed path; the driver derives its canonical source from that filename
+  (`origin/main:scripts/autonomy/ownership_loop_prompt.md`) and re-materialises
+  it every iteration, so a merged prompt edit reaches the loop with no
+  re-bootstrap (#2658). Override with TA_LOOP_PROMPT_SOURCE if that moves.
     cp scripts/autonomy/com.ebull.ownership-loop.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ebull.ownership-loop.plist
 
