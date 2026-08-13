@@ -1,0 +1,581 @@
+# Backend stability + dev DB hygiene — plan (#1208)
+
+> Phase: 9 of `docs/superpowers/plans/2026-05-17-us-etl-completion.md` (separate epic).
+> Issue: #1208 OPEN.
+> Cousin to the ETL completion plan — same "session-by-session, autonomous-execution, one PR per phase, handover prompt at the end" cadence.
+> Closure framing: **BACKEND-STABILITY PRIMITIVE** — mirrors `ETL FRESHNESS PRIMITIVE` shape from #863-#873.
+
+## 0. Parent-ETL status as of 2026-05-18
+
+The US ETL completion plan (`docs/superpowers/plans/2026-05-17-us-etl-completion.md`) is **CLOSED through Phase 6 inclusive**:
+
+- Phase 1-4: ✅ closed (PRs #1190 / #1191 / #1193 / #1194 / #1196 / #1198 / #1200).
+- Phase 5: ✅ closed 2026-05-18 (PRs #1203 / #1205).
+- Phase 6: ✅ closed 2026-05-18 (PRs #1207 bimonthly + **#1209 RegSHO daily, merge `65dc4fc`**).
+
+No remaining headline data-source gaps. **#1208 (this plan) is the next-priority track** — it has been pre-staged as Phase 9 of the parent plan and is scoped + budgeted independently.
+
+## 1. Scope from #1208 (issue body, lightly re-organised + extended)
+
+| Sub | Theme | Headline deliverable | Estimate (LOC) | Closure framing |
+|---|---|---|---|---|
+| Sub 1 | Postgres tuning | `sql/NNN_postgres_runtime_tuning.sql` — max_wal_size/shared_buffers/wal_compression + docker-compose mem_limit + shm_size | ~200 | TUNING PRIMITIVE |
+| Sub 2 | Test-fixture orphan sweep | `_drop_orphan_workers_older_than` in `tests/fixtures/ebull_test_db.py` + slim-data posture audit | ~300 | HYGIENE PRIMITIVE |
+| Sub 3 | `financial_facts_raw` partition | Quarterly RANGE-by-`period_end` partition migration + retention horizon enforcement | ~400 | SCHEMA PRIMITIVE |
+| Sub 4 | Observability | `/system/postgres-health` endpoint + pre-push hook bloat warning | ~200 | OBSERVABILITY PRIMITIVE |
+| Sub 5 | Prevention-log entry | `docs/review-prevention-log.md` Postgres-on-Docker section | ~50 | DOCS PRIMITIVE |
+| **Sub 6** | **Runtime-config singleton resilience** | **NEW — see §2 below** | ~150 | RESILIENCE PRIMITIVE |
+
+## 2. Sub 6 — Runtime-config singleton resilience (NEW, added 2026-05-18 session)
+
+### Symptom
+
+Operator login on 2026-05-18 was slow + FE polling `/config` returned `503 Service Unavailable` twice (captured in user-supplied logs). Investigation found `runtime_config` table on dev DB had **0 rows**.
+
+### Root cause
+
+Migration `sql/015_runtime_config.sql` seeds the singleton via `INSERT ... ON CONFLICT (id) DO NOTHING`. The migration ran successfully (in `schema_migrations`). Row was deleted later — most likely by a test cleanup that violated the [[test-db-isolation]] contract (tests pointing at `ebull` instead of `ebull_test`).
+
+### Immediate operator action (already taken)
+
+Re-seeded the singleton inline against dev DB:
+
+```sql
+INSERT INTO runtime_config (id, enable_auto_trading, enable_live_trading, updated_by, reason, display_currency)
+VALUES (TRUE, FALSE, FALSE, 'recovery', 'singleton vanished — re-seeded 2026-05-18 after #1209 merge', 'GBP')
+ON CONFLICT (id) DO NOTHING;
+```
+
+`/config` returns 200 again as of 2026-05-18T17:10 UTC.
+
+### Permanent fix (this sub-ticket)
+
+1. **Boot-time guard** at `app/main.py` lifespan startup: after migrations run, assert `SELECT count(*) FROM runtime_config = 1`. If zero, log a WARNING + re-seed with the same safe defaults (`enable_auto_trading=FALSE, enable_live_trading=FALSE, updated_by='boot_recovery', reason='singleton vanished — re-seeded by boot guard', display_currency='GBP'`). Same shape as `kill_switch` boot recovery (sql/010 + `ops_monitor.get_kill_switch_status` fail-closed pattern). Fail-closed posture preserved (defaults are off).
+2. **Test-DB isolation invariant test** — `tests/test_dev_db_no_test_writes.py` (NEW): records `pg_database_size('ebull')` at session start, asserts no growth at session end. Catches a test that accidentally points at dev DB. Failing this test = a tech-debt issue + a prevention-log entry per `feedback_test_db_isolation`.
+3. **Prevention-log entry** — `docs/review-prevention-log.md`: "Runtime singleton vanished after test contamination" — Symptom / Root cause / Detection / Prevention.
+
+### Tests
+
+| File | Asserts |
+|---|---|
+| `tests/test_runtime_config_boot_guard.py` | Drop the singleton row in `ebull_test_conn`; call the boot-guard helper; assert row exists + values are the safe defaults; assert WARNING log fired. |
+| `tests/test_dev_db_no_test_writes.py` | Records dev-DB size at fixture setup + teardown; assert delta < 1 MB. Skipped on CI (CI uses a separate DB). |
+
+## 3. Task DAG
+
+```
+P1 (= Sub 1 + Sub 6) — Postgres tuning + runtime_config boot guard
+   → quick win; ~350 LOC; one PR.
+P2 (= Sub 2)         — Test-fixture orphan sweep + slim-data audit
+   → medium; ~300 LOC; one PR.
+P3 (= Sub 3)         — financial_facts_raw partition + retention
+   → biggest; ~400 LOC; one PR (schema migration + retention sweep).
+P4 (= Sub 4)         — /system/postgres-health + pre-push hook warning
+   → medium; ~200 LOC; one PR.
+P5 (= Sub 5)         — Prevention-log entry
+   → small; ~50 LOC; folded into the LAST landing PR (P4) to keep prevention writing close to the lessons.
+```
+
+Dependency order: P1 unlocks everything (tuning + boot resilience first). P2 + P3 are independent — could land in parallel sessions; default sequential P2 → P3 to keep blast radius small. P4 + P5 are last (depend on the prior changes being live so the health endpoint has interesting numbers to report).
+
+## 4. Per-phase brief (each = one session)
+
+Each phase follows the **same shape as the ETL plan**: spike → spec → Codex 1a → plan → Codex 1b → implementation → tests → local gates → Codex 2 → push → bot review → merge. **Autonomous-execution contract: no operator signoff between Codex iterations; drive each PR to merge in one session.**
+
+### Phase 1 — Postgres tuning + runtime_config boot guard (Subs 1 + 6) — **SHIPPED 2026-05-18 (PR #1210 merge SHA `471a3b3`)**
+
+Architectural sibling: G14 `bootstrap_orchestrator` source-registry (boot-time resilience pattern, PR #1191) + kill_switch fail-closed (sql/010).
+
+- `sql/155_postgres_runtime_tuning.sql` — `ALTER SYSTEM SET` knobs per #1208 Sub 1. Applied via the new `-- runner: autocommit` migration-runner directive at `app/db/migrations.py` (multi-statement ClientCursor under autocommit still implicitly transacts — split + per-statement execute via `_split_autocommit_statements`). Test-template builder mirrored in `tests/fixtures/ebull_test_db.py`.
+- `docker-compose.yml` — `mem_limit: 4g` + `shm_size: 1g`.
+- `app/services/runtime_config.py::ensure_runtime_config_singleton` — hard-enforces autocommit-conn contract; race-safe via `INSERT ON CONFLICT DO NOTHING RETURNING id`; 3 `runtime_config_audit` rows on re-seed in one `conn.transaction()`; fails loud on non-canonical row.
+- `app/main.py` lifespan + `app/jobs/__main__.py::_ensure_runtime_config_singleton_with_cleanup` — boot wiring with fence+pool cleanup-on-raise pattern. API-first migration contract (jobs has not called `run_migrations` since #719).
+- `tests/test_runtime_config_boot_guard.py` (5 cases incl. atomic rollback + non-autocommit rejection) + `tests/test_migration_runner_autocommit.py` (directive parser + splitter) + `tests/conftest.py::_dev_db_size_tripwire` (session-autouse — moved from inert standalone module per Codex 2).
+- `docs/review-prevention-log.md` — extended singleton-row entry + added Postgres-on-Docker + ALTER-SYSTEM-autocommit-directive sections.
+- `.claude/skills/engineering/test-quality.md` — new "Dev-DB isolation invariant" section.
+
+Codex iterations recorded inline in `docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md` §3.4 + §3.5.
+
+Operator runbook (post-merge):
+1. `docker compose up -d` to pick up `mem_limit` + `shm_size`.
+2. Restart `python -m app.main` → migration 155 applies; `pg_reload_conf()` activates everything except `shared_buffers`.
+3. `docker restart ebull-postgres` to pick up `shared_buffers=2GB`.
+4. Confirm `SHOW shared_buffers; SHOW max_wal_size; SHOW wal_compression;` reports the tuned values.
+
+### Phase 2 — Test-fixture orphan sweep + slim-data posture (Sub 2)
+
+- `tests/fixtures/ebull_test_db.py::_drop_orphan_workers_older_than(min_age='1h')` (NEW).
+- Audit: build fresh template DB; measure size; identify non-zero tables; flag any migrations that populate user data (defect — migrations should be schema only).
+- Codify slim-test-data rule in `.claude/skills/engineering/test-quality.md` (NEW section or skill update — owns the rule).
+
+### Phase 3 — `financial_facts_raw` partition + retention (Sub 3)
+
+- Schema migration: `PARTITION BY RANGE (period_end)` quarterly buckets. Backfill via online detach/attach OR a fresh-table swap. Decision deferred to spec.
+- Retention sweep: enforce per-table horizons documented at `.claude/skills/data-engineer/SKILL.md` §13 (10-K = last 3 annual, 10-Q = last 8 quarterly).
+- Closure framing: SCHEMA PRIMITIVE (no operator-visible UI change; the partition is the deliverable).
+
+### Phase 4 — `/system/postgres-health` + pre-push hook bloat warn (Sub 4)
+
+- New endpoint `GET /system/postgres-health` returning: `pg_database_size('ebull')`, leaked-DB count, current WAL size, last checkpoint, autovacuum lag per top-10 tables.
+- Pre-push hook addition at `.githooks/pre-push`: warn (don't block) if `pg_database_size('ebull') > 10 GB`.
+- FE: small admin-page tile if scope budget allows; otherwise endpoint-only with operator runbook.
+
+### Phase 5 — Prevention-log + skill updates (Sub 5)
+
+Folded into the P4 PR. Lessons accumulated across P1-P4 land in `docs/review-prevention-log.md` as a single coherent section, not scattered. Skill updates flow inline as gaps are spotted (per the "own skill updates" rule — see §6 below).
+
+## 5. Skill ownership posture (per user instruction 2026-05-18)
+
+Skill files at `.claude/skills/**` are **owned by the agent** for this maintenance track:
+
+1. When a gap is observed mid-task (e.g. an empirical finding contradicts the skill, a new pattern emerges, or a recurring trap surfaces), update the skill **inline**, in the same session, in the same PR. **Do not** ask for approval to read or edit skill files — they are part of the engineering substrate.
+2. When a skill is found to be **stale** (claims something the codebase no longer does), correct it as a routine maintenance edit — same shape as a doc-comment update.
+3. When a **new** prevention-log lesson surfaces mid-task, extract it into the relevant skill + the prevention-log in the SAME PR — never defer the "I'll write that up later" trap.
+
+This document is itself a skill output — `.claude/skills/data-sources/finra.md` was updated mid-#916 to absorb the 403 lesson without ceremony.
+
+## 6. Handover prompt for the next session (Phase 1)
+
+Paste the block below verbatim into the next session — self-contained, no prior conversation context required.
+
+---
+
+```
+Pick up Phase 1 of docs/superpowers/plans/2026-05-18-backend-stability.md
+(Backend stability + dev DB hygiene, autonomous-execution contract per
+ETL plan §1 — no operator signoff between Codex iterations, drive PR to
+merge in one session).
+
+PHASE 1 SCOPE — Postgres tuning + runtime_config boot guard (#1208 Subs 1 + 6):
+
+Sub 1 — Postgres tuning (TUNING PRIMITIVE):
+- New `sql/NNN_postgres_runtime_tuning.sql`:
+    ALTER SYSTEM SET max_wal_size = '4GB';
+    ALTER SYSTEM SET min_wal_size = '512MB';
+    ALTER SYSTEM SET wal_compression = 'on';
+    ALTER SYSTEM SET checkpoint_completion_target = '0.9';
+    ALTER SYSTEM SET shared_buffers = '2GB';            -- restart req
+    ALTER SYSTEM SET maintenance_work_mem = '512MB';
+    ALTER SYSTEM SET effective_cache_size = '4GB';
+    ALTER SYSTEM SET work_mem = '32MB';
+    SELECT pg_reload_conf();
+- `docker-compose.yml`: `mem_limit: 4g` + `shm_size: 1g`.
+
+Sub 6 — runtime_config boot guard (RESILIENCE PRIMITIVE):
+- `app/services/runtime_config.py::ensure_runtime_config_singleton(conn)`:
+  After migrations run, check `SELECT count(*) FROM runtime_config = 1`.
+  If 0, INSERT safe defaults (enable_auto_trading=FALSE,
+  enable_live_trading=FALSE, updated_by='boot_recovery', reason=
+  'singleton vanished — re-seeded by boot guard', display_currency='GBP')
+  + log WARNING. Same fail-closed posture as kill_switch (sql/010).
+- Wire `ensure_runtime_config_singleton(conn)` into `app/main.py`
+  lifespan AFTER `run_migrations()` and BEFORE pool open.
+- New invariant test `tests/test_dev_db_no_test_writes.py`: records
+  pg_database_size('ebull') at session-scoped fixture setup + teardown;
+  assert delta < 1 MB. SKIPPED on CI (different DB).
+
+FIRST ACTIONS:
+
+1. Read CLAUDE.md working order. Confirm #1208 still OPEN; #1209 merged.
+2. Read docs/settled-decisions.md for kill_switch fail-closed pattern.
+3. Read docs/review-prevention-log.md for any test-DB-isolation entries.
+4. Read sql/010_kill_switch.sql + sql/015_runtime_config.sql to clone
+   the singleton + fail-closed shape verbatim.
+5. Read app/main.py lifespan startup ordering.
+
+DESIGN STEPS (follow CLAUDE.md working order verbatim):
+
+1. Branch: feature/1208-phase1-postgres-tuning-runtime-config-boot-guard.
+2. Spike: verify dev-DB current Postgres knob values + assert
+   pg_database_size shrinks after the proposed tuning takes effect on a
+   sample workload (POST /jobs/finra_regsho_daily_refresh/run with
+   backfill_window_days=14 → ~84 fetches; observe WAL gen + autovacuum
+   behaviour pre/post tuning).
+3. Spec at docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md
+   mirroring the ETL spec shape.
+4. Codex 1a on spec + Codex 1b on plan + Codex 2 pre-push. Non-negotiable
+   per CLAUDE.md.
+5. Implementation order:
+   - T1: sql/NNN migration.
+   - T2: docker-compose mem_limit + shm_size.
+   - T3: ensure_runtime_config_singleton helper.
+   - T4: app/main.py lifespan wiring.
+   - T5: tests/test_runtime_config_boot_guard.py.
+   - T6: tests/test_dev_db_no_test_writes.py.
+   - T7: prevention-log entry (Postgres on Docker + singleton vanished).
+   - T8: skill updates — `.claude/skills/engineering/test-quality.md`
+        if it exists, otherwise `.claude/skills/data-engineer/SKILL.md`
+        §"Dev-DB isolation invariant".
+
+ETL DoD CLAUSES that apply (#8-#12):
+
+- #8 Smoke: app boot succeeds with re-seeded singleton on fresh dev DB
+  (delete the row, restart `python -m app.main`, observe WARNING +
+  /config returns 200).
+- #9 Cross-source: N/A (not a data-source change).
+- #10 Backfill: N/A.
+- #11 Operator-visible: GET /config returns 200 after the boot guard
+  re-seeds; tail the app log for the WARNING line.
+- #12 PR records verification + SHA.
+
+NON-NEGOTIABLES (carried from ETL plan):
+
+- Autonomous-execution contract per ETL plan §1 — no operator signoff
+  between Codex iterations; merge to master in one session.
+- Service-no-commit invariant + psycopg3 savepoint discipline still
+  apply (no DB-touching service should enter its own transaction).
+- Skill ownership posture per Phase 1 plan §6 — update skills inline
+  on any observed gap; do NOT defer.
+- Per feedback_post_push_cycle.md: poll gh pr view + gh pr checks
+  IMMEDIATELY after push.
+- Per feedback_pre_push_xdist_postgres_locks.md: if pre-push pytest
+  wedges on Postgres locks, `--no-verify` justified when impacted-files
+  clean + Codex green + targeted pytest + smoke pass.
+- Per feedback_pr_auto_close_required.md: PR body MUST contain
+  `Refs #1208` on its own line (sub-ticket, not closing parent).
+
+REFERENCES:
+
+- Parent maintenance plan: docs/superpowers/plans/2026-05-18-backend-stability.md.
+- Issue: #1208 (Postgres tuning + dev-DB hygiene umbrella).
+- Sibling resilience pattern: sql/010_kill_switch.sql + sql/015_runtime_config.sql.
+- ETL plan template: docs/superpowers/plans/2026-05-17-us-etl-completion.md.
+- Live evidence: 2026-05-18 user-reported login slowness + /config 503 →
+  re-seeded singleton inline; Postgres PANIC log evidence captured in
+  #1208 issue body.
+
+If Phase 1 lands clean, the next session picks up Phase 2 (test-fixture
+orphan sweep + slim-data audit). The same handover prompt template at
+docs/superpowers/plans/2026-05-18-backend-stability.md §6 is re-used
+with the Phase 2 brief substituted.
+```
+
+---
+
+### 6.1 Handover prompt for Phase 2 (test-fixture orphan sweep + slim-data audit, #1208 Sub 2)
+
+Paste the block below verbatim into the next session — self-contained, no prior conversation context required.
+
+---
+
+```
+Pick up Phase 2 of docs/superpowers/plans/2026-05-18-backend-stability.md
+(Backend stability + dev DB hygiene, autonomous-execution contract per
+ETL plan §1 — no operator signoff between Codex iterations, drive PR to
+merge in one session).
+
+PHASE 2 SCOPE — Test-fixture orphan sweep + slim-data audit (#1208 Sub 2):
+
+HYGIENE PRIMITIVE. Phase 1 (PR #1210 SHA `471a3b3` + docs PR #1211 SHA
+`3c32574`) shipped 2026-05-18 — Postgres tuning + runtime_config boot
+guard + dev-DB-size tripwire are LIVE on dev. Phase 2 fixes the leaked
+test-DB problem that has been accumulating since pytest-xdist landed
+(#893): each worker creates a private `ebull_test_*_gw*` DB but a
+worker crash leaves the DB behind. As of Phase 1 the dev cluster
+carries 20+ leaked DBs from prior runs.
+
+DELIVERABLES:
+
+Task A — Orphan sweep helper:
+- `tests/fixtures/ebull_test_db.py::_drop_orphan_workers_older_than(
+  min_age=timedelta(hours=1)) -> int` (NEW). Lists every database
+  matching `ebull_test_*_gw*`, queries `pg_stat_activity` +
+  `pg_database` for last-activity / created-at, drops any whose last
+  activity is older than `min_age`. Returns count of dropped DBs.
+  - Use `DROP DATABASE IF EXISTS ... WITH (FORCE)` (PG13+).
+  - NEVER touches `ebull` or `ebull_test_template` — enforced via
+    explicit name check + the existing `_assert_test_db` guard.
+- Call from `build_template_if_stale()` (controller-only, BEFORE
+  template build) so each pytest invocation starts with a clean
+  cluster. Cross-pytest-invocation lock prevents two controllers
+  racing the sweep.
+- Test: `tests/test_orphan_sweep.py` — create a fake
+  `ebull_test_FAKE_gw99` DB, set its `datlastsysoid` proxy / commit a
+  no-op tx >1h ago via `pg_stat_reset_single_table_counters` shim if
+  available, run the sweep, assert the fake DB is dropped + neither
+  `ebull` nor `ebull_test_template` are touched.
+
+Task B — Slim-data posture audit:
+- Spike: build a fresh `ebull_test_template` from scratch, dump
+  `SELECT relname, pg_size_pretty(pg_total_relation_size(oid)) FROM
+  pg_class WHERE relkind='r' AND pg_total_relation_size(oid) > 0
+  ORDER BY pg_total_relation_size(oid) DESC LIMIT 20`. Migrations are
+  supposed to be schema-only; any non-zero non-system table in a
+  fresh template is a defect.
+- For each non-zero table found: identify the migration that seeds
+  it. If the seed is genuinely required for tests to work (e.g.
+  reference data), leave + document. If the seed is bulk fixture
+  data that snuck in (e.g. universe rows, financial_facts_raw
+  spikes), file follow-up tickets to move the seed into per-test
+  fixtures.
+- Codify the rule in `.claude/skills/engineering/test-quality.md`
+  (new section §"Slim test-data posture"): tests seed 1–5 rows
+  per-test via fixtures, never via migrations. Bulk-data tests must
+  be marked `@pytest.mark.slow` + opted out of the default suite.
+
+Task C — Prevention-log + skill updates:
+- `docs/review-prevention-log.md` — new section "Test-DB leaks
+  accumulate on xdist-worker crash" describing the 20+ leak shape +
+  the orphan sweep fix.
+- Bundle in same PR.
+
+FIRST ACTIONS:
+
+1. Read CLAUDE.md working order. Confirm #1208 still OPEN; PR #1210
+   merged (SHA `471a3b3`).
+2. Read docs/review-prevention-log.md §"Test-DB isolation invariant"
+   (landed in Phase 1) + the singleton-row entry for context.
+3. Read tests/fixtures/ebull_test_db.py end-to-end to understand the
+   per-worker DB lifecycle + the existing `_assert_test_db` guard
+   shape.
+4. Read tests/conftest.py to understand session ordering — the
+   sweep must fire BEFORE `build_template_if_stale()`.
+5. Spike: list `ebull_test_*` DBs on the cluster. Expect 20+ leaks.
+
+DESIGN STEPS (follow CLAUDE.md working order verbatim):
+
+1. Branch: feature/1208-phase2-test-fixture-orphan-sweep.
+2. Spike: capture leaked-DB count + total bytes BEFORE any changes
+   so the PR can claim concrete cleanup.
+3. Spec at docs/superpowers/specs/2026-05-19-phase2-test-fixture-orphan-sweep.md
+   mirroring Phase 1's spec shape (§3.4/§3.5 for Codex iterations).
+4. Codex 1a on spec. Address findings. Codex 1b on revised spec.
+5. Implementation order:
+   - T1: `_drop_orphan_workers_older_than` helper.
+   - T2: Wire into `build_template_if_stale()` controller path.
+   - T3: tests/test_orphan_sweep.py.
+   - T4: slim-data audit script (one-shot, captures output to the
+        spec + PR description).
+   - T5: skill update in `.claude/skills/engineering/test-quality.md`.
+   - T6: prevention-log entry.
+6. Codex 2 pre-push review on branch diff.
+7. Push + poll bot review + CI immediately.
+8. Resolve every review comment per the FIXED/DEFERRED/REBUTTED
+   contract. PREVENTION comments end in EXTRACTED/ALREADY_COVERED/
+   REBUTTED.
+
+ETL DoD CLAUSES that apply (#8-#12):
+
+- #8 Smoke: run `pytest tests/test_orphan_sweep.py` against the real
+  test cluster; pre-create a fake `ebull_test_FAKE_gw99` DB and
+  confirm it gets dropped while `ebull` and `ebull_test_template`
+  survive.
+- #9 Cross-source: N/A (not a data-source change).
+- #10 Backfill: N/A.
+- #11 Operator-visible: after merge + a single `uv run pytest -q`,
+  `SELECT count(*) FROM pg_database WHERE datname LIKE 'ebull_test_%'
+  AND datname != 'ebull_test_template'` returns the expected number
+  (≤ worker count; ideally 0 after teardown).
+- #12 PR records verification + SHA.
+
+NON-NEGOTIABLES (carried forward):
+
+- Autonomous-execution contract per ETL plan §1 — no operator signoff
+  between Codex iterations; merge to master in one session.
+- Service-no-commit invariant + psycopg3 savepoint discipline still
+  apply. The orphan sweep uses its own admin DB connection + autocommit.
+- Skill ownership posture per Phase 1 plan §5 — update skills inline
+  on any observed gap; do NOT defer.
+- Per feedback_post_push_cycle.md: poll gh pr view + gh pr checks
+  IMMEDIATELY after push.
+- Per feedback_pre_push_xdist_postgres_locks.md: --no-verify justified
+  when impacted-files clean + Codex green + targeted pytest + smoke
+  pass.
+- Per feedback_pr_auto_close_required.md: PR body MUST contain
+  `Refs #1208` on its own line.
+- Per [[alter_system_in_migration]]: no autocommit-directive migrations
+  in this phase (no ALTER SYSTEM, no CREATE DATABASE-in-migration).
+
+REFERENCES:
+
+- Parent maintenance plan: docs/superpowers/plans/2026-05-18-backend-stability.md.
+- Issue: #1208 (Postgres tuning + dev-DB hygiene umbrella).
+- Phase 1 spec (template shape): docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md.
+- Phase 1 merge SHA: `471a3b3` (PR #1210), docs follow-up SHA `3c32574` (PR #1211).
+- Live evidence: 20+ leaked `ebull_test_*_gw*` DBs on the dev cluster
+  as of 2026-05-18; sample names dumped in the Phase 2 spike.
+
+If Phase 2 lands clean, the next session picks up Phase 3
+(`financial_facts_raw` partition + retention sweep, #1208 Sub 3).
+That's the biggest blast-radius phase of the epic. The same handover
+prompt template at this §6 is re-used with the Phase 3 brief
+substituted.
+```
+
+---
+
+### 6.2 Handover prompt for Phase 3 (`financial_facts_raw` partition + retention, #1208 Sub 3)
+
+Paste the block below verbatim into the next session — self-contained, no prior conversation context required.
+
+---
+
+```
+Pick up Phase 3 of docs/superpowers/plans/2026-05-18-backend-stability.md
+(Backend stability + dev DB hygiene, autonomous-execution contract per
+ETL plan §1 — no operator signoff between Codex iterations, drive PR to
+merge in one session).
+
+PHASE 3 SCOPE — financial_facts_raw partition + retention (#1208 Sub 3):
+
+SCHEMA PRIMITIVE. Biggest blast radius of the epic. Phase 2 (PR #1213
+merged YYYY-MM-DD SHA `XXXXXXX`) shipped 2026-05-19 — orphan sweep +
+keepalive fixture + slim-data audit are LIVE on dev. As of Phase 2 the
+dev cluster:
+
+- `pg_database_size('ebull')` ≈ 46 GB (spike value pre-tuning;
+  re-measure pre-Phase-3 with `docker exec ebull-postgres psql -tAc
+  "SELECT pg_size_pretty(pg_database_size('ebull'));"`).
+- `financial_facts_raw` is ~28 GB unpartitioned — the WAL-PANIC root
+  cause from Phase 1 §1. Autovacuum bursts on this single table caused
+  two PG container PANICs on 2026-05-18.
+- No partition strategy in place; rows accumulate forever; retention
+  horizons documented at `.claude/skills/data-engineer/SKILL.md` §13
+  (10-K = last 3 annual, 10-Q = last 8 quarterly) are NOT enforced.
+
+DELIVERABLES:
+
+Task A — Schema migration:
+- `sql/NNN_financial_facts_raw_partition.sql` — convert
+  `financial_facts_raw` to `PARTITION BY RANGE (period_end)` with
+  quarterly buckets (e.g. `financial_facts_raw_2020q1`, ...,
+  `financial_facts_raw_2026q2` + a default partition for the future).
+- Decision (deferred to spec): online detach/attach vs fresh-table
+  swap-rename. Both have trade-offs:
+    online detach/attach = live; lower risk; multi-step migration.
+    swap-rename = atomic; requires brief table-lock window; simpler.
+  Recommend swap-rename for v1 (28 GB is one-shot tractable) with the
+  spec capturing the brief-lock window operator runbook.
+- Same `-- runner: autocommit` directive shape as Phase 1's sql/155
+  if any non-tx statement is needed; otherwise plain tx migration.
+
+Task B — Retention sweep:
+- `app/services/financial_facts_retention.py::sweep_retention()` —
+  enforce per-table horizons from `.claude/skills/data-engineer/SKILL.md`
+  §13. For each (instrument, concept) family, keep last N rows where
+  N is statement-type-dependent (10-K → 3, 10-Q → 8). DELETE the
+  excess via per-partition tx-bounded batch.
+- Wire as a `ScheduledJob` at 03:00 ET nightly (idempotent if no
+  excess rows).
+
+Task C — Tests:
+- tests/test_financial_facts_raw_partition.py — fresh template +
+  insert rows spanning >5 quarters → assert correct partition routing
+  + retention sweep keeps the documented N per concept.
+- tests/test_financial_facts_raw_swap.py — exercise the swap-rename
+  migration shape on a fixture table.
+
+Task D — Operator runbook + prevention-log:
+- docs/review-prevention-log.md — new section "Unpartitioned mega-table
+  WAL-PANICs Postgres" linking back to Phase 1's tuning entry.
+- `.claude/skills/data-engineer/SKILL.md` §13 — retention horizons
+  cross-reference to the sweep service.
+
+FIRST ACTIONS:
+
+1. Read CLAUDE.md working order. Confirm #1208 OPEN; PR #1213 merged
+   (record SHA in spec).
+2. Read docs/review-prevention-log.md §"Postgres on Docker Desktop
+   macOS — defaults blow up partition-heavy workloads" — the
+   WAL-PANIC root cause that motivates this phase.
+3. Read sql/097_financial_facts_raw.sql (or whichever migration owns
+   the current shape) end-to-end. Capture the index inventory + the
+   FK fan-in so the partition migration preserves both.
+4. Read app/services/financial_facts/* — every reader path that
+   issues queries against the table; partition-routing must be
+   transparent to them.
+5. Spike: count + size per period_end quarter:
+     SELECT date_trunc('quarter', period_end), count(*),
+            pg_size_pretty(sum(pg_column_size(t.*)))
+     FROM financial_facts_raw t GROUP BY 1 ORDER BY 1;
+   Capture in spec §2 as the partition-budget evidence.
+
+DESIGN STEPS (follow CLAUDE.md working order verbatim):
+
+1. Branch: feature/1208-phase3-financial-facts-raw-partition.
+2. Spike: row counts per quarter; index inventory; FK fan-in;
+   smoke test reads under the proposed partition shape on a copy.
+3. Spec at docs/superpowers/specs/2026-05-NN-phase3-financial-facts-raw-partition.md
+   mirroring Phase 1 + Phase 2 spec shape (§3.4/§3.5/§3.6 for Codex
+   iterations). Explicit decision on swap-rename vs detach/attach
+   with operator-runbook implications.
+4. Codex 1a on spec → Codex 1b on revised spec → Codex 1c if needed.
+5. Implementation order:
+   - T1: schema migration (swap-rename OR detach/attach per spec).
+   - T2: retention service + ScheduledJob registration.
+   - T3: tests (partition routing + retention sweep + migration).
+   - T4: operator-runbook + prevention-log + skill cross-reference.
+6. Codex 2 pre-push on branch diff.
+7. Push + poll bot + CI.
+
+ETL DoD CLAUSES that apply (#8-#12):
+
+- #8 Smoke against 3-5 known instruments (AAPL, GME, MSFT, JPM, HD)
+  on dev DB: read `/instruments/<symbol>/fundamentals` post-migration
+  + confirm partition routing transparent.
+- #9 Cross-source: spot-check one concept against an independent
+  source (gurufocus / SEC EDGAR direct).
+- #10 Backfill: POST /jobs/sec_rebuild/run with the affected source
+  scope; observe partition rows populate.
+- #11 Operator-visible: `pg_database_size('ebull')` < 10 GB
+  post-retention-sweep + first nightly run (target <5 GB per epic
+  acceptance §8.3).
+- #12 PR records SHA + verification.
+
+NON-NEGOTIABLES (carried forward):
+
+- Autonomous-execution contract per ETL plan §1 — no operator signoff
+  between Codex iterations; merge to master in one session.
+- Service-no-commit invariant + psycopg3 savepoint discipline still
+  apply. The retention sweep service MUST NOT enter its own
+  `conn.transaction()` block (Phase 1 lesson — see prevention-log
+  §"psycopg3 service-no-commit invariant").
+- ALTER SYSTEM forbidden inside non-autocommit migrations — if the
+  partition migration needs anything non-transactional, use the
+  `-- runner: autocommit` directive from Phase 1.
+- Skill ownership posture — update skills inline on any observed gap.
+- Per feedback_post_push_cycle.md: poll gh pr view + gh pr checks
+  IMMEDIATELY after push.
+- Per feedback_pre_push_xdist_postgres_locks.md: --no-verify justified
+  when impacted-files clean + Codex green + targeted pytest + smoke
+  pass.
+- Per feedback_pr_auto_close_required.md: PR body MUST contain
+  `Refs #1208` on its own line.
+
+REFERENCES:
+
+- Parent maintenance plan: docs/superpowers/plans/2026-05-18-backend-stability.md.
+- Issue: #1208 (Postgres tuning + dev-DB hygiene umbrella).
+- Phase 1 spec (template shape): docs/superpowers/specs/2026-05-18-phase1-tuning-boot-guard.md.
+- Phase 2 spec (sibling): docs/superpowers/specs/2026-05-19-phase2-test-fixture-orphan-sweep.md.
+- Phase 1 merge SHA: `471a3b3` (PR #1210). Phase 2 merge SHA: TBD
+  (PR #1213).
+- WAL-PANIC root cause: prevention-log §"Postgres on Docker Desktop
+  macOS — defaults blow up partition-heavy workloads".
+- Retention horizons: `.claude/skills/data-engineer/SKILL.md` §13.
+
+If Phase 3 lands clean, next session = Phase 4 (`/system/postgres-health`
+endpoint + pre-push hook bloat warning, #1208 Sub 4). Phase 5
+(prevention-log + skill updates) folds into Phase 4's PR per §3 of
+this plan.
+```
+
+---
+
+## 7. Out of scope for the whole #1208 epic (yet)
+
+- Production HA / replication tuning. eBull demo-first; production posture is a separate epic.
+- Postgres-on-K8s / managed-Postgres migration.
+- WAL archiving / point-in-time-recovery setup.
+- Frontend admin observability tiles beyond the simplest /system/postgres-health embed (deferred to a UI-revisit epic).
+
+## 8. Acceptance for the whole epic
+
+When Phases 1-5 land:
+
+1. Postgres survives `POST /jobs/finra_regsho_daily_refresh/run` with `backfill_window_days=90` (worst-case current ingest burst: 6 prefixes × ~63 trading days = 378 fetches + ~7 M observation rows) WITHOUT WAL PANIC or container restart.
+2. Fresh pytest run leaves **zero** `ebull_test_*` DBs after teardown (orphan sweep validates).
+3. `pg_database_size('ebull')` < 5 GB after the `financial_facts_raw` retention sweep.
+4. `/system/postgres-health` returns the documented metrics + pre-push hook warns on bloat.
+5. Prevention-log section + skill updates merged in the same PRs they came from.
+6. `/config` returns 200 even after the singleton row is manually deleted (boot guard re-seeds).

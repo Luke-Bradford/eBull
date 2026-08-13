@@ -1,0 +1,55 @@
+{
+  "instrumentID": 100000,
+  "instrumentDisplayName": "Bitcoin",
+  "instrumentTypeID": 10,
+  "exchangeID": 8,
+  "images": [
+    {
+      "instrumentID": 100000,
+      "width": 50.0,
+      "height": 50.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/btc/50x50.png"
+    },
+    {
+      "instrumentID": 100000,
+      "width": 150.0,
+      "height": 150.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/btc/150x150.png"
+    },
+    {
+      "instrumentID": 100000,
+      "width": 35.0,
+      "height": 35.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/btc/35x35.png"
+    },
+    {
+      "instrumentID": 100000,
+      "width": 90.0,
+      "height": 90.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/btc/90x90.png"
+    },
+    {
+      "instrumentID": 100000,
+      "width": 80.0,
+      "height": 80.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/btc/80x80.png"
+    },
+    {
+      "instrumentID": 100000,
+      "width": 70.0,
+      "height": 70.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/btc/70x70.png"
+    },
+    {
+      "instrumentID": 100000,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/100000/100000_F0AF32_F7F7F7.svg",
+      "backgroundColor": "#F0AF32",
+      "textColor": "#F7F7F7"
+    }
+  ],
+  "symbolFull": "BTC",
+  "instrumentTypeSubCategoryID": 1001,
+  "priceSource": "eToro",
+  "hasExpirationDate": false,
+  "isInternalInstrument": false
+}

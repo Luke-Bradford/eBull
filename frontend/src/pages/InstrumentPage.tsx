@@ -1,0 +1,830 @@
+/**
+ * /instrument/:symbol — per-stock research page.
+ *
+ * Layout after Slice 1 of the per-stock research page spec
+ * (docs/superpowers/specs/2026-04-20-per-stock-research-page.md):
+ *   - Sticky SummaryStrip (identity + price + thesis/score/held badges + actions)
+ *   - Tabs: Research (default) · Financials · Positions · News · Filings
+ *   - Research tab replaces the old Overview tab; key stats + thesis memo
+ *     live there so the operator lands on "is this worth owning?".
+ *   - The old Analysis tab is gone — its Generate-thesis button moved
+ *     into the SummaryStrip and the memo renders inside Research.
+ *
+ * The right rail (filings + peer + news preview) ships in Slice 2.
+ */
+
+import { useCallback, useEffect, useState } from "react";
+import {
+  Navigate,
+  useLocation,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
+
+import { fetchFilings } from "@/api/filings";
+import {
+  fetchInstrumentFinancials,
+  fetchInstrumentSummary,
+} from "@/api/instruments";
+import { fetchNews } from "@/api/news";
+import { fetchInstrumentPositions } from "@/api/portfolio";
+import {
+  fetchLatestThesis,
+  generateInstrumentThesis,
+} from "@/api/theses";
+import { ApiError } from "@/api/client";
+import type {
+  FilingsListResponse,
+  InstrumentFinancials,
+  InstrumentPositionDetail,
+  InstrumentSummary,
+  NewsListResponse,
+  ThesisDetail,
+} from "@/api/types";
+import { OfferingBlock } from "@/components/instrument/OfferingBlock";
+import { TenderBlock } from "@/components/instrument/TenderBlock";
+import { InstrumentTradesTable } from "@/components/instrument/InstrumentTradesTable";
+import { InstrumentTradeHistory } from "@/components/instrument/InstrumentTradeHistory";
+import { LiveQuoteProvider } from "@/components/quotes/LiveQuoteProvider";
+import { ClosePositionModal } from "@/components/orders/ClosePositionModal";
+import { OrderEntryModal } from "@/components/orders/OrderEntryModal";
+import { Section, SectionSkeleton } from "@/components/dashboard/Section";
+import { EmptyState } from "@/components/states/EmptyState";
+import { ResearchTab } from "@/components/instrument/ResearchTab";
+import { VerdictTab } from "@/components/instrument/VerdictTab";
+import { RightRail } from "@/components/instrument/RightRail";
+import { SummaryStrip } from "@/components/instrument/SummaryStrip";
+import { useAsync } from "@/lib/useAsync";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
+
+function ErrorView({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+  const message = error instanceof Error ? error.message : "Request failed.";
+  return (
+    <div className="rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 p-3 text-sm text-red-700 dark:text-red-300">
+      <p>{message}</p>
+      {onRetry && (
+        <button
+          type="button"
+          className="mt-1 text-xs underline"
+          onClick={onRetry}
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
+type TabId =
+  | "research"
+  | "verdict"
+  | "financials"
+  | "positions"
+  | "news"
+  | "filings";
+
+const ALL_TABS: { id: TabId; label: string }[] = [
+  { id: "research", label: "Research" },
+  { id: "verdict", label: "Verdict" },
+  { id: "financials", label: "Financials" },
+  { id: "positions", label: "Positions" },
+  { id: "news", label: "News" },
+  { id: "filings", label: "Filings" },
+];
+
+/**
+ * Filter the visible tabs to those an instrument's coverage
+ * actually populates (#503 PR 2 / #515 PR 3b).
+ *
+ * Filings: provider-agnostic gate via
+ * ``summary.capabilities.filings`` — any active provider shows
+ * the tab.
+ *
+ * Financials: still SEC-XBRL-only at the data layer
+ * (``/instruments/{symbol}/financials`` reads
+ * ``financial_periods`` exclusively), so the tab gates on the
+ * ``sec_xbrl`` provider specifically. An instrument with only
+ * non-SEC fundamentals (e.g. FMP-only) would render an empty
+ * statement table — gating on the broader ``fundamentals``
+ * capability would regress that. Once the financials surface
+ * lands a provider-agnostic refactor (follow-up to #515), this
+ * gate widens to ``hasActiveCapability(summary, "fundamentals")``.
+ */
+function visibleTabs(summary: InstrumentSummary | null): typeof ALL_TABS {
+  if (summary === null) return ALL_TABS;
+  return ALL_TABS.filter((t) => {
+    if (t.id === "financials")
+      return hasActiveProvider(summary, "fundamentals", "sec_xbrl");
+    if (t.id === "filings") return hasActiveCapability(summary, "filings");
+    return true;
+  });
+}
+
+function hasActiveCapability(
+  summary: InstrumentSummary,
+  capability: string,
+): boolean {
+  const cell = summary.capabilities[capability];
+  if (cell === undefined) return false;
+  return cell.providers.some((p) => cell.data_present[p] === true);
+}
+
+function hasActiveProvider(
+  summary: InstrumentSummary,
+  capability: string,
+  provider: string,
+): boolean {
+  const cell = summary.capabilities[capability];
+  if (cell === undefined) return false;
+  return cell.data_present[provider] === true;
+}
+
+function formatDecimal(
+  value: string | null | undefined,
+  options: { percent?: boolean; currency?: string | null } = {},
+): string {
+  if (value === null || value === undefined) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  if (options.percent) return `${(num * 100).toFixed(2)}%`;
+  const formatted = num.toLocaleString(undefined, {
+    maximumFractionDigits: 2,
+  });
+  return options.currency ? `${options.currency} ${formatted}` : formatted;
+}
+
+// Header + Overview tab removed in Slice 1 — replaced by
+// `components/instrument/SummaryStrip.tsx` (sticky strip) and
+// `components/instrument/ResearchTab.tsx` (Research tab content).
+// `formatDecimal` is still used by the Financials tab below.
+
+// ---------------------------------------------------------------------------
+// Financials tab
+// ---------------------------------------------------------------------------
+
+function FinancialsTab({ symbol }: { symbol: string }) {
+  const [statement, setStatement] = useState<"income" | "balance" | "cashflow">("income");
+  const [period, setPeriod] = useState<"quarterly" | "annual">("quarterly");
+
+  const { data, error, loading } = useAsync<InstrumentFinancials>(
+    () => fetchInstrumentFinancials(symbol, { statement, period }),
+    [symbol, statement, period],
+  );
+
+  const rows = data?.rows ?? [];
+  // Collect the column set across all rows (periods may report different
+  // concepts), then sort alphabetically so the ordering is stable across
+  // re-fetches regardless of backend key order.
+  const columns = rows.length
+    ? Array.from(new Set(rows.flatMap((row) => Object.keys(row.values)))).sort()
+    : [];
+
+  return (
+    <Section title={`${statement.charAt(0).toUpperCase()}${statement.slice(1)} statement`}>
+      <div className="mb-3 flex gap-2 text-xs">
+        <div className="flex rounded border border-slate-300 dark:border-slate-700">
+          {(["income", "balance", "cashflow"] as const).map((s) => (
+            <button
+              key={s}
+              type="button"
+              className={`px-2 py-1 ${
+                statement === s ? "bg-slate-800 text-white" : "bg-white dark:bg-slate-900"
+              }`}
+              onClick={() => setStatement(s)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+        <div className="flex rounded border border-slate-300 dark:border-slate-700">
+          {(["quarterly", "annual"] as const).map((p) => (
+            <button
+              key={p}
+              type="button"
+              className={`px-2 py-1 ${period === p ? "bg-slate-800 text-white" : "bg-white dark:bg-slate-900"}`}
+              onClick={() => setPeriod(p)}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+        {data && (
+          <span className="ml-auto self-end text-slate-500">
+            Source: {data.source}
+            {data.currency ? ` · ${data.currency}` : ""}
+          </span>
+        )}
+      </div>
+
+      {loading && <SectionSkeleton rows={4} />}
+      {error !== null && <ErrorView error={error} />}
+      {!loading && error === null && rows.length === 0 && (
+        <EmptyState title="No statement data" description="The local SEC XBRL cache has no data for this statement." />
+      )}
+      {!loading && error === null && rows.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-xs text-slate-500">
+                <th className="sticky left-0 z-20 border-r border-slate-200 bg-white px-2 py-1 dark:border-slate-800 dark:bg-slate-950">
+                  Metric
+                </th>
+                {rows.map((row) => (
+                  <th key={row.period_end} className="px-2 py-1 text-right">
+                    {row.period_type}
+                    <br />
+                    <span className="font-normal">{row.period_end}</span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {columns.map((col) => (
+                <tr key={col} className="border-b border-slate-100 last:border-0 dark:border-slate-800">
+                  <td className="sticky left-0 z-10 border-r border-slate-200 bg-white px-2 py-1 font-medium dark:border-slate-800 dark:bg-slate-950">
+                    {col}
+                  </td>
+                  {rows.map((row) => (
+                    <td key={row.period_end} className="px-2 py-1 text-right">
+                      {formatDecimal(row.values[col] ?? null)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// Analysis tab retired in Slice 1. The Generate-thesis button moved to
+// `SummaryStrip`; the memo renders inside `ResearchTab`. Thesis history
+// lives in a dedicated Thesis tab (landing in a follow-up slice).
+
+// ---------------------------------------------------------------------------
+// Stub tabs (positions / news / filings) — deferred to follow-up work
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Positions tab
+// ---------------------------------------------------------------------------
+
+function PositionsTab({ symbol, instrumentId }: { symbol: string; instrumentId: number }) {
+  // Use the per-instrument endpoint so we never silently false-negative on a
+  // paginated portfolio list (Codex review feedback on PR #366).
+  const { data, error, loading } = useAsync<InstrumentPositionDetail>(
+    () => fetchInstrumentPositions(instrumentId),
+    [instrumentId],
+  );
+
+  if (loading) return <SectionSkeleton rows={3} />;
+  if (error !== null) return <ErrorView error={error} />;
+  if (!data || data.total_units === 0) {
+    return (
+      <Section title="Position">
+        <EmptyState
+          title="Not held"
+          description={`You don't currently hold ${symbol}.`}
+        />
+        {/* #1926: a fully closed-out instrument has no current holding but may
+            still have realised round-trips worth showing. `data.currency` is
+            the instrument's native currency (present even at zero units). */}
+        {data && (
+          <InstrumentTradeHistory instrumentId={instrumentId} currency={data.currency} />
+        )}
+      </Section>
+    );
+  }
+
+  const pnlColor =
+    data.total_pnl > 0
+      ? "text-emerald-600"
+      : data.total_pnl < 0
+        ? "text-red-600"
+        : "text-slate-600";
+
+  return (
+    <Section title="Position">
+      <dl className="grid grid-cols-2 gap-y-2 text-sm md:grid-cols-4">
+        <dt className="text-slate-500">Units</dt>
+        <dd>{data.total_units.toLocaleString()}</dd>
+        <dt className="text-slate-500">Avg entry</dt>
+        <dd>{data.avg_entry !== null ? data.avg_entry.toFixed(2) : "—"}</dd>
+        <dt className="text-slate-500">Current price</dt>
+        <dd>{data.current_price !== null ? data.current_price.toFixed(2) : "—"}</dd>
+        <dt className="text-slate-500">Currency</dt>
+        <dd className="text-xs text-slate-500">{data.currency}</dd>
+        <dt className="text-slate-500">Total invested</dt>
+        <dd>{data.total_invested.toFixed(2)}</dd>
+        <dt className="text-slate-500">Market value</dt>
+        <dd>{data.total_value.toFixed(2)}</dd>
+        <dt className="text-slate-500">Unrealised P&amp;L</dt>
+        <dd className={pnlColor}>
+          {data.total_pnl >= 0 ? "+" : ""}
+          {data.total_pnl.toFixed(2)}
+        </dd>
+      </dl>
+      {/* #1899 slice 1: the individual trades behind the aggregate, not just
+          a count. Data already loaded above — no extra fetch. */}
+      <InstrumentTradesTable trades={data.trades} currency={data.currency} />
+      {/* #1926 slice 2: closed round-trips for this instrument (realised P&L,
+          holding period) from the trade ledger, scoped via ?instrument_id. */}
+      <InstrumentTradeHistory instrumentId={instrumentId} currency={data.currency} />
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// News tab
+// ---------------------------------------------------------------------------
+
+function sentimentBadge(score: number | null) {
+  if (score === null) return null;
+  // Match sign prefix to colour bucket so a neutral-grey badge never
+  // shows a "+" prefix (Codex feedback).
+  const positive = score > 0.2;
+  const negative = score < -0.2;
+  const tone: BadgeTone = positive ? "ok" : negative ? "risk" : "neutral";
+  const prefix = positive ? "+" : negative ? "" : "";
+  return (
+    <Badge tone={tone}>
+      {prefix}
+      {score.toFixed(2)}
+    </Badge>
+  );
+}
+
+function NewsTab({ instrumentId }: { instrumentId: number }) {
+  const { data, error, loading } = useAsync<NewsListResponse>(
+    () => fetchNews(instrumentId, 0, 25),
+    [instrumentId],
+  );
+
+  if (loading) return <SectionSkeleton rows={5} />;
+  if (error !== null) return <ErrorView error={error} />;
+  if (!data || data.items.length === 0) {
+    return (
+      <Section title="News">
+        <EmptyState
+          title="No news yet"
+          description="News events appear once the news feed has been ingested for this instrument."
+        />
+      </Section>
+    );
+  }
+
+  return (
+    <Section title={`News (${data.total})`}>
+      <ul className="space-y-3 text-sm">
+        {data.items.map((n) => (
+          <li key={n.news_event_id} className="border-b border-slate-100 pb-2 last:border-0">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs text-slate-500">{n.event_time.slice(0, 10)}</span>
+              {n.source && <span className="text-xs text-slate-500">· {n.source}</span>}
+              {sentimentBadge(n.sentiment_score)}
+              {n.category && (
+                <Badge>{n.category}</Badge>
+              )}
+            </div>
+            <div className="mt-0.5">
+              {n.url ? (
+                <a
+                  href={n.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-blue-700 hover:underline"
+                >
+                  {n.headline}
+                </a>
+              ) : (
+                <span className="font-medium">{n.headline}</span>
+              )}
+            </div>
+            {n.snippet && <p className="text-xs text-slate-600">{n.snippet}</p>}
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Filings tab
+// ---------------------------------------------------------------------------
+
+function redFlagBadge(score: number | null) {
+  if (score === null) return null;
+  const tone: BadgeTone = score > 0.5 ? "risk" : score > 0.2 ? "warn" : "neutral";
+  return <Badge tone={tone}>red-flag {score.toFixed(2)}</Badge>;
+}
+
+const FILINGS_PAGE_SIZE = 25;
+
+function FilingsTab({ instrumentId }: { instrumentId: number }) {
+  const [offset, setOffset] = useState(0);
+  useEffect(() => {
+    setOffset(0);
+  }, [instrumentId]);
+  const { data, error, loading } = useAsync<FilingsListResponse>(
+    () => fetchFilings(instrumentId, offset, FILINGS_PAGE_SIZE),
+    [instrumentId, offset],
+  );
+
+  if (loading) return <SectionSkeleton rows={5} />;
+  if (error !== null) return <ErrorView error={error} />;
+  if (!data || data.items.length === 0) {
+    return (
+      <Section title="Filings">
+        <EmptyState
+          title="No filings"
+          description="Filings appear once SEC EDGAR or Companies House has been crawled for this instrument."
+        />
+      </Section>
+    );
+  }
+
+  const total = data.total;
+  const pageCount = data.items.length;
+  const rangeStart = total === 0 ? 0 : offset + 1;
+  const rangeEnd = offset + pageCount;
+  const hasPrev = offset > 0;
+  const hasNext = offset + FILINGS_PAGE_SIZE < total;
+
+  return (
+    <Section title={`Filings (${data.total})`}>
+      <ul className="space-y-3 text-sm">
+        {data.items.map((f) => (
+          <li key={f.filing_event_id} className="border-b border-slate-100 pb-2 last:border-0">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs text-slate-500">{f.filing_date}</span>
+              <Badge>{f.filing_type ?? "?"}</Badge>
+              <span className="text-xs text-slate-500">{f.provider}</span>
+              {redFlagBadge(f.red_flag_score)}
+            </div>
+            {f.extracted_summary && (
+              <p className="mt-1 text-xs text-slate-600">{f.extracted_summary}</p>
+            )}
+            {f.offering !== null && <OfferingBlock offering={f.offering} />}
+            {f.tender !== null && <TenderBlock tender={f.tender} />}
+            <div className="mt-1 flex gap-3 text-xs">
+              {f.primary_document_url && (
+                <a
+                  href={f.primary_document_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-700 hover:underline"
+                >
+                  document
+                </a>
+              )}
+              {f.source_url && f.source_url !== f.primary_document_url && (
+                <a
+                  href={f.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-700 hover:underline"
+                >
+                  index
+                </a>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-3 flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-3 text-xs text-slate-500">
+        <span className="tabular-nums">
+          Showing {rangeStart}–{rangeEnd} of {total}
+        </span>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setOffset((o) => Math.max(0, o - FILINGS_PAGE_SIZE))}
+            disabled={!hasPrev}
+            className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1 font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            ‹ Prev
+          </button>
+          <button
+            type="button"
+            onClick={() => setOffset((o) => o + FILINGS_PAGE_SIZE)}
+            disabled={!hasNext}
+            className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1 font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Next ›
+          </button>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
+
+export function InstrumentPage() {
+  const { symbol = "" } = useParams<{ symbol: string }>();
+  const location = useLocation();
+
+  const summaryAsync = useAsync<InstrumentSummary>(
+    () => fetchInstrumentSummary(symbol),
+    [symbol],
+  );
+
+  if (summaryAsync.loading) return <SectionSkeleton rows={4} />;
+  if (summaryAsync.error !== null) return <ErrorView error={summaryAsync.error} />;
+  if (!summaryAsync.data)
+    return <EmptyState title="No data" description={`No data for ${symbol}.`} />;
+
+  // #819: operational-duplicate redirect. When the loaded summary
+  // names a canonical symbol that differs from the URL slug, the
+  // instrument is a ``.RTH``-style variant; the chart / ownership /
+  // fundamentals all live under the canonical row, so redirect there.
+  // ``<Navigate replace>`` blocks further render — the canonical page
+  // mounts fresh on the new URL, no flash of empty variant.
+  //
+  // The CHECK constraint on instruments.canonical_instrument_id rules
+  // out self-loops; an upper-cased symbol comparison handles the
+  // case-mismatch input cleanly. The current search string is
+  // preserved so dashboard drill-ins (``?tab=positions``) survive.
+  const canonical = summaryAsync.data.identity.canonical_symbol;
+  if (canonical && canonical.toUpperCase() !== symbol.toUpperCase()) {
+    return (
+      <Navigate
+        to={`/instrument/${encodeURIComponent(canonical)}${location.search}`}
+        replace
+      />
+    );
+  }
+
+  // Per-instrument state (thesis, position, tab, modals) lives in a
+  // child so its useAsync hooks only fire when we have a real
+  // `instrument_id`. Without this split, the parent's hooks would run
+  // once with `instrumentId=null` and settle (data=null, loading=false)
+  // before the id became known, creating a brief "loaded + null"
+  // window where the Generate-thesis gate would misfire (Codex slice-1
+  // round-2 feedback).
+  return <InstrumentPageBody summary={summaryAsync.data} symbol={symbol} />;
+}
+
+function InstrumentPageBody({
+  summary,
+  symbol,
+}: {
+  summary: InstrumentSummary;
+  symbol: string;
+}): JSX.Element {
+  const instrumentId = summary.instrument_id;
+
+  // Tab state lives in the URL so dashboard/portfolio drill-ins can
+  // preselect the Positions tab via `?tab=positions` (Slice 3 of
+  // per-stock research spec). `replace: true` on the setter so
+  // tab-switching doesn't spam browser history.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const tabs = visibleTabs(summary);
+  // Fall back to "research" both when the tab param isn't a known
+  // id AND when the instrument's coverage hides the requested tab
+  // (e.g. ``?tab=filings`` on a crypto instrument).
+  const activeTab: TabId = tabs.some((t) => t.id === tabParam)
+    ? (tabParam as TabId)
+    : "research";
+  const setActiveTab = useCallback(
+    (next: TabId) => {
+      const params = new URLSearchParams(searchParams);
+      if (next === "research") {
+        params.delete("tab");
+      } else {
+        params.set("tab", next);
+      }
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const thesisAsync = useAsync<ThesisDetail | null>(
+    async () => {
+      try {
+        return await fetchLatestThesis(instrumentId);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+    [instrumentId],
+  );
+
+  const positionAsync = useAsync<InstrumentPositionDetail | null>(
+    async () => {
+      try {
+        return await fetchInstrumentPositions(instrumentId);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+    [instrumentId],
+  );
+
+  const [addOpen, setAddOpen] = useState(false);
+  const [closeOpen, setCloseOpen] = useState(false);
+  // Capture the close target at click time so a mid-flight refetch
+  // clearing `positionAsync.data` can't unmount an open modal
+  // (Codex slice-1 round-3 finding).
+  const [closeTarget, setCloseTarget] = useState<{
+    positionId: number;
+  } | null>(null);
+  const [thesisBusy, setThesisBusy] = useState(false);
+  const [thesisErr, setThesisErr] = useState<string | null>(null);
+
+  // Sticky error flags. `useAsync.refetch()` clears `error` to null at
+  // the start of the next run, which would briefly hide the error
+  // badge + retry affordance. Keep a sticky bit that only clears when
+  // the next fetch settles cleanly (non-loading + non-error).
+  const [thesisErrSticky, setThesisErrSticky] = useState(false);
+  const [positionErrSticky, setPositionErrSticky] = useState(false);
+  useEffect(() => {
+    if (thesisAsync.error !== null) setThesisErrSticky(true);
+    else if (!thesisAsync.loading) setThesisErrSticky(false);
+  }, [thesisAsync.error, thesisAsync.loading]);
+  useEffect(() => {
+    if (positionAsync.error !== null) setPositionErrSticky(true);
+    else if (!positionAsync.loading) setPositionErrSticky(false);
+  }, [positionAsync.error, positionAsync.loading]);
+
+  async function handleGenerateThesis() {
+    setThesisBusy(true);
+    setThesisErr(null);
+    try {
+      await generateInstrumentThesis(symbol);
+      thesisAsync.refetch();
+    } catch (err) {
+      setThesisErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setThesisBusy(false);
+    }
+  }
+
+  function handleFilled() {
+    setAddOpen(false);
+    setCloseOpen(false);
+    setCloseTarget(null);
+    positionAsync.refetch();
+  }
+
+  const position = positionAsync.data;
+  const singleTrade =
+    position !== null && position.trades.length === 1
+      ? position.trades[0]
+      : null;
+
+  function handleCloseClick() {
+    if (singleTrade === null || singleTrade === undefined) return;
+    setCloseTarget({ positionId: singleTrade.position_id });
+    setCloseOpen(true);
+  }
+
+  return (
+    <LiveQuoteProvider instrumentIds={[instrumentId]}>
+    <div className="space-y-4">
+      <SummaryStrip
+        summary={summary}
+        thesis={thesisAsync.data}
+        // `thesisLoaded=true` iff fetch settled cleanly (not errored,
+        // even historically) AND not currently reloading.
+        thesisLoaded={
+          !thesisAsync.loading &&
+          thesisAsync.error === null &&
+          !thesisErrSticky
+        }
+        thesisError={thesisErrSticky}
+        position={position}
+        positionLoaded={
+          !positionAsync.loading &&
+          positionAsync.error === null &&
+          !positionErrSticky
+        }
+        positionError={positionErrSticky}
+        onAdd={() => setAddOpen(true)}
+        onClose={handleCloseClick}
+        onGenerateThesis={handleGenerateThesis}
+        generatingThesis={thesisBusy}
+      />
+      {thesisErr !== null ? (
+        <div
+          role="status"
+          className="rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-1.5 text-xs text-red-700 dark:text-red-300"
+        >
+          Thesis generation failed: {thesisErr}
+        </div>
+      ) : null}
+      {/* Layout: Research tab is the full-width density grid (#559).
+          All other tabs keep the legacy 8/12 + 4/12 split with the
+          persistent RightRail (filings / peer / news preview). */}
+      {activeTab === "research" ? (
+        <div className="space-y-4">
+          <nav className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={`px-3 py-2 text-sm ${
+                  activeTab === tab.id
+                    ? "border-b-2 border-blue-600 font-medium text-blue-700"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+          <ResearchTab
+            summary={summary}
+            thesis={thesisAsync.data}
+            thesisErrored={thesisErrSticky}
+          />
+        </div>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-12">
+          <div className="space-y-4 lg:col-span-8">
+            <nav className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className={`px-3 py-2 text-sm ${
+                    activeTab === tab.id
+                      ? "border-b-2 border-blue-600 font-medium text-blue-700"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </nav>
+
+            {activeTab === "verdict" && (
+              <VerdictTab
+                instrumentId={summary.instrument_id}
+                thesis={thesisAsync.data}
+                thesisErrored={thesisErrSticky}
+                currentPrice={summary.price?.current ?? null}
+                currency={summary.identity.currency}
+              />
+            )}
+            {activeTab === "financials" && <FinancialsTab symbol={symbol} />}
+            {activeTab === "positions" && (
+              <PositionsTab symbol={symbol} instrumentId={summary.instrument_id} />
+            )}
+            {activeTab === "news" && <NewsTab instrumentId={summary.instrument_id} />}
+            {activeTab === "filings" && (
+              <FilingsTab instrumentId={summary.instrument_id} />
+            )}
+          </div>
+          <div className="lg:col-span-4">
+            <RightRail
+              instrumentId={summary.instrument_id}
+              sectorSpdr={summary.identity.sector_spdr}
+              sectorLabel={summary.identity.gics_sector}
+              currentSymbol={summary.identity.symbol}
+              filingsActive={hasActiveCapability(summary, "filings")}
+            />
+          </div>
+        </div>
+      )}
+
+      {addOpen ? (
+        <OrderEntryModal
+          isOpen
+          instrumentId={summary.instrument_id}
+          symbol={summary.identity.symbol}
+          companyName={summary.identity.display_name ?? summary.identity.symbol}
+          valuationSource="quote"
+          onRequestClose={() => setAddOpen(false)}
+          onFilled={handleFilled}
+        />
+      ) : null}
+
+      {closeOpen && closeTarget !== null ? (
+        <ClosePositionModal
+          isOpen
+          instrumentId={summary.instrument_id}
+          positionId={closeTarget.positionId}
+          valuationSource="quote"
+          onRequestClose={() => {
+            setCloseOpen(false);
+            setCloseTarget(null);
+          }}
+          onFilled={handleFilled}
+        />
+      ) : null}
+    </div>
+    </LiveQuoteProvider>
+  );
+}
+
+export default InstrumentPage;

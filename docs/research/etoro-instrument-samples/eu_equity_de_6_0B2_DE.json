@@ -1,0 +1,31 @@
+{
+  "instrumentID": 12321,
+  "instrumentDisplayName": "BAWAG Group AG",
+  "instrumentTypeID": 5,
+  "exchangeID": 6,
+  "images": [
+    {
+      "instrumentID": 12321,
+      "width": 35.0,
+      "height": 35.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/12321/35x35.png"
+    },
+    {
+      "instrumentID": 12321,
+      "width": 50.0,
+      "height": 50.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/12321/50x50.png"
+    },
+    {
+      "instrumentID": 12321,
+      "width": 150.0,
+      "height": 150.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/12321/150x150.png"
+    }
+  ],
+  "symbolFull": "0B2.DE",
+  "stocksIndustryID": 4,
+  "priceSource": "Xetra",
+  "hasExpirationDate": false,
+  "isInternalInstrument": false
+}

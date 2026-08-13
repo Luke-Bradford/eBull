@@ -1,0 +1,354 @@
+/**
+ * SummaryStrip — sticky per-instrument header (Slice 1 of per-stock
+ * research page, docs/superpowers/specs/2026-04-20-per-stock-research-page.md).
+ *
+ * Always-visible identity + price + thesis + score + position badges
+ * plus the research-page action surface (Add / Close / Generate thesis).
+ * Sits above the tab nav; stays visible as the operator scrolls through
+ * financials or news.
+ *
+ * Action gating:
+ *   - Close — only when `heldUnits > 0`.
+ *   - Generate thesis — when no thesis, or thesis is > 30d old.
+ *   - Add/Buy — always enabled on tradable instruments. Labeled "Buy" only
+ *     once the position fetch has resolved and confirmed no holding;
+ *     "Add" is the default (loading, error, or held), matching the action
+ *     OrderEntryModal actually submits (#316) and avoiding a wrong CTA
+ *     flash while position state is still unknown.
+ */
+import type {
+  InstrumentSummary,
+  InstrumentPositionDetail,
+  ThesisDetail,
+} from "@/api/types";
+import { Term } from "@/components/Term";
+import { formatCloseDate } from "@/lib/format";
+import {
+  liveTickDisplayCompanion,
+  liveTickNativePrice,
+  useLiveQuote,
+} from "@/lib/useLiveQuote";
+
+function formatPrice(
+  value: string | null | undefined,
+  currency: string | null | undefined,
+): string {
+  if (value === null || value === undefined) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  const formatted = num.toLocaleString(undefined, {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2,
+  });
+  return currency ? `${currency} ${formatted}` : formatted;
+}
+
+// Absolute day-change, formatted to the same 2dp precision as the price
+// (formatPrice) with an explicit sign. The native price triple (#1906) can
+// carry >2dp, so rendering day_change raw leaks e.g. `+0.130000` (#1953).
+function formatChange(value: string | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  // Sign off the rounded value so a magnitude that rounds to zero
+  // (e.g. -0.004 → -0.00) reads as "+0.00", not a bare "-0.00".
+  const rounded = Number(num.toFixed(2));
+  const formatted = Math.abs(rounded).toLocaleString(undefined, {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2,
+  });
+  return `${rounded >= 0 ? "+" : "-"}${formatted}`;
+}
+
+function formatPct(value: string | null | undefined, signed = false): string {
+  if (value === null || value === undefined) return "—";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  const pct = (num * 100).toFixed(2);
+  const sign = signed && num > 0 ? "+" : "";
+  return `${sign}${pct}%`;
+}
+
+// Staleness single-source (#1902): the latest-thesis GET carries the
+// server verdict (`is_stale` via find_stale_instruments — coverage
+// cadence + filing-event triggers). The FE never re-derives it from a
+// local day constant; a missing thesis is trivially stale (nothing to
+// act on), which is an existence check, not a threshold.
+function isThesisStale(thesis: ThesisDetail | null): boolean {
+  if (thesis === null) return true;
+  return thesis.is_stale === true;
+}
+
+function thesisTone(stance: string): string {
+  switch (stance.toLowerCase()) {
+    case "buy":
+      return "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700";
+    case "hold":
+      return "bg-slate-100 dark:bg-slate-800 text-slate-700 border-slate-300 dark:border-slate-700";
+    case "exit":
+    case "sell":
+      return "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-300 dark:border-red-700";
+    default:
+      return "bg-slate-100 dark:bg-slate-800 text-slate-700 border-slate-300 dark:border-slate-700";
+  }
+}
+
+export interface SummaryStripProps {
+  summary: InstrumentSummary;
+  thesis: ThesisDetail | null;
+  /** True iff the thesis fetch has settled (resolved or legitimate 404). */
+  thesisLoaded: boolean;
+  /** True iff the thesis fetch errored on a non-404 failure. */
+  thesisError: boolean;
+  position: InstrumentPositionDetail | null;
+  /** True iff the position fetch has settled. */
+  positionLoaded: boolean;
+  /** True iff the position fetch errored on a non-404 failure. */
+  positionError: boolean;
+  onAdd: () => void;
+  onClose: () => void;
+  onGenerateThesis: () => void;
+  generatingThesis: boolean;
+}
+
+export function SummaryStrip({
+  summary,
+  thesis,
+  thesisLoaded,
+  thesisError,
+  position,
+  positionLoaded,
+  positionError,
+  onAdd,
+  onClose,
+  onGenerateThesis,
+  generatingThesis,
+}: SummaryStripProps): JSX.Element {
+  const { identity, price } = summary;
+  // Live-quote overlay (#488). When an SSE tick arrives for this
+  // instrument, it overrides the REST snapshot's current/currency.
+  // Day change columns keep using the snapshot — the live tick
+  // only carries bid/ask/last, not the daily anchor. Hook opens a
+  // stream on mount (triggering a dynamic eToro Subscribe per #487)
+  // and closes on unmount.
+  const live = useLiveQuote(summary.instrument_id);
+  // #1906 (operator decision 2026-07-04): NATIVE price is primary — the
+  // tradable number — with the display-currency (e.g. GBP) worth shown as a
+  // secondary muted companion. The header previously FLIPPED currency between
+  // tabs because it merged whichever of two sources answered first (REST
+  // snapshot vs SSE live tick) and they disagreed on currency semantics. Both
+  // sources now expose a native triple + a display companion, so the primary
+  // is always native regardless of which resolves first.
+  const liveNative = liveTickNativePrice(live.tick);
+  const primaryCurrent = liveNative?.value ?? price?.current ?? null;
+  const primaryCurrency = liveNative?.currency ?? price?.currency ?? null;
+  // Source-couple the companion to the primary: when a live tick drives the
+  // primary, ITS OWN display block (or null) drives the companion — never the
+  // REST snapshot's stale conversion. Otherwise the header could show a live
+  // native price beside a companion computed for a different (older) price.
+  const companion = liveNative
+    ? liveTickDisplayCompanion(live.tick)
+    : price?.display_current != null && price?.display_currency != null
+      ? { value: price.display_current, currency: price.display_currency }
+      : null;
+  // Also require a labelled primary: never show a companion beside an
+  // unlabelled native price. (Backend + SSE both guarantee null native
+  // currency ⟹ null companion, so this is defensive against contract drift.)
+  const showCompanion =
+    companion !== null &&
+    primaryCurrency !== null &&
+    companion.currency !== primaryCurrency;
+  const changeNum =
+    price?.day_change_pct != null ? Number(price.day_change_pct) : null;
+  const dayChangeAsOf = formatCloseDate(price?.day_change_as_of ?? null);
+  const changeColor =
+    changeNum === null
+      ? "text-slate-500"
+      : changeNum >= 0
+        ? "text-emerald-600"
+        : "text-red-600";
+
+  const heldUnits = position?.total_units ?? 0;
+  const isHeld = heldUnits > 0;
+  // Multi-trade positions can't be closed from this strip because
+  // ClosePositionModal needs one specific position_id. The operator
+  // goes to the Positions tab instead. Also gate on `positionLoaded`
+  // (NOT errored) so a stale/unresolved fetch doesn't offer a
+  // dead-end click.
+  const canCloseFromStrip =
+    positionLoaded &&
+    !positionError &&
+    isHeld &&
+    position !== null &&
+    position.trades.length === 1;
+  const thesisStale = isThesisStale(thesis);
+  // Still offer Generate thesis on errored thesis state — gives the
+  // operator a retry affordance instead of silent lockout.
+  const showGenerateThesis = (thesisLoaded && thesisStale) || thesisError;
+
+  return (
+    <div
+      data-testid="summary-strip"
+      className="sticky top-0 z-20 -mx-6 border-b border-slate-200 bg-white px-6 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none"
+    >
+      {/* Row 1: identity + price */}
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <h1 className="text-2xl font-semibold text-slate-800 dark:text-slate-100">
+          {identity.symbol}
+        </h1>
+        <span className="text-lg text-slate-600">
+          {identity.display_name ?? "—"}
+        </span>
+        {summary.coverage_tier !== null ? (
+          <Term
+            term={`Tier ${summary.coverage_tier}`}
+            className="rounded bg-blue-100 dark:bg-blue-900/40 px-2 py-0.5 text-xs font-medium text-blue-700 dark:text-blue-300 no-underline"
+          >
+            Tier {summary.coverage_tier}
+          </Term>
+        ) : null}
+        {price || liveNative ? (
+          <>
+            <span className="ml-auto flex items-baseline gap-1.5 text-2xl font-semibold tabular-nums text-slate-800 dark:text-slate-100">
+              {formatPrice(primaryCurrent, primaryCurrency)}
+              {live.connected ? (
+                <span
+                  data-testid="live-pulse"
+                  title="Live price stream active"
+                  className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-500"
+                />
+              ) : null}
+            </span>
+            {showCompanion ? (
+              <span
+                data-testid="price-companion"
+                title="Approximate worth in your display currency"
+                className="text-sm tabular-nums text-slate-400 dark:text-slate-500"
+              >
+                ≈ {formatPrice(companion!.value, companion!.currency)}
+              </span>
+            ) : null}
+            <span className={`text-sm tabular-nums ${changeColor}`}>
+              {formatChange(price?.day_change)} (
+              {formatPct(price?.day_change_pct, true)})
+            </span>
+            {/* #1924: stamp the day-change with its close date so a stale close
+                (common in the loop) reads honestly rather than as "today". */}
+            {dayChangeAsOf ? (
+              <span
+                className="text-xs tabular-nums text-slate-400 dark:text-slate-500"
+                title="Close-to-close change, as of this close"
+              >
+                as of {dayChangeAsOf}
+              </span>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+
+      {/* Row 2: sector strip. Prefer the real GICS sector (#1634, resolved from
+          the SEC SIC); fall back to the resolved eToro industry name (#1599) for
+          non-SEC instruments. Never the opaque numeric `sector` id. */}
+      <div className="mt-1 text-xs text-slate-500">
+        {identity.gics_sector ?? identity.sector_name ?? "—"}
+        {identity.gics_sector && identity.sector_spdr
+          ? ` (${identity.sector_spdr})`
+          : ""}
+        {identity.industry ? ` · ${identity.industry}` : ""}
+        {/* #1955: render the human exchange label, never the opaque numeric
+            `exchange` id (which leaked as "· 4 ·"). */}
+        {identity.exchange_name ? ` · ${identity.exchange_name}` : ""}
+        {identity.country ? ` · ${identity.country}` : ""}
+      </div>
+
+      {/* Row 3: badges + actions */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {/* Show stance badge whenever we have thesis data, even when
+            the sticky error flag is set — dropping the last-known
+            stance/confidence would lose useful operator context
+            during a refetch hiccup. Add a stale/errored qualifier
+            inline. */}
+        {thesis !== null ? (
+          <span
+            data-testid="thesis-badge"
+            className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${thesisTone(thesis.stance)}`}
+          >
+            Thesis: {thesis.stance.toUpperCase()}
+            {thesis.confidence_score !== null
+              ? ` ${Math.round(Number(thesis.confidence_score) * 100)}%`
+              : ""}
+            {thesisStale ? (
+              <span className="ml-1.5 text-amber-600">(stale)</span>
+            ) : null}
+          </span>
+        ) : thesisLoaded ? (
+          <span
+            data-testid="thesis-badge-missing"
+            className="inline-flex items-center rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 px-2 py-0.5 text-xs font-medium text-slate-500"
+          >
+            No thesis yet
+          </span>
+        ) : null}
+
+        {thesisError ? (
+          <span
+            data-testid="thesis-badge-error"
+            className="inline-flex items-center rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-300"
+          >
+            Thesis unavailable
+          </span>
+        ) : null}
+
+        {positionError ? (
+          <span
+            data-testid="position-badge-error"
+            className="inline-flex items-center rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-300"
+          >
+            Holdings unavailable
+          </span>
+        ) : positionLoaded && isHeld ? (
+          <span
+            data-testid="held-badge"
+            className="inline-flex items-center rounded border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/40 px-2 py-0.5 text-xs font-medium text-blue-700 dark:text-blue-300"
+          >
+            Held: {heldUnits}u
+          </span>
+        ) : null}
+
+        <div className="ml-auto flex gap-2">
+          {summary.is_tradable ? (
+            <button
+              type="button"
+              data-testid="action-add"
+              onClick={onAdd}
+              className="rounded border border-blue-300 bg-white dark:bg-slate-900 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50"
+            >
+              {positionLoaded && !positionError && !isHeld ? "Buy" : "Add"}
+            </button>
+          ) : null}
+          {canCloseFromStrip ? (
+            <button
+              type="button"
+              data-testid="action-close"
+              onClick={onClose}
+              className="rounded border border-red-300 bg-white dark:bg-slate-900 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+            >
+              Close
+            </button>
+          ) : null}
+          {showGenerateThesis ? (
+            <button
+              type="button"
+              data-testid="action-generate-thesis"
+              onClick={onGenerateThesis}
+              disabled={generatingThesis}
+              className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800/40"
+            >
+              {generatingThesis ? "Generating…" : "Generate thesis"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,208 @@
+{
+  "exchangeInfo": [
+    {
+      "exchangeID": 1,
+      "exchangeDescription": "FX"
+    },
+    {
+      "exchangeID": 2,
+      "exchangeDescription": "Commodity"
+    },
+    {
+      "exchangeID": 3,
+      "exchangeDescription": "CFD"
+    },
+    {
+      "exchangeID": 4,
+      "exchangeDescription": "Nasdaq"
+    },
+    {
+      "exchangeID": 5,
+      "exchangeDescription": "NYSE"
+    },
+    {
+      "exchangeID": 6,
+      "exchangeDescription": "FRA"
+    },
+    {
+      "exchangeID": 7,
+      "exchangeDescription": "LSE"
+    },
+    {
+      "exchangeID": 8,
+      "exchangeDescription": "Digital Currency"
+    },
+    {
+      "exchangeID": 9,
+      "exchangeDescription": "Euronext Paris"
+    },
+    {
+      "exchangeID": 10,
+      "exchangeDescription": "Bolsa De Madrid"
+    },
+    {
+      "exchangeID": 11,
+      "exchangeDescription": "Borsa Italiana"
+    },
+    {
+      "exchangeID": 12,
+      "exchangeDescription": "SIX"
+    },
+    {
+      "exchangeID": 13,
+      "exchangeDescription": "TYO"
+    },
+    {
+      "exchangeID": 14,
+      "exchangeDescription": "Oslo Stock Exchange"
+    },
+    {
+      "exchangeID": 15,
+      "exchangeDescription": "Stockholm  Stock Exchange"
+    },
+    {
+      "exchangeID": 16,
+      "exchangeDescription": "Copenhagen Stock Exchange"
+    },
+    {
+      "exchangeID": 17,
+      "exchangeDescription": "Helsinki Stock Exchange"
+    },
+    {
+      "exchangeID": 18,
+      "exchangeDescription": "Toronto Stock Exchange"
+    },
+    {
+      "exchangeID": 19,
+      "exchangeDescription": "OTC Markets Stock Exchange"
+    },
+    {
+      "exchangeID": 20,
+      "exchangeDescription": "Chicago Board Options Exchange"
+    },
+    {
+      "exchangeID": 21,
+      "exchangeDescription": "Hong Kong Exchanges"
+    },
+    {
+      "exchangeID": 22,
+      "exchangeDescription": "Euronext Lisbon"
+    },
+    {
+      "exchangeID": 23,
+      "exchangeDescription": "Euronext Brussels"
+    },
+    {
+      "exchangeID": 24,
+      "exchangeDescription": "Tadawul"
+    },
+    {
+      "exchangeID": 30,
+      "exchangeDescription": "Euronext Amsterdam"
+    },
+    {
+      "exchangeID": 31,
+      "exchangeDescription": "Sydney"
+    },
+    {
+      "exchangeID": 32,
+      "exchangeDescription": "Vienna"
+    },
+    {
+      "exchangeID": 33,
+      "exchangeDescription": "Regular Trading Hours - RTH"
+    },
+    {
+      "exchangeID": 34,
+      "exchangeDescription": "Dublin EN"
+    },
+    {
+      "exchangeID": 35,
+      "exchangeDescription": "Prague SE"
+    },
+    {
+      "exchangeID": 36,
+      "exchangeDescription": "Warsaw"
+    },
+    {
+      "exchangeID": 37,
+      "exchangeDescription": "Budapest"
+    },
+    {
+      "exchangeID": 38,
+      "exchangeDescription": "Xetra ETFs"
+    },
+    {
+      "exchangeID": 39,
+      "exchangeDescription": "Dubai Financial Market"
+    },
+    {
+      "exchangeID": 40,
+      "exchangeDescription": "CME"
+    },
+    {
+      "exchangeID": 41,
+      "exchangeDescription": "Abu Dhabi"
+    },
+    {
+      "exchangeID": 42,
+      "exchangeDescription": "LSE_AIM"
+    },
+    {
+      "exchangeID": 43,
+      "exchangeDescription": "LSE AIM Auction"
+    },
+    {
+      "exchangeID": 44,
+      "exchangeDescription": "LSE Auction"
+    },
+    {
+      "exchangeID": 45,
+      "exchangeDescription": "Shenzen Stock Exchange"
+    },
+    {
+      "exchangeID": 46,
+      "exchangeDescription": "Shanghai Stock Exchange"
+    },
+    {
+      "exchangeID": 47,
+      "exchangeDescription": "National Stock Exchange of India"
+    },
+    {
+      "exchangeID": 48,
+      "exchangeDescription": "TSX Venture Exchange"
+    },
+    {
+      "exchangeID": 49,
+      "exchangeDescription": "Singapore Exchange"
+    },
+    {
+      "exchangeID": 50,
+      "exchangeDescription": "Nasdaq Iceland"
+    },
+    {
+      "exchangeID": 51,
+      "exchangeDescription": "Nasdaq Tallinn"
+    },
+    {
+      "exchangeID": 52,
+      "exchangeDescription": "Nasdaq Vilnius"
+    },
+    {
+      "exchangeID": 53,
+      "exchangeDescription": "Nasdaq Riga"
+    },
+    {
+      "exchangeID": 54,
+      "exchangeDescription": "Korea Exchange"
+    },
+    {
+      "exchangeID": 55,
+      "exchangeDescription": "Taiwan Stock Exchange"
+    },
+    {
+      "exchangeID": 56,
+      "exchangeDescription": "Tokyo Stock Exchange"
+    }
+  ]
+}

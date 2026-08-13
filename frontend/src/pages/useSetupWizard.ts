@@ -1,0 +1,130 @@
+/**
+ * useSetupWizard — state machine + fetch dispatcher for SetupPage.
+ *
+ * Post-amendment 2026-05-07 (#971): the wizard is single-step. The
+ * broker-credential step has been removed; operators add eToro keys in
+ * Settings after first-run setup.
+ *
+ * Reducer covers operator-submit fetch-status flags. Form-field inputs
+ * (username, password, setupToken) stay as component-level useState in
+ * SetupPage.tsx — field churn does not belong in the state machine.
+ *
+ * Completion is a side effect (markAuthenticated + navigate) driven by
+ * the component via the `onComplete` callback option.
+ */
+import { useCallback, useEffect, useReducer, useRef } from "react";
+
+import type { Operator } from "@/api/auth";
+import { postSetup } from "@/api/auth";
+import { GENERIC_ERROR } from "@/pages/setupErrorMessages";
+
+// ---------------------------------------------------------------------------
+// State + actions
+// ---------------------------------------------------------------------------
+
+export type WizardState = {
+  pendingOperator: Operator | null;
+  operatorSubmitting: boolean;
+  operatorError: string | null;
+};
+
+export const initialWizardState: WizardState = {
+  pendingOperator: null,
+  operatorSubmitting: false,
+  operatorError: null,
+};
+
+export type WizardAction =
+  | { type: "OPERATOR_SUBMIT_START" }
+  | { type: "OPERATOR_SUBMIT_SUCCESS"; operator: Operator }
+  | { type: "OPERATOR_SUBMIT_ERROR" };
+
+export function wizardReducer(state: WizardState, action: WizardAction): WizardState {
+  switch (action.type) {
+    case "OPERATOR_SUBMIT_START":
+      return { ...state, operatorSubmitting: true, operatorError: null };
+    case "OPERATOR_SUBMIT_SUCCESS":
+      return {
+        ...state,
+        pendingOperator: action.operator,
+        operatorSubmitting: false,
+        operatorError: null,
+      };
+    case "OPERATOR_SUBMIT_ERROR":
+      // #98 non-leaky contract: never propagate err.message into state.
+      return { ...state, operatorSubmitting: false, operatorError: GENERIC_ERROR };
+    default: {
+      const _exhaustive: never = action;
+      return _exhaustive;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
+
+export interface UseSetupWizardOptions {
+  /**
+   * Called after a successful operator-create with the operator
+   * returned by ``POST /auth/setup``. The hook MUST pass the
+   * operator through this argument rather than expect callers to
+   * read `state.pendingOperator` — a closure captured at submit
+   * time would otherwise see a stale state snapshot and skip
+   * `markAuthenticated`.
+   */
+  onComplete: (operator: Operator) => void;
+}
+
+export interface UseSetupWizardResult {
+  state: WizardState;
+  submitOperator: (input: {
+    username: string;
+    password: string;
+    setupToken: string;
+  }) => Promise<void>;
+}
+
+export function useSetupWizard(opts: UseSetupWizardOptions): UseSetupWizardResult {
+  const [state, dispatch] = useReducer(wizardReducer, initialWizardState);
+
+  // Stash onComplete in a ref so submitOperator's identity stays
+  // stable across renders. Callers commonly inline a closure for
+  // onComplete each render, which would otherwise force submitOperator
+  // (via useCallback deps) to recreate on every parent state tick.
+  const onCompleteRef = useRef(opts.onComplete);
+  useEffect(() => {
+    onCompleteRef.current = opts.onComplete;
+  }, [opts.onComplete]);
+
+  const submitOperator = useCallback(
+    async ({
+      username,
+      password,
+      setupToken,
+    }: {
+      username: string;
+      password: string;
+      setupToken: string;
+    }): Promise<void> => {
+      dispatch({ type: "OPERATOR_SUBMIT_START" });
+      try {
+        const { operator } = await postSetup(
+          username,
+          password,
+          setupToken === "" ? null : setupToken,
+        );
+        dispatch({ type: "OPERATOR_SUBMIT_SUCCESS", operator });
+        // Pass the operator directly — relying on
+        // `state.pendingOperator` here would read a stale closure
+        // snapshot.
+        onCompleteRef.current(operator);
+      } catch {
+        dispatch({ type: "OPERATOR_SUBMIT_ERROR" });
+      }
+    },
+    [],
+  );
+
+  return { state, submitOperator };
+}

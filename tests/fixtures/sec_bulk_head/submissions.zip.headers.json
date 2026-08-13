@@ -1,0 +1,10 @@
+{
+  "_recorded_at": "2026-05-22T23:56:39Z",
+  "_url": "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip",
+  "_recorded_with": "curl -sI -A 'eBull dev@example.com'",
+  "content-type": "application/zip",
+  "content-length": "1541272031",
+  "last-modified": "Fri, 22 May 2026 04:36:27 GMT",
+  "etag": "\"504b124e9474334e889e9e525db95c14-184\"",
+  "accept-ranges": "bytes"
+}

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  eBull TA headless loop.
+
+  Install (once) — driver copy FIRST, then the agent:
+    mkdir -p /Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/bin
+    cp scripts/autonomy/ta_loop.sh \
+       /Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/bin/
+    cp scripts/autonomy/com.ebull.ta-loop.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ebull.ta-loop.plist
+
+  ⚠ The DRIVER is the only file copied. The prompt installs itself: the driver
+  materialises it from `origin/main:.autonomy/loop_prompt.md` every iteration
+  and replaces the installed copy when the hashes differ (#2658). No plist
+  change and no re-bootstrap is needed to re-aim the loop — merge the prompt.
+
+  ⚠ launchd runs the copy under var/autonomy/bin/, NOT the tracked script.
+  The driver drives a worktree whose branch changes every iteration, so a
+  driver read from a tracked path is deleted by its own `git checkout` the
+  first time the loop branches off a commit older than this one. `/var/*` is
+  gitignored, so the installed copy is invisible to every checkout.
+  Re-copy it after any change to ta_loop.sh — the tracked file is the source,
+  the installed file is what runs.
+
+  ⚠ This plist is a LOCAL-MACHINE artefact and its absolute paths and username
+  are deliberate, not an oversight: launchd requires absolute paths, offers no
+  variable expansion in ProgramArguments, and this loop drives one specific
+  worktree on one specific Mac. It is committed for provenance and recovery,
+  not for reuse. Anyone else: change the four paths, or drive it by hand with
+  TA_LOOP_WORKTREE.
+
+  Stop it gracefully (finishes the current iteration, then idles):
+    touch /Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/PAUSE
+
+  Stop it entirely:
+    launchctl bootout gui/$(id -u)/com.ebull.ta-loop
+
+  Check on it:
+    cat /Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/status.md
+
+  ⚠ KeepAlive is TRUE so a crashed iteration restarts, but the driver itself
+  stops after 3 consecutive failures. That pairing is deliberate: launchd
+  handles "the process died", the driver handles "the work keeps failing", and
+  neither pretends to do the other's job. The previous loop conflated them and
+  spun on a wedged state file for two weeks.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ebull.ta-loop</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/bin/ta_loop.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/lukebradford/Dev/.ebull-autonomy</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Homebrew first: `claude` and `uv` both live there. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- A pause between iterations so a fast-failing loop cannot hammer
+             the API or the review bot. Longer than ta_loop.sh's own 60s
+             default (TA_LOOP_COOLDOWN in the script) on purpose: unattended
+             runs get twice the backoff a supervised one does. If the script's
+             default changes, this stays as-is unless the reason above changes
+             with it. -->
+        <key>TA_LOOP_COOLDOWN</key>
+        <string>120</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- ⚠ Not piped anywhere. The driver's own log is the record; these catch
+         anything that escapes it (a bad PATH, a missing binary) which is
+         precisely the class of failure that leaves no application-level trace. -->
+    <key>StandardOutPath</key>
+    <string>/Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/lukebradford/Dev/.ebull-autonomy/var/autonomy/launchd.err.log</string>
+</dict>
+</plist>

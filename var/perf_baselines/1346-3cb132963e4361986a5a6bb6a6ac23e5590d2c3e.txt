@@ -1,0 +1,509 @@
+EXPLAIN (ANALYZE, BUFFERS, COSTS, FORMAT TEXT)
+Aggregate  (cost=1021.25..1021.26 rows=1 width=8) (actual time=1.004..1.019 rows=1 loops=1)
+  Buffers: shared hit=253
+  ->  Append  (cost=0.14..1020.94 rows=125 width=0) (actual time=1.002..1.016 rows=0 loops=1)
+        Buffers: shared hit=253
+        ->  Index Scan using ownership_institutions_observatio_instrument_id_ingested_at_idx on ownership_institutions_observations_2010q1 ownership_institutions_observations_1  (cost=0.14..8.16 rows=1 width=0) (actual time=0.031..0.032 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=5
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx1 on ownership_institutions_observations_2010q2 ownership_institutions_observations_2  (cost=0.14..8.16 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx2 on ownership_institutions_observations_2010q3 ownership_institutions_observations_3  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx3 on ownership_institutions_observations_2010q4 ownership_institutions_observations_4  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx4 on ownership_institutions_observations_2011q1 ownership_institutions_observations_5  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx5 on ownership_institutions_observations_2011q2 ownership_institutions_observations_6  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx6 on ownership_institutions_observations_2011q3 ownership_institutions_observations_7  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx7 on ownership_institutions_observations_2011q4 ownership_institutions_observations_8  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx8 on ownership_institutions_observations_2012q1 ownership_institutions_observations_9  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observati_instrument_id_ingested_at_idx9 on ownership_institutions_observations_2012q2 ownership_institutions_observations_10  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx10 on ownership_institutions_observations_2012q3 ownership_institutions_observations_11  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx11 on ownership_institutions_observations_2012q4 ownership_institutions_observations_12  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx12 on ownership_institutions_observations_2013q1 ownership_institutions_observations_13  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx13 on ownership_institutions_observations_2013q2 ownership_institutions_observations_14  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx14 on ownership_institutions_observations_2013q3 ownership_institutions_observations_15  (cost=0.14..8.16 rows=1 width=0) (actual time=0.011..0.011 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx15 on ownership_institutions_observations_2013q4 ownership_institutions_observations_16  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx16 on ownership_institutions_observations_2014q1 ownership_institutions_observations_17  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx17 on ownership_institutions_observations_2014q2 ownership_institutions_observations_18  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx18 on ownership_institutions_observations_2014q3 ownership_institutions_observations_19  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx19 on ownership_institutions_observations_2014q4 ownership_institutions_observations_20  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx20 on ownership_institutions_observations_2015q1 ownership_institutions_observations_21  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx21 on ownership_institutions_observations_2015q2 ownership_institutions_observations_22  (cost=0.14..8.16 rows=1 width=0) (actual time=0.005..0.005 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx22 on ownership_institutions_observations_2015q3 ownership_institutions_observations_23  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx23 on ownership_institutions_observations_2015q4 ownership_institutions_observations_24  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx24 on ownership_institutions_observations_2016q1 ownership_institutions_observations_25  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx25 on ownership_institutions_observations_2016q2 ownership_institutions_observations_26  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx26 on ownership_institutions_observations_2016q3 ownership_institutions_observations_27  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx27 on ownership_institutions_observations_2016q4 ownership_institutions_observations_28  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx28 on ownership_institutions_observations_2017q1 ownership_institutions_observations_29  (cost=0.14..8.16 rows=1 width=0) (actual time=0.269..0.269 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx29 on ownership_institutions_observations_2017q2 ownership_institutions_observations_30  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx30 on ownership_institutions_observations_2017q3 ownership_institutions_observations_31  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx31 on ownership_institutions_observations_2017q4 ownership_institutions_observations_32  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx32 on ownership_institutions_observations_2018q1 ownership_institutions_observations_33  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx33 on ownership_institutions_observations_2018q2 ownership_institutions_observations_34  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx34 on ownership_institutions_observations_2018q3 ownership_institutions_observations_35  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx35 on ownership_institutions_observations_2018q4 ownership_institutions_observations_36  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx36 on ownership_institutions_observations_2019q1 ownership_institutions_observations_37  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx37 on ownership_institutions_observations_2019q2 ownership_institutions_observations_38  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx38 on ownership_institutions_observations_2019q3 ownership_institutions_observations_39  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx39 on ownership_institutions_observations_2019q4 ownership_institutions_observations_40  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx40 on ownership_institutions_observations_2020q1 ownership_institutions_observations_41  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx41 on ownership_institutions_observations_2020q2 ownership_institutions_observations_42  (cost=0.14..8.16 rows=1 width=0) (actual time=0.005..0.005 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx42 on ownership_institutions_observations_2020q3 ownership_institutions_observations_43  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx43 on ownership_institutions_observations_2020q4 ownership_institutions_observations_44  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx44 on ownership_institutions_observations_2021q1 ownership_institutions_observations_45  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx45 on ownership_institutions_observations_2021q2 ownership_institutions_observations_46  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx46 on ownership_institutions_observations_2021q3 ownership_institutions_observations_47  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx47 on ownership_institutions_observations_2021q4 ownership_institutions_observations_48  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx48 on ownership_institutions_observations_2022q1 ownership_institutions_observations_49  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx49 on ownership_institutions_observations_2022q2 ownership_institutions_observations_50  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx50 on ownership_institutions_observations_2022q3 ownership_institutions_observations_51  (cost=0.14..8.16 rows=1 width=0) (actual time=0.013..0.013 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx51 on ownership_institutions_observations_2022q4 ownership_institutions_observations_52  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx52 on ownership_institutions_observations_2023q1 ownership_institutions_observations_53  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx53 on ownership_institutions_observations_2023q2 ownership_institutions_observations_54  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx54 on ownership_institutions_observations_2023q3 ownership_institutions_observations_55  (cost=0.14..8.16 rows=1 width=0) (actual time=0.011..0.011 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx55 on ownership_institutions_observations_2023q4 ownership_institutions_observations_56  (cost=0.14..8.16 rows=1 width=0) (actual time=0.009..0.009 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx56 on ownership_institutions_observations_2024q1 ownership_institutions_observations_57  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx57 on ownership_institutions_observations_2024q2 ownership_institutions_observations_58  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx58 on ownership_institutions_observations_2024q3 ownership_institutions_observations_59  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx59 on ownership_institutions_observations_2024q4 ownership_institutions_observations_60  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx60 on ownership_institutions_observations_2025q1 ownership_institutions_observations_61  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx61 on ownership_institutions_observations_2025q2 ownership_institutions_observations_62  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx62 on ownership_institutions_observations_2025q3 ownership_institutions_observations_63  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx63 on ownership_institutions_observations_2025q4 ownership_institutions_observations_64  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx64 on ownership_institutions_observations_2026q1 ownership_institutions_observations_65  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx65 on ownership_institutions_observations_2026q2 ownership_institutions_observations_66  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx66 on ownership_institutions_observations_2026q3 ownership_institutions_observations_67  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx67 on ownership_institutions_observations_2026q4 ownership_institutions_observations_68  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx68 on ownership_institutions_observations_2027q1 ownership_institutions_observations_69  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx69 on ownership_institutions_observations_2027q2 ownership_institutions_observations_70  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx70 on ownership_institutions_observations_2027q3 ownership_institutions_observations_71  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx71 on ownership_institutions_observations_2027q4 ownership_institutions_observations_72  (cost=0.14..8.16 rows=1 width=0) (actual time=0.011..0.011 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx72 on ownership_institutions_observations_2028q1 ownership_institutions_observations_73  (cost=0.14..8.16 rows=1 width=0) (actual time=0.011..0.011 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx73 on ownership_institutions_observations_2028q2 ownership_institutions_observations_74  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx74 on ownership_institutions_observations_2028q3 ownership_institutions_observations_75  (cost=0.14..8.16 rows=1 width=0) (actual time=0.013..0.013 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx75 on ownership_institutions_observations_2028q4 ownership_institutions_observations_76  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx76 on ownership_institutions_observations_2029q1 ownership_institutions_observations_77  (cost=0.14..8.16 rows=1 width=0) (actual time=0.010..0.010 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx77 on ownership_institutions_observations_2029q2 ownership_institutions_observations_78  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx78 on ownership_institutions_observations_2029q3 ownership_institutions_observations_79  (cost=0.14..8.16 rows=1 width=0) (actual time=0.012..0.012 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx79 on ownership_institutions_observations_2029q4 ownership_institutions_observations_80  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx80 on ownership_institutions_observations_2030q1 ownership_institutions_observations_81  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx81 on ownership_institutions_observations_2030q2 ownership_institutions_observations_82  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx82 on ownership_institutions_observations_2030q3 ownership_institutions_observations_83  (cost=0.14..8.16 rows=1 width=0) (actual time=0.006..0.006 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx83 on ownership_institutions_observations_2030q4 ownership_institutions_observations_84  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx85 on ownership_institutions_observations_2031q1 ownership_institutions_observations_85  (cost=0.14..8.16 rows=1 width=0) (actual time=0.010..0.010 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx86 on ownership_institutions_observations_2031q2 ownership_institutions_observations_86  (cost=0.14..8.16 rows=1 width=0) (actual time=0.014..0.014 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx87 on ownership_institutions_observations_2031q3 ownership_institutions_observations_87  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx88 on ownership_institutions_observations_2031q4 ownership_institutions_observations_88  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx89 on ownership_institutions_observations_2032q1 ownership_institutions_observations_89  (cost=0.14..8.16 rows=1 width=0) (actual time=0.009..0.009 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx90 on ownership_institutions_observations_2032q2 ownership_institutions_observations_90  (cost=0.14..8.16 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx91 on ownership_institutions_observations_2032q3 ownership_institutions_observations_91  (cost=0.14..8.16 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx92 on ownership_institutions_observations_2032q4 ownership_institutions_observations_92  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx93 on ownership_institutions_observations_2033q1 ownership_institutions_observations_93  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx94 on ownership_institutions_observations_2033q2 ownership_institutions_observations_94  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx95 on ownership_institutions_observations_2033q3 ownership_institutions_observations_95  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx96 on ownership_institutions_observations_2033q4 ownership_institutions_observations_96  (cost=0.14..8.16 rows=1 width=0) (actual time=0.010..0.010 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx97 on ownership_institutions_observations_2034q1 ownership_institutions_observations_97  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx98 on ownership_institutions_observations_2034q2 ownership_institutions_observations_98  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx99 on ownership_institutions_observations_2034q3 ownership_institutions_observations_99  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx100 on ownership_institutions_observations_2034q4 ownership_institutions_observations_100  (cost=0.14..8.16 rows=1 width=0) (actual time=0.006..0.006 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx101 on ownership_institutions_observations_2035q1 ownership_institutions_observations_101  (cost=0.14..8.16 rows=1 width=0) (actual time=0.006..0.006 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx102 on ownership_institutions_observations_2035q2 ownership_institutions_observations_102  (cost=0.14..8.16 rows=1 width=0) (actual time=0.013..0.013 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx103 on ownership_institutions_observations_2035q3 ownership_institutions_observations_103  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx104 on ownership_institutions_observations_2035q4 ownership_institutions_observations_104  (cost=0.14..8.16 rows=1 width=0) (actual time=0.009..0.009 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx105 on ownership_institutions_observations_2036q1 ownership_institutions_observations_105  (cost=0.14..8.16 rows=1 width=0) (actual time=0.009..0.009 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx106 on ownership_institutions_observations_2036q2 ownership_institutions_observations_106  (cost=0.14..8.16 rows=1 width=0) (actual time=0.007..0.007 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx107 on ownership_institutions_observations_2036q3 ownership_institutions_observations_107  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx108 on ownership_institutions_observations_2036q4 ownership_institutions_observations_108  (cost=0.14..8.16 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx109 on ownership_institutions_observations_2037q1 ownership_institutions_observations_109  (cost=0.14..8.16 rows=1 width=0) (actual time=0.010..0.010 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx110 on ownership_institutions_observations_2037q2 ownership_institutions_observations_110  (cost=0.14..8.16 rows=1 width=0) (actual time=0.010..0.010 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx111 on ownership_institutions_observations_2037q3 ownership_institutions_observations_111  (cost=0.14..8.16 rows=1 width=0) (actual time=0.011..0.011 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx112 on ownership_institutions_observations_2037q4 ownership_institutions_observations_112  (cost=0.14..8.16 rows=1 width=0) (actual time=0.012..0.012 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx113 on ownership_institutions_observations_2038q1 ownership_institutions_observations_113  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx114 on ownership_institutions_observations_2038q2 ownership_institutions_observations_114  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx115 on ownership_institutions_observations_2038q3 ownership_institutions_observations_115  (cost=0.14..8.16 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx116 on ownership_institutions_observations_2038q4 ownership_institutions_observations_116  (cost=0.14..8.16 rows=1 width=0) (actual time=0.009..0.009 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx117 on ownership_institutions_observations_2039q1 ownership_institutions_observations_117  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx118 on ownership_institutions_observations_2039q2 ownership_institutions_observations_118  (cost=0.14..8.16 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx119 on ownership_institutions_observations_2039q3 ownership_institutions_observations_119  (cost=0.14..8.16 rows=1 width=0) (actual time=0.011..0.011 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx120 on ownership_institutions_observations_2039q4 ownership_institutions_observations_120  (cost=0.14..8.16 rows=1 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx121 on ownership_institutions_observations_2040q1 ownership_institutions_observations_121  (cost=0.14..8.16 rows=1 width=0) (actual time=0.010..0.010 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx122 on ownership_institutions_observations_2040q2 ownership_institutions_observations_122  (cost=0.14..8.16 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx123 on ownership_institutions_observations_2040q3 ownership_institutions_observations_123  (cost=0.14..8.16 rows=1 width=0) (actual time=0.011..0.011 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observa_instrument_id_ingested_at_idx124 on ownership_institutions_observations_2040q4 ownership_institutions_observations_124  (cost=0.14..8.16 rows=1 width=0) (actual time=0.009..0.010 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+        ->  Index Scan using ownership_institutions_observat_instrument_id_ingested_at_idx84 on ownership_institutions_observations_default ownership_institutions_observations_125  (cost=0.14..8.16 rows=1 width=0) (actual time=0.008..0.008 rows=0 loops=1)
+              Index Cond: (instrument_id = 1999999999)
+              Filter: (known_to IS NULL)
+              Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=18457
+Planning Time: 38.467 ms
+Execution Time: 1.528 ms

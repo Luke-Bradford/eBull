@@ -1,0 +1,1512 @@
+"""
+Tests for app.services.order_client.
+
+Structure:
+  - TestSyntheticFill         — _synthetic_fill pure logic
+  - TestLoadApprovedRec       — _load_approved_recommendation validation
+  - TestExecuteOrderDemoMode  — full execute_order in demo mode (no broker)
+  - TestExecuteOrderLiveMode  — execute_order with mocked broker provider
+  - TestExecuteOrderFailures  — error paths: rejected, failed, missing broker
+
+Mock DB approach mirrors test_execution_guard.py:
+  - _make_cursor(rows) builds a context-manager cursor mock
+  - _make_conn(cursors) builds a connection mock
+  - conn.transaction() is a no-op context manager
+
+Cursor call order inside execute_order (demo BUY with suggested_size_pct):
+  1. _load_approved_recommendation  — fetchone
+  2. _load_cash                     — fetchone
+  3. _load_quote_for_execution      — fetchone (last/bid/ask/spread_pct)
+  4. _persist_order                 — fetchone (INSERT RETURNING)
+  5. get_transaction_cost_config    — fetchone
+  6. load_instrument_cost           — fetchone
+  7. record_estimated_cost          — cursor (INSERT, no fetchone)
+  8. _persist_fill                  — fetchone (INSERT RETURNING)
+  9. conn.execute x5                — position upsert, broker_positions, cash_ledger, rec status, audit
+
+  When spread data is unavailable (no cost_model, no quote spread_pct),
+  cursor 7 (record_estimated_cost) is skipped — s_bps is None.
+
+Cursor call order inside execute_order (demo EXIT):
+  1. _load_approved_recommendation  — fetchone
+  2. _load_position_units           — fetchone
+  3. _load_quote_for_execution      — fetchone (last/bid/ask/spread_pct)
+  4. _persist_order                 — fetchone (INSERT RETURNING)
+  5. _persist_fill                  — fetchone (INSERT RETURNING)
+  6. conn.execute x4                — position update, cash_ledger, rec status, audit
+
+  Cost recording (steps 5-7 in BUY sequence) is BUY/ADD only — skipped for EXIT.
+
+Live mode BUY cursor sequences are similar but without step 3 in the main
+path (no _load_quote_for_execution for the fill). Instead, when
+cost_model_row is None, _load_quote_for_execution is called in the
+cost-recording fallback path (between steps 6 and 7).
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.providers.broker import BrokerOrderResult, OrderParams
+from app.services.order_client import (
+    _load_approved_recommendation,
+    _load_latest_quote_price,
+    _load_position_units,
+    _persist_broker_position,
+    _synthetic_fill,
+    _update_position_buy,
+    execute_order,
+)
+from app.services.runtime_config import RuntimeConfig, RuntimeConfigCorrupt
+
+# ---------------------------------------------------------------------------
+# Cost-related test constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_COST_CONFIG: dict[str, Any] = {
+    "max_total_cost_bps": Decimal("150"),
+    "min_return_vs_cost_ratio": Decimal("3.0"),
+    "default_hold_days": 90,
+}
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+
+_RUNTIME_DEMO = RuntimeConfig(
+    enable_auto_trading=True,
+    enable_live_trading=False,
+    display_currency="USD",
+    llm_provider="openai_compatible",
+    llm_base_url="http://localhost:11434/v1",
+    llm_model_writer="qwen3:14b",
+    llm_model_critic="qwen3:14b",
+    updated_at=_NOW,
+    updated_by="test",
+    reason="test",
+)
+
+_RUNTIME_LIVE = RuntimeConfig(
+    enable_auto_trading=True,
+    enable_live_trading=True,
+    display_currency="USD",
+    llm_provider="openai_compatible",
+    llm_base_url="http://localhost:11434/v1",
+    llm_model_writer="qwen3:14b",
+    llm_model_critic="qwen3:14b",
+    updated_at=_NOW,
+    updated_by="test",
+    reason="test",
+)
+
+
+@pytest.fixture(autouse=True)
+def _patch_runtime_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default every test in this file to demo mode.
+
+    Tests that need live mode override via monkeypatch within the test body.
+    Tests that need a corrupt-config failure raise RuntimeConfigCorrupt.
+    """
+    monkeypatch.setattr(
+        "app.services.order_client.get_runtime_config",
+        lambda _conn: _RUNTIME_DEMO,
+    )
+    monkeypatch.setattr(
+        "app.services.order_client._assert_transaction_cost_complete_for_buy_add",
+        lambda _conn, _action, _instrument_id: None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_post_trade_enqueue() -> Iterator[MagicMock]:
+    """#1593: enqueue_post_trade_sync opens its own cursor, which would
+    exhaust the sequenced mock conns here. Patched at point of use;
+    the enqueue contract is asserted in TestPostTradeEnqueue."""
+    with patch("app.services.order_client.enqueue_post_trade_sync") as stub:
+        yield stub
+
+
+def _make_cursor(rows: list[dict[str, Any]]) -> MagicMock:
+    cur = MagicMock()
+    cur.fetchall.return_value = rows
+    cur.fetchone.return_value = rows[0] if rows else None
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+    return cur
+
+
+def _make_conn(cursor_sequence: list[MagicMock]) -> MagicMock:
+    """
+    Build a fake psycopg connection.
+    conn.cursor() calls consume cursor_sequence in order.
+    conn.execute() is a no-op mock.
+    conn.transaction() is a no-op context manager.
+    """
+    conn = MagicMock()
+    conn.cursor.side_effect = cursor_sequence
+    conn.execute.return_value = MagicMock()
+    conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
+    conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+    return conn
+
+
+def _rec_cursor(
+    action: str = "BUY",
+    instrument_id: int = 1,
+    recommendation_id: int = 42,
+    target_entry: float | None = 100.0,
+    suggested_size_pct: float | None = 0.05,
+    model_version: str | None = "v1-balanced",
+    status: str = "approved",
+    stop_loss_rate: float | None = None,
+    take_profit_rate: float | None = None,
+) -> MagicMock:
+    return _make_cursor(
+        [
+            {
+                "recommendation_id": recommendation_id,
+                "instrument_id": instrument_id,
+                "action": action,
+                "target_entry": target_entry,
+                "suggested_size_pct": suggested_size_pct,
+                "model_version": model_version,
+                "status": status,
+                "stop_loss_rate": stop_loss_rate,
+                "take_profit_rate": take_profit_rate,
+            }
+        ]
+    )
+
+
+def _cash_cursor(balance: float | None = 10_000.0) -> MagicMock:
+    return _make_cursor([{"balance": balance}])
+
+
+def _quote_cursor(
+    last: float | None = 150.0,
+    bid: float | None = None,
+    ask: float | None = None,
+    spread_pct: float | None = None,
+) -> MagicMock:
+    if last is None and bid is None:
+        return _make_cursor([])
+    row: dict[str, Any] = {"last": last, "bid": bid, "ask": ask, "spread_pct": spread_pct}
+    return _make_cursor([row])
+
+
+def _position_cursor(current_units: float = 10.0) -> MagicMock:
+    return _make_cursor([{"current_units": current_units}])
+
+
+def _order_returning_cursor(order_id: int = 1) -> MagicMock:
+    return _make_cursor([{"order_id": order_id}])
+
+
+def _fill_returning_cursor(fill_id: int = 1) -> MagicMock:
+    return _make_cursor([{"fill_id": fill_id}])
+
+
+def _cost_config_cursor() -> MagicMock:
+    return _make_cursor([_DEFAULT_COST_CONFIG])
+
+
+def _cost_model_cursor(row: dict[str, Any] | None = None) -> MagicMock:
+    return _make_cursor([row] if row is not None else [])
+
+
+def _cost_record_write_cursor() -> MagicMock:
+    """Cursor consumed by record_estimated_cost INSERT (no rows returned)."""
+    return _make_cursor([])
+
+
+def _update_cursor(rowcount: int = 1) -> MagicMock:
+    """Cursor consumed by an UPDATE that asserts ``cur.rowcount == 1``.
+
+    Used by the #243 ``_update_order_with_broker_result`` post-broker
+    UPDATE on the pre-call intent row.
+    """
+    cur = _make_cursor([])
+    cur.__enter__.return_value.rowcount = rowcount
+    return cur
+
+
+# ---------------------------------------------------------------------------
+# TestSyntheticFill
+# ---------------------------------------------------------------------------
+
+
+class TestSyntheticFill:
+    def test_buy_with_amount(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="BUY",
+            quote_price=Decimal("100"),
+            requested_amount=Decimal("500"),
+            requested_units=None,
+        )
+        assert result.status == "filled"
+        assert result.filled_price == Decimal("100")
+        assert result.filled_units == Decimal("5.000000")
+        assert result.broker_order_ref == "DEMO-1-BUY"
+        assert result.raw_payload["demo"] is True
+        assert result.fees == Decimal("0")
+
+    def test_buy_with_units(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="BUY",
+            quote_price=Decimal("50"),
+            requested_amount=None,
+            requested_units=Decimal("10"),
+        )
+        assert result.status == "filled"
+        assert result.filled_price == Decimal("50")
+        assert result.filled_units == Decimal("10")
+
+    def test_exit_with_units(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="EXIT",
+            quote_price=Decimal("200"),
+            requested_amount=None,
+            requested_units=Decimal("5"),
+        )
+        assert result.status == "filled"
+        assert result.filled_price == Decimal("200")
+        assert result.filled_units == Decimal("5")
+
+    def test_no_quote_price_uses_zero(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="BUY",
+            quote_price=None,
+            requested_amount=Decimal("500"),
+            requested_units=None,
+        )
+        assert result.filled_price == Decimal("0")
+        assert result.filled_units == Decimal("0")
+        assert "no quote available" in result.raw_payload["note"]
+
+    def test_zero_amount_and_no_units(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="BUY",
+            quote_price=Decimal("100"),
+            requested_amount=None,
+            requested_units=None,
+        )
+        assert result.filled_units == Decimal("0")
+
+    def test_exit_with_no_quote_fails_closed(self) -> None:
+        """Regression for #241.
+
+        Demo EXIT with no quote (no last, no bid) used to return
+        ``status='filled'`` with ``filled_price=0`` and
+        ``filled_units = position_units``. The outer guard ``fu > 0``
+        in execute_order is satisfied (units came from the open
+        position) so a fill at price=0 was persisted, the cash ledger
+        credited 0, and a realised loss equal to the position's open
+        basis was booked.
+
+        Now: status='failed', filled_units=None, filled_price=None.
+        execute_order's persistence guard skips the fill and the
+        recommendation ends in a failed state.
+        """
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="EXIT",
+            quote_price=None,
+            requested_amount=None,
+            requested_units=Decimal("10"),  # position size
+            bid=None,
+            ask=None,
+        )
+        assert result.status == "failed"
+        assert result.filled_price is None
+        assert result.filled_units is None
+        assert result.fees == Decimal("0")
+        assert "no quote" in result.raw_payload["error"].lower()
+
+    def test_buy_with_no_quote_still_zero_units(self) -> None:
+        """The fail-closed branch is EXIT-only. BUY/ADD with
+        amount-based sizing already correctly produced units=0 when
+        price=0; that path must remain unchanged.
+        """
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="BUY",
+            quote_price=None,
+            requested_amount=Decimal("1000"),
+            requested_units=None,
+            bid=None,
+            ask=None,
+        )
+        assert result.status == "filled"
+        assert result.filled_units == Decimal("0")
+
+    def test_buy_zero_ask_does_not_override_valid_last(self) -> None:
+        """#1439: a non-positive ask must not price the fill at 0.
+
+        eToro persists ``bid=ask=0.00`` for an instrument with no
+        recent two-sided book. The directional ``BUY at ask`` branch
+        used ``ask is not None`` — a 0.00 ask is non-None, so it won
+        over a perfectly valid ``last``, filling the BUY at price 0.
+        A non-positive book side is treated as missing; the fill falls
+        back to the valid ``last``.
+        """
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="BUY",
+            quote_price=Decimal("150"),
+            requested_amount=Decimal("300"),
+            requested_units=None,
+            bid=Decimal("0"),
+            ask=Decimal("0"),
+        )
+        assert result.status == "filled"
+        assert result.filled_price == Decimal("150")
+        assert result.filled_units == Decimal("2.000000")
+
+    def test_exit_zero_bid_does_not_fail_when_last_valid(self) -> None:
+        """#1439: a non-positive bid must not price the EXIT at 0.
+
+        ``EXIT at bid`` used ``bid is not None`` — a 0.00 bid won over
+        a valid ``last`` and tripped the price==0 EXIT fail-closed,
+        wrongly refusing an exit that has a usable last price. The
+        non-positive bid is ignored; the EXIT fills at the valid last.
+        """
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="EXIT",
+            quote_price=Decimal("200"),
+            requested_amount=None,
+            requested_units=Decimal("5"),
+            bid=Decimal("0"),
+            ask=Decimal("0"),
+        )
+        assert result.status == "filled"
+        assert result.filled_price == Decimal("200")
+        assert result.filled_units == Decimal("5")
+
+    def test_zero_last_with_valid_ask_fills_at_ask(self) -> None:
+        """#1439 canonical scenario: last=0 (no recent trade) but a
+        valid two-sided book. BUY fills at ask, never at the 0 last.
+        """
+        result = _synthetic_fill(
+            instrument_id=1,
+            action="BUY",
+            quote_price=Decimal("0"),
+            requested_amount=Decimal("500"),
+            requested_units=None,
+            bid=Decimal("99.80"),
+            ask=Decimal("100.20"),
+        )
+        assert result.filled_price == Decimal("100.20")
+
+
+# ---------------------------------------------------------------------------
+# TestSyntheticFillSpreadCost
+# ---------------------------------------------------------------------------
+
+
+class TestSyntheticFillSpreadCost:
+    def test_buy_fills_at_ask_with_zero_fees(self) -> None:
+        """BUY at ask already embeds half-spread vs mid in execution price.
+        Fees must be 0 — see #255 — so the cash ledger does not subtract
+        the spread twice (once via gross at ask, once via fees).
+        """
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="BUY",
+            quote_price=Decimal("100.00"),
+            requested_amount=Decimal("1000"),
+            requested_units=None,
+            bid=Decimal("99.80"),
+            ask=Decimal("100.20"),
+        )
+        # BUY fills at ask
+        assert result.filled_price == Decimal("100.20")
+        # units = 1000 / 100.20
+        expected_units = (Decimal("1000") / Decimal("100.20")).quantize(Decimal("0.000001"))
+        assert result.filled_units == expected_units
+        # Spread already embedded in fill price; fees=0 to avoid double count.
+        assert result.fees == Decimal("0")
+
+    def test_exit_fills_at_bid_with_zero_fees(self) -> None:
+        """EXIT at bid already embeds half-spread vs mid. Fees must be 0
+        so cash credit on close is `bid * units` flat, not `bid * units
+        - half_spread * units`.
+        """
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="EXIT",
+            quote_price=Decimal("100.00"),
+            requested_amount=None,
+            requested_units=Decimal("10"),
+            bid=Decimal("99.80"),
+            ask=Decimal("100.20"),
+        )
+        assert result.filled_price == Decimal("99.80")
+        assert result.fees == Decimal("0")
+
+    def test_demo_buy_cash_ledger_writes_gross_only_no_double_count(self) -> None:
+        """Regression for #255 at the ledger boundary.
+
+        Before the fix the cash ledger row for demo BUY was
+        ``-(gross + half_spread*units)`` — spread subtracted twice
+        (once via ask>mid in gross, once via fees). After the fix the
+        ledger row must be exactly ``-gross``.
+        """
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, bid=99.80, ask=100.20, spread_pct=0.40),
+            _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+            _fill_returning_cursor(fill_id=3),
+        ]
+        conn = _make_conn(cursors)
+
+        with patch("app.services.order_client._utcnow", return_value=_NOW):
+            execute_order(conn, recommendation_id=42, decision_id=10)
+
+        # gross = filled_price (ask=100.20) * units (suggested_size=5% of 10_000 / 100.20)
+        # Match cash_ledger inserts via positional OR keyword query
+        # (#612 review). A positional-only filter would silently
+        # pass with zero matches if the production call is ever
+        # refactored to ``conn.execute(query=...)``, defeating the
+        # regression guard.
+        def _query_str(c: Any) -> str:
+            if c.args:
+                return str(c.args[0])
+            return str(c.kwargs.get("query", ""))
+
+        ledger_calls = [c for c in conn.execute.call_args_list if "cash_ledger" in _query_str(c)]
+        # Belt-and-braces: assert match count is non-zero before
+        # taking [0], so a future test-mock refactor that drops
+        # all positional args trips this assertion loudly.
+        assert len(ledger_calls) >= 1, list(conn.execute.call_args_list)
+        assert len(ledger_calls) == 1, ledger_calls
+        params = ledger_calls[0].args[1] if ledger_calls[0].args else ledger_calls[0].kwargs.get("params")
+        # amount must equal -gross exactly (fees=0). Any negative drift
+        # vs that == double-count regression.
+        units = (Decimal("500") / Decimal("100.20")).quantize(Decimal("0.000001"))
+        expected_gross = Decimal("100.20") * units
+        assert params["amount"] == -expected_gross
+        assert params["type"] == "order_buy"
+
+    def test_no_bid_ask_falls_back_to_zero_fees(self) -> None:
+        result = _synthetic_fill(
+            instrument_id=123,
+            action="BUY",
+            quote_price=Decimal("100.00"),
+            requested_amount=Decimal("1000"),
+            requested_units=None,
+            bid=None,
+            ask=None,
+        )
+        assert result.fees == Decimal("0")
+        assert result.filled_price == Decimal("100.00")
+
+
+# ---------------------------------------------------------------------------
+# TestLoadApprovedRec
+# ---------------------------------------------------------------------------
+
+
+class TestLoadApprovedRec:
+    def test_not_found_raises(self) -> None:
+        conn = _make_conn([_make_cursor([])])
+        with pytest.raises(ValueError, match="not found"):
+            _load_approved_recommendation(conn, 999)
+
+    def test_not_approved_raises(self) -> None:
+        conn = _make_conn([_rec_cursor(status="proposed")])
+        with pytest.raises(ValueError, match="expected 'approved'"):
+            _load_approved_recommendation(conn, 42)
+
+    def test_approved_returns_row(self) -> None:
+        conn = _make_conn([_rec_cursor(status="approved")])
+        row = _load_approved_recommendation(conn, 42)
+        assert row["recommendation_id"] == 42
+        assert row["action"] == "BUY"
+        assert row["status"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# TestLoadHelpers
+# ---------------------------------------------------------------------------
+
+
+class TestLoadHelpers:
+    def test_quote_price_returns_decimal(self) -> None:
+        conn = _make_conn([_quote_cursor(last=150.50)])
+        price = _load_latest_quote_price(conn, 1)
+        assert price == Decimal("150.5")
+
+    def test_quote_price_none_when_no_rows(self) -> None:
+        conn = _make_conn([_make_cursor([])])
+        price = _load_latest_quote_price(conn, 1)
+        assert price is None
+
+    def test_quote_price_none_when_last_is_null(self) -> None:
+        conn = _make_conn([_make_cursor([{"last": None}])])
+        price = _load_latest_quote_price(conn, 1)
+        assert price is None
+
+    def test_quote_price_none_when_last_is_zero(self) -> None:
+        """#1439: last=0.00 is not a usable mark — treat as missing."""
+        conn = _make_conn([_make_cursor([{"last": 0}])])
+        price = _load_latest_quote_price(conn, 1)
+        assert price is None
+
+    def test_quote_price_none_when_last_is_negative(self) -> None:
+        """#1439: a negative last is impossible/garbage — treat as missing."""
+        conn = _make_conn([_make_cursor([{"last": -1.5}])])
+        price = _load_latest_quote_price(conn, 1)
+        assert price is None
+
+    def test_position_units_returns_decimal(self) -> None:
+        conn = _make_conn([_position_cursor(current_units=10.5)])
+        units = _load_position_units(conn, 1)
+        assert units == Decimal("10.5")
+
+    def test_position_units_zero_when_no_position(self) -> None:
+        conn = _make_conn([_make_cursor([])])
+        units = _load_position_units(conn, 1)
+        assert units == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# TestExecuteOrderDemoMode
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteOrderDemoMode:
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_buy_produces_fill_and_order(self, _mock_now: MagicMock) -> None:
+        """Demo BUY: synthetic fill, order row, fill row, position upsert, cash, audit."""
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
+            # Inside transaction:
+            _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote spread
+            _cost_record_write_cursor(),  # record_estimated_cost INSERT
+            _fill_returning_cursor(fill_id=3),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "filled"
+        assert result.order_id == 7
+        assert result.fill_id == 3
+        assert result.broker_order_ref == "DEMO-1-BUY"
+        assert "order filled" in result.explanation
+
+        # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
+        # position upsert, broker_positions, cash_ledger, rec status, audit = 7
+        assert conn.execute.call_count == 7
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_exit_produces_fill(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
+        """Demo EXIT: loads position units, synthetic fill at quote price."""
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            _quote_cursor(last=200.0, spread_pct=0.30),
+            # Inside transaction (no cost recording for EXIT):
+            _order_returning_cursor(order_id=8),
+            _fill_returning_cursor(fill_id=4),
+            # Post-fill: read current_units for attribution check
+            _make_cursor([{"current_units": 0}]),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "filled"
+        assert result.order_id == 8
+        assert result.fill_id == 4
+
+        # conn.execute: position update, cash_ledger, rec status, audit = 4
+        assert conn.execute.call_count == 4
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_exit_no_quote_fails_closed(self, _mock_now: MagicMock) -> None:
+        """Regression for #241. Demo EXIT with no quote must NOT
+        persist a fill at price=0 / book a synthetic loss / drain
+        the position. Synthetic_fill returns status=failed; the outer
+        guard skips _persist_fill, _update_position_exit and the cash
+        ledger entirely.
+        """
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            _make_cursor([]),  # no quote
+            # Inside transaction: order persisted (status=failed), no fill, no
+            # position update, no cash ledger, no attribution.
+            _order_returning_cursor(order_id=11),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "failed"
+        assert result.fill_id is None
+        assert result.order_id == 11
+
+        # conn.execute: rec status update + audit = 2 (NO position deduct,
+        # NO cash ledger, NO broker_positions). The fill guard rejected
+        # everything because broker_result.status = 'failed'.
+        assert conn.execute.call_count == 2
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_buy_no_quote_produces_failed_no_fill(self, _mock_now: MagicMock) -> None:
+        """Demo BUY with no quote: zero-unit fill is not persisted."""
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _make_cursor([]),  # no quote → quote_data=None
+            # Inside transaction: order persisted, no fill (zero units)
+            _order_returning_cursor(order_id=9),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _make_cursor([]),  # cost fallback: no quote either → s_bps=None, no record
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "failed"
+        assert result.fill_id is None
+        assert result.order_id == 9
+        assert "zero units" in result.explanation
+
+        # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
+        # rec status update, audit = 4 (no fill/position/cash)
+        assert conn.execute.call_count == 4
+
+    @patch("app.services.order_client._synthetic_fill")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_filled_zero_price_positive_units_not_persisted(
+        self, _mock_now: MagicMock, mock_fill: MagicMock
+    ) -> None:
+        """#1439 defense-in-depth: a 'filled' broker result with price=0 but
+        positive units must NOT persist a fill (free holdings, prevention-log
+        #68). The persistence guard requires ``fp > 0`` for every action.
+        """
+        mock_fill.return_value = BrokerOrderResult(
+            broker_order_ref="DEMO-1-BUY",
+            status="filled",
+            filled_price=Decimal("0"),
+            filled_units=Decimal("5"),
+            fees=Decimal("0"),
+            raw_payload={"demo": True},
+        )
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
+            _order_returning_cursor(order_id=3),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(conn, recommendation_id=42, decision_id=10)
+        assert result.fill_id is None
+        assert result.outcome == "failed"
+        sql_calls = [str(c.args[0]) for c in conn.execute.call_args_list]
+        assert not any("INSERT INTO fills" in s for s in sql_calls)
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_mode_never_calls_broker(self, _mock_now: MagicMock) -> None:
+        """Demo mode must never invoke the broker provider."""
+        broker = MagicMock()
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
+            _order_returning_cursor(order_id=1),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+            _fill_returning_cursor(fill_id=1),
+        ]
+        conn = _make_conn(cursors)
+        execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        broker.place_order.assert_not_called()
+        broker.close_position.assert_not_called()
+        broker.get_order_status.assert_not_called()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_buy_writes_broker_positions_row(self, _mock_now: MagicMock) -> None:
+        """BUY/ADD fills must INSERT into broker_positions so EXIT can resolve."""
+        cursors = [
+            _rec_cursor(action="BUY", stop_loss_rate=90.0, take_profit_rate=120.0),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
+            _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+            _fill_returning_cursor(fill_id=3),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "filled"
+
+        # Find the broker_positions INSERT among conn.execute calls
+        bp_calls = [c for c in conn.execute.call_args_list if "broker_positions" in str(c)]
+        assert len(bp_calls) == 1, f"Expected 1 broker_positions INSERT, got {len(bp_calls)}"
+
+        # Verify params passed through execute_order (not just SQL shape)
+        params = bp_calls[0].args[1]
+        # #227: synthetic position_id is the negation of order_id so the
+        # synthetic-id namespace can never collide with a real broker
+        # position_id pulled in by portfolio sync.
+        assert params["pid"] == -7
+        assert params["pid"] < 0  # negative-namespace contract
+        assert params["iid"] == 1  # instrument_id from rec
+        assert params["sl"] == Decimal("90")
+        assert params["tp"] == Decimal("120")
+        assert params["no_sl"] is False
+        assert params["no_tp"] is False
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_exit_does_not_write_broker_positions(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
+        """EXIT fills must NOT insert into broker_positions (the row already exists)."""
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            _quote_cursor(last=200.0, spread_pct=0.30),
+            # No cost recording for EXIT
+            _order_returning_cursor(order_id=8),
+            _fill_returning_cursor(fill_id=4),
+            # Post-fill: read current_units for attribution check
+            _make_cursor([{"current_units": 0}]),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        assert result.outcome == "filled"
+        bp_calls = [c for c in conn.execute.call_args_list if "broker_positions" in str(c)]
+        assert len(bp_calls) == 0
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_demo_buy_writes_execution_audit(self, _mock_now: MagicMock) -> None:
+        """Every code path must write a decision_audit row for execution outcome."""
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
+            _order_returning_cursor(order_id=1),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+            _fill_returning_cursor(fill_id=1),
+        ]
+        conn = _make_conn(cursors)
+        execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+        )
+        # Find the decision_audit INSERT among conn.execute calls
+        audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c)]
+        assert len(audit_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestExecuteOrderLiveMode
+# ---------------------------------------------------------------------------
+
+
+class TestPostTradeEnqueue:
+    """#1593: a persisted fill queues an immediate daily_portfolio_sync
+    so the broker-observed trade lands in trade_events within seconds."""
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_filled_demo_buy_enqueues_portfolio_sync(
+        self, _mock_now: MagicMock, _stub_post_trade_enqueue: MagicMock
+    ) -> None:
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _quote_cursor(last=100.0, spread_pct=0.20),
+            _order_returning_cursor(order_id=7),
+            _cost_config_cursor(),
+            _cost_model_cursor(),
+            _cost_record_write_cursor(),
+            _fill_returning_cursor(fill_id=3),
+        ]
+        result = execute_order(_make_conn(cursors), recommendation_id=42, decision_id=10)
+        assert result.outcome == "filled"
+        _stub_post_trade_enqueue.assert_called_once()
+        assert _stub_post_trade_enqueue.call_args.kwargs["requested_by"] == "execute_order"
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_failed_order_does_not_enqueue(self, _mock_now: MagicMock, _stub_post_trade_enqueue: MagicMock) -> None:
+        # Demo EXIT with no quote fails closed: no fill → no enqueue.
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            _make_cursor([]),  # no quote
+            _order_returning_cursor(order_id=11),
+        ]
+        result = execute_order(_make_conn(cursors), recommendation_id=42, decision_id=10)
+        assert result.outcome == "failed"
+        _stub_post_trade_enqueue.assert_not_called()
+
+
+class TestExecuteOrderLiveMode:
+    @pytest.fixture(autouse=True)
+    def _force_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Override the file-level demo default for every test in this class.
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_buy_calls_broker_place_order(self, _mock_now: MagicMock) -> None:
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-123",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            raw_payload={"orderId": "ORD-123", "status": "filled"},
+        )
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            # #243 pre-broker durable intent INSERT
+            _order_returning_cursor(order_id=10),
+            # broker called (no cursor)
+            # #243 post-broker UPDATE asserts rowcount == 1
+            _update_cursor(rowcount=1),
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
+            _fill_returning_cursor(fill_id=6),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        assert result.outcome == "filled"
+        assert result.broker_order_ref == "ORD-123"
+        broker.place_order.assert_called_once()
+        # #243: durable intent commit happens before broker call.
+        assert conn.commit.called
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_buy_records_cost_from_quote_fallback(self, _mock_now: MagicMock) -> None:
+        """Live mode with no cost_model falls back to quote spread_pct for cost recording."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-789",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            raw_payload={"orderId": "ORD-789"},
+        )
+        cost_insert_cursor = _make_cursor([])
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=10),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
+            cost_insert_cursor,  # record_estimated_cost INSERT
+            _fill_returning_cursor(fill_id=6),
+        ]
+        conn = _make_conn(cursors)
+        execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        # Verify the cost record INSERT was called
+        cost_insert_cursor.__enter__.return_value.execute.assert_called_once()
+        sql = cost_insert_cursor.__enter__.return_value.execute.call_args[0][0]
+        assert "INSERT INTO trade_cost_record" in sql
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_cost_insert_failure_does_not_abort_fill(self, _mock_now: MagicMock) -> None:
+        """A DB error during record_estimated_cost must not prevent the fill.
+
+        The cost recording block runs inside a savepoint.  If the cost INSERT
+        raises, the savepoint rolls back and the outer transaction stays
+        intact — _persist_fill still executes.
+        """
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-COST-FAIL",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            raw_payload={"orderId": "ORD-COST-FAIL"},
+        )
+        # Cost INSERT cursor raises on execute — simulates a DB error.
+        bad_cost_cursor = _make_cursor([])
+        bad_cost_cursor.__enter__.return_value.execute.side_effect = Exception("FK violation")
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=10),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, bid=99.5, ask=100.5, spread_pct=0.30),
+            bad_cost_cursor,  # record_estimated_cost INSERT — will raise
+            _fill_returning_cursor(fill_id=6),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(conn, recommendation_id=42, decision_id=10, broker=broker)
+        # Fill must succeed despite cost recording failure.
+        assert result.outcome == "filled"
+        assert result.fill_id == 6
+
+    @patch("app.services.order_client._maybe_trigger_attribution")
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_exit_calls_broker_close_position(self, _mock_now: MagicMock, _mock_attr: MagicMock) -> None:
+        broker = MagicMock()
+        broker.close_position.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-456",
+            status="filled",
+            filled_price=Decimal("200"),
+            filled_units=Decimal("5"),
+            fees=Decimal("0"),
+            raw_payload={"orderId": "ORD-456", "status": "filled"},
+        )
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            # _load_position_id_for_exit resolves instrument_id → position_id
+            _make_cursor([{"position_id": 98765}]),
+            # #243 pre-broker durable intent INSERT
+            _order_returning_cursor(order_id=11),
+            # broker called (no cursor)
+            # #243 post-broker UPDATE asserts rowcount == 1
+            _update_cursor(rowcount=1),
+            # No cost recording for EXIT
+            _fill_returning_cursor(fill_id=7),
+            # Post-fill: read current_units for attribution check
+            _make_cursor([{"current_units": 0}]),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        assert result.outcome == "filled"
+        broker.close_position.assert_called_once_with(98765)
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_exit_no_broker_positions_row_fails(self, _mock_now: MagicMock) -> None:
+        """EXIT with no broker_positions row returns failed (pre-024 positions)."""
+        broker = MagicMock()
+        cursors = [
+            _rec_cursor(action="EXIT", target_entry=None, suggested_size_pct=None),
+            _position_cursor(current_units=5.0),
+            # _load_position_id_for_exit returns None — no broker_positions row
+            _make_cursor([]),
+            # broker NOT called — broker_result is constructed inline as failed
+            # No cost recording for EXIT
+            _order_returning_cursor(order_id=12),
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        assert result.outcome == "failed"
+        broker.close_position.assert_not_called()
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_buy_persists_intent_before_broker_call(self, _mock_now: MagicMock) -> None:
+        """#243 — durable order intent must be INSERTed and COMMITed
+        BEFORE the broker call. A fake broker that raises after the
+        commit must leave the intent row visible to a reconciler.
+
+        Mock-level proof: track the order of cursor consumption, the
+        commit call, and the broker call. Asserts:
+          1. the intent INSERT cursor is consumed
+          2. conn.commit() runs
+          3. broker.place_order is invoked
+          4. all in that exact order
+
+        With this ordering, a real DB would have a committed
+        ``status='submitted'`` row on disk before any external side
+        effect — the reconciler can find it after a crash.
+        """
+        sequence: list[str] = []
+
+        broker = MagicMock()
+
+        def _broker_side_effect(*_args: object, **_kwargs: object) -> BrokerOrderResult:
+            sequence.append("broker.place_order")
+            raise RuntimeError("simulated broker crash")
+
+        broker.place_order.side_effect = _broker_side_effect
+
+        intent_cursor = _order_returning_cursor(order_id=99)
+
+        def _intent_execute(*_args: object, **_kwargs: object) -> None:
+            # Tag the cursor execute fired inside _persist_submitted_intent.
+            # No real DB; fetchone is already wired by _make_cursor.
+            sequence.append("intent_insert")
+
+        intent_cursor.__enter__.return_value.execute.side_effect = _intent_execute
+
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            intent_cursor,
+        ]
+        conn = _make_conn(cursors)
+
+        def _commit_tag() -> None:
+            sequence.append("commit")
+
+        conn.commit.side_effect = _commit_tag
+
+        with pytest.raises(RuntimeError, match="simulated broker crash"):
+            execute_order(
+                conn,
+                recommendation_id=42,
+                decision_id=10,
+                broker=broker,
+            )
+
+        # Order matters: intent → commit → broker call.
+        assert sequence == ["intent_insert", "commit", "broker.place_order"], (
+            f"durable-intent ordering violated: {sequence}"
+        )
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_buy_zero_row_update_raises(self, _mock_now: MagicMock) -> None:
+        """#637 review BLOCKING — _update_order_with_broker_result MUST
+        refuse to advance to fill/cost/position writes when the UPDATE
+        matches zero rows. Without this guard, ``order_id`` would
+        silently flow forward as a foreign key into fills, corrupting
+        referential integrity. Simulate by returning rowcount=0 from
+        the UPDATE cursor."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-PHANTOM",
+            status="filled",
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("0"),
+            raw_payload={},
+        )
+        cursors = [
+            _rec_cursor(action="BUY", target_entry=100.0, suggested_size_pct=0.05),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=99),  # pre-broker intent INSERT
+            _update_cursor(rowcount=0),  # phantom UPDATE matches nothing
+        ]
+        conn = _make_conn(cursors)
+
+        with pytest.raises(RuntimeError, match="expected to update exactly 1 orders row"):
+            execute_order(
+                conn,
+                recommendation_id=42,
+                decision_id=10,
+                broker=broker,
+            )
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_live_mode_no_broker_raises(self, _mock_now: MagicMock) -> None:
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+        ]
+        conn = _make_conn(cursors)
+        with pytest.raises(ValueError, match="no broker provider supplied"):
+            execute_order(
+                conn,
+                recommendation_id=42,
+                decision_id=10,
+                broker=None,
+            )
+
+
+# ---------------------------------------------------------------------------
+# TestExecuteOrderFailures
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteOrderFailures:
+    @pytest.fixture(autouse=True)
+    def _force_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # All tests in this class exercise broker error paths, which are
+        # only reachable in live mode.  The two not-found / not-approved
+        # tests fail before the runtime read, so this override is harmless
+        # for them.
+        monkeypatch.setattr(
+            "app.services.order_client.get_runtime_config",
+            lambda _conn: _RUNTIME_LIVE,
+        )
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_broker_failed_persists_order_with_failed_status(self, _mock_now: MagicMock) -> None:
+        """Failed broker call still persists an order row and audit row."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref=None,
+            status="failed",
+            filled_price=None,
+            filled_units=None,
+            fees=Decimal("0"),
+            raw_payload={"error": "insufficient funds"},
+        )
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=12),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        assert result.outcome == "failed"
+        assert result.fill_id is None
+        assert result.order_id == 12
+        assert "failed" in result.explanation
+
+        # conn.execute: safety-layer checks (fx_rates + portfolio_sync = 2),
+        # rec status update + audit = 2. Total 4 (no fill/position/cash
+        # on a failed broker call). The #243 post-broker UPDATE goes
+        # through a cursor, not conn.execute, so it does not bump this
+        # counter.
+        assert conn.execute.call_count == 4
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_broker_pending_persists_order_with_pending_status(self, _mock_now: MagicMock) -> None:
+        """Pending broker response still persists an order row and audit row."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-789",
+            status="pending",
+            filled_price=None,
+            filled_units=None,
+            fees=Decimal("0"),
+            raw_payload={"orderId": "ORD-789", "status": "pending"},
+        )
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=13),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        assert result.outcome == "pending"
+        assert result.fill_id is None
+        assert result.broker_order_ref == "ORD-789"
+        assert "pending" in result.explanation
+
+    def test_recommendation_not_found_raises(self) -> None:
+        conn = _make_conn([_make_cursor([])])
+        with pytest.raises(ValueError, match="not found"):
+            execute_order(
+                conn,
+                recommendation_id=999,
+                decision_id=10,
+            )
+
+    def test_recommendation_not_approved_raises(self) -> None:
+        conn = _make_conn([_rec_cursor(status="proposed")])
+        with pytest.raises(ValueError, match="expected 'approved'"):
+            execute_order(
+                conn,
+                recommendation_id=42,
+                decision_id=10,
+            )
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_broker_rejected_persists_order_row(self, _mock_now: MagicMock) -> None:
+        """Rejected broker response persists order with rejected status."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref="ORD-REJ",
+            status="rejected",
+            filled_price=None,
+            filled_units=None,
+            fees=Decimal("0"),
+            raw_payload={"orderId": "ORD-REJ", "status": "rejected", "reason": "market closed"},
+        )
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=14),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
+        ]
+        conn = _make_conn(cursors)
+        result = execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        assert result.outcome == "failed"
+        assert result.fill_id is None
+        assert result.order_id == 14
+
+    @patch("app.services.order_client._utcnow", return_value=_NOW)
+    def test_failed_order_still_writes_audit(self, _mock_now: MagicMock) -> None:
+        """Even a failed order must produce a decision_audit row."""
+        broker = MagicMock()
+        broker.place_order.return_value = BrokerOrderResult(
+            broker_order_ref=None,
+            status="failed",
+            filled_price=None,
+            filled_units=None,
+            fees=Decimal("0"),
+            raw_payload={"error": "timeout"},
+        )
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+            _order_returning_cursor(order_id=15),  # #243 pre-broker intent
+            _update_cursor(rowcount=1),  # #243 post-broker UPDATE
+            _cost_config_cursor(),
+            _cost_model_cursor(),  # no cost_model → falls back to quote
+            _quote_cursor(last=100.0, spread_pct=0.30),  # cost fallback
+            _make_cursor([]),  # record_estimated_cost INSERT
+        ]
+        conn = _make_conn(cursors)
+        execute_order(
+            conn,
+            recommendation_id=42,
+            decision_id=10,
+            broker=broker,
+        )
+        audit_calls = [c for c in conn.execute.call_args_list if "decision_audit" in str(c)]
+        assert len(audit_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestExecuteOrderRuntimeConfigCorrupt
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteOrderRuntimeConfigCorrupt:
+    """RuntimeConfigCorrupt must propagate from execute_order — never silently
+    fall through to demo or live mode.  The execution_guard fails closed on
+    the same condition; the order client is the second line of defence.
+    """
+
+    def test_corrupt_runtime_config_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(_conn: object) -> RuntimeConfig:
+            raise RuntimeConfigCorrupt("singleton missing")
+
+        monkeypatch.setattr("app.services.order_client.get_runtime_config", _raise)
+
+        cursors = [
+            _rec_cursor(action="BUY"),
+            _cash_cursor(balance=10_000.0),
+        ]
+        conn = _make_conn(cursors)
+        with pytest.raises(RuntimeConfigCorrupt):
+            execute_order(conn, recommendation_id=42, decision_id=10)
+
+        # No order should have been persisted, no audit row written.
+        conn.transaction.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestUpdatePositionBuySource
+# ---------------------------------------------------------------------------
+
+
+class TestUpdatePositionBuySource:
+    """Verify _update_position_buy writes ``source='ebull'`` and resets on reopen.
+
+    Issue #180 — the positions ``source`` column identifies who currently
+    manages the open units.  Every eBull-originated BUY must insert
+    ``'ebull'``.  On reopen (ON CONFLICT into a closed row), source must
+    flip to ``'ebull'`` too; on ADD into an already-open position, the
+    existing source must be preserved so an ebull ADD into a
+    broker_sync-owned position doesn't claim ownership of the original
+    external open.
+    """
+
+    def test_insert_emits_source_literal_and_reopen_reset_clause(self) -> None:
+        """INSERT carries the 'ebull' literal AND the reset CASE WHEN.
+
+        With a mocked connection, ``_update_position_buy`` captures a
+        single SQL string per call regardless of whether Postgres would
+        take the INSERT or the ON CONFLICT branch at runtime — the
+        branch decision is made by the planner, not by us.  So the
+        unit-level guarantee we can assert here is SQL *shape*: a
+        single captured string must contain both the hard-coded VALUES
+        literal and the reset CASE WHEN, evaluated together from one
+        call.
+
+        End-to-end verification that Postgres actually routes closed
+        rows through the reset arm is tracked in the DB integration
+        test backlog (#186) — unreachable from a mocked connection.
+        """
+        conn = _make_conn([])
+        _update_position_buy(
+            conn,
+            instrument_id=42,
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            now=_NOW,
+        )
+
+        assert conn.execute.call_count == 1
+        sql = conn.execute.call_args_list[0].args[0]
+        normalised = re.sub(r"\s+", " ", sql)
+
+        # Hard-coded VALUES literal — no parameter placeholder.
+        assert "INSERT INTO positions" in normalised
+        assert "'ebull'" in normalised
+        # Reset CASE WHEN: pre-update row fully closed → overwrite
+        # source; otherwise preserve.  Postgres evaluates CASE against
+        # the pre-update row, so SET-list ordering is irrelevant.
+        assert "positions.current_units <= 0" in normalised
+        assert "EXCLUDED.source" in normalised
+        assert "ELSE positions.source" in normalised
+
+
+# ---------------------------------------------------------------------------
+# TestPersistBrokerPosition
+# ---------------------------------------------------------------------------
+
+
+class TestPersistBrokerPosition:
+    """Verify _persist_broker_position emits the correct INSERT."""
+
+    def test_inserts_with_source_ebull_and_sl_tp(self) -> None:
+        conn = _make_conn([])
+        _persist_broker_position(
+            conn,
+            order_id=7,
+            instrument_id=42,
+            filled_price=Decimal("100"),
+            filled_units=Decimal("5"),
+            fees=Decimal("1.50"),
+            order_params=OrderParams(
+                stop_loss_rate=Decimal("90"),
+                take_profit_rate=Decimal("120"),
+            ),
+            raw_payload={"demo": True},
+            now=_NOW,
+        )
+        assert conn.execute.call_count == 1
+        sql = conn.execute.call_args_list[0].args[0]
+        normalised = re.sub(r"\s+", " ", sql)
+        assert "INSERT INTO broker_positions" in normalised
+        assert "'ebull'" in normalised
+        assert "ON CONFLICT (position_id) DO UPDATE" in normalised
+        # ON CONFLICT must update raw_payload to prevent silent payload loss
+        assert "raw_payload = EXCLUDED.raw_payload" in normalised
+
+        params = conn.execute.call_args_list[0].args[1]
+        # #227: synthetic position_id = -order_id (negative-namespace
+        # convention to avoid colliding with real broker position_ids).
+        assert params["pid"] == -7
+        assert params["pid"] < 0
+        assert params["iid"] == 42
+        assert params["units"] == Decimal("5")
+        # amount = price * units = 500
+        assert params["amount"] == Decimal("500")
+        assert params["sl"] == Decimal("90")
+        assert params["tp"] == Decimal("120")
+        assert params["no_sl"] is False
+        assert params["no_tp"] is False
+
+    def test_inserts_without_order_params(self) -> None:
+        conn = _make_conn([])
+        _persist_broker_position(
+            conn,
+            order_id=8,
+            instrument_id=99,
+            filled_price=Decimal("50"),
+            filled_units=Decimal("10"),
+            fees=Decimal("0"),
+            order_params=None,
+            raw_payload={"demo": True},
+            now=_NOW,
+        )
+        params = conn.execute.call_args_list[0].args[1]
+        assert params["sl"] is None
+        assert params["tp"] is None
+        assert params["no_sl"] is True
+        assert params["no_tp"] is True
+        assert params["leverage"] == 1
+        assert params["tsl"] is False

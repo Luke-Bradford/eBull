@@ -1,0 +1,1156 @@
+"""Scheduled-job → ProcessRow adapter for the admin control hub.
+
+Issue #1071 (umbrella #1064).
+Spec: ``docs/superpowers/specs/2026-05-08-admin-control-hub-rewrite.md``
+      §Adapter map / scheduled_job.
+
+Translates the static ``SCHEDULED_JOBS`` registry plus the live
+``job_runs`` + ``pending_job_requests`` tables into one ``ProcessRow``
+per declared job. ``process_id`` is the job_name verbatim — a stable,
+operator-readable identifier already used throughout the codebase.
+
+Auto-hide-on-retry rule (spec §Auto-hide-on-retry rule): when the
+latest terminal run of a job is ``failure`` AND a manual_job request is
+currently in flight (``pending_job_requests`` row for the same job_name
+in pending|claimed|dispatched), the row is rendered as ``running`` with
+``last_n_errors`` empty so a retry that is about to re-fetch the failed
+scope does not show stale red chips. The 'pending_retry' status (next
+scheduled fire within the freshness window) requires watermark info and
+is wired in PR4 — PR3 conservatively returns 'failed' for the
+no-in-flight-retry case.
+
+PR3 leaves ``ProcessRow.watermark = None``. PR4 wires per-cursor-kind
+resolution.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final, cast
+
+import psycopg
+import psycopg.rows
+
+from app.services.data_freshness import cadence_for
+from app.services.job_liveness import cadence_period
+from app.services.ops_monitor import LANE_BUSY_SKIP_PREFIX, TERMINAL_STATUS_SQL
+from app.services.processes import (
+    ActiveRunSummary,
+    ErrorClassSummary,
+    ProcessLane,
+    ProcessRow,
+    ProcessRunSummary,
+    ProcessStatus,
+    RunStatus,
+    StaleReason,
+)
+from app.services.processes.bootstrap_coverage import (
+    BOOTSTRAP_COVERED_FRESHNESS_SOURCES,
+)
+from app.services.processes.stale_detection import (
+    QUEUE_STUCK_THRESHOLD_S,
+    SCHEDULE_MISS_FLOOR_S,
+    WATERMARK_GAP_TOLERANCE_S,
+)
+from app.services.processes.stale_detection import (
+    compute as compute_stale_reasons,
+)
+from app.services.processes.watermarks import (
+    freshness_source_for,
+    manifest_source_for,
+    resolve_watermark,
+)
+from app.services.sec_manifest import ManifestSource
+from app.workers.scheduler import (
+    SCHEDULED_JOBS,
+    Cadence,
+    ScheduledJob,
+    compute_next_run,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Lane assignment
+# ---------------------------------------------------------------------------
+#
+# PR3 maps each scheduled job into one of the eight operator-facing
+# lanes (spec §Process envelope). Unknown jobs default to ``ops``. The
+# mapping lives here rather than on ``ScheduledJob`` so adding a lane
+# field to that dataclass — touching every job declaration — can be
+# deferred to PR8 + PR9 polish.
+
+_LANE_BY_JOB: dict[str, ProcessLane] = {
+    # Universe
+    "nightly_universe_sync": "universe",
+    "etoro_lookups_refresh": "universe",
+    "exchanges_metadata_refresh": "universe",
+    "cusip_universe_backfill": "universe",
+    "cusip_extid_sweep": "universe",
+    # Candles / market data
+    "daily_candle_refresh": "candles",
+    "fx_rates_refresh": "candles",
+    # SEC ingest (filings + identifiers)
+    "daily_cik_refresh": "sec",
+    "daily_financial_facts": "sec",
+    "sec_filing_documents_ingest": "sec",
+    "sec_8k_events_ingest": "sec",
+    # Ownership (insider / institutional / fund)
+    "ownership_observations_sync": "ownership",
+    "ownership_observations_backfill": "ownership",
+    "sec_form3_ingest": "ownership",
+    "sec_insider_transactions_ingest": "ownership",
+    "sec_insider_transactions_backfill": "ownership",
+    "sec_def14a_ingest": "ownership",
+    "sec_def14a_bootstrap": "ownership",
+    "sec_13f_filer_directory_sync": "ownership",
+    "sec_13f_quarterly_sweep": "ownership",
+    "sec_nport_filer_directory_sync": "ownership",
+    "sec_n_port_ingest": "ownership",
+    "ncen_classifier_yearly": "ownership",
+    # Fundamentals
+    "fundamentals_sync": "fundamentals",
+    "sec_business_summary_bootstrap": "fundamentals",
+    # Ops
+    "monitor_positions": "ops",
+    "attribution_summary": "ops",
+    "weekly_report": "ops",
+    "monthly_report": "ops",
+    "raw_data_retention_sweep": "ops",
+    "pg_size_sample": "ops",
+    "financial_facts_retention_sweep": "ops",
+    "daily_tax_reconciliation": "ops",
+    "daily_portfolio_sync": "ops",
+    "retry_deferred_recommendations": "ops",
+    "execute_approved_orders": "ops",
+    "seed_cost_models": "ops",
+    "morning_candidate_review": "ops",
+    "daily_research_refresh": "ops",
+    "orchestrator_full_sync": "ops",
+    "orchestrator_high_frequency_sync": "ops",
+}
+
+
+def _lane_for(job_name: str) -> ProcessLane:
+    return _LANE_BY_JOB.get(job_name, "ops")
+
+
+# ---------------------------------------------------------------------------
+# Cron rendering
+# ---------------------------------------------------------------------------
+#
+# ``cadence_cron`` is informational ("show the operator the literal
+# crontab line"). APScheduler runs in the jobs process so we cannot
+# read its trigger from the API; rebuild the cron string from
+# ``Cadence`` directly. Linux crontab weekday convention is 0=Sun..6=Sat
+# while ``Cadence.weekday`` is 0=Mon..6=Sun (Python datetime), so the
+# render shifts the field by one — Cadence Mon (0) → cron 1, Cadence
+# Sun (6) → cron 0.
+
+
+def _cron_for(cadence: Cadence) -> str:
+    if cadence.kind == "every_n_minutes":
+        return f"*/{cadence.interval_minutes} * * * *"
+    if cadence.kind == "hourly":
+        return f"{cadence.minute} * * * *"
+    if cadence.kind == "daily":
+        return f"{cadence.minute} {cadence.hour} * * *"
+    if cadence.kind == "weekly":
+        cron_dow = (cadence.weekday + 1) % 7
+        return f"{cadence.minute} {cadence.hour} * * {cron_dow}"
+    if cadence.kind == "monthly":
+        return f"{cadence.minute} {cadence.hour} {cadence.day} * *"
+    if cadence.kind == "yearly":
+        return f"{cadence.minute} {cadence.hour} {cadence.day} {cadence.month} *"
+    # Cadence.kind is a Literal — every value is enumerated above. The
+    # fallthrough is a safety net for a future-added kind that forgets
+    # to extend this function.
+    raise ValueError(f"unsupported cadence kind: {cadence.kind!r}")
+
+
+# ---------------------------------------------------------------------------
+# Status mapping
+# ---------------------------------------------------------------------------
+
+_RUN_STATUS_TO_SUMMARY: dict[str, RunStatus] = {
+    "success": "success",
+    "failure": "failure",
+    "skipped": "skipped",
+    "cancelled": "cancelled",
+    # #2218 — carried through as its own member, NOT folded into "partial";
+    # see the RunStatus comment in app/services/processes/__init__.py.
+    "degraded": "degraded",
+}
+
+
+def _status_for(
+    *,
+    has_running_row: bool,
+    last_terminal_status: str | None,
+    has_inflight_request: bool,
+    kill_switch_active: bool,
+    failed_scope_covered: bool,
+) -> ProcessStatus:
+    """Compute ProcessRow.status from the per-job inputs.
+
+    Order matters:
+
+    * ``disabled`` wins when kill_switch is on (the row is not actionable
+      until it flips back).
+    * ``running`` wins when a job_runs row is in flight, OR when the
+      latest terminal was a failure AND a retry is in flight (auto-hide).
+    * ``pending_retry`` when the latest terminal was failure, no retry
+      is in flight, but the next scheduled fire provably covers the
+      failed scope (freshness recheck or manifest retry within the
+      next-fire window — spec §"Auto-hide-on-retry rule" / "Covered"
+      check). Caller surfaces empty ``last_n_errors`` for this state.
+    * ``failed`` wins when the latest terminal is failure with no retry
+      in flight AND the failed scope is not covered.
+    * ``ok`` for success; ``cancelled`` for cancelled; ``idle`` /
+      ``pending_first_run`` when no terminal exists.
+    """
+    if kill_switch_active:
+        return "disabled"
+    if has_running_row:
+        return "running"
+    if last_terminal_status == "failure":
+        if has_inflight_request:
+            # Auto-hide: caller will set last_n_errors=(), status=running
+            return "running"
+        if failed_scope_covered:
+            # Auto-hide: next scheduled fire will reattempt the failed
+            # scope; caller surfaces last_n_errors=().
+            return "pending_retry"
+        return "failed"
+    if last_terminal_status == "success":
+        return "ok"
+    # #2218. ⚠ Placed BEFORE the fall-through, which is the whole point: an
+    # unhandled terminal status lands on `pending_first_run` — "never ran" —
+    # so a new status added without touching this function would report the
+    # single most misleading state available.
+    if last_terminal_status == "degraded":
+        return "degraded"
+    if last_terminal_status == "cancelled":
+        return "cancelled"
+    if last_terminal_status == "skipped":
+        # 'skipped' is a benign terminal — prerequisite not yet met. The
+        # operator should see this as 'idle' so the row is not painted red.
+        return "idle"
+    # No history at all.
+    return "pending_first_run"
+
+
+# ---------------------------------------------------------------------------
+# DB readers
+# ---------------------------------------------------------------------------
+
+
+def _kill_switch_active(conn: psycopg.Connection[Any]) -> bool:
+    """Read the kill_switch singleton. Fail closed on missing row.
+
+    Mirrors ``ops_monitor.get_kill_switch_status`` semantics so the
+    adapter is honest under configuration corruption.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT is_active FROM kill_switch")
+        row = cur.fetchone()
+    if row is None:
+        return True
+    return bool(row[0])
+
+
+def _read_running_run(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
+    """Latest in-flight job_runs row for the job, or None.
+
+    Multiple ``running`` rows can theoretically coexist if a prior crash
+    left a stranded entry — take the newest by ``started_at`` so the
+    operator sees the live one rather than a ghost.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT run_id, started_at, processed_count, target_count,
+                   last_progress_at, warnings_count, cancel_requested_at
+              FROM job_runs
+             WHERE job_name = %(name)s
+               AND status   = 'running'
+             ORDER BY started_at DESC
+             LIMIT 1
+            """,
+            {"name": job_name},
+        )
+        return cur.fetchone()
+
+
+def _read_latest_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
+    """Latest terminal job_runs row (success / failure / skipped / cancelled)."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT run_id, started_at, finished_at, status, row_count,
+                   error_msg, error_classes, rows_skipped_by_reason,
+                   rows_errored, cancelled_at, next_retry_at, attempt
+              FROM job_runs
+             WHERE job_name = %(name)s
+               AND status   IN {TERMINAL_STATUS_SQL}
+             ORDER BY started_at DESC
+             LIMIT 1
+            """,
+            {"name": job_name},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    # Task 5 (#1508): tag the terminal-row KIND so the operator-cancel probe
+    # (``_cancel_was_operator_initiated``) matches the right ``target_run_kind``
+    # in ``process_stop_requests``. A ``job_runs`` terminal is kind ``job_run``,
+    # keyed on ``run_id``.
+    row["terminal_kind"] = "job_run"
+    return row
+
+
+def _is_lane_busy_skip(row: dict[str, Any] | None) -> bool:
+    """True when *row* is a ``lane_busy`` skip (#2052).
+
+    A lane-busy skip means "work was due, couldn't start" — unlike a benign
+    prereq/gate skip it must NOT anchor the ``expected_fire_at`` clock, or a
+    permanently-starved job would read green forever (each nightly skip row
+    resetting the schedule-missed threshold).
+    """
+    return (
+        row is not None
+        and row.get("status") == "skipped"
+        and str(row.get("error_msg") or "").startswith(LANE_BUSY_SKIP_PREFIX)
+    )
+
+
+def _read_latest_anchor_terminal_run(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
+    """Latest terminal run eligible to anchor ``expected_fire_at`` (#2052).
+
+    Same population as ``_read_latest_terminal_run`` MINUS ``lane_busy`` skip
+    rows. Deliberately a SECOND resolver: the unfiltered latest terminal keeps
+    driving ``last_run`` / the status pill / the retry+cancel look-throughs,
+    and this one is only consulted when the latest terminal IS a lane-busy
+    skip (the rare starved path), so the extra query costs nothing on the
+    steady-state path. Only the columns the anchor math reads are selected.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT run_id, started_at, finished_at, status
+              FROM job_runs
+             WHERE job_name = %(name)s
+               AND status   IN {TERMINAL_STATUS_SQL}
+               AND NOT (status = 'skipped' AND error_msg LIKE %(lane_busy_pat)s)
+             ORDER BY started_at DESC
+             LIMIT 1
+            """,
+            {"name": job_name, "lane_busy_pat": LANE_BUSY_SKIP_PREFIX + "%"},
+        )
+        return cur.fetchone()
+
+
+# #1474 Part 2 — orchestrator-driven jobs record completions in
+# ``sync_runs`` (the #260/#1155 orchestrator migration), NOT
+# ``job_runs``. Their ``job_runs`` "last run" is frozen at whenever they
+# last wrote one → permanent false ``schedule_missed`` even though the
+# work fires every cadence. For these jobs the adapter resolves the
+# terminal row from ``sync_runs`` (keyed by scope) instead.
+#
+# Both orchestrator wrapper jobs are telemetry-frozen: each runs a
+# ``SyncScope`` and records solely in ``sync_runs`` (scope='high_frequency'
+# every 5m; scope='full' on the daily DAG). The Layer-1/2/3 standalone
+# crons write ``job_runs`` again after a clean restart, so they are
+# deliberately NOT re-homed here (per the #1474 2026-06-04 triage). Add a
+# job_name here only when it is confirmed to record solely in ``sync_runs``.
+_ORCHESTRATOR_SYNC_SCOPE: Final[dict[str, str]] = {
+    "orchestrator_high_frequency_sync": "high_frequency",
+    # ``orchestrator_full_sync`` runs ``SyncScope.full()``, which writes a
+    # ``sync_runs`` row with ``scope = scope.kind = 'full'`` (see
+    # ``executor._insert_sync_run``). Like the HF sync it records solely in
+    # ``sync_runs`` (no ``job_runs`` terminal), so resolve its last-run /
+    # ``schedule_missed`` from ``sync_runs`` too (#1508 C5).
+    "orchestrator_full_sync": "full",
+}
+
+# ``sync_runs.status`` → the ``job_runs`` terminal vocabulary that
+# ``_RUN_STATUS_TO_SUMMARY`` + ``_status_for`` consume. ``partial`` (a
+# sync that completed but left a layer behind) surfaces as ``failure`` —
+# actionable, not a green ``success`` (Codex ckpt-1).
+_SYNC_STATUS_TO_JOB_TERMINAL: Final[dict[str, str]] = {
+    "complete": "success",
+    "failed": "failure",
+    "partial": "failure",
+    "cancelled": "cancelled",
+}
+
+
+def _read_latest_terminal_sync_run(conn: psycopg.Connection[Any], *, scope: str) -> dict[str, Any] | None:
+    """Latest terminal ``sync_runs`` row for ``scope``, shaped like a
+    ``job_runs`` terminal row so the shared ``_build_row`` /
+    ``_build_last_run`` path consumes it unchanged (#1474 Part 2).
+
+    ``sync_runs`` has no per-error-class / row-count columns, so those
+    map to ``None`` (``_build_last_run`` coerces to ``{}`` / ``0``). The
+    status is normalised into the job_runs vocabulary up-front.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT sync_run_id, started_at, finished_at, status
+              FROM sync_runs
+             WHERE scope = %(scope)s
+               AND status IN ('complete', 'partial', 'failed', 'cancelled')
+             ORDER BY started_at DESC, sync_run_id DESC
+             LIMIT 1
+            """,
+            {"scope": scope},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    job_status = _SYNC_STATUS_TO_JOB_TERMINAL.get(row["status"], "skipped")
+    return {
+        "run_id": row["sync_run_id"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "status": job_status,
+        "row_count": None,
+        "error_msg": None,
+        "error_classes": None,
+        "rows_skipped_by_reason": None,
+        "rows_errored": None,
+        "cancelled_at": row["finished_at"] if job_status == "cancelled" else None,
+        # Task 5 (#1508): orchestrator/sync_runs terminal — kind ``sync_run``,
+        # keyed on the original ``sync_run_id`` (surfaced as ``run_id`` above).
+        "terminal_kind": "sync_run",
+    }
+
+
+def _resolve_terminal_row(conn: psycopg.Connection[Any], *, job_name: str) -> dict[str, Any] | None:
+    """Terminal row for last-run + staleness: from ``sync_runs`` for
+    orchestrator-driven jobs (#1474 Part 2), else ``job_runs``.
+
+    Scope (intentional — #1474 targets the Processes control-hub
+    ``schedule_missed`` chip, which was permanently false for
+    ``orchestrator_high_frequency_sync``). This fixes the process-row
+    **terminal** read only. Deliberately NOT changed, each still reading
+    ``job_runs`` for these jobs:
+
+      * **Active/running state** (``_read_running_run``): an in-flight
+        high-frequency sync writes a ``sync_runs`` 'running' row, not a
+        ``job_runs`` one, so during the (seconds-long, every-5-min)
+        active window the row shows the last terminal run instead of
+        "running"/progress. Strictly better than the *permanent*
+        ``schedule_missed`` it replaces — and ``schedule_missed`` itself
+        is now correct, because the recent terminal ``sync_runs`` row
+        keeps ``expected_fire_at`` current (only a genuinely-stalled HF
+        sync, whose latest terminal row ages out, will re-raise it,
+        which is the right behaviour).
+      * **History tab** (``list_runs`` / ``list_run_errors``).
+      * **Legacy** ``/system/jobs`` / ``/system/status``
+        (``ops_monitor.check_job_health``).
+
+    Widen those only if the operator needs full sync_runs parity for
+    these jobs; tracked as a #1474 follow-up if so.
+    """
+    scope = _ORCHESTRATOR_SYNC_SCOPE.get(job_name)
+    if scope is not None:
+        return _read_latest_terminal_sync_run(conn, scope=scope)
+    return _read_latest_terminal_run(conn, job_name=job_name)
+
+
+def _cancel_was_operator_initiated(conn: psycopg.Connection[Any], *, run_kind: str, run_id: int) -> bool:
+    """True if the terminal run was cancelled by a deliberate operator stop.
+
+    Task 5 (#1508): a ``cancelled`` terminal is benign ONLY when its
+    cancel is traceable to an operator ``process_stop_requests`` row
+    (sql/135) pinning the EXACT ``(target_run_kind, target_run_id)`` of
+    the run. A system/crash cancel leaves no such row → stays attention.
+    The presence of the row is the operator-intent signal regardless of
+    its ``completed_at`` (the stop handler always inserts on operator
+    action; boot-recovery later stamps ``completed_at`` on abandoned
+    rows but never deletes them, so historical traceability is preserved).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM process_stop_requests WHERE target_run_kind = %(k)s AND target_run_id = %(id)s LIMIT 1",
+            {"k": run_kind, "id": run_id},
+        )
+        return cur.fetchone() is not None
+
+
+def _has_inflight_manual_request(conn: psycopg.Connection[Any], *, job_name: str) -> bool:
+    """True if a manual_job pending_job_requests row is live for this job."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM pending_job_requests
+             WHERE request_kind = 'manual_job'
+               AND job_name     = %(name)s
+               AND status       IN ('pending', 'claimed', 'dispatched')
+             LIMIT 1
+            """,
+            {"name": job_name},
+        )
+        return cur.fetchone() is not None
+
+
+# #1510 / T4 — a liveness-kick request older than this is itself wedged (queue
+# not draining / scheduler dead) and must NOT keep painting the row self-healing;
+# past the window the probe returns False and the row falls back to its honest
+# schedule_missed / queue_stuck → attention surface. 30 min = 2× the 15-min
+# watchdog interval. Process-wide death stays owned by supervisor/heartbeat (#719).
+_LIVENESS_KICK_FRESH_WINDOW = timedelta(minutes=30)
+
+
+def _has_inflight_liveness_kick(conn: psycopg.Connection[Any], *, job_name: str, now: datetime) -> bool:
+    """True if a FRESH watchdog re-enqueue (``requested_by='system:liveness_kick'``)
+    is live for this job. Dedicated EXISTS probe — not an unordered LIMIT 1 read of
+    the requester (Codex ckpt-1 #4: multiple live manual requests can coexist)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pending_job_requests
+                 WHERE request_kind = 'manual_job'
+                   AND job_name     = %(name)s
+                   AND requested_by = 'system:liveness_kick'
+                   AND status       IN ('pending', 'claimed', 'dispatched')
+                   AND requested_at >= %(fresh_floor)s
+            )
+            """,
+            {"name": job_name, "fresh_floor": now - _LIVENESS_KICK_FRESH_WINDOW},
+        )
+        row = cur.fetchone()
+        return bool(row[0]) if row is not None else False
+
+
+def _source_watermark_behind(conn: psycopg.Connection[Any], *, source: str) -> bool:
+    """True when ``source``'s ingest is FAILING — at least one subject in
+    ``state='error'`` (C2 / #1508). A POSITIVE, source-level "we tried to keep
+    this source current and failed" signal.
+
+    Deliberately NOT ``not _source_watermark_fresh`` (false-REDs quiet sources)
+    and NOT the per-subject ``expected_next_at`` timing probe / ``state=
+    'expected_filing_overdue'`` (event-form jitter — an issuer simply not filing
+    is not an ingest problem). The state machine sets ``state='error'`` only from
+    a failed poll/ingest. LIMIT 1, source-level.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM data_freshness_index
+             WHERE source = %(source)s AND state = 'error'
+             LIMIT 1
+            """,
+            {"source": source},
+        )
+        return cur.fetchone() is not None
+
+
+def _source_watermark_fresh(
+    conn: psycopg.Connection[Any],
+    *,
+    source: str,
+    now: datetime,
+) -> bool:
+    """True when ``source``'s newest filing is recent enough that the source
+    as a whole is being kept current — ``MAX(last_known_filed_at)`` within one
+    cadence interval (+ the shared watermark tolerance) of ``now``.
+
+    Source-LEVEL recency, deliberately NOT a per-subject ``expected_next_at``
+    overdue probe: event-driven forms (Form 3/4, 13D/G) leave most subjects
+    perpetually "overdue" (filed once, never again), so an any-subject-overdue
+    test reads stale for a source that is in fact current.
+    The #1511 look-through promotes a never-run job to Current only when the
+    source's freshest filing sits inside its cadence window. Returns False on
+    a source with no rows / no ``last_known_filed_at`` (nothing seeded → not
+    fresh) and on an unknown source (no cadence → cannot assert freshness).
+    """
+    try:
+        cadence = cadence_for(cast(ManifestSource, source))
+    except KeyError:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT MAX(last_known_filed_at) FROM data_freshness_index WHERE source = %(source)s",
+            {"source": source},
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return False
+    max_filed_at: datetime = row[0]
+    return max_filed_at >= now - cadence - timedelta(seconds=WATERMARK_GAP_TOLERANCE_S)
+
+
+def _job_first_seen(conn: psycopg.Connection[Any], *, job_name: str) -> datetime | None:
+    """Persisted first-seen anchor for ``job_name`` (#1508 C6).
+
+    ``job_first_seen`` is written once per process start by
+    ``JobRuntime.start`` (``ON CONFLICT DO NOTHING`` keeps the first-ever
+    boot's timestamp). Returns ``None`` when no row exists yet — a job seen
+    for the first time this very boot cannot be "never started past grace".
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT first_seen FROM job_first_seen WHERE job_name = %(n)s", {"n": job_name})
+        row = cur.fetchone()
+    return row[0] if row is not None else None
+
+
+def _has_dispatched_queue_age(
+    conn: psycopg.Connection[Any],
+    *,
+    process_id: str,
+    deadline: datetime,
+) -> bool:
+    """True when at least one ``pending_job_requests`` row for
+    ``process_id`` has ``status='dispatched'`` AND worker pickup older
+    than ``deadline``.
+
+    Operator-amendment §A1.3 queue_stuck probe (PR8 / #1083). The
+    timestamp used is ``COALESCE(claimed_at, requested_at)`` —
+    ``claimed_at`` is set on ``pending → claimed`` (sql/084:24,
+    dispatcher.py:183) and a row in ``status='dispatched'`` will
+    almost always have it populated, but a buggy NULL would otherwise
+    silently skip the stuck row. Falling back to ``requested_at`` is
+    conservative (older or equal to claimed_at) so the rule is still
+    correct.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM pending_job_requests
+             WHERE process_id = %(pid)s
+               AND status     = 'dispatched'
+               AND COALESCE(claimed_at, requested_at) < %(deadline)s
+             LIMIT 1
+            """,
+            {"pid": process_id, "deadline": deadline},
+        )
+        return cur.fetchone() is not None
+
+
+def _has_pending_full_wash_fence(conn: psycopg.Connection[Any], *, process_id: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM pending_job_requests
+             WHERE process_id = %(pid)s
+               AND mode       = 'full_wash'
+               AND status     IN ('pending', 'claimed', 'dispatched')
+             LIMIT 1
+            """,
+            {"pid": process_id},
+        )
+        return cur.fetchone() is not None
+
+
+def _freshness_failure_counts(
+    conn: psycopg.Connection[Any],
+    *,
+    source: str,
+    deadline: datetime,
+) -> tuple[int, int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE state = 'error') AS total,
+                COUNT(*) FILTER (
+                  WHERE state = 'error'
+                    AND (next_recheck_at IS NULL OR next_recheck_at > %(deadline)s)
+                ) AS uncovered
+              FROM data_freshness_index
+             WHERE source = %(source)s
+            """,
+            {"source": source, "deadline": deadline},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return (0, 0)
+    return (int(row[0]), int(row[1]))
+
+
+def _manifest_failure_counts(
+    conn: psycopg.Connection[Any],
+    *,
+    source: str,
+    deadline: datetime,
+) -> tuple[int, int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE ingest_status = 'failed') AS total,
+                COUNT(*) FILTER (
+                  WHERE ingest_status = 'failed'
+                    AND (next_retry_at IS NULL OR next_retry_at > %(deadline)s)
+                ) AS uncovered
+              FROM sec_filing_manifest
+             WHERE source = %(source)s
+            """,
+            {"source": source, "deadline": deadline},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return (0, 0)
+    return (int(row[0]), int(row[1]))
+
+
+def _is_failed_scope_covered(
+    conn: psycopg.Connection[Any],
+    *,
+    process_id: str,
+    next_fire_at: datetime | None,
+    kill_switch_active: bool,
+) -> bool:
+    """True when the next scheduled fire provably reattempts the failed scope.
+
+    Spec §"Auto-hide-on-retry rule" / "Covered" check (post-W2).
+
+    Codex pre-push round 1 BLOCKING: the check must prove EVERY
+    failed row has retry coverage; an existential probe was wrong.
+
+    Codex pre-push round 2 BLOCKING: for jobs with BOTH a
+    ``freshness_source`` and a ``manifest_source`` (e.g.
+    ``sec_filing_documents_ingest`` post-WARNING fix), the check must
+    consider ALL applicable sources together. A short-circuit on the
+    first covered source could auto-hide errors while another source's
+    failed rows remain uncovered.
+
+    Final shape: enumerate every applicable source. Any uncovered
+    failure on any applicable source → False. At least one source
+    must contribute a positive ``total`` (otherwise nothing is
+    actionable and there is no scope to cover).
+
+    Kill-switch + no-cadence both short-circuit to False so a paused
+    or one-shot job never enters auto-hide.
+    """
+    if kill_switch_active or next_fire_at is None:
+        return False
+    freshness_source = freshness_source_for(process_id)
+    manifest_source = manifest_source_for(process_id)
+    if freshness_source is None and manifest_source is None:
+        return False
+    cumulative_total = 0
+    if freshness_source is not None:
+        total, uncovered = _freshness_failure_counts(conn, source=freshness_source, deadline=next_fire_at)
+        if uncovered > 0:
+            return False
+        cumulative_total += total
+    if manifest_source is not None:
+        total, uncovered = _manifest_failure_counts(conn, source=manifest_source, deadline=next_fire_at)
+        if uncovered > 0:
+            return False
+        cumulative_total += total
+    return cumulative_total > 0
+
+
+# ---------------------------------------------------------------------------
+# Builders
+# ---------------------------------------------------------------------------
+
+
+def _build_active_run(active_row: dict[str, Any]) -> ActiveRunSummary:
+    target = active_row["target_count"]
+    processed = int(active_row["processed_count"]) if active_row["processed_count"] is not None else 0
+    last_progress_at = active_row.get("last_progress_at")
+    return ActiveRunSummary(
+        run_id=int(active_row["run_id"]),
+        started_at=active_row["started_at"],
+        rows_processed_so_far=processed if processed > 0 else None,
+        progress_units_done=processed if target is not None else None,
+        progress_units_total=int(target) if target is not None else None,
+        last_progress_at=last_progress_at,
+        is_cancelling=active_row["cancel_requested_at"] is not None,
+    )
+
+
+def _build_last_run(terminal_row: dict[str, Any]) -> ProcessRunSummary:
+    started_at: datetime = terminal_row["started_at"]
+    finished_at: datetime | None = terminal_row["finished_at"]
+    duration = (finished_at - started_at).total_seconds() if finished_at else 0.0
+    summary_status = _RUN_STATUS_TO_SUMMARY.get(terminal_row["status"], "skipped")
+    skips = terminal_row.get("rows_skipped_by_reason") or {}
+    return ProcessRunSummary(
+        run_id=int(terminal_row["run_id"]),
+        started_at=started_at,
+        finished_at=finished_at if finished_at is not None else started_at,
+        duration_seconds=duration,
+        rows_processed=terminal_row.get("row_count"),
+        rows_skipped_by_reason={k: int(v) for k, v in skips.items()},
+        rows_errored=int(terminal_row.get("rows_errored") or 0),
+        status=summary_status,
+        # History-tab operator UUID — distinct from the Task 5 (#1508) verdict
+        # boolean ``cancel_was_operator_initiated`` (computed in ``_build_row``
+        # via ``_cancel_was_operator_initiated``). Resolving the actual
+        # ``process_stop_requests.requested_by_operator_id`` here needs ``conn``
+        # threaded into ``_build_last_run`` across all three adapters; left
+        # unresolved (None) as out-of-scope for the two-state verdict work.
+        cancelled_by_operator_id=None,
+    )
+
+
+def _build_error_summaries(
+    error_classes: dict[str, Any] | None,
+) -> tuple[ErrorClassSummary, ...]:
+    """Translate the ``job_runs.error_classes`` JSONB into envelope shape.
+
+    JSONB shape (sql/137 header): ``{"<error_class>": {"count": N,
+    "sample_message": "...", "last_subject": "...",
+    "last_seen_at": "ISO-8601"}}``. Keys with malformed values are
+    skipped — the producer-side aggregator pins the shape, but defensive
+    parsing prevents a single corrupt row from breaking the whole row.
+    """
+    if not error_classes:
+        return ()
+    summaries: list[ErrorClassSummary] = []
+    for error_class, payload in error_classes.items():
+        if not isinstance(payload, dict):
+            continue
+        last_seen_raw = payload.get("last_seen_at")
+        if not isinstance(last_seen_raw, str):
+            continue
+        try:
+            last_seen_at = datetime.fromisoformat(last_seen_raw)
+        except ValueError:
+            continue
+        # Producer writes UTC ISO strings (datetime.now(UTC).isoformat());
+        # coerce naive parses to UTC so downstream comparisons are safe
+        # (prevention-log "Naive datetime in TIMESTAMPTZ query params" #80).
+        if last_seen_at.tzinfo is None:
+            last_seen_at = last_seen_at.replace(tzinfo=UTC)
+        summaries.append(
+            ErrorClassSummary(
+                error_class=str(error_class),
+                count=int(payload.get("count", 0)),
+                last_seen_at=last_seen_at,
+                sample_message=str(payload.get("sample_message", ""))[:500],
+                sample_subject=(str(payload["last_subject"]) if payload.get("last_subject") else None),
+            )
+        )
+    return tuple(summaries)
+
+
+def _build_row(
+    job: ScheduledJob,
+    *,
+    conn: psycopg.Connection[Any],
+    active_row: dict[str, Any] | None,
+    terminal_row: dict[str, Any] | None,
+    has_inflight_request: bool,
+    fence_held: bool,
+    kill_switch_active: bool,
+) -> ProcessRow:
+    # next_fire_at: always compute against ``now`` rather than the last
+    # successful run — the operator wants "when will this fire next?",
+    # which APScheduler answers identically regardless of the prior
+    # outcome. ``compute_next_run`` is pure cadence math so it is safe to
+    # call from the API process (no APScheduler consult). PR4 needs it
+    # before status computation so the covered-check can compare against
+    # the next-fire deadline.
+    next_fire_at: datetime | None = compute_next_run(job.cadence, datetime.now(UTC))
+
+    last_terminal_status = terminal_row["status"] if terminal_row is not None else None
+    failed_scope_covered = False
+    if last_terminal_status == "failure" and not has_inflight_request:
+        # Only probe the per-source covered check when it could affect
+        # the status (last terminal failed AND no explicit retry is
+        # already in flight).
+        failed_scope_covered = _is_failed_scope_covered(
+            conn,
+            process_id=job.name,
+            next_fire_at=next_fire_at,
+            kill_switch_active=kill_switch_active,
+        )
+
+    process_status = _status_for(
+        has_running_row=active_row is not None,
+        last_terminal_status=last_terminal_status,
+        has_inflight_request=has_inflight_request,
+        kill_switch_active=kill_switch_active,
+        failed_scope_covered=failed_scope_covered,
+    )
+
+    last_run = _build_last_run(terminal_row) if terminal_row is not None else None
+    active_run = _build_active_run(active_row) if active_row is not None else None
+
+    # Auto-hide-on-retry: hide error chips when status is running (retry
+    # in flight) or pending_retry (next fire covers failed scope). Only
+    # surface grouped errors in the actionable ``failed`` state.
+    last_n_errors: tuple[ErrorClassSummary, ...] = ()
+    if process_status == "failed" and terminal_row is not None:
+        last_n_errors = _build_error_summaries(terminal_row.get("error_classes"))
+
+    # Stale-reason probes — operator-amendment §A1 four-case model
+    # (PR8 / #1083). Each probe is a LIMIT 1 read; only run them when
+    # the rule's mechanism gate could fire to keep the snapshot read
+    # cheap.
+    now = datetime.now(UTC)
+    # ``expected_fire_at`` is the first cadence-occurrence after the
+    # latest terminal run's anchor. When it falls more than one full
+    # cadence in the past (now > expected + max(cadence, floor)), the
+    # schedule was missed (C1, #1508; see compute_stale_reasons'
+    # cadence_period_s arg below). ``expected_fire_at`` is already the
+    # next slot (anchor + ~1 cadence); Rule 1 then waits another full
+    # cadence, so schedule_missed surfaces ~2 cadences after the last
+    # successful run — deliberate de-noise, errs green.
+    # Codex pre-push BLOCKING: ``next_fire_at`` is the strictly-future
+    # next fire from compute_next_run(cadence, now), so it could never
+    # satisfy ``< now - threshold`` and the rule was unreachable.
+    expected_fire_at: datetime | None = None
+    # #2052 — a ``lane_busy`` skip must not anchor the overdue clock ("work
+    # was due, couldn't start" is not a completed cycle). When the latest
+    # terminal is one, re-resolve the anchor from the latest NON-lane-busy
+    # terminal; when the ENTIRE history is lane-busy skips, fall back to the
+    # persisted ``job_first_seen`` anchor (#1508 C6 — the ``terminal_row is
+    # None`` never-started path below cannot arm here because the skip rows
+    # make ``terminal_row`` non-null). Benign skips (prereq/gate) still
+    # anchor exactly as before.
+    anchor_row = terminal_row
+    if _is_lane_busy_skip(terminal_row) and terminal_row is not None and terminal_row.get("terminal_kind") == "job_run":
+        anchor_row = _read_latest_anchor_terminal_run(conn, job_name=job.name)
+        if anchor_row is None:
+            first_seen = _job_first_seen(conn, job_name=job.name)
+            if first_seen is not None:
+                expected_fire_at = compute_next_run(job.cadence, first_seen)
+    if anchor_row is not None and anchor_row.get("started_at") is not None:
+        # C1 (#1508): anchor on the LATER of started_at / finished_at so a
+        # run that just completed resets the overdue clock — a long run that
+        # finishes after a nominal slot must not read overdue the instant it
+        # ends.
+        anchor = anchor_row["started_at"]
+        finished = anchor_row.get("finished_at")
+        if finished is not None and finished > anchor:
+            anchor = finished
+        expected_fire_at = compute_next_run(job.cadence, anchor)
+    freshness_source = freshness_source_for(job.name)
+    has_data_freshness_gap = (
+        freshness_source is not None
+        and process_status != "running"
+        and _source_watermark_behind(conn, source=freshness_source)
+    )
+    has_dispatched_queue_age = _has_dispatched_queue_age(
+        conn,
+        process_id=job.name,
+        deadline=now - timedelta(seconds=QUEUE_STUCK_THRESHOLD_S),
+    )
+    stale_reasons: tuple[StaleReason, ...] = compute_stale_reasons(
+        mechanism="scheduled_job",
+        status=process_status,
+        expected_fire_at=expected_fire_at,
+        has_data_freshness_gap=has_data_freshness_gap,
+        has_dispatched_queue_age=has_dispatched_queue_age,
+        last_progress_at=active_run.last_progress_at if active_run is not None else None,
+        active_run_started_at=active_run.started_at if active_run is not None else None,
+        process_id=job.name,
+        now=now,
+        cadence_period_s=int(cadence_period(job.cadence).total_seconds()),
+    )
+
+    # PR4 watermark — surface the resume cursor on the FE tooltip.
+    # Returns None for jobs without a registered source (heartbeat,
+    # monitor_positions, …); the FE renders that as "no resume cursor".
+    watermark = resolve_watermark(conn, process_id=job.name, mechanism="scheduled_job")
+
+    # #1511 / T5 — verdict look-through signal. True when the job polls a
+    # bootstrap-covered freshness source whose newest filing is still within
+    # cadence; ``compute_verdict`` uses it to read a ``pending_first_run`` job
+    # as Current (data seeded by bootstrap) rather than "first run pending".
+    source_watermark_fresh = (
+        freshness_source is not None
+        and freshness_source in BOOTSTRAP_COVERED_FRESHNESS_SOURCES
+        and _source_watermark_fresh(conn, source=freshness_source, now=now)
+    )
+
+    # #1508 / C6 — never-started verdict signal. A job with ZERO lifetime rows
+    # (``terminal_row is None``) that is now overdue past its FIRST expected
+    # fire is broken-from-day-one, not merely awaiting its first natural slot.
+    # The anchor is the PERSISTED ``job_first_seen.first_seen`` (not a volatile
+    # process clock); first_expected = that anchor + one cadence, and we wait a
+    # further full grace (max(cadence, floor)) before declaring it broken — same
+    # de-noise posture as schedule_missed (errs green). A job seen for the first
+    # time this boot has no row yet (None) and reads False.
+    never_started = False
+    if terminal_row is None:
+        first_seen = _job_first_seen(conn, job_name=job.name)
+        if first_seen is not None:
+            first_expected = compute_next_run(job.cadence, first_seen)
+            grace = max(int(cadence_period(job.cadence).total_seconds()), SCHEDULE_MISS_FLOOR_S)
+            never_started = first_expected < now - timedelta(seconds=grace)
+
+    # Task 5 (#1508) — operator-cancel look-through. Only probe when the row
+    # actually resolved to ``cancelled`` (cheap LIMIT 1, but pointless otherwise).
+    # The terminal row carries its KIND (``job_run`` / ``sync_run``) so the probe
+    # matches the right ``process_stop_requests.target_run_kind`` on the run id.
+    cancel_was_operator_initiated = False
+    if process_status == "cancelled" and terminal_row is not None:
+        cancel_was_operator_initiated = _cancel_was_operator_initiated(
+            conn,
+            run_kind=terminal_row["terminal_kind"],
+            run_id=int(terminal_row["run_id"]),
+        )
+
+    # #1510 / T4 — verdict signal: a fresh watchdog re-enqueue is in flight, so
+    # ``compute_verdict`` reads this re-enqueued stall as Self-healing rather than
+    # the red schedule_missed it would otherwise show (a genuine wedge still
+    # outranks). Probe is cheap (single EXISTS) and bounded to the 30-min window.
+    liveness_kick_in_flight = _has_inflight_liveness_kick(conn, job_name=job.name, now=now)
+
+    can_cancel = (
+        active_run is not None and active_run.run_id is not None and process_status == "running"
+        # short-runners (heartbeat etc.) are not worth cooperative-cancel;
+        # spec marks them can_cancel=False but PR3 doesn't know which jobs
+        # cooperate — leave True universally and let PR8 trim the list
+        # once the per-job checkpoint catalogue is wired.
+    )
+
+    return ProcessRow(
+        process_id=job.name,
+        # PR4 #1082 — prefer the operator-facing label PR1a populated
+        # on every ScheduledJob; fall back to the raw name when an
+        # entry doesn't declare one (defensive — registry test pins
+        # display_name non-empty).
+        display_name=job.display_name or job.name,
+        lane=_lane_for(job.name),
+        mechanism="scheduled_job",
+        status=process_status,
+        last_run=last_run,
+        active_run=active_run,
+        cadence_human=job.cadence.label,
+        cadence_cron=_cron_for(job.cadence),
+        next_fire_at=next_fire_at,
+        watermark=watermark,
+        can_iterate=(
+            not kill_switch_active and not has_inflight_request and not fence_held and process_status != "running"
+        ),
+        can_full_wash=(not kill_switch_active and not fence_held and process_status != "running"),
+        can_cancel=can_cancel,
+        last_n_errors=last_n_errors,
+        stale_reasons=stale_reasons,
+        # PR2 #1064 — surface ``ScheduledJob.params_metadata`` so the FE
+        # Advanced disclosure renders one form field per declared param.
+        # Empty tuple for jobs with no operator-exposable params (the
+        # default — every entry except ``sec_13f_quarterly_sweep`` today).
+        params_metadata=job.params_metadata,
+        # PR4 #1082 — operator-visible description for the ⓘ tooltip.
+        description=job.description,
+        # #1511 / T5 — verdict look-through input (see compute_verdict).
+        source_watermark_fresh=source_watermark_fresh,
+        # #1509 / T3 — backoff retry timestamp from the latest terminal run
+        # (``.get`` so the sync_runs-shaped row, which has no such column,
+        # yields None — those jobs never schedule a retry anyway).
+        next_retry_at=terminal_row.get("next_retry_at") if terminal_row is not None else None,
+        # #1510 / T4 — fresh watchdog re-enqueue in flight (see compute_verdict).
+        liveness_kick_in_flight=liveness_kick_in_flight,
+        # #1508 / C6 — never-run job overdue past its first expected fire
+        # (persisted first-seen anchor). Reads attention "never started".
+        never_started=never_started,
+        # Task 5 (#1508) — operator-traceable cancel reads benign Current;
+        # system/crash cancel stays attention "last run cancelled".
+        cancel_was_operator_initiated=cancel_was_operator_initiated,
+        # C7 (#1530) — page-scope role straight from the registry entry so
+        # the FE can partition steady-state keepers from bootstrap / backfill.
+        role=job.role,
+        # #1689 — latest terminal ``attempt`` (``.get`` so a sync_runs-shaped
+        # orchestrator row, which has no such column, yields None).
+        attempt=terminal_row.get("attempt") if terminal_row is not None else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public entrypoints
+# ---------------------------------------------------------------------------
+
+
+def list_rows(conn: psycopg.Connection[Any]) -> list[ProcessRow]:
+    """Return one ProcessRow per declared scheduled job.
+
+    Caller MUST be inside a ``snapshot_read(conn)`` block. The kill_switch
+    read is shared across rows — capture it once at the top so a switch
+    flip mid-loop cannot produce a row-by-row inconsistency.
+    """
+    kill_switch_active = _kill_switch_active(conn)
+    rows: list[ProcessRow] = []
+    for job in SCHEDULED_JOBS:
+        active_row = _read_running_run(conn, job_name=job.name)
+        terminal_row = _resolve_terminal_row(conn, job_name=job.name)
+        has_inflight_request = _has_inflight_manual_request(conn, job_name=job.name)
+        fence_held = _has_pending_full_wash_fence(conn, process_id=job.name)
+        rows.append(
+            _build_row(
+                job,
+                conn=conn,
+                active_row=active_row,
+                terminal_row=terminal_row,
+                has_inflight_request=has_inflight_request,
+                fence_held=fence_held,
+                kill_switch_active=kill_switch_active,
+            )
+        )
+    return rows
+
+
+def get_row(conn: psycopg.Connection[Any], *, process_id: str) -> ProcessRow | None:
+    """Return a single ProcessRow for ``process_id`` (= job_name)."""
+    job = next((j for j in SCHEDULED_JOBS if j.name == process_id), None)
+    if job is None:
+        return None
+    return _build_row(
+        job,
+        conn=conn,
+        active_row=_read_running_run(conn, job_name=job.name),
+        terminal_row=_resolve_terminal_row(conn, job_name=job.name),
+        has_inflight_request=_has_inflight_manual_request(conn, job_name=job.name),
+        fence_held=_has_pending_full_wash_fence(conn, process_id=job.name),
+        kill_switch_active=_kill_switch_active(conn),
+    )
+
+
+def list_runs(conn: psycopg.Connection[Any], *, process_id: str, days: int) -> list[ProcessRunSummary]:
+    """Return last-N-days terminal runs for the History tab."""
+    if days <= 0:
+        raise ValueError("days must be positive")
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT run_id, started_at, finished_at, status, row_count,
+                   rows_skipped_by_reason, rows_errored, cancelled_at
+              FROM job_runs
+             WHERE job_name   = %(name)s
+               AND status     IN {TERMINAL_STATUS_SQL}
+               AND started_at >= now() - (%(days)s::int * INTERVAL '1 day')
+             ORDER BY started_at DESC
+            """,
+            {"name": process_id, "days": days},
+        )
+        rows = cur.fetchall()
+    return [_build_last_run(row) for row in rows]
+
+
+def list_run_errors(conn: psycopg.Connection[Any], *, process_id: str, run_id: int) -> tuple[ErrorClassSummary, ...]:
+    """Return the grouped error_classes for a specific run."""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT error_classes
+              FROM job_runs
+             WHERE run_id   = %(run_id)s
+               AND job_name = %(name)s
+            """,
+            {"run_id": run_id, "name": process_id},
+        )
+        row = cur.fetchone()
+    if row is None:
+        return ()
+    return _build_error_summaries(row.get("error_classes"))
+
+
+__all__ = ["get_row", "list_run_errors", "list_rows", "list_runs"]

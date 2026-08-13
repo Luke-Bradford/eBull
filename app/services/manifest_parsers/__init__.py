@@ -1,0 +1,81 @@
+"""Manifest-worker parser registry hub (#873).
+
+The manifest worker (`app/jobs/sec_manifest_worker.py`) dispatches one
+parser callable per `ManifestSource`. Pre-#873 nothing registered any
+parser at production startup, so every manifest row was debug-skipped
+and the worker was a no-op.
+
+This package is the single registration point. Each per-source module
+(`eight_k`, `def14a`, `form4`, ...) exposes a `register()` callable.
+Importing this package side-effects-populates the worker's global
+`_PARSERS` dict by calling every submodule's `register()` once.
+
+Both processes import this package on startup:
+- API: `app/main.py` imports `app.services.manifest_parsers` near the
+  top so the `/coverage/manifest-parsers` audit endpoint sees the
+  same registry the worker has.
+- Worker: `app/jobs/__main__.py` imports the same module before
+  starting the worker loop.
+
+Module-import-time registration is the architecture invariant. A
+parser that registers itself only inside a function body would
+break the cross-process registry view — the audit endpoint would
+report `has_registered_parser=False` for a source the worker
+actually handles, and the operator would mis-diagnose the lane as
+stuck.
+
+Test isolation: tests that need a clean registry call
+`sec_manifest_worker.clear_registered_parsers()`, then re-register
+with `register_all_parsers()`. ``importlib.reload(__name__)`` is not
+sufficient because the per-source submodules are cached and their
+module-body side effects don't re-fire.
+"""
+
+from __future__ import annotations
+
+from app.services.manifest_parsers import def14a as _def14a
+from app.services.manifest_parsers import eight_k as _eight_k
+from app.services.manifest_parsers import finra_regsho_daily as _finra_regsho_daily
+from app.services.manifest_parsers import finra_short_interest as _finra_short_interest
+from app.services.manifest_parsers import insider_345 as _insider_345
+from app.services.manifest_parsers import sec_10k as _sec_10k
+from app.services.manifest_parsers import sec_10q as _sec_10q
+from app.services.manifest_parsers import sec_13dg as _sec_13dg
+from app.services.manifest_parsers import sec_13f_hr as _sec_13f_hr
+from app.services.manifest_parsers import sec_424b as _sec_424b
+from app.services.manifest_parsers import sec_n_csr as _sec_n_csr
+from app.services.manifest_parsers import sec_n_port as _sec_n_port
+from app.services.manifest_parsers import sec_nt as _sec_nt
+from app.services.manifest_parsers import sec_pre14a as _sec_pre14a
+from app.services.manifest_parsers import sec_tender as _sec_tender
+from app.services.manifest_parsers import sec_xbrl_facts as _sec_xbrl_facts
+
+
+def register_all_parsers() -> None:
+    """Idempotent: registers every per-source parser with the
+    manifest worker. Called once at package import (below) and
+    callable again by tests after ``clear_registered_parsers()``.
+    """
+    _eight_k.register()
+    _def14a.register()
+    _sec_10k.register()
+    _sec_10q.register()  # synth no-op per sec-edgar §11.5.1 (#1168)
+    _sec_13dg.register()  # registers BOTH sec_13d and sec_13g
+    _insider_345.register()  # registers sec_form3 + sec_form4 + sec_form5
+    _sec_13f_hr.register()
+    _sec_n_csr.register()  # real fund-metadata parser (#1171; replaced synth no-op)
+    _sec_n_port.register()
+    _sec_nt.register()  # NT 10-K / NT 10-Q late-filing parser (#1015)
+    _sec_424b.register()  # 424B tier-1 prospectus offering parser (#1816)
+    _sec_tender.register()  # tender / going-private schedule parser (#1982)
+    _sec_pre14a.register()  # PRE 14A / PRER14A proposal-signal parser (#1892)
+    _sec_xbrl_facts.register()  # synth no-op per sec-edgar §11.5.1 (G7)
+    _finra_short_interest.register()  # synth no-op (G6/#915 — ScheduledJob owns writes)
+    _finra_regsho_daily.register()  # synth no-op (G6/#916 — ScheduledJob owns writes)
+
+
+# Run once at package import.
+register_all_parsers()
+
+
+__all__ = ("register_all_parsers",)

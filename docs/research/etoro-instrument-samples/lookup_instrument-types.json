@@ -1,0 +1,44 @@
+{
+  "instrumentTypes": [
+    {
+      "instrumentTypeID": 1,
+      "instrumentTypeDescription": "Forex"
+    },
+    {
+      "instrumentTypeID": 2,
+      "instrumentTypeDescription": "Commodity"
+    },
+    {
+      "instrumentTypeID": 3,
+      "instrumentTypeDescription": "CFD"
+    },
+    {
+      "instrumentTypeID": 4,
+      "instrumentTypeDescription": "Indices"
+    },
+    {
+      "instrumentTypeID": 5,
+      "instrumentTypeDescription": "Stocks"
+    },
+    {
+      "instrumentTypeID": 6,
+      "instrumentTypeDescription": "ETF"
+    },
+    {
+      "instrumentTypeID": 7,
+      "instrumentTypeDescription": "Bonds"
+    },
+    {
+      "instrumentTypeID": 8,
+      "instrumentTypeDescription": "TrustFunds"
+    },
+    {
+      "instrumentTypeID": 9,
+      "instrumentTypeDescription": "Options"
+    },
+    {
+      "instrumentTypeID": 10,
+      "instrumentTypeDescription": "Crypto"
+    }
+  ]
+}

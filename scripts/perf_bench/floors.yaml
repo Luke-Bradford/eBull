@@ -1,0 +1,17 @@
+# Per-table row-count floors for valid perf claims.
+#
+# Single source of truth. Consumed by:
+#   - scripts/perf_bench/_run_explain.py (--check-floors-only)
+#   - scripts/perf_bench/lint_pr_artifacts.py (manifest validation)
+#
+# Mirror of the table in docs/proposals/etl/bootstrap-sub-1h-plan.md §4
+# "Named row-count floors". Drift between this file and the master plan
+# is caught by tests/scripts/test_perf_bench_lint.py::test_14_floors_yaml_matches_master_plan.
+
+ownership_institutions_current: 1000000
+ownership_institutions_observations: 2000000
+ownership_insiders_observations: 500000
+ownership_funds_observations: 200000
+financial_facts_raw: 10000000
+sec_filing_manifest: 1000000
+filing_events: 2000000

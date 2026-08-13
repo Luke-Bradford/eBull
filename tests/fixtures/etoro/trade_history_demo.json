@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "captured": "2026-06-13",
+    "endpoint": "GET /api/v1/trading/info/trade/demo/history",
+    "params": {
+      "minDate": "2020-01-01T00:00:00Z",
+      "page": "1",
+      "pageSize": "50"
+    },
+    "note": "#1593 probe capture \u2014 dev demo account, single closed trade (ILMN). Body is the verbatim API response array."
+  },
+  "body": [
+    {
+      "netProfit": 1910.47,
+      "closeRate": 120.56,
+      "closeTimestamp": "2025-11-14T19:24:35.307Z",
+      "positionId": 3308442654,
+      "instrumentId": 4077,
+      "isBuy": true,
+      "leverage": 1,
+      "openRate": 97.3,
+      "openTimestamp": "2025-08-12T16:47:12.643Z",
+      "stopLossRate": 0.0001,
+      "takeProfitRate": 200.0,
+      "trailingStopLoss": false,
+      "orderId": 272136682,
+      "socialTradeId": 0,
+      "parentPositionId": 0,
+      "investment": 7991.79,
+      "initialInvestment": 7991.79,
+      "fees": 0.0,
+      "units": 82.135523
+    }
+  ]
+}

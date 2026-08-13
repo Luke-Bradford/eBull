@@ -1,0 +1,29 @@
+# Per-ticket perf-bench config for #1346 — `SET LOCAL jit = off` × 10
+# ownership refresh helpers.
+#
+# Spec: docs/proposals/etl/bootstrap-sub-1h-plan.md §7 Phase 1.
+# Skill: .claude/skills/engineering/etl-perf-claims.md.
+#
+# The EXPLAIN fixture is a SELECT proxy over the partitioned
+# `ownership_institutions_observations` table (125 leaves, sql/177) at a
+# sentinel `instrument_id = 1_999_999_999` outside the seeded range
+# [1_000_000_000, 1_000_001_000). SELECT-only by design — Codex 2 caught
+# that a MERGE fixture with `WHEN NOT MATCHED BY SOURCE DELETE` is not
+# fixture-safe under `_time_trials` (would mutate `_current` if any
+# sentinel-collision row ever existed). The SELECT exercises the same
+# 125-leaf planner walk that drives the MERGE's planning + JIT cost
+# without any mutation path.
+#
+# What the artifact demonstrates: planner overhead from the partition
+# walk (~65 ms planning + ~1.5 ms execution). JIT does not trigger
+# naturally on the bench fixture because the per-partition const-clamp
+# keeps total plan cost below `jit_above_cost`. The 1.86× JIT-savings
+# receipt comes from #1345 EXPLAIN ANALYZE against the pre-wipe
+# prod-sized dev DB at `instrument_id = 1004` (771 JIT functions,
+# 307 ms JIT compile per call). Bench fixture verifies the planner-walk
+# cost still exists post-change (no regression in plan shape) and lets
+# `perf-claim-lint` enforce the 1M-row floor on `_current`.
+
+sql_file: scripts/perf_bench/1346.sql
+fixture_label: "ownership_institutions_observations_select_proxy_sentinel"
+target_table: ownership_institutions_current

@@ -1,0 +1,37 @@
+{
+  "instrumentID": 14646,
+  "instrumentDisplayName": "Toyota Motor Corp.",
+  "instrumentTypeID": 5,
+  "exchangeID": 56,
+  "images": [
+    {
+      "instrumentID": 14646,
+      "width": 35.0,
+      "height": 35.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/14646/35x35.png"
+    },
+    {
+      "instrumentID": 14646,
+      "width": 50.0,
+      "height": 50.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/14646/50x50.png"
+    },
+    {
+      "instrumentID": 14646,
+      "width": 150.0,
+      "height": 150.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/14646/150x150.png"
+    },
+    {
+      "instrumentID": 14646,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/14646/14646_EB0A1E_F7F7F7.svg",
+      "backgroundColor": "#EB0A1E",
+      "textColor": "#F7F7F7"
+    }
+  ],
+  "symbolFull": "7203.T",
+  "stocksIndustryID": 1,
+  "priceSource": "Tokyo",
+  "hasExpirationDate": false,
+  "isInternalInstrument": false
+}

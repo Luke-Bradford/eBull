@@ -1,0 +1,2402 @@
+{
+  "census_version": "etoro-preflight-v2",
+  "cohort": [
+    {
+      "dollar_volume": "32269451.5000000000",
+      "instrument_id": 1750,
+      "instrument_type": "Stocks",
+      "local_is_tradable": true,
+      "symbol": "ASH"
+    },
+    {
+      "dollar_volume": "15791186759.1800000000",
+      "instrument_id": 2900,
+      "instrument_type": "Stocks",
+      "local_is_tradable": true,
+      "symbol": "MU.RTH"
+    },
+    {
+      "dollar_volume": "0.0200000000",
+      "instrument_id": 9278,
+      "instrument_type": "Stocks",
+      "local_is_tradable": true,
+      "symbol": "MFLTY"
+    },
+    {
+      "dollar_volume": "4247715.7800000000",
+      "instrument_id": 10331,
+      "instrument_type": "Stocks",
+      "local_is_tradable": true,
+      "symbol": "KLXE"
+    },
+    {
+      "dollar_volume": "47148647.7500000000",
+      "instrument_id": 1099,
+      "instrument_type": "ETF",
+      "local_is_tradable": true,
+      "symbol": "PDBC"
+    },
+    {
+      "dollar_volume": "11885499874.9800000000",
+      "instrument_id": 3417,
+      "instrument_type": "ETF",
+      "local_is_tradable": true,
+      "symbol": "SPY.RTH"
+    },
+    {
+      "dollar_volume": "1869.5600000000",
+      "instrument_id": 11158,
+      "instrument_type": "ETF",
+      "local_is_tradable": true,
+      "symbol": "KOKU"
+    },
+    {
+      "dollar_volume": "7916566.0400000000",
+      "instrument_id": 13568,
+      "instrument_type": "ETF",
+      "local_is_tradable": true,
+      "symbol": "FTSL"
+    }
+  ],
+  "cohort_definition": {
+    "asset_class": "us_equity",
+    "instrument_types": [
+      "Stocks",
+      "ETF"
+    ],
+    "requested_total": 8,
+    "selected_by_type": {
+      "ETF": 4,
+      "Stocks": 4
+    },
+    "selected_total": 8,
+    "selection": "equal type quota; nearest deterministic latest-dollar-volume quantiles"
+  },
+  "cost_errors": [],
+  "cost_population": {
+    "canonical_response_bytes": 5781,
+    "cost_type_row_counts": {
+      "marketSpread": 18,
+      "markup": 20,
+      "overnightFee": 20,
+      "transactionFee": 12
+    },
+    "currency_row_counts": {
+      "USD": 70
+    },
+    "eligible_arms": 22,
+    "errored_arms": 0,
+    "execution_usable_arms": 0,
+    "requested_arms": 20,
+    "resolved_arms": 20,
+    "skipped_by_rate_budget": 2
+  },
+  "cost_preflights": [
+    {
+      "age_seconds_at_receipt": "13092.1109",
+      "arm_id": "etoro-preflight-v2:1750:buy:real:1x",
+      "canonical_response_bytes": 257,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.37
+          },
+          "value": "0.37"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 1750,
+      "last_updated": "2026-08-12T19:59:54.908353+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:38:07.019253+00:00",
+      "settlement_type": "real",
+      "ticket_amount_usd": "100",
+      "transaction": "buy"
+    },
+    {
+      "age_seconds_at_receipt": "13094.820301",
+      "arm_id": "etoro-preflight-v2:1750:buy:real:10x",
+      "canonical_response_bytes": 257,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 3.74
+          },
+          "value": "3.74"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 1750,
+      "last_updated": "2026-08-12T19:59:54.908353+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:38:09.728654+00:00",
+      "settlement_type": "real",
+      "ticket_amount_usd": "1000",
+      "transaction": "buy"
+    },
+    {
+      "age_seconds_at_receipt": "13098.713994",
+      "arm_id": "etoro-preflight-v2:1099:sellShort:cfd:1x",
+      "canonical_response_bytes": 318,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 0.15
+          },
+          "value": "0.15"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.11
+          },
+          "value": "0.11"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 1099,
+      "last_updated": "2026-08-12T19:59:54.531279+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:38:13.245273+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "100",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13102.183873",
+      "arm_id": "etoro-preflight-v2:1099:sellShort:cfd:10x",
+      "canonical_response_bytes": 317,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 1.5
+          },
+          "value": "1.5"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 1.11
+          },
+          "value": "1.11"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 1099,
+      "last_updated": "2026-08-12T19:59:54.531279+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:38:16.715152+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "1000",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13105.344851",
+      "arm_id": "etoro-preflight-v2:1750:sellShort:cfd:1x",
+      "canonical_response_bytes": 317,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 0.15
+          },
+          "value": "0.15"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.37
+          },
+          "value": "0.37"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 1750,
+      "last_updated": "2026-08-12T19:59:54.908353+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:38:20.253204+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "100",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13108.913065",
+      "arm_id": "etoro-preflight-v2:1750:sellShort:cfd:10x",
+      "canonical_response_bytes": 316,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 1.5
+          },
+          "value": "1.5"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 3.75
+          },
+          "value": "3.75"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 1750,
+      "last_updated": "2026-08-12T19:59:54.908353+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:38:23.821418+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "1000",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13112.360994",
+      "arm_id": "etoro-preflight-v2:3417:buy:real:1x",
+      "canonical_response_bytes": 203,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 3417,
+      "last_updated": "2026-08-12T19:59:54.892953+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:38:27.253947+00:00",
+      "settlement_type": "real",
+      "ticket_amount_usd": "100",
+      "transaction": "buy"
+    },
+    {
+      "age_seconds_at_receipt": "13115.836011",
+      "arm_id": "etoro-preflight-v2:3417:buy:real:10x",
+      "canonical_response_bytes": 261,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.03
+          },
+          "value": "0.03"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 3417,
+      "last_updated": "2026-08-12T19:59:54.892953+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:38:30.728964+00:00",
+      "settlement_type": "real",
+      "ticket_amount_usd": "1000",
+      "transaction": "buy"
+    },
+    {
+      "age_seconds_at_receipt": "13119.33283",
+      "arm_id": "etoro-preflight-v2:2900:buy:real:1x",
+      "canonical_response_bytes": 260,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.02
+          },
+          "value": "0.02"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 2900,
+      "last_updated": "2026-08-12T19:59:54.910133+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:38:34.242963+00:00",
+      "settlement_type": "real",
+      "ticket_amount_usd": "100",
+      "transaction": "buy"
+    },
+    {
+      "age_seconds_at_receipt": "13122.961839",
+      "arm_id": "etoro-preflight-v2:2900:buy:real:10x",
+      "canonical_response_bytes": 260,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.15
+          },
+          "value": "0.15"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 2900,
+      "last_updated": "2026-08-12T19:59:54.910133+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:38:37.871972+00:00",
+      "settlement_type": "real",
+      "ticket_amount_usd": "1000",
+      "transaction": "buy"
+    },
+    {
+      "age_seconds_at_receipt": "13126.347449",
+      "arm_id": "etoro-preflight-v2:3417:sellShort:cfd:1x",
+      "canonical_response_bytes": 263,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 0.15
+          },
+          "value": "0.15"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 3417,
+      "last_updated": "2026-08-12T19:59:54.892953+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:38:41.240402+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "100",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13129.878573",
+      "arm_id": "etoro-preflight-v2:3417:sellShort:cfd:10x",
+      "canonical_response_bytes": 320,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 1.5
+          },
+          "value": "1.5"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.03
+          },
+          "value": "0.03"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 3417,
+      "last_updated": "2026-08-12T19:59:54.892953+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:38:44.771526+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "1000",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13133.352132",
+      "arm_id": "etoro-preflight-v2:2900:sellShort:cfd:1x",
+      "canonical_response_bytes": 320,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 0.15
+          },
+          "value": "0.15"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.02
+          },
+          "value": "0.02"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 2900,
+      "last_updated": "2026-08-12T19:59:54.910133+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:38:48.262265+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "100",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13136.840099",
+      "arm_id": "etoro-preflight-v2:2900:sellShort:cfd:10x",
+      "canonical_response_bytes": 319,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 1.5
+          },
+          "value": "1.5"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.15
+          },
+          "value": "0.15"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 2900,
+      "last_updated": "2026-08-12T19:59:54.910133+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:38:51.750232+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "1000",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13171.562249",
+      "arm_id": "etoro-preflight-v2:11158:sellShort:cfd:1x",
+      "canonical_response_bytes": 319,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 0.15
+          },
+          "value": "0.15"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 2.03
+          },
+          "value": "2.03"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 11158,
+      "last_updated": "2026-08-12T19:59:23.703748+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:38:55.265997+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "100",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13175.0836",
+      "arm_id": "etoro-preflight-v2:11158:sellShort:cfd:10x",
+      "canonical_response_bytes": 319,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 1.5
+          },
+          "value": "1.5"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 20.33
+          },
+          "value": "20.33"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 11158,
+      "last_updated": "2026-08-12T19:59:23.703748+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:38:58.787348+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "1000",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13146.331687",
+      "arm_id": "etoro-preflight-v2:10331:buy:real:1x",
+      "canonical_response_bytes": 259,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.61
+          },
+          "value": "0.61"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 10331,
+      "last_updated": "2026-08-12T19:59:55.968124+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:39:02.299811+00:00",
+      "settlement_type": "real",
+      "ticket_amount_usd": "100",
+      "transaction": "buy"
+    },
+    {
+      "age_seconds_at_receipt": "13149.815278",
+      "arm_id": "etoro-preflight-v2:10331:buy:real:10x",
+      "canonical_response_bytes": 259,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 6.06
+          },
+          "value": "6.06"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 10331,
+      "last_updated": "2026-08-12T19:59:55.968124+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:39:05.783402+00:00",
+      "settlement_type": "real",
+      "ticket_amount_usd": "1000",
+      "transaction": "buy"
+    },
+    {
+      "age_seconds_at_receipt": "13154.381713",
+      "arm_id": "etoro-preflight-v2:13568:sellShort:cfd:1x",
+      "canonical_response_bytes": 319,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 0.15
+          },
+          "value": "0.15"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 0.11
+          },
+          "value": "0.11"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 13568,
+      "last_updated": "2026-08-12T19:59:54.925692+00:00",
+      "multiplier": "1",
+      "received_at": "2026-08-12T23:39:09.307405+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "100",
+      "transaction": "sellShort"
+    },
+    {
+      "age_seconds_at_receipt": "13157.849762",
+      "arm_id": "etoro-preflight-v2:13568:sellShort:cfd:10x",
+      "canonical_response_bytes": 318,
+      "costs": [
+        {
+          "amount": null,
+          "cost_type": "transactionFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "transactionFee",
+            "currency": "USD",
+            "value": 1.5
+          },
+          "value": "1.5"
+        },
+        {
+          "amount": null,
+          "cost_type": "markup",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "markup",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        },
+        {
+          "amount": null,
+          "cost_type": "marketSpread",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "marketSpread",
+            "currency": "USD",
+            "value": 1.11
+          },
+          "value": "1.11"
+        },
+        {
+          "amount": null,
+          "cost_type": "overnightFee",
+          "currency": "USD",
+          "raw_payload": {
+            "costType": "overnightFee",
+            "currency": "USD",
+            "value": 0.0
+          },
+          "value": "0.0"
+        }
+      ],
+      "execution_blockers": [
+        "undocumented_value_semantics:marketSpread",
+        "undocumented_value_semantics:markup",
+        "undocumented_value_semantics:overnightFee",
+        "undocumented_value_semantics:transactionFee"
+      ],
+      "execution_usable": false,
+      "freshness_status": "within_24h",
+      "instrument_id": 13568,
+      "last_updated": "2026-08-12T19:59:54.925692+00:00",
+      "multiplier": "10",
+      "received_at": "2026-08-12T23:39:12.775454+00:00",
+      "settlement_type": "cfd",
+      "ticket_amount_usd": "1000",
+      "transaction": "sellShort"
+    }
+  ],
+  "cost_scaling": [
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 10331,
+      "observations": [
+        {
+          "cost": "0.61",
+          "multiplier": "1"
+        },
+        {
+          "cost": "6.06",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "other_blocking",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 10331,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 10331,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1099,
+      "observations": [
+        {
+          "cost": "0.11",
+          "multiplier": "1"
+        },
+        {
+          "cost": "1.11",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "other_blocking",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1099,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1099,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "transactionFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1099,
+      "observations": [
+        {
+          "cost": "0.15",
+          "multiplier": "1"
+        },
+        {
+          "cost": "1.5",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "ticket_proportional",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 11158,
+      "observations": [
+        {
+          "cost": "2.03",
+          "multiplier": "1"
+        },
+        {
+          "cost": "20.33",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "other_blocking",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 11158,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 11158,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "transactionFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 11158,
+      "observations": [
+        {
+          "cost": "0.15",
+          "multiplier": "1"
+        },
+        {
+          "cost": "1.5",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "ticket_proportional",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 13568,
+      "observations": [
+        {
+          "cost": "0.11",
+          "multiplier": "1"
+        },
+        {
+          "cost": "1.11",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "other_blocking",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 13568,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 13568,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "transactionFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 13568,
+      "observations": [
+        {
+          "cost": "0.15",
+          "multiplier": "1"
+        },
+        {
+          "cost": "1.5",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "ticket_proportional",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1750,
+      "observations": [
+        {
+          "cost": "0.37",
+          "multiplier": "1"
+        },
+        {
+          "cost": "3.74",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "other_blocking",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1750,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1750,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1750,
+      "observations": [
+        {
+          "cost": "0.37",
+          "multiplier": "1"
+        },
+        {
+          "cost": "3.75",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "other_blocking",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1750,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1750,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "transactionFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 1750,
+      "observations": [
+        {
+          "cost": "0.15",
+          "multiplier": "1"
+        },
+        {
+          "cost": "1.5",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "ticket_proportional",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 2900,
+      "observations": [
+        {
+          "cost": "0.02",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.15",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "other_blocking",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 2900,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 2900,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 2900,
+      "observations": [
+        {
+          "cost": "0.02",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.15",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "other_blocking",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 2900,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 2900,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "transactionFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 2900,
+      "observations": [
+        {
+          "cost": "0.15",
+          "multiplier": "1"
+        },
+        {
+          "cost": "1.5",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "ticket_proportional",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": null,
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 3417,
+      "observations": [
+        {
+          "cost": "0.03",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "incomplete_blocking",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 3417,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 3417,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "real",
+      "transaction": "buy"
+    },
+    {
+      "cost_type": "marketSpread",
+      "currency": "USD",
+      "equation": null,
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 3417,
+      "observations": [
+        {
+          "cost": "0.03",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "incomplete_blocking",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "markup",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 3417,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "overnightFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 3417,
+      "observations": [
+        {
+          "cost": "0.0",
+          "multiplier": "1"
+        },
+        {
+          "cost": "0.0",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "zero_only_uninformative",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    },
+    {
+      "cost_type": "transactionFee",
+      "currency": "USD",
+      "equation": "cost(k * base_ticket) = k * cost(base_ticket)",
+      "execution_semantics": "undocumented_blocking",
+      "field": "value",
+      "instrument_id": 3417,
+      "observations": [
+        {
+          "cost": "0.15",
+          "multiplier": "1"
+        },
+        {
+          "cost": "1.5",
+          "multiplier": "10"
+        }
+      ],
+      "relationship": "ticket_proportional",
+      "settlement_type": "cfd",
+      "transaction": "sellShort"
+    }
+  ],
+  "eligibility": [
+    {
+      "allow_close_position": true,
+      "allow_open_position": true,
+      "allow_partial_close_position": true,
+      "allow_trailing_stop_loss": true,
+      "directions": [
+        {
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        }
+      ],
+      "instrument_id": 1099,
+      "max_units_per_order": "23697.0",
+      "min_position_exposure": "50.0",
+      "symbol": "PDBC"
+    },
+    {
+      "allow_close_position": true,
+      "allow_open_position": true,
+      "allow_partial_close_position": true,
+      "allow_trailing_stop_loss": true,
+      "directions": [
+        {
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "real"
+        },
+        {
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        }
+      ],
+      "instrument_id": 1750,
+      "max_units_per_order": "1519.0",
+      "min_position_exposure": "10.0",
+      "symbol": "ASH"
+    },
+    {
+      "allow_close_position": true,
+      "allow_open_position": true,
+      "allow_partial_close_position": true,
+      "allow_trailing_stop_loss": true,
+      "directions": [
+        {
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "real"
+        },
+        {
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        }
+      ],
+      "instrument_id": 2900,
+      "max_units_per_order": "2133.0",
+      "min_position_exposure": "10.0",
+      "symbol": "MU.RTH"
+    },
+    {
+      "allow_close_position": true,
+      "allow_open_position": true,
+      "allow_partial_close_position": true,
+      "allow_trailing_stop_loss": true,
+      "directions": [
+        {
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "real"
+        },
+        {
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        }
+      ],
+      "instrument_id": 3417,
+      "max_units_per_order": "134.0",
+      "min_position_exposure": "10.0",
+      "symbol": "SPY.RTH"
+    },
+    {
+      "allow_close_position": true,
+      "allow_open_position": false,
+      "allow_partial_close_position": true,
+      "allow_trailing_stop_loss": true,
+      "directions": [
+        {
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "real"
+        },
+        {
+          "direction": "short",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        }
+      ],
+      "instrument_id": 9278,
+      "max_units_per_order": "25000000.0",
+      "min_position_exposure": "10.0",
+      "symbol": "MFLTY"
+    },
+    {
+      "allow_close_position": true,
+      "allow_open_position": true,
+      "allow_partial_close_position": true,
+      "allow_trailing_stop_loss": true,
+      "directions": [
+        {
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "real"
+        },
+        {
+          "direction": "short",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        }
+      ],
+      "instrument_id": 10331,
+      "max_units_per_order": "9843.0",
+      "min_position_exposure": "10.0",
+      "symbol": "KLXE"
+    },
+    {
+      "allow_close_position": true,
+      "allow_open_position": true,
+      "allow_partial_close_position": true,
+      "allow_trailing_stop_loss": true,
+      "directions": [
+        {
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        }
+      ],
+      "instrument_id": 11158,
+      "max_units_per_order": "195.0",
+      "min_position_exposure": "10.0",
+      "symbol": "KOKU"
+    },
+    {
+      "allow_close_position": true,
+      "allow_open_position": true,
+      "allow_partial_close_position": true,
+      "allow_trailing_stop_loss": true,
+      "directions": [
+        {
+          "direction": "long",
+          "leverage_values": [
+            1
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "short",
+          "leverage_values": [
+            1,
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        },
+        {
+          "direction": "long",
+          "leverage_values": [
+            2,
+            5,
+            10,
+            20
+          ],
+          "min_position_amount": "10.0",
+          "settlement_type": "cfd"
+        }
+      ],
+      "instrument_id": 13568,
+      "max_units_per_order": "2228.0",
+      "min_position_exposure": "10.0",
+      "symbol": "FTSL"
+    }
+  ],
+  "eligibility_canonical_response_bytes": 12192,
+  "eligibility_coverage": {
+    "direction_config_counts": {
+      "long": 14,
+      "short": 8
+    },
+    "leverage_config_counts": {
+      "1": 16,
+      "10": 12,
+      "2": 12,
+      "20": 12,
+      "5": 12
+    },
+    "settlement_config_counts": {
+      "cfd": 17,
+      "real": 5
+    }
+  },
+  "mode": "apply",
+  "observed_at": "2026-08-12T23:38:02.574622+00:00",
+  "population": {
+    "local_tradable_broker_open_mismatch_count": 1,
+    "local_tradable_broker_open_mismatch_ids": [
+      9278
+    ],
+    "not_found_instrument_ids": [],
+    "not_found_symbols": [],
+    "refused_open": 1,
+    "requested": 8,
+    "resolved": 8
+  },
+  "request_budget": {
+    "cost_endpoint_documented_limit_per_60s": 20,
+    "cost_requests_max": 20,
+    "eligibility_requests": 1,
+    "scaling_multipliers": [
+      "1",
+      "10"
+    ]
+  }
+}

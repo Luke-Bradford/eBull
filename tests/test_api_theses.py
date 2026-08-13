@@ -1,0 +1,723 @@
+"""
+Tests for app.api.theses — latest thesis and thesis history endpoints.
+
+Test strategy:
+  Mock DB via FastAPI dependency override, matching the pattern from
+  test_api_scores.  The ``get_conn`` dependency is replaced with
+  a mock connection returning ``dict_row``-style dicts.
+
+Structure:
+  - TestGetLatestThesis   — happy path, 404, nullable fields
+  - TestGetThesisHistory  — happy path, empty, pagination, instrument-not-found 404
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import MagicMock
+
+from fastapi.testclient import TestClient
+
+from app.db import get_conn
+from app.main import app
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+_EARLIER = datetime(2026, 4, 5, 12, 0, 0, tzinfo=UTC)
+
+
+def _make_thesis_row(
+    thesis_id: int = 1,
+    instrument_id: int = 100,
+    thesis_version: int = 1,
+    thesis_type: str = "compounder",
+    stance: str = "buy",
+    confidence_score: float | None = 0.85,
+    buy_zone_low: float | None = 140.0,
+    buy_zone_high: float | None = 155.0,
+    base_value: float | None = 200.0,
+    bull_value: float | None = 250.0,
+    bear_value: float | None = 120.0,
+    break_conditions_json: list[str] | None = None,
+    memo_markdown: str = "Strong compounder thesis.",
+    critic_json: dict[str, object] | None = None,
+    created_at: datetime = _NOW,
+) -> dict[str, Any]:
+    """Build a dict matching the theses query shape."""
+    return {
+        "thesis_id": thesis_id,
+        "instrument_id": instrument_id,
+        "thesis_version": thesis_version,
+        "thesis_type": thesis_type,
+        "stance": stance,
+        "confidence_score": confidence_score,
+        "buy_zone_low": buy_zone_low,
+        "buy_zone_high": buy_zone_high,
+        "base_value": base_value,
+        "bull_value": bull_value,
+        "bear_value": bear_value,
+        "break_conditions_json": break_conditions_json,
+        "memo_markdown": memo_markdown,
+        "critic_json": critic_json,
+        "created_at": created_at,
+    }
+
+
+def _stale_query_row(
+    instrument_id: int,
+    symbol: str,
+    review_frequency: str | None,
+    latest_thesis_at: object,
+) -> dict[str, object]:
+    """One find_stale_instruments dict row (#2074 — keyed by SELECT alias;
+    neutral v2 tail so only the cadence rules evaluate)."""
+    return {
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "review_frequency": review_frequency,
+        "latest_thesis_at": latest_thesis_at,
+        "latest_event_created_at": None,
+        "latest_event_filing_type": None,
+        "break_fired": False,
+        "bear_value": None,
+        "bull_value": None,
+        "close_now": None,
+        "close_now_date": None,
+        "close_at_mint": None,
+        "m7": 0,
+        "m30": 0,
+    }
+
+
+def _mock_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
+    """Build a mock psycopg.Connection.
+
+    ``cursor_results`` is a list of result sets, one per ``cur.execute()`` call.
+    Each ``fetchone()`` returns the first row (or None), and ``fetchall()``
+    returns the full list.
+    """
+    cur = MagicMock()
+    result_iter = iter(cursor_results)
+
+    def _on_execute(*_args: Any, **_kwargs: Any) -> None:
+        # Exhausted → empty set, not StopIteration: ancillary read-path
+        # lookups (#2013 diff predecessors, #2051 break predicates) run on
+        # every detail/history call and default to honest-empty results;
+        # tests that care about them supply explicit result sets in order.
+        rows = next(result_iter, [])
+        cur.fetchone.return_value = rows[0] if rows else None
+        cur.fetchall.return_value = rows
+
+    cur.execute.side_effect = _on_execute
+    cur.__enter__ = MagicMock(return_value=cur)
+    cur.__exit__ = MagicMock(return_value=False)
+
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    return conn
+
+
+def _with_conn(cursor_results: list[list[dict[str, Any]]]) -> MagicMock:
+    """Set up a mock connection as the get_conn dependency override."""
+    conn = _mock_conn(cursor_results)
+
+    def _override() -> Iterator[MagicMock]:
+        yield conn
+
+    app.dependency_overrides[get_conn] = _override
+    return conn
+
+
+def _cleanup() -> None:
+    app.dependency_overrides[get_conn] = _fallback_conn
+
+
+def _fallback_conn() -> Iterator[MagicMock]:
+    yield _mock_conn([])
+
+
+app.dependency_overrides.setdefault(get_conn, _fallback_conn)
+
+client = TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# TestGetLatestThesis
+# ---------------------------------------------------------------------------
+
+
+class TestGetLatestThesis:
+    """GET /theses/{instrument_id} — latest thesis for an instrument."""
+
+    def teardown_method(self) -> None:
+        _cleanup()
+
+    def test_happy_path_returns_latest_thesis(self) -> None:
+        row = _make_thesis_row(
+            thesis_id=5,
+            thesis_version=3,
+            thesis_type="compounder",
+            stance="buy",
+            confidence_score=0.85,
+            memo_markdown="Strong thesis.",
+            critic_json={"overall": "sound"},
+        )
+        _with_conn([[row]])
+        resp = client.get("/theses/100")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["thesis_id"] == 5
+        assert body["instrument_id"] == 100
+        assert body["thesis_version"] == 3
+        assert body["thesis_type"] == "compounder"
+        assert body["stance"] == "buy"
+        assert body["confidence_score"] == 0.85
+        assert body["memo_markdown"] == "Strong thesis."
+        assert body["critic_json"] == {"overall": "sound"}
+        assert body["created_at"] is not None
+
+    def test_known_instrument_no_thesis_returns_200_null(self) -> None:
+        """Known instrument, no thesis yet → 200 + null body, not 404
+        (#1813). The instrument page fetches this on every load; a 404
+        meant a console error on every un-analysed instrument. Two
+        queries: thesis (empty) then instrument-existence (present)."""
+        _with_conn([[], [{"exists": 1}]])
+        resp = client.get("/theses/100")
+
+        assert resp.status_code == 200
+        assert resp.json() is None
+
+    def test_unknown_instrument_returns_404(self) -> None:
+        """Unknown instrument → 404 (#1813 reserves 404 for an unknown
+        resource, distinct from the absent-optional-datum null case).
+        Two queries: thesis (empty) then instrument-existence (empty)."""
+        _with_conn([[], []])
+        resp = client.get("/theses/999")
+
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"].lower()
+
+    def test_nullable_numeric_fields_returned_as_null(self) -> None:
+        """All nullable numeric fields can be None without crashing."""
+        row = _make_thesis_row(
+            confidence_score=None,
+            buy_zone_low=None,
+            buy_zone_high=None,
+            base_value=None,
+            bull_value=None,
+            bear_value=None,
+            break_conditions_json=None,
+            critic_json=None,
+        )
+        _with_conn([[row]])
+        resp = client.get("/theses/100")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["confidence_score"] is None
+        assert body["buy_zone_low"] is None
+        assert body["buy_zone_high"] is None
+        assert body["base_value"] is None
+        assert body["bull_value"] is None
+        assert body["bear_value"] is None
+        assert body["break_conditions_json"] is None
+        assert body["critic_json"] is None
+
+    def test_valuation_fields_returned_correctly(self) -> None:
+        row = _make_thesis_row(
+            buy_zone_low=140.50,
+            buy_zone_high=155.25,
+            base_value=200.0,
+            bull_value=250.0,
+            bear_value=120.0,
+        )
+        _with_conn([[row]])
+        resp = client.get("/theses/100")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["buy_zone_low"] == 140.50
+        assert body["buy_zone_high"] == 155.25
+        assert body["base_value"] == 200.0
+        assert body["bull_value"] == 250.0
+        assert body["bear_value"] == 120.0
+
+    def test_query_orders_by_created_at_desc_then_version_desc(self) -> None:
+        conn = _with_conn([[_make_thesis_row()]])
+        client.get("/theses/100")
+
+        cur = conn.cursor.return_value
+        sql: str = cur.execute.call_args_list[0][0][0]
+        sql_lower = sql.lower()
+        assert "order by" in sql_lower
+        assert "created_at desc" in sql_lower
+        assert "thesis_version desc" in sql_lower
+        assert "limit 1" in sql_lower
+
+
+# ---------------------------------------------------------------------------
+# TestGetThesisHistory
+# ---------------------------------------------------------------------------
+
+
+class TestGetThesisHistory:
+    """GET /theses/{instrument_id}/history — paginated thesis history."""
+
+    def teardown_method(self) -> None:
+        _cleanup()
+
+    def test_happy_path_returns_ordered_theses(self) -> None:
+        row_v2 = _make_thesis_row(thesis_id=2, thesis_version=2, created_at=_NOW)
+        row_v1 = _make_thesis_row(thesis_id=1, thesis_version=1, created_at=_EARLIER)
+        # Query sequence: EXISTS instrument, COUNT, data
+        _with_conn(
+            [
+                [{"_": 1}],
+                [{"cnt": 2}],
+                [row_v2, row_v1],
+            ]
+        )
+        resp = client.get("/theses/100/history")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["instrument_id"] == 100
+        assert body["total"] == 2
+        assert body["offset"] == 0
+        assert body["limit"] == 50
+        assert len(body["items"]) == 2
+        assert body["items"][0]["thesis_version"] == 2
+        assert body["items"][1]["thesis_version"] == 1
+
+    def test_instrument_not_found_returns_404(self) -> None:
+        """If the instrument doesn't exist, return 404."""
+        _with_conn([[]])
+        resp = client.get("/theses/999/history")
+
+        assert resp.status_code == 404
+        assert "Instrument 999 not found" in resp.json()["detail"]
+
+    def test_instrument_exists_but_no_theses_returns_empty(self) -> None:
+        """Instrument exists but has no thesis rows → 200 with empty items."""
+        _with_conn(
+            [
+                [{"_": 1}],
+                [{"cnt": 0}],
+            ]
+        )
+        resp = client.get("/theses/100/history")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["instrument_id"] == 100
+        assert body["items"] == []
+        assert body["total"] == 0
+
+    def test_pagination_offset_and_limit(self) -> None:
+        row = _make_thesis_row()
+        conn = _with_conn(
+            [
+                [{"_": 1}],
+                [{"cnt": 20}],
+                [row],
+            ]
+        )
+        resp = client.get("/theses/100/history", params={"offset": 5, "limit": 10})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 20
+        assert body["offset"] == 5
+        assert body["limit"] == 10
+
+        cur = conn.cursor.return_value
+        data_params = cur.execute.call_args_list[2][0][1]
+        assert data_params["offset"] == 5
+        assert data_params["limit"] == 10
+
+    def test_count_query_receives_no_limit_offset(self) -> None:
+        """COUNT query params must not contain limit/offset keys."""
+        conn = _with_conn(
+            [
+                [{"_": 1}],
+                [{"cnt": 3}],
+                [_make_thesis_row()],
+            ]
+        )
+        client.get("/theses/100/history", params={"offset": 5, "limit": 10})
+
+        cur = conn.cursor.return_value
+        count_params = cur.execute.call_args_list[1][0][1]
+        assert "limit" not in count_params
+        assert "offset" not in count_params
+
+    def test_limit_capped_at_max(self) -> None:
+        resp = client.get("/theses/100/history", params={"limit": 999})
+        assert resp.status_code == 422
+
+    def test_negative_offset_rejected(self) -> None:
+        resp = client.get("/theses/100/history", params={"offset": -1})
+        assert resp.status_code == 422
+
+    def test_zero_limit_rejected(self) -> None:
+        resp = client.get("/theses/100/history", params={"limit": 0})
+        assert resp.status_code == 422
+
+    def test_nullable_fields_in_history_items(self) -> None:
+        row = _make_thesis_row(
+            confidence_score=None,
+            buy_zone_low=None,
+            buy_zone_high=None,
+            base_value=None,
+            bull_value=None,
+            bear_value=None,
+            break_conditions_json=None,
+            critic_json=None,
+        )
+        _with_conn(
+            [
+                [{"_": 1}],
+                [{"cnt": 1}],
+                [row],
+            ]
+        )
+        resp = client.get("/theses/100/history")
+
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["confidence_score"] is None
+        assert item["buy_zone_low"] is None
+        assert item["critic_json"] is None
+
+    def test_history_query_orders_by_created_at_desc_then_version_desc(self) -> None:
+        conn = _with_conn(
+            [
+                [{"_": 1}],
+                [{"cnt": 1}],
+                [_make_thesis_row()],
+            ]
+        )
+        client.get("/theses/100/history")
+
+        cur = conn.cursor.return_value
+        data_sql: str = cur.execute.call_args_list[2][0][0]
+        sql_lower = data_sql.lower()
+        assert "order by" in sql_lower
+        assert "created_at desc" in sql_lower
+        assert "thesis_version desc" in sql_lower
+
+
+# ---------------------------------------------------------------------------
+# #1902 — staleness single-source on the latest-thesis GET
+# ---------------------------------------------------------------------------
+
+
+class TestGetLatestThesisStaleness:
+    def test_stale_thesis_carries_server_verdict(self) -> None:
+        """find_stale_instruments (via conn.execute) drives is_stale."""
+        # Cursor result sets in execute order: latest-thesis row, the #2051
+        # break-predicates read (the #2013 diff-predecessor read is skipped
+        # for a v1 row), then the find_stale_instruments read (dict_row
+        # cursor since #2074) — monthly cadence + a past created_at is
+        # deterministically stale against the real clock.
+        _with_conn(
+            [
+                [_make_thesis_row(created_at=_EARLIER)],
+                [],
+                [_stale_query_row(100, "AAPL", "monthly", _EARLIER)],
+            ]
+        )
+        resp = client.get("/theses/100")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_stale"] is True
+        assert body["stale_reason"] == "stale"
+
+    def test_fresh_thesis_reports_not_stale(self) -> None:
+        # find_stale (second cursor read) defaults to the honest-empty set.
+        _with_conn([[_make_thesis_row()]])
+        resp = client.get("/theses/100")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_stale"] is False
+        assert body["stale_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# #1902 — theses library: pure helpers + list endpoint
+# ---------------------------------------------------------------------------
+
+
+def _make_library_row(
+    instrument_id: int = 100,
+    symbol: str = "AAPL",
+    stance: str = "buy",
+    is_held: bool = False,
+    critic_json: dict[str, object] | None = None,
+    run_status: str | None = None,
+    created_at: datetime = _NOW,
+) -> dict[str, Any]:
+    return {
+        "thesis_id": instrument_id * 10,
+        "instrument_id": instrument_id,
+        "thesis_version": 1,
+        "thesis_type": "value",
+        "stance": stance,
+        "confidence_score": 0.7,
+        "buy_zone_low": 10.0,
+        "buy_zone_high": 12.0,
+        "critic_json": critic_json,
+        "created_at": created_at,
+        "symbol": symbol,
+        "company_name": f"{symbol} Co",
+        "is_held": is_held,
+        "latest_score": 0.61,
+        "latest_rank": 7,
+        "run_status": run_status,
+        "run_error": None,
+        "run_trigger": None,
+        "run_started_at": None,
+    }
+
+
+class TestFilterAndPageLibrary:
+    """Table tests for the pure filter/pagination helper."""
+
+    def _rows(self) -> list[dict[str, Any]]:
+        from app.api.theses import filter_and_page_library  # noqa: F401
+
+        return [
+            _make_library_row(1, "AAA", stance="buy", is_held=True),
+            _make_library_row(2, "BBB", stance="hold"),
+            _make_library_row(3, "CCC", stance="buy"),
+            _make_library_row(4, "DDD", stance="avoid", is_held=True),
+        ]
+
+    def test_no_filters_returns_all(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {}, held_only=False, stale_only=False, stance=None, offset=0, limit=50
+        )
+        assert total == 4
+        assert [r["instrument_id"] for r in page] == [1, 2, 3, 4]
+
+    def test_stale_reason_merged_onto_every_row(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        _, page = filter_and_page_library(
+            self._rows(),
+            {1: "stale", 3: "event_new_10k"},
+            held_only=False,
+            stale_only=False,
+            stance=None,
+            offset=0,
+            limit=50,
+        )
+        by_id = {r["instrument_id"]: r["stale_reason"] for r in page}
+        assert by_id == {1: "stale", 2: None, 3: "event_new_10k", 4: None}
+
+    def test_held_only_filter(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {}, held_only=True, stale_only=False, stance=None, offset=0, limit=50
+        )
+        assert total == 2
+        assert [r["instrument_id"] for r in page] == [1, 4]
+
+    def test_stale_only_filter(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {2: "stale"}, held_only=False, stale_only=True, stance=None, offset=0, limit=50
+        )
+        assert total == 1
+        assert page[0]["instrument_id"] == 2
+
+    def test_stance_filter(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {}, held_only=False, stale_only=False, stance="buy", offset=0, limit=50
+        )
+        assert total == 2
+        assert [r["instrument_id"] for r in page] == [1, 3]
+
+    def test_filters_compose_and_total_counts_pre_pagination(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        rows = [_make_library_row(i, f"S{i}", stance="buy", is_held=True) for i in range(1, 8)]
+        stale = {i: "stale" for i in range(1, 8)}
+        total, page = filter_and_page_library(
+            rows, stale, held_only=True, stale_only=True, stance="buy", offset=2, limit=3
+        )
+        assert total == 7
+        assert [r["instrument_id"] for r in page] == [3, 4, 5]
+
+    def test_offset_beyond_total_returns_empty_page(self) -> None:
+        from app.api.theses import filter_and_page_library
+
+        total, page = filter_and_page_library(
+            self._rows(), {}, held_only=False, stale_only=False, stance=None, offset=10, limit=5
+        )
+        assert total == 4
+        assert page == []
+
+
+class TestCriticVerdictExtraction:
+    def test_extracts_verdict_string(self) -> None:
+        from app.api.theses import _critic_verdict
+
+        assert _critic_verdict({"verdict": "Strong challenge"}) == "Strong challenge"
+
+    def test_non_dict_and_missing_and_non_string_return_none(self) -> None:
+        from app.api.theses import _critic_verdict
+
+        assert _critic_verdict(None) is None
+        assert _critic_verdict("nope") is None
+        assert _critic_verdict({}) is None
+        assert _critic_verdict({"verdict": 3}) is None
+
+
+class TestListTheses:
+    # Cursor result sets in execute order: [held-no-thesis rows], [library rows],
+    # then the find_stale_instruments read (dict_row cursor, #2074).
+
+    def test_returns_enriched_items(self) -> None:
+        row = _make_library_row(
+            100,
+            "AAPL",
+            is_held=True,
+            critic_json={"verdict": "Moderate challenge"},
+            run_status="failed",
+        )
+        _with_conn([[], [row], [_stale_query_row(100, "AAPL", "monthly", _EARLIER)]])
+        resp = client.get("/theses")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["symbol"] == "AAPL"
+        assert item["critic_verdict"] == "Moderate challenge"
+        assert item["stale_reason"] == "stale"
+        assert item["is_held"] is True
+        assert item["run_status"] == "failed"
+        assert item["latest_rank"] == 7
+
+    def test_held_no_thesis_row_prepended(self) -> None:
+        gap_row = {
+            "thesis_id": None,
+            "instrument_id": 200,
+            "thesis_version": None,
+            "thesis_type": None,
+            "stance": None,
+            "confidence_score": None,
+            "buy_zone_low": None,
+            "buy_zone_high": None,
+            "critic_json": None,
+            "created_at": None,
+            "symbol": "GME",
+            "company_name": "GameStop",
+            "is_held": True,
+            "latest_score": None,
+            "latest_rank": None,
+            "run_status": None,
+            "run_error": None,
+            "run_trigger": None,
+            "run_started_at": None,
+        }
+        _with_conn(
+            [
+                [gap_row],
+                [_make_library_row(100, "AAPL")],
+                [_stale_query_row(200, "GME", None, None)],  # no_thesis via find_stale
+            ]
+        )
+        resp = client.get("/theses")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 2
+        # Gap row first — a held name without a memo outranks memo age.
+        assert body["items"][0]["symbol"] == "GME"
+        assert body["items"][0]["thesis_id"] is None
+        assert body["items"][0]["stale_reason"] == "no_thesis"
+        assert body["items"][1]["symbol"] == "AAPL"
+
+    def test_stance_filter_excludes_thesis_less_rows(self) -> None:
+        gap_row = {
+            "thesis_id": None,
+            "instrument_id": 200,
+            "thesis_version": None,
+            "thesis_type": None,
+            "stance": None,
+            "confidence_score": None,
+            "buy_zone_low": None,
+            "buy_zone_high": None,
+            "critic_json": None,
+            "created_at": None,
+            "symbol": "GME",
+            "company_name": "GameStop",
+            "is_held": True,
+            "latest_score": None,
+            "latest_rank": None,
+            "run_status": None,
+            "run_error": None,
+            "run_trigger": None,
+            "run_started_at": None,
+        }
+        _with_conn([[gap_row], [_make_library_row(100, "AAPL", stance="buy")]])
+        resp = client.get("/theses?stance=buy")
+        _cleanup()
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["items"][0]["symbol"] == "AAPL"
+
+    def test_stance_param_validated(self) -> None:
+        resp = client.get("/theses?stance=exit")
+        assert resp.status_code == 422
+
+    def test_empty_library_returns_empty_page(self) -> None:
+        _with_conn([[], []])
+        resp = client.get("/theses")
+        _cleanup()
+
+        assert resp.status_code == 200
+        assert resp.json() == {"items": [], "total": 0, "offset": 0, "limit": 50}
+
+
+class TestLibraryOrderKey:
+    def test_gap_rows_first_then_newest_thesis(self) -> None:
+        from app.api.theses import library_order_key
+
+        gap = {"created_at": None, "thesis_id": None}
+        older = {"created_at": _EARLIER, "thesis_id": 1}
+        newer = {"created_at": _NOW, "thesis_id": 2}
+        rows = [older, newer, gap]
+        rows.sort(key=library_order_key)
+        assert rows == [gap, newer, older]
+
+    def test_same_timestamp_breaks_on_thesis_id_desc(self) -> None:
+        from app.api.theses import library_order_key
+
+        first = {"created_at": _NOW, "thesis_id": 5}
+        second = {"created_at": _NOW, "thesis_id": 9}
+        rows = [first, second]
+        rows.sort(key=library_order_key)
+        assert rows == [second, first]

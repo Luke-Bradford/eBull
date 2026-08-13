@@ -1,0 +1,370 @@
+# EdgarTools — library reference
+
+> Read this before adding any new SEC parser. EdgarTools (`edgartools` on PyPI, `dgunning/edgartools` on GitHub) is the most active SEC-data library in the Python ecosystem (~2-3 patch releases / week). eBull pins **`edgartools==5.30.2`** (exact pin, no ceiling) at [pyproject.toml:27](../../../pyproject.toml#L27). Internal module paths are not part of the library's public stability contract — pin tight, keep golden-file replays, audit on every minor bump.
+
+## Coverage matrix
+
+Static parsers (no network, no Pydantic strict) — the **safe drop-in path**:
+
+| Form | Entry point | Returns |
+|---|---|---|
+| 13F-HR primary doc | `edgar.thirteenf.parsers.primary_xml.parse_primary_document_xml(xml)` | `PrimaryDocument13F` dataclass |
+| 13F-HR INFOTABLE | `edgar.thirteenf.parsers.infotable_xml.parse_infotable_xml(xml)` | `pd.DataFrame` (cols: `Issuer, Class, Cusip, Value, PutCall, InvestmentDiscretion, OtherManager, SharesPrnAmount, Type, SoleVoting, SharedVoting, NonVoting, Ticker`) |
+| Form 3 / 4 / 5 | `Ownership.parse_xml(xml)` (BeautifulSoup) | dict → `Form3/Form4/Form5(**dict)` |
+| Schedule 13D / 13G (post-2024-12-18) | `edgar.beneficial_ownership.schedule13.Schedule13D.parse_xml(xml)` / `Schedule13G.parse_xml(xml)` | dict at the top level; nested values are dataclasses (`IssuerInfo`, `SecurityInfo`, `ReportingPerson`, `Signature`) — **attribute access**, not nested dict-key. See Gotcha **G15**. |
+| Form 144 | `Form144.from_filing(filing)` | `Form144` |
+| Form D, EFFECT, MA-I, ATS-N | `FormD.from_xml(xml)` / `XmlFiling.from_filing(...)` | structured object |
+
+Network-required (live filing fetch + identity required):
+
+| Form | Entry point | Notes |
+|---|---|---|
+| 10-K / 10-Q / 8-K / 6-K / 20-F / 40-F | `Company("AAPL").latest_tenk` or `filing.obj()` | XBRL-backed reports |
+| N-PORT (P / EX / /A) | `FundReport.parse_fund_xml(xml)` (dict) | **Structural + internal Pydantic cliffs — see Gotcha G3.** Live wrapper at `app/services/n_port_ingest.py` (#932). |
+| N-CSR | `FundShareholderReport.from_filing(filing)` | iXBRL OEF taxonomy. **No CUSIP at holding level** (#918 closeout). |
+| N-CEN | `FundCensus.from_filing(filing)` | structured census |
+| N-MFP2/3 | `MoneyMarketFund.from_filing(filing)` | money-market holdings |
+| N-PX | `NPX.from_filing(filing)` | proxy voting record |
+| DEF 14A family | `ProxyStatement.from_filing(filing)`; `Company.proxy_season(0)`; `edgar.proxy.html_extractor.extract_beneficial_ownership(tree)` / `extract_summary_compensation` / `extract_director_compensation` / `extract_ceo_pay_ratio` / `extract_audit_fees` / `extract_voting_proposals` | HTML extraction; quality variable. See **G16** (SCT — ours wins) and **G17** (Item 403 — complementary, and the source of the data-row column-classification technique). |
+| S-1 / F-1 / S-3 / 424B / 497K / CORRESP | `RegistrationS1.from_filing(filing)` etc. | added in 5.23-5.27 |
+| Filings index walk | `get_filings(year, quarter, form=..., index=...)` | calendar year, NOT fiscal |
+| Submissions API per CIK | `get_entity_submissions(cik)` → `EntityData` | wraps `data.sec.gov` |
+| companyfacts | `Company("AAPL").facts` → `EntityFacts` | `time_series, get_concept, latest_periods, shares_outstanding, public_float` |
+| XBRL statements | `XBRL.from_filing(filing)` / `XBRL.from_directory(path)` | full statement engine |
+| Multi-filing stitching | `XBRLS.from_filings(c.latest("10-K", 5))` | 5y income statement stitched |
+
+**Not covered**: pre-2024-12-18 HTML 13D/G; non-CMBS Form 10-D; MSRB / FINRA filings; real-time push feeds.
+
+## API cheat-sheet
+
+```python
+# --- one-time setup -------------------------------------------------------
+from edgar import set_identity
+set_identity("Your Name your.email@example.com")  # required by SEC fair-use
+
+# --- universal find ------------------------------------------------------
+from edgar import find
+find("AAPL")                  # -> Entity
+find(320193)                  # -> Entity by CIK int
+find("0000320193-26-000042")  # -> Filing by accession
+find("S000012345")            # -> FundSeries
+
+# --- companies / entities ------------------------------------------------
+from edgar import Company
+c = Company("AAPL")
+c.cik; c.tickers; c.sic; c.is_foreign; c.fiscal_year_end
+c.latest_tenk; c.latest_tenq                  # one round-trip each
+c.get_filings(form="4", trigger_full_load=False).latest(10)
+c.facts                                        # EntityFacts (cached)
+c.shares_outstanding; c.public_float           # via facts
+
+# --- 13F-HR (the static, network-free path eBull uses) -------------------
+from edgar.thirteenf.parsers.primary_xml   import parse_primary_document_xml
+from edgar.thirteenf.parsers.infotable_xml import parse_infotable_xml
+primary  = parse_primary_document_xml(open("primary_doc.xml").read())
+holdings = parse_infotable_xml(open("infotable.xml").read())  # pd.DataFrame
+
+# --- Form 3/4/5 ---------------------------------------------------------
+from edgar.ownership import Ownership, Form4
+form4 = Form4(**Ownership.parse_xml(xml_string))
+form4.issuer.cik; form4.reporting_owners
+form4.non_derivative_table.transactions
+
+# --- N-PORT (validation cliff!) ------------------------------------------
+from edgar.funds.reports import FundReport
+report_dict = FundReport.parse_fund_xml(xml_string)  # dict (safe)
+fr = FundReport(**report_dict)                       # Pydantic — may raise
+
+# --- companyfacts / XBRL -------------------------------------------------
+facts = c.facts
+facts.get_concept("us-gaap:Revenues")
+facts.time_series("us-gaap:Revenues", periods=20)
+from edgar.xbrl import XBRLS
+XBRLS.from_filings(c.latest("10-K", 5)).statements.income_statement()
+
+# --- bulk download for offline / containers -----------------------------
+from edgar import download_edgar_data, use_local_storage
+use_local_storage("/data/edgar")
+download_edgar_data(submissions=True, facts=True, reference=True)  # ~7GB
+
+# --- HTTP configuration --------------------------------------------------
+from edgar import configure_http
+configure_http(use_system_certs=True)            # corp networks
+configure_http(timeout=30.0, proxy="http://...")
+```
+
+## Cache directories
+
+| Root | Default | Env var | Created when |
+|---|---|---|---|
+| Edgar data dir | `~/.edgar/` | `EDGAR_LOCAL_DATA_DIR` | **mkdir at module import** (`edgar/httpclient.py:103-108, 323`) |
+| Edgar cache dir | `~/.edgar_cache/` | `EDGAR_CACHE_DIR` | lazily on first search query |
+
+`~/.edgar/_tcache` is hishel-File HTTP cache, no automatic TTL. Manual invalidation: `edgar.storage.clear_cache()`.
+
+`download_edgar_data()` pulls submissions + facts + reference (~7 GB total). Does NOT pull SEC Data Sets archives or per-filing XBRL — for those use `download_filings('YYYY-MM-DD')` per day.
+
+## Identity / authentication
+
+- `set_identity("Name email@domain.com")` writes `EDGAR_IDENTITY` env var. Resets httpx client.
+- `get_identity()` **prompts interactively** if missing — in non-TTY contexts blocks 60s then raises `TimeoutError`. **Always set `EDGAR_IDENTITY` before any edgar import in batch / cron.**
+- Static parsers (`thirteenf.parsers.*`) never call `get_identity()` — fixture-safe.
+- eBull does NOT call `set_identity()` — only static parsers used today. Our HTTP fetch goes through `app/providers/implementations/sec_edgar.py` with `settings.sec_user_agent` directly.
+
+## Gotchas
+
+### G1 — Filesystem mkdir at module import
+`HOME=/nonexistent python -c "import edgar"` → `PermissionError`. Workaround: lazy-import inside a factory. Pattern at [app/providers/implementations/sec_13f.py:76-80](../../../app/providers/implementations/sec_13f.py#L76-L80):
+
+```python
+def _edgar_parsers() -> tuple[Any, Any]:
+    from edgar.thirteenf.parsers.infotable_xml import parse_infotable_xml
+    from edgar.thirteenf.parsers.primary_xml import parse_primary_document_xml
+    return parse_primary_document_xml, parse_infotable_xml
+```
+
+### G2 — Interactive identity prompt in batch contexts
+`unset EDGAR_IDENTITY; python -c "from edgar import get_filings; get_filings(2026,1)"` blocks 60s. Always export `EDGAR_IDENTITY` before HTTP-touching call.
+
+### G3 — N-PORT structural + Pydantic cliffs
+
+`FundReport.parse_fund_xml(xml)` returns a `Dict[str, Any]` with keys `header / general_info / fund_info / investments`. Two failure modes (#932 spike `docs/_archive/2026-05/spike-n-port-edgartools.md` §4):
+
+1. **Structural cliff (observed on synthetic fixtures)**: the parser unconditionally dereferences `<filerInfo>` + `<fundInfo>` + `<returnInfo>` + `<monthlyTotReturns>` blocks. Missing any block → `AttributeError: 'NoneType' object has no attribute 'find'`. Hand-trimmed fixtures must include all four blocks plus `GeneralInfo` non-Optional text fields (`<regName>`, `<regCik>`, `<regFileNumber>`, `<regStreet1>` with non-empty content), `<fundInfo>` 9 required Decimal fields, and empty `<othMon1/2/3/>` tags under `<returnInfo>`.
+2. **Internal Pydantic cliff (latent on real-world payloads)**: `InvestmentOrSecurity.value_usd: Decimal` is non-Optional at `edgar/funds/reports.py:346`. An NPORT-P row that omits `<valUSD>` raises `pydantic.ValidationError` mid-iteration, aborting the whole-accession parse. Unobserved on the Vanguard probe sample but theoretically possible.
+
+**Rule of thumb**: if a form's module imports `from pydantic import BaseModel`, expect a validation cliff for synthetic fixtures AND for real-world payloads with missing required Decimal cells. Wrap the parser call AND the post-parse dict-key dereferences in `try/except (AttributeError, KeyError, decimal.InvalidOperation, ValueError, TypeError, pydantic.ValidationError, lxml.etree.XMLSyntaxError)` and convert to a parser-specific error type so accession-level tombstones fire. `KeyError` defends against dict-shape drift on pin bump. `lxml.etree.XMLSyntaxError` covers the edge case where both `parse_fund_xml`'s primary `etree.fromstring` AND its `recover=True` fallback fail (empty / null-byte body) and the raw exception escapes unclassified.
+
+Pinned at edgartools 5.30.2 by `pyproject.toml:27` (#925). Live wrapper at `app/services/n_port_ingest.py::parse_n_port_payload` (#932). See `docs/_archive/2026-05/spike-n-port-edgartools.md` for the full empirical analysis.
+
+### G4 — Type-label rewrite (`SH` → `Shares`, `PRN` → `Principal`)
+`parse_infotable_xml` output's `Type` column has values `"Shares"` / `"Principal"`, NOT the SEC two-letter codes. eBull maps back via `_TYPE_CODE_FROM_LABEL` ([app/providers/implementations/sec_13f.py:231-234](../../../app/providers/implementations/sec_13f.py#L231-L234), applied at L383).
+
+### G5–G6 — Empty `<value>` and empty `<cusip>` rows tolerated
+Empty value/sshPrnamt rows land as `0`/`0` (not dropped). Empty CUSIP row lands as `Cusip=""`. Filter both at the boundary ([app/providers/implementations/sec_13f.py:368-378](../../../app/providers/implementations/sec_13f.py#L368-L378)).
+
+### G7 — `Decimal(float)` vulnerability
+EdgarTools constructs `total_value = Decimal(child_text(summary_page_el, "tableValueTotal"))` at `edgar/thirteenf/parsers/primary_xml.py:80` — the input is already a string (XML text from `child_text`). A future regression to `Decimal(<float-or-non-str>)` would silently introduce IEEE-754 rounding. Defense-in-depth: re-wrap with `Decimal(str(...))` at the boundary. See [app/providers/implementations/sec_13f.py:274-284](../../../app/providers/implementations/sec_13f.py#L274-L284).
+
+### G8 — Signature date timezone naivety
+`parsed.signature.date` is a string `"MM-DD-YYYY"`. Attach UTC explicitly:
+```python
+return datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC)
+```
+
+### G9 — Calendar-year vs fiscal-year in `get_filings(year, quarter)`
+Returns 10-Ks **filed** in that calendar year, NOT covering that fiscal year. Use `period_of_report` for fiscal queries.
+
+### G10 — `get_filings()` triggers full submissions load
+Default pages every historical filing. For Berkshire / BlackRock that's dozens of round-trips. Use `trigger_full_load=False` to limit to first ~1000.
+
+### G11 — Pre-2024-12-18 13D/G is HTML, not XML
+`Schedule13D.from_filing(old_filing)` returns `None` because `parse_xml` requires `<edgarSubmission>` root which only exists in post-rule structured XML. Filter ingest by filing date `>= 2024-12-18`.
+
+### G12 — N-CSR has no per-holding identifier of any kind
+OEF iXBRL N-CSR taxonomy publishes fund-level + class-level + sector-axis facts ONLY. There is no holding-level CUSIP / ISIN / SEDOL / ticker / portfolio-issuer CIK in the iXBRL. The N-CSR primary HTML's Schedule of Investments lists positions as `Name`-`Shares`-`Value` columns with no machine-readable identifier. The N-CSR itself directs readers to N-PORT for structured per-issuer holdings. Don't use N-CSR for security-level rollups under any path (iXBRL, HTML, exhibit). Verified by raw-payload spike `docs/_archive/2026-05/spike-n-csr-feasibility.md` (4 iXBRL companions + 52 MB primary HTML across 3 sampled OEF families). #918 closed (synth no-op landed); the gap is a real taxonomy limitation, not an EdgarTools surface limitation.
+
+### G13 — Internal module path is the only stability contract
+13F static parsers live under `edgar.thirteenf.parsers` — internal-looking. Library may reorganise. Mitigation: pin tight, keep golden-replay tests, audit on every minor bump.
+
+### G14 — Process-local rate limiter
+Default `requests_per_second=9` (`edgar/httpclient.py:142`). Spawning N processes each calling `get_filings(...)` collectively hits SEC at N×9 r/s. SEC threshold is ~10 r/s per IP. Lower `EDGAR_RATE_LIMIT_PER_SEC=9/N` per process or centralise SEC fetches.
+
+### G15 — `Schedule13D / Schedule13G` `.parse_xml()` returns a dict; the `__init__` constructor needs 7 positional args
+Verified at `.venv/lib/python3.14/site-packages/edgar/beneficial_ownership/schedule13.py` + `models.py` (pinned `edgartools==5.30.2`, 2026-05-21).
+
+```python
+from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
+
+parsed = Schedule13D.parse_xml(xml)   # @staticmethod -> dict (NOT a Schedule13D instance)
+parsed = Schedule13G.parse_xml(xml)   # @staticmethod -> dict
+
+# DO NOT do this — Schedule13D is a plain class; __init__ requires 7 positional args incl. a `filing` ref
+# filing = Schedule13D(**parsed)        # TypeError: missing 7 required positional args
+# filing = Schedule13D(filing=None, **parsed)  # technically works but a `filing` ref the worker rarely has
+```
+
+**Top-level keys** (dict access): `"issuer_info"`, `"security_info"`, `"reporting_persons"`, `"items"`, `"signatures"`, `"date_of_event"`, `"previously_filed"`, `"amendment_number"`.
+
+**Nested values are dataclasses** (attribute access, NOT dict-key):
+
+```python
+parsed["issuer_info"]                  # IssuerInfo dataclass
+parsed["issuer_info"].cik              # str
+parsed["issuer_info"].name             # str
+parsed["issuer_info"].cusip            # str (issuer-level CUSIP)
+
+parsed["security_info"]                # SecurityInfo dataclass
+parsed["security_info"].title          # str (securities class title)
+parsed["security_info"].cusip          # str (share-class-specific CUSIP)
+
+parsed["reporting_persons"]            # list[ReportingPerson dataclass]
+for person in parsed["reporting_persons"]:
+    person.cik, person.name, person.citizenship                         # str, str, str
+    person.sole_voting_power, person.shared_voting_power                # int, int
+    person.sole_dispositive_power, person.shared_dispositive_power      # int, int
+    person.aggregate_amount                                              # int  (NOT aggregate_amount_owned)
+    person.percent_of_class                                              # float
+    person.type_of_reporting_person                                      # str
+    person.fund_type, person.comment, person.member_of_group             # str | None
+    person.is_aggregate_exclude_shares                                   # bool
+    person.no_cik                                                        # bool — True for natural-person filers
+
+parsed["signatures"]                   # list[Signature dataclass]
+```
+
+**Recommended adapter pattern**: skip constructor instantiation entirely; read from the dict + nested dataclass attrs directly. PR11 (#1233 SC 13D/G activation) uses this pattern in both the manifest-worker `_parse_13dg` and rewash `_apply_blockholders`.
+
+**Pin against drift**: a contract test (e.g. `tests/test_edgartools_schedule13_shape.py`) that exercises BOTH top-level dict keys AND nested dataclass attribute access on a real EDGAR fixture catches any `edgartools` upgrade that renames either layer at CI time.
+
+**Codex 1d/1e/1f on the PR11 spec all caught this in sequence** — the documentation gap cost three review rounds. This entry exists so the next PR adopting `parse_xml` gets it right on the first pass.
+
+### G17 — DEF 14A Item 403 `extract_beneficial_ownership`: complementary, NOT a drop-in — but borrow its data-row column fallback
+
+`edgar.proxy.html_extractor.extract_beneficial_ownership(tree)` -> `list[BeneficialOwner(name, holder_type, shares, percent_of_class)]`,
+where `holder_type` is `5pct_holder` / `director_officer` / `group`. Architecture
+mirrors ours: section-heading anchors (`_OWNERSHIP_HEADING_ANCHORS` +
+`_OWNERSHIP_HEADING_REJECTS`), a table scorer (`_score_ownership_table`), then a
+column map.
+
+Measured offline on our stored bodies (#2160, edgartools 5.30.2), against the 8
+accessions our `def14a-v13` branch emptied and hand-classified as GENUINE losses:
+
+```text
+0001193125-25-075693   ours 0   edgartools 20 rows WITH percentages
+0001104659-25-031699   ours 0   edgartools 18 rows WITH percentages
+0001213900-26-047155   ours 0   edgartools  4 rows
+0000816956-26-000047   ours 0   edgartools  2 rows   <- main found 16; UNDER-extracts
+0000805928-25-000059   ours 0   edgartools None
+0000805928-26-000057   ours 0   edgartools None
+0001437749-25-009904   ours 0   edgartools None
+0001104659-26-036909   ours 0   edgartools None
+```
+
+**Verdict: do not swap.** It returns `None` on half our failing set and
+under-extracts a fifth. Same shape of answer as G16 — the value is the
+TECHNIQUE, not the function.
+
+**The technique worth taking** (`_build_column_map`, html_extractor.py:775):
+
+```python
+for i, header in enumerate(headers):          # header pass
+    if (t := classifier(header)): col_map[t] = i
+if len(col_map) < min_columns:                # DATA-ROW FALLBACK
+    for row in data_rows[:2]:
+        for i, cell in enumerate(row):
+            if (t := classifier(cell)) and t not in col_map: col_map[t] = i
+```
+
+When headers classify too few columns, it classifies the first two DATA ROWS
+instead. Our Item 403 gate is header-only, which is precisely why a genuine
+table rendering `| | | Number of Shares | | | | | | Number of Shares | |` over
+BlackRock / First Light / Soleus rows is rejected (44 accessions full-pop).
+
+⚠ Call it with **bytes**: `lxml.html.fromstring(payload.encode())`. A `str`
+carrying an encoding declaration raises
+`ValueError: Unicode strings with encoding declaration are not supported`.
+
+Note also that no dedicated open-source Item 403 parser exists anywhere — Item
+403 is unstructured BY REGULATION (17 CFR 240.14a-101 mandates content, not
+form). The structured arbiters for the same facts are Schedule 13D/G (XML
+mandate 2024-12-18) and Forms 3/4/5, both already ingested here.
+
+### G16 — DEF 14A SCT name/title split leaks the title into the name (do NOT drop-in for exec comp)
+`edgar.proxy.html_extractor.extract_summary_compensation(tree)` returns `list[ExecutiveCompEntry(name, title, year, salary…total)]` and DOES flatten intra-cell newlines first (`_split_name_title`, `html_extractor.py:551` — `re.sub(r'\s+',' ',cell)`; the later `\n`-split at :554 is dead code). But it then **comma-splits before role-keyword-splits** (:554 vs :570), so a multi-clause NEO cell leaks the first title phrase into `name`. Verified empirically on Alphabet `0001308179-25-000511` (edgartools 5.30.2, offline via `lxml.html.fromstring(body_bytes)`):
+
+```
+edgartools: name='Sundar Pichai Chief Executive Officer'  title='Alphabet and Google, and Director'
+our parser: name='Sundar Pichai'  position='Chief Executive Officer, Alphabet and Google, and Director'
+```
+
+Our `sec_def14a.py::_split_name_position` splits at the FIRST `_POSITION_ROLE_RE` keyword (the semantic name/title boundary) → correct name. **Keep our parser for SCT; do NOT swap to edgartools here.** The shared, proven core (both do it) is *flatten the newline first* — a `\n` in an SCT first-cell is a render wrap, never a name/title delimiter (#2097). The genuinely reliable NEO-*name* source is the Item 402(v) Pay-vs-Performance **dimensional iXBRL** tags (edgartools `ProxyStatement` "named executives when dimensionally tagged", `core.py:727`) — machine-readable names, but only PEO/NEO totals, not the per-year SCT components we store; a cross-check candidate, not a drop-in (research ticket #2099).
+
+**#2099 research OUTCOME (2026-07-22, spec `docs/proposals/etl/2026-07-22-def14a-pvp-neo-name-oracle.md`)**: verified full-pop on our stored bodies. `ecd:PeoName` facts (× `ExecutiveCategoryAxis` × `IndividualAxis`) DO carry names machine-readably — but the element is a PEO-name element; only a minority of filers (AAPL pattern) extend it to non-PEO NEOs. 89.4% of 2026-filed SCT accessions carry PeoName, row-level SCT-name match just 23.1%, oracle-only repairs ≈2 rows post-v5. edgartools `ProxyStatement.named_executives` uses the same concept/axis logic but needs network XBRL per accession AND drops undimensioned PeoName facts (JPM's bare PEO name lost) — our offline stored-body extractor (`sec_def14a.py::parse_pvp_neo_names`, def14a-v6) keeps both. Shipped as a same-document repair source (sibling > camel-verbatim > FY-gated oracle, unanimity + collision guards, #2100); the oracle is corroboration, never ground truth (live filer typo: TechnipFMC tagged "Douglas P. Pferdehirt" for the real Douglas J.).
+
+## Decision tree — when to use edgartools vs roll-our-own
+
+```
+Need to parse SEC data?
+├─ Existing eBull parser/provider for it?  → use that, do not casually add edgartools
+│
+├─ Static parser exists in edgartools (no Pydantic strict)?
+│   ├─ 13F-HR primary/infotable          → edgartools
+│   ├─ Form 3/4/5                        → edgartools (BeautifulSoup, fixture-safe)
+│   ├─ Schedule 13D/G post-2024-12-18    → edgartools
+│   ├─ Form 144                          → edgartools
+│   ├─ N-PORT                            → edgartools wrapper (#932 — see G3 + spike doc)
+│   └─ Anything else                     → investigate first
+│
+├─ Need live HTTP fetch + auth?
+│   ├─ We have a wrapper (sec_edgar.py)  → use ours
+│   └─ We don't                          → edgartools (lazy-import + set_identity at startup)
+│
+├─ Need complex domain object (TenK / XBRL.statements)?
+│   └─ → edgartools (no realistic roll-our-own)
+│
+└─ Need bulk download / first-install drain?
+    └─ download_edgar_data() covers submissions + companyfacts. NOT data-sets.
+       For wider bulk: datamule. For narrow: write a date-range walker.
+```
+
+**Hard-stop criteria for adopting edgartools in a new path:**
+1. Confirm offline behaviour (set `EDGAR_LOCAL_DATA_DIR` first if sandboxed).
+2. Grep the form's module for `BaseModel` — if present, write fixture-compat spike before committing.
+3. Confirm internal module paths exist at the pinned version.
+4. Pin tight: `edgartools==X.Y.Z, <X.(Y+1).0`.
+5. `set_identity()` at process startup if any HTTP path will fire.
+
+**Roll-our-own when:**
+- Endpoint is well-known and stable (`data.sec.gov/submissions/...`, `companyfacts/...`, archive `index.json`). 20-50 LoC.
+- Need control over UA / retry / cache TTL / psycopg-friendly types.
+- Pydantic validation cliff (N-PORT).
+- Throughput must ride eBull's shared SEC rate floor — `SEC_MIN_REQUEST_INTERVAL_S` at [app/providers/rate_gate.py:23](../../../app/providers/rate_gate.py#L23), enforced by the process-wide clock in `app/providers/implementations/sec_edgar.py`. edgartools carries its own per-process limiter (G14), not this one.
+
+## Comparison
+
+| Need | edgartools | datamule | secedgar | direct httpx |
+|---|---|---|---|---|
+| 13F INFOTABLE → typed | **best** | partial (download only) | no | ~50 LoC |
+| Form 3/4/5 transactions | **best** (full insider model) | partial | no | hard |
+| 13D/13G structured XML | **best** (post-2024-12-18) | partial | no | possible |
+| N-PORT XML | **best** (wrapper + tombstone catch, #932) | no | no | ~150 LoC viable |
+| 10-K/10-Q XBRL | **best** (full statements engine) | no | no | painful |
+| companyfacts JSON | wraps cleanly | no | no | ~20 LoC |
+| Bulk archive download | yes (`download_edgar_data()`) | yes (faster on AWS path) | no | manual |
+| Rate-limit aware HTTP | yes | yes | partial | DIY |
+| Maintenance signal | very active | active | last release 2025-05 | n/a |
+
+## Existing eBull usage map
+
+Confirmed via `grep -rn "from edgar\b\|import edgar\b" app/ tests/`:
+
+| Where | What |
+|---|---|
+| [app/providers/implementations/sec_13f.py:76-80](../../../app/providers/implementations/sec_13f.py#L76-L80) | lazy `_edgar_parsers()` factory imports both static parsers |
+| [app/providers/implementations/sec_13f.py:258-259](../../../app/providers/implementations/sec_13f.py#L258-L259) | `parse_primary_doc()` calls `edgar_parse_primary(xml)` |
+| [app/providers/implementations/sec_13f.py:360-361](../../../app/providers/implementations/sec_13f.py#L360-L361) | `parse_infotable()` calls `edgar_parse_infotable(xml)` |
+| `app/services/n_port_ingest.py::parse_n_port_payload` (#932) | lazy `_edgar_fund_report()` + `_pydantic_validation_error()` + `_lxml_syntax_error()` factories; wraps `FundReport.parse_fund_xml(xml)` with `try/except` over 7 failure classes (AttributeError / KeyError / InvalidOperation / ValueError / TypeError / pydantic.ValidationError / lxml.etree.XMLSyntaxError) |
+
+All other SEC paths (`sec_edgar.py`, `sec_submissions.py`, `sec_daily_index.py`, `sec_13dg.py`, `sec_fundamentals.py`, `sec_getcurrent.py`) remain direct httpx/lxml.
+
+## Upgrade procedure
+
+1. Read CHANGELOG between current pin and target.
+2. Re-run `tests/test_sec_13f_*` and any other golden-replay tests.
+3. Confirm `edgar.thirteenf.parsers.{primary,infotable}_xml.parse_*` exist at same paths with same signature.
+4. Confirm DataFrame columns unchanged (`Issuer, Class, Cusip, Value, ...`).
+5. Confirm `PrimaryDocument13F.summary_page.total_value` is still `Decimal | int` (not `float`).
+6. Run `pre-push` gate (lint/typecheck/test/format).
+7. Bump pin in `pyproject.toml` + `uv.lock` (exact pin, e.g. `edgartools==X.Y.Z`).
+
+**Do not auto-upgrade from Renovate/Dependabot.** Pin tight, upgrade manually after smoke run.
+
+## References
+
+- PyPI: <https://pypi.org/project/edgartools/>
+- GitHub: <https://github.com/dgunning/edgartools>
+- Source files (installed venv): `.venv/lib/python*/site-packages/edgar/` (relative to repo root)
+- `pyproject.toml:27` — pin
+- Specs: `docs/specs/bootstrap/bulk-datasets.md` (edgartools dependency boundary)
+- Memory: `feedback_pydantic_validation_cliff.md`

@@ -1,0 +1,492 @@
+"""SEC SC 13D / 13G manifest-worker parser adapter (#873).
+
+Wraps the existing ``parse_primary_doc`` + ``blockholders`` helpers
+into the manifest-worker ``ParserFn`` contract. Same callable is
+registered against BOTH ``sec_13d`` and ``sec_13g`` since one XML
+parser handles both schemas — the parsed ``submission_type`` field
+disambiguates downstream.
+
+ParseOutcome contract (see ``sec_manifest_worker.ParserSpec``):
+
+  * ``status='parsed'`` + ``raw_status='stored'`` — primary_doc.xml
+    persisted; ``blockholder_filings`` rows upserted (one per
+    reporting person on the cover page); ``blockholder_filings_ingest_log``
+    records ``success`` or ``partial``; if issuer CUSIP resolved,
+    ``ownership_blockholders_observations`` + ``_current`` refresh.
+  * ``status='tombstoned'`` — fetch returned non-200/empty body. The
+    legacy ``ingest_filer_blockholders`` returns status='failed' for
+    this case; manifest path treats persistently-404 primary docs as
+    tombstones so the row doesn't spin retry forever.
+  * ``status='failed'`` — transient error (fetch raise, store_raw
+    error, upsert error). Worker schedules a 1h backoff retry.
+
+Raw-payload invariant (#938): registered with
+``requires_raw_payload=True``. ``store_raw`` runs in a savepoint
+BEFORE parse so the invariant holds whether parsing succeeds or
+raises.
+
+Subject identity: 13D/G manifest rows have ``subject_type='blockholder_filer'``
++ ``subject_id=filer_cik`` (per spec §I10 + sec_filing_manifest CHECK).
+``instrument_id`` is NULL on the manifest row — issuer linkage is
+resolved at parse-time via CUSIP→instrument lookup in
+``external_identifiers``. CUSIP-unresolved accessions still write
+``blockholder_filings`` rows (with NULL instrument_id) — the audit
+trail is preserved even when the rollup join is gated by #740
+backfill coverage.
+
+URL construction: the canonical ``primary_doc.xml`` URL is built
+from ``cik + accession_number`` via ``_archive_file_url`` rather
+than read from ``row.primary_document_url``. The manifest's URL
+may be the filing-index page from Atom discovery or a sibling
+attachment — only the canonical archive URL guarantees XML.
+"""
+
+from __future__ import annotations
+
+import logging
+import xml.etree.ElementTree as ET  # noqa: S405 — only ET.ParseError caught; no untrusted parse.
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import uuid4
+
+import psycopg
+from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
+
+from app.config import settings
+from app.providers.implementations.sec_13dg import BlockholderFiling
+from app.providers.implementations.sec_edgar import SecFilingsProvider
+from app.services.blockholders import (
+    _PARSER_VERSION_13DG,
+    AccessionRef,
+    _archive_file_url,
+    _record_13dg_observation_for_filing,
+    _record_ingest_attempt,
+    _resolve_issuer_to_instrument_id,
+    _upsert_filer,
+    _upsert_filing_row,
+    blockholders_within_retention,
+)
+from app.services.manifest_parsers._schedule13_adapter import (
+    build_filing_from_edgartools_dict,
+)
+from app.services.ownership_observations import refresh_blockholders_current
+from app.services.raw_filings import (
+    acquire_filing_accession_write_lock,
+    store_raw,
+    stored_body,
+)
+from app.services.upsert_classify import (
+    format_upsert_error,
+    is_transient_upsert_error,
+)
+
+logger = logging.getLogger(__name__)
+
+_FAILED_RETRY_DELAY = timedelta(hours=1)
+
+
+def _failed_outcome(error: str, raw_status: Any = None) -> Any:
+    """Build a ``failed`` ParseOutcome with a 1h backoff applied."""
+    from app.jobs.sec_manifest_worker import ParseOutcome
+
+    return ParseOutcome(
+        status="failed",
+        parser_version=_PARSER_VERSION_13DG,
+        raw_status=raw_status,
+        error=error,
+        next_retry_at=datetime.now(tz=UTC) + _FAILED_RETRY_DELAY,
+    )
+
+
+def _parse_13dg(
+    conn: psycopg.Connection[Any],
+    row: Any,  # ManifestRow — forward-ref to avoid circular import
+) -> Any:  # ParseOutcome — forward-ref
+    """Manifest-worker parser for one SC 13D / 13G accession."""
+    from app.jobs.sec_manifest_worker import ParseOutcome
+
+    accession = row.accession_number
+    filer_cik = (row.cik or "").strip()
+
+    if not filer_cik:
+        logger.warning(
+            "13D/G manifest parser: accession=%s has no filer cik; tombstoning",
+            accession,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13DG,
+            error="missing filer cik",
+        )
+
+    # Defense-in-depth (post-#1249/#1250 cleanup, anticipating PR11 #1233):
+    # row.cik MUST NOT be a known filing-agent CIK. Discovery for 13D/G
+    # writes cik=<first non-issuer-non-agent CIK from ciks[]> per the
+    # #1233 PR11 spec; legacy daily-index path resolves via the
+    # blockholder_filers table (which also excludes agents). A row whose
+    # cik resolves to an agent CIK means a future discovery PR has a bug
+    # — _archive_file_url below would 404 because SEC archives are not
+    # mounted under agent CIKs (see sec_edgar.py:83-104 +
+    # fetch_filing_index agent-fallback at sec_edgar.py:397-417). Fail
+    # loudly here rather than tombstone with a generic empty-body error
+    # that masks the real upstream bug.
+    from app.providers.implementations.sec_edgar import (
+        KNOWN_FILING_AGENT_CIKS,
+        _zero_pad_cik,
+    )
+
+    padded_filer_cik = _zero_pad_cik(filer_cik)
+    if padded_filer_cik in KNOWN_FILING_AGENT_CIKS:
+        logger.warning(
+            "13D/G manifest parser: accession=%s row.cik=%s resolves to "
+            "known filing-agent CIK %s — discovery should never enqueue "
+            "agent CIKs as filer_cik. Tombstoning to surface the upstream "
+            "discovery bug.",
+            accession,
+            filer_cik,
+            padded_filer_cik,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13DG,
+            error=f"row.cik is a known filing-agent CIK ({padded_filer_cik})",
+        )
+
+    # Chokepoint B (#1233 PR11): pre-fetch retention gate. Tombstone
+    # any manifest row whose ``filed_at`` falls strictly before
+    # ``blockholders_retention_cutoff()`` BEFORE we touch SEC HTTP or
+    # ``store_raw`` — saves the rate-limited budget AND prevents any
+    # operator-triggered rebuild (POST /jobs/sec_rebuild/run) from
+    # re-introducing pre-cap rows through the manifest worker. The cap
+    # honours the SEC Schedule 13 XML mandate (2024-12-18) as a
+    # mandate-floor — pre-mandate filings are HTML-only and not
+    # parseable by edgartools. ``filed_at IS NULL`` resolves to
+    # ``False`` (defensive — a row without a canonical filing
+    # timestamp cannot be placed inside the window).
+    if not blockholders_within_retention(row.filed_at):
+        logger.info(
+            "13D/G manifest parser: accession=%s filed_at=%s outside retention cutoff; tombstoning without fetch",
+            accession,
+            row.filed_at,
+        )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13DG,
+            error="retention floor",
+        )
+
+    # Build canonical primary_doc.xml URL — manifest's
+    # primary_document_url may be the filing-index page or a sibling
+    # attachment. The legacy ingester builds this URL directly from
+    # cik+accession; mirror that so the manifest path doesn't fetch
+    # an HTML wrapper and immediately tombstone-on-parse.
+    primary_url = _archive_file_url(filer_cik, accession, "primary_doc.xml")
+
+    # #1591 — reuse the stored body on a re-drain (parser-version bump →
+    # sec_rebuild resets the row to pending) instead of re-downloading.
+    # primary_doc_13dg is retained and SEC filings are immutable per
+    # accession, so a present body is always safe to re-parse. Fetch +
+    # store only on a miss (first ingest); reuse skips both.
+    primary_xml = stored_body(conn, accession_number=accession, document_kind="primary_doc_13dg")
+    if primary_xml is None:
+        try:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                primary_xml = provider.fetch_document_text(primary_url)
+        except Exception as exc:  # noqa: BLE001 — transient fetch errors retry via backoff
+            logger.warning(
+                "13D/G manifest parser: fetch raised accession=%s url=%s: %s",
+                accession,
+                primary_url,
+                exc,
+            )
+            return _failed_outcome(f"fetch error: {exc}")
+
+        if not primary_xml:
+            # Empty / non-200. Log the attempt with status='failed' to
+            # match legacy accounting; manifest itself tombstones so we
+            # don't spin retry on a persistently-404 doc.
+            try:
+                with conn.transaction():
+                    _record_ingest_attempt(
+                        conn,
+                        filer_cik=filer_cik,
+                        accession_number=accession,
+                        submission_type=None,
+                        status="failed",
+                        error="primary_doc.xml fetch returned empty or non-200",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "13D/G manifest parser: ingest-log INSERT failed accession=%s",
+                    accession,
+                )
+                return _failed_outcome(f"log error: {exc}")
+            return ParseOutcome(
+                status="tombstoned",
+                parser_version=_PARSER_VERSION_13DG,
+                error="empty or non-200 fetch",
+            )
+
+        # store_raw in a savepoint so the worker's outer tx stays clean
+        # on partial failure. Raw body persisted BEFORE parse so #938
+        # invariant holds even when downstream raises.
+        try:
+            with conn.transaction():
+                store_raw(
+                    conn,
+                    accession_number=accession,
+                    document_kind="primary_doc_13dg",
+                    payload=primary_xml,
+                    parser_version=_PARSER_VERSION_13DG,
+                    source_url=primary_url,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "13D/G manifest parser: store_raw failed accession=%s",
+                accession,
+            )
+            return _failed_outcome(f"store_raw error: {exc}")
+
+    # Parse-phase errors AFTER store_raw must return
+    # raw_status='stored' so the manifest matches filing_raw_documents.
+    # ET.ParseError covers malformed XML; ValueError covers schema
+    # errors (missing field, unknown submissionType); broader Exception
+    # covers unexpected raises (e.g. AttributeError in a tag walker).
+    # Every parse-failure branch writes an ingest-log row so the audit
+    # trail is consistent regardless of which exception type fires
+    # (#1129 review WARNING + PREVENTION).
+    try:
+        # PR11 (#1233): edgartools-backed parse via Schedule13D/G
+        # static methods. ``parse_xml`` returns a dict whose nested
+        # values are frozen dataclasses; the local adapter converts
+        # that into the repo-internal ``BlockholderFiling`` shape so
+        # downstream consumers (``_upsert_filing_row`` +
+        # ``_record_13dg_observation_for_filing``) are unchanged.
+        # The in-house ``parse_primary_doc`` is retained at
+        # ``app/providers/implementations/sec_13dg.py`` for backward
+        # compat with ``rewash_filings._apply_blockholders`` until
+        # that consumer is migrated in a follow-up.
+        if row.source == "sec_13d":
+            parsed_dict = Schedule13D.parse_xml(primary_xml)
+        else:  # sec_13g
+            parsed_dict = Schedule13G.parse_xml(primary_xml)
+        filing: BlockholderFiling = build_filing_from_edgartools_dict(
+            parsed_dict,
+            source=row.source,
+            manifest_form=row.form,
+            manifest_filer_cik=filer_cik,
+            raw_xml=primary_xml,
+        )
+    except Exception as exc:  # noqa: BLE001 — broad catch + audit-log write
+        # Tag the error string by exception class so operators reading
+        # blockholder_filings_ingest_log can distinguish expected
+        # schema/parse failures from unexpected parser crashes.
+        is_unexpected = not isinstance(exc, (ValueError, ET.ParseError))
+        kind = "parse error (unexpected)" if is_unexpected else "parse error"
+        logger.exception(
+            "13D/G manifest parser: parse raised accession=%s (unexpected=%s)",
+            accession,
+            is_unexpected,
+        )
+        try:
+            with conn.transaction():
+                _record_ingest_attempt(
+                    conn,
+                    filer_cik=filer_cik,
+                    accession_number=accession,
+                    submission_type=None,
+                    status="failed",
+                    error=f"{kind}: {exc}",
+                )
+        except Exception:  # noqa: BLE001 — log failure shouldn't mask parse failure
+            logger.exception(
+                "13D/G manifest parser: ingest-log INSERT failed after parse error accession=%s",
+                accession,
+            )
+        return _failed_outcome(f"{kind}: {exc}", raw_status="stored")
+
+    # Resolve the filer's canonical name — pure-Python, no DB.
+    filer_name = next(
+        (p.name for p in filing.reporting_persons if p.cik == filing.primary_filer_cik),
+        filing.reporting_persons[0].name if filing.reporting_persons else f"CIK {filing.primary_filer_cik}",
+    )
+
+    ref = AccessionRef(
+        accession_number=accession,
+        filing_type=filing.submission_type,
+        filed_at=row.filed_at,
+    )
+
+    # CUSIP lookup is a DB SELECT — keep inside the same try that
+    # returns ``_failed_outcome(raw_status='stored')`` so a DB error
+    # doesn't escape to the worker's generic exception handler and
+    # lose the manifest's view of the stored raw row (Codex pre-push
+    # finding). Skipping the observation write-through is conditional
+    # on instrument_id resolving non-NULL — the upsert path still
+    # writes ``blockholder_filings`` rows for auditability (audit
+    # trail preserved per the module docstring; CUSIP-unresolved
+    # accessions are tracked by #740).
+    inserted = 0
+    try:
+        with conn.transaction():
+            # #817 — serialise this accession's blockholder_filings writes
+            # against a concurrent rewash DELETE+INSERT (same lock key). First
+            # statement in the txn, after the stored-body read above (no SEC
+            # fetch inside this block).
+            # #1735: the manifest worker now commits per row, so this
+            # ``with conn.transaction()`` is a TOP-LEVEL txn and the xact lock
+            # releases at the accession's row boundary (same as the rewash +
+            # legacy per-accession callers). Mutual exclusion preserved; the
+            # pre-#1735 batch-txn rewash-vs-live deadlock no longer arises.
+            acquire_filing_accession_write_lock(conn, accession)
+            # Resolve the subject company to an instrument (#1628). CUSIP
+            # is the security-precise key (disambiguates share-class
+            # siblings; settled "CIK = entity, CUSIP = security" #1102),
+            # with a single-class-only CIK fallback for the coverage gap.
+            # Pre-#1628 this was CUSIP-only AND edgartools returned an
+            # empty CUSIP for every modern filing (stale <issuerCUSIP>
+            # tag) → 0 resolutions → blockholders never populated; the
+            # adapter now backfills the CUSIP from the unified mandate
+            # schema. (Discovery stays the legacy daily-index path —
+            # efts.sec.gov does not index SC 13D/G by subject CIK; PR11
+            # v8 2026-05-21.)
+            instrument_id = _resolve_issuer_to_instrument_id(conn, cusip=filing.issuer_cusip, cik=filing.issuer_cik)
+            log_error: str | None = (
+                None
+                if instrument_id is not None
+                else f"issuer_unresolved (cusip={filing.issuer_cusip!r} cik={filing.issuer_cik!r})"
+            )
+
+            skipped_no_cusip = 0 if instrument_id is not None else len(filing.reporting_persons)
+            filer_id = _upsert_filer(conn, cik=filing.primary_filer_cik, name=filer_name)
+            for person in filing.reporting_persons:
+                if _upsert_filing_row(
+                    conn,
+                    filer_id=filer_id,
+                    accession_number=accession,
+                    submission_type=filing.submission_type,
+                    status=filing.status,
+                    instrument_id=instrument_id,
+                    issuer_cik=filing.issuer_cik,
+                    issuer_cusip=filing.issuer_cusip,
+                    securities_class_title=filing.securities_class_title,
+                    date_of_event=filing.date_of_event,
+                    filed_at=filing.filed_at or ref.filed_at,
+                    person=person,
+                ):
+                    inserted += 1
+
+            if instrument_id is not None:
+                _record_13dg_observation_for_filing(
+                    conn,
+                    instrument_id=instrument_id,
+                    accession_number=accession,
+                    primary_document_url=primary_url,
+                    filing=filing,
+                    ref=ref,
+                    run_id=uuid4(),  # one-shot per accession; no batch run_id concept on manifest path
+                )
+                refresh_blockholders_current(conn, instrument_id=instrument_id)
+
+            # CUSIP-resolved → success (observation written).
+            # CUSIP-unresolved → partial (no observation row, audit-log
+            # carries the reason; rollup join gated by #740 backfill).
+            log_status = "success" if instrument_id is not None else "partial"
+            _record_ingest_attempt(
+                conn,
+                filer_cik=filer_cik,
+                accession_number=accession,
+                submission_type=filing.submission_type,
+                status=log_status,
+                rows_inserted=inserted,
+                rows_skipped=skipped_no_cusip,
+                error=log_error,
+            )
+    except Exception as exc:  # noqa: BLE001
+        # #1131 transient-vs-deterministic discrimination — see
+        # ``_classify.is_transient_upsert_error`` for the policy.
+        # Transient (OperationalError) gets a 1h retry; deterministic
+        # constraint violations tombstone the manifest so a permanently
+        # broken accession stops re-fetching from SEC every tick.
+        # Tombstone for 13D/G means writing the ingest-log attempt with
+        # status='failed' (mirrors the empty-body branch above) +
+        # returning manifest ``tombstoned``.
+        logger.exception(
+            "13D/G manifest parser: upsert/observation batch failed accession=%s",
+            accession,
+        )
+        if is_transient_upsert_error(exc):
+            return _failed_outcome(format_upsert_error(exc), raw_status="stored")
+        try:
+            with conn.transaction():
+                _record_ingest_attempt(
+                    conn,
+                    filer_cik=filer_cik,
+                    accession_number=accession,
+                    submission_type=None,
+                    status="failed",
+                    error=format_upsert_error(exc),
+                )
+        except Exception:  # noqa: BLE001 — ingest-log failure shouldn't mask upsert failure
+            logger.exception(
+                "13D/G manifest parser: ingest-log INSERT failed after upsert error accession=%s",
+                accession,
+            )
+            return _failed_outcome(
+                f"upsert+log error: {type(exc).__name__}: {exc}",
+                raw_status="stored",
+            )
+        return ParseOutcome(
+            status="tombstoned",
+            parser_version=_PARSER_VERSION_13DG,
+            raw_status="stored",
+            error=format_upsert_error(exc),
+        )
+
+    return ParseOutcome(
+        status="parsed",
+        parser_version=_PARSER_VERSION_13DG,
+        raw_status="stored",
+    )
+
+
+def _blockholder_fetch_url(conn: Any, row: Any) -> str | None:  # conn: Connection; row: ManifestRow
+    """#1700 Phase 2 prefetch hook — the SINGLE canonical primary_doc.xml URL
+    the 13D/G parser GETs, returned ONLY when the parser would actually fetch
+    it. Mirrors EVERY pre-fetch gate in :func:`_parse_13dg` (in order), so
+    prefetch never burns SEC budget on a row the parser tombstones before any
+    HTTP. ``conn`` (part of the shared hook contract) is used for the #1591
+    stored-body gate below. An over-broad ``None`` is always safe (serial
+    fallback reaches the identical tombstone).
+    """
+    filer_cik = (row.cik or "").strip()
+    if not filer_cik:
+        return None  # parser tombstones pre-fetch: "missing filer cik"
+    from app.providers.implementations.sec_edgar import (
+        KNOWN_FILING_AGENT_CIKS,
+        _zero_pad_cik,
+    )
+
+    if _zero_pad_cik(filer_cik) in KNOWN_FILING_AGENT_CIKS:
+        return None  # parser tombstones pre-fetch: agent CIK
+    if not blockholders_within_retention(row.filed_at):
+        return None  # parser tombstones pre-fetch: retention floor
+    # #1591 — body already stored → parser reuses it; skip prefetch
+    # (prevention-log #1956). Checked last, after the cheap row-local gates.
+    if stored_body(conn, accession_number=row.accession_number, document_kind="primary_doc_13dg") is not None:
+        return None
+    # Same canonical URL the parser builds (sec_13dg.py:_parse_13dg).
+    return _archive_file_url(filer_cik, row.accession_number, "primary_doc.xml")
+
+
+def register() -> None:
+    """Register the 13D/G parser under BOTH manifest sources.
+
+    Idempotent — last-write-wins. One callable handles both schemas
+    (parse_primary_doc dispatches on submissionType inside the XML)
+    so the manifest dispatcher need only know the source key.
+    """
+    from app.jobs.sec_manifest_worker import register_parser
+
+    register_parser("sec_13d", _parse_13dg, requires_raw_payload=True, fetch_url=_blockholder_fetch_url)
+    register_parser("sec_13g", _parse_13dg, requires_raw_payload=True, fetch_url=_blockholder_fetch_url)

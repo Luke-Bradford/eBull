@@ -1,0 +1,19 @@
+{
+  "trials": [
+    {
+      "wall_ms": 46.36770898650866
+    },
+    {
+      "wall_ms": 40.86616700806189
+    },
+    {
+      "wall_ms": 45.076458001858555
+    }
+  ],
+  "median_ms": 45.076458001858555,
+  "fingerprint": {
+    "pg_version": "17.9 (Debian 17.9-1.pgdg13+1)",
+    "host": "Lukes-Mac-mini.lan",
+    "shared_buffers": "2GB"
+  }
+}

@@ -1,0 +1,33 @@
+-- 094_insider_transactions_filer_cik_index.sql
+--
+-- Composite (instrument_id, filer_cik) index on insider_transactions
+-- (#768 PR 3 — Codex review).
+--
+-- The Form 3 baseline-only reader (``list_baseline_only_insider_holdings``)
+-- runs a NOT EXISTS anti-join against insider_transactions:
+--
+--   WHERE NOT EXISTS (
+--       SELECT 1
+--       FROM insider_transactions it
+--       INNER JOIN insider_filings ft ON ft.accession_number = it.accession_number
+--       WHERE it.instrument_id = ?
+--         AND it.filer_cik    = b.filer_cik
+--   )
+--
+-- Existing indexes on insider_transactions only cover (instrument_id,
+-- txn_date) — migration 056. The new lookup fixes instrument_id AND
+-- filer_cik but not txn_date, so the planner falls back to a scan of
+-- the instrument's Form 4 rows on every probe. At reader scale that
+-- becomes the dominant cost as soon as the ownership card hits a
+-- liquid issuer with hundreds of insiders.
+--
+-- Adding the composite index drops the probe to an index-only scan
+-- and keeps the anti-join cheap as the baseline endpoint becomes
+-- API-backed (#768 PR 4).
+--
+-- Storage note: insider_transactions is medium-volume (~1M rows
+-- expected at full coverage); the index is ~30 MB at that scale —
+-- well below the threshold where an index needs justification.
+
+CREATE INDEX IF NOT EXISTS idx_insider_transactions_instrument_filer_cik
+    ON insider_transactions (instrument_id, filer_cik);

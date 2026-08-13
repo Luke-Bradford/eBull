@@ -1,0 +1,447 @@
+"""Layer refresh adapters.
+
+One adapter per in-DAG JOB_TO_LAYERS entry (13 total). Each adapter:
+
+- Opens its own connections via the underlying legacy scheduler function
+  (which already uses `_tracked_job` for `job_runs` audit).
+- Wraps the legacy call in `JobLock` so contention with a still-scheduled
+  cron fire becomes PREREQ_SKIP instead of a duplicate run.
+- Reads outcome INSIDE the JobLock context to avoid race with a
+  concurrent cron-triggered run writing a newer `job_runs` row.
+- Returns ``Sequence[tuple[str, RefreshResult]]`` per spec §2.3.
+  Single-layer adapters return one element; composite adapters return
+  one element per emitted layer.
+
+Phase 4 removes the scheduled cron triggers for these 13 jobs, ending
+all contention. Until then, cross-locking keeps orchestrator-triggered
+and cron-triggered runs serialized.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+import psycopg
+
+from app.config import settings
+from app.jobs.locks import JobAlreadyRunning, JobLock
+from app.services.ops_monitor import record_job_skip
+from app.services.sync_orchestrator.progress import (
+    clear_active_progress,
+    set_active_progress,
+)
+from app.services.sync_orchestrator.types import (
+    PREREQ_SKIP_MARKER,
+    LayerOutcome,
+    ProgressCallback,
+    RefreshResult,
+    prereq_skip_reason,
+)
+
+# ---------------------------------------------------------------------------
+# Shared helper: convert latest job_runs row → (LayerOutcome, row_count)
+# ---------------------------------------------------------------------------
+
+
+def _latest_job_outcome(job_name: str) -> tuple[LayerOutcome, int, str | None]:
+    """Read the most recent job_runs row for `job_name` and map to
+    LayerOutcome. Returns (outcome, row_count, error_category). The
+    category is always None for success + PREREQ_SKIP, and reflects
+    whatever chunk 3's _tracked_job classified for failure.
+
+    Called INSIDE the JobLock context so a concurrent cron-triggered
+    run cannot race a newer row in between.
+
+    autocommit=True so the SELECT does not leave an idle transaction
+    open on the connection — consistent with every other orchestrator
+    connection. The context-manager close would roll back anyway, but
+    explicit autocommit avoids accumulating idle transactions on the
+    DB during periods of high invocation frequency.
+    """
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        row = conn.execute(
+            """
+            SELECT status, row_count, error_msg, error_category
+            FROM job_runs
+            WHERE job_name = %s
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (job_name,),
+        ).fetchone()
+    if row is None:
+        return LayerOutcome.FAILED, 0, None
+    status, row_count, error_msg, error_category = row
+    if status == "success":
+        return (
+            LayerOutcome.SUCCESS if (row_count or 0) else LayerOutcome.NO_WORK,
+            row_count or 0,
+            None,
+        )
+    if status == "skipped" and error_msg is not None and error_msg.startswith(PREREQ_SKIP_MARKER):
+        return LayerOutcome.PREREQ_SKIP, 0, None
+    return LayerOutcome.FAILED, row_count or 0, (str(error_category) if error_category else None)
+
+
+def _run_with_lock(
+    job_name: str,
+    legacy_fn: Any,
+    progress: ProgressCallback | None = None,
+) -> tuple[LayerOutcome, int, str | None] | str:
+    """Run legacy_fn() under JobLock. Returns (outcome, row_count) on
+    success-or-handled-failure; returns a PREREQ_SKIP reason string on
+    JobAlreadyRunning contention.
+
+    When ``progress`` is provided, installs it on the shared ContextVar
+    (spec §2.7) so long-running inner loops can call
+    ``sync_orchestrator.progress.report_progress`` without extra
+    plumbing. The var is cleared in ``finally`` so it never leaks
+    between layers in the same sync run.
+    """
+    try:
+        with JobLock(settings.database_url, job_name):
+            token = set_active_progress(progress) if progress is not None else None
+            try:
+                legacy_fn()
+            except Exception:
+                # _tracked_job recorded failure; re-raise so the
+                # orchestrator records FAILED for the emit.
+                raise
+            finally:
+                if token is not None:
+                    clear_active_progress(token)
+            return _latest_job_outcome(job_name)
+    except JobAlreadyRunning:
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            record_job_skip(
+                conn,
+                job_name,
+                prereq_skip_reason("legacy cron holder active"),
+            )
+        return "legacy cron holder active (JobLock busy)"
+
+
+def _single_emit_result(
+    layer_name: str,
+    outcome: LayerOutcome,
+    row_count: int,
+    detail: str,
+    error_category: str | None = None,
+) -> list[tuple[str, RefreshResult]]:
+    return [
+        (
+            layer_name,
+            RefreshResult(
+                outcome=outcome,
+                row_count=row_count,
+                items_processed=row_count,
+                items_total=None,
+                detail=detail,
+                error_category=error_category,
+            ),
+        )
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Single-layer adapters
+# ---------------------------------------------------------------------------
+
+
+def _wrap_single(
+    *,
+    job_name: str,
+    layer_name: str,
+    legacy_fn: Any,
+    progress: ProgressCallback | None = None,
+) -> Sequence[tuple[str, RefreshResult]]:
+    """Common pattern for single-emit adapters."""
+    # #1183 — keyword form so tests/test_job_registry.py::
+    # TestOrchestratorAdapterSourceCoverage's AST invariant can resolve
+    # the literal job_name through each call site.
+    result = _run_with_lock(job_name=job_name, legacy_fn=legacy_fn, progress=progress)
+    if isinstance(result, str):
+        return _single_emit_result(layer_name, LayerOutcome.PREREQ_SKIP, 0, result)
+    outcome, row_count, error_category = result
+    return _single_emit_result(
+        layer_name,
+        outcome,
+        row_count,
+        f"{job_name}: {outcome.value}",
+        error_category=error_category,
+    )
+
+
+def refresh_universe(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import nightly_universe_sync
+
+    return _wrap_single(
+        job_name="nightly_universe_sync",
+        layer_name="universe",
+        legacy_fn=nightly_universe_sync,
+    )
+
+
+def refresh_candles(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import daily_candle_refresh
+
+    return _wrap_single(
+        job_name="daily_candle_refresh",
+        layer_name="candles",
+        legacy_fn=daily_candle_refresh,
+        progress=progress,
+    )
+
+
+def refresh_fundamentals(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import daily_research_refresh
+
+    return _wrap_single(
+        job_name="daily_research_refresh",
+        layer_name="fundamentals",
+        legacy_fn=daily_research_refresh,
+    )
+
+
+def refresh_portfolio_sync(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import daily_portfolio_sync
+
+    return _wrap_single(
+        job_name="daily_portfolio_sync",
+        layer_name="portfolio_sync",
+        legacy_fn=daily_portfolio_sync,
+    )
+
+
+def refresh_cost_models(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import seed_cost_models
+
+    return _wrap_single(
+        job_name="seed_cost_models",
+        layer_name="cost_models",
+        legacy_fn=seed_cost_models,
+    )
+
+
+def refresh_fx_rates(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import fx_rates_refresh
+
+    return _wrap_single(
+        job_name="fx_rates_refresh",
+        layer_name="fx_rates",
+        legacy_fn=fx_rates_refresh,
+    )
+
+
+def refresh_weekly_reports(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import weekly_report
+
+    return _wrap_single(
+        job_name="weekly_report",
+        layer_name="weekly_reports",
+        legacy_fn=weekly_report,
+    )
+
+
+def refresh_monthly_reports(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import monthly_report
+
+    return _wrap_single(
+        job_name="monthly_report",
+        layer_name="monthly_reports",
+        legacy_fn=monthly_report,
+    )
+
+
+def refresh_risk_metrics(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    from app.workers.scheduler import risk_metrics_refresh
+
+    return _wrap_single(
+        job_name="risk_metrics_refresh",
+        layer_name="risk_metrics",
+        legacy_fn=risk_metrics_refresh,
+        progress=progress,
+    )
+
+
+def refresh_price_quarantine(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    # #2261 — impossible-bar quarantine recompute over the priced universe.
+    from app.workers.scheduler import price_quarantine_refresh
+
+    return _wrap_single(
+        job_name="price_quarantine_refresh",
+        layer_name="price_quarantine",
+        legacy_fn=price_quarantine_refresh,
+        progress=progress,
+    )
+
+
+def refresh_fair_value_band(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    # #2009 — full-universe deterministic fair-value band recompute (pass-1
+    # cohort materialize + pass-2 per-name synthesis). Mirrors
+    # refresh_risk_metrics: the legacy_fn (fair_value_band_refresh) runs
+    # refresh_fair_value_band_batch(conn, instrument_ids=None) under its own
+    # _tracked_job telemetry; _wrap_single adds the JobLock + outcome read.
+    from app.workers.scheduler import fair_value_band_refresh
+
+    return _wrap_single(
+        job_name="fair_value_band_refresh",
+        layer_name="fair_value_band",
+        legacy_fn=fair_value_band_refresh,
+        progress=progress,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Composite adapters (spec §2.3.1)
+# ---------------------------------------------------------------------------
+
+
+def refresh_scoring_and_recommendations(
+    *,
+    sync_run_id: int,
+    progress: ProgressCallback,
+    upstream_outcomes: Mapping[str, LayerOutcome],
+) -> Sequence[tuple[str, RefreshResult]]:
+    """Composite: morning_candidate_review emits (scoring, recommendations).
+
+    Does NOT call execute_approved_orders — that side effect lives
+    only on the legacy scheduled path (spec §2.3.1). Calls the
+    extracted compute_morning_recommendations() which handles the
+    per-phase connection discipline.
+    """
+    from app.workers.scheduler import (
+        JOB_MORNING_CANDIDATE_REVIEW,
+        _tracked_job,
+        compute_morning_recommendations,
+    )
+
+    job_name = JOB_MORNING_CANDIDATE_REVIEW
+
+    # Acquire the lock via a normal `with` so the context manager
+    # receives the real (exc_type, exc_val, exc_tb) on abnormal exit,
+    # not the (None, None, None) of a manual __exit__ call. On any
+    # inner exception: the `with` exits with the live exception info
+    # (JobLock's __exit__ sees it), then re-raises — the orchestrator
+    # records FAILED for every emit.
+    try:
+        with JobLock(settings.database_url, job_name):
+            with _tracked_job(job_name) as tracker:
+                result = compute_morning_recommendations()
+                tracker.row_count = len(result.ranking_result.scored) + (
+                    len(result.review_result.recommendations) if result.review_result is not None else 0
+                )
+            # Reading outcome INSIDE the JobLock context ensures a
+            # concurrent cron-triggered fire cannot race a newer row in.
+            outcome, _, error_category = _latest_job_outcome(job_name)
+    except JobAlreadyRunning:
+        # JobAlreadyRunning raises from `__enter__` BEFORE the body
+        # executes, so no result/outcome variables are in scope here.
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            record_job_skip(
+                conn,
+                job_name,
+                prereq_skip_reason("legacy cron holder active"),
+            )
+        skip = RefreshResult(
+            outcome=LayerOutcome.PREREQ_SKIP,
+            row_count=0,
+            items_processed=0,
+            items_total=None,
+            detail="legacy cron holder active (JobLock busy)",
+            error_category=None,
+        )
+        return [("scoring", skip), ("recommendations", skip)]
+
+    # Reached only on the success path; every other exception propagated
+    # out with the live exc_info passed to JobLock.__exit__.
+    scoring_count = len(result.ranking_result.scored)
+    if result.review_result is None:
+        rec_outcome = LayerOutcome.NO_WORK
+        rec_count = 0
+        rec_detail = "no eligible instruments to score"
+    else:
+        rec_outcome = outcome
+        rec_count = len(result.review_result.recommendations)
+        rec_detail = "recommendations pass"
+
+    return [
+        (
+            "scoring",
+            RefreshResult(
+                outcome=outcome,
+                row_count=scoring_count,
+                items_processed=scoring_count,
+                items_total=None,
+                detail="scoring pass",
+                error_category=error_category,
+            ),
+        ),
+        (
+            "recommendations",
+            RefreshResult(
+                outcome=rec_outcome,
+                row_count=rec_count,
+                items_processed=rec_count,
+                items_total=None,
+                detail=rec_detail,
+                error_category=error_category if rec_outcome is outcome else None,
+            ),
+        ),
+    ]

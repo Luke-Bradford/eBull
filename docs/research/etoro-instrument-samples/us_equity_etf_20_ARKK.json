@@ -1,0 +1,37 @@
+{
+  "instrumentID": 3166,
+  "instrumentDisplayName": "ARK Innovation ETF",
+  "instrumentTypeID": 6,
+  "exchangeID": 20,
+  "images": [
+    {
+      "instrumentID": 3166,
+      "width": 35.0,
+      "height": 35.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/3166/35x35.png"
+    },
+    {
+      "instrumentID": 3166,
+      "width": 50.0,
+      "height": 50.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/3166/50x50.png"
+    },
+    {
+      "instrumentID": 3166,
+      "width": 150.0,
+      "height": 150.0,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/3166/150x150.png"
+    },
+    {
+      "instrumentID": 3166,
+      "uri": "https://etoro-cdn.etorostatic.com/market-avatars/3166/3166_F7F7F7_2C2C2C.svg",
+      "backgroundColor": "#F7F7F7",
+      "textColor": "#2C2C2C"
+    }
+  ],
+  "symbolFull": "ARKK",
+  "stocksIndustryID": 4,
+  "priceSource": "NASDAQ",
+  "hasExpirationDate": false,
+  "isInternalInstrument": false
+}

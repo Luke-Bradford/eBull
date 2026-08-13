@@ -1,0 +1,22 @@
+-- #1922 — rank-move alert feed cursor.
+--
+-- A fourth dashboard alert feed (AlertsStrip #1898/#399): a HELD instrument
+-- whose deterministic rank moved materially between scoring runs. The
+-- "event" is a row in `scores` (append-only, one row per instrument per
+-- compute_rankings run) whose `rank_delta` magnitude clears the threshold.
+-- `scores.score_id` (BIGSERIAL PK, monotonic, unique) is the cursor — same
+-- rationale as migration 044's decision_id / migration 047's event_id: a
+-- TIMESTAMPTZ cursor (scored_at) is microsecond-resolution and NOT unique
+-- within a run (every instrument in a run shares one scored_at), which would
+-- leave a tie-break race; score_id closes it under strict `>` comparison.
+--
+-- NULL = never acknowledged (all in-window moves unseen), matching the other
+-- three cursor columns on `operators`.
+--
+-- No supporting index: the feed predicate gates on held instruments
+-- (EXISTS over `positions` WHERE current_units > 0 — a handful of rows), and
+-- the existing idx_scores_instrument_scored (instrument_id, scored_at DESC)
+-- covers the per-instrument recent-row lookup. The score_id > cursor bound is
+-- a cheap residual filter over that already-tiny row set.
+ALTER TABLE operators
+    ADD COLUMN IF NOT EXISTS alerts_last_seen_rank_event_id BIGINT;

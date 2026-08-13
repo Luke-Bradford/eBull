@@ -1,0 +1,345 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        # Pinned so CI / local dev / supply-chain audit see the
+        # same resolver behavior across runs. Retry-wrapped (#1747): a
+        # transient PyPI/CDN fetch error otherwise fails the job.
+        run: bash scripts/ci_retry.sh pip install "uv==0.5.21"
+
+      - name: Install dependencies
+        # Retry-wrapped (#1747): uv sync downloads wheels from PyPI; a
+        # broken-pipe/reset mid-download is transient (PR #1744/#1746).
+        run: bash scripts/ci_retry.sh uv sync --group dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Pyright typecheck
+        run: uv run pyright
+
+      - name: shellcheck scripts lint (#1257)
+        # Lint scripts/*.sh at -S warning (errors + warnings). The
+        # chokepoint-lint guards below are awk-/grep-heavy where silent
+        # shell bugs hide (clobbered vars, competing redirects, unquoted
+        # word-splits). uv provides shellcheck via the dev group, so the
+        # gate resolves the binary even before a system install.
+        run: bash scripts/check_shellcheck.sh
+
+      - name: Caller-owned-tx lint (FINRA ingest)
+        # #1233 run-8-readiness-fixes Item 8 — FINRA caller-owned
+        # ingest modules (app/services/finra_*_ingest.py) MUST NOT
+        # enter their own `with conn.transaction():` block. AST-based
+        # (Codex 1: grep cannot distinguish module docstrings, which
+        # document the rule). Manifest parsers under
+        # app/services/manifest_parsers/ legitimately DO use it and
+        # are NOT in scope.
+        run: bash scripts/check_caller_owned_tx.sh
+
+      - name: Pooled-conn-across-HTTP lint
+        # #1472 PR2 — a route declaring `conn = Depends(get_conn)` holds
+        # the pooled connection for its whole body; it MUST NOT reach an
+        # external provider's HTTP client (eToro / SEC EDGAR) while
+        # holding it (a conn pinned across slow external I/O stalls a
+        # small pool — block-then-PoolTimeout, max_waiting=0). AST-based;
+        # allowlists the two KNOWN-DEFERRED lazy-fill routes (#1492).
+        run: bash scripts/check_pooled_conn_across_http.sh
+
+      - name: ETL source-to-sink spec docs
+        # Every source in ManifestSource Literal + each ad-hoc + bulk-
+        # reference source MUST have docs/etl/sources/<source>.md with
+        # the 13 required sections. Pinned by docs/etl/sources/README.md
+        # + .claude/skills/data-engineer/etl-source-to-sink-template.md.
+        # Same script that runs in the pre-push hook — duplicated here
+        # so a push that bypasses the local hook still trips at CI.
+        run: bash scripts/check_etl_source_docs.sh
+
+      # #1329 — mirror the remaining .githooks/pre-push chokepoint-lint
+      # scripts into CI. A `--no-verify` push of a chokepoint regression
+      # otherwise lands green at CI (this is how #1382 / #1387 drifted
+      # unnoticed). The full rationale for each guard lives in the
+      # matching pre-push hook comment; these steps are the CI mirror.
+      # Source-of-truth is the hook's script list, NOT the #1329 issue
+      # body (which predates check_jit_off_in_refresh_helpers.sh, #1346).
+      # All pure-shell over the repo tree — no DB / docker / Python.
+      - name: INSERT INTO instruments lint
+        run: bash scripts/check_instruments_inserts.sh
+
+      - name: INSERT INTO external_identifiers lint (#1173)
+        # Every INSERT INTO external_identifiers must list is_primary
+        # (readers filter on it to pick the canonical row). Mirrors the
+        # is_tradable guard; ALLOW_LIST escape hatch for intentional-
+        # DEFAULT sites lives in the script.
+        run: bash scripts/check_external_identifiers_inserts.sh
+
+      - name: Form 4 retention cap lint
+        run: bash scripts/check_form4_retention.sh
+
+      - name: filing_events retention cap lint
+        run: bash scripts/check_filing_events_retention.sh
+
+      - name: DEF 14A latest-N cap lint
+        run: bash scripts/check_def14a_cap.sh
+
+      - name: 13F-HR 8-quarter retention cap lint
+        run: bash scripts/check_13f_hr_retention.sh
+
+      - name: N-PORT 8-quarter retention cap lint
+        run: bash scripts/check_nport_retention.sh
+
+      - name: N-CSR 730d retention cap lint
+        run: bash scripts/check_n_csr_retention.sh
+
+      - name: N-CEN latest-only invariant lint
+        run: bash scripts/check_ncen_latest_only.sh
+
+      - name: business_summary latest-only invariant lint
+        run: bash scripts/check_business_summary_latest_only.sh
+
+      - name: bulk-ingest COPY pattern lint
+        run: bash scripts/check_bulk_ingest_copy_pattern.sh
+
+      - name: Form 5 retention cap lint
+        run: bash scripts/check_form5_retention.sh
+
+      - name: Form 3 latest-per-pair invariant lint
+        run: bash scripts/check_form3_latest_per_pair.sh
+
+      - name: 13D/G retention cap invariant lint
+        run: bash scripts/check_13dg_retention.sh
+
+      - name: ownership_*_current MERGE writer invariant lint
+        run: bash scripts/check_ownership_refresh_writer_pattern.sh
+
+      - name: jit=off in ownership refresh helpers lint (#1346)
+        run: bash scripts/check_jit_off_in_refresh_helpers.sh
+
+      - name: manifest-parser archive-URL agent-CIK guard lint
+        run: bash scripts/check_archive_url_agent_guard.sh
+
+      - name: bounded Anthropic client construction lint (#1479)
+        # Every app/ Anthropic client MUST go through the
+        # make_anthropic_client factory (bounded timeout + max_retries);
+        # a raw anthropic.Anthropic(...) reintroduces the unbounded 600s
+        # SDK default that wedged the jobs boot ~43min on 2026-06-04.
+        run: bash scripts/check_anthropic_timeout.sh
+
+      - name: LLM completion chokepoint lint (#1919)
+        # Every OpenAI-compatible LLM completion under app/ MUST go
+        # through app/services/llm_client.py (bounded httpx timeout +
+        # per-process semaphore) — same #1479 hang class as above.
+        run: bash scripts/check_llm_chokepoint.sh
+
+      - name: frontend skip-test accumulation gate (#990)
+        # Fails if the describe.skip / it.skip count under frontend/src
+        # exceeds scripts/frontend_skip_baseline.txt. Stops silent
+        # coverage debt (#989-style "skip pending cleanup") from piling
+        # up across PRs; adding a justified skip requires an explicit
+        # baseline bump in the same diff.
+        run: bash scripts/check_frontend_skip_count.sh
+
+      - name: pre-push <-> ci.yml lint parity (#1329)
+        # Self-enforcing mirror: fails if any `bash scripts/check_*.sh`
+        # runs in only one of .githooks/pre-push / this file. Stops the
+        # mirror from silently drifting the moment a new hook lint lands.
+        run: bash scripts/check_ci_mirrors_prepush.sh
+
+      - name: Pre-push hook is executable
+        # Hook is committed at .githooks/pre-push and wired via
+        # ``git config core.hooksPath .githooks``. On Windows, a
+        # local ``chmod +x`` does not update git's stored mode —
+        # the file ships as 100644 and the hook silently never
+        # runs, defeating the whole purpose of committing it.
+        # PR #642 review BLOCKING.
+        run: |
+          mode=$(git ls-files -s .githooks/pre-push | awk '{print $1}')
+          if [ "$mode" != "100755" ]; then
+            echo "::error::.githooks/pre-push is mode $mode, expected 100755"
+            echo "Fix: git update-index --chmod=+x .githooks/pre-push"
+            exit 1
+          fi
+
+  # Operator decision 2026-05-05: pytest removed from CI entirely.
+  # Pre-push hook (.githooks/pre-push) runs ruff/format/pyright on
+  # every push and pytest is run locally before push. Push-to-main
+  # safety-net pytest job ran for ~5 weeks but was broken by
+  # xdist + per-worker DB races introduced in #893; 8 consecutive
+  # failures, 16-17 min each, produced email noise without catching
+  # real bugs. CI now lints only; pytest is the developer's
+  # responsibility.
+
+  supply-chain:
+    # #598: catch yanked / phantom / advisory-laden lockfile entries
+    # before merge. Runs alongside the frontend / backend lint jobs;
+    # advisories block the merge so a CVE in a transitive dep cannot
+    # ship silently.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Pinned to 10.33.0 because npm registry briefly served a
+          # 404 for the 10.34.0 tarball (2026-05-27) — meta-tag
+          # ``version: 10`` resolved to 10.34.0 and broke supply-chain
+          # CI. Bump only after confirming the target tag's tarball
+          # is reachable via ``curl -I registry.npmjs.org/pnpm/-/pnpm-<v>.tgz``.
+          version: 10.33.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend deps (lockfile fetchability gate)
+        # ``--frozen-lockfile`` resolves every entry in
+        # ``frontend/pnpm-lock.yaml`` against the registry. A yanked /
+        # unpublished / phantom version that ``pnpm audit`` would not
+        # surface fails this step instead. Without this, a backend-
+        # only PR could merge green despite a non-fetchable frontend
+        # lockfile entry (the "phantom version" case #598 was filed
+        # to catch).
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: npm bulk advisory audit (frontend, all deps)
+        # Audit dev + prod deps. The frontend toolchain (vite,
+        # vitest, typescript) executes during builds and tests, so
+        # advisories there are still in the supply chain we ship
+        # through CI. ``high`` floor matches what we'd accept as a
+        # merge gate; ``moderate`` produced too many false alarms in
+        # tooling chains we don't deploy.
+        #
+        # #2038: was ``pnpm --dir frontend audit --audit-level high``.
+        # npm retired the classic audit endpoints on 2026-07-15 (410
+        # Gone) and pnpm (<=11.13.0) has not migrated to the bulk
+        # advisory endpoint, so ``pnpm audit`` fails on every run.
+        # scripts/audit_frontend_bulk.mjs POSTs the resolved package
+        # set to the bulk endpoint directly (server-side version
+        # filtering) with the same ``high`` floor, and fails CLOSED
+        # (exit 2) on an empty package set or endpoint error. Revert
+        # to ``pnpm audit`` once pnpm ships bulk-endpoint support.
+        # set -o pipefail: the default Actions shell is ``bash -e`` WITHOUT
+        # pipefail — a failing ``pnpm list`` would otherwise be masked by a
+        # passing audit script reading truncated-but-parseable JSON.
+        run: |
+          set -o pipefail
+          pnpm --dir frontend list --depth Infinity --json | node scripts/audit_frontend_bulk.mjs --audit-level high
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv + pip-audit
+        # uv pinned for resolver determinism (matches the lint/pytest
+        # jobs above); pip-audit floats so we always hit the latest
+        # advisory database — pinning that would defeat the gate.
+        # Retry-wrapped (#1747): transient PyPI fetch.
+        run: bash scripts/ci_retry.sh pip install "uv==0.5.21" pip-audit
+
+      - name: Export Python lockfile to requirements.txt
+        # GitHub's default ``bash -e`` does not reliably run process
+        # substitution across runners. Materialise the requirements
+        # to disk so pip-audit can read it as a real file. Include
+        # dev deps so the CI / pre-push toolchain (pytest, ruff,
+        # pyright) is also covered — those packages execute on
+        # operator machines and CI runners, so their advisories are
+        # supply-chain risks too.
+        run: uv export --no-hashes --no-emit-project > /tmp/requirements.txt
+
+      - name: Audit Python dependencies
+        # ``pip-audit`` resolves the lockfile against the PyPA
+        # advisory database. Strict-mode failure surfaces both
+        # advisory-laden and yanked versions; tolerated exceptions
+        # belong in this step's allowlist (none today).
+        run: pip-audit --strict --requirement /tmp/requirements.txt
+
+  perf-claim-lint:
+    # Phase 0 NEW-A (#1356) — gate every perf-claim PR against the §4
+    # evidence contract. Detects perf claim via PR label ``perf`` OR
+    # body ``## Performance impact`` header; validates 3 artifacts
+    # (var/perf_baselines/<ticket>-<sha>.*) + 3 PR-description sections.
+    # Honours gated bypass (label ``emergency`` + body ``## Bypass
+    # justification`` section + env PERF_CLAIM_LINT_BYPASS=true).
+    #
+    # PR-only: push-to-main has no PR body so the lint cannot resolve a
+    # ticket or claim. Sibling ``lint`` job runs on both events, but
+    # this gate is PR-scoped by contract.
+    #
+    # Untrusted PR inputs (body, labels, head.sha) are passed via the
+    # ``env:`` block — NEVER inlined into ``run:`` — so a malicious PR
+    # title/body cannot inject shell commands. The lint script reads
+    # via ``os.environ.get(...)`` and treats every value as data only.
+    #
+    # Same-repo guard: the job checks out ``pull_request.head.sha`` and
+    # executes ``uv run python -m scripts.perf_bench.lint_pr_artifacts``,
+    # so a fork-authored PR would otherwise run untrusted Python with
+    # access to ``vars.PERF_CLAIM_LINT_BYPASS``. Restrict to PRs whose
+    # head ref lives in this repository. Fork PRs SKIP the job
+    # entirely; the gate is enforced only on operator-owned branches.
+    # (Bot review iter-2 BLOCKING fold.)
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the PR head SHA explicitly so the artifact
+          # filename convention ``<ticket>-<sha>.*`` lines up with
+          # GITHUB_PR_HEAD_SHA in the lint. Default checkout would
+          # resolve to the merge-commit SHA which never matches
+          # author-uploaded artifacts.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        # Pinned to match the sibling ``lint`` + ``supply-chain`` jobs.
+        # Retry-wrapped (#1747): transient PyPI fetch.
+        run: bash scripts/ci_retry.sh pip install "uv==0.5.21"
+
+      - name: Install dependencies
+        # ``pyyaml`` (load floors.yaml + manifest.yaml) is already in
+        # the dev group via uv.lock; use uv sync for parity with the
+        # local pre-push hook + sibling CI jobs. Retry-wrapped (#1747).
+        run: bash scripts/ci_retry.sh uv sync --group dev
+
+      - name: Perf-claim artifact lint
+        # All untrusted PR inputs are bound via env, not interpolated
+        # into the command line, per GitHub Actions workflow-injection
+        # guidance.
+        run: uv run python -m scripts.perf_bench.lint_pr_artifacts
+        env:
+          GITHUB_PR_BODY: ${{ github.event.pull_request.body }}
+          GITHUB_PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          GITHUB_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PERF_CLAIM_LINT_BYPASS: ${{ vars.PERF_CLAIM_LINT_BYPASS || 'false' }}

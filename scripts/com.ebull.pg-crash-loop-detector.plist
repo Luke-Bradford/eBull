@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent for the dev-PG crash-loop detector (D1, #1449).
+
+  Wire once (see docs/operator/runbooks/pg-crash-loop-detector.md):
+    1. Replace __REPO__ below with your absolute eBull checkout path.
+    2. cp scripts/com.ebull.pg-crash-loop-detector.plist \
+         ~/Library/LaunchAgents/com.ebull.pg-crash-loop-detector.plist
+    3. launchctl load ~/Library/LaunchAgents/com.ebull.pg-crash-loop-detector.plist
+
+  Runs the detector in loop mode (it maintains its own poll history, which the
+  recovery-stall signal needs). KeepAlive restarts it if it dies. It talks only
+  to the Docker daemon, so it keeps watching even when Postgres + the app are down.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ebull.pg-crash-loop-detector</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.pg_crash_loop_detector</string>
+        <string>--container</string>
+        <string>ebull-postgres</string>
+        <string>--interval</string>
+        <string>60</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <!-- Docker CLI lives in /usr/local/bin or /opt/homebrew/bin on macOS. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardErrorPath</key>
+    <string>__REPO__/var/log/pg-crash-loop-detector.log</string>
+    <key>StandardOutPath</key>
+    <string>__REPO__/var/log/pg-crash-loop-detector.log</string>
+</dict>
+</plist>

@@ -1,0 +1,635 @@
+"""Tests for the pipelined SEC EDGAR fetcher (#1026)."""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+
+import httpx
+import pytest
+
+from app.services.sec_pipelined_fetcher import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_TARGET_RPS,
+    FetchTask,
+    PipelinedSecFetcher,
+    _AsyncRateLimiter,
+)
+
+
+def _isolated_budget() -> tuple[list[float], threading.Lock]:
+    """Return a fresh (clock, lock) pair for tests that need predictable timing.
+
+    Without this the fetcher shares the process-wide SEC budget with
+    every other test in the suite, making timing-sensitive assertions
+    fragile under xdist.
+    """
+    return [0.0], threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# AsyncRateLimiter unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncRateLimiter:
+    @pytest.mark.asyncio
+    async def test_first_acquire_is_immediate(self) -> None:
+        # Explicit shared_clock -> legacy in-process target_rps floor, NOT the
+        # #1484 cross-process gate (which would impose its own 0.11s floor and
+        # make this assertion test the gate instead of target_rps).
+        clock, lock = _isolated_budget()
+        rl = _AsyncRateLimiter(target_rps=10, shared_clock=clock, shared_lock=lock)
+        started = time.monotonic()
+        await rl.acquire()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.05
+
+    @pytest.mark.asyncio
+    async def test_back_to_back_acquires_observe_min_interval(self) -> None:
+        # Explicit shared_clock pins the legacy 100 ms (target_rps=10) floor so
+        # this tests target_rps, not the #1484 gate default.
+        clock, lock = _isolated_budget()
+        rl = _AsyncRateLimiter(target_rps=10, shared_clock=clock, shared_lock=lock)  # 100 ms floor
+        started = time.monotonic()
+        await rl.acquire()
+        await rl.acquire()
+        await rl.acquire()
+        elapsed = time.monotonic() - started
+        # 3 acquires over a 100 ms floor must take at least ~200 ms.
+        assert elapsed >= 0.18
+
+    @pytest.mark.asyncio
+    async def test_zero_or_negative_rps_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            _AsyncRateLimiter(target_rps=0)
+        with pytest.raises(ValueError):
+            _AsyncRateLimiter(target_rps=-1)
+
+
+# ---------------------------------------------------------------------------
+# PipelinedSecFetcher integration tests
+# ---------------------------------------------------------------------------
+
+
+def _record_handler(latency_s: float = 0.05, in_flight: list[int] | None = None):
+    """Return a MockTransport handler that records concurrent in-flight counts."""
+    if in_flight is None:
+        in_flight = [0, 0]  # current, peak
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        in_flight[0] += 1
+        in_flight[1] = max(in_flight[1], in_flight[0])
+        time.sleep(latency_s)
+        in_flight[0] -= 1
+        path = request.url.path
+        return httpx.Response(200, content=path.encode("utf-8"))
+
+    return handler, in_flight
+
+
+class TestPipelinedSecFetcher:
+    @pytest.mark.asyncio
+    async def test_results_yield_in_completion_order_with_correct_keys(self) -> None:
+        # Each URL responds after a deterministic delay; with
+        # concurrency=3 all three start near-simultaneously and
+        # complete in increasing-delay order.
+        delays = {"a": 0.15, "b": 0.05, "c": 0.10}
+
+        async def async_handler(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(delays.get(request.url.path.strip("/"), 0))
+            return httpx.Response(200)
+
+        transport = httpx.MockTransport(async_handler)
+        async with httpx.AsyncClient(transport=transport, base_url="https://test") as client:
+            clock, lock = _isolated_budget()
+            fetcher = PipelinedSecFetcher(
+                client=client,
+                target_rps=1000,
+                concurrency=3,
+                shared_clock=clock,
+                shared_lock=lock,
+            )
+            tasks = [FetchTask(key=k, url=f"https://test/{k}") for k in ("a", "b", "c")]
+            keys_in_order: list[object] = []
+            async for result in fetcher.fetch_many(tasks):
+                assert result.error is None
+                keys_in_order.append(result.key)
+        # Completion order: shortest delay first.
+        assert keys_in_order == ["b", "c", "a"]
+
+    @pytest.mark.asyncio
+    async def test_concurrency_cap_honoured(self) -> None:
+        in_flight = [0, 0]
+
+        async def async_handler(request: httpx.Request) -> httpx.Response:
+            in_flight[0] += 1
+            in_flight[1] = max(in_flight[1], in_flight[0])
+            await asyncio.sleep(0.05)
+            in_flight[0] -= 1
+            return httpx.Response(200)
+
+        transport = httpx.MockTransport(async_handler)
+        async with httpx.AsyncClient(transport=transport, base_url="https://test") as client:
+            clock, lock = _isolated_budget()
+            fetcher = PipelinedSecFetcher(
+                client=client,
+                target_rps=1000,
+                concurrency=2,
+                shared_clock=clock,
+                shared_lock=lock,
+            )
+            tasks = [FetchTask(key=i, url=f"https://test/{i}") for i in range(8)]
+            async for _ in fetcher.fetch_many(tasks):
+                pass
+        # With concurrency=2, peak in-flight must never exceed 2.
+        assert in_flight[1] <= 2
+
+    @pytest.mark.asyncio
+    async def test_rate_ceiling_honoured_under_load(self) -> None:
+        # 5 req/s ceiling = 200 ms floor; 6 requests over MockTransport
+        # with negligible latency must take ~1.0s (5 floors between
+        # 6 acquires).
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200)
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="https://test") as client:
+            clock, lock = _isolated_budget()
+            fetcher = PipelinedSecFetcher(
+                client=client,
+                target_rps=5,
+                concurrency=4,
+                shared_clock=clock,
+                shared_lock=lock,
+            )
+            tasks = [FetchTask(key=i, url=f"https://test/{i}") for i in range(6)]
+            started = time.monotonic()
+            async for _ in fetcher.fetch_many(tasks):
+                pass
+            elapsed = time.monotonic() - started
+        assert elapsed >= 0.95  # 5 floors × 200 ms
+
+    @pytest.mark.asyncio
+    async def test_empty_task_list_yields_nothing(self) -> None:
+        transport = httpx.MockTransport(lambda r: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as client:
+            fetcher = PipelinedSecFetcher(client=client)
+            yielded = [r async for r in fetcher.fetch_many([])]
+        assert yielded == []
+
+    @pytest.mark.asyncio
+    async def test_http_error_surfaces_on_result_error_field(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("simulated")
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="https://test") as client:
+            clock, lock = _isolated_budget()
+            fetcher = PipelinedSecFetcher(
+                client=client,
+                target_rps=1000,
+                concurrency=1,
+                shared_clock=clock,
+                shared_lock=lock,
+            )
+            results = [r async for r in fetcher.fetch_many([FetchTask(key="x", url="https://test/x")])]
+        assert len(results) == 1
+        assert results[0].response is None
+        assert results[0].error is not None
+
+    def test_concurrency_zero_rejected(self) -> None:
+        async def _make() -> None:
+            async with httpx.AsyncClient() as client:
+                with pytest.raises(ValueError):
+                    PipelinedSecFetcher(client=client, concurrency=0)
+
+        asyncio.run(_make())
+
+    def test_default_constants_match_spec(self) -> None:
+        assert DEFAULT_TARGET_RPS == 7.0
+        assert DEFAULT_CONCURRENCY == 4
+
+    @pytest.mark.asyncio
+    async def test_async_floor_observes_sync_stamp(self) -> None:
+        # Mixed sync+async sharing of the same clock: simulate a sync
+        # ResilientClient firing "right now" by stamping clock[0] =
+        # monotonic(); the async fetcher must wait min_interval before
+        # firing. Codex pre-push round 2: the prior implementation
+        # treated clock[0] as "next allowed time" and bypassed the
+        # floor when it was actually a last-request stamp.
+        clock, lock = _isolated_budget()
+        # Sync client just fired:
+        clock[0] = time.monotonic()
+        rl = _AsyncRateLimiter(target_rps=10, shared_clock=clock, shared_lock=lock)
+        started = time.monotonic()
+        await rl.acquire()
+        elapsed = time.monotonic() - started
+        # 10 req/s = 100 ms floor; the async caller should wait ~100 ms.
+        assert elapsed >= 0.08, f"expected ~100 ms wait, got {elapsed:.3f} s"
+
+    @pytest.mark.asyncio
+    async def test_two_fetchers_share_rate_budget_via_shared_clock(self) -> None:
+        # Two fetchers configured against the SAME (clock, lock)
+        # tuple must serialise their requests against the budget —
+        # combined throughput stays at target_rps, not 2 × target_rps.
+        # Codex pre-push round 1: this is the prevention-log
+        # "Multiple ResilientClient instances sharing a rate limit
+        # must share throttle state" case applied to async clients.
+        clock, lock = _isolated_budget()
+        transport = httpx.MockTransport(lambda r: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport, base_url="https://test") as client:
+            # 5 req/s shared budget; two fetchers each issuing 3 requests.
+            f1 = PipelinedSecFetcher(client=client, target_rps=5, concurrency=3, shared_clock=clock, shared_lock=lock)
+            f2 = PipelinedSecFetcher(client=client, target_rps=5, concurrency=3, shared_clock=clock, shared_lock=lock)
+            t1 = [FetchTask(key=f"a{i}", url=f"https://test/a{i}") for i in range(3)]
+            t2 = [FetchTask(key=f"b{i}", url=f"https://test/b{i}") for i in range(3)]
+
+            async def _drain(fetcher: PipelinedSecFetcher, tasks: list[FetchTask]) -> None:
+                async for _ in fetcher.fetch_many(tasks):
+                    pass
+
+            started = time.monotonic()
+            await asyncio.gather(_drain(f1, t1), _drain(f2, t2))
+            elapsed = time.monotonic() - started
+        # 6 requests at 5 req/s shared = 5 floors × 200 ms ≈ 1.0 s.
+        # If the budget were NOT shared, two fetchers at 3 req each
+        # would interleave at 10 req/s combined and finish in ~0.4 s.
+        assert elapsed >= 0.95
+
+
+class TestPrefetchDocumentTexts:
+    def test_returns_empty_dict_for_empty_input(self) -> None:
+        from app.services.sec_pipelined_fetcher import prefetch_document_texts
+
+        result = prefetch_document_texts([], user_agent="test/1.0")
+        assert result == {}
+
+    def _patch_transport(self, monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ignore[no-untyped-def]
+        transport = httpx.MockTransport(handler)
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs["transport"] = transport
+            original_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
+
+    def test_404_cached_as_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Permanent 404 maps to cached None (matches sync
+        # fetch_document_text's `return None` path).
+        from app.services.sec_pipelined_fetcher import prefetch_document_texts
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(404))
+        result = prefetch_document_texts(["https://www.sec.gov/missing.htm"], user_agent="test/1.0")
+        assert result == {"https://www.sec.gov/missing.htm": None}
+
+    def test_5xx_omitted_from_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 5xx is transient — must be OMITTED so cache-miss falls
+        # through to the underlying sync provider's retry path.
+        from app.services.sec_pipelined_fetcher import prefetch_document_texts
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(503))
+        result = prefetch_document_texts(["https://www.sec.gov/transient.htm"], user_agent="test/1.0")
+        assert "https://www.sec.gov/transient.htm" not in result
+
+    def test_200_cached_as_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import prefetch_document_texts
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(200, text="<html>ok</html>"))
+        result = prefetch_document_texts(["https://www.sec.gov/ok.htm"], user_agent="test/1.0")
+        assert result == {"https://www.sec.gov/ok.htm": "<html>ok</html>"}
+
+
+class TestCachedDocFetcher:
+    def test_cache_hit_with_string_returns_cached(self) -> None:
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher
+
+        class _Stub:
+            def fetch_document_text(self, url: str) -> str | None:  # noqa: ARG002
+                raise AssertionError("should not be called on cache hit")
+
+        wrapped = _CachedDocFetcher(_Stub(), {"u": "body"})
+        assert wrapped.fetch_document_text("u") == "body"
+        assert wrapped.cache_hits == 1
+        assert wrapped.cache_misses == 0
+
+    def test_cache_hit_with_none_returns_none_no_fallback(self) -> None:
+        # Cached None = permanent 404/410. Don't fall back to underlying.
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher
+
+        calls: list[str] = []
+
+        class _Stub:
+            def fetch_document_text(self, url: str) -> str | None:
+                calls.append(url)
+                return "fallback"
+
+        wrapped = _CachedDocFetcher(_Stub(), {"u": None})
+        assert wrapped.fetch_document_text("u") is None
+        assert calls == []  # no fallback for cached permanent failure
+
+    def test_cache_miss_falls_back_to_underlying(self) -> None:
+        from app.services.sec_pipelined_fetcher import _CachedDocFetcher
+
+        class _Stub:
+            def fetch_document_text(self, url: str) -> str | None:  # noqa: ARG002
+                return "from_underlying"
+
+        wrapped = _CachedDocFetcher(_Stub(), {})
+        assert wrapped.fetch_document_text("u") == "from_underlying"
+        assert wrapped.cache_misses == 1
+        assert wrapped.cache_hits == 0
+
+
+# ---------------------------------------------------------------------------
+# #1341 — prefetch_submissions_pages_conditional + _CachedSubmissionsPageFetcher
+# ---------------------------------------------------------------------------
+
+
+class TestPrefetchSubmissionsPagesConditional:
+    def _patch_transport(self, monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ignore[no-untyped-def]
+        transport = httpx.MockTransport(handler)
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs["transport"] = transport
+            original_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
+
+    def test_empty_tasks_returns_empty_dict(self) -> None:
+        from app.services.sec_pipelined_fetcher import prefetch_submissions_pages_conditional
+
+        assert prefetch_submissions_pages_conditional([], user_agent="test/1.0") == {}
+
+    def test_200_returns_page_result_with_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"hello": "world"},
+                headers={"Last-Modified": "Wed, 27 May 2026 12:34:56 GMT"},
+            )
+
+        self._patch_transport(monkeypatch, handler)
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        page_result = result["CIK0000320193-submissions-001.json"]
+        assert page_result is not None
+        assert page_result.payload == {"hello": "world"}
+        assert page_result.last_modified == "Wed, 27 May 2026 12:34:56 GMT"
+        assert page_result.not_modified is False
+
+    def test_304_returns_page_result_with_ims(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        ims = "Tue, 26 May 2026 09:00:00 GMT"
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(304))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000789019-submissions-002.json", if_modified_since=ims)],
+            user_agent="test/1.0",
+        )
+        page_result = result["CIK0000789019-submissions-002.json"]
+        assert page_result is not None
+        assert page_result.payload is None
+        assert page_result.last_modified == ims
+        assert page_result.not_modified is True
+
+    def test_404_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(404))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000000001-submissions-099.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert result == {"CIK0000000001-submissions-099.json": None}
+
+    def test_5xx_omitted_from_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(503))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000019617-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert "CIK0000019617-submissions-001.json" not in result
+
+    def test_429_omitted_from_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(429))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000354950-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert "CIK0000354950-submissions-001.json" not in result
+
+    def test_malformed_json_omitted_from_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        # 200 with non-JSON body → resp.json() raises ValueError →
+        # per-task try/except omits from cache.
+        self._patch_transport(monkeypatch, lambda r: httpx.Response(200, content=b"not-json-at-all"))
+        result = prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0001326380-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert "CIK0001326380-submissions-001.json" not in result
+
+    def test_dedupe_by_page_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        hits: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            hits.append(req.url.path)
+            return httpx.Response(200, json={"x": 1})
+
+        self._patch_transport(monkeypatch, handler)
+        result = prefetch_submissions_pages_conditional(
+            [
+                ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since=None),
+                ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since="ignored"),
+            ],
+            user_agent="test/1.0",
+        )
+        # Dedupe → only one HTTP call.
+        assert len(hits) == 1
+        assert "CIK0000320193-submissions-001.json" in result
+
+    def test_ims_header_sent_when_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        captured_headers: list[dict[str, str]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured_headers.append(dict(req.headers))
+            return httpx.Response(304)
+
+        self._patch_transport(monkeypatch, handler)
+        ims = "Mon, 25 May 2026 00:00:00 GMT"
+        prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since=ims)],
+            user_agent="test/1.0",
+        )
+        # Exactly one HTTP call; If-Modified-Since header present.
+        assert len(captured_headers) == 1
+        assert captured_headers[0].get("if-modified-since") == ims
+
+    def test_ims_header_omitted_when_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.sec_pipelined_fetcher import (
+            ConditionalFetchTask,
+            prefetch_submissions_pages_conditional,
+        )
+
+        captured_headers: list[dict[str, str]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured_headers.append(dict(req.headers))
+            return httpx.Response(200, json={"x": 1})
+
+        self._patch_transport(monkeypatch, handler)
+        prefetch_submissions_pages_conditional(
+            [ConditionalFetchTask(page_name="CIK0000320193-submissions-001.json", if_modified_since=None)],
+            user_agent="test/1.0",
+        )
+        assert len(captured_headers) == 1
+        assert "if-modified-since" not in captured_headers[0]
+
+
+class TestCachedSubmissionsPageFetcher:
+    def test_cache_hit_returns_cached_result(self) -> None:
+        from app.providers.implementations.sec_edgar import SubmissionsPageResult
+        from app.services.sec_pipelined_fetcher import _CachedSubmissionsPageFetcher
+
+        class _Stub:
+            def fetch_submissions_page_conditional(self, name, *, if_modified_since=None):  # type: ignore[no-untyped-def]
+                raise AssertionError("should not be called on cache hit")
+
+        cached = SubmissionsPageResult(payload={"x": 1}, last_modified="lm", not_modified=False)
+        wrapped = _CachedSubmissionsPageFetcher(_Stub(), {"page": cached})
+        assert wrapped.fetch_submissions_page_conditional("page", if_modified_since="ims") is cached
+        assert wrapped.cache_hits == 1
+        assert wrapped.cache_misses == 0
+
+    def test_cache_hit_with_none_returns_none_no_fallback(self) -> None:
+        from app.services.sec_pipelined_fetcher import _CachedSubmissionsPageFetcher
+
+        calls: list[str] = []
+
+        class _Stub:
+            def fetch_submissions_page_conditional(self, name, *, if_modified_since=None):  # type: ignore[no-untyped-def]
+                calls.append(name)
+                return None
+
+        wrapped = _CachedSubmissionsPageFetcher(_Stub(), {"page": None})
+        assert wrapped.fetch_submissions_page_conditional("page") is None
+        assert calls == []  # cached permanent 404; no fallback
+        assert wrapped.cache_hits == 1
+
+    def test_cache_miss_falls_back_to_underlying_with_ims(self) -> None:
+        from app.providers.implementations.sec_edgar import SubmissionsPageResult
+        from app.services.sec_pipelined_fetcher import _CachedSubmissionsPageFetcher
+
+        calls: list[tuple[str, str | None]] = []
+        underlying_result = SubmissionsPageResult(payload={"y": 2}, last_modified="lm2", not_modified=False)
+
+        class _Stub:
+            def fetch_submissions_page_conditional(self, name, *, if_modified_since=None):  # type: ignore[no-untyped-def]
+                calls.append((name, if_modified_since))
+                return underlying_result
+
+        wrapped = _CachedSubmissionsPageFetcher(_Stub(), {})
+        assert wrapped.fetch_submissions_page_conditional("page", if_modified_since="ims") is underlying_result
+        assert calls == [("page", "ims")]
+        assert wrapped.cache_misses == 1
+        assert wrapped.cache_hits == 0
+
+
+# ---------------------------------------------------------------------------
+# SEC 429 counter (#1545) — async paths must increment sec_throttle_429_total
+# ---------------------------------------------------------------------------
+
+
+class TestSec429Counter:
+    """fetch_one is the chokepoint: every pipelined SEC request flows
+    through it, so one increment there covers prefetch_document_texts
+    AND prefetch_submissions_pages_conditional.
+
+    Delta-based assertions per the prevention log — the counter is
+    process-global, never assert exact totals."""
+
+    async def test_fetch_one_429_increments_counter(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        clock, lock = _isolated_budget()
+        transport = httpx.MockTransport(lambda r: httpx.Response(429))
+        async with httpx.AsyncClient(transport=transport) as client:
+            fetcher = PipelinedSecFetcher(
+                client=client, target_rps=1000, concurrency=1, shared_clock=clock, shared_lock=lock
+            )
+            before = sec_throttle_429_total()
+            result = await fetcher.fetch_one(FetchTask(key="k", url="https://example.test/doc", headers={}))
+        assert result.response is not None
+        assert result.response.status_code == 429
+        assert sec_throttle_429_total() - before == 1
+
+    async def test_fetch_one_200_does_not_increment(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        clock, lock = _isolated_budget()
+        transport = httpx.MockTransport(lambda r: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as client:
+            fetcher = PipelinedSecFetcher(
+                client=client, target_rps=1000, concurrency=1, shared_clock=clock, shared_lock=lock
+            )
+            before = sec_throttle_429_total()
+            await fetcher.fetch_one(FetchTask(key="k", url="https://example.test/doc", headers={}))
+        assert sec_throttle_429_total() - before == 0
+
+    async def test_fetch_one_transport_error_does_not_increment(self) -> None:
+        from app.providers.sec_throttle_metrics import sec_throttle_429_total
+
+        clock, lock = _isolated_budget()
+
+        def boom(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as client:
+            fetcher = PipelinedSecFetcher(
+                client=client, target_rps=1000, concurrency=1, shared_clock=clock, shared_lock=lock
+            )
+            before = sec_throttle_429_total()
+            result = await fetcher.fetch_one(FetchTask(key="k", url="https://example.test/doc", headers={}))
+        assert result.error is not None
+        assert sec_throttle_429_total() - before == 0

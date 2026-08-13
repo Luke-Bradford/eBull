@@ -1,0 +1,234 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "stack: prepare (postgres + migrate)",
+      "type": "shell",
+      "windows": {
+        "command": "./stack.ps1",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "./stack.sh"
+      },
+      "linux": {
+        "command": "./stack.sh"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "stack: backend",
+      "type": "shell",
+      "windows": {
+        "command": "./scripts/clear-port.ps1 8000; uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "./scripts/clear-port.sh 8000 && uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000"
+      },
+      "linux": {
+        "command": "./scripts/clear-port.sh 8000 && uv run uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8000"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "ebull-stack",
+        "clear": false
+      },
+      "problemMatcher": {
+        "owner": "ebull-backend",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\x00$",
+          "endsPattern": "^\\x00$"
+        }
+      }
+    },
+    {
+      "label": "stack: frontend",
+      "type": "shell",
+      "windows": {
+        "command": "../scripts/clear-port.ps1 5173; pnpm dev",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "../scripts/clear-port.sh 5173 && pnpm dev"
+      },
+      "linux": {
+        "command": "../scripts/clear-port.sh 5173 && pnpm dev"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/frontend"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "ebull-stack",
+        "clear": false
+      },
+      "problemMatcher": {
+        "owner": "ebull-frontend",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\x00$",
+          "endsPattern": "^\\x00$"
+        }
+      }
+    },
+    {
+      "label": "stack: jobs",
+      "type": "shell",
+      "windows": {
+        "command": "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'app\\.jobs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; uv run python -m app.jobs.dev_reload",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "mkdir -p var/autonomy-logs; if launchctl kickstart -k \"gui/$(id -u)/com.ebull.jobs-daemon\" 2>/dev/null; then echo '==> restarted launchd com.ebull.jobs-daemon; tailing its log (closing this panel does NOT stop the daemon)'; exec tail -n 50 -F var/autonomy-logs/launchd.jobs-daemon.err.log; else echo '==> launchd agent com.ebull.jobs-daemon not installed (see scripts/autonomy/README.md) — running a local supervisor instead'; exec uv run python -m app.jobs.dev_reload; fi"
+      },
+      "linux": {
+        "command": "pgrep -f '[p]ython3 -m app\\.jobs(\\.dev_reload)?($|[[:space:]])' | xargs kill -9 2>/dev/null; uv run python -m app.jobs.dev_reload"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "ebull-stack",
+        "clear": false
+      },
+      "problemMatcher": {
+        "owner": "ebull-jobs",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\x00$",
+          "endsPattern": "^\\x00$"
+        }
+      }
+    },
+    {
+      "label": "stack: backend+frontend",
+      "dependsOn": ["stack: backend", "stack: frontend", "stack: jobs"],
+      "problemMatcher": []
+    },
+    {
+      "label": "restart: all (backend + frontend)",
+      "type": "shell",
+      "windows": {
+        "command": "./stack-restart.ps1",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "./stack-restart.sh"
+      },
+      "linux": {
+        "command": "./stack-restart.sh"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "restart: backend only",
+      "type": "shell",
+      "windows": {
+        "command": "./stack-restart.ps1 -Backend",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "./stack-restart.sh --backend"
+      },
+      "linux": {
+        "command": "./stack-restart.sh --backend"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "restart: frontend only",
+      "type": "shell",
+      "windows": {
+        "command": "./stack-restart.ps1 -Frontend",
+        "options": {
+          "shell": {
+            "executable": "pwsh",
+            "args": ["-NoProfile", "-Command"]
+          }
+        }
+      },
+      "osx": {
+        "command": "./stack-restart.sh --frontend"
+      },
+      "linux": {
+        "command": "./stack-restart.sh --frontend"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: start stack",
+      "dependsOn": [
+        "stack: prepare (postgres + migrate)",
+        "stack: backend+frontend"
+      ],
+      "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

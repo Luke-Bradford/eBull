@@ -1,0 +1,1538 @@
+"""
+Unit tests for market data normalisation, feature computation, and spread checks.
+
+No network calls, no database — all tests use in-memory fixtures.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import Any
+from unittest.mock import MagicMock
+
+import httpx
+import pytest
+
+from app.providers.implementations.etoro import (
+    _normalise_candle,
+    _normalise_candles,
+    _normalise_instrument,
+    _normalise_instruments,
+    _normalise_intraday_candle,
+    _normalise_intraday_candles,
+    _normalise_market_snapshot_instrument,
+    _normalise_rate,
+    _normalise_rates,
+)
+from app.providers.market_data import OHLCVBar, Quote
+from app.services.market_data import (
+    _INCREMENTAL_FETCH_BARS,
+    DEFAULT_MAX_SPREAD_PCT,
+    _candles_are_fresh,
+    _candles_fetch_count,
+    _compute_and_store_features,
+    _compute_rolling_returns,
+    _compute_volatility_30d,
+    compute_day_change,
+    compute_spread_pct,
+    most_recent_trading_day,
+)
+
+# ---------------------------------------------------------------------------
+# Fixtures — real eToro API response shapes
+# ---------------------------------------------------------------------------
+
+FIXTURE_INSTRUMENT = {
+    "instrumentID": 1001,
+    "symbolFull": "AAPL",
+    "instrumentDisplayName": "Apple",
+    "exchangeID": 10,
+    "stocksIndustryID": 42,
+    "priceSource": "Nasdaq",
+    "isInternalInstrument": False,
+}
+
+FIXTURE_INSTRUMENT_INTERNAL = {
+    **FIXTURE_INSTRUMENT,
+    "instrumentID": 9999,
+    "isInternalInstrument": True,
+}
+
+FIXTURE_CANDLE = {
+    "fromDate": "2024-06-15T00:00:00",
+    "open": 185.00,
+    "high": 187.50,
+    "low": 184.20,
+    "close": 186.80,
+    "volume": 55000000,
+}
+
+FIXTURE_CANDLE_2 = {
+    "fromDate": "2024-06-16T00:00:00",
+    "open": 186.80,
+    "high": 189.00,
+    "low": 185.50,
+    "close": 188.20,
+    "volume": 48000000,
+}
+
+FIXTURE_CANDLE_3 = {
+    "fromDate": "2024-06-14T00:00:00",
+    "open": 183.00,
+    "high": 185.10,
+    "low": 182.50,
+    "close": 185.00,
+    "volume": 60000000,
+}
+
+# Real API candle response: nested { candles: [{ instrumentId, candles: [...] }] }
+FIXTURE_CANDLES_RESPONSE = {
+    "candles": [
+        {
+            "instrumentId": 1001,
+            "candles": [FIXTURE_CANDLE_3, FIXTURE_CANDLE, FIXTURE_CANDLE_2],
+        }
+    ]
+}
+
+FIXTURE_RATE = {
+    "instrumentID": 1001,
+    "bid": 186.50,
+    "ask": 186.70,
+    "lastExecution": 186.60,
+    "date": "2024-06-17T14:30:00Z",
+}
+
+FIXTURE_RATE_2 = {
+    "instrumentID": 1002,
+    "bid": 50.10,
+    "ask": 50.30,
+    "lastExecution": 50.20,
+    "date": "2024-06-17T14:30:00Z",
+}
+
+FIXTURE_RATES_RESPONSE = {"rates": [FIXTURE_RATE, FIXTURE_RATE_2]}
+
+FIXTURE_MARKET_SNAPSHOT = {
+    "instrumentId": 1001,
+    "currentRate": 305.1,
+    "dailyPriceChange": 0.0623,
+    "weeklyPriceChange": 2.1,
+    "monthlyPriceChange": 4.2,
+    "isCurrentlyTradable": True,
+    "isExchangeOpen": True,
+    "isActiveInPlatform": True,
+    "isBuyEnabled": True,
+    "internalIndustryId": 42,
+    "sectorNameId": 7,
+    "popularityUniques7Day": 1234,
+    "traders7DayChange": -3,
+    "buyHoldingPct": 91.5,
+    "sellHoldingPct": 8.5,
+}
+
+
+# ---------------------------------------------------------------------------
+# Instrument normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseInstrument:
+    def test_valid_instrument(self) -> None:
+        rec = _normalise_instrument(FIXTURE_INSTRUMENT)
+        assert rec is not None
+        assert rec.provider_id == "1001"
+        assert rec.symbol == "AAPL"
+        assert rec.company_name == "Apple"
+        assert rec.exchange == "10"
+        assert rec.sector == "42"
+        assert rec.is_tradable is True
+
+    def test_currency_is_none_without_enrichment(self) -> None:
+        """currency is None — eToro instruments endpoint does not expose it."""
+        rec = _normalise_instrument(FIXTURE_INSTRUMENT)
+        assert rec is not None
+        assert rec.currency is None
+
+    def test_internal_instrument_skipped(self) -> None:
+        assert _normalise_instrument(FIXTURE_INSTRUMENT_INTERNAL) is None
+
+    def test_missing_id_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_INSTRUMENT.items() if k != "instrumentID"}
+        assert _normalise_instrument(item) is None
+
+    def test_missing_symbol_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_INSTRUMENT.items() if k != "symbolFull"}
+        assert _normalise_instrument(item) is None
+
+
+class TestNormaliseInstruments:
+    def test_filters_internals(self) -> None:
+        raw = {"instrumentDisplayDatas": [FIXTURE_INSTRUMENT, FIXTURE_INSTRUMENT_INTERNAL]}
+        records = _normalise_instruments(raw)
+        assert len(records) == 1
+        assert records[0].symbol == "AAPL"
+
+    def test_empty_list(self) -> None:
+        assert _normalise_instruments({"instrumentDisplayDatas": []}) == []
+
+    def test_non_dict_response_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected dict"):
+            _normalise_instruments(["not", "a", "dict"])
+
+    def test_bad_items_skipped(self) -> None:
+        raw = {"instrumentDisplayDatas": [FIXTURE_INSTRUMENT, "not a dict", {}]}
+        records = _normalise_instruments(raw)
+        assert len(records) == 1
+
+
+class TestNormaliseMarketSnapshotInstrument:
+    def test_projected_values_preserve_provider_units(self) -> None:
+        row = _normalise_market_snapshot_instrument(FIXTURE_MARKET_SNAPSHOT)
+        assert row is not None
+        assert row.instrument_id == 1001
+        assert row.current_rate == Decimal("305.1")
+        assert row.daily_price_change_pct == Decimal("0.0623")
+        assert row.is_exchange_open is True
+        assert row.industry_id == 42
+        assert row.buy_holding_pct == Decimal("91.5")
+
+    @pytest.mark.parametrize("instrument_id", [None, 0, -1, "bad"])
+    def test_invalid_provider_id_is_discarded(self, instrument_id: object) -> None:
+        assert _normalise_market_snapshot_instrument({**FIXTURE_MARKET_SNAPSHOT, "instrumentId": instrument_id}) is None
+
+    def test_missing_and_non_finite_optional_values_remain_unknown(self) -> None:
+        row = _normalise_market_snapshot_instrument(
+            {
+                "instrumentId": 1001,
+                "currentRate": 0,
+                "dailyPriceChange": "NaN",
+                "isCurrentlyTradable": 1,
+            }
+        )
+        assert row is not None
+        assert row.current_rate is None
+        assert row.daily_price_change_pct is None
+        assert row.is_currently_tradable is None
+
+
+# ---------------------------------------------------------------------------
+# Candle normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseCandle:
+    def test_valid_candle(self) -> None:
+        bar = _normalise_candle(FIXTURE_CANDLE)
+        assert bar is not None
+        assert bar.price_date == date(2024, 6, 15)
+        assert bar.open == Decimal("185.0")
+        assert bar.high == Decimal("187.5")
+        assert bar.low == Decimal("184.2")
+        assert bar.close == Decimal("186.8")
+        assert bar.volume == 55000000
+
+    def test_missing_close_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_CANDLE.items() if k != "close"}
+        assert _normalise_candle(item) is None
+
+    def test_missing_date_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_CANDLE.items() if k != "fromDate"}
+        assert _normalise_candle(item) is None
+
+    def test_zero_volume_becomes_none(self) -> None:
+        item = {**FIXTURE_CANDLE, "volume": 0}
+        bar = _normalise_candle(item)
+        assert bar is not None
+        assert bar.volume is None
+
+    def test_absent_volume_becomes_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_CANDLE.items() if k != "volume"}
+        bar = _normalise_candle(item)
+        assert bar is not None
+        assert bar.volume is None
+
+    def test_empty_string_date_returns_none(self) -> None:
+        item = {**FIXTURE_CANDLE, "fromDate": ""}
+        assert _normalise_candle(item) is None
+
+    def test_returns_ohlcv_bar(self) -> None:
+        bar = _normalise_candle(FIXTURE_CANDLE)
+        assert isinstance(bar, OHLCVBar)
+
+
+class TestNormaliseCandles:
+    def test_nested_response_shape(self) -> None:
+        """Real API: { candles: [{ instrumentId, candles: [...] }] }"""
+        bars = _normalise_candles(FIXTURE_CANDLES_RESPONSE)
+        assert len(bars) == 3
+
+    def test_preserves_order_from_api(self) -> None:
+        """asc direction means API returns oldest-first; normaliser preserves order."""
+        # Fixture has candles in order: 2024-06-14, 2024-06-15, 2024-06-16
+        bars = _normalise_candles(FIXTURE_CANDLES_RESPONSE)
+        assert bars[0].price_date == date(2024, 6, 14)
+        assert bars[1].price_date == date(2024, 6, 15)
+        assert bars[2].price_date == date(2024, 6, 16)
+
+    def test_empty_list(self) -> None:
+        assert _normalise_candles({"candles": []}) == []
+
+    def test_non_dict_response_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected dict"):
+            _normalise_candles(["not", "a", "dict"])
+
+    def test_bad_items_skipped(self) -> None:
+        raw = {
+            "candles": [
+                {
+                    "instrumentId": 1001,
+                    "candles": [
+                        FIXTURE_CANDLE,
+                        {"fromDate": "2024-06-16"},  # missing OHLC → skipped
+                        "not a dict",  # not a dict → skipped
+                    ],
+                }
+            ]
+        }
+        bars = _normalise_candles(raw)
+        assert len(bars) == 1
+
+
+# ---------------------------------------------------------------------------
+# Intraday candle normalisation (#600)
+# ---------------------------------------------------------------------------
+
+
+_FIXTURE_INTRADAY_CANDLE = {
+    "fromDate": "2026-04-27T14:30:00Z",
+    "open": "180.00",
+    "high": "180.50",
+    "low": "179.80",
+    "close": "180.20",
+    "volume": "12345",
+}
+
+
+class TestNormaliseIntradayCandle:
+    def test_valid_intraday_candle_keeps_time(self) -> None:
+        bar = _normalise_intraday_candle(_FIXTURE_INTRADAY_CANDLE)
+        assert bar is not None
+        assert bar.timestamp == datetime(2026, 4, 27, 14, 30, tzinfo=UTC)
+        assert bar.open == Decimal("180.00")
+        assert bar.close == Decimal("180.20")
+        assert bar.volume == 12345
+
+    def test_iso_timestamp_with_offset_normalised_to_utc(self) -> None:
+        item = {**_FIXTURE_INTRADAY_CANDLE, "fromDate": "2026-04-27T16:30:00+02:00"}
+        bar = _normalise_intraday_candle(item)
+        assert bar is not None
+        # +02:00 at 16:30 == 14:30 UTC
+        assert bar.timestamp == datetime(2026, 4, 27, 14, 30, tzinfo=UTC)
+
+    def test_missing_close_returns_none(self) -> None:
+        item = {k: v for k, v in _FIXTURE_INTRADAY_CANDLE.items() if k != "close"}
+        assert _normalise_intraday_candle(item) is None
+
+    def test_empty_string_timestamp_returns_none(self) -> None:
+        item = {**_FIXTURE_INTRADAY_CANDLE, "fromDate": ""}
+        assert _normalise_intraday_candle(item) is None
+
+    def test_malformed_timestamp_returns_none(self) -> None:
+        item = {**_FIXTURE_INTRADAY_CANDLE, "fromDate": "not-a-datetime"}
+        assert _normalise_intraday_candle(item) is None
+
+
+class TestNormaliseIntradayCandles:
+    def test_nested_response_shape(self) -> None:
+        raw = {
+            "candles": [
+                {
+                    "instrumentId": 1001,
+                    "candles": [
+                        _FIXTURE_INTRADAY_CANDLE,
+                        {**_FIXTURE_INTRADAY_CANDLE, "fromDate": "2026-04-27T14:31:00Z"},
+                    ],
+                }
+            ]
+        }
+        bars = _normalise_intraday_candles(raw)
+        assert len(bars) == 2
+        assert bars[0].timestamp.minute == 30
+        assert bars[1].timestamp.minute == 31
+
+    def test_empty_list(self) -> None:
+        assert _normalise_intraday_candles({"candles": []}) == []
+
+    def test_non_dict_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected dict"):
+            _normalise_intraday_candles(["not", "a", "dict"])
+
+    def test_bad_items_skipped(self) -> None:
+        raw = {
+            "candles": [
+                {
+                    "instrumentId": 1001,
+                    "candles": [
+                        _FIXTURE_INTRADAY_CANDLE,
+                        {"fromDate": "2026-04-27T14:31:00Z"},  # missing OHLC
+                        "not a dict",
+                    ],
+                }
+            ]
+        }
+        bars = _normalise_intraday_candles(raw)
+        assert len(bars) == 1
+
+
+# ---------------------------------------------------------------------------
+# Rate / quote normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseRate:
+    def test_valid_rate(self) -> None:
+        quote = _normalise_rate(FIXTURE_RATE)
+        assert quote is not None
+        assert quote.instrument_id == 1001
+        assert quote.bid == Decimal("186.5")
+        assert quote.ask == Decimal("186.7")
+        assert quote.last == Decimal("186.6")
+
+    def test_missing_instrument_id_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "instrumentID"}
+        assert _normalise_rate(item) is None
+
+    def test_missing_bid_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "bid"}
+        assert _normalise_rate(item) is None
+
+    def test_missing_ask_returns_none(self) -> None:
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "ask"}
+        assert _normalise_rate(item) is None
+
+    def test_zero_bid_returns_none(self) -> None:
+        item = {**FIXTURE_RATE, "bid": 0}
+        assert _normalise_rate(item) is None
+
+    def test_zero_ask_returns_none(self) -> None:
+        item = {**FIXTURE_RATE, "ask": 0}
+        assert _normalise_rate(item) is None
+
+    def test_returns_quote(self) -> None:
+        quote = _normalise_rate(FIXTURE_RATE)
+        assert isinstance(quote, Quote)
+
+    def test_none_last_execution(self) -> None:
+        item = {k: v for k, v in FIXTURE_RATE.items() if k != "lastExecution"}
+        quote = _normalise_rate(item)
+        assert quote is not None
+        assert quote.last is None
+
+    def test_zero_last_execution_coerced_to_none(self) -> None:
+        """#1429: eToro returns lastExecution=0 for un-freshly-traded
+        instruments (bid/ask present). A 0 last must never be persisted —
+        coerce to None so the read-side derives a mark from bid/ask."""
+        item = {**FIXTURE_RATE, "lastExecution": 0.0}
+        quote = _normalise_rate(item)
+        assert quote is not None
+        assert quote.last is None  # NOT Decimal("0")
+
+    def test_negative_last_execution_coerced_to_none(self) -> None:
+        item = {**FIXTURE_RATE, "lastExecution": -1.0}
+        quote = _normalise_rate(item)
+        assert quote is not None
+        assert quote.last is None
+
+    def test_timestamp_parsed(self) -> None:
+        quote = _normalise_rate(FIXTURE_RATE)
+        assert quote is not None
+        assert quote.timestamp == datetime(2024, 6, 17, 14, 30, tzinfo=UTC)
+
+
+class TestNormaliseRates:
+    def test_batch_response(self) -> None:
+        quotes = _normalise_rates(FIXTURE_RATES_RESPONSE)
+        assert len(quotes) == 2
+        ids = {q.instrument_id for q in quotes}
+        assert ids == {1001, 1002}
+
+    def test_empty_rates(self) -> None:
+        assert _normalise_rates({"rates": []}) == []
+
+    def test_non_dict_response_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected dict"):
+            _normalise_rates(["not", "a", "dict"])
+
+
+# ---------------------------------------------------------------------------
+# Provider get_quotes chunking
+# ---------------------------------------------------------------------------
+
+
+class TestGetQuotesChunking:
+    """Test that get_quotes chunks IDs at 50 and builds correct params."""
+
+    def test_empty_list_no_http_call(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            result = provider.get_quotes([])
+            assert result == []
+            provider._http.get.assert_not_called()
+
+    def test_single_batch_params(self) -> None:
+        """instrumentIds are inlined in the URL with raw commas (not percent-encoded)."""
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"rates": [FIXTURE_RATE]}
+        mock_resp.raise_for_status = MagicMock()
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = mock_resp
+
+            provider.get_quotes([1001, 1002, 1003])
+
+            provider._http.get.assert_called_once()
+            url_arg = provider._http.get.call_args.args[0]
+            assert "instrumentIds=1001,1002,1003" in url_arg
+
+    def test_chunking_at_51_ids(self) -> None:
+        """51 IDs should produce exactly 2 HTTP requests (50 + 1)."""
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"rates": []}
+        mock_resp.raise_for_status = MagicMock()
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = mock_resp
+
+            ids = list(range(1, 52))  # 51 IDs
+            provider.get_quotes(ids)
+
+            assert provider._http.get.call_count == 2
+            # First call: 50 IDs inlined in URL
+            first_url = provider._http.get.call_args_list[0].args[0]
+            first_ids = first_url.split("instrumentIds=")[1].split("&")[0]
+            assert len(first_ids.split(",")) == 50
+            # Second call: 1 ID
+            second_url = provider._http.get.call_args_list[1].args[0]
+            second_ids = second_url.split("instrumentIds=")[1].split("&")[0]
+            assert len(second_ids.split(",")) == 1
+
+    def test_failed_chunk_does_not_poison_others(self) -> None:
+        """If one chunk 500s, the rest still return quotes."""
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        ok_resp = MagicMock()
+        ok_resp.json.return_value = {"rates": [FIXTURE_RATE]}
+        ok_resp.raise_for_status = MagicMock()
+
+        error_response = httpx.Response(500, content=b'{"error":"internal"}')
+        fail_resp = MagicMock()
+        fail_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500",
+            request=httpx.Request("GET", "https://x"),
+            response=error_response,
+        )
+
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            # First chunk succeeds, second fails
+            provider._http.get.side_effect = [ok_resp, fail_resp]
+
+            ids = list(range(1, 52))  # 51 IDs → 2 chunks
+            result = provider.get_quotes(ids)
+
+            # Should return the quotes from the successful chunk
+            assert len(result) == 1
+            assert provider._http.get.call_count == 2
+            # Error body no longer persisted to disk under #471 — the
+            # raw-persistence path was retired now that SQL coverage
+            # is complete. Error diagnostics live in the log line via
+            # exc_info instead.
+
+
+class TestGetBroadMarketSnapshot:
+    def test_one_page_uses_live_page_parameter_and_tracks_discarded_rows(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 2,
+            "items": [FIXTURE_MARKET_SNAPSHOT, {"instrumentId": -100000}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            snapshot = provider.get_broad_market_snapshot()
+            params = provider._http.get.call_args.kwargs["params"]
+
+        assert params["page"] == 1
+        assert "pageNumber" not in params
+        assert snapshot.reported_total_items == 2
+        assert snapshot.discarded_items == 1
+        assert [row.instrument_id for row in snapshot.instruments] == [1001]
+        assert snapshot.observed_from <= snapshot.observed_to
+
+    def test_fetches_every_reported_page(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        first = MagicMock()
+        first.raise_for_status = MagicMock()
+        first.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 10_001,
+            "items": [{"instrumentId": i} for i in range(1, 10_001)],
+        }
+        second = MagicMock()
+        second.raise_for_status = MagicMock()
+        second.json.return_value = {
+            "page": 2,
+            "pageSize": 10_000,
+            "totalItems": 10_001,
+            "items": [{"instrumentId": 10_001}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.side_effect = [first, second]
+            snapshot = provider.get_broad_market_snapshot()
+            requested_pages = [call.kwargs["params"]["page"] for call in provider._http.get.call_args_list]
+
+        assert len(snapshot.instruments) == 10_001
+        assert requested_pages == [1, 2]
+
+    def test_refuses_incomplete_pagination(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"page": 1, "pageSize": 10_000, "totalItems": 3, "items": []}
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="pagination incomplete"):
+                provider.get_broad_market_snapshot()
+
+    def test_refuses_duplicate_ids(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 2,
+            "items": [{"instrumentId": 1001}, {"instrumentId": 1001}],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="repeated instrumentId"):
+                provider.get_broad_market_snapshot()
+
+    def test_refuses_unbounded_page_count(self) -> None:
+        from app.providers.implementations.etoro import EtoroMarketDataProvider
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "page": 1,
+            "pageSize": 10_000,
+            "totalItems": 20_001,
+            "items": [],
+        }
+        with EtoroMarketDataProvider(api_key="k", user_key="u") as provider:
+            provider._http = MagicMock()
+            provider._http.get.return_value = response
+            with pytest.raises(ValueError, match="bounded adapter permits 2"):
+                provider.get_broad_market_snapshot()
+
+
+# ---------------------------------------------------------------------------
+# Rolling returns
+# ---------------------------------------------------------------------------
+
+
+def _make_prices(closes: list[float], start: date | None = None) -> list[tuple[date, Decimal]]:
+    """Build a prices list from a sequence of closes, one per day from start."""
+    base = start or date(2024, 1, 2)
+    return [(date.fromordinal(base.toordinal() + i), Decimal(str(c))) for i, c in enumerate(closes)]
+
+
+class TestComputeRollingReturns:
+    def test_1w_return_correct(self) -> None:
+        # 8 prices spanning 7 intervals: anchor at index 0 (100), latest at index 7 (110)
+        # target_date = latest_date - 7, which falls on index 0 → return = (110/100) - 1 = 0.10
+        prices = _make_prices([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 110.0])
+        results = _compute_rolling_returns(prices)
+        r1w = results["return_1w"]
+        assert r1w is not None
+        assert abs(float(r1w) - 0.10) < 0.001
+
+    def test_insufficient_history_returns_none(self) -> None:
+        # Only 3 days — not enough for any window
+        prices = _make_prices([100.0, 101.0, 102.0])
+        results = _compute_rolling_returns(prices)
+        assert results["return_1m"] is None
+        assert results["return_3m"] is None
+        assert results["return_1y"] is None
+
+    def test_empty_prices_all_none(self) -> None:
+        results = _compute_rolling_returns([])
+        assert all(v is None for v in results.values())
+
+    def test_flat_prices_return_zero(self) -> None:
+        # 40 days all at 100 → all returns should be ~0
+        prices = _make_prices([100.0] * 40)
+        results = _compute_rolling_returns(prices)
+        r1m = results["return_1m"]
+        assert r1m is not None
+        assert abs(float(r1m)) < 0.001
+
+    def test_negative_return(self) -> None:
+        # 40 days: starts at 100, ends at 90
+        closes = [100.0] + [100.0] * 38 + [90.0]
+        prices = _make_prices(closes)
+        results = _compute_rolling_returns(prices)
+        r1m = results["return_1m"]
+        assert r1m is not None
+        assert float(r1m) < 0
+
+
+# ---------------------------------------------------------------------------
+# Volatility
+# ---------------------------------------------------------------------------
+
+
+class TestComputeVolatility30d:
+    def test_flat_prices_near_zero_volatility(self) -> None:
+        prices = _make_prices([100.0] * 35)
+        vol = _compute_volatility_30d(prices)
+        assert vol is not None
+        assert float(vol) < 0.01  # flat prices → near-zero volatility
+
+    def test_insufficient_history_returns_none(self) -> None:
+        prices = _make_prices([100.0, 101.0, 102.0])
+        assert _compute_volatility_30d(prices) is None
+
+    def test_empty_prices_returns_none(self) -> None:
+        assert _compute_volatility_30d([]) is None
+
+    def test_volatile_prices_higher_than_flat(self) -> None:
+        flat = _make_prices([100.0] * 35)
+        volatile = _make_prices([100.0 + (i % 5) * 5.0 for i in range(35)])
+        vol_flat = _compute_volatility_30d(flat)
+        vol_volatile = _compute_volatility_30d(volatile)
+        assert vol_flat is not None
+        assert vol_volatile is not None
+        assert vol_volatile > vol_flat
+
+    def test_returns_decimal(self) -> None:
+        prices = _make_prices([100.0 + i * 0.5 for i in range(35)])
+        vol = _compute_volatility_30d(prices)
+        assert isinstance(vol, Decimal)
+
+
+# ---------------------------------------------------------------------------
+# Spread check
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSpreadPct:
+    def test_normal_spread(self) -> None:
+        spread = compute_spread_pct(Decimal("186.50"), Decimal("186.70"))
+        assert spread is not None
+        # spread = 0.20, mid = 186.60 → 0.20/186.60*100 ≈ 0.107%
+        assert abs(float(spread) - 0.107) < 0.001
+
+    def test_zero_mid_returns_none(self) -> None:
+        assert compute_spread_pct(Decimal("0"), Decimal("0")) is None
+
+    def test_wide_spread_exceeds_default_threshold(self) -> None:
+        # bid=100, ask=103 → spread=3%, mid=101.5 → spread_pct ≈ 2.96% > 1%
+        spread = compute_spread_pct(Decimal("100"), Decimal("103"))
+        assert spread is not None
+        assert spread > DEFAULT_MAX_SPREAD_PCT
+
+    def test_tight_spread_within_default_threshold(self) -> None:
+        # bid=100, ask=100.50 → spread=0.5%, mid=100.25 → spread_pct ≈ 0.499% < 1%
+        spread = compute_spread_pct(Decimal("100"), Decimal("100.50"))
+        assert spread is not None
+        assert spread < DEFAULT_MAX_SPREAD_PCT
+
+
+class TestComputeDayChange:
+    """#1924 — close-to-close fractional day-change (pure)."""
+
+    def test_gain_is_positive_fraction(self) -> None:
+        # 102 from 100 → +0.02 (a fraction, not 2.0)
+        assert compute_day_change(Decimal("102"), Decimal("100")) == Decimal("0.02")
+
+    def test_loss_is_negative_fraction(self) -> None:
+        # AAPL 291.22 from 295.65 → ≈ -1.50%
+        pct = compute_day_change(Decimal("291.22"), Decimal("295.65"))
+        assert pct is not None
+        assert abs(float(pct) - (-0.014984)) < 1e-6
+
+    def test_flat_is_zero(self) -> None:
+        assert compute_day_change(Decimal("50"), Decimal("50")) == Decimal("0")
+
+    def test_zero_prior_close_returns_none(self) -> None:
+        # A zero close is a non-price sentinel — no meaningful change.
+        assert compute_day_change(Decimal("10"), Decimal("0")) is None
+
+    def test_negative_prior_close_returns_none(self) -> None:
+        assert compute_day_change(Decimal("10"), Decimal("-5")) is None
+
+
+# ---------------------------------------------------------------------------
+# Candle freshness skip
+# ---------------------------------------------------------------------------
+
+
+def _mock_conn_with_latest_date(latest_date: date | None) -> MagicMock:
+    """Build a mock connection whose execute().fetchone() returns (latest_date,)."""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    # Aggregate always returns one row; column is None if table empty.
+    mock_cursor.fetchone.return_value = (latest_date,) if latest_date is not None else (None,)
+    mock_conn.execute.return_value = mock_cursor
+    return mock_conn
+
+
+class TestCandlesAreFresh:
+    def test_fresh_when_latest_is_today(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(today)
+        assert _candles_are_fresh(conn, 1, today) is True
+
+    def test_stale_when_latest_is_yesterday_weekday(self) -> None:
+        """On Friday, yesterday (Thursday) is stale — today's candle is the target."""
+        today = date(2026, 4, 10)  # Friday
+        conn = _mock_conn_with_latest_date(date(2026, 4, 9))  # Thursday
+        assert _candles_are_fresh(conn, 1, today) is False
+
+    def test_fresh_over_weekend(self) -> None:
+        """Friday candle is fresh on Saturday/Sunday (weekends target Friday)."""
+        saturday = date(2026, 4, 11)
+        friday = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(friday)
+        assert _candles_are_fresh(conn, 1, saturday) is True
+
+    def test_stale_friday_candle_on_monday(self) -> None:
+        """Friday candle is stale on Monday — Monday's candle is the target."""
+        monday = date(2026, 4, 13)
+        friday = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(friday)
+        assert _candles_are_fresh(conn, 1, monday) is False
+
+    def test_stale_when_latest_is_four_days_ago(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(date(2026, 4, 6))
+        assert _candles_are_fresh(conn, 1, today) is False
+
+    def test_stale_when_no_data(self) -> None:
+        today = date(2026, 4, 10)
+        conn = _mock_conn_with_latest_date(None)
+        assert _candles_are_fresh(conn, 1, today) is False
+
+
+# ---------------------------------------------------------------------------
+# Weekday-aware candle freshness
+# ---------------------------------------------------------------------------
+
+
+def _candles_are_fresh_standalone(latest_date: date, today: date) -> bool:
+    return latest_date >= most_recent_trading_day(today)
+
+
+class TestCandleFreshness:
+    """Tests for the weekday-aware candle freshness check."""
+
+    def test_friday_candle_fresh_on_saturday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 11))  # Fri, Sat
+
+    def test_friday_candle_fresh_on_sunday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 12))  # Fri, Sun
+
+    def test_friday_candle_stale_on_monday(self) -> None:
+        # Monday's target is Monday itself; Friday's candle is stale.
+        assert not _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 13))  # Fri, Mon
+
+    def test_monday_candle_fresh_on_monday(self) -> None:
+        # Monday's target is Monday itself; Monday's candle is fresh.
+        assert _candles_are_fresh_standalone(date(2026, 4, 13), date(2026, 4, 13))  # Mon, Mon
+
+    def test_wednesday_candle_stale_on_friday(self) -> None:
+        assert not _candles_are_fresh_standalone(date(2026, 4, 8), date(2026, 4, 10))
+
+    def test_thursday_candle_stale_on_friday(self) -> None:
+        # Friday's target is Friday itself; Thursday's candle is stale.
+        assert not _candles_are_fresh_standalone(date(2026, 4, 9), date(2026, 4, 10))
+
+    def test_friday_candle_fresh_on_friday(self) -> None:
+        # Friday's target is Friday itself; Friday's candle is fresh.
+        assert _candles_are_fresh_standalone(date(2026, 4, 10), date(2026, 4, 10))
+
+    def test_monday_candle_stale_on_wednesday(self) -> None:
+        assert not _candles_are_fresh_standalone(date(2026, 4, 6), date(2026, 4, 8))
+
+    def test_same_day_weekday(self) -> None:
+        assert _candles_are_fresh_standalone(date(2026, 4, 13), date(2026, 4, 13))
+
+
+# ---------------------------------------------------------------------------
+# TA integration in _compute_and_store_features
+# ---------------------------------------------------------------------------
+
+_TA_COLUMN_NAMES = [
+    "sma_20",
+    "sma_50",
+    "sma_200",
+    "ema_12",
+    "ema_26",
+    "macd_line",
+    "macd_signal",
+    "macd_histogram",
+    "rsi_14",
+    "stoch_k",
+    "stoch_d",
+    "bb_upper",
+    "bb_lower",
+    "atr_14",
+]
+
+
+def _make_mock_execute(results_queue: Sequence[Sequence[Any]]) -> object:
+    """Return a side_effect callable that pops from a pre-built results queue.
+
+    Each call to conn.execute() returns a MagicMock whose .fetchall()
+    yields the next list from the queue.  Calls beyond the queue length
+    return empty results (for the UPDATE).
+    """
+    queue = list(results_queue)
+    idx = [0]
+
+    def _side_effect(*args: object, **kwargs: object) -> MagicMock:
+        mock = MagicMock()
+        if idx[0] < len(queue):
+            mock.fetchall.return_value = queue[idx[0]]
+            mock.fetchone.return_value = queue[idx[0]][0] if queue[idx[0]] else None
+        else:
+            mock.fetchall.return_value = []
+            mock.fetchone.return_value = None
+        idx[0] += 1
+        return mock
+
+    return _side_effect
+
+
+def _generate_price_rows(n: int) -> list[tuple[date, Decimal]]:
+    """Generate n rows of (price_date, close) with a gentle uptrend."""
+    base = date(2025, 1, 1)
+    return [(date.fromordinal(base.toordinal() + i), Decimal(str(100 + i * 0.5))) for i in range(n)]
+
+
+def _generate_ohlcv_rows(n: int) -> list[tuple[date, Decimal, Decimal, Decimal, Decimal, int]]:
+    """Generate n OHLCV tuples (price_date, open, high, low, close, volume).
+
+    Dates match _generate_price_rows so the TA date-alignment check passes.
+    """
+    base = date(2025, 1, 1)
+    return [
+        (
+            date.fromordinal(base.toordinal() + i),  # price_date
+            Decimal(str(100 + i * 0.5)),  # open
+            Decimal(str(101 + i * 0.5)),  # high
+            Decimal(str(99 + i * 0.5)),  # low
+            Decimal(str(100 + i * 0.5)),  # close
+            1000000,  # volume
+        )
+        for i in range(n)
+    ]
+
+
+class TestComputeAndStoreFeaturesTA:
+    """Tests for TA indicator integration in _compute_and_store_features."""
+
+    def test_ta_columns_in_update_sql(self) -> None:
+        """With 250+ rows, the UPDATE SQL contains all TA columns and params."""
+        n = 250
+        price_rows = _generate_price_rows(n)
+        # DB returns newest-first; function reverses internally
+        close_rows = list(reversed(price_rows))
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 1
+
+        # The third conn.execute call is the UPDATE
+        assert conn.execute.call_count == 3
+        update_call = conn.execute.call_args_list[2]
+        sql = update_call[0][0]
+        params = update_call[0][1]
+
+        # Verify every TA column appears in both the SQL and params dict
+        for col in _TA_COLUMN_NAMES:
+            assert f"%({col})s" in sql, f"Missing placeholder for {col}"
+            assert col in params, f"Missing param key for {col}"
+
+        # With 250 bars, at least RSI and SMA-20 should be non-None
+        assert params["rsi_14"] is not None
+        assert params["sma_20"] is not None
+        # Values should be Decimal (not float)
+        assert isinstance(params["rsi_14"], Decimal)
+        assert isinstance(params["sma_20"], Decimal)
+
+    def test_ta_none_with_insufficient_data(self) -> None:
+        """With only 10 rows, long-window indicators (sma_200) are None."""
+        n = 10
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 1
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        # sma_200 needs 200 bars — with 10 rows it must be None
+        assert params["sma_200"] is None
+        # sma_50 needs 50 bars — with 10 rows it must be None
+        assert params["sma_50"] is None
+        # All TA keys must still be present (even if None)
+        for col in _TA_COLUMN_NAMES:
+            assert col in params
+
+    def test_ta_skipped_when_no_rows(self) -> None:
+        """When there are no price rows, function returns 0 with no crash."""
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([[]])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 0
+        # Only the initial close-prices SELECT was executed; no OHLCV or UPDATE
+        assert conn.execute.call_count == 1
+
+    def test_ta_values_are_rounded_decimals(self) -> None:
+        """TA float values are converted to Decimal with 6dp precision."""
+        n = 250
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        _compute_and_store_features(conn, instrument_id=42)
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        for col in _TA_COLUMN_NAMES:
+            val = params[col]
+            if val is not None:
+                assert isinstance(val, Decimal), f"{col} should be Decimal, got {type(val)}"
+                # Verify at most 6 decimal places
+                _, _, exponent = val.as_tuple()
+                assert isinstance(exponent, int)
+                assert abs(exponent) <= 6, f"{col} has more than 6dp: {val}"
+
+    def test_ta_skipped_when_dates_misaligned(self) -> None:
+        """When latest OHLCV date != latest close date, all TA params are None.
+
+        This tests the stale-TA guard: if the latest candle has close but
+        incomplete OHLC, the OHLCV query returns the prior complete bar,
+        creating a date mismatch that should suppress TA computation.
+        """
+        n = 250
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+
+        # OHLCV rows end one day earlier than close rows — simulates a
+        # partial candle where close is set but OHLC is still NULL.
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n - 1)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        result = _compute_and_store_features(conn, instrument_id=42)
+        assert result == 1
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        # Every TA column must be None due to date mismatch
+        for col in _TA_COLUMN_NAMES:
+            assert params[col] is None, f"{col} should be None when dates misalign"
+
+    def test_string_indicators_excluded_from_ta_params(self) -> None:
+        """Regression guard: compute_indicators no longer emits the derived
+        trend-signal strings (#1989 — see derive_trend_signals); if they are
+        ever reintroduced they must still not reach the numeric UPDATE params."""
+        n = 250
+        price_rows = _generate_price_rows(n)
+        close_rows = list(reversed(price_rows))
+        ohlcv_rows = list(reversed(_generate_ohlcv_rows(n)))
+
+        conn = MagicMock()
+        conn.execute.side_effect = _make_mock_execute([close_rows, ohlcv_rows])
+
+        _compute_and_store_features(conn, instrument_id=42)
+
+        update_call = conn.execute.call_args_list[2]
+        params = update_call[0][1]
+
+        assert "price_vs_sma200" not in params
+        assert "trend_sma_cross" not in params
+
+
+class TestCandlesFetchCount:
+    """_candles_fetch_count (#271) — two-mode backfill vs incremental."""
+
+    def _mock_conn(self, fetchone_return):
+        """Return a MagicMock conn whose .execute().fetchone() yields the row."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = fetchone_return
+        conn.execute.return_value = cursor
+        return conn
+
+    def test_returns_default_when_no_prior_candles(self) -> None:
+        """Initial backfill — fetchone returns None (no rows)."""
+        conn = self._mock_conn(fetchone_return=None)
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+
+    def test_returns_default_when_max_price_date_is_null(self) -> None:
+        """Defensive — SELECT MAX(...) always returns a row; NULL when
+        there are no matching rows. Treat as initial backfill."""
+        conn = self._mock_conn(fetchone_return=(None,))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+
+    def test_returns_incremental_when_latest_is_within_window(self) -> None:
+        """Normal daily maintenance — last candle is yesterday."""
+        conn = self._mock_conn(fetchone_return=(date(2026, 4, 16),))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == _INCREMENTAL_FETCH_BARS
+        assert _INCREMENTAL_FETCH_BARS == 3  # pinning documented value
+
+    def test_returns_default_when_gap_exceeds_incremental_window(self) -> None:
+        """Gap resumption — instrument was halted / re-added after a
+        multi-day closure. Last candle is 10 days ago. A 3-bar
+        incremental fetch would leave a 7-day hole; fall back to
+        full backfill instead."""
+        conn = self._mock_conn(fetchone_return=(date(2026, 4, 7),))
+        assert _candles_fetch_count(conn, 42, default=400, today=date(2026, 4, 17)) == 400
+
+    def test_returns_incremental_at_exact_window_boundary(self) -> None:
+        """Boundary — gap of exactly _INCREMENTAL_FETCH_BARS days is
+        still coverable by the incremental fetch window."""
+        today = date(2026, 4, 17)
+        latest = date(2026, 4, 14)  # 3 days ago
+        assert (today - latest).days == _INCREMENTAL_FETCH_BARS
+        conn = self._mock_conn(fetchone_return=(latest,))
+        assert _candles_fetch_count(conn, 42, default=400, today=today) == _INCREMENTAL_FETCH_BARS
+
+
+class TestRefreshMarketDataForceBackfill:
+    """force_backfill=True bypasses freshness skip + uses lookback_days
+    regardless of incremental mode (#603)."""
+
+    def _mock_conn_fresh(self) -> MagicMock:
+        """Mock conn whose `_candles_are_fresh` returns True for everything."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        # _candles_are_fresh and _candles_fetch_count both call
+        # conn.execute(...).fetchone() — return today's date so the
+        # default-mode path skips and the force-mode path overrides.
+        cursor.fetchone.return_value = (date.today(),)
+        conn.execute.return_value = cursor
+        # transaction context manager passthrough
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = ctx
+        return conn
+
+    def test_default_mode_skips_fresh_instruments(self) -> None:
+        from app.services.market_data import refresh_market_data
+
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = []
+        provider.get_quotes.return_value = []
+        conn = self._mock_conn_fresh()
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=[(42, "AAPL")],
+            skip_quotes=True,
+        )
+        # Fresh instrument with no force flag → provider not called.
+        provider.get_daily_candles.assert_not_called()
+        assert summary.candle_rows_upserted == 0
+
+    def test_force_backfill_calls_provider_with_full_lookback(self) -> None:
+        from app.services.market_data import refresh_market_data
+
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = []
+        provider.get_quotes.return_value = []
+        conn = self._mock_conn_fresh()
+
+        refresh_market_data(
+            provider,
+            conn,
+            instruments=[(42, "AAPL")],
+            lookback_days=1000,
+            skip_quotes=True,
+            force_backfill=True,
+        )
+        # force_backfill bypasses both freshness skip AND incremental
+        # fetch-count logic — provider gets the full lookback verbatim.
+        provider.get_daily_candles.assert_called_once_with(42, 1000)
+
+    def test_fresh_instrument_counted_in_candles_skipped(self) -> None:
+        """#1293: a freshness-skipped instrument increments candles_skipped
+        so the caller can tell 'all fresh' from 'all failed'."""
+        from app.services.market_data import refresh_market_data
+
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = []
+        conn = self._mock_conn_fresh()
+        summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
+        assert summary.candles_skipped == 1
+        assert summary.candles_failed == 0
+        assert summary.candle_rows_upserted == 0
+
+    def test_completed_session_boundary_excludes_forming_future_candle(self) -> None:
+        """#2572: a retry may fetch today's forming bar; it is not a close."""
+        from unittest.mock import patch
+
+        from app.services.market_data import refresh_market_data
+
+        completed = date(2026, 8, 10)
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = [
+            OHLCVBar(completed, Decimal("10"), Decimal("11"), Decimal("9"), Decimal("10.5"), 1000),
+            OHLCVBar(date(2026, 8, 11), Decimal("10.5"), Decimal("12"), Decimal("10"), Decimal("11"), 500),
+        ]
+        conn = MagicMock(autocommit=True)
+        transaction = MagicMock()
+        transaction.__enter__ = MagicMock(return_value=transaction)
+        transaction.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = transaction
+
+        with (
+            patch("app.services.market_data._candles_are_fresh", return_value=False),
+            patch("app.services.market_data._candles_fetch_count", return_value=3),
+            patch("app.services.market_data._last_bar", return_value=None),
+            patch("app.services.market_data._upsert_candles", return_value=1) as upsert,
+            patch("app.services.market_data._compute_and_store_features", return_value=0),
+            patch("app.services.market_data._record_supply_outcome"),
+        ):
+            summary = refresh_market_data(
+                provider,
+                conn,
+                instruments=[(42, "AAPL")],
+                skip_quotes=True,
+                fresh_through=completed,
+            )
+
+        written_bars = upsert.call_args.args[2]
+        assert [bar.price_date for bar in written_bars] == [completed]
+        assert summary.candle_rows_upserted == 1
+
+    def test_fetch_exception_counted_in_candles_failed(self) -> None:
+        """#1293: a candle fetch that raises increments candles_failed (the
+        silent-failure signal — eToro session lapse / API outage)."""
+        from app.services.market_data import refresh_market_data
+
+        # conn whose _candles_are_fresh returns False (old latest date) so the
+        # fetch is attempted, then the provider raises.
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (date(2020, 1, 1),)
+        conn.execute.return_value = cursor
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = ctx
+
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = RuntimeError("eToro 401 session expired")
+
+        summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
+        assert summary.candles_failed == 1
+        assert summary.candles_skipped == 0
+        assert summary.candle_rows_upserted == 0
+
+    def test_rollback_after_upsert_does_not_count_rows(self) -> None:
+        """#1293 (Codex): if the upsert succeeds but feature-compute (still
+        inside the transaction) raises, the write rolls back — candle_rows_upserted
+        must NOT count it, and the instrument is counted as failed."""
+        from unittest.mock import patch as _patch
+
+        from app.services import market_data
+        from app.services.market_data import refresh_market_data
+
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (date(2020, 1, 1),)  # not fresh → attempt fetch
+        conn.execute.return_value = cursor
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = ctx
+
+        provider = MagicMock()
+        provider.get_daily_candles.return_value = [MagicMock()]  # non-empty bars
+
+        with (
+            _patch.object(market_data, "_upsert_candles", return_value=5),
+            _patch.object(market_data, "_compute_and_store_features", side_effect=RuntimeError("feature boom")),
+        ):
+            summary = refresh_market_data(provider, conn, instruments=[(42, "AAPL")], skip_quotes=True)
+
+        assert summary.candle_rows_upserted == 0  # the 5 rolled back — not counted
+        assert summary.candles_failed == 1
+
+
+class TestRefreshMarketDataCircuitBreaker:
+    """#1833 — batch circuit-breaker: K consecutive *systemic* candle-fetch
+    failures abort the whole batch with a clear terminal status instead of
+    grinding every instrument through the provider's 30s timeout."""
+
+    @staticmethod
+    def _not_fresh_conn() -> MagicMock:
+        """Conn whose freshness check returns an old date → every instrument
+        attempts a fetch; transaction is a passthrough context manager."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (date(2020, 1, 1),)  # ancient → not fresh
+        conn.execute.return_value = cursor
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        conn.transaction.return_value = ctx
+        return conn
+
+    @staticmethod
+    def _http_error(status: int) -> httpx.HTTPStatusError:
+        request = httpx.Request("GET", "https://public-api.etoro.com/x")
+        response = httpx.Response(status, request=request)
+        return httpx.HTTPStatusError(f"{status}", request=request, response=response)
+
+    @staticmethod
+    def _instruments(n: int) -> list[tuple[int, str]]:
+        return [(i, f"SYM{i}") for i in range(1, n + 1)]
+
+    def test_trips_after_limit_consecutive_transport_failures(self) -> None:
+        """eToro unreachable → every fetch is a TransportError (SOURCE_DOWN).
+        The breaker raises after `limit` and does NOT walk the remainder."""
+        from app.services.market_data import refresh_market_data
+        from app.services.sync_orchestrator.layer_types import (
+            FailureCategory,
+            UpstreamUnreachableError,
+        )
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = httpx.ConnectTimeout("eToro unreachable")
+
+        with pytest.raises(UpstreamUnreachableError) as excinfo:
+            refresh_market_data(
+                provider,
+                conn,
+                instruments=self._instruments(100),
+                skip_quotes=True,
+                consecutive_failure_limit=10,
+            )
+        # Tripped at exactly the limit — only 10 fetches attempted, not 100.
+        assert provider.get_daily_candles.call_count == 10
+        assert excinfo.value.category == FailureCategory.SOURCE_DOWN
+
+    def test_404s_never_trip_the_breaker(self) -> None:
+        """A 404 (delisted) proves the server responded → per-instrument,
+        not systemic. A whole batch of 404s walks every instrument."""
+        from app.services.market_data import refresh_market_data
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = self._http_error(404)
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=self._instruments(30),
+            skip_quotes=True,
+            consecutive_failure_limit=10,
+        )
+        assert provider.get_daily_candles.call_count == 30
+        assert summary.candles_failed == 30
+
+    def test_interspersed_success_resets_counter(self) -> None:
+        """A reachable success (empty bars) between failures resets the
+        consecutive counter, so the breaker never trips."""
+        from app.services.market_data import refresh_market_data
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        # 9 fails, 1 success (empty bars), repeated — never 10 in a row.
+        cycle = [httpx.ConnectError("down")] * 9 + [[]]
+        provider.get_daily_candles.side_effect = cycle * 5  # 50 instruments
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=self._instruments(50),
+            skip_quotes=True,
+            consecutive_failure_limit=10,
+        )
+        assert provider.get_daily_candles.call_count == 50
+        assert summary.candles_failed == 45
+
+    def test_404_between_failures_resets_counter(self) -> None:
+        """A per-instrument fault (404) also proves reachability → resets."""
+        from app.services.market_data import refresh_market_data
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        cycle = [httpx.ConnectError("down")] * 9 + [self._http_error(404)]
+        provider.get_daily_candles.side_effect = cycle * 5
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=self._instruments(50),
+            skip_quotes=True,
+            consecutive_failure_limit=10,
+        )
+        assert provider.get_daily_candles.call_count == 50
+        assert summary.candles_failed == 50
+
+    def test_trip_carries_triggering_category_auth(self) -> None:
+        """A 401 trip stays AUTH_EXPIRED (operator-actionable, self_heal=False)
+        rather than being flattened to SOURCE_DOWN."""
+        from app.services.market_data import refresh_market_data
+        from app.services.sync_orchestrator.layer_types import (
+            FailureCategory,
+            UpstreamUnreachableError,
+        )
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = self._http_error(401)
+
+        with pytest.raises(UpstreamUnreachableError) as excinfo:
+            refresh_market_data(
+                provider,
+                conn,
+                instruments=self._instruments(20),
+                skip_quotes=True,
+                consecutive_failure_limit=3,
+            )
+        assert excinfo.value.category == FailureCategory.AUTH_EXPIRED
+        assert provider.get_daily_candles.call_count == 3
+
+    def test_limit_zero_disables_breaker(self) -> None:
+        """`consecutive_failure_limit <= 0` walks every instrument even when
+        all fail systemically (matches pre-#1833 behaviour for callers that
+        opt out)."""
+        from app.services.market_data import refresh_market_data
+
+        conn = self._not_fresh_conn()
+        provider = MagicMock()
+        provider.get_daily_candles.side_effect = httpx.ConnectTimeout("down")
+
+        summary = refresh_market_data(
+            provider,
+            conn,
+            instruments=self._instruments(25),
+            skip_quotes=True,
+            consecutive_failure_limit=0,
+        )
+        assert provider.get_daily_candles.call_count == 25
+        assert summary.candles_failed == 25
+
+
+class TestDetectAdjustmentEvent:
+    """#2066 — ratio-scale overlap mismatch = split/adjustment event."""
+
+    @staticmethod
+    def _bar(price_date: date, close: str) -> OHLCVBar:
+        c = Decimal(close)
+        return OHLCVBar(price_date=price_date, open=c, high=c, low=c, close=c, volume=1000)
+
+    _D1 = date(2026, 7, 15)
+    _D2 = date(2026, 7, 16)
+
+    def test_forward_split_fires(self) -> None:
+        """2:1 split — stored old-basis 100, re-fetched back-adjusted 50."""
+        from app.services.market_data import detect_adjustment_event
+
+        ratio = detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "50")])
+        assert ratio == Decimal("2")
+
+    def test_reverse_split_fires(self) -> None:
+        """1:10 reverse split — stored 12, re-fetched 120; ratio is
+        direction-normalised so both directions read as the same event."""
+        from app.services.market_data import detect_adjustment_event
+
+        ratio = detect_adjustment_event({self._D1: Decimal("12")}, [self._bar(self._D1, "120")])
+        assert ratio == Decimal("10")
+
+    def test_small_correction_does_not_fire(self) -> None:
+        """A late exchange correction (single-digit %) is not an event."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "104")]) is None
+
+    def test_threshold_boundary_fires_inclusive(self) -> None:
+        """Exactly 1.2 fires (threshold is inclusive); just below does not."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "120")]) == Decimal("1.2")
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "119")]) is None
+
+    def test_zero_close_sentinel_skipped(self) -> None:
+        """price_daily zero-close sentinels must not fake a split."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("0")}, [self._bar(self._D1, "50")]) is None
+
+    def test_nonpositive_fetched_close_skipped(self) -> None:
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({self._D1: Decimal("100")}, [self._bar(self._D1, "0")]) is None
+
+    def test_no_overlap_no_signal(self) -> None:
+        """Dates absent from the store are new rows — no basis to compare."""
+        from app.services.market_data import detect_adjustment_event
+
+        assert detect_adjustment_event({}, [self._bar(self._D1, "50")]) is None
+
+    def test_worst_ratio_of_multiple_overlaps_returned(self) -> None:
+        from app.services.market_data import detect_adjustment_event
+
+        stored = {self._D1: Decimal("100"), self._D2: Decimal("300")}
+        bars = [self._bar(self._D1, "50"), self._bar(self._D2, "100")]
+        assert detect_adjustment_event(stored, bars) == Decimal("3")

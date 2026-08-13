@@ -1,0 +1,172 @@
+"""Tests for portfolio valuation hierarchy: quote → daily_close → cost_basis.
+
+The mark-resolution logic moved from `app.api.portfolio._parse_position`
+to `app.services.valuation._holding_from_row` with #1596 (shared
+valuation helper) — same hierarchy, same field names."""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+from decimal import Decimal
+
+import pytest
+
+from app.services.valuation import _holding_from_row
+
+
+def _row(
+    *,
+    instrument_id: int = 1,
+    symbol: str = "AAPL",
+    company_name: str = "Apple Inc.",
+    currency: str = "USD",
+    open_date: date | None = date(2024, 1, 1),
+    avg_cost: float = 150.0,
+    current_units: float = 10.0,
+    cost_basis: float = 1500.0,
+    source: str = "broker_sync",
+    updated_at: datetime = datetime(2026, 4, 13, 12, 0, tzinfo=UTC),
+    last: float | None = None,
+    daily_close: float | None = None,
+) -> dict[str, object]:
+    return {
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "company_name": company_name,
+        "currency": currency,
+        "open_date": open_date,
+        "avg_cost": avg_cost,
+        "current_units": current_units,
+        "cost_basis": cost_basis,
+        "source": source,
+        "updated_at": updated_at,
+        "last": last,
+        "daily_close": daily_close,
+    }
+
+
+class TestValuationHierarchy:
+    """Verify the three-tier pricing fallback: quote → daily_close → cost_basis."""
+
+    def test_quote_is_primary(self) -> None:
+        """When quote.last exists, use it regardless of daily_close."""
+        row = _row(current_units=10.0, cost_basis=1500.0, last=160.0, daily_close=155.0)
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _holding_from_row(row, "USD", rates)
+
+        assert pos.valuation_source == "quote"
+        assert pos.current_price == 160.0
+        assert pos.market_value == 10.0 * 160.0
+        assert pos.unrealized_pnl == (10.0 * 160.0) - 1500.0
+
+    def test_daily_close_is_secondary(self) -> None:
+        """When no quote but daily_close exists, use daily_close."""
+        row = _row(current_units=10.0, cost_basis=1500.0, last=None, daily_close=155.0)
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _holding_from_row(row, "USD", rates)
+
+        assert pos.valuation_source == "daily_close"
+        assert pos.current_price == 155.0
+        assert pos.market_value == 10.0 * 155.0
+        assert pos.unrealized_pnl == (10.0 * 155.0) - 1500.0
+
+    def test_cost_basis_is_fallback(self) -> None:
+        """When neither quote nor daily_close exists, fall back to cost_basis."""
+        row = _row(current_units=10.0, cost_basis=1500.0, last=None, daily_close=None)
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _holding_from_row(row, "USD", rates)
+
+        assert pos.valuation_source == "cost_basis"
+        assert pos.current_price is None
+        assert pos.market_value == 1500.0
+        assert pos.unrealized_pnl == 0.0
+
+    def test_fx_conversion_applied_to_daily_close(self) -> None:
+        """Daily close values are converted to display currency."""
+        row = _row(currency="USD", current_units=10.0, cost_basis=1500.0, daily_close=155.0)
+        rates = {("USD", "GBP"): Decimal("0.78")}
+        pos = _holding_from_row(row, "GBP", rates)
+
+        assert pos.valuation_source == "daily_close"
+        # current_price = 155 * 0.78 = 120.9
+        expected_price = float(Decimal("155.0") * Decimal("0.78"))
+        assert abs(pos.current_price - expected_price) < 0.01  # type: ignore[operator]
+        # market_value = 10 * 155 * 0.78 = 1209.0
+        expected_mv = float(Decimal("1550.0") * Decimal("0.78"))
+        assert abs(pos.market_value - expected_mv) < 0.01
+
+    def test_zero_last_price_is_treated_as_missing(self) -> None:
+        """#1428: a quote.last of 0.0 is NOT a valid mark.
+
+        eToro persists last=0.00 for instruments not freshly traded. Using
+        0 as the mark values the position at 0 → fake −100% P&L. With no
+        usable bid/ask, the next real signal (daily_close) must be chosen.
+        """
+        row = _row(current_units=100.0, cost_basis=500.0, last=0.0, daily_close=5.0)
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _holding_from_row(row, "USD", rates)
+
+        assert pos.valuation_source == "daily_close"
+        assert pos.market_value == 500.0  # 100 * 5.0, NOT 0
+
+    def test_zero_last_uses_bid_ask_mid(self) -> None:
+        """#1428: last=0 with a live two-sided book values at the mid."""
+        row = _row(current_units=10.0, cost_basis=6000.0, last=0.0)
+        row["bid"] = 697.16
+        row["ask"] = 697.22
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _holding_from_row(row, "USD", rates)
+
+        assert pos.valuation_source == "quote"
+        assert pos.market_value == pytest.approx(6971.9)  # 10 * 697.19 mid
+
+
+class TestCurrencyLabel:
+    """`currency` records the currency the money fields are ACTUALLY in (#2129):
+    display when converted or no-op, native on an FX-rate-missing degrade."""
+
+    def test_currency_is_display_when_converted(self) -> None:
+        row = _row(currency="USD", daily_close=155.0)
+        rates = {("USD", "GBP"): Decimal("0.78")}
+        pos = _holding_from_row(row, "GBP", rates)
+        assert pos.native_currency == "USD"
+        assert pos.currency == "GBP"  # converted
+
+    def test_currency_is_native_when_no_conversion_needed(self) -> None:
+        row = _row(currency="GBP", daily_close=155.0)
+        rates: dict[tuple[str, str], Decimal] = {}
+        pos = _holding_from_row(row, "GBP", rates)
+        assert pos.currency == "GBP"  # native == display, no-op
+
+    def test_currency_is_native_on_fx_degrade(self) -> None:
+        # native != display but no rate available → values left native, currency=native.
+        row = _row(currency="USD", current_units=10.0, cost_basis=1500.0, daily_close=155.0)
+        rates: dict[tuple[str, str], Decimal] = {}  # no USD→GBP
+        pos = _holding_from_row(row, "GBP", rates)
+        assert pos.native_currency == "USD"
+        assert pos.currency == "USD"  # degrade: money stayed native
+        assert pos.market_value == 10.0 * 155.0  # unconverted magnitude
+
+
+class TestFxPairAvailable:
+    """`_fx_pair_available` mirrors `fx.convert`'s reachability (equal / direct /
+    inverse; no triangulation) — drives the cash/mirror totals-mixed flag (#2129)."""
+
+    def test_equal_currency(self) -> None:
+        from app.services.valuation import _fx_pair_available
+
+        assert _fx_pair_available("USD", "USD", {}) is True
+
+    def test_direct_and_inverse(self) -> None:
+        from app.services.valuation import _fx_pair_available
+
+        rates = {("USD", "GBP"): Decimal("0.78")}
+        assert _fx_pair_available("USD", "GBP", rates) is True  # direct
+        assert _fx_pair_available("GBP", "USD", rates) is True  # inverse
+
+    def test_missing_and_no_triangulation(self) -> None:
+        from app.services.valuation import _fx_pair_available
+
+        rates = {("USD", "EUR"): Decimal("0.9")}  # USD→EUR only
+        assert _fx_pair_available("USD", "GBP", rates) is False
+        assert _fx_pair_available("EUR", "GBP", rates) is False  # no USD triangulation

@@ -1,0 +1,56 @@
+{
+  "name": "ebull-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --noEmit",
+    "dark:check": "node scripts/check-dark-classes.mjs",
+    "pills:check": "node scripts/check-hand-rolled-pills.mjs",
+    "charts:check": "node scripts/check-chart-integrity.mjs",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:unit": "vitest run --exclude src/pages/SetupPage.test.tsx",
+    "test:integration": "vitest run src/pages/SetupPage.test.tsx",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.59.0",
+    "lightweight-charts": "^5.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0",
+    "recharts": "^2.15.4"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "autoprefixer": "^10.4.20",
+    "jsdom": "^25.0.1",
+    "postcss": "^8.5.22",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.2",
+    "vite": "^6.4.3",
+    "vitest": "^4.1.8",
+    "vitest-axe": "^0.1.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "esbuild": ">=0.28.1 <0.29",
+      "ws@>=8.0.0 <8.21.0": ">=8.21.0",
+      "form-data@>=4.0.0 <4.0.6": ">=4.0.6"
+    }
+  }
+}

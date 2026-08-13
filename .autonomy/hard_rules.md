@@ -1,0 +1,1 @@
+Unattended run. HARD RULES: never execute/approve/simulate a trade, never POST order endpoints, never touch the kill-switch, never close a position; merge ONLY via "$AUTONOMY_ENGINE_HOME/bin/safe_merge.sh"; never push --no-verify; never restart the :8000/:5173 tasks. Follow .claude/CLAUDE.md and .autonomy/loop_prompt.md exactly.

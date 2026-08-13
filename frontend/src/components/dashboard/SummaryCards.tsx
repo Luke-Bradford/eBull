@@ -1,0 +1,153 @@
+import type { BudgetStateResponse, PortfolioResponse } from "@/api/types";
+import { useDisplayCurrency } from "@/lib/DisplayCurrencyContext";
+import { formatMoney, formatPct } from "@/lib/format";
+import { portfolioTotals } from "@/lib/portfolioTotals";
+import { SectionSkeleton } from "@/components/dashboard/Section";
+import { STAT_ROW_GRID, StatTile } from "@/components/dashboard/StatTile";
+
+/**
+ * Four top-level cards: Total AUM, Cash, Unrealized P&L, Available for
+ * deployment.
+ *
+ * AUM honours the settled decision: backend uses mark-to-market first and
+ * falls back to cost basis when no quote exists (see app/api/portfolio.py).
+ * The frontend just displays the value the API returns; it does not
+ * recompute. Cash may be `null` (unknown), distinct from `0`.
+ *
+ * Unrealized P&L is summed from positions because the API does not yet
+ * expose a top-line `unrealized_pnl` field. Percentage uses sum-of-PnL over
+ * sum-of-cost-basis (capital-weighted), not an average of per-position
+ * percentages.
+ *
+ * Design-system v1 chrome (#691): borderless, divided by hairlines on
+ * sm+ screens. Replaces the prior bordered+shadowed card pattern so
+ * the page reads as one editorial spread.
+ */
+export function SummaryCards({
+  data,
+  budgetData,
+  budgetError,
+}: {
+  data: PortfolioResponse | null;
+  budgetData: BudgetStateResponse | null;
+  budgetError?: boolean;
+}) {
+  const currency = useDisplayCurrency();
+  if (data === null) {
+    return (
+      <div className={STAT_ROW_GRID}>
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
+            <SectionSkeleton rows={2} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // #1901: shared totals + #2129 display-currency labeling (single source, also
+  // used by the Portfolio workstation's SummaryBar). The budget card keeps the
+  // /config currency: its `available_for_deployment` is separate budget math with
+  // no per-response currency.
+  const { totalPnl, pnlFraction, displayCurrency, hasUnconverted } = portfolioTotals(data);
+
+  return (
+    <>
+      <div className={STAT_ROW_GRID}>
+        <StatTile label="Total AUM" value={formatMoney(data.total_aum, displayCurrency)} />
+        <StatTile
+          label="Cash balance"
+          value={formatMoney(data.cash_balance, data.cash_currency)}
+          hint={data.cash_balance === null ? "unknown" : undefined}
+        />
+        <StatTile
+          label="Unrealized P&L"
+          value={formatMoney(totalPnl, displayCurrency)}
+          // The % RESTATES the money delta in another unit, so it carries the
+          // same signal and the same colour — matching the rolling-P&L row
+          // directly below, which is the point of sharing the tile at all.
+          // Contrast the Deployment tile's hint, a caveat that stays muted.
+          hint={pnlFraction === null ? undefined : formatPct(pnlFraction)}
+          tone={totalPnl >= 0 ? "positive" : "negative"}
+          toneHint
+        />
+        <DeploymentCard budget={budgetData} budgetError={budgetError} currency={currency} />
+      </div>
+      {hasUnconverted && (
+        <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+          ⚠ Some positions couldn&apos;t be converted to {displayCurrency}; totals may mix
+          currencies.
+        </p>
+      )}
+    </>
+  );
+}
+
+/**
+ * Classify the deployment-budget state for display. Pure so it can be
+ * table-tested without React.
+ *
+ * The key honesty distinction: a NEGATIVE `available_for_deployment` is not
+ * "low" — it means cash has fallen below the cash-buffer reserve floor
+ * (`app/services/budget.py`), and the execution guard then blocks every
+ * order as "budget exhausted" the moment `available_for_deployment <= 0`
+ * (`app/services/execution_guard.py`). Surface that buffer-breach distinctly
+ * from a merely-low-but-still-deployable budget.
+ */
+export function classifyDeployment(budget: BudgetStateResponse): {
+  tone: "positive" | "negative" | undefined;
+  hint: string | undefined;
+  isNull: boolean;
+} {
+  const available = budget.available_for_deployment;
+  if (available === null) {
+    return { tone: undefined, hint: "Cash unknown", isNull: true };
+  }
+  // Mirror the execution guard's threshold (`<= 0` → budget exhausted).
+  const isExhausted = available <= 0;
+  const isLow =
+    !isExhausted &&
+    budget.working_budget !== null &&
+    budget.working_budget > 0 &&
+    available / budget.working_budget < 0.05;
+  const hint = isExhausted
+    ? "At or below cash buffer reserve"
+    : isLow
+      ? "Low deployment capital"
+      : undefined;
+  return { tone: isExhausted || isLow ? "negative" : "positive", hint, isNull: false };
+}
+
+function DeploymentCard({
+  budget,
+  budgetError,
+  currency,
+}: {
+  budget: BudgetStateResponse | null;
+  budgetError?: boolean;
+  currency: string;
+}) {
+  if (budget === null) {
+    // Distinguish "still loading" (skeleton) from "failed" (dash + hint).
+    if (budgetError) {
+      return <StatTile label="Available for deployment" value="—" hint="Budget unavailable" />;
+    }
+    return (
+      <div className="border-t border-slate-200 dark:border-slate-800 px-1 pt-3 pb-1">
+        <SectionSkeleton rows={2} />
+      </div>
+    );
+  }
+
+  const available = budget.available_for_deployment;
+  const { tone, hint, isNull } = classifyDeployment(budget);
+
+  return (
+    <StatTile
+      label="Available for deployment"
+      value={isNull ? "—" : formatMoney(available, currency)}
+      hint={hint}
+      tone={tone}
+    />
+  );
+}

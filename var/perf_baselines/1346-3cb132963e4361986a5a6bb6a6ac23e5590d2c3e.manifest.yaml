@@ -1,0 +1,4 @@
+fixture_label: ownership_institutions_observations_select_proxy_sentinel
+row_counts:
+  ownership_institutions_current: 1000000
+target_table: ownership_institutions_current

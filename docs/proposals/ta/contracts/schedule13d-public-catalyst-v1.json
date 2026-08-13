@@ -1,0 +1,176 @@
+{
+  "candidate_id": "c4-schedule13d-public-catalyst",
+  "contract_version": "schedule13d-public-catalyst-v1",
+  "decision": "historical_falsification_only",
+  "hypothesis": "A clean first public Schedule 13D has positive ten-session total return after a causal retail fill and adverse costs.",
+  "source": {
+    "form": "SCHEDULE 13D",
+    "document_kind": "primary_doc_13dg",
+    "public_filing_date_source": "sec_filing_manifest.filed_at",
+    "accepted_timestamp_optional_source": "sec_filing_manifest.accepted_at",
+    "blockholder_filed_at_policy": "signature_or_fallback_provenance_only_never_public_decision_clock",
+    "first_source_date": "2024-12-18",
+    "last_complete_filing_date": "2026-06-18",
+    "research_vendor": "paperswithbacktest/Stocks-Daily-Price"
+  },
+  "event_identity": {
+    "unit": "one accession_number",
+    "reporter_identity": "reporter_cik_else_normalized_reporter_name",
+    "issuer_identity": "issuer_cik",
+    "joint_reporter_rule": "union_history_across_every_reporter_then_count_accession_once",
+    "prior_history_order": "strictly_earlier_sec_manifest_public_filing_date_only",
+    "primary_population": "no_prior_active_and_no_prior_passive_and_no_same_timestamp_peer",
+    "separate_attribution_only": [
+      "prior_passive_13g_to_13d_conversion",
+      "prior_active_repeat",
+      "same_timestamp_chain_ambiguous"
+    ]
+  },
+  "eligibility": {
+    "instrument_mapping_required": true,
+    "research_series_mapping_required": true,
+    "minimum_prior_daily_sessions": 60,
+    "prior_20_session_return_definition": "close_session_60_div_close_session_40_minus_one_exactly_20_close_to_close_intervals",
+    "trailing_20_session_liquidity_definition": "median_raw_close_times_volume_sessions_41_through_60",
+    "required_session_policy": "all_60_prior_and_10_holding_nyse_sessions_must_have_exact_bars_never_skip_to_next_bar",
+    "minimum_entry_price_usd": 5.0,
+    "minimum_trailing_20_session_median_dollar_volume_usd": 10000000,
+    "security_scope": "current_tradable_etoro_instrument_type_5_Stocks_and_exchange_id_4_Nasdaq_or_5_NYSE",
+    "current_is_tradable_required": true,
+    "historical_security_identity_limit": "current_snapshot_only_not_point_in_time_common_share_proof",
+    "unknown_security_type": "refuse",
+    "missing_or_nonpositive_ohlcv": "refuse",
+    "corporate_action_ambiguity": "refuse"
+  },
+  "decision_clock": {
+    "historical_fill": "first_regular_session_open_strictly_after_filing_date",
+    "filing_date_field": "sec_filing_manifest.filed_at_date",
+    "date_only_policy": "never_same_day",
+    "precise_timestamp_policy": "same_next_session_rule_for_daily_corpus_comparability",
+    "same_close_fill": "forbidden"
+  },
+  "position": {
+    "side": "long",
+    "entry": "raw_open_at_historical_fill",
+    "exit": "raw_close_of_tenth_regular_session_including_entry_session_as_session_one",
+    "holding_sessions": 10,
+    "stop_loss": null,
+    "take_profit": null,
+    "return_basis": "raw_execution_prices_with_adj_close_over_close_total_return_factor",
+    "round_trip_adverse_cost_bps": 50,
+    "break_even_cost_bps_reported": true
+  },
+  "challengers": {
+    "unfiltered_eligible_13d": "same_fill_exit_cost_and_coverage",
+    "matched_random_time": "one_sha256_seeded_price_covered_non_event_entry_session_per_treatment_same_instrument_and_treatment_entry_year_month_excluding_any_13d_entry_plus_or_minus_10_nyse_sessions_empty_set_is_unmatched",
+    "random_seed": 2582,
+    "initial_13g": "match_without_replacement_and_report_separately_by_13g_1b_13g_1c_both_or_unknown_rule",
+    "matching": {
+      "exact_fields": [
+        "filing_year_month",
+        "entry_price_bucket",
+        "trailing_dollar_volume_bucket",
+        "prior_20_session_market_return_bucket"
+      ],
+      "entry_price_bucket_usd_edges": [5, 10, 25, 50, 100],
+      "trailing_dollar_volume_bucket_usd_edges": [10000000, 25000000, 100000000, 500000000],
+      "prior_20_session_market_return_pct_edges": [-5, 0, 5],
+      "tie_break": "sha256_treatment_accession_challenger_accession_seed_ascending",
+      "treatment_order": "accession_number_ascending_within_each_separate_rule_population",
+      "unmatched_treatment": "retain_primary_but_refuse_that_challenger_pair"
+    },
+    "unknown_13g_rule": "never_pool_with_known_rule",
+    "paired_difference_inference": "treatment_return_minus_challenger_return_two_way_pigeonhole_bootstrap_by_treatment_issuer_and_treatment_entry_session",
+    "paired_confidence_interval": "two_sided_95pct_linear_percentile_interval",
+    "paired_one_sided_p_value": "null_center_bootstrap_probability_centered_mean_gte_observed_mean_with_plus_one_finite_resample_correction",
+    "multiplicity": "holm_step_down_adjust_one_sided_p_values_for_random_13g_1b_and_13g_1c_at_family_alpha_0_05",
+    "both_and_unknown_13g_rules": "report_separately_attribution_only_not_acceptance_gates"
+  },
+  "context": {
+    "market_series": {
+      "series_id": 7713,
+      "vendor": "etoro/etoro-comparators-2026-07-08-v1",
+      "vendor_symbol": "SPY",
+      "comparator_snapshot_id": "etoro-comparators-2026-07-08-v1",
+      "return_basis": "price_only_close_to_close",
+      "allowed_use": "matching_and_attribution_only_not_total_return_benchmark"
+    },
+    "predeclared_attribution_only": [
+      "filing_year_month",
+      "exchange",
+      "entry_price_bucket",
+      "trailing_dollar_volume_bucket",
+      "trailing_20_session_realised_volatility_bucket",
+      "prior_20_session_stock_return",
+      "prior_20_session_market_return",
+      "market_return_over_holding_window",
+      "maximum_percent_of_class_across_accession_reporters"
+    ],
+    "context_may_gate_primary_result": false,
+    "subgroup_selection_after_outcome": "forbidden",
+    "item4_policy": "not_used_in_v1_beyond_required_source_presence_and_document_hash"
+  },
+  "statistics": {
+    "primary_estimand": "mean_net_total_return_pct",
+    "confidence_interval": "two_way_pigeonhole_bootstrap_by_issuer_and_entry_session_95pct_percentile",
+    "bootstrap_weighting": "independent_multinomial_cluster_counts_product_discard_empty_intersection_until_10000_valid_draws",
+    "bootstrap_quantile_method": "linear",
+    "bootstrap_seed": 2582,
+    "bootstrap_resamples": 10000,
+    "minimum_worthwhile_net_effect_pct": 1.0,
+    "planning_return_standard_deviation_pct": 10.0,
+    "planning_alpha_two_sided": 0.05,
+    "planning_power": 0.8,
+    "minimum_planning_effective_sample_size": 785,
+    "effective_sample_size_definition": "min_raw_n_sample_return_variance_div_pigeonhole_bootstrap_mean_variance",
+    "recent_stability_windows": [
+      "2025-01-01_to_2025-06-30",
+      "2025-07-01_to_2025-12-31",
+      "2026-01-01_to_2026-06-30",
+      "latest_12m_2025-07-01_to_2026-06-30"
+    ],
+    "signal_strength_monotonicity_definition": "spearman_average_tie_rank_maximum_percent_of_class_vs_net_return_attribution_only",
+    "concentration_return_basis": "gross_return_before_fixed_50bps_cost_positive_part",
+    "required_reports": [
+      "eligible_event_count",
+      "effective_sample_size",
+      "mean_and_median_net_return",
+      "confidence_interval",
+      "hit_rate",
+      "average_winner_and_loser",
+      "profit_factor",
+      "expected_shortfall_5pct",
+      "worst_net_event_return",
+      "concurrency",
+      "sector_and_issuer_concentration",
+      "result_excluding_best_1pct",
+      "rolling_6_month_result",
+      "rolling_12_month_result",
+      "signal_strength_monotonicity",
+      "break_even_cost"
+    ]
+  },
+  "acceptance": {
+    "historical_pass_requires": [
+      "effective_sample_size_gte_785",
+      "adverse_cost_clustered_lower_bound_gt_zero",
+      "paired_95pct_lower_bound_vs_random_gt_zero_and_holm_adjusted_one_sided_p_lte_0_05",
+      "paired_95pct_lower_bound_vs_matched_13g_1b_gt_zero_and_holm_adjusted_one_sided_p_lte_0_05",
+      "paired_95pct_lower_bound_vs_matched_13g_1c_gt_zero_and_holm_adjusted_one_sided_p_lte_0_05",
+      "profit_factor_gt_one",
+      "positive_result_excluding_best_1pct",
+      "no_issuer_or_entry_session_supplies_20pct_or_more_of_gross_positive_return",
+      "latest_nonoverlapping_6_month_mean_positive",
+      "at_least_two_of_three_nonoverlapping_6_month_means_positive"
+    ],
+    "historical_archive_can_promote_capital": false,
+    "next_stage_if_passed": "freeze_bracket_and_sizing_then_collect_untouched_prospective_shadow",
+    "next_stage_if_failed": "retain_rejection_without_threshold_horizon_purpose_or_regime_rescue"
+  },
+  "storage": {
+    "duplicate_raw_document": false,
+    "persist_non_firing_poll_rows": false,
+    "research_output": "one_bounded_aggregate_artifact",
+    "prospective_output_if_authorised": "one_compact_fired_or_refused_decision_with_category_version_and_hash"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "stocksIndustries": [
+    {
+      "industryID": 1,
+      "industryName": "Basic Materials"
+    },
+    {
+      "industryID": 2,
+      "industryName": "Conglomerates"
+    },
+    {
+      "industryID": 3,
+      "industryName": "Consumer Goods"
+    },
+    {
+      "industryID": 4,
+      "industryName": "Financial"
+    },
+    {
+      "industryID": 5,
+      "industryName": "Healthcare"
+    },
+    {
+      "industryID": 6,
+      "industryName": "Industrial Goods"
+    },
+    {
+      "industryID": 7,
+      "industryName": "Services"
+    },
+    {
+      "industryID": 8,
+      "industryName": "Technology"
+    },
+    {
+      "industryID": 9,
+      "industryName": "Utilities"
+    }
+  ]
+}

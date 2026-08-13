@@ -1,0 +1,397 @@
+{
+  "symbol": "JPM",
+  "instrument_id": 1023,
+  "context": {
+    "instrument": {
+      "symbol": "JPM",
+      "company_name": "JPMorgan Chase & Co",
+      "sector": "4",
+      "industry": null,
+      "country": "US",
+      "currency": "USD"
+    },
+    "fundamentals": [
+      {
+        "as_of_date": "2026-03-31",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -107704000000.0,
+        "cash": null,
+        "debt": 68048000000.0,
+        "net_debt": null,
+        "eps": 20.89,
+        "book_value": null
+      },
+      {
+        "as_of_date": "2025-12-31",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -147782000000.0,
+        "cash": null,
+        "debt": 64776000000.0,
+        "net_debt": null,
+        "eps": 20.02,
+        "book_value": 134.4255
+      },
+      {
+        "as_of_date": "2025-09-30",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -119748000000.0,
+        "cash": null,
+        "debt": 69355000000.0,
+        "net_debt": null,
+        "eps": 20.2,
+        "book_value": null
+      },
+      {
+        "as_of_date": "2025-06-30",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -148615000000.0,
+        "cash": null,
+        "debt": 65293000000.0,
+        "net_debt": null,
+        "eps": 19.5,
+        "book_value": null
+      },
+      {
+        "as_of_date": "2025-03-31",
+        "revenue_ttm": null,
+        "gross_margin": null,
+        "operating_margin": null,
+        "fcf": -139693000000.0,
+        "cash": null,
+        "debt": 64980000000.0,
+        "net_debt": null,
+        "eps": 20.38,
+        "book_value": null
+      }
+    ],
+    "filings": [],
+    "news": [
+      {
+        "event_time": "2026-06-30T04:30:55+00:00",
+        "source": "Yahoo Finance",
+        "headline": "NKE Stock In Focus: JPMorgan Doubts Nike\u2019s Turnaround Potential, But Retail Disagrees",
+        "category": "earnings",
+        "sentiment_score": -0.6667,
+        "importance_score": 0.8333
+      },
+      {
+        "event_time": "2026-07-11T02:39:48+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Dow Jones Futures: Watch Nvidia, Micron, Sandisk, Robinhood As Market Sets Up; Big Earnings Due",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8303
+      },
+      {
+        "event_time": "2026-07-08T22:45:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "A Positive Outlook as Q2 Earnings Season Gets Underway",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8111
+      },
+      {
+        "event_time": "2026-07-10T22:32:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Q2 Earnings Season Arrives: Can Results Match Upbeat Expectations?",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.81
+      },
+      {
+        "event_time": "2026-07-01T21:53:03+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Cboe Seeks to List Prediction Market Type Options on Earnings Metrics",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.8069
+      },
+      {
+        "event_time": "2026-07-06T20:28:42+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Bank Stocks Rally Ahead Of Earnings. Why Bullishness Is Growing.",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.8
+      },
+      {
+        "event_time": "2026-06-29T20:17:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "UBS, JPMorgan Lower Lennar (LEN) Targets on Softer Housing Demand and Revised Guidance",
+        "category": "earnings",
+        "sentiment_score": 0.6667,
+        "importance_score": 0.799
+      },
+      {
+        "event_time": "2026-07-10T20:11:38+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Meta Leads Again as Markets Look Forward to Earnings: Stock Market Today",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.7986
+      },
+      {
+        "event_time": "2026-07-01T20:09:00+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Wells Fargo Stock Has Lagged Other Banks. Earnings Can Change That.",
+        "category": "earnings",
+        "sentiment_score": 0.0,
+        "importance_score": 0.7984
+      },
+      {
+        "event_time": "2026-07-01T19:24:53+00:00",
+        "source": "Yahoo Finance",
+        "headline": "Passive Indexers Are Shuffling Billions Into the Russell 2000 Just in Time for a Brutal Fed Reality Check",
+        "category": "earnings",
+        "sentiment_score": 0.3333,
+        "importance_score": 0.7948
+      }
+    ],
+    "prior_thesis": null,
+    "risk_metrics": {
+      "metric_version": "risk_v1",
+      "basis_note": "All returns/ratios are fractions (0.10 = 10%, not percent). Drawdown, var_5 and worst_day are signed losses (negative is a loss). Basis is price-return (no dividend reinvestment; total-return is future work), so do not over-read CAGR for high-yield names. A non-'ok' status means the metric is NOT a precise number: treat insufficient_history / partial_window as provisional, and benchmark_missing beta/excess as absent, not zero. Cite a risk figure as {window_key, as_of_date, metric_version}.",
+      "windows": [
+        {
+          "window_key": "1y",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.15894761297354207,
+          "excess_cagr_vs_spy": -0.04694419351321514,
+          "vol_annualized": 0.21814391192250301,
+          "beta": 0.80103831921444,
+          "beta_r2": 0.22546643179207818,
+          "calmar": 1.0327470319636198,
+          "max_drawdown": -0.15390759600763615,
+          "current_drawdown": 0.0,
+          "var_5": -0.02323215,
+          "worst_day": -0.04707043563508619,
+          "cagr_status": "partial_window",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "partial_window"
+        },
+        {
+          "window_key": "3y",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.32644104783713007,
+          "excess_cagr_vs_spy": 0.13186617353601118,
+          "vol_annualized": 0.22615820942406473,
+          "beta": 0.8821838436161393,
+          "beta_r2": 0.3192669193195257,
+          "calmar": 1.3158817442863586,
+          "max_drawdown": -0.24807779973736824,
+          "current_drawdown": 0.0,
+          "var_5": -0.01977911,
+          "worst_day": -0.0800965227368612,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        },
+        {
+          "window_key": "full",
+          "as_of_date": "2026-07-07",
+          "benchmark_symbol": "SPY",
+          "cagr": 0.2853130357289001,
+          "excess_cagr_vs_spy": 0.1224524189882053,
+          "vol_annualized": 0.24101433606305742,
+          "beta": 0.8976909370165466,
+          "beta_r2": 0.3760669303947472,
+          "calmar": 1.1500949945176535,
+          "max_drawdown": -0.24807779973736824,
+          "current_drawdown": 0.0,
+          "var_5": -0.02158441,
+          "worst_day": -0.0800965227368612,
+          "cagr_status": "ok",
+          "excess_cagr_status": "ok",
+          "vol_status": "ok",
+          "beta_status": "ok",
+          "drawdown_status": "ok",
+          "distribution_status": "ok",
+          "calmar_status": "ok"
+        }
+      ]
+    },
+    "price_anchor": {
+      "close": 336.07,
+      "price_date": "2026-07-10",
+      "currency": "USD",
+      "high_52w": 343.16,
+      "low_52w": 279.0,
+      "window_days_52w": 252,
+      "return_1w": 0.007313,
+      "return_1m": 0.087605,
+      "return_3m": 0.085007,
+      "return_6m": 0.022434,
+      "return_1y": 0.168501
+    },
+    "valuation": {
+      "available": true,
+      "current_price": 345.3,
+      "price_as_of": "2026-07-16T11:51:10.487126+00:00",
+      "market_cap_live": null,
+      "enterprise_value": null,
+      "pe_ratio": 16.52943992340833,
+      "pb_ratio": null,
+      "p_fcf_ratio": null,
+      "fcf_yield": null,
+      "ev_revenue": null,
+      "ev_ebitda": null,
+      "debt_equity_ratio": 0.1869255407402524,
+      "net_margin": null,
+      "gross_margin": null,
+      "operating_margin": null,
+      "roa": 0.012019038970712022,
+      "roe": 0.16179354902510176,
+      "dividend_yield": 1.7086591369823343,
+      "is_complete_ttm": true
+    },
+    "fair_value_band": {
+      "available": true,
+      "reason": "ok",
+      "quality_status": "medium",
+      "bear": 262.945479,
+      "base": 298.550091,
+      "bull": 365.115953,
+      "as_of_date": "2026-07-15",
+      "ttm_end": "2026-03-31",
+      "price_as_of": "2026-07-10",
+      "basis": {
+        "ttm_end": "2026-03-31",
+        "selected": [
+          "pe"
+        ],
+        "multiples": {
+          "pe": {
+            "own": {
+              "p25": 12.587145935612096,
+              "p50": 14.416306347043733,
+              "p75": 15.375777240416351
+            },
+            "peer": {
+              "p25": 12.819856000000001,
+              "p50": 14.1667565,
+              "p75": 17.4780255
+            },
+            "cohort_n": 72,
+            "peer_ids": [
+              1011,
+              1037,
+              1837,
+              2201,
+              7957,
+              8941,
+              9126,
+              10403
+            ],
+            "sic_level": 4,
+            "base_value": 298.5500914373718,
+            "capped_low": false,
+            "own_points": 6,
+            "capped_high": false,
+            "precap_low_mult": 12.587145935612096,
+            "excluded_stale_n": 52,
+            "precap_high_mult": 17.4780255
+          }
+        },
+        "price_as_of": "2026-07-10",
+        "own_capped_total": 0
+      }
+    },
+    "analytics_evidence": {
+      "schema": "iar_v1",
+      "as_of": "2026-07-15T12:43:49.910179+00:00",
+      "model_version": "v1.3-balanced",
+      "piotroski": {
+        "score": null,
+        "band": null,
+        "components_available": null,
+        "suppressed": true,
+        "reason": "quality_signal_na_financials"
+      },
+      "altman_z": {
+        "z": null,
+        "reason": "quality_signal_na_financials",
+        "suppressed": true
+      },
+      "positioning": {
+        "inst_13f_qoq": {
+          "asof": "2026-06-30",
+          "caveat": "<=135d stale",
+          "signal": 0.0,
+          "source": "ownership_institutions_observations",
+          "delta_shares_pct": -0.988
+        },
+        "short_interest": {
+          "reason": "no_short_interest_or_shares",
+          "signal": null
+        },
+        "insider_net_90d": {
+          "asof": "2026-06-02",
+          "reason": "no_insider_or_shares",
+          "signal": null,
+          "net_shares": -39378.0
+        }
+      },
+      "peer_grade": {
+        "peer_key": "4",
+        "peer_n": 619,
+        "basis": "run_eligible_sector",
+        "families": {
+          "value": {
+            "hybrid": 0.8932,
+            "percentile": 0.9992
+          },
+          "quality": {
+            "hybrid": 0.3818,
+            "percentile": 0.5727
+          },
+          "momentum": {
+            "hybrid": 0.6438,
+            "percentile": 0.6438
+          },
+          "sentiment": {
+            "hybrid": 0.6589,
+            "percentile": 0.8635
+          },
+          "confidence": {
+            "hybrid": 0.4981,
+            "percentile": 0.4935
+          },
+          "turnaround": {
+            "hybrid": 0.459,
+            "percentile": 0.3635
+          }
+        }
+      }
+    },
+    "ta_state": {
+      "sma_50": 315.4574,
+      "sma_200": 308.574969,
+      "rsi_14": 61.346,
+      "macd_histogram": -0.484935,
+      "atr_14": 7.927335,
+      "volatility_30d": 0.213133,
+      "price_vs_sma200": "above",
+      "sma_50_200_regime": "golden"
+    },
+    "earnings_history": [],
+    "analyst_estimates": null
+  }
+}

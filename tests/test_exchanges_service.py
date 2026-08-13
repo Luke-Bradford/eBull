@@ -1,0 +1,416 @@
+"""Tests for the exchanges metadata refresh (#503 PR 4).
+
+Covers:
+
+* The eToro exchanges normaliser — pins the live ``{"exchangeInfo":
+  [...]}`` shape (the portal docs show a bare list, but the live
+  API returns the wrapper; both are accepted, anything else raises).
+* ``refresh_exchanges_metadata`` semantics:
+
+  - inserts new rows with ``asset_class='unknown'``
+  - updates ``description`` on existing rows (operator-curated
+    ``country`` / ``asset_class`` are not touched)
+  - no-op upsert when description matches (no row returned)
+  - empty provider response → no DB writes (guards against an eToro
+    blip wiping operator data)
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import psycopg
+import pytest
+
+from app.providers.implementations.etoro import _normalise_exchanges
+from app.providers.market_data import ExchangeRecord
+from app.services.exchanges import ExchangesRefreshSummary, refresh_exchanges_metadata
+
+# Exchange ids used in DB tests. Synthetic prefix so a collision with
+# the migration-067 seed (``1``..``20``) cannot mask a bug.
+_TEST_ID_NEW = "test_new_e1"
+_TEST_ID_EXISTING = "test_existing_e2"
+
+
+# ---------------------------------------------------------------------------
+# _normalise_exchanges — pure unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseExchanges:
+    def test_bare_list_shape(self) -> None:
+        raw = [
+            {"exchangeID": 1, "exchangeDescription": "London Stock Exchange"},
+            {"exchangeID": 2, "exchangeDescription": "XETRA"},
+        ]
+        records = _normalise_exchanges(raw)
+        assert len(records) == 2
+        assert all(isinstance(r, ExchangeRecord) for r in records)
+        assert records[0].provider_id == "1"
+        assert records[0].description == "London Stock Exchange"
+        assert records[1].provider_id == "2"
+        assert records[1].description == "XETRA"
+
+    def test_live_wrapper_shape(self) -> None:
+        """The live eToro API returns ``{"exchangeInfo": [...]}`` even
+        though the portal docs show a bare list. Pin the actual
+        production shape — discovered when the cron crashed on first
+        run with ValueError after the round-2 tightening rejected
+        the wrapper. We accept the wrapper explicitly by known key
+        only; unknown wrappers still raise."""
+        raw = {
+            "exchangeInfo": [
+                {"exchangeID": 1, "exchangeDescription": "FX"},
+                {"exchangeID": 5, "exchangeDescription": "NASDAQ"},
+            ]
+        }
+        records = _normalise_exchanges(raw)
+        assert len(records) == 2
+        assert records[0].provider_id == "1"
+        assert records[0].description == "FX"
+        assert records[1].provider_id == "5"
+        assert records[1].description == "NASDAQ"
+
+    def test_unknown_wrapper_key_raises(self) -> None:
+        """A dict without the expected ``exchangeInfo`` key raises so
+        a silent schema drift fails the cron run loudly rather than
+        parsing the wrong list and reporting an empty feed."""
+        with pytest.raises(ValueError, match="exchangeInfo"):
+            _normalise_exchanges({"exchanges": [{"exchangeID": 8}]})
+
+    def test_wrapper_value_not_list_raises(self) -> None:
+        """``exchangeInfo`` key present but value is not a list →
+        raise rather than silently iterating a non-iterable."""
+        with pytest.raises(ValueError, match="exchangeInfo"):
+            _normalise_exchanges({"exchangeInfo": {"unexpected": "shape"}})
+
+    def test_camelCase_id_variant_accepted(self) -> None:
+        """eToro is inconsistent — some endpoints use ``exchangeId``,
+        some ``exchangeID``. Accept both."""
+        raw = [{"exchangeId": 5, "exchangeDescription": "NASDAQ"}]
+        records = _normalise_exchanges(raw)
+        assert len(records) == 1
+        assert records[0].provider_id == "5"
+
+    def test_missing_id_skipped(self) -> None:
+        raw = [
+            {"exchangeID": 1, "exchangeDescription": "OK"},
+            {"exchangeDescription": "Missing ID — drop"},
+            {"exchangeID": 2},  # missing description is fine; description optional
+        ]
+        records = _normalise_exchanges(raw)
+        assert len(records) == 2
+        assert {r.provider_id for r in records} == {"1", "2"}
+        # Second record had no description → None (not "")
+        rec2 = next(r for r in records if r.provider_id == "2")
+        assert rec2.description is None
+
+    def test_non_dict_items_skipped(self) -> None:
+        raw = [
+            {"exchangeID": 1, "exchangeDescription": "OK"},
+            "not a dict",
+            None,
+        ]
+        records = _normalise_exchanges(raw)
+        assert len(records) == 1
+
+    def test_empty_response_returns_empty(self) -> None:
+        assert _normalise_exchanges([]) == []
+
+    def test_unknown_shape_raises(self) -> None:
+        with pytest.raises(ValueError, match="Expected dict"):
+            _normalise_exchanges("not a payload")
+
+
+# ---------------------------------------------------------------------------
+# refresh_exchanges_metadata — DB integration
+# ---------------------------------------------------------------------------
+
+
+def _seed_existing_exchange(
+    conn: psycopg.Connection[tuple],
+    *,
+    exchange_id: str,
+    description: str | None,
+    country: str | None = "GB",
+    asset_class: str = "uk_equity",
+) -> None:
+    """Pre-populate one ``exchanges`` row with an operator-curated
+    ``country`` + ``asset_class``. The refresh service must not
+    touch those columns even when it updates ``description``."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO exchanges (exchange_id, description, country, asset_class)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (exchange_id) DO UPDATE SET
+                description = EXCLUDED.description,
+                country     = EXCLUDED.country,
+                asset_class = EXCLUDED.asset_class
+            """,
+            (exchange_id, description, country, asset_class),
+        )
+
+
+def _read_exchange(conn: psycopg.Connection[tuple], exchange_id: str) -> tuple[str | None, str | None, str] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT description, country, asset_class FROM exchanges WHERE exchange_id = %s",
+            (exchange_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return (row[0], row[1], row[2])
+
+
+def _cleanup(conn: psycopg.Connection[tuple], ids: list[str]) -> None:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM exchanges WHERE exchange_id = ANY(%s)", (ids,))
+    conn.commit()
+
+
+@pytest.mark.integration
+class TestRefreshExchangesMetadata:
+    def test_inserts_new_exchange_as_unknown(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        provider = MagicMock()
+        provider.get_exchanges.return_value = [
+            ExchangeRecord(provider_id=_TEST_ID_NEW, description="Test Exchange One"),
+        ]
+        try:
+            summary = refresh_exchanges_metadata(provider, ebull_test_conn)
+            ebull_test_conn.commit()
+
+            assert summary.fetched == 1
+            assert summary.inserted == 1
+            assert summary.description_updated == 0
+
+            row = _read_exchange(ebull_test_conn, _TEST_ID_NEW)
+            assert row == ("Test Exchange One", None, "unknown")
+        finally:
+            _cleanup(ebull_test_conn, [_TEST_ID_NEW])
+
+    def test_updates_description_only(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """Operator-curated ``country`` + ``asset_class`` survive an
+        eToro-driven description refresh — those columns are the
+        operator's source of truth."""
+        _seed_existing_exchange(
+            ebull_test_conn,
+            exchange_id=_TEST_ID_EXISTING,
+            description="Old description",
+            country="GB",
+            asset_class="uk_equity",
+        )
+        ebull_test_conn.commit()
+
+        provider = MagicMock()
+        provider.get_exchanges.return_value = [
+            ExchangeRecord(provider_id=_TEST_ID_EXISTING, description="London Stock Exchange"),
+        ]
+        try:
+            summary = refresh_exchanges_metadata(provider, ebull_test_conn)
+            ebull_test_conn.commit()
+
+            assert summary.fetched == 1
+            assert summary.inserted == 0
+            assert summary.description_updated == 1
+
+            row = _read_exchange(ebull_test_conn, _TEST_ID_EXISTING)
+            assert row == ("London Stock Exchange", "GB", "uk_equity")
+        finally:
+            _cleanup(ebull_test_conn, [_TEST_ID_EXISTING])
+
+    def test_unchanged_description_is_noop(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """When description matches, neither ``inserted`` nor
+        ``description_updated`` advances. Verifies the conditional
+        ON CONFLICT WHERE actually filters out and the
+        description_updated counter is meaningful (not just a count
+        of every row processed)."""
+        _seed_existing_exchange(
+            ebull_test_conn,
+            exchange_id=_TEST_ID_EXISTING,
+            description="Same",
+            country="DE",
+            asset_class="eu_equity",
+        )
+        ebull_test_conn.commit()
+
+        provider = MagicMock()
+        provider.get_exchanges.return_value = [
+            ExchangeRecord(provider_id=_TEST_ID_EXISTING, description="Same"),
+        ]
+        try:
+            summary = refresh_exchanges_metadata(provider, ebull_test_conn)
+            ebull_test_conn.commit()
+
+            assert summary.fetched == 1
+            assert summary.inserted == 0
+            assert summary.description_updated == 0
+
+            row = _read_exchange(ebull_test_conn, _TEST_ID_EXISTING)
+            assert row == ("Same", "DE", "eu_equity")
+        finally:
+            _cleanup(ebull_test_conn, [_TEST_ID_EXISTING])
+
+    def test_blank_description_does_not_clobber_existing(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """A partial eToro response that omits ``exchangeDescription``
+        for a row must NOT erase a previously-known description.
+        Pins the WARNING-fix from Codex round 1: COALESCE in the
+        upsert preserves the existing value when EXCLUDED is NULL."""
+        _seed_existing_exchange(
+            ebull_test_conn,
+            exchange_id=_TEST_ID_EXISTING,
+            description="London Stock Exchange",
+            country="GB",
+            asset_class="uk_equity",
+        )
+        ebull_test_conn.commit()
+
+        provider = MagicMock()
+        provider.get_exchanges.return_value = [
+            ExchangeRecord(provider_id=_TEST_ID_EXISTING, description=None),
+        ]
+        try:
+            summary = refresh_exchanges_metadata(provider, ebull_test_conn)
+            ebull_test_conn.commit()
+
+            assert summary.fetched == 1
+            # Neither inserted nor updated — the WHERE clause filters
+            # out the no-op write.
+            assert summary.inserted == 0
+            assert summary.description_updated == 0
+
+            row = _read_exchange(ebull_test_conn, _TEST_ID_EXISTING)
+            assert row == ("London Stock Exchange", "GB", "uk_equity")
+        finally:
+            _cleanup(ebull_test_conn, [_TEST_ID_EXISTING])
+
+    def test_empty_response_writes_nothing(self, ebull_test_conn: psycopg.Connection[tuple]) -> None:
+        """An eToro hiccup that returns zero rows must NOT clobber
+        existing operator data. Mirrors the ``sync_universe`` empty
+        guard — same risk model."""
+        _seed_existing_exchange(
+            ebull_test_conn,
+            exchange_id=_TEST_ID_EXISTING,
+            description="Operator data",
+            country="GB",
+            asset_class="uk_equity",
+        )
+        ebull_test_conn.commit()
+
+        provider = MagicMock()
+        provider.get_exchanges.return_value = []
+        try:
+            summary = refresh_exchanges_metadata(provider, ebull_test_conn)
+            ebull_test_conn.commit()
+
+            assert summary == ExchangesRefreshSummary(fetched=0, inserted=0, description_updated=0)
+
+            row = _read_exchange(ebull_test_conn, _TEST_ID_EXISTING)
+            assert row == ("Operator data", "GB", "uk_equity")
+        finally:
+            _cleanup(ebull_test_conn, [_TEST_ID_EXISTING])
+
+
+# ---------------------------------------------------------------------------
+# Auto-reclassify post-universe-sync (#1055)
+# ---------------------------------------------------------------------------
+
+
+import pytest as _pytest_for_reclassify  # noqa: E402
+
+from tests.fixtures.ebull_test_db import ebull_test_conn as _ebull_test_conn_for_reclassify  # noqa: E402, F401
+from tests.fixtures.ebull_test_db import test_db_available as _test_db_available_for_reclassify  # noqa: E402
+
+
+@_pytest_for_reclassify.mark.integration
+@_pytest_for_reclassify.mark.skipif(not _test_db_available_for_reclassify(), reason="ebull_test DB unavailable")
+class TestReclassifyUnknownExchanges:
+    @staticmethod
+    def _seed_us_exchange(conn, exchange_id: str, instrument_count: int) -> None:
+        # ON CONFLICT DO NOTHING — preserves any existing asset_class
+        # the test pre-seeded (e.g. operator-curated 'crypto').
+        conn.execute(
+            """
+            INSERT INTO exchanges (exchange_id, description, asset_class)
+            VALUES (%s, 'Test', 'unknown')
+            ON CONFLICT (exchange_id) DO NOTHING
+            """,
+            (exchange_id,),
+        )
+        # Seed instrument_count tradable instruments WITHOUT a suffix
+        # (US-style symbols).
+        for i in range(instrument_count):
+            iid = 900_000_000 + int(exchange_id) * 1000 + i
+            conn.execute(
+                """
+                INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+                VALUES (%s, %s, 'X', %s, 'USD', TRUE)
+                ON CONFLICT (instrument_id) DO NOTHING
+                """,
+                (iid, f"X{exchange_id}{i}", exchange_id),
+            )
+        conn.commit()
+
+    def test_us_exchange_reclassified_when_unknown(
+        self,
+        ebull_test_conn,
+    ) -> None:
+        from app.services.exchanges import reclassify_unknown_exchanges
+
+        # Use a fresh exchange_id that won't collide with seed data.
+        TEST_ID = "97"
+        ebull_test_conn.execute("DELETE FROM exchanges WHERE exchange_id = %s", (TEST_ID,))
+        ebull_test_conn.commit()
+        self._seed_us_exchange(ebull_test_conn, TEST_ID, 50)
+        ebull_test_conn.commit()
+        reclassify_unknown_exchanges(ebull_test_conn)
+        ebull_test_conn.commit()
+        row = ebull_test_conn.execute(
+            "SELECT asset_class, country FROM exchanges WHERE exchange_id = %s",
+            (TEST_ID,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "us_equity"
+        assert row[1] == "US"
+
+    def test_operator_curated_rows_preserved(
+        self,
+        ebull_test_conn,
+    ) -> None:
+        # Pre-set asset_class to 'crypto' (non-unknown). Reclassify
+        # MUST NOT overwrite it even if the suffix heuristic would
+        # imply 'us_equity'.
+        from app.services.exchanges import reclassify_unknown_exchanges
+
+        TEST_ID = "98"
+        ebull_test_conn.execute("DELETE FROM exchanges WHERE exchange_id = %s", (TEST_ID,))
+        ebull_test_conn.execute(
+            "INSERT INTO exchanges (exchange_id, description, asset_class) VALUES (%s, 'Test', 'crypto')",
+            (TEST_ID,),
+        )
+        ebull_test_conn.commit()
+        self._seed_us_exchange(ebull_test_conn, TEST_ID, 50)
+        ebull_test_conn.commit()
+        reclassify_unknown_exchanges(ebull_test_conn)
+        ebull_test_conn.commit()
+        row = ebull_test_conn.execute("SELECT asset_class FROM exchanges WHERE exchange_id = %s", (TEST_ID,)).fetchone()
+        assert row is not None
+        assert row[0] == "crypto"  # operator-curated value preserved
+
+    def test_idempotent_rerun_classified_count_drops_to_zero(self, ebull_test_conn) -> None:
+        from app.services.exchanges import reclassify_unknown_exchanges
+
+        TEST_ID = "99"
+        ebull_test_conn.execute("DELETE FROM exchanges WHERE exchange_id = %s", (TEST_ID,))
+        ebull_test_conn.commit()
+        self._seed_us_exchange(ebull_test_conn, TEST_ID, 40)
+        ebull_test_conn.commit()
+        first = reclassify_unknown_exchanges(ebull_test_conn)
+        ebull_test_conn.commit()
+        second = reclassify_unknown_exchanges(ebull_test_conn)
+        ebull_test_conn.commit()
+        # First call promotes the unknown row; second call has no
+        # unknown rows left to promote (this run's delta = 0).
+        assert first.classified >= 1
+        assert second.classified == 0

@@ -1,0 +1,32 @@
+-- #1933 (split from #1918 review, Codex ckpt-2) — enforce uniqueness of
+-- (instrument_id, model_version, scored_at) on `scores`.
+--
+-- Today the invariant holds by the WRITE PATH, not the schema:
+-- `compute_rankings` (app/services/scoring.py:1812) captures a single
+-- `run_at` per run and calls `_insert_score` exactly once per instrument,
+-- so every (instrument_id, model_version, scored_at) triple is unique by
+-- construction. But there was no DB-level guard, so `GET /rankings` counts
+-- rows with COUNT(*) while `GET /rankings/coverage` (#1918) uses
+-- COUNT(DISTINCT instrument_id); they agree today only by luck. A future
+-- retry/concurrency bug that double-inserted a run would silently diverge
+-- the coverage banner from the table and page a duplicate instrument.
+--
+-- Full-population verification (dev DB, 2026-07-04): 104,285 score rows,
+-- 0 duplicate (instrument_id, model_version, scored_at) triples, 0 rows
+-- with NULL model_version/scored_at (both are NOT NULL). Backfill-safe —
+-- the index builds without violating any existing row.
+--
+-- A UNIQUE INDEX (not ALTER TABLE ... ADD CONSTRAINT) is used deliberately:
+-- Postgres has no `IF NOT EXISTS` on ADD CONSTRAINT, so the index form is
+-- the idempotent one the migration runner (re-run on partial apply) needs.
+-- Built non-CONCURRENTLY because the runner wraps each file in a
+-- transaction (app/db/migrations.py:194); on ~104k rows the ACCESS
+-- EXCLUSIVE lock is sub-second and `scores` is written only in bursts by
+-- compute_rankings, never continuously.
+--
+-- Kept alongside the existing idx_scores_instrument_scored
+-- (instrument_id, scored_at DESC) which serves latest-per-instrument reads;
+-- this index leads with (instrument_id, model_version) and does not replace
+-- that ordering.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scores_instrument_model_scored
+    ON scores (instrument_id, model_version, scored_at);

@@ -1,0 +1,1075 @@
+"""Integration tests for the DEF 14A ingester (#769 PR 2).
+
+The service interacts with three boundaries:
+  1. SEC HTTP — abstracted as :class:`SecDocFetcher` so tests
+     substitute a deterministic in-memory fake.
+  2. Postgres — real ``ebull_test`` DB.
+  3. The pure parser from #769 PR 1 — exercised end-to-end.
+
+Each test seeds the inputs (an instrument with an SEC profile, a
+filing_events row for DEF 14A, a fake fetcher mapped to the
+primary doc URL) and asserts the canonical row state.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+
+import psycopg
+import psycopg.rows
+import pytest
+
+from app.services.def14a_ingest import (
+    _PARSER_VERSION_DEF14A,
+    _supersede_dropped_holdings,
+    bootstrap_def14a,
+    discover_pending_def14a,
+    ingest_def14a,
+)
+from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
+
+pytestmark = pytest.mark.integration
+
+
+# ---------------------------------------------------------------------------
+# Fixture builders
+# ---------------------------------------------------------------------------
+
+
+def _proxy_html_with_table() -> str:
+    """Minimal proxy with a recognisable beneficial-ownership table."""
+    return """<!DOCTYPE html>
+<html><body>
+<h1>Annual Meeting</h1>
+<h2>Security Ownership of Certain Beneficial Owners and Management</h2>
+<p>The following table sets forth the beneficial ownership as of March 1, 2026.</p>
+<table>
+  <tr>
+    <th>Name and Address of Beneficial Owner</th>
+    <th>Number of Shares Beneficially Owned</th>
+    <th>Percent of Class</th>
+  </tr>
+  <tr><td>John Doe, CEO</td><td>1,500,000</td><td>5.5%</td></tr>
+  <tr><td>Jane Smith, Director</td><td>250,000</td><td>1.0%</td></tr>
+  <tr><td>Vanguard Group, Inc.</td><td>3,000,000</td><td>11.0%</td></tr>
+</table>
+</body></html>
+"""
+
+
+def _proxy_html_unrecognisable_table() -> str:
+    """Proxy with no recognisable beneficial-ownership table."""
+    return """<!DOCTYPE html>
+<html><body>
+<h1>Annual Meeting</h1>
+<table>
+  <tr><th>Auditor</th><th>Term</th></tr>
+  <tr><td>Acme LLP</td><td>1 year</td></tr>
+</table>
+</body></html>
+"""
+
+
+class _InMemoryFetcher:
+    def __init__(self, payloads: dict[str, str | None]) -> None:
+        self._payloads = payloads
+        self.calls: list[str] = []
+
+    def fetch_document_text(self, absolute_url: str) -> str | None:
+        self.calls.append(absolute_url)
+        return self._payloads.get(absolute_url)
+
+
+def _seed_instrument(conn: psycopg.Connection[tuple], *, iid: int, symbol: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (%s, %s, %s, '4', 'USD', TRUE)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (iid, symbol, f"{symbol} Inc"),
+    )
+
+
+def _seed_sec_profile(conn: psycopg.Connection[tuple], *, instrument_id: int, cik: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO instrument_sec_profile (instrument_id, cik)
+        VALUES (%s, %s)
+        ON CONFLICT (instrument_id) DO NOTHING
+        """,
+        (instrument_id, cik),
+    )
+
+
+def _seed_filing_event(
+    conn: psycopg.Connection[tuple],
+    *,
+    instrument_id: int,
+    accession: str,
+    filing_date: date,
+    primary_document_url: str,
+    filing_type: str = "DEF 14A",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO filing_events (
+            instrument_id, filing_date, filing_type,
+            provider, provider_filing_id, primary_document_url
+        ) VALUES (%s, %s, %s, 'sec', %s, %s)
+        ON CONFLICT (provider, provider_filing_id, instrument_id) DO NOTHING
+        """,
+        (instrument_id, filing_date, filing_type, accession, primary_document_url),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverPendingDef14a:
+    def test_returns_empty_when_no_filings(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        result = discover_pending_def14a(ebull_test_conn)
+        assert result == []
+
+    def test_returns_def14a_filings_only(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=769_001, symbol="TEST")
+        _seed_filing_event(
+            conn,
+            instrument_id=769_001,
+            accession="0001234567-25-000001",
+            filing_date=date(2026, 3, 15),
+            primary_document_url="https://www.sec.gov/test/proxy.htm",
+            filing_type="DEF 14A",
+        )
+        _seed_filing_event(
+            conn,
+            instrument_id=769_001,
+            accession="0001234567-25-000002",
+            filing_date=date(2026, 2, 1),
+            primary_document_url="https://www.sec.gov/test/10k.htm",
+            filing_type="10-K",
+        )
+        _seed_filing_event(
+            conn,
+            instrument_id=769_001,
+            accession="0001234567-25-000003",
+            filing_date=date(2026, 4, 1),
+            primary_document_url="https://www.sec.gov/test/proxy-additional.htm",
+            filing_type="DEFA14A",
+        )
+        conn.commit()
+
+        result = discover_pending_def14a(conn)
+        accessions = [r.accession_number for r in result]
+        assert "0001234567-25-000001" in accessions
+        assert "0001234567-25-000003" in accessions
+        assert "0001234567-25-000002" not in accessions  # 10-K excluded
+        # Ordered by filing_date DESC — DEFA14A (2026-04-01) before
+        # DEF 14A (2026-03-15).
+        assert accessions[0] == "0001234567-25-000003"
+
+    def test_skips_filings_without_primary_document_url(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=769_002, symbol="TEST")
+        conn.execute(
+            """
+            INSERT INTO filing_events (
+                instrument_id, filing_date, filing_type,
+                provider, provider_filing_id, primary_document_url
+            ) VALUES (%s, %s, %s, 'sec', %s, NULL)
+            """,
+            (769_002, date(2026, 3, 15), "DEF 14A", "0001234567-25-000010"),
+        )
+        conn.commit()
+
+        result = discover_pending_def14a(conn)
+        assert result == []
+
+    def test_skips_already_attempted_accessions(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=769_003, symbol="TEST")
+        _seed_filing_event(
+            conn,
+            instrument_id=769_003,
+            accession="0001234567-25-000020",
+            filing_date=date(2026, 3, 15),
+            primary_document_url="https://www.sec.gov/test/proxy.htm",
+        )
+        # Pre-populate the ingest log to mark this accession attempted.
+        conn.execute(
+            """
+            INSERT INTO def14a_ingest_log (accession_number, issuer_cik, status, rows_inserted)
+            VALUES ('0001234567-25-000020', '0001234567', 'success', 3)
+            """,
+        )
+        conn.commit()
+
+        result = discover_pending_def14a(conn)
+        assert result == []
+
+    def test_instrument_id_filter_scopes_discovery(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=769_004, symbol="A")
+        _seed_instrument(conn, iid=769_005, symbol="B")
+        _seed_filing_event(
+            conn,
+            instrument_id=769_004,
+            accession="A-25-000001",
+            filing_date=date(2026, 3, 15),
+            primary_document_url="https://www.sec.gov/A/proxy.htm",
+        )
+        _seed_filing_event(
+            conn,
+            instrument_id=769_005,
+            accession="B-25-000001",
+            filing_date=date(2026, 3, 15),
+            primary_document_url="https://www.sec.gov/B/proxy.htm",
+        )
+        conn.commit()
+
+        scoped = discover_pending_def14a(conn, instrument_id=769_004)
+        assert len(scoped) == 1
+        assert scoped[0].accession_number == "A-25-000001"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end ingest
+# ---------------------------------------------------------------------------
+
+
+class TestIngestDef14a:
+    @pytest.fixture
+    def _setup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> psycopg.Connection[tuple]:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=769_100, symbol="AAPL")
+        _seed_sec_profile(conn, instrument_id=769_100, cik="0000320193")
+        conn.commit()
+        return conn
+
+    def test_happy_path_ingests_three_holders(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession="0001234567-25-000001",
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({url: _proxy_html_with_table()})
+
+        summary = ingest_def14a(conn, fetcher)
+
+        assert summary.accessions_seen == 1
+        assert summary.accessions_succeeded == 1
+        assert summary.accessions_partial == 0
+        assert summary.accessions_failed == 0
+        assert summary.accessions_ingested == 1  # back-compat alias
+        assert summary.rows_inserted == 3
+        assert summary.rows_updated == 0
+
+        # Holdings persisted with parsed values.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT holder_name, holder_role, shares, percent_of_class, as_of_date, issuer_cik
+                FROM def14a_beneficial_holdings
+                WHERE instrument_id = %s
+                ORDER BY shares DESC
+                """,
+                (769_100,),
+            )
+            rows = cur.fetchall()
+        assert [r["holder_name"] for r in rows] == [
+            "Vanguard Group, Inc.",
+            "John Doe, CEO",
+            "Jane Smith, Director",
+        ]
+        assert rows[1]["holder_role"] == "officer"
+        assert rows[2]["holder_role"] == "director"
+        assert rows[0]["shares"] == Decimal("3000000")
+        assert rows[0]["percent_of_class"] == Decimal("11.0")
+        assert rows[0]["as_of_date"] == date(2026, 3, 1)
+        assert rows[0]["issuer_cik"] == "0000320193"
+
+        # Ingest log records success.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT status, rows_inserted FROM def14a_ingest_log WHERE accession_number = %s",
+                ("0001234567-25-000001",),
+            )
+            log = cur.fetchone()
+        assert log is not None
+        assert log["status"] == "success"
+        assert log["rows_inserted"] == 3
+
+    def test_raw_payload_persisted_for_def14a_body(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """DEF 14A ingester must persist the proxy body to
+        ``filing_raw_documents`` before parsing — operator audit
+        2026-05-03 + PR #808 contract."""
+        from app.services import raw_filings
+
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy_raw.htm"
+        accession = "0001234567-25-RAW001"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({url: _proxy_html_with_table()})
+        ingest_def14a(conn, fetcher)
+        conn.commit()
+
+        doc = raw_filings.read_raw(
+            conn,
+            accession_number=accession,
+            document_kind="def14a_body",
+        )
+        assert doc is not None
+        # Reference the live constant — literal pins went stale across three
+        # version bumps because this is db-tier, off the fast push gate
+        # (#2100 fresh-agent review).
+        assert doc.parser_version == _PARSER_VERSION_DEF14A
+        assert doc.source_url == url
+        assert len(doc.require_payload()) > 0
+
+    def test_re_ingest_promotes_via_upsert_not_insert(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Idempotent re-ingest: if the operator clears the log row
+        and re-runs, holders UPSERT (rows_updated counter increments,
+        rows_inserted stays zero on second pass)."""
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession="0001234567-25-000002",
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({url: _proxy_html_with_table()})
+
+        first = ingest_def14a(conn, fetcher)
+        assert first.rows_inserted == 3
+
+        # Operator clears the log row to force re-ingest of the same
+        # accession.
+        conn.execute(
+            "DELETE FROM def14a_ingest_log WHERE accession_number = %s",
+            ("0001234567-25-000002",),
+        )
+        conn.commit()
+
+        second = ingest_def14a(conn, fetcher)
+        assert second.accessions_seen == 1
+        assert second.accessions_ingested == 1
+        assert second.rows_inserted == 0
+        assert second.rows_updated == 3
+
+        # No duplicate rows in the canonical table.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM def14a_beneficial_holdings WHERE accession_number = %s",
+                ("0001234567-25-000002",),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 3
+
+    def test_re_ingest_supersedes_renamed_holders_and_revives_the_rest(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#2140 D6 — the observations conflict key is DERIVED from the parsed
+        name (``holder_name_key = lower(trim(holder_name))``), so a parser fix
+        that changes a name writes the corrected row under a NEW key. Unless
+        the filing's prior rows are superseded first, the broken row stays
+        live and ``refresh_def14a_current`` — which prunes from that same set —
+        keeps its ``_current`` row alive forever.
+
+        Asserts BOTH halves of the mechanism: a holder the re-parse no longer
+        emits stays tombstoned, and one it still emits is REVIVED (the
+        ``known_to = NULL`` clause in ``record_def14a_observation``).
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000009"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _live_names() -> set[str]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT holder_name FROM ownership_def14a_observations
+                     WHERE source_document_id = %s AND known_to IS NULL
+                    """,
+                    (accession,),
+                )
+                return {r[0] for r in cur.fetchall()}
+
+        first_names = _live_names()
+        assert first_names, "first ingest wrote no observations"
+
+        # Simulate a parser fix that RENAMES one holder: rewrite one stored
+        # observation under a broken key, as the pre-#2140 parser would have.
+        broken, *rest = sorted(first_names)
+        conn.execute(
+            """
+            UPDATE ownership_def14a_observations
+               SET holder_name = %s
+             WHERE source_document_id = %s AND holder_name = %s
+            """,
+            ("999,999", accession, broken),
+        )
+        conn.execute("DELETE FROM def14a_ingest_log WHERE accession_number = %s", (accession,))
+        conn.commit()
+        assert "999,999" in _live_names()
+
+        # Re-ingest under the current (fixed) parser.
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        live = _live_names()
+        # The broken key is no longer emitted -> superseded, not resurrected.
+        assert "999,999" not in live
+        # Every name the parse still emits is live again, including the one
+        # whose row had been rewritten (revive clause) and the untouched rest.
+        assert live == first_names, f"expected {first_names}, got {live}"
+        # I6: superseded, never hard-deleted — the audit row survives.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT known_to IS NOT NULL FROM ownership_def14a_observations
+                 WHERE source_document_id = %s AND holder_name = %s
+                """,
+                (accession, "999,999"),
+            )
+            row = cur.fetchone()
+        assert row is not None and row[0] is True
+
+    def test_reparse_drops_typed_rows_the_new_parse_no_longer_emits(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#2140 (Codex pre-push) — ``_upsert_holding`` is keyed on
+        ``(instrument_id, accession_number, holder_name)``, so a parser bump
+        that RENAMES a holder writes the corrected row under a new key and
+        leaves the old one live in ``def14a_beneficial_holdings``, which the
+        rollup / drillthrough / drift readers use. ``rewash_filings`` already
+        deleted the accession's typed rows, but the MANIFEST re-drive path that
+        the v6->v7 bump triggers did not.
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000011"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _typed_names() -> set[str]:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT holder_name FROM def14a_beneficial_holdings WHERE accession_number = %s",
+                    (accession,),
+                )
+                return {r[0] for r in cur.fetchall()}
+
+        first = _typed_names()
+        assert first
+
+        # Simulate the pre-fix parser output: rename one stored holder.
+        stale = sorted(first)[0]
+        conn.execute(
+            """
+            UPDATE def14a_beneficial_holdings
+               SET holder_name = %s
+             WHERE accession_number = %s AND holder_name = %s
+            """,
+            ("999,999", accession, stale),
+        )
+        conn.execute("DELETE FROM def14a_ingest_log WHERE accession_number = %s", (accession,))
+        conn.commit()
+        assert "999,999" in _typed_names()
+
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        after = _typed_names()
+        assert "999,999" not in after, "renamed row survived the reparse"
+        assert after == first
+
+    def test_zero_row_reparse_preserves_existing_typed_rows(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Review bot BLOCKING on PR #2159 — ``holder_name <> ALL('{}')`` is
+        VACUOUSLY TRUE in Postgres, so an empty holder-name list would delete
+        every typed row for the accession instead of preserving them, turning a
+        zero-row re-parse into silent data loss.
+
+        Exercises ``_supersede_dropped_holdings`` directly: the call sites pass
+        the parse's names unconditionally, so the guard has to live in the
+        helper.
+        """
+        conn = _setup
+        url = "https://www.sec.gov/test/proxy.htm"
+        accession = "0001234567-25-000012"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession=accession,
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        ingest_def14a(conn, _InMemoryFetcher({url: _proxy_html_with_table()}))
+        conn.commit()
+
+        def _typed_count() -> int:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM def14a_beneficial_holdings WHERE accession_number = %s",
+                    (accession,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+        before = _typed_count()
+        assert before > 0
+
+        deleted = _supersede_dropped_holdings(
+            conn,
+            accession_number=accession,
+            instrument_ids=[769_100],
+            holder_names=[],
+        )
+        conn.commit()
+        assert deleted == 0
+        assert _typed_count() == before, "a zero-row re-parse wiped the accession's typed rows"
+
+    def test_unrecognisable_table_tombstones_partial(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        url = "https://www.sec.gov/test/notice-only.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession="0001234567-25-000003",
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({url: _proxy_html_unrecognisable_table()})
+
+        summary = ingest_def14a(conn, fetcher)
+
+        # Tombstoned as 'partial' (parser returned empty rows) — the
+        # accession is logged so re-runs skip it; operator can clear
+        # the log row to force retry once parser improves.
+        assert summary.accessions_partial == 1
+        assert summary.accessions_succeeded == 0
+        assert summary.accessions_failed == 0
+        assert summary.rows_inserted == 0
+
+        # Run-level audit reflects the degraded state — Codex review
+        # of an earlier draft caught a partial run silently logging
+        # ``data_ingestion_runs.status='success'``.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT status, error
+                FROM data_ingestion_runs
+                WHERE source = 'sec_edgar_def14a'
+                ORDER BY ingestion_run_id DESC
+                LIMIT 1
+                """
+            )
+            run = cur.fetchone()
+        assert run is not None
+        assert run["status"] == "partial"
+        assert run["error"] is not None and "tombstoned partial" in run["error"]
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT status, error FROM def14a_ingest_log WHERE accession_number = %s",
+                ("0001234567-25-000003",),
+            )
+            log = cur.fetchone()
+        assert log is not None
+        assert log["status"] == "partial"
+        assert log["error"] is not None and "no beneficial-ownership table" in log["error"]
+
+        # No canonical rows persisted.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM def14a_beneficial_holdings WHERE accession_number = %s",
+                ("0001234567-25-000003",),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 0
+
+    def test_404_fetch_tombstones_failed(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        url = "https://www.sec.gov/test/missing.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_100,
+            accession="0001234567-25-000004",
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({})  # url -> None
+
+        summary = ingest_def14a(conn, fetcher)
+        assert summary.accessions_failed == 1
+        assert summary.rows_inserted == 0
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT status FROM def14a_ingest_log WHERE accession_number = %s",
+                ("0001234567-25-000004",),
+            )
+            log = cur.fetchone()
+        assert log is not None
+        assert log["status"] == "failed"
+
+    def test_missing_sec_profile_uses_cik_sentinel(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """Instrument without an instrument_sec_profile row still
+        ingests — the issuer_cik column gets the sentinel so the
+        NOT NULL constraint is satisfied. PR 3's drift detector
+        ignores sentinel rows."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=769_200, symbol="NOPROF")
+        # Note: no _seed_sec_profile call.
+        url = "https://www.sec.gov/test/proxy-noprof.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=769_200,
+            accession="0001234567-25-000050",
+            filing_date=date(2026, 3, 15),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({url: _proxy_html_with_table()})
+
+        summary = ingest_def14a(conn, fetcher)
+        assert summary.rows_inserted == 3
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT issuer_cik FROM def14a_beneficial_holdings WHERE instrument_id = %s LIMIT 1",
+                (769_200,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row["issuer_cik"] == "CIK-MISSING"
+
+    def test_no_pending_returns_empty_summary(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        fetcher = _InMemoryFetcher({})
+        summary = ingest_def14a(conn, fetcher)
+        assert summary.accessions_seen == 0
+        assert summary.rows_inserted == 0
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap drain (#839 — operator audit found table empty)
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapDef14a:
+    """Mirror of the :func:`bootstrap_business_summaries` test surface
+    — the bootstrap helper loops the standard ingester until the
+    candidate query empties or the deadline elapses, summing per-chunk
+    counts. Idempotent: a second invocation is a fast no-op because
+    every accession lands in ``def14a_ingest_log`` after the first
+    pass."""
+
+    @pytest.fixture
+    def _setup(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> psycopg.Connection[tuple]:
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=839_001, symbol="BOOT")
+        _seed_sec_profile(conn, instrument_id=839_001, cik="0000839001")
+        return conn
+
+    def test_drains_multiple_accessions_in_one_call(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Four pending accessions across TWO filers (2 each),
+        chunk_limit=2 → two chunks consumed by one bootstrap call
+        (the deadline doesn't fire, the empty-chunk break does).
+
+        #1233 PR5 cap: 2 primary accessions per filer is the cap.
+        Two filers × 2 accessions exercises the chunking loop while
+        keeping every accession within the cap so the legacy
+        "drains across chunks" contract holds.
+        """
+        conn = _setup
+        # Filer A is the default ``839_001`` seeded in ``_setup``;
+        # seed a second filer here.
+        _seed_instrument(conn, iid=839_002, symbol="BOOTB")
+        _seed_sec_profile(conn, instrument_id=839_002, cik="0000839002")
+
+        urls: dict[str, str | None] = {}
+        for filer_iid, base in [(839_001, "0000839001"), (839_002, "0000839002")]:
+            for i in range(2):
+                url = f"https://www.sec.gov/Archives/edgar/data/{filer_iid}/{base}25-00000{i}/d.htm"
+                urls[url] = _proxy_html_with_table()
+                _seed_filing_event(
+                    conn,
+                    instrument_id=filer_iid,
+                    accession=f"{base}-25-00000{i}",
+                    filing_date=date(2026, 1, 15 + i),
+                    primary_document_url=url,
+                )
+        conn.commit()
+        fetcher = _InMemoryFetcher(urls)
+
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=2, max_runtime_seconds=60)
+        assert summary.accessions_seen == 4
+        assert summary.accessions_succeeded == 4
+        assert summary.rows_inserted == 12  # 3 holders × 4 accessions
+
+    def test_idempotent_second_run_is_noop(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Acceptance #5: re-running the bootstrap after every
+        accession is logged is zero-work (no duplicate rows, no SEC
+        re-fetch). Mirrors the
+        ``app.services.business_summary.bootstrap_business_summaries``
+        idempotency contract."""
+        conn = _setup
+        url = "https://www.sec.gov/Archives/edgar/data/839001/000083900125-000010/d.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=839_001,
+            accession="0000839001-25-000010",
+            filing_date=date(2026, 2, 1),
+            primary_document_url=url,
+        )
+        conn.commit()
+        fetcher = _InMemoryFetcher({url: _proxy_html_with_table()})
+
+        first = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=30)
+        assert first.accessions_succeeded == 1
+        first_calls = len(fetcher.calls)
+
+        second = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=30)
+        assert second.accessions_seen == 0
+        assert second.rows_inserted == 0
+        # No additional SEC fetches — the discovery selector excluded
+        # the already-logged accession.
+        assert len(fetcher.calls) == first_calls
+
+        # Holdings table has exactly 3 rows (one accession × 3 holders).
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM def14a_beneficial_holdings WHERE instrument_id = %s",
+                (839_001,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 3
+
+    def test_empty_pending_returns_empty_summary(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        conn = _setup
+        fetcher = _InMemoryFetcher({})
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=100, max_runtime_seconds=10)
+        assert summary.accessions_seen == 0
+        assert summary.rows_inserted == 0
+        assert fetcher.calls == []
+
+    def test_crash_path_tombstones_failed_so_bootstrap_doesnt_redrive(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Codex pre-push review for #839 (#2): a per-accession crash
+        used to roll back without writing a log row, so the next chunk's
+        discovery query rediscovered the same accession and re-crashed
+        on it. In bootstrap mode that wasted SEC calls + clock for the
+        entire 1-hour deadline. Now the crash path writes a 'failed'
+        tombstone in a fresh transaction so the loop progresses.
+
+        Repro: a fetcher whose ``fetch_document_text`` raises. After
+        bootstrap completes, the accession must be in
+        ``def14a_ingest_log`` with status='failed', and a second
+        bootstrap call must see zero pending."""
+        from typing import NoReturn
+
+        conn = _setup
+        url = "https://www.sec.gov/Archives/edgar/data/839001/CRASH/d.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=839_001,
+            accession="0000839001-25-000099",
+            filing_date=date(2026, 3, 1),
+            primary_document_url=url,
+        )
+        conn.commit()
+
+        class _CrashingFetcher:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def fetch_document_text(self, _absolute_url: str) -> NoReturn:
+                self.calls += 1
+                raise RuntimeError("synthetic SEC fetch crash")
+
+        fetcher = _CrashingFetcher()
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=10)  # type: ignore[arg-type]
+        assert summary.accessions_seen == 1
+        assert summary.accessions_failed == 1
+        assert summary.rows_inserted == 0
+
+        # Tombstone landed.
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT status, error FROM def14a_ingest_log WHERE accession_number = %s",
+                ("0000839001-25-000099",),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row["status"] == "failed"
+        assert "synthetic SEC fetch crash" in (row["error"] or "")
+
+        # Second bootstrap call sees zero pending — the discovery
+        # query excludes already-tombstoned accessions.
+        prior_calls = fetcher.calls
+        second = bootstrap_def14a(conn, fetcher, chunk_limit=10, max_runtime_seconds=5)  # type: ignore[arg-type]
+        assert second.accessions_seen == 0
+        assert fetcher.calls == prior_calls  # no SEC re-fetches
+
+    def test_accounting_invariant_holds_under_crash(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """Bot review for #839 PR #850: the bootstrap summary must
+        satisfy ``seen == succeeded + partial + failed`` even when the
+        per-accession crash path fires. Operator-facing run audit
+        relies on this invariant to reconcile what was attempted vs
+        accounted."""
+        from typing import NoReturn
+
+        conn = _setup
+        url = "https://www.sec.gov/Archives/edgar/data/839001/INV/d.htm"
+        _seed_filing_event(
+            conn,
+            instrument_id=839_001,
+            accession="0000839001-25-000200",
+            filing_date=date(2026, 4, 1),
+            primary_document_url=url,
+        )
+        conn.commit()
+
+        class _CrashingFetcher:
+            def fetch_document_text(self, _absolute_url: str) -> NoReturn:
+                raise RuntimeError("synthetic crash for invariant test")
+
+        summary = bootstrap_def14a(conn, _CrashingFetcher(), chunk_limit=5, max_runtime_seconds=5)  # type: ignore[arg-type]
+        assert (
+            summary.accessions_seen
+            == summary.accessions_succeeded + summary.accessions_partial + summary.accessions_failed
+        )
+        assert summary.accessions_failed >= 1
+
+    def test_exit_reason_drained_when_queue_empties(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#1234 — when the candidate query returns zero rows, the
+        loop exits with ``exit_reason='drained'``. Confirms the natural
+        completion path is signalled explicitly so downstream
+        observability can distinguish from deadline-bound exits."""
+        conn = _setup
+        fetcher = _InMemoryFetcher({})
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=100, max_runtime_seconds=10)
+        assert summary.accessions_seen == 0
+        assert summary.exit_reason == "drained"
+
+    def test_exit_reason_deadline_when_max_runtime_zero(
+        self,
+        _setup: psycopg.Connection[tuple],
+    ) -> None:
+        """#1234 — when ``max_runtime_seconds=0`` the deadline expires
+        before the first chunk runs, so the loop never enters its body
+        and exits with ``exit_reason='deadline'`` (the default). Pin
+        the deadline-exit signal so a future regression that conflates
+        deadline-bound vs drained tripping is caught here."""
+        conn = _setup
+        fetcher = _InMemoryFetcher({})
+        summary = bootstrap_def14a(conn, fetcher, chunk_limit=100, max_runtime_seconds=0)
+        # Loop body never executed (deadline was 0); no work done.
+        assert summary.accessions_seen == 0
+        assert summary.exit_reason == "deadline"
+
+
+class TestExecCompensation:
+    """Item 402(c) Summary Compensation Table write path (#1945) —
+    ``apply_exec_comp_best_effort`` + ``_upsert_comp`` against the real DB.
+    Covers the one genuinely-new SQL mechanism (the def14a_exec_compensation
+    table + its ON CONFLICT upsert + sibling fan-out); the parser itself is
+    covered by pure tests in test_sec_def14a_sct_parser.py."""
+
+    # Minimal real-shape SCT: name-rowspan first row + a continuation year row.
+    _SCT_HTML = (
+        "<html><body><h2>Summary Compensation Table</h2><table>"
+        "<tr><td>Name and Principal Position</td><td>Year</td><td>Salary ($)</td>"
+        "<td>Bonus ($)</td><td>Stock Awards ($)</td><td>Total ($)</td></tr>"
+        "<tr><td>Jane Roe\nChief Executive Officer</td><td>2025</td><td>1,000,000</td>"
+        "<td>500,000</td><td>4,000,000</td><td>5,500,000</td></tr>"
+        "<tr><td>2024</td><td>950,000</td><td>400,000</td><td>3,500,000</td><td>4,850,000</td></tr>"
+        "</table></body></html>"
+    )
+
+    def test_apply_exec_comp_inserts_then_upserts(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.def14a_ingest import apply_exec_comp_best_effort
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=1_945_001, symbol="COMP")
+        acc = "0001945001-26-000001"
+
+        written = apply_exec_comp_best_effort(
+            conn,
+            accession_number=acc,
+            issuer_cik="0001945001",
+            body=self._SCT_HTML,
+            instrument_ids=[1_945_001],
+        )
+        assert written == 2  # two fiscal-year rows for the one NEO
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT executive_name, principal_position, fiscal_year, salary, "
+                "total_comp FROM def14a_exec_compensation "
+                "WHERE accession_number = %s ORDER BY fiscal_year DESC",
+                (acc,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 2
+        assert rows[0]["executive_name"] == "Jane Roe"
+        assert rows[0]["principal_position"] == "Chief Executive Officer"
+        assert rows[0]["fiscal_year"] == 2025
+        assert rows[0]["salary"] == Decimal("1000000")
+        assert rows[0]["total_comp"] == Decimal("5500000")
+        assert rows[1]["fiscal_year"] == 2024
+        assert rows[1]["total_comp"] == Decimal("4850000")
+
+        # Re-apply: the (instrument, accession, exec, fiscal_year) unique key
+        # UPSERTs in place — no duplicate rows.
+        again = apply_exec_comp_best_effort(
+            conn,
+            accession_number=acc,
+            issuer_cik="0001945001",
+            body=self._SCT_HTML,
+            instrument_ids=[1_945_001],
+        )
+        assert again == 2
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM def14a_exec_compensation WHERE accession_number = %s",
+                (acc,),
+            )
+            count = cur.fetchone()
+        assert count is not None and count[0] == 2  # still 2, not 4
+
+    def test_apply_exec_comp_no_sct_writes_nothing(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        from app.services.def14a_ingest import apply_exec_comp_best_effort
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=1_945_002, symbol="NOSCT")
+        acc = "0001945002-26-000001"
+        written = apply_exec_comp_best_effort(
+            conn,
+            accession_number=acc,
+            issuer_cik="0001945002",
+            body="<html><body><h2>Notice of Meeting</h2><p>Vote.</p></body></html>",
+            instrument_ids=[1_945_002],
+        )
+        assert written == 0
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM def14a_exec_compensation WHERE accession_number = %s",
+                (acc,),
+            )
+            count = cur.fetchone()
+        assert count is not None and count[0] == 0

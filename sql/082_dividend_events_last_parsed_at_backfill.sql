@@ -1,0 +1,34 @@
+-- 082_dividend_events_last_parsed_at_backfill.sql
+--
+-- Issue #644 — schema drift fix.
+--
+-- Background: 054_dividend_events.sql declared `last_parsed_at` as
+-- part of the CREATE TABLE for `dividend_events`. On any database
+-- where `dividend_events` already existed when 054 ran (the table
+-- predated 054 in some shape, or 054 partially applied and the txn
+-- rolled back without removing the schema_migrations row), the
+-- `CREATE TABLE IF NOT EXISTS` short-circuited and the column was
+-- never added. Migration 054 was recorded as applied; the column
+-- was missing.
+--
+-- Symptom on the dev DB the operator ran into: every daily run of
+-- `sec_dividend_calendar_ingest` failed with
+--
+--     column de.last_parsed_at does not exist
+--
+-- because the ingester query at app/services/dividend_calendar.py:328
+-- references it.
+--
+-- This migration is idempotent and safe to run on any DB:
+-- `ADD COLUMN IF NOT EXISTS` is a no-op when the column already
+-- exists, otherwise adds it with the original 054 default. After
+-- running, `\d dividend_events` shows `last_parsed_at` populated to
+-- NOW() for all existing rows (the DEFAULT applies to backfill).
+--
+-- Lesson: `CREATE TABLE IF NOT EXISTS` does not add columns to
+-- pre-existing tables. Any column added in a "new table" migration
+-- must be paired with an idempotent ALTER for the case where the
+-- table already exists. See docs/review-prevention-log.md.
+
+ALTER TABLE dividend_events
+    ADD COLUMN IF NOT EXISTS last_parsed_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
