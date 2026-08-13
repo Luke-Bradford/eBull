@@ -4320,3 +4320,59 @@ Two things S-4 adds to the prevention above:
 - Root cause: `tests/conftest.py::_module_source_touches_db` is `any(marker in source for marker in _DB_SOURCE_MARKERS)` — a **substring** match over the whole module source, docstrings and comments included. The file's module docstring explained the bug it guards by naming `settings.database_url`, which is one of the markers. The heuristic is deliberately conservative and correct to be; the collision is with *prose*, and it is silent in the direction that matters — over-marking removes a test from the gate without removing it from the run, so nothing is ever red.
 - Prevention: **after adding any test that should be on the push gate, assert its tier, not just its result** — `uv run pytest -m "not db" --collect-only -q <file>` and check the collected count, because exit 5 and exit 0 both look like success next to a green run. When a pure-logic test needs to *discuss* a DB symbol, paraphrase it ("the database-URL setting") rather than quoting the literal; the markers to avoid are listed at `tests/conftest.py::_DB_SOURCE_MARKERS`. Do not widen the marker list to allow the prose — the conservative direction is the safe one for the other 200-odd files.
 - Enforced in: this log; the module docstring of `tests/test_unattended_broker_mutation_guard.py` (paraphrases rather than quoting).
+
+---
+
+### An "independent" cross-check that traces to the same venue decodes the UNIT and cannot validate the LEVEL
+
+- First seen in: #2598 (2026-08-13), while running the band-stratified preflight census the ticket asked for.
+- Symptom: the decode of eToro's undocumented what-if `value` field rests on comparing `value / ticket_amount` against `quotes.spread_pct`, described in the skill as *"an independent same-quantity measurement"* because `quotes` *"is written by a feed path that never reads a what-if response, so this is not circular"*. That is true about the code path and misleading about the evidence: `quotes` is written by `market_data._upsert_quote` **from eToro**. Two endpoints of one venue.
+- Root cause: "independent" was applied to the *producing code path* when the property that matters is the *upstream observer*. For a UNIT question (is this field monetary or a rate?) the code-path independence is sufficient — a rate would miss by four orders of magnitude whatever the source. For a LEVEL question (is this spread real / is our band table calibrated?) it is worth nothing: both sides inherit the same book, the same staleness and the same venue-specific markup.
+- ⚠ The distinction had already been half-noticed and half-lost. The skill's *"do NOT upgrade this to `marketSpread == the quoted spread`"* caution is exactly the right instinct, but it is justified by per-observation noise on four names — which invites the reading that a bigger sample would license the upgrade. It would not. The 60-instrument census measured a population median of **0.995x**, and the identity still cannot be read as validation, because the wider sample makes the correlation tighter without making the sources any more independent.
+- ⚠⚠ Generalises past this endpoint: **before writing "independent" about a cross-check, name the two OBSERVERS, not the two code paths.** If the answer is one observer twice, the check can settle representation (unit, scale, encoding) and never magnitude.
+- Prevention: state, next to any cross-source claim, which upstream produced each side. Where only one upstream exists, say what the comparison can and cannot license, in that sentence rather than in a caveat further down.
+- Enforced in: this log; `scripts/verify_2598_preflight_quote_crosscheck.py` (the census arm's docstring); the #2598 comment carrying the census results.
+
+---
+
+### A p75 is not a bound, and neither is the maximum of a snapshot the market can exceed
+
+- First seen in: #2598 (2026-08-13), scope 5 asked for the banded static cost model to become *"the declared execution-side conservative bound"*.
+- Symptom: `static-p75-insession-v2+split-adjusted-max` was proposed as that bound. **A 75th percentile is exceeded by a quarter of its population by construction** — a property of the statistic, not of the sample — so the fix looked like "recalibrate at p95 or the max". Measured, that fails too: the `>=$100` band's p95 is 87.1 bps and its whole in-session sample max is 245.9 bps, while a single broker preflight for ETR came back at **381.5 bps**, 1.55x the largest spread anywhere in that band's calibration snapshot.
+- Root cause: two different jobs were being asked of one artefact. The banded model exists for the BACKTEST, where no quote exists and a per-band figure is the only thing available. Execution has the broker's own number at entry time and needs no model at all. Once that is separated, the bound question dissolves for execution and stays honest for the backtest — where the right disclosure is the measured exceedance, not the word "conservative".
+- ⚠ **The exceedance RATE is not the finding; the worst multiple is.** On the census the `>=$100` band's rate (4 of 15 over the p75) reads unremarkable and its worst observation is 11.85x. A rate near 25% says only that a p75 is behaving like a p75. Any report of a bound's adequacy that prints a rate without a tail is reporting the half that cannot fail.
+- ⚠ Second-order, and the reason a "conservative" label was plausible for so long: the frozen table was calibrated from a snapshot concentrated in the CLOSING hour (1,149 of 1,159 captures at 15:00-15:59 ET) and re-measured against one concentrated in the OPENING hour (1,517 of 1,569 at 10:00-10:59 ET). Same one-hour-of-the-day defect, opposite direction of bias, and it moved every band from "conservative" to "optimistic" without anything about the model changing. **A percentile inherits the sampling hour; two snapshots of one statistic can disagree in direction for a reason that is not drift.**
+- Prevention: before declaring any statistic a bound, ask what fraction of its own population exceeds it. If the answer is not ~0, it is a central estimate with a disclosure attached. And check whether the consumer already holds the true value — a modelled bound in front of a live measurement is the wrong artefact however well it is calibrated.
+- Enforced in: this log; `scripts/verify_2240_cost_model.py::_report_bounding_statistics` (prints p95/max with the freeze-ready quantisation and the sample caveat); `scripts/verify_2598_preflight_quote_crosscheck.py::_census_statistics` (`worst_over_p75` is a field beside the rate); `sql/342_strategy_entry_preflight_cost_basis.sql` (declines to mint a `static_band_bound` vocabulary member on this evidence).
+
+---
+
+### ⚠ OUTSTANDING (#2403) — four measured facts owed to `.claude/skills/data-sources/etoro-api.md`
+
+`Edit` on `.claude/skills/**` is refused in the autonomy worktree, so the skill-ownership
+rule ("update the skill inline, same PR") is unsatisfiable here and these are parked. They
+belong in the §"`value` IS DENOMINATED IN THE ROW'S OWN `currency`" bullet, after the
+freshness paragraph. A session working from `~/Dev/eBull` can apply them directly.
+
+Measured 2026-08-13 (#2598), 60 instruments, 15 per cost band, stored at
+`tests/fixtures/etoro_preflight_2598/band_census_2026-08-13.json`; re-summarise offline
+with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
+
+1. **`amount` is ABSENT AS A KEY, not present-and-null.** Raw cost-row keys are exactly
+   `['costType', 'currency', 'value']`. `currency` IS returned (`USD`) — and the live
+   portal documents it as *"ISO 4217 currency code in which **amount** is denominated"*,
+   so the response ships the denominator of a field it does not ship. Portal re-verified
+   the same day: `amount` = *"the monetary value of this cost component, expressed in
+   `currency`"*; `value` still appears nowhere in the documentation.
+2. **Three of the six documented components come back** for an unleveraged long:
+   `markup`, `marketSpread`, `overnightFee`. `transactionFee`, `overWeekendFee` and
+   `sdrt` are absent — and per the never-coerce rule, absent is not zero.
+3. **`value / ticket` matches the separately observed quoted spread at a population
+   MEDIAN of 0.995x (n=60 decidable), individual observations ranging 0.143x-3.526x.**
+   The skill's existing "do NOT upgrade this to `marketSpread == the quoted spread`"
+   caution is therefore right PER OBSERVATION while the aggregate identity holds — which
+   is what settles the one-side-vs-round-trip question (compare against
+   `p75_spread_pct`, never `half_spread_pct`) without licensing a per-instrument equality.
+   Only observations at or above 10 rounding quanta count: at a $1,000 ticket SPY read
+   0.4 bp against a 0.13 bp quote (3.08x), entirely rounding.
+4. **The comparison is not cross-source** — see the "independent cross-check" entry above.
