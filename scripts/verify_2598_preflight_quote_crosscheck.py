@@ -368,8 +368,12 @@ def _summarise_census(observations: list[dict]) -> None:
             f"  {band.label:<10} {band.n:>4}   {band.omitted:>7}   {band.decidable:>9}   {median:>21}   "
             f"{band.over_p75:>4}/{band.priced:<4}  {band.over_half:>4}/{band.priced:<4}   {worst:>13}"
         )
+    # ⚠ The count prints even at zero — "errors: 0" is the evidence the arm
+    # looked, and a line that appears only on failure cannot be distinguished
+    # from a line nobody wrote. The TYPE LIST is what is conditional.
     errors = [record for record in observations if "error" in record]
-    print(f"  errors: {len(errors)}   " + ", ".join(sorted({record["error"] for record in errors})))
+    kinds = ", ".join(sorted({record["error"] for record in errors}))
+    print(f"  errors: {len(errors)}" + (f"   {kinds}" if errors else ""))
     if every_ratio:
         print(
             f"\n  ratio over every decidable observation (n={len(every_ratio)}): "
