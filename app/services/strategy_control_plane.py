@@ -26,6 +26,8 @@ from app.services.strategy_base_currency import (
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyPurpose
 from app.services.strategy_promotion_evidence import evidence_refusals
 from app.services.strategy_promotion_evidence_store import load_promotion_evidence
+from app.services.strategy_result import structural_promotion_refusals
+from app.services.strategy_result_ambiguity import ambiguity_promotion_refusals, load_result_ambiguity
 from app.services.strategy_result_universe import load_result_universe, universe_promotion_refusals
 
 Stage = Literal[
@@ -434,13 +436,24 @@ def promote_strategy(
     belong to this exact strategy version.  Global auto/live switches are not
     read here and therefore cannot create or advance a promotion.
 
-    Evidence stages replay two persisted records per pinned result: the #2505
-    edge-evidence record and the #2621 frozen-universe record
-    (``evaluated ⊆ validated`` as the run loaded it — never today's
-    ``load_validated_universe``, whose ``is_tradable`` filter would let a later
-    delisting retroactively invalidate a passing result). A result stored
-    without either record refuses; this is the fail-closed replacement for
-    trusting that the sole writer ran ``check_promotable`` at write time.
+    Evidence stages replay, per pinned result: the #2505 edge-evidence record,
+    the #2621 frozen-universe record (``evaluated ⊆ validated`` as the run
+    loaded it — never today's ``load_validated_universe``, whose ``is_tradable``
+    filter would let a later delisting retroactively invalidate a passing
+    result), the #2625 frozen §3.4 ambiguity record, and the row's own
+    structural stamps through the shared ``structural_promotion_refusals``. A
+    result stored without any required record refuses; this is the fail-closed
+    replacement for trusting that the sole writer ran ``check_promotable`` at
+    write time.
+
+    ⚠ WHAT IS STILL *NOT* REPLAYED, because a partial gate read as a whole one
+    is how #2621 happened: the hold-out evaluation/access counts, criterion 9's
+    quarantine-arm comparison, and the deflation / effective-sample-size /
+    synthetic-control clauses. Each is classified — with its reason and its
+    temporal rule — in ``app.services.strategy_promotion_replay``, and
+    ``unenforced_candidate_fields`` returns the current set, and #2639 tracks
+    closing it. Do not add an input here without classifying it there; a test
+    enforces that.
     """
     for value, field in (
         (strategy_id, "strategy_id"),
@@ -475,7 +488,8 @@ def promote_strategy(
     if result_ids:
         rows = conn.execute(
             """
-            SELECT result_id, profit_factor, evaluated_instrument_count
+            SELECT result_id, profit_factor, evaluated_instrument_count,
+                   universe_basis, carry_unmodelled, fx_unmodelled
             FROM strategy_results_store
             WHERE strategy_id = %s AND strategy_version = %s
               AND result_id = ANY(%s)
@@ -491,6 +505,24 @@ def promote_strategy(
         if to_stage in _RESULT_EVIDENCE_STAGES:
             profit_factor_by_result = {int(row[0]): None if row[1] is None else Decimal(str(row[1])) for row in rows}
             evaluated_count_by_result = {int(row[0]): int(row[2]) for row in rows}
+            # ⚠ A NULL COST STAMP READS AS *UNMODELLED*, NEVER AS MODELLED.
+            # `bool(None)` is False, and False means "carry is modelled" — so the
+            # obvious coercion turns an unset stamp into a PASS on the clause it
+            # exists to enforce, which is fail-open on the Tier 1 refusals. Both
+            # columns are NOT NULL today (verified against dev, 2026-08-13), so
+            # this is defence in depth rather than a live bug; it is written this
+            # way because the failure direction is silent and the schema is one
+            # migration away from changing. `universe_basis` needs no such care —
+            # it preserves None, which `structural_promotion_refusals` already
+            # refuses as `universe_basis_absent`.
+            stamps_by_result = {
+                int(row[0]): (
+                    None if row[3] is None else str(row[3]),
+                    True if row[4] is None else bool(row[4]),
+                    True if row[5] is None else bool(row[5]),
+                )
+                for row in rows
+            }
             for result_id in result_ids:
                 # #2621 — the transition REPLAYS the universe check from the
                 # frozen record instead of trusting the write-time refusal that
@@ -505,6 +537,27 @@ def promote_strategy(
                     universe_promotion_refusals(
                         load_result_universe(conn, result_id),
                         evaluated_instrument_count=evaluated_count_by_result[result_id],
+                    )
+                )
+                # #2625 — the §3.4 ambiguity comparison, re-derived from the
+                # frozen record rather than trusted. Same shape and the same
+                # argument as the universe replay above; the record stores the
+                # comparison's INPUTS so the verdict can be disagreed with.
+                refusals.extend(ambiguity_promotion_refusals(load_result_ambiguity(conn, result_id)))
+                # #2625 — the row's own STRUCTURAL stamps. ⚠ These were
+                # persisted and never replayed: before this, a result stamped
+                # `survivor_only` / `carry_unmodelled` / `fx_unmodelled` — which
+                # is all 324 rows in dev — could be pinned to a promotion
+                # without the transition ever looking. Routed through the SHARED
+                # `structural_promotion_refusals`, the single copy #2599's
+                # preregistration freeze also calls, so the freeze's expectation
+                # and the transition's verdict cannot drift apart.
+                universe_basis, carry_unmodelled, fx_unmodelled = stamps_by_result[result_id]
+                refusals.extend(
+                    structural_promotion_refusals(
+                        universe_basis=universe_basis,
+                        carry_unmodelled=carry_unmodelled,
+                        fx_unmodelled=fx_unmodelled,
                     )
                 )
                 evidence = load_promotion_evidence(conn, result_id)

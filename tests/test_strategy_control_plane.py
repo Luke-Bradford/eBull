@@ -42,6 +42,11 @@ from app.services.strategy_promotion_evidence import (
     RecentYearEvidence,
 )
 from app.services.strategy_promotion_evidence_store import store_promotion_evidence
+from app.services.strategy_result_ambiguity import (
+    AMBIGUITY_RULE_VERSION,
+    AmbiguityRecord,
+    store_result_ambiguity,
+)
 from app.services.strategy_result_universe import ResultUniverseRecord, store_result_universe
 from tests.test_result_ledger import build_metrics, build_result
 
@@ -134,6 +139,35 @@ def _universe_record(
             validated_universe_ids=universe,
         ),
     )
+
+
+def _ambiguity_record(conn: psycopg.Connection[Any], result_id: int) -> None:
+    """The #2625 frozen §3.4 record a pinned result must carry to promote.
+
+    ``shared_measurement`` is the immaterial verdict a non-level strategy
+    produces — the only basis that reaches "not material" without a random
+    cohort, which this fixture has no way to supply.
+    """
+    store_result_ambiguity(
+        conn,
+        result_id=result_id,
+        record=AmbiguityRecord(
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            comparison_basis="shared_measurement",
+        ),
+    )
+
+
+#: #2625 — the row stamps ``promote_strategy`` now replays through the shared
+#: ``structural_promotion_refusals``. ⚠ ``build_result`` defaults to
+#: ``survivor_only`` + both costs unmodelled, which is correct for the corpus we
+#: actually hold and means a fixture must OPT IN to being promotable. Spelled
+#: out here rather than buried per-test so the opt-in is visible.
+_PROMOTABLE_STAMPS: dict[str, Any] = {
+    "universe_basis": "survivorship_free",
+    "carry_unmodelled": False,
+    "fx_unmodelled": False,
+}
 
 
 def _instrument(conn: psycopg.Connection[Any], instrument_id: int = 2454001) -> None:
@@ -303,9 +337,11 @@ def test_historical_validation_requires_passing_edge_evidence(
         namespace="in_sample",
         metrics=build_metrics(profit_factor=1.2),
         evaluated_instrument_count=3,
+        **_PROMOTABLE_STAMPS,
     )
     result_id = store_in_sample_result(conn, result)
     _universe_record(conn, result_id)
+    _ambiguity_record(conn, result_id)
 
     with pytest.raises(StrategyControlError, match="promotion_evidence_missing"):
         promote_strategy(
@@ -343,9 +379,11 @@ def test_historical_validation_requires_passing_edge_evidence(
         ambiguity_arm="best_case",
         metrics=build_metrics(profit_factor=1.2),
         evaluated_instrument_count=3,
+        **_PROMOTABLE_STAMPS,
     )
     passing_result_id = store_in_sample_result(conn, passing_result)
     _universe_record(conn, passing_result_id)
+    _ambiguity_record(conn, passing_result_id)
     store_promotion_evidence(
         conn,
         result_id=passing_result_id,
@@ -402,9 +440,11 @@ def test_promotion_replays_the_frozen_universe_check(
             quarantine_arm=quarantine_arm,
             metrics=build_metrics(profit_factor=1.2),
             evaluated_instrument_count=2,
+            **_PROMOTABLE_STAMPS,
         )
         result_id = store_in_sample_result(conn, result)
         store_promotion_evidence(conn, result_id=result_id, evidence=_passing_promotion_evidence())
+        _ambiguity_record(conn, result_id)
         return result_id
 
     def _refuses(result_id: int, code: str) -> None:
@@ -446,6 +486,91 @@ def test_promotion_replays_the_frozen_universe_check(
         reason="frozen universe replay passes",
         evidence_ref="result:test-universe-passing",
         result_ids=(passing_id,),
+    )
+    assert promotion.to_stage == "historical_validated"
+
+
+def test_promotion_replays_the_ambiguity_record_and_the_structural_stamps(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """#2625 — the §3.4 comparison and the row's own stamps are re-derived at
+    the transition, not trusted from write time.
+
+    ⚠⚠ THE STRUCTURAL HALF IS THE POINT. Before this, `promote_strategy` never
+    read `universe_basis`, `carry_unmodelled` or `fx_unmodelled` — a `grep` for
+    any of the three in `strategy_control_plane.py` returned nothing — so a
+    result stamped `survivor_only` with both costs unmodelled, which is all 324
+    rows in dev, could be pinned to a promotion without the transition ever
+    looking. Tier 1's refusals could close and promotion would still not consult
+    them.
+    """
+    conn = ebull_test_conn
+    promote_strategy(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="research_candidate",
+        promoted_by="operator",
+        reason="register candidate",
+    )
+
+    def _result_id(ambiguity_arm: str, quarantine_arm: str, **stamps: Any) -> int:
+        result = build_result(
+            strategy_id="S-GOV",
+            strategy_version="v1",
+            namespace="in_sample",
+            ambiguity_arm=ambiguity_arm,
+            quarantine_arm=quarantine_arm,
+            metrics=build_metrics(profit_factor=1.2),
+            evaluated_instrument_count=3,
+            **{**_PROMOTABLE_STAMPS, **stamps},
+        )
+        result_id = store_in_sample_result(conn, result)
+        _universe_record(conn, result_id)
+        store_promotion_evidence(conn, result_id=result_id, evidence=_passing_promotion_evidence())
+        return result_id
+
+    def _refuses(result_id: int, code: str) -> None:
+        with pytest.raises(StrategyControlError, match=code):
+            promote_strategy(
+                conn,
+                strategy_id="S-GOV",
+                strategy_version="v1",
+                to_stage="historical_validated",
+                promoted_by="operator",
+                reason="replay must refuse",
+                evidence_ref="result:test-2625",
+                result_ids=(result_id,),
+            )
+        assert current_stage(conn, "S-GOV", "v1") == "research_candidate"
+
+    # A clean row with no ambiguity record refuses — evidence and a frozen
+    # universe are not enough on their own.
+    _refuses(_result_id("worst_case", "masked"), "ambiguity_verdict_unrecorded")
+
+    # The three structural stamps, each refusing on its own.
+    survivor = _result_id("worst_case", "admitted", universe_basis="survivor_only")
+    _ambiguity_record(conn, survivor)
+    _refuses(survivor, "universe_basis_not_survivorship_free")
+
+    carry = _result_id("best_case", "masked", carry_unmodelled=True)
+    _ambiguity_record(conn, carry)
+    _refuses(carry, "carry_unmodelled")
+
+    # ⚠ Routed through the SHARED `structural_promotion_refusals`, so this also
+    # pins that the transition and #2599's preregistration freeze read one copy
+    # of the rule rather than two that can drift.
+    passing = _result_id("best_case", "admitted")
+    _ambiguity_record(conn, passing)
+    promotion = promote_strategy(
+        conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="historical_validated",
+        promoted_by="operator",
+        reason="ambiguity and structural replays pass",
+        evidence_ref="result:test-2625-passing",
+        result_ids=(passing,),
     )
     assert promotion.to_stage == "historical_validated"
 

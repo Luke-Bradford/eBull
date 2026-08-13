@@ -145,6 +145,13 @@ from app.services.strategy_result import (
     check_promotable,
     namespace_for_position,
 )
+from app.services.strategy_result_ambiguity import (
+    AMBIGUITY_RULE_VERSION,
+    AmbiguityRecord,
+    ambiguity_verdict,
+    load_result_ambiguity,
+    store_result_ambiguity,
+)
 from app.services.strategy_result_universe import (
     ResultUniverseRecord,
     load_result_universe,
@@ -2267,6 +2274,69 @@ def _candidate(
     )
 
 
+def _ambiguity_record_for(
+    arms: Sequence[ArmMeasurement],
+    result: StrategyResult,
+) -> AmbiguityRecord:
+    """§3.4's comparison INPUTS for this row, for freezing under #2625.
+
+    Split out of ``_ambiguity_material_for`` so the verdict has exactly one
+    definition: this function gathers what was compared, and
+    ``ambiguity_verdict`` decides. The stored record is then provably the thing
+    the write-time gate judged, rather than a second description of it.
+
+    ⚠ THE SHORT-CIRCUIT IS PRESERVED, and it is observable. The original
+    returned ``None`` on the FIRST unpriced arm without validating the later
+    arm's namespace, so collecting both eagerly would raise where the runner
+    used to return a verdict. The ``break`` keeps that exact behaviour.
+
+    ⚠ A NON-FINITE SHARPE IS TREATED AS UNPRICED, which is what the original
+    did by accident and this does on purpose. ``sharpes[0] == sharpes[1]`` is
+    ``False`` for NaN, so the old code fell through to ``None``; ``AmbiguityRecord``
+    refuses a non-finite value outright, so without this branch a degenerate
+    zero-volatility measurement would turn a "not compared" verdict into a
+    crashed run.
+    """
+    matching = [
+        measurement
+        for measurement in arms
+        if measurement.strategy_id == result.identity.strategy_id
+        and measurement.quarantine_arm == result.identity.quarantine_arm
+    ]
+    if any(measurement.ambiguity_arm is None for measurement in matching):
+        # ⚠ PRECEDENCE: presence of a shared measurement decides the record
+        # before any Sharpe is read, and regardless of their values.
+        return AmbiguityRecord(
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            comparison_basis="shared_measurement",
+        )
+    by_arm = {measurement.ambiguity_arm: measurement for measurement in matching}
+    if set(by_arm) != set(AMBIGUITY_ARM_ORDER):
+        raise RuntimeError(
+            f"{result.identity.strategy_id}/{result.identity.quarantine_arm} has ambiguity measurements "
+            f"{sorted(arm for arm in by_arm if arm is not None)} rather than both declared arms"
+        )
+    sharpes: dict[str, float | None] = {}
+    for ambiguity in AMBIGUITY_ARM_ORDER:
+        outcome = by_arm[ambiguity].namespaces.get(result.identity.namespace)
+        if outcome is None:
+            raise RuntimeError(
+                f"{result.identity.strategy_id}/{ambiguity}/{result.identity.quarantine_arm} has no "
+                f"{result.identity.namespace} measurement for a row built from that namespace"
+            )
+        sharpe = outcome.metrics.sharpe
+        if sharpe is None or not math.isfinite(sharpe):
+            sharpes[ambiguity] = None
+            break
+        sharpes[ambiguity] = sharpe
+    return AmbiguityRecord(
+        ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+        comparison_basis="arm_sharpes",
+        best_case_sharpe=sharpes.get("best_case"),
+        worst_case_sharpe=sharpes.get("worst_case"),
+    )
+
+
 def _ambiguity_material_for(
     arms: Sequence[ArmMeasurement],
     result: StrategyResult,
@@ -2279,33 +2349,13 @@ def _ambiguity_material_for(
     unpriced Sharpes need the random cohort's 95th-percentile gap. This runner
     does not attach that cohort yet, so the only honest verdict is ``None`` and
     the promotion gate stays closed.
+
+    ⚠ ONE DEFINITION, SHARED WITH THE TRANSITION (#2625). The verdict is derived
+    from the same record that gets frozen, by the same pure function
+    ``promote_strategy`` calls on the way back out. A second hand-written copy
+    of §3.4 here is exactly the drift the extraction prevents.
     """
-    matching = [
-        measurement
-        for measurement in arms
-        if measurement.strategy_id == result.identity.strategy_id
-        and measurement.quarantine_arm == result.identity.quarantine_arm
-    ]
-    if any(measurement.ambiguity_arm is None for measurement in matching):
-        return False
-    by_arm = {measurement.ambiguity_arm: measurement for measurement in matching}
-    if set(by_arm) != set(AMBIGUITY_ARM_ORDER):
-        raise RuntimeError(
-            f"{result.identity.strategy_id}/{result.identity.quarantine_arm} has ambiguity measurements "
-            f"{sorted(arm for arm in by_arm if arm is not None)} rather than both declared arms"
-        )
-    sharpes: list[float] = []
-    for ambiguity in AMBIGUITY_ARM_ORDER:
-        outcome = by_arm[ambiguity].namespaces.get(result.identity.namespace)
-        if outcome is None:
-            raise RuntimeError(
-                f"{result.identity.strategy_id}/{ambiguity}/{result.identity.quarantine_arm} has no "
-                f"{result.identity.namespace} measurement for a row built from that namespace"
-            )
-        if outcome.metrics.sharpe is None:
-            return None
-        sharpes.append(outcome.metrics.sharpe)
-    return False if sharpes[0] == sharpes[1] else None
+    return ambiguity_verdict(_ambiguity_record_for(arms, result))
 
 
 def _expected_refusals(
@@ -2821,6 +2871,7 @@ def _write_rows(
                 )
                 for result_id, result in zip(ids, (masked, admitted), strict=True):
                     _store_universe_record(conn, result_id, result, arms=arms, validated=validated)
+                    _store_ambiguity_record(conn, result_id, result, arms=arms)
             stored.extend((result_id, result, 0) for result_id, result in zip(ids, (masked, admitted), strict=True))
             continue
         # ⚠ ONE SPLIT PER ARM, NOT PER PAIR. The two rows of a pair differ in
@@ -2841,6 +2892,7 @@ def _write_rows(
                     splits.get(split_key) or splits[shared_key],
                 )
                 _store_universe_record(conn, result_id, result, arms=arms, validated=validated)
+                _store_ambiguity_record(conn, result_id, result, arms=arms)
                 stored.append((result_id, result, folds))
 
     # Criterion 8 — RE-MEASURED on every written row, with the hold-out counts
@@ -2849,6 +2901,9 @@ def _write_rows(
     # same pair, so they are cached rather than re-queried 8 times per strategy.
     written: list[WrittenRow] = []
     counts_cache: dict[tuple[str, str], tuple[int, int]] = {}
+    #: One §3.4 comparison per (strategy_id, quarantine_arm, namespace); both
+    #: ambiguity arms of that key must freeze the same record. See the check below.
+    ambiguity_by_comparison: dict[tuple[str, str, str], AmbiguityRecord] = {}
     for result_id, result, folds_written in stored:
         identity = result.identity
         key = (identity.strategy_id, identity.strategy_version)
@@ -2856,7 +2911,34 @@ def _write_rows(
             counts = holdout_access_counts(conn, *key)
             counts_cache[key] = (counts.holdout_evaluations, counts.recorded_accesses)
         evaluations, accesses = counts_cache[key]
-        ambiguity_material = _ambiguity_material_for(arms, result)
+        # ⚠ READ BACK, not taken from memory — the same argument as the frozen
+        # universe record directly below. Deriving the write-time verdict from
+        # the row the TRANSITION will load is what proves the two agree; a
+        # divergence (a constraint that rejected a value, a hash that does not
+        # round-trip) then fails this run loudly instead of surfacing months
+        # later as a result nobody can promote.
+        ambiguity_record = load_result_ambiguity(conn, result_id)
+        if ambiguity_record is None:
+            raise RuntimeError(
+                f"{identity.strategy_id} {identity.namespace}/{identity.quarantine_arm} stored without its frozen "
+                "ambiguity record — the writer must freeze the gate's inputs in the pair's own transaction"
+            )
+        # ⚠⚠ SIBLING CONSISTENCY, ENFORCED AT WRITE TIME AND NOT ONLY IN A TEST.
+        # The verdict is a function of (strategy_id, quarantine_arm, namespace)
+        # and NOT of `ambiguity_arm`, so the two rows differing solely in their
+        # ambiguity arm are two views of ONE §3.4 comparison. If they ever froze
+        # different records, `promote_strategy` would admit whichever of the pair
+        # happened to pass — so the divergence must fail the run that caused it,
+        # not wait to be noticed at a promotion months later.
+        comparison_key = (identity.strategy_id, identity.quarantine_arm, identity.namespace)
+        seen_record = ambiguity_by_comparison.setdefault(comparison_key, ambiguity_record)
+        if seen_record != ambiguity_record:
+            raise RuntimeError(
+                f"{identity.strategy_id} {identity.namespace}/{identity.quarantine_arm} froze ambiguity record "
+                f"{ambiguity_record} against {seen_record} for the same comparison — the two ambiguity arms of one "
+                "quarantine arm share a §3.4 verdict and cannot disagree"
+            )
+        ambiguity_material = ambiguity_verdict(ambiguity_record)
         # ⚠ The universe inputs are READ BACK from the frozen record, not taken
         # from memory — the same argument that reads the hold-out counts off the
         # database. The re-measure then verifies exactly what the promotion
@@ -3017,6 +3099,32 @@ def _evaluated_ids(arms: Sequence[ArmMeasurement], result: StrategyResult) -> fr
                 return outcome.evaluated_instrument_ids
     raise RuntimeError(  # pragma: no cover - every stored row came from a measurement
         f"no measurement matches the stored row {result.identity.version}"
+    )
+
+
+def _store_ambiguity_record(
+    conn: psycopg.Connection[Any],
+    result_id: int,
+    result: StrategyResult,
+    *,
+    arms: Sequence[ArmMeasurement],
+) -> None:
+    """Freeze the row's §3.4 comparison inputs in the pair's own transaction (#2625).
+
+    ⚠ THE RECORD IS A FUNCTION OF (strategy_id, quarantine_arm, namespace) AND
+    NOT OF ``ambiguity_arm`` — ``_ambiguity_record_for`` filters on the first
+    three only. So the two result rows that differ solely in their ambiguity arm
+    MUST receive identical records, and do, by construction. That is enforced
+    twice, because the consequence of divergence is a promotion: the criterion-8
+    loop in ``_write_rows`` compares every pair it reads back and raises, and
+    ``tests/test_backtest_run.py`` pins the purity property that makes it hold.
+    A future edit making the record depend on the arm would give one comparison
+    two verdicts, and ``promote_strategy`` would admit whichever half passed.
+    """
+    store_result_ambiguity(
+        conn,
+        result_id=result_id,
+        record=_ambiguity_record_for(arms, result),
     )
 
 
