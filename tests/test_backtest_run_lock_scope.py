@@ -102,6 +102,38 @@ def _run_until_evaluation(
     return seen[0]
 
 
+def _run_to_the_write_phase(conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive a real run through evaluation with the corpus pass stubbed out.
+
+    The measurement carries no namespace, so the deflation pass has nothing to
+    group and the run arrives at the write phase with an empty book — which is
+    all these tests need it to do. The caller stubs ``_write_rows`` to raise
+    ``_StopAfterEvaluation`` after recording whatever it is measuring.
+    """
+    measurement = SimpleNamespace(
+        strategy_id="stub",
+        ambiguity_arm=None,
+        quarantine_arm="masked",
+        series_evaluated=0,
+        elapsed_s=0.0,
+        namespaces={},
+        holdout_positions_discarded=0,
+    )
+    monkeypatch.setattr(backtest_run, "load_corpus", lambda *_args, **_kwargs: _tiny_corpus())
+    monkeypatch.setattr(backtest_run, "_assert_ambiguity_contract", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(backtest_run, "evaluate_arm", lambda *_args, **_kwargs: measurement)
+    monkeypatch.setattr(backtest_run, "evaluate_level_arms", lambda *_args, **_kwargs: (measurement,))
+
+    strategy_id = next(iter(sorted(STRATEGY_MANIFEST)))
+    with pytest.raises(_StopAfterEvaluation):
+        run_backtest(
+            conn,
+            strategy_id=strategy_id,
+            manifest={strategy_id: STRATEGY_MANIFEST[strategy_id]},
+            release_read_locks=True,
+        )
+
+
 @pytest.fixture
 def probe_conn(ebull_test_conn: psycopg.Connection[Any]) -> Any:
     """A second session, so the locks are read from outside the transaction.
@@ -179,38 +211,37 @@ def test_the_write_phase_runs_inside_one_transaction_even_after_a_release(
     repair — turning a resumable failure into one that needs a human.
     """
     seen: list[int] = []
-    monkeypatch.setattr(backtest_run, "load_corpus", lambda *_args, **_kwargs: _tiny_corpus())
-    # A measurement that carries no namespace: the deflation pass then has
-    # nothing to group and the run reaches the write phase with an empty book,
-    # which is all this test needs it to do.
-    measurement = SimpleNamespace(
-        strategy_id="stub",
-        ambiguity_arm=None,
-        quarantine_arm="masked",
-        series_evaluated=0,
-        elapsed_s=0.0,
-        namespaces={},
-        holdout_positions_discarded=0,
-    )
-    monkeypatch.setattr(backtest_run, "_assert_ambiguity_contract", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(backtest_run, "evaluate_arm", lambda *_args, **_kwargs: measurement)
-    monkeypatch.setattr(backtest_run, "evaluate_level_arms", lambda *_args, **_kwargs: (measurement,))
 
     def _write(inner_conn: psycopg.Connection[Any], **_kwargs: object) -> object:
         seen.append(int(inner_conn.info.transaction_status))
         raise _StopAfterEvaluation
 
     monkeypatch.setattr(backtest_run, "_write_rows", _write)
-
-    strategy_id = next(iter(sorted(STRATEGY_MANIFEST)))
-    with pytest.raises(_StopAfterEvaluation):
-        run_backtest(
-            ebull_test_conn,
-            strategy_id=strategy_id,
-            manifest={strategy_id: STRATEGY_MANIFEST[strategy_id]},
-            release_read_locks=True,
-        )
+    _run_to_the_write_phase(ebull_test_conn, monkeypatch)
     assert seen == [int(psycopg.pq.TransactionStatus.INTRANS)]
+
+
+def test_every_arm_ends_its_own_read_transaction(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One arm is a full corpus pass, so the pass is the bound worth holding to.
+
+    Releasing only before the evaluation phase would still leave one transaction
+    open across every arm — holding the corpus tables and pinning ``xmin`` against
+    vacuum for the whole run. The count is the pre-evaluation boundary plus one
+    per quarantine arm, derived from the module's own constant rather than typed
+    in, so adding an arm does not silently stop being checked.
+    """
+    calls: list[None] = []
+
+    def _stop(*_args: object, **_kwargs: object) -> object:
+        raise _StopAfterEvaluation
+
+    monkeypatch.setattr(backtest_run, "_end_read_phase", lambda _conn: calls.append(None))
+    monkeypatch.setattr(backtest_run, "_write_rows", _stop)
+    _run_to_the_write_phase(ebull_test_conn, monkeypatch)
+    assert len(calls) == 1 + len(backtest_run.QUARANTINE_ARM_ORDER)
 
 
 def test_release_is_refused_when_the_caller_already_holds_a_transaction(
