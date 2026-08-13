@@ -1,0 +1,169 @@
+[
+ {
+  "cost_last_updated": "2026-08-13T15:29:56.411913+00:00",
+  "cost_rows": {
+   "marketSpread": "0.01",
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 1.0,
+  "instrument_id": 1001,
+  "market_spread_row_present": true,
+  "market_spread_value_null": false,
+  "observed_quote_bps": 0.99,
+  "quote_ask": "304.120000",
+  "quote_bid": "304.090000",
+  "quoted_at": "2026-08-13T15:23:01.177720+00:00",
+  "rounding_floor_bps": 1.0,
+  "settlement_type": "real",
+  "symbol": "AAPL",
+  "ticket_amount_usd": "100",
+  "transaction": "buy"
+ },
+ {
+  "cost_last_updated": "2026-08-13T15:29:59.439490+00:00",
+  "cost_rows": {
+   "marketSpread": "0.07",
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 0.7,
+  "instrument_id": 1001,
+  "market_spread_row_present": true,
+  "market_spread_value_null": false,
+  "observed_quote_bps": 0.99,
+  "quote_ask": "304.120000",
+  "quote_bid": "304.090000",
+  "quoted_at": "2026-08-13T15:23:01.177720+00:00",
+  "rounding_floor_bps": 0.1,
+  "settlement_type": "real",
+  "symbol": "AAPL",
+  "ticket_amount_usd": "1000",
+  "transaction": "buy"
+ },
+ {
+  "cost_last_updated": "2026-08-13T15:30:02.463592+00:00",
+  "cost_rows": {
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": null,
+  "instrument_id": 3000,
+  "market_spread_row_present": false,
+  "market_spread_value_null": false,
+  "observed_quote_bps": 0.13,
+  "quote_ask": "776.950000",
+  "quote_bid": "776.940000",
+  "quoted_at": "2026-08-13T15:23:08.560873+00:00",
+  "rounding_floor_bps": 1.0,
+  "settlement_type": "real",
+  "symbol": "SPY",
+  "ticket_amount_usd": "100",
+  "transaction": "buy"
+ },
+ {
+  "cost_last_updated": "2026-08-13T15:30:06.497066+00:00",
+  "cost_rows": {
+   "marketSpread": "0.04",
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 0.4,
+  "instrument_id": 3000,
+  "market_spread_row_present": true,
+  "market_spread_value_null": false,
+  "observed_quote_bps": 0.13,
+  "quote_ask": "776.950000",
+  "quote_bid": "776.940000",
+  "quoted_at": "2026-08-13T15:23:08.560873+00:00",
+  "rounding_floor_bps": 0.1,
+  "settlement_type": "real",
+  "symbol": "SPY",
+  "ticket_amount_usd": "1000",
+  "transaction": "buy"
+ },
+ {
+  "cost_last_updated": "2026-08-13T15:30:09.625004+00:00",
+  "cost_rows": {
+   "marketSpread": "0.01",
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 1.0,
+  "instrument_id": 3017,
+  "market_spread_row_present": true,
+  "market_spread_value_null": false,
+  "observed_quote_bps": 1.19,
+  "quote_ask": "168.750000",
+  "quote_bid": "168.730000",
+  "quoted_at": "2026-08-13T15:23:08.623027+00:00",
+  "rounding_floor_bps": 1.0,
+  "settlement_type": "real",
+  "symbol": "XLV",
+  "ticket_amount_usd": "100",
+  "transaction": "buy"
+ },
+ {
+  "cost_last_updated": "2026-08-13T15:30:13.651081+00:00",
+  "cost_rows": {
+   "marketSpread": "0.12",
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 1.2,
+  "instrument_id": 3017,
+  "market_spread_row_present": true,
+  "market_spread_value_null": false,
+  "observed_quote_bps": 1.19,
+  "quote_ask": "168.750000",
+  "quote_bid": "168.730000",
+  "quoted_at": "2026-08-13T15:23:08.623027+00:00",
+  "rounding_floor_bps": 0.1,
+  "settlement_type": "real",
+  "symbol": "XLV",
+  "ticket_amount_usd": "1000",
+  "transaction": "buy"
+ },
+ {
+  "cost_last_updated": "2026-07-17T12:03:10.387000+00:00",
+  "cost_rows": {
+   "marketSpread": "0.01",
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 1.0,
+  "instrument_id": 9660,
+  "market_spread_row_present": true,
+  "market_spread_value_null": false,
+  "observed_quote_bps": 0.81,
+  "quote_ask": "123.950000",
+  "quote_bid": "123.940000",
+  "quoted_at": "2026-07-13T19:59:54.941779+00:00",
+  "rounding_floor_bps": 1.0,
+  "settlement_type": "real",
+  "symbol": "NUVL",
+  "ticket_amount_usd": "100",
+  "transaction": "buy"
+ },
+ {
+  "cost_last_updated": "2026-07-17T12:03:10.387000+00:00",
+  "cost_rows": {
+   "marketSpread": "0.08",
+   "markup": "0.0",
+   "overnightFee": "0.0"
+  },
+  "implied_bps_if_monetary": 0.8,
+  "instrument_id": 9660,
+  "market_spread_row_present": true,
+  "market_spread_value_null": false,
+  "observed_quote_bps": 0.81,
+  "quote_ask": "123.950000",
+  "quote_bid": "123.940000",
+  "quoted_at": "2026-07-13T19:59:54.941779+00:00",
+  "rounding_floor_bps": 0.1,
+  "settlement_type": "real",
+  "symbol": "NUVL",
+  "ticket_amount_usd": "1000",
+  "transaction": "buy"
+ }
+]

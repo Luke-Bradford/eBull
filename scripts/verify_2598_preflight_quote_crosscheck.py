@@ -43,11 +43,12 @@ The census answers that on a population, per band, and reports the exceedance
 under BOTH readings rather than picking one.
 
 ⚠ THE RATIO IS NOT STABLE ON TIGHT NAMES, which is the trap this arm is built
-around. Re-running the four-name cross-check on 2026-08-13 gave AAPL 0.71x and
-SPY 3.08x against their own observed quotes, where the previous day's run had
-all three of its names within 0.02x of 1.0 — because at 0.13 bp quoted, one
-cent of rounding on a $1,000 ticket IS the measurement. Only observations well
-above the quantum are counted as decidable; see ``DECIDABLE_MIN_QUANTA``.
+around. Re-running the four-name cross-check on 2026-08-13
+(``quote_crosscheck_2026-08-13_runC.json``) gave AAPL 0.71x and SPY 3.08x
+against their own observed quotes, where the previous day's run had all three
+of its names within 0.02x of 1.0 — because at 0.13 bp quoted, one cent of
+rounding on a $1,000 ticket IS the measurement. Only observations well above
+the quantum are counted as decidable; see ``DECIDABLE_MIN_QUANTA``.
 """
 
 from __future__ import annotations
@@ -136,16 +137,26 @@ def _census_targets(conn: psycopg.Connection[Any], *, per_band: int) -> tuple[in
     """Up to ``per_band`` instruments from EACH frozen cost band (#2598 step 2).
 
     ⚠ THE SELECTION RULE IS THE MEASUREMENT'S WEAKEST POINT, so it is stated
-    rather than left in the SQL. Within a band the instruments are ordered by
-    id and taken at an even STRIDE:
+    rather than left in the SQL. Within a band the instruments are ordered by id
+    and N positions are taken EVENLY ACROSS THE WHOLE INDEX RANGE, endpoints
+    included:
 
     * not the first N — eToro ids run roughly in listing vintage, so the head of
       the list is the mega-caps and the sample would be the tightest names in
       every band;
     * not the widest N — that selects on the very quantity being measured, and
       would report a bound that the selection guaranteed;
-    * a stride is reproducible (no RNG, no seed to carry) and is independent of
-      spread, which is what makes the exceedance counts mean anything.
+    * the positions are reproducible (no RNG, no seed to carry) and independent
+      of spread, which is what makes the exceedance counts mean anything.
+
+    ⚠⚠ NOT A FIXED STRIDE, and the difference is not cosmetic (Codex ckpt-2 on
+    this diff). ``ids[:: len(ids) // per_band]`` truncates: at 80 candidates and
+    N=15 the step is 5 and the sample stops at index 70, leaving the last eighth
+    of the band unsampled — and where a band holds fewer than ``2 × per_band``
+    rows the step is 1 and it degenerates to exactly the "first N" this
+    docstring claims to avoid. Interpolating the positions instead makes the
+    last instrument in the band the last observation, for every N and every band
+    size.
 
     The population is the §4.0 validated universe intersected with the quote
     panel — the set the cost model is actually applied to — and a row without a
@@ -162,12 +173,23 @@ def _census_targets(conn: psycopg.Connection[Any], *, per_band: int) -> tuple[in
         by_band[band_for(last).label].append(instrument_id)
     chosen: list[int] = []
     for band in BANDS:
-        ids = by_band[band.label]
-        if not ids:
-            continue
-        stride = max(1, len(ids) // per_band)
-        chosen.extend(ids[::stride][:per_band])
+        chosen.extend(_even_positions(by_band[band.label], count=per_band))
     return tuple(chosen)
+
+
+def _even_positions(ids: list[int], *, count: int) -> list[int]:
+    """``count`` ids spread evenly over ``ids``, first and last always included.
+
+    Strictly increasing positions (``count <= len(ids)`` after the clamp), so no
+    instrument is probed twice and the request budget buys ``count`` distinct
+    observations.
+    """
+    if not ids:
+        return []
+    taken = min(count, len(ids))
+    if taken == 1:
+        return [ids[0]]
+    return [ids[index * (len(ids) - 1) // (taken - 1)] for index in range(taken)]
 
 
 def _probe(

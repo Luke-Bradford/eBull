@@ -24,6 +24,7 @@ from scripts.verify_2598_preflight_quote_crosscheck import (
     COST_QUANTUM_USD,
     DECIDABLE_MIN_QUANTA,
     _census_statistics,
+    _even_positions,
 )
 
 #: The measuring ticket's rounding floor in bps — 0.01 USD on $1,000 is 0.1 bp.
@@ -122,8 +123,12 @@ class TestBothReadingsOfMarketSpread:
 class TestTheWorstMultiple:
     def test_it_is_the_maximum_and_not_the_mean(self) -> None:
         """⚠ The rate says a p75 is behaving like a p75; the worst multiple is
-        what says it cannot be a bound. Measured 2026-08-13: MXC at 910 bps
-        against a 57.1 bps band, 15.9x, inside a band whose rate was 3-in-15."""
+        what says it cannot be a bound. On the stored census the ``>=$100``
+        band's rate is 4-in-15 — unremarkable — and its worst observation is
+        11.85x (ETR, 381.5 bps against a 32.2 bps band). Reproduce with
+        ``--replay tests/fixtures/etoro_preflight_2598/band_census_2026-08-13.json``;
+        the figures are not asserted here because they are a snapshot, and a
+        test that pins them fails on the next census rather than on a defect."""
         band = _only(
             [
                 _observation(implied_bps_if_monetary=BAND_P75_BPS / 2),
@@ -132,3 +137,28 @@ class TestTheWorstMultiple:
         )
         assert band.over_p75 == 1
         assert band.worst_over_p75 == 16.0
+
+
+class TestTheSelectionPositions:
+    """⚠ Codex ckpt-2 killed the first rule here: a fixed stride
+    (``ids[:: len(ids) // count]``) truncates, and degenerates to "the first N"
+    — the exact bias the census exists to avoid — whenever a band holds fewer
+    than twice ``count`` rows."""
+
+    def test_the_last_instrument_in_a_band_is_always_reached(self) -> None:
+        ids = list(range(80))
+        assert _even_positions(ids, count=15)[-1] == 79
+
+    def test_it_does_not_degenerate_to_the_first_n_on_a_thin_band(self) -> None:
+        """20 candidates, 15 wanted: a stride of 1 would return 0..14."""
+        assert _even_positions(list(range(20)), count=15) != list(range(15))
+
+    def test_the_positions_are_strictly_increasing_so_nothing_is_probed_twice(self) -> None:
+        for size in (1, 2, 15, 16, 80, 275, 754):
+            for count in (1, 2, 15):
+                picked = _even_positions(list(range(size)), count=count)
+                assert picked == sorted(set(picked)), (size, count)
+                assert len(picked) == min(count, size)
+
+    def test_an_empty_band_selects_nothing(self) -> None:
+        assert _even_positions([], count=15) == []
