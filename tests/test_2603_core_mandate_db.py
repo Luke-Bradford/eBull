@@ -15,6 +15,7 @@ import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, LiteralString, cast
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -82,6 +83,49 @@ def _seed_instrument(conn: psycopg.Connection[Any]) -> int:
         "VALUES (920603,'CORE.TEST','Core Mandate Test',TRUE) ON CONFLICT DO NOTHING"
     )
     return 920603
+
+
+def _seed_proved_account(conn: psycopg.Connection[Any], instrument_id: int) -> dict[str, Any]:
+    """An operator with a live credential pair and a passing eligibility proof.
+
+    #2603 item 2 gates an ENABLED mandate on one; the gate itself is covered in
+    ``test_2603_core_eligibility_db``, so this is only the setup the writer's own
+    revision behaviour now needs.
+    """
+    operator_id = uuid4()
+    conn.execute(
+        "INSERT INTO operators (operator_id, username, password_hash) VALUES (%s,%s,'x')",
+        (operator_id, f"op_{operator_id.hex[:8]}"),
+    )
+    credential_ids: list[Any] = []
+    for label in ("api_key", "user_key"):
+        row = conn.execute(
+            """
+            INSERT INTO broker_credentials
+                (operator_id, provider, label, environment, ciphertext, last_four, key_version)
+            VALUES (%s,'etoro',%s,'demo','\\x00'::bytea,'0000',1)
+            RETURNING id
+            """,
+            (operator_id, label),
+        ).fetchone()
+        assert row is not None
+        credential_ids.append(row[0])
+    conn.execute(
+        """
+        INSERT INTO strategy_core_eligibility_proofs (
+            instrument_id, operator_id, provider, environment,
+            api_key_credential_id, user_key_credential_id,
+            verdict, requested_currency, response_currency,
+            settlement_type, direction, leverage_values, qualifying_arm_count,
+            allow_open_position, response_digest, policy_version, recorded_by
+        ) VALUES (
+            %s,%s,'etoro','demo',%s,%s,'underlying','USD','usd','real','long',
+            ARRAY[1],1,TRUE,%s,'core-eligibility-v1','test'
+        )
+        """,
+        (instrument_id, operator_id, credential_ids[0], credential_ids[1], "a" * 64),
+    )
+    return {"operator_id": operator_id, "provider": "etoro", "environment": "demo"}
 
 
 def test_the_reference_row_inserts(ebull_test_conn: psycopg.Connection[Any]) -> None:
@@ -308,6 +352,7 @@ def test_the_writer_appends_revisions_and_refuses_a_no_op(
     """
     assert load_core_mandate(ebull_test_conn) is None
     instrument_id = _seed_instrument(ebull_test_conn)
+    account = _seed_proved_account(ebull_test_conn, instrument_id)
 
     first = configure_core_mandate(
         ebull_test_conn,
@@ -319,6 +364,7 @@ def test_the_writer_appends_revisions_and_refuses_a_no_op(
         min_rebalance_amount=Decimal("25"),
         changed_by="test",
         reason="initial core/cash mandate",
+        **account,
     )
     assert first.revision == 1
     assert first.cash_target_pct == Decimal("40")
@@ -333,6 +379,7 @@ def test_the_writer_appends_revisions_and_refuses_a_no_op(
         min_rebalance_amount=Decimal("25"),
         changed_by="test",
         reason="raise the core weight",
+        **account,
     )
     assert second.revision == 2
     assert load_core_mandate(ebull_test_conn) == second
@@ -348,5 +395,6 @@ def test_the_writer_appends_revisions_and_refuses_a_no_op(
             min_rebalance_amount=Decimal("25"),
             changed_by="test",
             reason="no material change",
+            **account,
         )
     ebull_test_conn.rollback()

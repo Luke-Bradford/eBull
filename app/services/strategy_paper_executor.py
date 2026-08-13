@@ -31,6 +31,7 @@ from app.providers.broker import (
     BrokerWhatIfCostResponse,
     BrokerWhatIfOrder,
 )
+from app.services.broker_settlement_arms import select_underlying_long_arms
 from app.services.cost_model import COST_MODEL_ID
 from app.services.market_calendar import us_market_status
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
@@ -599,11 +600,16 @@ def _eligibility_reason(response: BrokerEligibilityResponse, intent: _Intent, am
     matches = [row for row in response.eligibilities if row.instrument_id == intent.instrument_id]
     if len(matches) != 1 or not matches[0].allow_open_position:
         return "instrument_ineligible"
-    arms = [
-        arm
-        for arm in matches[0].leverage_configs
-        if arm.settlement_type.lower() == "real" and arm.direction.upper() == "LONG" and 1 in arm.leverage_values
-    ]
+    # One definition of "the underlying product, held long, unleveraged", shared
+    # with #2603 item 2's core eligibility proof. It is also stricter than the
+    # inline version it replaces: `bool` is an `int`, so `1 in leverage_values`
+    # was true for `leverageValues: [true]`, which the provider parser admits.
+    arms = select_underlying_long_arms(matches[0])
+    # ⚠ Zero arms and many arms are DIFFERENT answers -- "not offered as the
+    # underlying" versus "genuinely ambiguous" -- and the shared helper now tells
+    # them apart. Both still map to this one code because `reason_code` is stored
+    # data on `strategy_entry_preflights`; re-labelling it is a data-semantics
+    # change, filed as #2678 rather than folded into #2603 item 2.
     if len(arms) != 1:
         return "eligibility_arm_ambiguous"
     arm = arms[0]
