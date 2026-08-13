@@ -32,8 +32,8 @@
 -- Full population at authoring time (dev, the only database):
 --   select verdict, count(*) from strategy_entry_preflights group by verdict;  -- []
 --   select count(*) from strategy_entry_preflights;                            -- 0
--- The table is EMPTY, so the allocated-row constraint below needs no backfill and can
--- be strict from the first row rather than NULLable-then-tightened.  (It is empty
+-- The table is EMPTY, so the allocated-row constraint below can be strict from the
+-- first row rather than NULLable-then-tightened.  (It is empty
 -- because every preflight to date refuses at `cost_unit_undocumented`: eToro sends the
 -- undocumented `value` field and never the documented monetary `amount`, which is the
 -- 0/20 wall #2446 measured and #2598 exists to resolve.)
@@ -50,6 +50,18 @@ ALTER TABLE strategy_entry_preflights
 ALTER TABLE strategy_entry_preflights
     ADD CONSTRAINT strategy_entry_preflights_cost_basis_vocabulary
     CHECK (cost_basis IS NULL OR cost_basis IN ('broker_preflight'));
+
+-- ⚠ A NO-OP ON EVERY DATABASE THAT EXISTS TODAY, AND IT STAYS ANYWAY (Codex ckpt-2).
+-- The count above is a measurement taken at AUTHORING time; the constraint below runs
+-- at APPLICATION time, and a CHECK that fails then aborts the migration and therefore
+-- the FastAPI lifespan that runs it.  Nothing structural closes that window: it is
+-- closed only by `_costs` refusing every preflight at `cost_unit_undocumented` today,
+-- which is an invariant in another module and precisely what #2598 exists to remove.
+-- The value is not a guess -- `_costs` is the sole producer of `stressed_cost_amount`,
+-- so any allocated row that does exist was priced by the broker path by construction.
+UPDATE strategy_entry_preflights
+   SET cost_basis = 'broker_preflight'
+ WHERE verdict = 'allocated' AND cost_basis IS NULL;
 
 -- An allocated row DID price something -- `stressed_cost_amount` and
 -- `net_expectancy_pct` are both non-NULL on that path -- so it must say what priced it.
