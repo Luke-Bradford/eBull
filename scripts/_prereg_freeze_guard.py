@@ -18,7 +18,8 @@ preregistration exists to hold fixed.
 ⚠ WHAT THIS GUARD DOES, AND — MORE USEFULLY — WHAT IT DOES NOT
 ---------------------------------------------------------------------------
 It refuses a freeze whose policy version is **not the merged one**: the constant
-in this working tree against the constant on ``origin/main``. That is a state
+in this working tree against the constant on ``origin/main``, after fetching so
+that "main" means main and not a local snapshot of unknown age. That is a state
 that is objectively wrong rather than merely unlucky — a declaration frozen
 under an unmerged policy version is frozen under a string that may never exist
 on main, or exist there meaning something else.
@@ -64,6 +65,32 @@ _POLICY_VERSION_RE: Final = re.compile(
 _REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 
 
+def refresh_main_ref() -> bool:
+    """``git fetch origin main``. ``False`` when the ref could not be refreshed.
+
+    ⚠ WITHOUT THIS THE GUARD CHECKS A LOCAL SNAPSHOT, NOT MAIN (Codex checkpoint
+    2). ``refs/remotes/origin/main`` is whatever the last fetch left behind; a
+    checkout that has not fetched since the policy moved compares v1 against a
+    stale v1 and reports a match — permitting exactly the freeze this refuses.
+
+    ⚠ Measured rather than assumed (git 2.54.0, 2026-08-13): plain ``git fetch
+    origin main`` DOES advance ``refs/remotes/origin/main``, not just
+    ``FETCH_HEAD``. Probed by staling the ref with ``git update-ref`` to the
+    prior commit and watching the fetch restore it.
+    """
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+            ["git", "fetch", "--quiet", "origin", "main"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
 def policy_version_on_main() -> str | None:
     """``STRUCTURAL_REFUSAL_POLICY_VERSION`` as it stands on ``origin/main``.
 
@@ -91,12 +118,15 @@ def policy_version_report() -> dict[str, object]:
     """The check's findings, for printing. Never raises, never refuses.
 
     ⚠ Reported by ``--dry-run`` precisely because that is the run whose whole
-    job is to show the operator what a real freeze would commit to.
+    job is to show the operator what a real freeze would commit to — including
+    the fetch, so a dry run cannot report agreement the real freeze would refuse.
     """
+    refreshed = refresh_main_ref()
     on_main = policy_version_on_main()
     return {
         "structural_refusal_policy_version": STRUCTURAL_REFUSAL_POLICY_VERSION,
         "structural_refusal_policy_version_on_main": on_main,
+        "main_ref_refreshed": refreshed,
         "policy_version_matches_main": on_main == STRUCTURAL_REFUSAL_POLICY_VERSION,
     }
 
@@ -112,10 +142,18 @@ def assert_policy_version_merged(*, allow_divergence: bool = False) -> dict[str,
     command; freezing under the wrong policy version is not recoverable at all.
     """
     report = policy_version_report()
-    if report["policy_version_matches_main"]:
+    if report["policy_version_matches_main"] and report["main_ref_refreshed"]:
         return report
     if allow_divergence:
         return {**report, "policy_version_divergence_overridden": True}
+    if not report["main_ref_refreshed"]:
+        raise SystemExit(
+            "refusing to freeze: could not run `git fetch origin main`, so the policy version this "
+            "check compared against is a local snapshot of unknown age. A checkout that has not "
+            "fetched since the policy moved sees a stale match and would freeze under a version "
+            "already superseded upstream — the failure this guard exists to prevent. Fetch and "
+            "re-run, or pass --allow-policy-divergence if you have established freshness another way."
+        )
     on_main = report["structural_refusal_policy_version_on_main"]
     detail = (
         f"origin/main carries {on_main!r}"
@@ -136,4 +174,5 @@ __all__ = [
     "assert_policy_version_merged",
     "policy_version_on_main",
     "policy_version_report",
+    "refresh_main_ref",
 ]

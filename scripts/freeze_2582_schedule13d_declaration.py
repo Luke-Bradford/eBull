@@ -181,8 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "freeze even though this tree's STRUCTURAL_REFUSAL_POLICY_VERSION is not the one on "
-            "origin/main. The override is recorded in the output; see scripts/_prereg_freeze_guard.py "
-            "for why the default refuses."
+            "origin/main, or that ref could not be refreshed. The override is recorded in the output; "
+            "see scripts/_prereg_freeze_guard.py for why the default refuses."
         ),
     )
     args = parser.parse_args(argv)

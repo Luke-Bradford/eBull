@@ -124,6 +124,7 @@ def test_dry_run_prints_the_policy_version_and_every_digest_field(
     module: object, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The regression #2631 was filed for: the version was in neither summary."""
+    monkeypatch.setattr(guard, "refresh_main_ref", lambda: True)
     monkeypatch.setattr(guard, "policy_version_on_main", lambda: STRUCTURAL_REFUSAL_POLICY_VERSION)
 
     assert module.main(["--dry-run"]) == 0  # type: ignore[attr-defined]
@@ -146,6 +147,7 @@ def test_dry_run_prints_the_policy_version_and_every_digest_field(
 
 
 def test_guard_passes_when_the_tree_matches_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(guard, "refresh_main_ref", lambda: True)
     monkeypatch.setattr(guard, "policy_version_on_main", lambda: STRUCTURAL_REFUSAL_POLICY_VERSION)
     report = guard.assert_policy_version_merged()
     assert report["policy_version_matches_main"] is True
@@ -153,6 +155,7 @@ def test_guard_passes_when_the_tree_matches_main(monkeypatch: pytest.MonkeyPatch
 
 
 def test_guard_refuses_an_unmerged_policy_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(guard, "refresh_main_ref", lambda: True)
     monkeypatch.setattr(guard, "policy_version_on_main", lambda: "structural-refusal-policy-2026-08-12-v1")
     with pytest.raises(SystemExit) as raised:
         guard.assert_policy_version_merged()
@@ -163,6 +166,7 @@ def test_guard_refuses_an_unmerged_policy_version(monkeypatch: pytest.MonkeyPatc
 
 def test_guard_fails_closed_when_main_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unknown is refused, never read as agreement — refusing costs one command."""
+    monkeypatch.setattr(guard, "refresh_main_ref", lambda: True)
     monkeypatch.setattr(guard, "policy_version_on_main", lambda: None)
     with pytest.raises(SystemExit) as raised:
         guard.assert_policy_version_merged()
@@ -171,10 +175,50 @@ def test_guard_fails_closed_when_main_cannot_be_read(monkeypatch: pytest.MonkeyP
 
 def test_the_override_is_recorded_in_the_report(monkeypatch: pytest.MonkeyPatch) -> None:
     """An override absent from the output would be a silent bypass."""
+    monkeypatch.setattr(guard, "refresh_main_ref", lambda: True)
     monkeypatch.setattr(guard, "policy_version_on_main", lambda: "structural-refusal-policy-2026-08-12-v1")
     report = guard.assert_policy_version_merged(allow_divergence=True)
     assert report["policy_version_divergence_overridden"] is True
     assert report["policy_version_matches_main"] is False
+
+
+def test_guard_refuses_when_the_main_ref_could_not_be_refreshed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale tracking ref matches for the same reason a correct one does.
+
+    ⚠ Codex checkpoint 2. Without the fetch this guard compares the tree against
+    ``refs/remotes/origin/main`` as the last fetch left it, so a checkout that
+    has not fetched since the policy moved sees v1 == stale v1 and freezes under
+    a version already superseded upstream — the precise failure it exists to
+    stop. An unrefreshed ref is therefore no evidence at all, matching or not.
+    """
+    monkeypatch.setattr(guard, "refresh_main_ref", lambda: False)
+    monkeypatch.setattr(guard, "policy_version_on_main", lambda: STRUCTURAL_REFUSAL_POLICY_VERSION)
+    with pytest.raises(SystemExit) as raised:
+        guard.assert_policy_version_merged()
+    assert "git fetch origin main" in str(raised.value)
+
+
+def test_the_report_carries_the_refresh_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(guard, "refresh_main_ref", lambda: False)
+    monkeypatch.setattr(guard, "policy_version_on_main", lambda: STRUCTURAL_REFUSAL_POLICY_VERSION)
+    assert guard.policy_version_report()["main_ref_refreshed"] is False
+    assert guard.assert_policy_version_merged(allow_divergence=True)["main_ref_refreshed"] is False
+
+
+@pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False), (128, False)])
+def test_refreshing_reports_the_fetch_exit_status(
+    returncode: int, expected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(guard.subprocess, "run", lambda *a, **k: _Completed(returncode, ""))
+    assert guard.refresh_main_ref() is expected
+
+
+def test_refreshing_reports_false_when_git_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise OSError("git not found")
+
+    monkeypatch.setattr(guard.subprocess, "run", _raise)
+    assert guard.refresh_main_ref() is False
 
 
 class _Completed:

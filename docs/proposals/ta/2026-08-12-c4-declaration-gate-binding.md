@@ -253,7 +253,9 @@ So the runbook line is: **run `--dry-run` first and read
 printed there now, by construction from `PreregDeclaration.digest_payload`), and
 freeze only when no change to the structural refusal policy is in flight.
 `scripts/_prereg_freeze_guard.assert_policy_version_merged` refuses
-automatically when this tree's constant is not the one on `origin/main`. ⚠ It
+automatically when this tree's constant is not the one on `origin/main` — after
+`git fetch origin main`, because an unfetched tracking ref would compare the
+repository to a stale copy of itself and match for the wrong reason. ⚠ It
 does **not** see the case that actually occurred — a bump on an unpushed branch
 in another worktree — because no check that reads this repository can see a
 commit that is not in it. There the dry-run and this paragraph are the control.
