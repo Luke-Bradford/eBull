@@ -1192,10 +1192,33 @@ def _parse_account_risk_snapshot(
             raise TradingPreflightParseError("account P&L instrument id must be positive")
         return value
 
+    def _account_currency_id(parent: dict[str, Any]) -> int | None:
+        """Read the reported account currency id, or None when absent.
+
+        The portal documents ``accountCurrencyId`` on this response ("Currency
+        ID of the account (1 = USD)"), so absence is drift worth logging -- but
+        it is not a formula input, and failing the whole parse over it would
+        take the paper executor's cash checks down with it.  Absence is carried
+        as None and refused where it matters, at the F-0 evidence writer
+        (#2602 item 2).  A PRESENT but malformed value is response drift of the
+        kind sql/324's fail-closed posture exists for, so that does raise.
+        """
+        if "accountCurrencyId" not in parent:
+            logger.warning(
+                "account P&L response carried no accountCurrencyId; "
+                "the account base currency is unobserved for this snapshot"
+            )
+            return None
+        value = parent["accountCurrencyId"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TradingPreflightParseError("account P&L accountCurrencyId must be an integer")
+        return value
+
     try:
         portfolio = raw.get("clientPortfolio")
         if not isinstance(portfolio, dict):
             raise TradingPreflightParseError("account P&L clientPortfolio must be an object")
+        account_currency_id = _account_currency_id(portfolio)
         credit = _money(portfolio, "credit")
         positions = _array(portfolio, "positions")
         mirrors = _array(portfolio, "mirrors")
@@ -1264,6 +1287,7 @@ def _parse_account_risk_snapshot(
             ),
             observed_at=observed_at,
             raw_payload=raw,
+            account_currency_id=account_currency_id,
         )
     except TradingPreflightParseError:
         raise

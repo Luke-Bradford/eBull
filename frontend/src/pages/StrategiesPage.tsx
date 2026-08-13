@@ -229,7 +229,10 @@ function AutomationReadiness({ overview }: { overview: StrategyOverviewResponse 
 
 function AccountEvidence({ overview }: { overview: StrategyOverviewResponse }) {
   const evidence = overview.account_equity_evidence;
-  const currency = evidence.currency ?? "USD";
+  // No `?? "USD"`. The broker reports the account currency (#2602 item 2) and a null
+  // here means it reported one we cannot name -- painting a $ on it would re-assert
+  // the assumption this panel exists to test.
+  const currency = evidence.currency;
   if (evidence.status === "unavailable") {
     return (
       <div className="mt-5 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800">
@@ -249,12 +252,16 @@ function AccountEvidence({ overview }: { overview: StrategyOverviewResponse }) {
       <div className="flex gap-5 text-right">
         <div>
           <span className="block text-slate-500">Broker equity</span>
-          <strong>{formatMoney(evidence.official_equity === null ? null : Number(evidence.official_equity), currency)}</strong>
+          {currency === null ? (
+            <strong className="text-amber-700 dark:text-amber-300">Currency unverified</strong>
+          ) : (
+            <strong>{formatMoney(evidence.official_equity === null ? null : Number(evidence.official_equity), currency)}</strong>
+          )}
         </div>
-        {evidence.local_eod_value !== null ? (
+        {evidence.local_eod_value !== null && evidence.local_eod_currency !== null ? (
           <div>
             <span className="block text-slate-500">Local valuation</span>
-            <strong>{formatMoney(Number(evidence.local_eod_value), evidence.local_eod_currency ?? currency)}</strong>
+            <strong>{formatMoney(Number(evidence.local_eod_value), evidence.local_eod_currency)}</strong>
           </div>
         ) : null}
         <div className="self-end text-amber-700 dark:text-amber-300">Reconciliation collecting</div>

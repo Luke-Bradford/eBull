@@ -18,7 +18,12 @@ from app.services.account_equity_evidence import (
 
 
 def _snapshot(
-    *, observed_at: datetime, cash: str = "500", invested: str = "400", pnl: str = "100"
+    *,
+    observed_at: datetime,
+    cash: str = "500",
+    invested: str = "400",
+    pnl: str = "100",
+    account_currency_id: int | None = 1,
 ) -> BrokerAccountRiskSnapshot:
     available_cash = Decimal(cash)
     total_invested = Decimal(invested)
@@ -31,6 +36,7 @@ def _snapshot(
         instrument_investments=(),
         observed_at=observed_at,
         raw_payload={"not": "persisted"},
+        account_currency_id=account_currency_id,
     )
 
 
@@ -89,6 +95,7 @@ def test_sub_micro_unit_component_rounding_is_accepted(
         _snapshot(observed_at=datetime.now(UTC), cash="-1"),
         replace(_snapshot(observed_at=datetime.now(UTC)), equity=Decimal("999")),
         _snapshot(observed_at=datetime.now()),
+        _snapshot(observed_at=datetime.now(UTC), account_currency_id=None),
     ],
 )
 def test_invalid_official_values_fail_closed(
@@ -151,3 +158,92 @@ def test_incomplete_local_valuation_exposes_reasons_not_false_comparison(
         "local_eod_valuation_incomplete",
         "local_eod_effective_time_unknown",
     }
+
+
+def test_observed_usd_account_reports_no_currency_caveat(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The whole point of #2602 item 2: a row that MEASURED USD says nothing about it."""
+    observed = datetime.now(UTC).replace(microsecond=0)
+    record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=_snapshot(observed_at=observed))
+    evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
+    assert evidence.account_currency_id == 1
+    assert evidence.currency == "USD"
+    assert "account_currency_assumed_not_observed" not in evidence.incomplete_reasons
+    assert "account_currency_not_documented" not in evidence.incomplete_reasons
+
+
+def test_undocumented_account_currency_is_stored_and_refused_by_name(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """A non-USD account must be recordable. Dropping the row would hide the finding."""
+    observed = datetime.now(UTC).replace(microsecond=0)
+    assert record_account_equity_snapshot(
+        ebull_test_conn,
+        environment="demo",
+        snapshot=_snapshot(observed_at=observed, account_currency_id=7),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO portfolio_eod_snapshots (
+          snapshot_date,display_currency,total_value,positions_value,cash_value,
+          positions_total,positions_priced,computed_at
+        ) VALUES (%s,'USD',995,495,500,1,1,%s)
+        """,
+        (observed.date(), observed),
+    )
+
+    evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
+    assert evidence.account_currency_id == 7
+    assert evidence.currency is None
+    assert evidence.official_equity == Decimal("1000.000000")
+    # No difference against a USD local total: the official side has no known unit, so
+    # subtracting is meaningless. And the local side is not blamed for it.
+    assert evidence.difference is None
+    assert "account_currency_not_documented" in evidence.incomplete_reasons
+    assert "local_eod_currency_mismatch" not in evidence.incomplete_reasons
+
+
+def test_pre_measurement_row_is_named_as_assumed_not_observed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """Rows written before sql/341 carry a USD nobody measured, permanently."""
+    observed = datetime.now(UTC).replace(microsecond=0)
+    ebull_test_conn.execute(
+        """
+        INSERT INTO broker_account_equity_snapshots (
+            environment,snapshot_date,observed_at,source_version,account_currency_id,currency,
+            available_cash,total_invested,unrealised_pnl,equity
+        ) VALUES ('demo',%s,%s,'etoro-pnl-v1',NULL,'USD',500,400,100,1000)
+        """,
+        (observed.date(), observed),
+    )
+    evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
+    assert evidence.account_currency_id is None
+    assert evidence.currency == "USD"
+    assert "account_currency_assumed_not_observed" in evidence.incomplete_reasons
+
+
+@pytest.mark.parametrize(
+    ("account_currency_id", "currency"),
+    [
+        (1, None),  # documented USD id must carry its code
+        (7, "USD"),  # an undocumented id must never wear a code we invented
+        (None, "GBP"),  # an unobserved row can only be the legacy USD assumption
+    ],
+)
+def test_currency_and_reported_id_cannot_disagree_at_rest(
+    ebull_test_conn: psycopg.Connection[tuple], account_currency_id: int | None, currency: str | None
+) -> None:
+    observed = datetime.now(UTC).replace(microsecond=0)
+    with pytest.raises(psycopg.errors.CheckViolation) as excinfo:
+        ebull_test_conn.execute(
+            """
+            INSERT INTO broker_account_equity_snapshots (
+                environment,snapshot_date,observed_at,source_version,account_currency_id,currency,
+                available_cash,total_invested,unrealised_pnl,equity
+            ) VALUES ('demo',%s,%s,'etoro-pnl-v1',%s,%s,500,400,100,1000)
+            """,
+            (observed.date(), observed, account_currency_id, currency),
+        )
+    assert excinfo.value.diag.constraint_name == "broker_account_equity_snapshots_currency_observed"
