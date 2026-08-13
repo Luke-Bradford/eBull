@@ -98,35 +98,59 @@ class TestVerdict:
     def test_a_shared_measurement_is_never_material(self) -> None:
         assert ambiguity_verdict(_SHARED) is False
 
-    def test_the_basis_outranks_the_sharpes(self) -> None:
-        """The basis decides BEFORE a Sharpe is read, on a record neither
-        validator would let you build.
+    @pytest.mark.parametrize(
+        ("best", "worst", "threshold"),
+        [
+            pytest.param(0.9, 0.1, 0.1, id="complete_arms_a_material_gap_would_beat"),
+            pytest.param(0.9, None, None, id="one_arm_absent_not_compared_would_beat"),
+        ],
+    )
+    def test_the_basis_outranks_the_sharpes(
+        self, best: float | None, worst: float | None, threshold: float | None
+    ) -> None:
+        """A ``shared_measurement`` record is ``False`` whatever numbers it
+        carries — on a record neither validator would let you build.
 
-        ⚠ THE PRECEDENCE IS THE ASSERTION, and asserting it needs the state two
-        layers forbid: ``__post_init__`` refuses a ``shared_measurement`` record
-        carrying Sharpes (``test_a_shared_measurement_carries_no_numbers``), and
-        so does the table's ``strategy_result_ambiguity_shared_carries_no_
-        measurements`` CHECK, so ``load_result_ambiguity`` cannot surface one
-        either. Written the obvious way — `ambiguity_verdict(_SHARED)` — this
-        test asserts the same expression as the one above it and exercises no
-        ordering at all.
+        ⚠ OUTCOME PRECEDENCE, NOT READ ORDER. This pins that the basis DECIDES,
+        not that it is read first: an implementation computing the gap and
+        consulting the basis last would satisfy it. The read-order claim is not
+        testable from outside the function and is not made here.
 
-        So the invalid record is forced past the frozen dataclass with
-        ``object.__setattr__``. The Sharpes chosen are material under every
-        other branch (gap 0.8 > threshold 0.1), which is what makes the
-        assertion fail if the basis check ever moves below them. Same reasoning
-        as the NULL-coercion fix on this branch: the defence is unreachable
-        today and one relaxed validator from mattering, and the honest way to
-        keep it is to test it deliberately rather than to claim coverage the
-        valid path cannot give.
+        ⚠ THE STATE IS FORBIDDEN TWICE, which is why it must be forced.
+        ``__post_init__`` refuses a ``shared_measurement`` record carrying
+        Sharpes (``test_a_shared_measurement_carries_no_numbers``), and so does
+        the table's ``strategy_result_ambiguity_shared_carries_no_measurements``
+        CHECK, so ``load_result_ambiguity`` cannot surface one either. Written
+        the obvious way — ``ambiguity_verdict(_SHARED)`` — this test asserts the
+        same expression as the one above it and exercises no ordering at all.
+        ``object.__setattr__`` mutates the frozen instance in place without
+        re-running ``__post_init__``.
+
+        ⚠⚠ BOTH CASES ARE LOAD-BEARING, and one alone is a false sense of
+        coverage. Each is chosen so that a DIFFERENT non-basis branch would
+        return a DIFFERENT verdict if it got there first:
+
+        - complete arms, gap 0.8 beyond a 0.1 threshold → the comparison branch
+          would say ``True``. Catches the basis check falling to the bottom.
+        - one arm absent → the unpriced branch would say ``None``. Catches the
+          basis check falling BELOW the missing-Sharpe guard but above the gap
+          maths — a one-line move the complete-arm case sails straight through,
+          because its Sharpes are both present.
+
+        Blast radius today is zero BY CONSTRUCTION, and that is the property
+        being defended rather than a weakness of the test: the record is
+        unreachable, so the only way this can regress is an edit to
+        ``ambiguity_verdict`` itself, which is ordinary live code that touches
+        neither validator. Same reasoning as the NULL-coercion fix on this
+        branch.
         """
         forced = AmbiguityRecord(
             ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
             comparison_basis="shared_measurement",
         )
-        object.__setattr__(forced, "best_case_sharpe", 0.9)
-        object.__setattr__(forced, "worst_case_sharpe", 0.1)
-        object.__setattr__(forced, "cohort_gap_threshold", 0.1)
+        object.__setattr__(forced, "best_case_sharpe", best)
+        object.__setattr__(forced, "worst_case_sharpe", worst)
+        object.__setattr__(forced, "cohort_gap_threshold", threshold)
 
         assert ambiguity_verdict(forced) is False
 
