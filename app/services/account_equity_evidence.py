@@ -20,6 +20,13 @@ SOURCE_VERSION = "etoro-pnl-v1"
 # an id whose code we infer is an assumption wearing a measurement's clothes, which is
 # the defect #2602 item 2 exists to remove.  Widening this does NOT widen what may be
 # traded: the deployment / pool / core-mandate authorities keep their own USD CHECKs.
+#
+# It DOES require a migration in the same PR.  `broker_account_equity_snapshots_currency_
+# observed` (sql/341) enumerates the documented ids literally, and its ELSE branch
+# demands `currency IS NULL` -- so a member added here without widening that CHECK makes
+# every write in the new currency fail closed, silently, and only once the account stops
+# being USD.  `test_every_documented_currency_id_is_admitted_by_the_check` parametrizes
+# off this dict so the drift fails there first.
 DOCUMENTED_ACCOUNT_CURRENCIES: dict[int, str] = {1: "USD"}
 
 

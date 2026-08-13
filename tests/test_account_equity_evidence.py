@@ -11,6 +11,7 @@ import pytest
 
 from app.providers.broker import BrokerAccountRiskSnapshot
 from app.services.account_equity_evidence import (
+    DOCUMENTED_ACCOUNT_CURRENCIES,
     AccountEquityEvidenceError,
     load_account_equity_evidence,
     record_account_equity_snapshot,
@@ -247,3 +248,32 @@ def test_currency_and_reported_id_cannot_disagree_at_rest(
             (observed.date(), observed, account_currency_id, currency),
         )
     assert excinfo.value.diag.constraint_name == "broker_account_equity_snapshots_currency_observed"
+
+
+@pytest.mark.parametrize("account_currency_id", sorted(DOCUMENTED_ACCOUNT_CURRENCIES))
+def test_every_documented_currency_id_is_admitted_by_the_check(
+    ebull_test_conn: psycopg.Connection[tuple], account_currency_id: int
+) -> None:
+    """The dict and sql/341's CHECK must be widened together, or neither.
+
+    The CHECK enumerates documented ids literally and its ELSE branch demands
+    `currency IS NULL`, while the writer binds the mapped code -- so a member added to
+    DOCUMENTED_ACCOUNT_CURRENCIES without a migration refuses every write in the new
+    currency. Fail-closed, but silent, and only reached once the account is not USD.
+    The parametrize is driven off the dict so that day fails here first.
+    """
+    observed = datetime.now(UTC).replace(microsecond=0)
+    currency = DOCUMENTED_ACCOUNT_CURRENCIES[account_currency_id]
+    ebull_test_conn.execute(
+        """
+        INSERT INTO broker_account_equity_snapshots (
+            environment,snapshot_date,observed_at,source_version,account_currency_id,currency,
+            available_cash,total_invested,unrealised_pnl,equity
+        ) VALUES ('demo',%s,%s,'etoro-pnl-v1',%s,%s,500,400,100,1000)
+        """,
+        (observed.date(), observed, account_currency_id, currency),
+    )
+    stored = ebull_test_conn.execute(
+        "SELECT account_currency_id,currency FROM broker_account_equity_snapshots WHERE environment='demo'"
+    ).fetchone()
+    assert stored == (account_currency_id, currency)
