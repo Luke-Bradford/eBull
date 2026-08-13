@@ -120,11 +120,20 @@ def policy_version_report() -> dict[str, object]:
     ⚠ Reported by ``--dry-run`` precisely because that is the run whose whole
     job is to show the operator what a real freeze would commit to — including
     the fetch, so a dry run cannot report agreement the real freeze would refuse.
+
+    ⚠ ``..._in_tree`` RATHER THAN ``structural_refusal_policy_version``, which is
+    the declaration's own field and arrives in the same JSON from
+    ``digest_payload`` (review nitpick, PR #2633). The two are equal for every
+    writer that exists, because both freeze scripts build the declaration from
+    this constant — but merging two dicts that share a key silently keeps one,
+    so if they ever DID diverge the operator would see a single value and no
+    sign that anything disagreed. Distinct keys make that visible instead, which
+    is the same defect this PR exists to fix, one level down.
     """
     refreshed = refresh_main_ref()
     on_main = policy_version_on_main()
     return {
-        "structural_refusal_policy_version": STRUCTURAL_REFUSAL_POLICY_VERSION,
+        "structural_refusal_policy_version_in_tree": STRUCTURAL_REFUSAL_POLICY_VERSION,
         "structural_refusal_policy_version_on_main": on_main,
         "main_ref_refreshed": refreshed,
         "policy_version_matches_main": on_main == STRUCTURAL_REFUSAL_POLICY_VERSION,

@@ -137,6 +137,12 @@ def test_dry_run_prints_the_policy_version_and_every_digest_field(
         assert printed["structural_refusal_policy_version"] == STRUCTURAL_REFUSAL_POLICY_VERSION
         assert printed["policy_version_matches_main"] is True
         assert printed["declaration_sha256"]
+        # ⚠ THE DECLARATION'S FIELD AND THE TREE'S CONSTANT ARE SEPARATE KEYS.
+        # Merged under one name the dict would keep whichever was applied last
+        # and show no sign the other existed — see the guard's docstring.
+        assert printed["structural_refusal_policy_version_in_tree"] == STRUCTURAL_REFUSAL_POLICY_VERSION
+        assert printed["structural_refusal_policy_version_on_main"] == STRUCTURAL_REFUSAL_POLICY_VERSION
+        assert len({k for k in printed if k.startswith("structural_refusal_policy_version")}) == 3
         # Every digest input, not a subset — the payload's own keys.
         assert set(_declaration().digest_payload) <= set(printed)
 
