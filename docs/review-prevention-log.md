@@ -4405,3 +4405,62 @@ with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
 - Enforced in: `app/services/strategy_core_allocator.py::_state_refusal` (per-component check
   documented as overflow-safety, not as a shortcut); `tests/test_2603_core_allocator.py`
   parametrises `9e999999 + 9e999999` and a pair that clears the component bound but sums past it.
+
+### An IN-RANGE bound is not a REACHABLE bound — a non-strict CHECK can leave a strict downstream comparator dead
+
+- First seen in: #2670 (`sql/336_strategy_core_mandate.sql`), found at #2603 item 3's Codex
+  checkpoint 1 while reviewing the allocator that consumes the constraint.
+- Symptom: two schema CHECKs written to keep a rebalance band's triggers "inside `[0,100]`"
+  each admitted the value at which one trigger can never fire. `core_target_pct -
+  rebalance_band_pct >= 0` permits `lower == 0`, and the allocator's trigger is
+  `core_pct < lower` — unreachable for a non-negative sleeve, *including* by the core going to
+  zero, which the CHECK's own comment named as the surviving case (`0` is not `< 0`). The
+  comment described a guarantee the comparator did not provide, and nothing failed: the
+  allocator computed correctly on such a mandate, one side simply never triggered.
+- The general shape: **a write-time bound and a read-time comparator are two different
+  inequalities, and the boundary value is where they disagree.** A constraint keeping a
+  derived quantity in a *closed* range is compatible with a consumer testing it with a
+  *strict* comparator, which makes the range's endpoint a value the consumer can never act on.
+  Nothing downstream can tell such a row apart from a genuinely one-sided intent, so it is a
+  write-time authority defect rather than a computation bug — which is exactly why no test
+  caught it.
+- Prevention: when adding a CHECK on a quantity some other module compares against, write down
+  the consumer's comparator and solve for reachability, not for range. Concretely: for a strict
+  `x < L` the bound is `L > min(x)`, not `L >= min(x)`. Then state in the migration what the
+  constraint forbids that was previously storable — an empty answer means the CHECK is
+  redundant, and a surprising one means it is not the constraint you thought.
+- Enforced in: `sql/344_core_mandate_trigger_reachability.sql` (both bounds strict, header
+  derives reachability from the consumer's comparators);
+  `app/services/strategy_core_mandate.py::validate_core_mandate`;
+  `tests/test_2603_core_mandate.py::test_a_band_whose_trigger_can_never_fire_is_refused` plus
+  `::test_the_narrowest_mandates_with_both_triggers_live_are_accepted`, which pins the
+  tightening at exactly one `NUMERIC(8,4)` quantum so a later over-correction fails.
+
+### "0 stored rows" does not excuse a version bump — a version denotes a RULE SET, not a row population
+
+- First seen in: #2670, at Codex checkpoint 1, against a spec amendment that had argued the
+  opposite at length.
+- Symptom: tightening `strategy_core_mandate_events`' invariants over an empty table, I argued
+  `CORE_MANDATE_POLICY_VERSION` need not move because no row was written under the old
+  arithmetic, so nothing could be silently reinterpreted — and cited `sql/342`'s refusal to
+  mint a vocabulary member nothing could produce as support. Both halves are wrong. `sql/342`
+  declined a state nothing could *produce*; here every future mandate is produced under the new
+  rules, so `v2` denotes a live rule set, not an empty one. And persistence is not the only
+  carrier: `CoreMandate` is a public frozen dataclass and `validate_core_mandate` a public
+  function, so a `v1` mandate can exist in a test, a cached input or a retried command without
+  ever having been stored — and goes from valid to `core_mandate_invalid` across the change.
+  One version string, two arithmetics, which is the exact silent reinterpretation the stamp
+  exists to prevent.
+- The general shape: **the question a version stamp answers is "under which rules was this
+  object judged", and objects outnumber rows.** Reaching for the row count is reaching for the
+  easiest measurement rather than the governing one, and it reads as evidence because it *is* a
+  real number — it just answers a different question.
+- Prevention: when a change alters what a validator accepts, bump the version regardless of row
+  count, and justify any exception by naming every carrier of the old rules (stored rows,
+  constructible objects, fixtures, cached requests) rather than by counting one of them. If the
+  governing spec states the rule unconditionally, follow it — proposing a carve-out at the
+  moment it first costs something is the weakest possible time to weaken a rule.
+- Enforced in: `app/services/strategy_core_mandate.py` (`core-mandate-v2`, with the reasoning on
+  the constant); `sql/344_core_mandate_trigger_reachability.sql` (re-issued `policy_version`
+  CHECK + `COMMENT ON`); `tests/test_2603_core_mandate.py::test_the_policy_version_records_which_arithmetic_wrote_the_row`;
+  `tests/test_2603_core_mandate_db.py` parametrises a `v1` row as a rejected raw INSERT.

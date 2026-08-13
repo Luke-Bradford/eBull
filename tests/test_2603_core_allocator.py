@@ -123,8 +123,14 @@ def test_reserve_breach_always_implies_a_band_breach() -> None:
     for target in range(0, 101, 5):
         for band in range(1, 101, 3):
             for reserve in range(0, 100, 7):
-                # sql/336's two CHECKs.
-                if target - band < 0:
+                # The schema's three band CHECKs, as of sql/344.  Kept in step
+                # with the migration deliberately: filtering by the allocator's
+                # own refusal instead would let the enumerated space silently
+                # follow the code under test, and a tightening would then narrow
+                # coverage rather than fail.
+                if target - band <= 0:
+                    continue
+                if target + band >= 100:
                     continue
                 if 100 - (target + band) < reserve:
                     continue
@@ -132,8 +138,10 @@ def test_reserve_breach_always_implies_a_band_breach() -> None:
                 for core_pct in range(0, 101):
                     state = sleeve(str(core_pct * 10), str((100 - core_pct) * 10))
                     decision = evaluate_core_rebalance(spec, state)
-                    if decision.action == "refused":
-                        continue
+                    assert decision.action != "refused", (
+                        f"a schema-valid mandate was refused ({decision.reason_code}): "
+                        f"target={target} band={band} reserve={reserve} core_pct={core_pct}"
+                    )
                     checked += 1
                     assert decision.reserve_breached is not None
                     if decision.reserve_breached:
@@ -274,7 +282,10 @@ def test_absent_mandate_is_a_state_not_a_default() -> None:
 @pytest.mark.parametrize(
     ("spec", "expected"),
     [
-        (mandate(policy_version="core-mandate-v2"), "core_mandate_policy_unsupported"),
+        # v3 is a LATER policy; v1 is the one #2670 superseded. Both unsupported,
+        # for opposite reasons, and the refusal must not distinguish them.
+        (mandate(policy_version="core-mandate-v3"), "core_mandate_policy_unsupported"),
+        (mandate(policy_version="core-mandate-v1"), "core_mandate_policy_unsupported"),
         (mandate(enabled=False, core_instrument_id=None), "core_mandate_disabled"),
         (mandate(target="90", band="9", reserve="20"), "core_mandate_invalid"),
     ],
@@ -287,7 +298,7 @@ def test_mandate_refusals(spec: CoreMandate, expected: str) -> None:
 
 def test_policy_version_is_checked_before_validity() -> None:
     """A row written under a later policy must not be blamed for our staleness."""
-    stale = mandate(policy_version="core-mandate-v2", target="90", band="9", reserve="20")
+    stale = mandate(policy_version="core-mandate-v3", target="90", band="9", reserve="20")
     assert evaluate_core_rebalance(stale, sleeve("600", "400")).reason_code == "core_mandate_policy_unsupported"
 
 
@@ -361,17 +372,46 @@ def test_a_refusal_nulls_the_arithmetic_it_could_not_compute() -> None:
     assert (decision.effective_floor, decision.floor_source) == (None, None)
 
 
-# --- the degenerate mandates sql/336 permits (#2670) ---------------------------
+# --- the degenerate mandates, now refused at the source (#2670) ----------------
+#
+# These two shapes were storable under sql/336 and reached the allocator, which
+# computed correctly on them while one trigger could never fire.  sql/344 makes
+# both unstorable and `validate_core_mandate` rejects them, so the allocator now
+# meets them only as directly-constructed objects — and refuses.  The tests are
+# kept (rather than deleted with the defect) because the dataclass is public: the
+# refusal is the only thing standing between a degenerate mandate and a verdict
+# computed on a band that is silently one-sided.
 
 
-def test_a_band_equal_to_the_target_never_fires_the_lower_trigger() -> None:
-    """#2670: sql/336 permits `band == target`, giving `lower == 0`, which
-    `core_pct < 0` can never reach.  Documented here so the behaviour is expected
-    rather than surprising — the arithmetic is right, the mandate is weaker than
-    it declares."""
-    spec = mandate(target="20", band="20", reserve="0", floor="0.000001")
-    assert spec.core_target_pct - spec.rebalance_band_pct == 0
-    # An empty core is the most extreme underweight there is, and it still holds.
+@pytest.mark.parametrize(
+    ("spec", "dead_side"),
+    [
+        # band == target -> lower == 0, and `core_pct < 0` is unreachable.
+        (mandate(target="20", band="20", reserve="0", floor="0.000001"), "lower"),
+        # target + band == 100 at reserve 0 -> upper == 100, `core_pct > 100`
+        # unreachable.  Storable under sql/336; rejected by sql/344.
+        (mandate(target="60", band="40", reserve="0", floor="0.000001"), "upper"),
+    ],
+)
+def test_a_mandate_with_a_dead_trigger_is_refused_not_computed(spec: CoreMandate, dead_side: str) -> None:
+    """#2670. The extreme state on the dead side is the probe: an empty core is
+    the most extreme underweight there is, and a fully-invested one the most
+    extreme overweight, so if the trigger were merely *narrow* rather than dead
+    this would fire."""
+    extreme = sleeve("0", "1000") if dead_side == "lower" else sleeve("1000", "0")
+    decision = evaluate_core_rebalance(spec, extreme)
+    assert decision.action == "refused"
+    assert decision.reason_code == "core_mandate_invalid"
+
+
+def test_the_dead_trigger_refusal_is_what_changed_and_not_the_arithmetic() -> None:
+    """Guards the claim in sql/344's header that the allocator was never wrong.
+
+    The same band width one quantum inside the dead point is storable, reaches
+    the arithmetic, and fires — so the refusal above is about reachability and
+    not about narrow bands.
+    """
+    spec = mandate(target="20", band="19.9999", reserve="0", floor="0.000001")
     decision = evaluate_core_rebalance(spec, sleeve("0", "1000"))
-    assert decision.lower_pct == Decimal("0")
-    assert decision.action == "hold"
+    assert decision.lower_pct == Decimal("0.0001")
+    assert decision.action == "buy_core"
