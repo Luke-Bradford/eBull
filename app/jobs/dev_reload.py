@@ -66,6 +66,14 @@ _DRAIN_TIMEOUT_S: Final[float] = 180.0
 # already gone; this only covers the wait() round-trip.
 _KILL_REAP_TIMEOUT_S: Final[float] = 10.0
 
+# How often to report progress while draining (#2666). A drain that runs
+# the full _DRAIN_TIMEOUT_S is three minutes of silence between "SIGTERM
+# -> pid N" and the respawn, and an observer polling PIDs across that
+# window sees an unchanged PID and concludes the reload never fired. It
+# did; it is mid-drain. Periodic INFO makes "still working" distinguish
+# itself from "never started".
+_DRAIN_PROGRESS_S: Final[float] = 15.0
+
 # After a SIGKILL the fence connection is closed by the OS, not by the
 # daemon, so Postgres only drops the advisory lock once it notices the
 # dead session. Same one-second settle stack-restart.sh uses.
@@ -112,6 +120,41 @@ def changes_are_stale(paths: Iterable[str], spawn_time: float) -> bool:
     return True
 
 
+def running_commit() -> str:
+    """The commit the child is about to run, or ``"unknown"`` (#2666).
+
+    The supervisor's own output is then enough to answer "which commit is the
+    running worker on", which is the property that was missing: PID polling
+    across a slow drain cannot distinguish a reload in progress from one that
+    never fired, and re-detaching the main checkout at ``origin/main`` is exactly
+    how a merged service change is meant to reach this daemon.
+
+    ⚠ ``GIT_*`` is scrubbed from the child environment.  A git hook exports
+    ``GIT_DIR`` (and friends) into everything it runs, so this call would resolve
+    against the HOOK's repository rather than ``_REPO_ROOT`` whenever the daemon
+    -- or a test exercising it -- is reached from under one.  Same trap as #2658.
+
+    Never raises: a missing git, a non-repo checkout or a slow disk degrades to
+    ``"unknown"``.  A reload must not be blocked by its own log line.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            env=env,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
 def _spawn_child() -> tuple[subprocess.Popen[bytes], float]:
     """Spawn the daemon, returning it with the wall-time it was started.
 
@@ -123,7 +166,7 @@ def _spawn_child() -> tuple[subprocess.Popen[bytes], float]:
     extra reload. Same principle as the deleted-path case — a redundant
     restart is always preferable to silently-stale code.
     """
-    logger.info("jobs dev-reload: starting %s", " ".join(_CHILD_ARGV))
+    logger.info("jobs dev-reload: starting %s at commit %s", " ".join(_CHILD_ARGV), running_commit())
     spawn_time = time.time()
     return subprocess.Popen(_CHILD_ARGV, cwd=_REPO_ROOT), spawn_time
 
@@ -143,16 +186,35 @@ def _stop_child(proc: subprocess.Popen[bytes]) -> None:
     except ProcessLookupError:
         proc.wait()
         return
-    try:
-        proc.wait(timeout=_DRAIN_TIMEOUT_S)
+    # Wait in _DRAIN_PROGRESS_S slices rather than one long block, so a slow
+    # drain reports itself (#2666).  The deadline is computed once: slicing must
+    # not extend the total budget, which is what a naive per-slice timeout would
+    # do.
+    deadline = started + _DRAIN_TIMEOUT_S
+    drained = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            proc.wait(timeout=min(_DRAIN_PROGRESS_S, remaining))
+            drained = True
+            break
+        except subprocess.TimeoutExpired:
+            logger.info(
+                "jobs dev-reload: pid %d still draining, %.0fs of %.0fs elapsed",
+                proc.pid,
+                time.monotonic() - started,
+                _DRAIN_TIMEOUT_S,
+            )
+    if drained:
         logger.info("jobs dev-reload: drained cleanly in %.1fs", time.monotonic() - started)
         return
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "jobs dev-reload: pid %d still draining after %.0fs — escalating to SIGKILL",
-            proc.pid,
-            _DRAIN_TIMEOUT_S,
-        )
+    logger.warning(
+        "jobs dev-reload: pid %d still draining after %.0fs — escalating to SIGKILL",
+        proc.pid,
+        _DRAIN_TIMEOUT_S,
+    )
     proc.kill()
     try:
         proc.wait(timeout=_KILL_REAP_TIMEOUT_S)
