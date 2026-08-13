@@ -965,6 +965,64 @@ depends on either reading.
 
 ---
 
+## The promotion transition's replay policy (#2625, settled 2026-08-13)
+
+`check_promotable` runs at RESULT PRODUCTION. `promote_strategy` cannot call it
+— it has no `StrategyResult` to hand it, and two of the gate's inputs cost an
+audited read — so it re-derives each input individually from a persisted record.
+**Which input replays against what is now fixed, and keyed on
+`PromotionCandidate`'s FIELDS rather than on refusal codes** (codes are a
+many-to-many projection of the inputs, so a code-keyed rule is satisfiable while
+an input goes unclassified).
+
+Three rules, and no fourth:
+
+- **`frozen`** — replayed from a record written at result time, never re-derived
+  from today's world. The default. Covers the universe (#2621), the §3.4
+  ambiguity comparison (#2625) and the row's own structural stamps.
+- **`today`** — re-evaluated against the current world, and legitimate **ONLY**
+  where the stored record DECLARES a validity window or is explicitly
+  supersedable. Exactly one input qualifies: `promotion_evidence`, whose
+  `cost_observed_on` / `cost_valid_through` say when executable costs go stale.
+  A today-check on anything else is an undeclared freshness rule — the reason
+  #2621 froze the universe instead of re-loading it. **A test pins this set to
+  one member**, so a second today-check cannot be added quietly.
+- **`not_re_read`** — neither persisted nor re-derived. ⚠⚠ **THIS NAMES A GAP,
+  NOT COVERAGE.** The transition does not enforce that clause at all and still
+  trusts a write-time verdict that died with `WrittenRow`. Currently
+  `holdout_evaluations`, `recorded_accesses` and `quarantine_arms_compared`;
+  `unenforced_candidate_fields()` returns the set and a test pins it so it
+  cannot grow unnoticed.
+
+The policy lives in `app/services/strategy_promotion_replay.py` with a reason on
+every entry. **Do not add an input to the transition without classifying it
+there** — `tests/test_strategy_promotion_replay.py` fails on an unclassified
+`PromotionCandidate` field, in both inclusion directions.
+
+⚠ **`replayed_at_transition` is a separate axis from the rule, and the two must
+not be conflated.** "This input's rule is frozen" and "the transition checks it"
+are different claims; every gap is a field where the first is true and the
+second is false. Before #2625, `grep` for
+`universe_basis|carry_unmodelled|fx_unmodelled` in `strategy_control_plane.py`
+returned **nothing** — the stamps were persisted and never read, so Tier 1's
+refusals could all close and promotion still would not consult them.
+
+⚠ Why not just replay the whole gate: the only code that rebuilds a
+`StrategyResult` from the store is `result_ledger._result_from_row`, reachable
+only through `read_holdout_results`, which RECORDS an access before it reads.
+300 of the 324 stored results are `hold_out`. And the gate has no single as-of —
+some inputs are frozen and one is today, which one `check_promotable(candidate)`
+call cannot express.
+
+**Blast radius when settled:** `strategy_promotions` held **0 rows** and
+`strategy_result_ambiguity` **0 rows** against 324 results (measured 2026-08-13),
+so all 324 refuse `ambiguity_verdict_unrecorded` and nothing existing was
+promotable to begin with.
+
+**Refs** #2625, #2621, #2505, #2599, #2437.
+
+---
+
 ## Maintenance rule
 
 When a new repo-level decision is agreed and is likely to affect future implementation:
