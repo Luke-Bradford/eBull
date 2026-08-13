@@ -160,7 +160,15 @@ def test_trailing_zeros_are_not_mistaken_for_precision() -> None:
     assert values.core_target_pct == Decimal("60")
 
 
-def test_an_out_of_range_percentage_reports_its_range_not_its_digit_count() -> None:
+@pytest.mark.parametrize(
+    "field,message",
+    [
+        ("core_target_pct", "core_target_pct must be between 0 and 100"),
+        ("liquidity_reserve_pct", "liquidity_reserve_pct must be at least 0 and below 100"),
+        ("rebalance_band_pct", "rebalance_band_pct must be above 0 and at most 100"),
+    ],
+)
+def test_an_out_of_range_percentage_reports_its_range_not_its_digit_count(field: str, message: str) -> None:
     """Check ORDER, which is the reason the range checks precede storability.
 
     `10000` violates both the [0,100] range and NUMERIC(8,4)'s four integer
@@ -168,9 +176,13 @@ def test_an_out_of_range_percentage_reports_its_range_not_its_digit_count() -> N
     the precision bound as dead code for percentages; it is reachable, and this
     ordering is what makes it unreachable *through this function* — deliberately,
     since the bound stays as a generic backstop in the shared helper.
+
+    Parametrised over all three percentage fields per review round 2: the
+    docstring's "unreachable through this function" claim covers the whole
+    percentage surface, so a guard on one field would leave two unpinned.
     """
-    with pytest.raises(CoreMandateError, match="core_target_pct must be between 0 and 100"):
-        validate_core_mandate(**{**_VALID, "core_target_pct": Decimal("10000")})
+    with pytest.raises(CoreMandateError, match=message):
+        validate_core_mandate(**{**_VALID, field: Decimal("10000")})
 
 
 def test_a_non_finite_percentage_is_caught_before_any_comparison() -> None:
