@@ -2411,6 +2411,25 @@ def _expected_refusals(
     return frozenset(expected)
 
 
+def _end_read_phase(conn: psycopg.Connection[Any]) -> None:
+    """Close the implicit read transaction so the next phase holds no locks.
+
+    ⚠ ROLLBACK AND NOT COMMIT, AND ONLY WHERE NOTHING HAS BEEN WRITTEN. Every
+    call site is a boundary between two read-only phases, so there is no work to
+    keep; ``rollback`` says that, and it also cannot flush a caller's pending
+    write if the opt-in guard in ``run_backtest`` is ever weakened.
+
+    ⚠ A ``psycopg`` connection with ``autocommit=False`` opens a transaction on
+    its FIRST statement and holds every lock that statement took until the
+    transaction ends — so a single ``SELECT`` on ``strategy_results_store``
+    keeps an ``AccessShareLock`` on it for the rest of the run. Measured on the
+    dev database 2026-08-13: the lock is present after the read and gone after
+    the rollback (#2628).
+    """
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        conn.rollback()
+
+
 def assert_no_existing_results(conn: psycopg.Connection[Any], identities: Sequence[ResultIdentity]) -> None:
     """Refuse a colliding ``result_version`` BEFORE the corpus is touched (§10).
 
@@ -2457,6 +2476,7 @@ def run_backtest(
     manifest: Mapping[str, StrategyEntry] = STRATEGY_MANIFEST,
     progress: ProgressCallback | None = None,
     synthetic_control: bool = False,
+    release_read_locks: bool = False,
 ) -> BacktestRunReport:
     """Evaluate every runnable strategy and persist criterion 9's arm pairs.
 
@@ -2488,7 +2508,40 @@ def run_backtest(
     ``pg_advisory_xact_lock`` taken inside this function's write phase would be
     absorbed by the parent transaction and held until the last arm pair
     committed (prevention log).
+
+    ⚠⚠ ``release_read_locks`` DEFAULTS OFF AND IS AN OPT-IN FOR A REASON (#2628).
+    A ``psycopg`` connection with ``autocommit=False`` opens one transaction at
+    its first statement, so without this flag the ``AccessShareLock`` that §10's
+    pre-flight takes on ``strategy_results_store`` is held for the WHOLE run.
+    Measured 2026-08-12: a migration on that relation waited behind a run for ten
+    minutes having burned 0.31s of CPU, and a *pending* ``AccessExclusiveLock``
+    queues ahead of new readers — so a waiting ``ALTER TABLE`` stalls the running
+    dev stack rather than politely taking its turn, which is why
+    ``tests/smoke/test_app_boots.py`` (the FastAPI lifespan runs migrations at
+    boot) fails for purely environmental reasons while this job runs.
+
+    Passing it asserts something the caller alone knows: **the connection is this
+    invocation's to manage and carries no uncommitted work**. That is checked, not
+    trusted — an open transaction at entry raises. It is off by default because
+    ``scripts/verify_2429_total_return.py`` and
+    ``scripts/benchmark_2488_evidence_refresh.py`` deliberately run the whole
+    thing inside their OWN transaction and ``rollback`` it so the measurement
+    never charges the trial register; a release would commit their rows.
+
+    ⚠ WHAT IT DOES NOT CHANGE: the atomic grain. The write phase is wrapped in
+    one ``conn.transaction()`` on both paths, so it stays a savepoint under a
+    caller's transaction and becomes a single top-level transaction under the
+    job — matching the invocation-atomicity ``refresh_recent`` already relies on
+    (a partially written pinned window is refused as needing operator repair).
     """
+    if release_read_locks and conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        # ⚠ The guard, not a comment, is what makes the opt-in safe: this
+        # function rolls back at its phase boundaries, and a caller that had
+        # pending work on the connection would silently lose it.
+        raise RuntimeError(
+            "release_read_locks was asked for on a connection that is already in a transaction — this run rolls "
+            "back at its phase boundaries, so any work the caller has not committed would be discarded"
+        )
     if trial_register_version is not None and trial_register_version != TRIAL_REGISTER.version:
         raise ValueError(
             f"invocation asserts trial register {trial_register_version!r} but the live register is "
@@ -2571,6 +2624,15 @@ def run_backtest(
     for entry in excluded:
         logger.info("strategy_backtest_run: EXCLUDED %s — %s", entry.strategy_id, entry.reason)
 
+    if release_read_locks:
+        # ⚠ THE ONE BOUNDARY THAT MATTERS. Everything above reads the strategy
+        # result relations (§10's pre-flight); nothing below does until the write
+        # phase. Measured 2026-08-13 on dev: the evaluation phase's only reads are
+        # ``research_price_daily``, ``research_bar_quarantine`` and
+        # ``research_price_quarantine_coverage``, so releasing here leaves the
+        # multi-hour pass holding no lock on any strategy table.
+        _end_read_phase(conn)
+
     # 1. Evaluate every strategy x quarantine arm, holding metrics in memory.
     arms: list[ArmMeasurement] = []
     for entry_id in runnable:
@@ -2614,6 +2676,11 @@ def run_backtest(
                     {name: outcome.position_count for name, outcome in measurement.namespaces.items()},
                     measurement.holdout_positions_discarded,
                 )
+            if release_read_locks:
+                # An arm is a full corpus pass, and the arms are independent —
+                # so this bounds the corpus-table read transaction to one pass
+                # instead of the whole run, and lets vacuum advance between them.
+                _end_read_phase(conn)
 
     # 2. Deflate once per (namespace, quarantine arm) group.
     _emit_progress(progress, BacktestProgressEvent(phase="deflation"))
@@ -2644,26 +2711,35 @@ def run_backtest(
     # 3. Write, one transaction per arm pair.
     _emit_progress(progress, BacktestProgressEvent(phase="write"))
     validated = frozenset(corpus.universe)
-    written = _write_rows(
-        conn,
-        arms=arms,
-        deflations=deflations,
-        validated=validated,
-        holdout_requested=holdout_requested,
-        holdout_purpose=holdout_purpose,
-        holdout_accessed_by=holdout_accessed_by,
-        corpus=corpus,
-        strategy_purposes={strategy_id: entry.purpose for strategy_id, entry in manifest.items()},
-    )
-    report = BacktestRunReport(
-        runnable=runnable,
-        excluded=excluded,
-        holdout_requested=holdout_requested,
-        arms=tuple(arms),
-        rows=written,
-        deflation_refusals=refusals,
-    )
-    _assert_every_runnable_produced_rows(report, namespaces=namespaces)
+    # ⚠ THE WRITE PHASE IS ONE EXPLICIT TRANSACTION, on both paths. Under a
+    # caller's transaction this is the SAVEPOINT it always was; under
+    # ``release_read_locks`` the connection is idle here, so without it each pair
+    # writer's ``conn.transaction()`` would become top-level and a run that died
+    # part-way would leave a PARTIAL pinned window committed — which
+    # ``_recent_evidence_completion`` refuses as needing operator repair. The
+    # completeness assertion is inside for the same reason: it must be able to
+    # discard the rows it rejects.
+    with conn.transaction():
+        written = _write_rows(
+            conn,
+            arms=arms,
+            deflations=deflations,
+            validated=validated,
+            holdout_requested=holdout_requested,
+            holdout_purpose=holdout_purpose,
+            holdout_accessed_by=holdout_accessed_by,
+            corpus=corpus,
+            strategy_purposes={strategy_id: entry.purpose for strategy_id, entry in manifest.items()},
+        )
+        report = BacktestRunReport(
+            runnable=runnable,
+            excluded=excluded,
+            holdout_requested=holdout_requested,
+            arms=tuple(arms),
+            rows=written,
+            deflation_refusals=refusals,
+        )
+        _assert_every_runnable_produced_rows(report, namespaces=namespaces)
     log_report(report)
     return report
 
@@ -2785,8 +2861,15 @@ def _write_rows(
     is a SAVEPOINT (measured on psycopg 3.3.3 — an inner failure unwinds the
     whole outer block), so a stored in-sample result and its split stand or fall
     together and "a result row whose split silently never landed" is not
-    reachable. ⚠ It does NOT make the invocation atomic: the grain is the pair,
-    exactly as it already was, and a failure at pair 7 still leaves 6 committed.
+    reachable.
+
+    ⚠ THE PAIR IS THE UNWIND GRAIN, NOT THE COMMIT GRAIN — corrected 2026-08-13
+    (#2628). This once read *"a failure at pair 7 still leaves 6 committed"*.
+    That was never true: ``run_backtest`` wraps this call in a transaction of its
+    own, so every ``conn.transaction()`` here is a savepoint and a failure at
+    pair 7 discards all seven. The invocation is the commit grain, which is what
+    ``refresh_recent`` relies on — it treats a window as the restart boundary and
+    refuses a partially written one as needing operator repair.
     """
     by_strategy: dict[str, dict[tuple[AmbiguityArm | None, QuarantineArm], ArmMeasurement]] = {}
     for measurement in arms:

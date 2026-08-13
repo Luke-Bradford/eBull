@@ -5575,6 +5575,11 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
         with connect_job() as conn:
             if refresh_recent:
                 complete, partial = _recent_evidence_completion(conn)
+                # That census reads the strategy result relations and so opened
+                # this connection's transaction. Close it here: `run_backtest`
+                # refuses `release_read_locks` on a connection that is already in
+                # one, precisely so it can never discard a caller's pending work.
+                conn.rollback()
                 if partial:
                     raise RuntimeError(
                         "recent evidence contains partial immutable windows "
@@ -5600,10 +5605,14 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                             trial_register_version=_optional_str(params.get("trial_register_version")),
                             evaluation_window=item.window,
                             progress=progress_writer,
+                            release_read_locks=True,
                         )
                         # A window is the restart boundary. The ledger identities
                         # are immutable, so keeping earlier windows uncommitted
                         # would make an hours-long refresh start from zero.
+                        # ⚠ A no-op since #2628 — `run_backtest` now commits its
+                        # own write phase — and kept because it is the statement
+                        # of that boundary and holds if the flag is ever dropped.
                         conn.commit()
                         rows_written += report.rows_written
                         newly_completed += 1
@@ -5663,6 +5672,7 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                 trial_register_version=_optional_str(params.get("trial_register_version")),
                 evaluation_window=evaluation_window,
                 synthetic_control=synthetic_control,
+                release_read_locks=True,
             )
             tracker.row_count = report.rows_written
 
