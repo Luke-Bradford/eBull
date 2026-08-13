@@ -61,16 +61,50 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
   1. **Scaling** — 1x→10x ticket moves `marketSpread` by 9.93-10.14x and
      `transactionFee` by exactly 10.00x, at a stable implied bps. A rate would
      be invariant under scaling.
-  2. **An independent same-quantity measurement** — `value / ticket_amount`
-     lands on the `quotes` panel's separately observed `spread_pct` for the same
-     instrument. `quotes` is written by a feed path that never reads a what-if
-     response, so this is not circular. Stable names match closely and reproduce
-     across all three runs (XLV 0.6 vs 0.59 bps; NUVL 0.8 vs 0.81 bps; SPY 0.9
-     vs 0.91 on the third).
+  2. **A same-quantity measurement** — `value / ticket_amount` lands on the
+     `quotes` panel's separately observed `spread_pct` for the same instrument.
+     Stable names match closely and reproduce across all three runs (XLV 0.6 vs
+     0.59 bps; NUVL 0.8 vs 0.81 bps; SPY 0.9 vs 0.91 on the third).
+     ⚠⚠ **CORRECTED 2026-08-13 (#2598): this is NOT an INDEPENDENT cross-check,
+     and this bullet previously claimed it was.** The old justification —
+     *"`quotes` is written by a feed path that never reads a what-if response,
+     so this is not circular"* — is true about the CODE PATH and misleading
+     about the EVIDENCE: `quotes` is written by `market_data._upsert_quote`
+     **from eToro**. Two endpoints of one venue, inheriting the same book, the
+     same staleness and the same venue markup. The distinction that matters is
+     the upstream OBSERVER, not the producing code path. For the UNIT question
+     here (monetary or rate?) code-path independence is enough — a rate would
+     miss by four orders of magnitude whatever the source, so **the decode
+     stands**. For any LEVEL question (is this spread real? is our band table
+     calibrated?) it is worth nothing.
   3. **The rounding quantum** — costs come back rounded to 0.01 USD, so a $100
      ticket has a 1.0 bp floor and every tight instrument reads ~1.0 bp there.
      The agreement appears at $1,000 and vanishes at $100, which is the
      signature a monetary field must have and a rate must not.
+
+  **Band census, 2026-08-13 (#2598)** — 60 instruments, 15 per cost band,
+  fixture `tests/fixtures/etoro_preflight_2598/band_census_2026-08-13.json`;
+  re-summarise offline with
+  `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`.
+
+  - ⚠ **`amount` is ABSENT AS A KEY, not present-and-null.** Raw cost-row keys
+    are exactly `['costType', 'currency', 'value']`. `currency` IS returned
+    (`USD`) — and the portal documents it as *"ISO 4217 currency code in which
+    **amount** is denominated"*, so the response ships the denominator of a
+    field it does not ship. Never coerce a missing key to zero.
+  - **Three of the six documented components come back** for an unleveraged
+    long: `markup`, `marketSpread`, `overnightFee`. `transactionFee`,
+    `overWeekendFee` and `sdrt` are absent — and absent is not zero.
+  - **`value / ticket` matches the separately observed quoted spread at a
+    population MEDIAN of 0.995x** (n=60 decidable), individual observations
+    ranging 0.143x-3.526x. So the per-observation caution below is right AND
+    the aggregate identity holds — which settles the one-side-vs-round-trip
+    question: compare against `p75_spread_pct`, **never** `half_spread_pct`.
+    ⚠ Only observations at or above 10 rounding quanta count: at a $1,000
+    ticket SPY read 0.4 bp against a 0.13 bp quote (3.08x), entirely rounding.
+  - ⚠ **x1 short CFDs remain UNDECODABLE** — an all-zero response proves
+    nothing about the unit. The long-only v1 lane has a unit; the short side
+    does not.
 
   ⚠ **Do NOT upgrade this to `marketSpread == the quoted spread`.** On the most
   actively quoted names both sides move between runs minutes apart: AAPL read
