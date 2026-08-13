@@ -116,9 +116,20 @@ branches, no unpushed WIP).
    inside a SINGLE Bash call instead, and read the result once:
 
    ```bash
-   until [ "$(gh pr checks <N> --json bucket --jq '[.[]|select(.bucket=="pending")]|length')" = "0" ]; do sleep 20; done
+   for _ in $(seq 60); do
+     [ "$(gh pr checks <N> --json bucket --jq '[.[]|select(.bucket=="pending")]|length')" = "0" ] && break
+     sleep 20
+   done
    gh pr checks <N>; gh pr view <N> --comments
    ```
+
+   ⚠ **BOUND THE WAIT — do not write a bare `until … done`.** An unbounded loop
+   in an unattended driver has no stop condition of its own; it relies on the
+   tool timeout as its only bound, which is a hang wearing a timeout's clothes.
+   The `seq 60` cap (~20 min) exits on its own and then PRINTS THE STATE, so a
+   stuck check surfaces as a visible non-empty pending list rather than as a
+   killed call that says nothing. Always read the output after the wait — the
+   loop's dangerous failures are the silent ones (#2658).
 
    Same information, same gate, same merge decision — one turn instead of sixty.
    Use `run_in_background` for the wait when you have other work to do meanwhile;
