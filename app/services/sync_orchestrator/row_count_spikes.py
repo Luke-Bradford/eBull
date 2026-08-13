@@ -61,7 +61,18 @@ def check_row_count_spike(
             WHERE job_name = %(name)s
               AND status = 'success'
               AND row_count IS NOT NULL
-              AND (%(exclude_id)s IS NULL OR run_id != %(exclude_id)s)
+              -- ::bigint at EVERY occurrence, matching job_runs.run_id.
+              -- psycopg3 dedups the repeated named param into one $n, and
+              -- `$n IS NULL` is a NullTest that determines no type, so the
+              -- default exclude_run_id=None binds as an untyped NULL and the
+              -- whole statement fails to plan with AmbiguousParameter.
+              -- `run_id != $n` does NOT rescue it. See prevention-log
+              -- §"A nullable SQL param whose only type-determining use is a
+              -- NULL test must be cast" (#1961/#2647/#2650).
+              AND (
+                  %(exclude_id)s::bigint IS NULL
+                  OR run_id != %(exclude_id)s::bigint
+              )
             ORDER BY started_at DESC
             LIMIT 1
             """,
