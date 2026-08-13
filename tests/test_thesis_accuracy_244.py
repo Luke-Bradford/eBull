@@ -20,6 +20,7 @@ import psycopg.rows
 import pytest
 
 from app.services.reporting import _thesis_accuracy
+from app.services.thesis_subject_identity import RULE_SET_VERSION
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
 
 pytestmark = pytest.mark.integration
@@ -46,18 +47,48 @@ def _seed_thesis(
     bull_value: Decimal,
     bear_value: Decimal,
     stance: str = "bullish",
+    subject_identity_ok: bool | None = True,
 ) -> None:
+    """Seed one thesis. ``subject_identity_ok`` defaults to TRUE deliberately.
+
+    ⚠ It was omitted entirely until #2648, so every row here carried the NULL
+    verdict — and `is_thesis_usable` fails CLOSED on NULL (#2436), which nulled
+    the bands before any assertion in this file could read them. These tests are
+    about the ENTRY ANCHOR; a thesis whose subject is refused never reaches the
+    anchor comparison, so seeding the refusal here tests nothing about #244.
+    Pass ``None``/``False`` explicitly to exercise the quarantine instead.
+
+    The verdict is a TRIPLE (`theses_subject_identity_triple_ck`, sql/332:37):
+    verdict + rule version + checked-at move together or are all NULL, because a
+    verdict without its rule version is unattributable. The rule version comes
+    from the module constant, never a literal — it is a code hash, so a literal
+    would pin a rule set that no longer exists.
+    """
+    checked_at = created_at if subject_identity_ok is not None else None
+    rule_version = RULE_SET_VERSION if subject_identity_ok is not None else None
     conn.execute(
         """
         INSERT INTO theses (
             instrument_id, thesis_version, created_at, thesis_type,
             stance, base_value, bull_value, bear_value, memo_markdown,
-            confidence_score
+            confidence_score, subject_identity_ok, subject_identity_rule_version,
+            subject_identity_checked_at
         ) VALUES (
-            %s, %s, %s, 'standard', %s, %s, %s, %s, 'test', 0.6
+            %s, %s, %s, 'standard', %s, %s, %s, %s, 'test', 0.6, %s, %s, %s
         )
         """,
-        (instrument_id, version, created_at, stance, base_value, bull_value, bear_value),
+        (
+            instrument_id,
+            version,
+            created_at,
+            stance,
+            base_value,
+            bull_value,
+            bear_value,
+            subject_identity_ok,
+            rule_version,
+            checked_at,
+        ),
     )
 
 
@@ -331,3 +362,73 @@ class TestThesisAccuracyEntryAnchor:
         assert rows[0]["base_value"] is None
         assert rows[0]["bull_value"] is None
         assert rows[0]["target_hit"] is None
+        # ⚠ Nulled because no anchor exists, NOT because the thesis was refused —
+        # and the two must stay distinguishable, which is the reason `thesis_id`
+        # is selected at all (reporting.py:647). Until #2648 this assertion could
+        # not have failed: every thesis here carried a NULL verdict, so the
+        # quarantine nulled the same three columns for a second reason.
+        assert rows[0]["thesis_quarantined"] is False
+
+    def test_a_thesis_with_an_undecided_subject_verdict_is_refused_not_read(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#2436's quarantine reaches the monthly report through this query.
+
+        A NULL verdict means NOBODY HAS CHECKED, which `is_thesis_usable` fails
+        closed on. The anchor is valid here and the thesis precedes it, so the
+        LATERAL join selects the row — and every thesis-derived field must still
+        come back NULL, flagged `thesis_quarantined`, rather than producing a
+        confident `target_hit` from a band whose subject was never verified.
+        """
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=103, symbol="QRTN")
+
+        entry_fill_id = _seed_order_and_fill(
+            conn,
+            instrument_id=103,
+            action="BUY",
+            filled_at=datetime(2026, 4, 9, 9, 0, 0, tzinfo=UTC),
+            price=Decimal("100"),
+            units=Decimal("10"),
+        )
+        exit_fill_id = _seed_order_and_fill(
+            conn,
+            instrument_id=103,
+            action="EXIT",
+            filled_at=datetime(2026, 5, 9, 9, 0, 0, tzinfo=UTC),
+            price=Decimal("120"),  # >= bull 110, so a usable thesis would say "bull"
+            units=Decimal("10"),
+        )
+        _seed_thesis(
+            conn,
+            instrument_id=103,
+            version=1,
+            created_at=datetime(2026, 4, 9, 6, 0, 0, tzinfo=UTC),
+            base_value=Decimal("100"),
+            bull_value=Decimal("110"),
+            bear_value=Decimal("90"),
+            subject_identity_ok=None,  # never checked — the fail-closed case
+        )
+        _seed_attribution(
+            conn,
+            instrument_id=103,
+            hold_start=date(2026, 4, 9),
+            hold_end=date(2026, 5, 9),
+            entry_fill_id=entry_fill_id,
+            exit_fill_id=exit_fill_id,
+        )
+        conn.commit()
+
+        all_rows = _thesis_accuracy(conn, period_start=date(2026, 5, 1), period_end=date(2026, 5, 31))
+        rows = [r for r in all_rows if r["instrument_id"] == 103]
+        assert len(rows) == 1
+        assert rows[0]["thesis_quarantined"] is True
+        assert rows[0]["base_value"] is None
+        assert rows[0]["bull_value"] is None
+        assert rows[0]["bear_value"] is None
+        assert rows[0]["stance"] is None
+        assert rows[0]["confidence_score"] is None
+        assert rows[0]["target_hit"] is None
+        # The exit price still renders — it is a fill, not a thesis claim.
+        assert Decimal(rows[0]["exit_price"]) == Decimal("120")

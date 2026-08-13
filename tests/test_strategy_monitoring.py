@@ -870,8 +870,16 @@ def test_evidence_invalid_enabled_allocation_can_reduce_without_disabling(
     strategy_id = "s1-time-series-momentum"
     version = _current_versions()[strategy_id]
     deployment_id = _deployment(ebull_test_conn, strategy_id, version)
+    # ⚠ This seeded `currency='EUR'` until #2648, to prove the response echoes the
+    # STORED currency rather than a hardcoded 'USD'. `sql/338` (#2363, USD-only
+    # while FX is unmodelled) landed after the fixture and makes a non-USD row
+    # unrepresentable at rest, so the discriminating value no longer exists to seed.
+    # What replaced that coverage: `tests/test_strategy_control_plane.py::
+    # test_an_unsupported_currency_is_unrepresentable_at_rest` (the constraint, by
+    # name, on both the current-state and event tables) and the ` usd ` →
+    # `USD` normalisation case above it.
     ebull_test_conn.execute(
-        "UPDATE strategy_deployments SET enabled=true, currency='EUR' WHERE deployment_id=%s",
+        "UPDATE strategy_deployments SET enabled=true WHERE deployment_id=%s",
         (deployment_id,),
     )
     ebull_test_conn.commit()
@@ -890,11 +898,11 @@ def test_evidence_invalid_enabled_allocation_can_reduce_without_disabling(
 
     assert response.enabled
     assert response.capital_limit == Decimal("500")
-    assert response.currency == "EUR"
+    assert response.currency == "USD"
     assert ebull_test_conn.execute(
         "SELECT capital_limit, currency, enabled FROM strategy_deployment_events WHERE deployment_id=%s",
         (deployment_id,),
-    ).fetchone() == (Decimal("500.000000"), "EUR", True)
+    ).fetchone() == (Decimal("500.000000"), "USD", True)
 
 
 def test_disabled_pre_promotion_deployment_remains_visible_for_risk_reduction(

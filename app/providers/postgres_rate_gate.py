@@ -13,6 +13,7 @@ import asyncio
 import logging
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from app.providers.rate_gate import SEC_MIN_REQUEST_INTERVAL_S, InProcessFloorGate
@@ -39,10 +40,37 @@ RETURNING EXTRACT(EPOCH FROM (g.next_free_at
 
 
 class PostgresFloorGate:
-    def __init__(self, pool: Any, *, budget: str = "sec", floor_s: float) -> None:
+    """Reservation pacer. ``acquire`` = a DB-clock slot grant, then a local sleep.
+
+    ⚠ The two halves have different guarantees, and only the first is this
+    class's. The GCRA UPDATE spaces GRANTS by ``floor_s`` on the Postgres clock;
+    what a caller does with the returned wait is a local sleep, whose accuracy is
+    the OS scheduler's. Measured on the dev box at #2648: ``time.sleep(0.05)``
+    returned 37-105 ms late single-threaded and 129-148 ms late with two threads
+    (loadavg 3.4, 10 CPUs). Oversleep only ever DELAYS a request, so the grant
+    ladder still bounds the request rate — but two threads whose grants are one
+    floor apart can EMIT within a millisecond of each other when the earlier one
+    oversleeps by more than the later one, so emission spacing is not a property
+    to assert on. See tests/db/test_postgres_rate_gate.py.
+
+    ``_sleep`` is injectable for exactly that reason, mirroring the seam
+    ``InProcessFloorGate`` already carries (app/providers/rate_gate.py:55) — it
+    lets a test observe the grant ladder without the scheduler in the way. The
+    async path keeps ``asyncio.sleep``; nothing needs to seam it yet.
+    """
+
+    def __init__(
+        self,
+        pool: Any,
+        *,
+        budget: str = "sec",
+        floor_s: float,
+        _sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._pool = pool
         self._budget = budget
         self._floor = floor_s
+        self._sleep = _sleep
         self._lock = threading.Lock()
         # §3e fallback is the process-global singleton above (shared by every
         # PostgresFloorGate instance), NOT a per-instance gate.
@@ -71,7 +99,7 @@ class PostgresFloorGate:
             self._fallback.acquire()
             return
         if wait > 0:
-            time.sleep(wait)
+            self._sleep(wait)
 
     async def acquire_async(self) -> None:
         loop = asyncio.get_running_loop()
