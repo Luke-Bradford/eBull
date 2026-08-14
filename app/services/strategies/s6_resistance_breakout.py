@@ -57,7 +57,7 @@ from app.services.indicator_series import (
     atr_series,
 )
 from app.services.market_regime import REGIME_RULE_VERSION, Regime, RegimeSeries
-from app.services.price_levels import LEVEL_RULE_VERSION, levels_at
+from app.services.price_levels import LEVEL_RULE_VERSION, LevelScan
 from app.services.strategy_registry import (
     NOT_EVALUABLE_REASONS,
     NotEvaluableReason,
@@ -249,7 +249,7 @@ def s6_exit_bracket(
     return target, stop, MAX_HOLD_BARS
 
 
-def _resistance_below(series: BarSeries, *, index: int, atr: float) -> float | None:
+def _resistance_below(series: BarSeries, *, index: int, atr: float, scan: LevelScan | None = None) -> float | None:
     """The nearest live resistance level below this bar's close, or ``None``.
 
     ⚠⚠ NO REGIME GATE HERE, AND THAT IS THE POINT OF THE SPLIT. The gate belongs
@@ -263,14 +263,30 @@ def _resistance_below(series: BarSeries, *, index: int, atr: float) -> float | N
     the worst possible moment to have no stop. A gate that can retroactively
     invalidate an open position's exit is not a safety control.
 
-    ⚠ Levels are recomputed from bars ``<= index`` on every call rather than
-    cached across the series. Slower, and deliberately so: a cache keyed by
-    anything other than the exact bar index is the standard way lookahead gets
-    reintroduced after the causal version was proved correct.
+    ⚠ Levels remain causal: only pivots CONFIRMED by ``index`` are considered,
+    and the ATR sizing the cluster tolerance is the one at ``index``.
+
+    ⚠⚠ ``scan`` REPLACES THE PER-CALL RECOMPUTE, AND IT IS NOT THE CACHE THIS
+    DOCSTRING PREVIOUSLY REFUSED. The objection was exact and correct: *"a cache
+    keyed by anything other than the exact bar index is the standard way lookahead
+    gets reintroduced"*. ``LevelScan`` has NO KEY. It precomputes swing-pivot
+    DETECTION for the whole series — legal because whether bar ``i`` is a pivot
+    depends only on bars ``i-5 .. i+5`` and never on where the observer stands —
+    and ``at(index)`` then filters to pivots confirmed by ``index`` on every call.
+    The causal filter still runs per bar; only the detection is shared, so there is
+    nothing to invalidate and no key to get wrong.
+
+    Measured rather than asserted: ``scripts/verify_2437_level_scan.py
+    --equivalence`` compares the two forms over 45,094 (instrument, bar, arm)
+    comparisons — including quarantine-masked instruments and the ``volumes=None``
+    arm — and reports 0 mismatches.
+
+    ⚠ ``scan`` defaults to ``None`` and is built internally when omitted, so a
+    direct caller keeps the standalone contract.
     """
-    highs = series.array_highs
-    lows = series.array_lows
-    levels = levels_at(highs=highs, lows=lows, volumes=_volumes(series), atr=atr, index=index)
+    if scan is None:
+        scan = LevelScan.build(highs=series.array_highs, lows=series.array_lows, volumes=_volumes(series))
+    levels = scan.at(atr=atr, index=index)
     close = series.float_closes[index]
     if close is None:
         return None
@@ -300,6 +316,12 @@ def s6_signals(
     atr = atr_series(series, universe=universe, period=ATR_PERIOD)
     avg_volume = average_volume_series(series, universe=universe)
     vols = _volumes(series)
+    # ⚠ ONE scan for the whole series, built here and passed into every per-bar
+    # lookup. Without it `_resistance_below` rebuilds whole-series pivot
+    # detection on every bar, which makes a full-series evaluation quadratic —
+    # 3.61 ms/bar against 0.1532 ms/bar, measured. See `_resistance_below` for
+    # why this is not the cache that docstring refuses.
+    scan = LevelScan.build(highs=series.array_highs, lows=series.array_lows, volumes=vols)
 
     inputs = (
         StrategyInput(series=_close_input(series, universe=universe), reason=masked_reason),
@@ -323,7 +345,7 @@ def s6_signals(
         # because it is the cheaper refusal and the more fundamental one.
         if not regime.permits(index, PERMITTED_REGIMES):
             return False
-        level = _resistance_below(series, index=index, atr=atr_now)
+        level = _resistance_below(series, index=index, atr=atr_now, scan=scan)
         if level is None or close <= level:
             return False
         # ⚠⚠ THE BREAK IS A CROSSING, NOT A POSITION. `close > level` alone is
