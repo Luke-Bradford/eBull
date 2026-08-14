@@ -25,7 +25,7 @@ import psycopg
 import pytest
 
 from app.services.strategy_core_allocator import CoreSleeveState
-from app.services.strategy_core_mandate import CORE_MANDATE_POLICY_VERSION
+from app.services.strategy_core_mandate import CORE_MANDATE_MODE, CORE_MANDATE_POLICY_VERSION
 from app.services.strategy_core_rebalance_intent import record_core_rebalance_intent
 
 _INSERT = """
@@ -99,11 +99,11 @@ def _seed_mandate(conn: psycopg.Connection[Any]) -> int:
         INSERT INTO strategy_core_mandate_events (
             revision,enabled,base_currency,core_instrument_id,core_target_pct,
             liquidity_reserve_pct,rebalance_band_pct,min_rebalance_amount,
-            policy_version,changed_by,reason
-        ) VALUES (1,TRUE,'USD',%s,60,20,5,25,%s,'test','test')
+            policy_version,changed_by,reason,mode
+        ) VALUES (1,TRUE,'USD',%s,60,20,5,25,%s,'test','test',%s)
         RETURNING core_mandate_event_id
         """,
-        (_INSTRUMENT_ID, CORE_MANDATE_POLICY_VERSION),
+        (_INSTRUMENT_ID, CORE_MANDATE_POLICY_VERSION, CORE_MANDATE_MODE),
     ).fetchone()
     assert row is not None
     return int(row[0])

@@ -716,6 +716,71 @@ def _costs(
     return _CostAssessment(stressed=stressed, net=net, basis=bases.pop())
 
 
+# The two PORTFOLIO-MANDATE observations that are sourced from OUR tables rather
+# than from the broker account snapshot -- and therefore the only two that went
+# blind to a core position when sql/349 added the core/cash arm.
+#
+# ⚠⚠ BOTH FEED HARD GATES, NOT REPORTS.  `open_strategy_lifecycles` is compared
+# against `mandate_max_concurrent_positions`, and `daily_realised_pnl` against
+# the daily loss limit; each returns a refusal.  The first inventory of this
+# slice classified these by JOIN SHAPE and so filed the second as cosmetic P&L
+# history and missed the first entirely.  Classify a query by the DECISION IT
+# FEEDS, not by the tables it touches.
+#
+# Why every OTHER mandate control needed no change: `portfolio_capacity`,
+# `instrument_capacity` and `drawdown` read `risk.total_invested`,
+# `risk.instrument_investments` and `risk.equity` -- the broker account snapshot,
+# which already counts a core position with no code at all.  So the split was
+# never a policy decision; it was an artefact of where each number came from.
+#
+# Counting core here is settled by sql/311, not by preference: the mandate is a
+# PORTFOLIO mandate (stored on `strategy_paper_pool_events`, every limit
+# denominated on `pool_base`), so leaving these two alpha-only would make one
+# mandate enforce two different populations depending on each limit's source.
+# It also errs toward the tighter cap, the correct direction for a risk control.
+#
+# The core arm is admitted by PRESENCE, deliberately.  These are caps: counting a
+# position makes a refusal MORE likely, so presence is the fail-closed choice and
+# the authorised witness chain would be the fail-open one.
+_MANDATE_OBSERVATION_SQL = """
+            SELECT
+                (
+                    SELECT count(*)
+                    FROM strategy_trades trade
+                    LEFT JOIN strategy_funding_decisions decision
+                      ON decision.funding_decision_id=trade.funding_decision_id
+                     AND decision.verdict='allocated'
+                    LEFT JOIN strategy_deployments deployment
+                      ON deployment.deployment_id=decision.deployment_id
+                     AND deployment.mode='paper'
+                    WHERE trade.status NOT IN ('closed','failed')
+                      AND (
+                        deployment.deployment_id IS NOT NULL
+                        OR trade.core_rebalance_intent_id IS NOT NULL
+                      )
+                ),
+                (
+                    SELECT COALESCE(SUM(event.realized_pnl_usd),0)
+                    FROM strategy_position_ownership ownership
+                    JOIN strategy_trades trade
+                      ON trade.strategy_trade_id=ownership.strategy_trade_id
+                    LEFT JOIN strategy_funding_decisions decision
+                      ON decision.funding_decision_id=trade.funding_decision_id
+                    LEFT JOIN strategy_deployments deployment
+                      ON deployment.deployment_id=decision.deployment_id
+                     AND deployment.mode='paper'
+                    JOIN trade_events event
+                      ON event.position_id=ownership.broker_position_id
+                     AND event.event_kind='close'
+                    WHERE event.executed_at >= %s AND event.executed_at < %s
+                      AND (
+                        deployment.deployment_id IS NOT NULL
+                        OR trade.core_rebalance_intent_id IS NOT NULL
+                      )
+                )
+"""
+
+
 def _observe_local_mandate_risk(
     conn: psycopg.Connection[Any],
     *,
@@ -752,35 +817,7 @@ def _observe_local_mandate_risk(
         market_day_start = datetime.combine(market_date, time.min, tzinfo=_NY).astimezone(UTC)
         market_day_end = (datetime.combine(market_date, time.min, tzinfo=_NY) + timedelta(days=1)).astimezone(UTC)
         mandate_row = conn.execute(
-            """
-            SELECT
-                (
-                    SELECT count(*)
-                    FROM strategy_trades trade
-                    JOIN strategy_funding_decisions decision
-                      ON decision.funding_decision_id=trade.funding_decision_id
-                    JOIN strategy_deployments deployment
-                      ON deployment.deployment_id=decision.deployment_id
-                     AND deployment.mode='paper'
-                    WHERE decision.verdict='allocated'
-                      AND trade.status NOT IN ('closed','failed')
-                ),
-                (
-                    SELECT COALESCE(SUM(event.realized_pnl_usd),0)
-                    FROM strategy_position_ownership ownership
-                    JOIN strategy_trades trade
-                      ON trade.strategy_trade_id=ownership.strategy_trade_id
-                    JOIN strategy_funding_decisions decision
-                      ON decision.funding_decision_id=trade.funding_decision_id
-                    JOIN strategy_deployments deployment
-                      ON deployment.deployment_id=decision.deployment_id
-                     AND deployment.mode='paper'
-                    JOIN trade_events event
-                      ON event.position_id=ownership.broker_position_id
-                     AND event.event_kind='close'
-                    WHERE event.executed_at >= %s AND event.executed_at < %s
-                )
-            """,
+            _MANDATE_OBSERVATION_SQL,
             (market_day_start, market_day_end),
         ).fetchone()
         if mandate_row is None:  # pragma: no cover - scalar SELECT always returns one row

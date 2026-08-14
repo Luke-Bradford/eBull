@@ -29,6 +29,7 @@ from app.providers.broker import (
     BrokerProvider,
 )
 from app.services.strategy_control_plane import StrategyControlError, StrategyOwnershipError, link_strategy_order
+from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
 
 _RATE_QUANTUM = Decimal("0.000001")
 _ADVISORY_HASH_SEED = 0
@@ -65,11 +66,22 @@ class _OwnedPosition:
     strategy_trade_id: int
     broker_position_id: int
     instrument_id: int
-    deployment_id: int
-    entry_stop: Decimal
-    entry_take_profit: Decimal
+    # ⚠ The four fields below became nullable in #2603 step 2, when
+    # ``strategy_trades`` gained the core/cash arm (sql/349).  A core position is
+    # authorised by a mandate rebalance intent, so it has no deployment, no
+    # entry preflight and no execution policy to read them from.
+    #
+    # ``is_core`` is the discriminator and is derived from the AUTHORISATION
+    # column, never from these being NULL.  Null-by-absence would conflate "this
+    # is a core holding" with "this deployment configured no such policy", and a
+    # later default would then silently start applying strategy behaviour to a
+    # mandate holding.
+    is_core: bool
+    deployment_id: int | None
+    entry_stop: Decimal | None
+    entry_take_profit: Decimal | None
     max_position_age_seconds: int | None
-    max_quote_age_seconds: int
+    max_quote_age_seconds: int | None
     ratchet_variant_id: int | None
     break_atr_multiple: Decimal | None
     chandelier_atr_multiple: Decimal | None
@@ -261,12 +273,16 @@ def calculate_ratchet_stop(
     return candidate if candidate > current_stop else None
 
 
-def _load_owned(conn: psycopg.Connection[Any], *, strategy_trade_id: int, broker_position_id: int) -> _OwnedPosition:
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
+# The manager's loader.  Signal-arm behaviour is unchanged: the former INNER
+# chain (funding -> deployment mode='paper' -> preflight verdict='allocated' ->
+# execution policy) is reproduced exactly by the LEFT chain plus the four
+# witnesses below.  Converting an INNER JOIN that also FILTERS into a LEFT JOIN
+# moves that filter into the WHERE clause or deletes it; there is no third
+# outcome, so each is restated rather than assumed.
+_LOAD_OWNED_SQL = f"""
             SELECT own.ownership_id, own.strategy_trade_id, own.broker_position_id,
                    t.instrument_id, d.deployment_id,
+                   t.core_rebalance_intent_id,
                    pre.stop_loss_rate AS entry_stop,
                    pre.take_profit_rate AS entry_take_profit,
                    manager.max_position_age_seconds,
@@ -278,34 +294,72 @@ def _load_owned(conn: psycopg.Connection[Any], *, strategy_trade_id: int, broker
                    q.bid AS quote_bid, q.quoted_at
             FROM strategy_position_ownership own
             JOIN strategy_trades t ON t.strategy_trade_id=own.strategy_trade_id
-            JOIN strategy_funding_decisions funding ON funding.funding_decision_id=t.funding_decision_id
-            JOIN strategy_deployments d ON d.deployment_id=funding.deployment_id AND d.mode='paper'
-            JOIN strategy_entry_preflights pre ON pre.signal_id=funding.signal_id AND pre.verdict='allocated'
-            JOIN strategy_execution_policies execution ON execution.deployment_id=d.deployment_id
+            LEFT JOIN strategy_funding_decisions funding
+              ON funding.funding_decision_id=t.funding_decision_id
+            LEFT JOIN strategy_deployments d
+              ON d.deployment_id=funding.deployment_id AND d.mode='paper'
+            LEFT JOIN strategy_entry_preflights pre
+              ON pre.signal_id=funding.signal_id AND pre.verdict='allocated'
+            LEFT JOIN strategy_execution_policies execution
+              ON execution.deployment_id=d.deployment_id
+{core_arm_joins("t")}
             LEFT JOIN strategy_position_manager_policies manager ON manager.deployment_id=d.deployment_id
             LEFT JOIN strategy_ratchet_variants variant
               ON variant.ratchet_variant_id=manager.ratchet_variant_id
             LEFT JOIN quotes q ON q.instrument_id=t.instrument_id
             WHERE own.strategy_trade_id=%s AND own.broker_position_id=%s AND own.status='active'
               AND t.status IN ('open','closing','reconcile_required')
-            """,
+              AND (
+                (
+                  -- ⚠ EVERY LINK NEEDS ITS OWN WITNESS.  `pre` joins on
+                  -- funding.signal_id and is independent of `d`, so witnessing
+                  -- `pre` alone would let a LIVE deployment load (d NULL, pre
+                  -- resolved).  `execution` likewise carries the quote-age
+                  -- policy that the casts below assume; without its own witness
+                  -- a signal trade could load with max_quote_age_seconds NULL
+                  -- and fail at the quote check instead of never loading.
+                  t.funding_decision_id IS NOT NULL
+                  AND d.deployment_id IS NOT NULL          -- carries mode='paper'
+                  AND execution.deployment_id IS NOT NULL  -- carries the quote-age policy
+                  AND pre.signal_id IS NOT NULL            -- carries verdict='allocated'
+                )
+                OR (
+                  {core_arm_authorised("t")}
+                  -- ⚠ The arc alone does not bind the trade's instrument to the
+                  -- intent's.  Without this, a malformed core trade would
+                  -- authorise the manager to close a DIFFERENT instrument's
+                  -- position.  The two live in different tables, so this is a
+                  -- load-time predicate rather than a CHECK -- and here is where
+                  -- the manager is about to act on it.
+                  AND core_intent.core_instrument_id=t.instrument_id
+                )
+              )
+"""
+
+
+def _load_owned(conn: psycopg.Connection[Any], *, strategy_trade_id: int, broker_position_id: int) -> _OwnedPosition:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            _LOAD_OWNED_SQL,
             (strategy_trade_id, broker_position_id),
         )
         row = cur.fetchone()
     if row is None:
         raise StrategyOwnershipError("exact active strategy position ownership is required before broker I/O")
+    is_core = row["core_rebalance_intent_id"] is not None
     return _OwnedPosition(
         ownership_id=int(row["ownership_id"]),
         strategy_trade_id=int(row["strategy_trade_id"]),
         broker_position_id=int(row["broker_position_id"]),
         instrument_id=int(row["instrument_id"]),
-        deployment_id=int(row["deployment_id"]),
-        entry_stop=Decimal(str(row["entry_stop"])),
-        entry_take_profit=Decimal(str(row["entry_take_profit"])),
+        is_core=is_core,
+        deployment_id=int(row["deployment_id"]) if row["deployment_id"] is not None else None,
+        entry_stop=Decimal(str(row["entry_stop"])) if row["entry_stop"] is not None else None,
+        entry_take_profit=(Decimal(str(row["entry_take_profit"])) if row["entry_take_profit"] is not None else None),
         max_position_age_seconds=(
             int(row["max_position_age_seconds"]) if row["max_position_age_seconds"] is not None else None
         ),
-        max_quote_age_seconds=int(row["max_quote_age_seconds"]),
+        max_quote_age_seconds=(int(row["max_quote_age_seconds"]) if row["max_quote_age_seconds"] is not None else None),
         ratchet_variant_id=(int(row["ratchet_variant_id"]) if row["ratchet_variant_id"] is not None else None),
         break_atr_multiple=(Decimal(str(row["break_atr_multiple"])) if row["break_atr_multiple"] is not None else None),
         chandelier_atr_multiple=(
@@ -413,6 +467,30 @@ def _resume_operation(
     if operation is None:
         return None
     operation_id = int(operation["position_operation_id"])
+    # ⚠⚠ THIS FUNCTION RUNS IMMEDIATELY AFTER LOAD, BEFORE ANY GATE, so the core
+    # exemption further down `manage_owned_position` cannot protect it.  A
+    # pending edit operation attached to a core ownership would otherwise resume
+    # a stop / take-profit mutation despite that exemption -- the exemption would
+    # hold on every fresh cycle and leak on exactly the crash-recovery path.
+    #
+    # No such operation can be created today (nothing writes an edit on the core
+    # arm), so this is refused rather than handled: a row that cannot legitimately
+    # exist should stop the cycle for that position, not be interpreted.
+    if owned.is_core and operation["operation_type"] != "close":
+        with conn.transaction():
+            _terminal(
+                conn,
+                operation_id=operation_id,
+                status="rejected",
+                error_code="core_mandate_position_exempt",
+            )
+        return PositionManagerResult(
+            owned.strategy_trade_id,
+            owned.broker_position_id,
+            "rejected",
+            "core_mandate_position_exempt",
+            operation_id,
+        )
     position = _exact_broker_position(broker, owned)
     if operation["status"] == "intent_persisted":
         # There is no edit/close lookup by request UUID. A crash can occur on
@@ -779,12 +857,19 @@ def manage_owned_position(
                 strategy_trade_id, broker_position_id, "reconcile_required", "owned_position_missing"
             )
 
+        # ⚠ Age-out is exempted by an EXPLICIT `is_core` test, never by relying on
+        # ``max_position_age_seconds`` being NULL for a core position.  Null-by-
+        # absence conflates "core is exempt" with "this deployment configured no
+        # age policy", so the day a default is introduced, mandate holdings would
+        # silently start being closed for being old.  A core holding has no
+        # horizon by construction -- that is what makes it core.
+        age_seconds = None if owned.is_core else owned.max_position_age_seconds
         timed_out = (
-            owned.max_position_age_seconds is not None
+            age_seconds is not None
             and position.open_date_time is not None
-            and position.open_date_time <= observed_at - timedelta(seconds=owned.max_position_age_seconds)
+            and position.open_date_time <= observed_at - timedelta(seconds=age_seconds)
         )
-        if owned.max_position_age_seconds is not None and position.open_date_time is None:
+        if age_seconds is not None and position.open_date_time is None:
             with conn.transaction():
                 conn.execute(
                     "UPDATE strategy_trades SET status='reconcile_required', updated_at=now() "
@@ -810,6 +895,33 @@ def manage_owned_position(
                 trigger_code=close_reason or "timeout",
             )
 
+        # ⚠⚠ THE CORE RETURN MUST PRECEDE THIS LINE, not merely guard the
+        # `if stop_gap or take_gap` body: the two lines below already dereference
+        # ``entry_stop`` / ``entry_take_profit``, which are NULL on the core arm.
+        #
+        # What a core position is exempt FROM: stop-forcing, take-profit-forcing
+        # and ratcheting.  Each converts a mandate into a strategy.  A stop on a
+        # benchmark holding sells the benchmark into a drawdown -- and "return to
+        # core/cash" is the outcome the viability plan falls back TO, so a stop
+        # underneath it would be giving the fallback a fallback.
+        #
+        # What it is NOT exempt from, and this is what makes the exemption safe:
+        # it is still selected by the paper cycle's batch, loaded here,
+        # reconciled when the broker disagrees, and closable on an explicit
+        # close_reason.  Exempt from three behaviours, not absent from the system.
+        #
+        # ⚠ Its own reason code.  Reusing `position_protected` would assert that a
+        # stop exists and is adequate; on this arm there is no stop at all.
+        if owned.is_core:
+            return PositionManagerResult(
+                strategy_trade_id, broker_position_id, "no_change", "core_mandate_position_exempt"
+            )
+
+        # Past this point the signal arm is guaranteed by _LOAD_OWNED_SQL's
+        # witnesses: a loaded non-core position has a preflight and an execution
+        # policy, so these are non-null.
+        assert owned.entry_stop is not None and owned.entry_take_profit is not None
+        assert owned.max_quote_age_seconds is not None
         current_stop = position.stop_loss_rate
         desired_stop = max(current_stop, owned.entry_stop) if current_stop is not None else owned.entry_stop
         desired_take = owned.entry_take_profit

@@ -65,6 +65,49 @@ invisible because a missing row looks like no work rather than like an error.
 and the frontend types follow. **That is the reason step 2 is not a backend-only change**,
 and it was invisible in the draft.
 
+### A′. The two mandate controls sourced from OUR tables — **missed by the first inventory**
+
+⚠ **Third mis-statement, same direction as the first two.** The inventory above was built by
+grepping `strategy_trades` / `strategy_position_ownership` and classifying by *join shape*.
+That reads a query's plumbing, not its consequence, so it filed
+`strategy_paper_executor.py:768-782` under "as above" — i.e. cosmetic P&L history — and did
+not surface `strategy_paper_executor.py:756-767` at all. Both are scalars of one query in
+`_observe_local_mandate_risk` (719-813), and **both feed hard risk gates**, not reports:
+
+| scalar | line | gate | consequence of omitting core |
+| --- | --- | --- | --- |
+| `open_strategy_lifecycles` | 756-767 | `>= mandate_max_concurrent_positions` → `portfolio_concurrency_limit` (790) | the concurrency cap under-counts, so the signal arm may open `max_concurrent_positions + N_core` positions |
+| `daily_realised_pnl` | 768-782 | `<= -daily_loss_limit` → `portfolio_daily_loss_limit` (793) | a core close's realised loss never counts against the daily loss limit, so the limit under-trips |
+
+**Why exactly these two, and no others in that function.** Every *other* mandate control in
+`_risk_and_amount` is sourced from the **broker account snapshot**, and therefore already
+counts a core position with no code change at all:
+
+| control | source | core counted today? |
+| --- | --- | --- |
+| `portfolio_capacity` (844) | `risk.total_invested` | ✅ broker snapshot |
+| `instrument_capacity` (848) | `risk.instrument_investments` | ✅ broker snapshot |
+| `drawdown` (836-839) | `risk.equity` | ✅ broker snapshot |
+| `cash_reserve_capacity` (850), `active_risk_capacity` (856) | `intent.pool_reserved` | pot bookkeeping — signal-arm by construction |
+| **`open_strategy_lifecycles`, `daily_realised_pnl`** | **our tables, INNER JOIN funding** | ❌ **blind to core** |
+
+So the split is not a policy decision anybody made — it is an artefact of which controls
+happen to read the broker and which read our own tables. **A grep that classifies by join
+shape cannot see this**, which is the generalisable lesson: *classify a query by the
+decision it feeds, not by the tables it touches.* A query that INNER JOINs funding is a
+finding about plumbing; a query whose scalar sits on the left of a `>=` guarding a return
+is a finding about safety.
+
+**Decision — core counts in both.** Not an operator call; `sql/311` settles it. The mandate
+is a *portfolio* mandate (stored on `strategy_paper_pool_events`, every limit denominated on
+`pool_base`), and the broker-sourced majority above already counts core. Leaving the two
+table-sourced ones alpha-only would make one mandate enforce two different populations
+depending on where each limit's number came from. Counting core also errs toward the tighter
+cap, which is the correct direction for a risk control.
+
+⚠ These are reachable from a bare trade row plus ownership — no order, no executor — so by
+this document's own sequencing rule they are **step 2, not step 3**.
+
 ### B. Starts from a funding decision — signal-arm-only **by design**, correctly unchanged
 
 `strategy_monitoring.py:202, 445, 655`; `strategy_live_gate.py:411, 464, 491`;
@@ -73,12 +116,37 @@ and it was invisible in the draft.
 decision become a trade"). A core trade has no funding decision and belongs in none of
 them.
 
+Also class B, added 2026-08-14 after re-running the grep — the first inventory left them
+unclassified rather than placing them:
+
+- `strategy_control_plane.py:289, 293` — the committed-capital `EXISTS` pair. Starts from
+  `strategy_funding_decisions` under `deployment.mode='paper'`; asks whether an *allocated
+  decision* became an open trade. Core has no decision to commit against.
+- `strategy_live_gate.py:423` — a LATERAL keyed on `t.strategy_trade_id`, but inside a query
+  rooted at `strategy_signals`. Signal-arm by its root, not by this join.
+
 ### C. Keys on `strategy_trade_id` / `broker_position_id` — **arm-agnostic already**
 
 `strategy_order_reconciliation.py:141, 260, 365`; `strategy_wealth.py:48, 60, 77`;
 `strategy_paper_executor.py`'s status `UPDATE`s. These work on a core trade unchanged,
 which is the strongest argument for the exclusive arc over a sibling table: an arc costs
 these nothing, a sibling table would need every one of them dual-written.
+
+Also class C, added 2026-08-14 on the same re-run — all keyed by `strategy_trade_id` and/or
+`broker_position_id`, so arm-agnostic already: `strategy_control_plane.py:1058`
+(`link_strategy_order`), `:1092` (`claim_exact_position`), `:1147`
+(`assert_exact_position_owned`); `strategy_position_manager.py:368` and its status `UPDATE`s
+(373, 440, 487, 632, 693, 717, 774, 790).
+
+### D. Fail-closed on core, but only reachable once the executor exists — **step 3**
+
+`strategy_paper_executor.py:925-935` — the uncertain-submission resume path. It reaches a
+trade from an *order*, then INNER JOINs funding **and** `strategy_entry_preflights`. On a
+core trade it returns no row and raises `"uncertain strategy submission identity is
+incomplete"` (941-942) rather than silently dropping — so it fails closed, which is the
+right default. But a core trade whose submission went uncertain could then never resolve.
+Listed here so step 3 owes it explicitly; it needs an entry *order* to be reachable, and
+only step 3 creates one.
 
 ## The arc
 
@@ -217,7 +285,8 @@ moment it applies, and this project's own tests and fixtures create rows directl
 today because no core trade exists" stops being true at the migration, not at the writer.
 
 So step 2 is: `sql/349` + `strategy_position_manager` + `strategy_paper_runtime` (both
-queries) + `api/strategies.py` (four queries) + the nullable `strategy_id`/`strategy_version`
+queries) + `strategy_paper_executor._observe_local_mandate_risk` (both mandate scalars, per
+class A′) + `api/strategies.py` (four queries) + the nullable `strategy_id`/`strategy_version`
 in the owned-position response and its frontend types. That is the coherent unit. It is
 substantially larger than "relax one join", which is the finding this document exists to
 record.
