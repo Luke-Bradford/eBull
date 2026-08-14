@@ -86,11 +86,12 @@ Frozen constants, S-2's shape, all hashed via params + source hash:
   strategy's top decile is where tick-quantised penny names concentrate).
   Entry eligibility only; **no price floor on the exit leg** — a held name
   that fell under $1 must still be exitable.
-- `MIN_CROSS_SECTION=100` — by construction, from the measurement's
+- `MIN_CROSS_SECTION=1000` — by construction, from the measurement's
   `THIN_PANEL`: a decile BAND retention rule evaluated against a sliver panel
   would liquidate a book built on thousands of names. (S-2's 10 protects a
   one-shot decile cut; a retention band needs the panel to resemble the one
-  the book was built from.)
+  the book was built from. Raised from a first draft's 100 at Codex ckpt-1 —
+  see the resolutions section below.)
 - `s10_rebalance_dates(calendar)` — weekday-filtered (Sat/Sun dropped) union
   calendar, then S-2's first-bar-of-new-month rule. By construction:
   `price_daily` carries weekend rows for ~11 instruments, and the unfiltered
