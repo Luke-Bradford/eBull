@@ -223,6 +223,23 @@ class ResultArm(BaseModel):
     turnover_annualised: Decimal
     return_vs_buy_and_hold_pct: Decimal
     deflated_sharpe: Decimal | None
+    # #2623 gap 1. ⚠ The three hold figures are null for every one of the 324
+    # stored rows and stay that way: they populate FORWARD ONLY, because
+    # backfilling means re-running the backtests, which charges the trial
+    # register (#2599/#2616). `metric_set_id` is what makes that null readable —
+    # `criterion7-v1` is a row written before the measurement existed, whereas a
+    # null under `criterion7-v2` is a writer defect (`sql/347` CHECKs it). The
+    # reader must render those two differently, so the id ships with them.
+    #
+    # ⚠ `median_hold_days` must never be displayed alone. It is right-censored
+    # and the direction of the bias is NOT determinable a priori — a position
+    # opened just before the window end is still open and short — so
+    # `open_trade_count` and `unpriced_trade_count` belong beside it. They are
+    # separate exclusions and neither implies the other.
+    metric_set_id: str
+    median_hold_days: Decimal | None
+    hold_days_p25: Decimal | None
+    hold_days_p75: Decimal | None
     promotion_refusals: list[str]
 
 

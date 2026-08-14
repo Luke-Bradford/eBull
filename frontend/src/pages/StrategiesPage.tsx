@@ -14,6 +14,7 @@ import {
 } from "@/api/strategies";
 import type {
   StrategyEvidenceWindow,
+  StrategyFireRate,
   StrategyOverview,
   StrategyOverviewResponse,
   StrategyOwnedPosition,
@@ -26,7 +27,7 @@ import { LiveQuoteProvider, useLiveTick } from "@/components/quotes/LiveQuotePro
 import { EmptyState } from "@/components/states/EmptyState";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
-import { formatDate, formatMoney, formatNumber, formatPct } from "@/lib/format";
+import { formatDate, formatMoney, formatNumber, formatPct, formatUnsignedPct } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { useChartTheme } from "@/lib/useChartTheme";
 import { liveTickPriceIn } from "@/lib/useLiveQuote";
@@ -144,6 +145,126 @@ function representativeArm(strategy: StrategyOverview): StrategyResultArm | null
 
 function completedEvidenceCount(strategy: StrategyOverview): number {
   return strategy.evidence_windows.filter((window) => window.status === "complete").length;
+}
+
+/** The metric set that carries a holding period, mirroring
+ *  `app/services/strategy_statistics.py::METRIC_SET_ID`. A row stamped with
+ *  anything else predates the measurement, which is a DIFFERENT statement from
+ *  "this strategy holds for zero days" — hence naming the version in the cell. */
+const HOLD_PERIOD_METRIC_SET = "criterion7-v2";
+
+const SHARE_UNAVAILABLE_LABELS: Record<
+  NonNullable<StrategyFireRate["share_unavailable_reason"]>,
+  string
+> = {
+  never_scanned: "Not scanned yet",
+  no_evaluable_decisions: "No evaluable decisions",
+};
+
+const WEEKLY_RATE_UNAVAILABLE_LABELS: Record<
+  NonNullable<StrategyFireRate["weekly_rate_unavailable_reason"]>,
+  string
+> = {
+  never_scanned: "Not scanned yet",
+  single_scan_day: "1 scan day — needs a span",
+};
+
+function CatalogFact({ label, value, note }: { label: string; value: string; note: string }) {
+  return (
+    <div>
+      <dt className="text-[10px] uppercase tracking-wider text-slate-500">{label}</dt>
+      <dd className="tabular-nums text-slate-700 dark:text-slate-200">{value}</dd>
+      <dd className="text-[10px] text-slate-500">{note}</dd>
+    </div>
+  );
+}
+
+/** The catalog facts #2623 asks for: how often the rule fires, how long it holds,
+ *  and how often it won — on every card, because all four strategies today are
+ *  `harness_validation` and so render through `ValidationControl` (#2624).
+ *
+ * ⚠⚠ `median_hold_days` is deliberately unreachable without its two exclusion
+ * counts. The median is right-censored and the direction of that bias is NOT
+ * determinable a priori — a position opened just before the window end is still
+ * open and also short — so `open_trade_count` and `unpriced_trade_count` are
+ * separate exclusions, neither implying the other. Keeping all three in one
+ * component is what makes "never render the median alone" structural rather than
+ * a convention the next edit can forget.
+ *
+ * ⚠ Every blank names its OWN reason. The three nulls are independent: the fire
+ * share and the weekly rate carry separate reason enums (#2623 gap 2), and the
+ * holding period's blank is explained by `metric_set_id`, not by either of them. */
+function StrategyCatalogFacts({
+  strategy,
+  arm,
+}: {
+  strategy: StrategyOverview;
+  arm: StrategyResultArm | null;
+}) {
+  const fireRate = strategy.fire_rate;
+  const share = number(fireRate.fired_share_of_evaluable);
+  const perWeek = number(fireRate.entries_per_calendar_week);
+  const shareReason = fireRate.share_unavailable_reason;
+  const weeklyReason = fireRate.weekly_rate_unavailable_reason;
+  const median = arm ? number(arm.median_hold_days) : null;
+  const p25 = arm ? number(arm.hold_days_p25) : null;
+  const p75 = arm ? number(arm.hold_days_p75) : null;
+  const excluded = arm ? arm.open_trade_count + arm.unpriced_trade_count : 0;
+
+  // The SHARE is the headline because it is dimensionless. `entries_per_calendar_week`
+  // is throughput and rises with the universe, so leading on it would make a
+  // strategy look busier purely because more instruments were listed.
+  const firesValue = share === null
+    ? (shareReason ? SHARE_UNAVAILABLE_LABELS[shareReason] : "—")
+    // ⚠ UNSIGNED. A fire propensity is a composition, not a return, and
+    // `formatPct` carries `signDisplay: "exceptZero"` — it would render a
+    // perfectly ordinary 52% share as "+52.10%".
+    : formatUnsignedPct(share);
+  const firesNote = perWeek === null
+    ? (weeklyReason ? WEEKLY_RATE_UNAVAILABLE_LABELS[weeklyReason] : "No weekly rate")
+    : `${formatNumber(perWeek, 2)} / week`;
+
+  let turnaroundValue: string;
+  let turnaroundNote: string;
+  if (arm === null) {
+    turnaroundValue = "—";
+    turnaroundNote = "No completed evidence";
+  } else if (median === null) {
+    // Two different nulls. A pre-`criterion7-v2` row was written before the
+    // holding period was measured at all; a row stamped WITH it and still null
+    // simply closed no trades (`sql/347` allows that case and no other).
+    turnaroundValue = "Not measured";
+    turnaroundNote = arm.metric_set_id === HOLD_PERIOD_METRIC_SET
+      ? "No completed trades"
+      : `Result version ${arm.metric_set_id}`;
+    if (excluded > 0) {
+      turnaroundNote += ` · ${formatNumber(arm.open_trade_count, 0)} open, ${formatNumber(arm.unpriced_trade_count, 0)} unpriced`;
+    }
+  } else {
+    turnaroundValue = `${formatNumber(median, 1)} days`;
+    const range = p25 !== null && p75 !== null
+      ? `${formatNumber(p25, 1)}–${formatNumber(p75, 1)} typical`
+      : "No range";
+    turnaroundNote = `${range} · ${formatNumber(arm.open_trade_count, 0)} open, ${formatNumber(arm.unpriced_trade_count, 0)} unpriced excluded`;
+  }
+
+  // ⚠ `trade_count` is ALREADY the resolved count — `backtest_run` appends a
+  // return only on a realised close, so open and unpriced positions were never
+  // in it. Subtracting them here (as this page used to) understates the figure.
+  const wins = arm ? arm.trade_count - arm.losing_trade_count : 0;
+  // Unsigned for the same reason as the share: a win rate is a composition.
+  const successValue = arm && arm.trade_count > 0 ? formatUnsignedPct(wins / arm.trade_count) : "—";
+  const successNote = arm && arm.trade_count > 0
+    ? `${formatNumber(wins, 0)} of ${formatNumber(arm.trade_count, 0)} backtest trades`
+    : "No completed backtest trades";
+
+  return (
+    <dl className="mt-2 flex flex-wrap gap-x-6 gap-y-2 text-xs">
+      <CatalogFact label="Fires" value={firesValue} note={firesNote} />
+      <CatalogFact label="Turnaround" value={turnaroundValue} note={turnaroundNote} />
+      <CatalogFact label="Won" value={successValue} note={successNote} />
+    </dl>
+  );
 }
 
 function validationState(strategy: StrategyOverview): {
@@ -915,6 +1036,7 @@ function ApprovedStrategy({
           </Badge>
         </div>
         <p className="mt-1 max-w-md text-xs text-slate-500">{strategy.description}</p>
+        <StrategyCatalogFacts strategy={strategy} arm={representativeArm(strategy)} />
         <StrategySizingControl strategy={strategy} onUpdated={onUpdated} />
       </div>
       <div><span className="text-xs text-slate-500">P&amp;L</span><strong className="block tabular-nums">{money(strategy.pnl.total_pnl)}</strong></div>
@@ -946,7 +1068,16 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
       </div>
     );
   }
-  const resolved = Math.max(0, arm.trade_count - arm.open_trade_count - arm.unpriced_trade_count);
+  // ⚠ `trade_count` IS the resolved count and always was. `backtest_run` appends
+  // to `book.returns` only inside `if realised`, and `trade_count = len(net_returns)`,
+  // so open and unpriced positions were never summands — they are reported
+  // ALONGSIDE it, never inside it. Subtracting them double-counted the exclusion
+  // and understated the headline on 300 of the 324 stored rows, by up to 2,296
+  // trades. Measured with:
+  //   select count(*) filter (where open_trade_count + unpriced_trade_count > 0),
+  //          max(open_trade_count + unpriced_trade_count)
+  //   from strategy_results_store;
+  const resolved = arm.trade_count;
   return (
     <div className="border-t border-slate-200 px-4 py-4 dark:border-slate-800">
       <div className="grid gap-5 lg:grid-cols-[1.3fr_1fr]">
@@ -954,7 +1085,11 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
           <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Primary evidence</h4>
           <p className="mt-1 text-xs text-slate-500">{window.label} · {formatDate(window.window_start)}–{formatDate(window.window_end)} · pessimistic execution arm</p>
           <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <div><dt className="text-xs text-slate-500">Trades</dt><dd className="font-semibold tabular-nums">{formatNumber(resolved, 0)}</dd></div>
+            <div>
+              <dt className="text-xs text-slate-500">Trades</dt>
+              <dd className="font-semibold tabular-nums">{formatNumber(resolved, 0)}</dd>
+              <dd className="text-[10px] text-slate-500">{formatNumber(arm.open_trade_count, 0)} open, {formatNumber(arm.unpriced_trade_count, 0)} unpriced excluded</dd>
+            </div>
             <div><dt className="text-xs text-slate-500">Profit factor</dt><dd className="font-semibold tabular-nums">{formatNumber(number(arm.profit_factor), 2)}</dd></div>
             <div><dt className="text-xs text-slate-500">Vs buy &amp; hold</dt><dd className="font-semibold tabular-nums">{pctPoints(arm.return_vs_buy_and_hold_pct)}</dd></div>
             <div><dt className="text-xs text-slate-500">Deflated Sharpe</dt><dd className="font-semibold tabular-nums">{formatNumber(number(arm.deflated_sharpe), 2)}</dd></div>
@@ -992,6 +1127,7 @@ function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
         <div>
           <div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold">{strategy.title}</h3><Badge tone={validation.tone}>{validation.label}</Badge></div>
           <p className="mt-1 max-w-lg text-xs text-slate-500">{validation.explanation}</p>
+          <StrategyCatalogFacts strategy={strategy} arm={arm} />
         </div>
         <div><span className="text-xs text-slate-500">Expected / trade</span><strong className="block tabular-nums">{pctPoints(arm?.expectancy_per_trade_pct ?? null)}</strong><span className="text-[10px] text-slate-500">After modelled costs</span></div>
         <div><span className="text-xs text-slate-500">95% range</span><strong className="block text-xs tabular-nums">{ci}</strong><span className="text-[10px] text-slate-500">Must clear 0%</span></div>
@@ -1024,6 +1160,7 @@ function ValidationControl({ strategy }: { strategy: StrategyOverview }) {
             Harness evidence only · never eligible for capital
             {strategy.forward_outcome_supported ? " · forward outcomes measured" : " · backtest only"}
           </p>
+          <StrategyCatalogFacts strategy={strategy} arm={arm} />
         </div>
         <div><span className="text-xs text-slate-500">Expected / trade</span><strong className="block tabular-nums">{pctPoints(arm?.expectancy_per_trade_pct ?? null)}</strong></div>
         <div><span className="text-xs text-slate-500">Worst drawdown</span><strong className="block tabular-nums">{pctPoints(arm?.max_drawdown_pct ?? null)}</strong></div>

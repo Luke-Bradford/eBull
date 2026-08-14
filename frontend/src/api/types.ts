@@ -2431,6 +2431,17 @@ export interface StrategyResultArm {
   turnover_annualised: string;
   return_vs_buy_and_hold_pct: string;
   deflated_sharpe: string | null;
+  /** Which metric set produced this row (#2623 gap 1). `criterion7-v1` predates
+   *  the holding-period measurement, so its null hold figures mean "not measured
+   *  for this result version" — NOT zero and NOT a defect. Every stored row reads
+   *  `criterion7-v1` today; the columns populate forward only, as backtests run. */
+  metric_set_id: string;
+  /** ⚠ Never render alone. Right-censored, and the bias direction is not
+   *  determinable a priori, so `open_trade_count` AND `unpriced_trade_count`
+   *  belong beside it — separate exclusions, neither implying the other. */
+  median_hold_days: string | null;
+  hold_days_p25: string | null;
+  hold_days_p75: string | null;
   promotion_refusals: string[];
 }
 
@@ -2501,10 +2512,35 @@ export interface StrategyOverview {
   all_recent_evidence_complete: boolean;
   stage: string | null;
   attribution: StrategyAttribution;
+  fire_rate: StrategyFireRate;
   pnl: StrategyPnl;
   allocation: StrategyAllocation;
   allocation_ready: boolean;
   allocation_refusals: string[];
+}
+
+/** How often the entry rule fires, from the durable census (#2623 gap 2).
+ *
+ * ⚠ `fired_share_of_evaluable` is the COMPARABLE number — dimensionless, so a
+ * growing universe does not move it. `entries_per_calendar_week` is throughput
+ * and is universe-size-dependent by design, so it must not be the headline.
+ *
+ * ⚠ The two nulls are INDEPENDENT and carry their own reasons: a version scanned
+ * across several days on which every bar was `not_evaluable` has a real 0.00/week
+ * rate and no share at all. Render each reason; never collapse them to a blank. */
+export interface StrategyFireRate {
+  universe: string;
+  scanned_days: number;
+  fired_days: number;
+  fired_entry_signals: number;
+  evaluable_entry_decisions: number;
+  not_evaluable_entry_decisions: number;
+  fired_share_of_evaluable: string | null;
+  entries_per_calendar_week: string | null;
+  first_scanned_bar: string | null;
+  last_scanned_bar: string | null;
+  share_unavailable_reason: "never_scanned" | "no_evaluable_decisions" | null;
+  weekly_rate_unavailable_reason: "never_scanned" | "single_scan_day" | null;
 }
 
 export interface StrategyAttribution {

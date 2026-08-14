@@ -39,6 +39,13 @@ const ARM: StrategyResultArm = {
   turnover_annualised: "4",
   return_vs_buy_and_hold_pct: "2",
   deflated_sharpe: "0.8",
+  // Matches every one of the 324 stored rows: written before the holding period
+  // was measured, so the three hold figures are null and the cell must say which
+  // result version that is rather than showing a blank or a zero (#2623 gap 1).
+  metric_set_id: "criterion7-v1",
+  median_hold_days: null,
+  hold_days_p25: null,
+  hold_days_p75: null,
   promotion_refusals: [],
 };
 
@@ -220,6 +227,23 @@ const OVERVIEW: StrategyOverviewResponse = {
       average_slippage_pct: null,
       average_stressed_cost_usd: null,
       max_observed_account_drawdown_pct: null,
+    },
+    // Mirrors what all four strategies actually return today: a share IS present
+    // (0.5210 / 0.0000 / 0.0039 / 0.0340 on dev), while every one of them has a
+    // single scan day and so has no weekly rate at all.
+    fire_rate: {
+      universe: "validated_us_equity",
+      scanned_days: 1,
+      fired_days: 1,
+      fired_entry_signals: 1740,
+      evaluable_entry_decisions: 3340,
+      not_evaluable_entry_decisions: 620,
+      fired_share_of_evaluable: "0.5210",
+      entries_per_calendar_week: null,
+      first_scanned_bar: "2026-08-12",
+      last_scanned_bar: "2026-08-12",
+      share_unavailable_reason: null,
+      weekly_rate_unavailable_reason: "single_scan_day",
     },
     pnl: { currency: "USD", strategy_trade_count: 0, owned_position_count: 0, active_position_count: 0, close_event_count: 0, invested_capital: "0", realised_pnl: "0", unrealised_pnl: "0", total_pnl: "0", observed_fees: "0", complete: true, incomplete_reasons: [] },
     allocation: { deployment_id: null, capital_limit: "0", currency: "USD", enabled: false, revision: null, reserved_capital: "0", invested_capital: "0", remaining_capital: "0", policy_configured: false, max_drawdown_limit_pct: null, ticket_sizing_mode: null, ticket_value: null, max_ticket_amount: null },
@@ -777,6 +801,72 @@ describe("StrategiesPage", () => {
     expect(await screen.findByText("Version rotated.")).toBeInTheDocument();
     expect(screen.getByText("Previous versions")).toBeInTheDocument();
     expect(screen.getByText(/different cost model/)).toBeInTheDocument();
+  });
+
+  it("names the reason for each blank catalog fact, on the surface every strategy renders through", async () => {
+    // ⚠ `harness_validation`, so `ValidationControl` — all four real strategies
+    // are controls, and a candidate-only fixture cannot prove the block is on the
+    // surface the operator sees (#2624). This is the day-one state exactly: a
+    // share but no weekly rate, and a pre-`criterion7-v2` result row.
+    const control = structuredClone(OVERVIEW);
+    control.strategies[0]!.purpose = "harness_validation";
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(control);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+
+    // The share renders; the weekly rate names its own independent reason.
+    // ⚠ Unsigned. `formatPct`'s `exceptZero` would render this "+52.10%", which
+    // reads as a change in the share rather than the share itself.
+    expect(await screen.findByText("52.10%")).toBeInTheDocument();
+    expect(screen.getByText("1 scan day — needs a span")).toBeInTheDocument();
+    // The holding period's blank is explained by the RESULT VERSION, not by
+    // either fire-rate reason, and must not read as a zero.
+    expect(screen.getByText("Not measured")).toBeInTheDocument();
+    expect(screen.getByText(/Result version criterion7-v1/)).toBeInTheDocument();
+  });
+
+  it("never shows a median holding period without both of its exclusion counts", async () => {
+    // The median is right-censored and the bias direction is not determinable a
+    // priori, so open and unpriced counts are separate exclusions that must both
+    // appear beside it — neither implies the other.
+    const measured = structuredClone(OVERVIEW);
+    const strategy = measured.strategies[0]!;
+    strategy.purpose = "harness_validation";
+    const arm = strategy.evidence_windows[0]!.arms[0]!;
+    arm.metric_set_id = "criterion7-v2";
+    arm.median_hold_days = "6.5";
+    arm.hold_days_p25 = "3";
+    arm.hold_days_p75 = "14";
+    arm.open_trade_count = 4;
+    arm.unpriced_trade_count = 2;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(measured);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+
+    expect(await screen.findByText("6.5 days")).toBeInTheDocument();
+    expect(screen.getByText("3–14 typical · 4 open, 2 unpriced excluded")).toBeInTheDocument();
+  });
+
+  it("counts backtest trades without subtracting exclusions that were never in the total", async () => {
+    // `trade_count = len(net_returns)` and `backtest_run` appends a return only
+    // on a realised close, so open and unpriced positions are reported alongside
+    // it, never inside it. Subtracting them understated 300 of the 324 stored
+    // rows. 12 trades with 4 open and 2 unpriced must still read 12, not 6.
+    const censored = structuredClone(OVERVIEW);
+    const arm = censored.strategies[0]!.evidence_windows[0]!.arms[0]!;
+    arm.open_trade_count = 4;
+    arm.unpriced_trade_count = 2;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(censored);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.click(await screen.findByRole("button", { name: "View evidence" }));
+
+    const trades = screen.getByText("Trades").parentElement!;
+    expect(within(trades).getByText("12")).toBeInTheDocument();
+    expect(within(trades).getByText("4 open, 2 unpriced excluded")).toBeInTheDocument();
   });
 
   it("shows no previous-versions block when there is no history", async () => {
