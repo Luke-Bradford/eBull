@@ -466,12 +466,38 @@ class CrossSectionalMember:
     bar it is eligible for. Everything else is an ordinary ``not_fired``: the
     rule is *"fire iff a decision bar AND selected"*, so a non-decision bar did
     not fire. It is a verdict, not an absence.
+
+    TWO OPTIONAL REFINEMENTS OF THE DECISION RULE (#2437 S-10), both ``None``
+    for a strategy that does not use them — ``None`` is exactly today's
+    behaviour and S-2 passes it implicitly:
+
+    - ``admissible_indices`` — decision bars allowed to fire WHEN SELECTED.
+      A selected bar outside it is ``not_fired``; its score still entered the
+      ranking, so the panel denominator is unchanged. This is what makes
+      *"the top decile that ALSO closes above its own 50-SMA"* expressible:
+      the decile is cut on the whole panel, the SMA condition then filters
+      the winners without backfilling the slots.
+    - ``mandatory_indices`` — decision bars that fire REGARDLESS of
+      selection. S-10's *"closes below 50-SMA"* exit fires whether or not the
+      name also left the retention band.
+
+    The one resolution rule, applied AFTER every refusal (``no_fill_bar``,
+    unevaluable inputs, non-decision, ``thin_cross_section`` — precedence is
+    unchanged and mandatory does NOT beat a refusal):
+
+        fired iff mandatory OR (selected AND admissible)
+
+    ⚠ Both are constrained to ``decision_indices`` and that is checked: an
+    admissibility or mandate on a bar that never ranks is a contradiction the
+    author should hear about, not a key silently ignored.
     """
 
     dates: tuple[date, ...]
     inputs: tuple[StrategyInput, ...]
     score: IndicatorSeries
     decision_indices: frozenset[int]
+    admissible_indices: frozenset[int] | None = None
+    mandatory_indices: frozenset[int] | None = None
 
     def __post_init__(self) -> None:
         n = len(self.dates)
@@ -491,6 +517,16 @@ class CrossSectionalMember:
         for index in self.decision_indices:
             if not 0 <= index < n:
                 raise ValueError(f"decision index {index} is outside the {n}-bar series")
+        refinements = (("admissible_indices", self.admissible_indices), ("mandatory_indices", self.mandatory_indices))
+        for name, refined in refinements:
+            if refined is None:
+                continue
+            stray = refined - self.decision_indices
+            if stray:
+                raise ValueError(
+                    f"{name} contains {sorted(stray)[:5]} outside decision_indices — a refinement of the "
+                    "decision rule on a bar that never ranks is a contradiction, not a no-op"
+                )
         for i in range(1, n):
             if self.dates[i] <= self.dates[i - 1]:
                 raise ValueError(
@@ -514,6 +550,36 @@ class StagedMember:
     verdicts: tuple[StrategySignal | None, ...]
     #: Ranking score per participating bar, keyed by that bar's DATE.
     scores: Mapping[date, float]
+    #: The member's refinements, converted to DATES so that a consumer that
+    #: re-slices series (``segmented_member``) merges them without the
+    #: index-remapping every index-keyed field owes at a reslice — the silent,
+    #: type-checking trap the 08-14 S-8 session committed to memory. ``None``
+    #: preserves the member's ``None`` (= unrefined).
+    admissible_dates: frozenset[date] | None = None
+    mandatory_dates: frozenset[date] | None = None
+
+
+def resolve_participating_bar(
+    *,
+    when: date,
+    index: int,
+    kind: SignalKind,
+    selected: bool,
+    admissible_dates: frozenset[date] | None,
+    mandatory_dates: frozenset[date] | None,
+) -> StrategySignal:
+    """THE one resolution rule for a staged bar that survived every refusal.
+
+    ⚠ Three resolvers rank cross-sections independently — ``evaluate_cross_
+    sectional`` here, the scan's ``_resolve_cross_section``, and the
+    backtest's ``_signals_for`` — and each used to inline ``fired iff
+    selected``. With admissibility and mandates in the rule, three inlined
+    copies is three chances for one of them to drift; they all call this.
+    """
+    admissible = admissible_dates is None or when in admissible_dates
+    mandatory = mandatory_dates is not None and when in mandatory_dates
+    fired = mandatory or (selected and admissible)
+    return StrategySignal(verdict="fired" if fired else "not_fired", signal_index=index, kind=kind)
 
 
 def stage_cross_sectional_member(member: CrossSectionalMember, *, kind: SignalKind = "entry") -> StagedMember:
@@ -553,7 +619,20 @@ def stage_cross_sectional_member(member: CrossSectionalMember, *, kind: SignalKi
         assert value is not None
         verdicts.append(None)
         scores[member.dates[index]] = value
-    return StagedMember(verdicts=tuple(verdicts), scores=scores)
+    return StagedMember(
+        verdicts=tuple(verdicts),
+        scores=scores,
+        admissible_dates=(
+            None
+            if member.admissible_indices is None
+            else frozenset(member.dates[index] for index in member.admissible_indices)
+        ),
+        mandatory_dates=(
+            None
+            if member.mandatory_indices is None
+            else frozenset(member.dates[index] for index in member.mandatory_indices)
+        ),
+    )
 
 
 #: Given a date and the scores of everyone ranking on it, the winners.
@@ -626,9 +705,16 @@ def evaluate_cross_sectional(
                 signals.append(
                     StrategySignal(verdict="not_evaluable", signal_index=index, kind=kind, reason="thin_cross_section")
                 )
-            elif key in winners_by_date[when]:
-                signals.append(StrategySignal(verdict="fired", signal_index=index, kind=kind))
             else:
-                signals.append(StrategySignal(verdict="not_fired", signal_index=index, kind=kind))
+                signals.append(
+                    resolve_participating_bar(
+                        when=when,
+                        index=index,
+                        kind=kind,
+                        selected=key in winners_by_date[when],
+                        admissible_dates=member_staged.admissible_dates,
+                        mandatory_dates=member_staged.mandatory_dates,
+                    )
+                )
         resolved[key] = signals
     return resolved

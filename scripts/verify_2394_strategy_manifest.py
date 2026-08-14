@@ -214,7 +214,13 @@ def equivalence() -> bool:
             assert s2.member is not None
             dates = s2.decision_calendar(series.dates)
             assert dates is not None
-            got_member = s2.member(series, panel_decision_dates=dates, universe=UNIVERSE, masked_reason=MASKED_REASON)
+            got_member = s2.member(
+                series,
+                panel_decision_dates=dates,
+                universe=UNIVERSE,
+                masked_reason=MASKED_REASON,
+                regime=unconstrained_regime(len(series)),
+            )
             want_member = s2_member(series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=MASKED_REASON)
             if (
                 got_member.dates != want_member.dates

@@ -140,6 +140,18 @@ from app.services.strategies.s9_squeeze_expansion import (
     s9_identity,
     s9_signals,
 )
+from app.services.strategies.s10_relative_strength_leader import (
+    MIN_CROSS_SECTION as S10_MIN_CROSS_SECTION,
+)
+from app.services.strategies.s10_relative_strength_leader import (
+    S10_STRATEGY_ID,
+    s10_entry_member,
+    s10_entry_select,
+    s10_exit_member,
+    s10_exit_select,
+    s10_identity,
+    s10_rebalance_dates,
+)
 from app.services.strategy_exit_levels_batch import s4_exit_levels_batch
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
@@ -213,6 +225,11 @@ class MemberStager(Protocol):
     the whole panel in memory and says so; a full-corpus runner must stream one
     series at a time through this and ``select``, which is what
     ``StagedMember`` is public for.
+
+    ⚠⚠ ``regime`` IS ON THE UNIFORM CALL — the same decision
+    ``PerSeriesSignals`` records above, for the same reason: S-2 ignores it,
+    S-10's entry leg gates on it, and the adapters absorb the difference so a
+    runner cannot forget to supply it for the one member that needs it.
     """
 
     def __call__(
@@ -222,6 +239,7 @@ class MemberStager(Protocol):
         panel_decision_dates: Set[date],
         universe: Universe,
         masked_reason: NotEvaluableReason,
+        regime: RegimeSeries,
     ) -> CrossSectionalMember: ...
 
 
@@ -279,6 +297,30 @@ class ExitLevelsBatchFactory(Protocol):
 
 
 @dataclass(frozen=True)
+class CrossSectionalLeg:
+    """One additional ranked leg of a cross-sectional strategy — S-10's exit.
+
+    A LEG OBJECT rather than parallel ``exit_member`` / ``exit_select`` /
+    ``exit_min_participants`` fields on ``StrategyEntry`` (Codex ckpt-1): the
+    three are meaningless apart, and parallel optional columns are an
+    increasingly unvalidated two-column structure the tagged-union
+    ``__post_init__`` below would have to keep re-learning.
+
+    ``min_participants`` is PER LEG deliberately — S-10 sets both legs to the
+    same floor, but an exit band and an entry decile protect different things
+    and a future strategy may need them apart.
+    """
+
+    member: MemberStager
+    select: CrossSectionalSelect
+    min_participants: int
+
+    def __post_init__(self) -> None:
+        if self.min_participants < 1:
+            raise ValueError(f"min_participants must be at least 1, got {self.min_participants}")
+
+
+@dataclass(frozen=True)
 class StrategyEntry:
     """One registered strategy: how to identify it, how to invoke it, how it exits.
 
@@ -305,6 +347,11 @@ class StrategyEntry:
     member: MemberStager | None = None
     select: CrossSectionalSelect | None = None
     min_participants: int | None = None
+    #: ``cross_sectional`` only, optional — a SECOND ranked leg (S-10's exit).
+    #: Present iff ``"exit"`` is among ``signal_kinds``: a cross-sectional
+    #: strategy's exit verdicts can only come from a ranked leg, so declaring
+    #: one without the other is a registration whose halves disagree.
+    exit_leg: CrossSectionalLeg | None = None
     #: Level-based only. Its absence is a named runner exclusion rather than a
     #: silent max-hold fallback.
     exit_levels: ExitLevelsFactory | None = None
@@ -338,7 +385,7 @@ class StrategyEntry:
         if self.strategy_class == "per_series":
             if self.signals is None:
                 raise ValueError(f"{self.strategy_id} is per_series and declares no signals function")
-            if any(field is not None for field in cross_sectional_fields):
+            if any(field is not None for field in cross_sectional_fields) or self.exit_leg is not None:
                 raise ValueError(
                     f"{self.strategy_id} is per_series but carries cross-sectional fields — the runner would "
                     "invoke whichever half it read first"
@@ -350,6 +397,12 @@ class StrategyEntry:
                 raise ValueError(
                     f"{self.strategy_id} is cross_sectional and must declare member, select and "
                     "min_participants together — a panel runner needs all three to rank anything"
+                )
+            if (self.exit_leg is not None) != ("exit" in self.signal_kinds):
+                raise ValueError(
+                    f"{self.strategy_id} declares signal_kinds {sorted(self.signal_kinds)} with "
+                    f"exit_leg {'present' if self.exit_leg is not None else 'absent'} — a cross-sectional "
+                    "exit verdict can only come from a ranked exit leg, so the two must agree"
                 )
         if self.min_participants is not None and self.min_participants < 1:
             raise ValueError(f"min_participants must be at least 1, got {self.min_participants}")
@@ -400,10 +453,45 @@ def _s2_member(
     panel_decision_dates: Set[date],
     universe: Universe,
     masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-2 does not gate on regime
 ) -> CrossSectionalMember:
     return s2_member(
         series,
         panel_rebalance_dates=panel_decision_dates,
+        universe=universe,
+        close_reason=masked_reason,
+    )
+
+
+def _s10_entry_member(
+    series: BarSeries,
+    *,
+    panel_decision_dates: Set[date],
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,
+) -> CrossSectionalMember:
+    """S-10's entry leg is the first cross-sectional member that reads ``regime``."""
+    return s10_entry_member(
+        series,
+        panel_decision_dates=panel_decision_dates,
+        universe=universe,
+        close_reason=masked_reason,
+        regime=regime,
+    )
+
+
+def _s10_exit_member(
+    series: BarSeries,
+    *,
+    panel_decision_dates: Set[date],
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,  # noqa: ARG001 - deliberate: a missing benchmark must never refuse an exit (S-7's rule)
+) -> CrossSectionalMember:
+    return s10_exit_member(
+        series,
+        panel_decision_dates=panel_decision_dates,
         universe=universe,
         close_reason=masked_reason,
     )
@@ -732,6 +820,25 @@ def _s6_exit_levels(
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
 
+def _s10_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
+    """S-10 closes on its own ranked exit leg — ``signal_pair`` alone.
+
+    ⚠ ``rebalance_dates`` stays ``None`` even though S-10 has a calendar: C4
+    closes at "the next rebalance NOT RESELECTED", which is ENTRY-set
+    retention, and S-10's retention is the wider top-three-decile band the
+    exit leg carries. Declaring both would close band-surviving positions a
+    month early. The calendar argument is still accepted (and ignored)
+    because the runner hands every cross-sectional strategy its own
+    ``decision_calendar`` output.
+    """
+    if decision_dates is None:
+        raise ValueError(
+            f"{S10_STRATEGY_ID} is cross_sectional and its runner must pass its decision calendar — "
+            "a None here means the runner skipped decision_calendar()"
+        )
+    return ExitRegime(signal_pair=True, level_based=False, max_hold_bars=None, rebalance_dates=None)
+
+
 #: Every strategy in the catalogue, keyed by ``strategy_id``.
 #:
 #: ⚠⚠ COMPLETENESS IS A TEST, NOT A CONVENTION.
@@ -842,6 +949,23 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             signals=_s9_signals,
             exit_levels=_s9_exit_levels,
         ),
+        S10_STRATEGY_ID: StrategyEntry(
+            strategy_id=S10_STRATEGY_ID,
+            purpose="harness_validation",
+            identity=s10_identity,
+            strategy_class="cross_sectional",
+            signal_kinds=frozenset({"entry", "exit"}),
+            exit_regime=_s10_exit_regime,
+            decision_calendar=s10_rebalance_dates,
+            member=_s10_entry_member,
+            select=s10_entry_select,
+            min_participants=S10_MIN_CROSS_SECTION,
+            exit_leg=CrossSectionalLeg(
+                member=_s10_exit_member,
+                select=s10_exit_select,
+                min_participants=S10_MIN_CROSS_SECTION,
+            ),
+        ),
     }
 )
 
@@ -849,6 +973,7 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
 __all__ = [
     "STRATEGY_CLASSES",
     "STRATEGY_MANIFEST",
+    "CrossSectionalLeg",
     "DecisionCalendar",
     "ExitRegimeFactory",
     "ExitLevelsBatchFactory",

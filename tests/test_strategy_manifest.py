@@ -53,6 +53,7 @@ SPEC_S6 = "s6-resistance-breakout"
 SPEC_S7 = "s7-trend-pullback"
 SPEC_S8 = "s8-range-mean-reversion"
 SPEC_S9 = "s9-squeeze-expansion"
+SPEC_S10 = "s10-relative-strength-leader"
 
 #: Spec §3's table, verbatim, as ``(signal_pair, level_based, max_hold_bars,
 #: has_rebalance_dates)``. ⚠ Written out for the reason in the module docstring:
@@ -70,6 +71,11 @@ SPEC_EXIT_REGIMES: dict[str, tuple[bool, bool, int | None, bool]] = {
     SPEC_S7: (True, True, 60, False),
     SPEC_S8: (False, True, 15, False),
     SPEC_S9: (False, True, 40, False),
+    #: ⚠ Signal-pair ONLY, despite having a calendar: S-10's retention is the
+    #: top-three-decile BAND its ranked exit leg carries, and C4's calendar
+    #: close is entry-set retention — declaring both would close
+    #: band-surviving positions a month early (module docstring).
+    SPEC_S10: (True, False, None, False),
 }
 
 #: The legs each strategy emits — §4: S-1 and S-3 have an exit rule, S-2 closes
@@ -84,6 +90,7 @@ SPEC_SIGNAL_KINDS: dict[str, frozenset[str]] = {
     SPEC_S7: frozenset({"entry", "exit"}),
     SPEC_S8: frozenset({"entry"}),
     SPEC_S9: frozenset({"entry"}),
+    SPEC_S10: frozenset({"entry", "exit"}),
 }
 
 SPEC_CLASSES: dict[str, str] = {
@@ -96,11 +103,12 @@ SPEC_CLASSES: dict[str, str] = {
     SPEC_S7: "per_series",
     SPEC_S8: "per_series",
     SPEC_S9: "per_series",
+    SPEC_S10: "cross_sectional",
 }
 
 SPEC_PURPOSES = {
     strategy_id: "harness_validation"
-    for strategy_id in (SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4, SPEC_S5, SPEC_S6, SPEC_S7, SPEC_S8, SPEC_S9)
+    for strategy_id in (SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4, SPEC_S5, SPEC_S6, SPEC_S7, SPEC_S8, SPEC_S9, SPEC_S10)
 }
 
 
@@ -175,7 +183,7 @@ class TestManifestIsComplete:
         forever. Pin that it is actually reading the modules it claims to — the
         prevention-log lesson from a probe that matched nothing."""
         declared = self._declared_strategy_ids()
-        assert len(declared) == 9, f"expected the nine catalogue modules, walked {sorted(declared)}"
+        assert len(declared) == 10, f"expected the ten catalogue modules, walked {sorted(declared)}"
         assert declared["s1_time_series_momentum.py"] == SPEC_S1
 
     def test_every_strategy_module_is_registered(self) -> None:
@@ -211,6 +219,7 @@ class TestManifestIsComplete:
             SPEC_S7,
             SPEC_S8,
             SPEC_S9,
+            SPEC_S10,
         }
 
 
@@ -354,7 +363,13 @@ class TestUniformInvocationEqualsTheDirectCall:
         series = _bars(_CLOSES)
         dates = entry.decision_calendar(series.dates)
         assert dates is not None
-        via_manifest = entry.member(series, panel_decision_dates=dates, universe=UNIVERSE, masked_reason=REASON)
+        via_manifest = entry.member(
+            series,
+            panel_decision_dates=dates,
+            universe=UNIVERSE,
+            masked_reason=REASON,
+            regime=unconstrained_regime(len(series)),
+        )
         expected = s2_member(series, panel_rebalance_dates=dates, universe=UNIVERSE, close_reason=REASON)
         assert via_manifest.dates == expected.dates
         assert via_manifest.decision_indices == expected.decision_indices

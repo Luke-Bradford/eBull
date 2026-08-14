@@ -128,7 +128,12 @@ from app.services.strategies.validated_universe import (
     load_validated_universe,
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST, StrategyEntry, StrategyPurpose
-from app.services.strategy_registry import StrategyIdentity, StrategySignal
+from app.services.strategy_registry import (
+    SignalKind,
+    StrategyIdentity,
+    StrategySignal,
+    resolve_participating_bar,
+)
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
     CORPUS_VERSION,
@@ -1468,14 +1473,15 @@ def evaluate_arm(
     discarded: Counter[str] = Counter()
     raw_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     wealth_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
-    ranking: _CrossSection | None = None
+    ranking: dict[SignalKind, _CrossSection] | None = None
 
     if entry.strategy_class == "cross_sectional":
-        ranking = _rank_cross_section(
+        ranking = _rank_cross_sections(
             conn,
             entry,
             corpus=corpus,
             quarantine_arm=quarantine_arm,
+            regime_provider=regime_provider,
             progress=progress,
         )
 
@@ -1758,11 +1764,12 @@ def evaluate_level_arms(
     raw_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     wealth_closes_by_instrument: dict[int, tuple[int, array[float]]] = {}
     ranking = (
-        _rank_cross_section(
+        _rank_cross_sections(
             conn,
             entry,
             corpus=corpus,
             quarantine_arm=quarantine_arm,
+            regime_provider=regime_provider,
             progress=progress,
         )
         if entry.strategy_class == "cross_sectional"
@@ -1942,7 +1949,7 @@ def _signals_for(
     series: BarSeries,
     *,
     instrument_id: int,
-    ranking: _CrossSection | None,
+    ranking: Mapping[SignalKind, _CrossSection] | None,
     unresolved_breaks: Sequence[date] = (),
     regime_provider: MarketRegimeProvider,
 ) -> list[StrategySignal]:
@@ -1970,32 +1977,74 @@ def _signals_for(
             regime=regime_provider.for_dates(series.dates),
         )
     assert entry.member is not None and ranking is not None
-    staged = segmented_member(
-        entry,
-        series,
-        panel_decision_dates=ranking.decision_dates,
-        universe=BACKTEST_UNIVERSE,
-        masked_reason="quarantined_bar",
-        unresolved_breaks=unresolved_breaks,
-    )
     signals: list[StrategySignal] = []
-    for index, verdict in enumerate(staged.verdicts):
-        if verdict is not None:
-            signals.append(verdict)
-            continue
-        when = series.dates[index]
-        if when in ranking.thin:
-            # ⚠ ``min_participants`` is the RUNNER's call, mirroring
-            # ``evaluate_cross_sectional``: an empty return from ``select``
-            # cannot be told apart from "the panel was too thin", and criterion
-            # 8 exists to keep that distinction countable.
+    for leg, leg_ranking in sorted(ranking.items()):
+        staged = segmented_member(
+            entry,
+            series,
+            panel_decision_dates=leg_ranking.decision_dates,
+            universe=BACKTEST_UNIVERSE,
+            masked_reason="quarantined_bar",
+            unresolved_breaks=unresolved_breaks,
+            regime=regime_provider.for_dates(series.dates),
+            leg=leg,
+        )
+        for index, verdict in enumerate(staged.verdicts):
+            if verdict is not None:
+                signals.append(verdict)
+                continue
+            when = series.dates[index]
+            if when in leg_ranking.thin:
+                # ⚠ ``min_participants`` is the RUNNER's call, mirroring
+                # ``evaluate_cross_sectional``: an empty return from ``select``
+                # cannot be told apart from "the panel was too thin", and criterion
+                # 8 exists to keep that distinction countable.
+                signals.append(
+                    StrategySignal(verdict="not_evaluable", signal_index=index, kind=leg, reason="thin_cross_section")
+                )
+                continue
             signals.append(
-                StrategySignal(verdict="not_evaluable", signal_index=index, kind="entry", reason="thin_cross_section")
+                resolve_participating_bar(
+                    when=when,
+                    index=index,
+                    kind=leg,
+                    selected=instrument_id in leg_ranking.winners.get(when, frozenset()),
+                    admissible_dates=staged.admissible_dates,
+                    mandatory_dates=staged.mandatory_dates,
+                )
             )
-            continue
-        fired = instrument_id in ranking.winners.get(when, frozenset())
-        signals.append(StrategySignal(verdict="fired" if fired else "not_fired", signal_index=index, kind="entry"))
     return signals
+
+
+def _rank_cross_sections(
+    conn: psycopg.Connection[Any],
+    entry: StrategyEntry,
+    *,
+    corpus: _Corpus,
+    quarantine_arm: QuarantineArm,
+    regime_provider: MarketRegimeProvider,
+    progress: ProgressCallback | None = None,
+) -> dict[SignalKind, _CrossSection]:
+    """Sub-pass A per ranked leg — one corpus read per leg, S-2 one, S-10 two.
+
+    ⚠ NOT one read shared: S-10's legs rank DIFFERENT panels (the entry panel
+    carries the $1 floor, the exit panel does not), so their score sets
+    genuinely differ and a shared read would silently rank one leg on the
+    other's denominator.
+    """
+    legs: tuple[SignalKind, ...] = ("entry", "exit") if entry.exit_leg is not None else ("entry",)
+    return {
+        leg: _rank_cross_section(
+            conn,
+            entry,
+            corpus=corpus,
+            quarantine_arm=quarantine_arm,
+            regime_provider=regime_provider,
+            leg=leg,
+            progress=progress,
+        )
+        for leg in legs
+    }
 
 
 def _rank_cross_section(
@@ -2004,6 +2053,8 @@ def _rank_cross_section(
     *,
     corpus: _Corpus,
     quarantine_arm: QuarantineArm,
+    regime_provider: MarketRegimeProvider,
+    leg: SignalKind = "entry",
     progress: ProgressCallback | None = None,
 ) -> _CrossSection:
     """Sub-pass A: stage every member and rank each decision date's cross-section.
@@ -2018,7 +2069,12 @@ def _rank_cross_section(
     eligible subset: a name that stopped trading in 1998 still contributed the
     sessions on which the panel rebalanced.
     """
-    assert entry.member is not None and entry.select is not None and entry.min_participants is not None
+    if leg == "entry":
+        select, min_participants = entry.select, entry.min_participants
+    else:
+        assert entry.exit_leg is not None
+        select, min_participants = entry.exit_leg.select, entry.exit_leg.min_participants
+    assert entry.member is not None and select is not None and min_participants is not None
     decision_dates = entry.decision_calendar(corpus.axis)
     if decision_dates is None:  # pragma: no cover - the manifest guarantees one
         raise RuntimeError(f"{entry.strategy_id} is cross_sectional but returned no decision calendar")
@@ -2057,6 +2113,8 @@ def _rank_cross_section(
             universe=BACKTEST_UNIVERSE,
             masked_reason="quarantined_bar",
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+            regime=regime_provider.for_dates(series.dates),
+            leg=leg,
         )
         for when, value in staged.scores.items():
             scores.setdefault(when, {})[instrument_id] = value
@@ -2074,15 +2132,15 @@ def _rank_cross_section(
     thin: set[date] = set()
     for when in sorted(scores):
         at_date = scores[when]
-        if len(at_date) < entry.min_participants:
+        if len(at_date) < min_participants:
             thin.add(when)
             continue
-        selected = frozenset(entry.select(when, at_date))
+        selected = frozenset(select(when, at_date))
         unknown = selected - at_date.keys()
         if unknown:
             raise ValueError(
-                f"{entry.strategy_id} select returned {sorted(unknown)} on {when}, which did not participate in "
-                "that cross-section — every winner must be one of the members offered"
+                f"{entry.strategy_id} {leg} select returned {sorted(unknown)} on {when}, which did not participate "
+                "in that cross-section — every winner must be one of the members offered"
             )
         winners[when] = selected
     return _CrossSection(decision_dates=decision_dates, winners=winners, thin=frozenset(thin))

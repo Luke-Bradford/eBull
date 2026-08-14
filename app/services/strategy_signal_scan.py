@@ -68,6 +68,7 @@ from app.services.strategy_registry import (
     StrategyIdentity,
     StrategySignal,
     Verdict,
+    resolve_participating_bar,
 )
 from app.services.strategy_segmented_evaluation import segmented_member, segmented_signals
 
@@ -403,6 +404,9 @@ class _PendingMember:
     decided: dict[date, StrategySignal]
     #: Window dates at which this member ranks.
     participating: frozenset[date]
+    #: The member's refinements (S-10), date-keyed — ``None`` = unrefined.
+    admissible_dates: frozenset[date] | None
+    mandatory_dates: frozenset[date] | None
 
 
 def run_signal_scan(
@@ -523,23 +527,34 @@ def run_signal_scan(
             per_strategy=tuple(results),
         )
 
-    panel_dates: frozenset[date] | None = None
     cross_sectional = [plan for plan in plans if plan.entry.strategy_class == "cross_sectional"]
+    panel_dates_by_plan: dict[str, frozenset[date]] = {}
     if cross_sectional:
         # ⚠ The union calendar spans every LOADABLE instrument, not only the
         # frontier-eligible ones: a name that stopped trading last year still
         # contributed the sessions on which the panel rebalanced.
+        #
+        # ⚠ PER PLAN, not shared from plans[0] — S-2 and S-10 read the same
+        # union calendar through different rules (S-10 drops weekend rows
+        # first), and one strategy's calendar imposed on another would move
+        # every rebalance verdict silently.
         calendar = load_union_calendar(conn, sorted(spans))
-        panel_dates = cross_sectional[0].entry.decision_calendar(calendar)
-        if panel_dates is None:  # pragma: no cover — the manifest guarantees one
-            raise RuntimeError(
-                f"{cross_sectional[0].entry.strategy_id} is cross_sectional but returned no decision calendar"
-            )
+        for plan in cross_sectional:
+            plan_dates = plan.entry.decision_calendar(calendar)
+            if plan_dates is None:  # pragma: no cover — the manifest guarantees one
+                raise RuntimeError(f"{plan.entry.strategy_id} is cross_sectional but returned no decision calendar")
+            panel_dates_by_plan[plan.entry.strategy_id] = plan_dates
 
     rows: dict[str, list[LedgerRow]] = {plan.entry.strategy_id: [] for plan in plans}
     expected: dict[str, int] = {plan.entry.strategy_id: 0 for plan in plans}
-    pending: dict[str, dict[int, _PendingMember]] = {plan.entry.strategy_id: {} for plan in cross_sectional}
-    scores: dict[str, dict[date, dict[int, float]]] = {plan.entry.strategy_id: {} for plan in cross_sectional}
+    #: Cross-sectional staging state, PER LEG — S-10's exit leg ranks its own
+    #: (floor-free) panel, so the two legs' scores must never share a dict.
+    pending: dict[tuple[str, SignalKind], dict[int, _PendingMember]] = {
+        (plan.entry.strategy_id, leg): {} for plan in cross_sectional for leg in _legs(plan.entry)
+    }
+    scores: dict[tuple[str, SignalKind], dict[date, dict[int, float]]] = {
+        (plan.entry.strategy_id, leg): {} for plan in cross_sectional for leg in _legs(plan.entry)
+    }
     moved_mid_scan = 0
     evaluated = 0
 
@@ -583,25 +598,29 @@ def run_signal_scan(
                     regime_provider=regime_provider,
                 )
             else:
-                assert panel_dates is not None
-                _stage_cross_sectional(
-                    plan,
-                    series,
-                    instrument_id,
-                    window,
-                    panel_dates=panel_dates,
-                    pending=pending[plan.entry.strategy_id],
-                    scores=scores[plan.entry.strategy_id],
-                    unresolved_breaks=unresolved_breaks.get(instrument_id, ()),
-                )
+                for leg in _legs(plan.entry):
+                    _stage_cross_sectional(
+                        plan,
+                        series,
+                        instrument_id,
+                        window,
+                        panel_dates=panel_dates_by_plan[plan.entry.strategy_id],
+                        leg=leg,
+                        pending=pending[(plan.entry.strategy_id, leg)],
+                        scores=scores[(plan.entry.strategy_id, leg)],
+                        unresolved_breaks=unresolved_breaks.get(instrument_id, ()),
+                        regime_provider=regime_provider,
+                    )
 
     for plan in cross_sectional:
-        _resolve_cross_section(
-            plan,
-            pending=pending[plan.entry.strategy_id],
-            scores=scores[plan.entry.strategy_id],
-            out=rows[plan.entry.strategy_id],
-        )
+        for leg in _legs(plan.entry):
+            _resolve_cross_section(
+                plan,
+                leg=leg,
+                pending=pending[(plan.entry.strategy_id, leg)],
+                scores=scores[(plan.entry.strategy_id, leg)],
+                out=rows[plan.entry.strategy_id],
+            )
 
     for plan in plans:
         strategy_id = plan.entry.strategy_id
@@ -672,6 +691,11 @@ def _scan_per_series(
     out.extend(resolve_fills(windowed, series=series, identity=plan.identity, instrument_id=instrument_id))
 
 
+def _legs(entry: StrategyEntry) -> tuple[SignalKind, ...]:
+    """The ranked legs a cross-sectional strategy stages — S-2 one, S-10 two."""
+    return ("entry", "exit") if entry.exit_leg is not None else ("entry",)
+
+
 def _stage_cross_sectional(
     plan: _Plan,
     series: BarSeries,
@@ -679,9 +703,11 @@ def _stage_cross_sectional(
     window: range,
     *,
     panel_dates: frozenset[date],
+    leg: SignalKind,
     pending: dict[int, _PendingMember],
     scores: dict[date, dict[int, float]],
     unresolved_breaks: Sequence[date] = (),
+    regime_provider: MarketRegimeProvider,
 ) -> None:
     """Everything decidable about one member without seeing the others.
 
@@ -698,6 +724,8 @@ def _stage_cross_sectional(
         universe=SCAN_UNIVERSE,
         masked_reason=MASKED_REASON,
         unresolved_breaks=unresolved_breaks,
+        regime=regime_provider.for_dates(series.dates),
+        leg=leg,
     )
 
     start = window.start
@@ -726,12 +754,15 @@ def _stage_cross_sectional(
         window_dates=window_dates,
         decided=decided,
         participating=frozenset(participating),
+        admissible_dates=staged.admissible_dates,
+        mandatory_dates=staged.mandatory_dates,
     )
 
 
 def _resolve_cross_section(
     plan: _Plan,
     *,
+    leg: SignalKind,
     pending: Mapping[int, _PendingMember],
     scores: Mapping[date, Mapping[int, float]],
     out: list[LedgerRow],
@@ -749,19 +780,24 @@ def _resolve_cross_section(
     date-aware one needs no signature change — and passing the wrong date would
     be silent until one arrives.
     """
-    assert plan.entry.select is not None and plan.entry.min_participants is not None
+    if leg == "entry":
+        select, min_participants = plan.entry.select, plan.entry.min_participants
+    else:
+        assert plan.entry.exit_leg is not None
+        select, min_participants = plan.entry.exit_leg.select, plan.entry.exit_leg.min_participants
+    assert select is not None and min_participants is not None
     winners: dict[date, frozenset[int]] = {}
     thin: set[date] = set()
     for when in sorted(scores):
         at_date = scores[when]
-        if len(at_date) < plan.entry.min_participants:
+        if len(at_date) < min_participants:
             thin.add(when)
             continue
-        selected = frozenset(plan.entry.select(when, at_date))
+        selected = frozenset(select(when, at_date))
         unknown = selected - at_date.keys()
         if unknown:
             raise ValueError(
-                f"{plan.entry.strategy_id} select returned {sorted(unknown)} on {when}, which did not "
+                f"{plan.entry.strategy_id} {leg} select returned {sorted(unknown)} on {when}, which did not "
                 "participate in that cross-section — every winner must be one of the members offered"
             )
         winners[when] = selected
@@ -785,13 +821,21 @@ def _resolve_cross_section(
                     StrategySignal(
                         verdict="not_evaluable",
                         signal_index=offset,
-                        kind="entry",
+                        kind=leg,
                         reason="thin_cross_section",
                     )
                 )
                 continue
-            fired = instrument_id in winners[when]
-            signals.append(StrategySignal(verdict="fired" if fired else "not_fired", signal_index=offset, kind="entry"))
+            signals.append(
+                resolve_participating_bar(
+                    when=when,
+                    index=offset,
+                    kind=leg,
+                    selected=instrument_id in winners[when],
+                    admissible_dates=member.admissible_dates,
+                    mandatory_dates=member.mandatory_dates,
+                )
+            )
         out.extend(resolve_fills(signals, series=member.series, identity=plan.identity, instrument_id=instrument_id))
 
 

@@ -270,13 +270,15 @@ class TestCrossSectionalResolution:
             window_dates=(date(2026, 1, 1),),
             decided={},
             participating=frozenset({date(2026, 1, 1)}),
+            admissible_dates=None,
+            mandatory_dates=None,
         )
 
     def test_winner_fills_at_the_next_bar_open(self) -> None:
         plan = self._plan()
         out: list[LedgerRow] = []
         scores = {date(2026, 1, 1): {instrument: float(instrument) for instrument in range(1, 21)}}
-        _resolve_cross_section(plan, pending={20: self._pending()}, scores=scores, out=out)
+        _resolve_cross_section(plan, leg="entry", pending={20: self._pending()}, scores=scores, out=out)
         assert len(out) == 1
         row = out[0]
         assert (row.verdict, row.signal_bar_date) == ("fired", date(2026, 1, 1))
@@ -294,7 +296,7 @@ class TestCrossSectionalResolution:
         plan = self._plan()
         out: list[LedgerRow] = []
         scores = {date(2026, 1, 1): {1: 1.0, 20: 2.0}}
-        _resolve_cross_section(plan, pending={20: self._pending()}, scores=scores, out=out)
+        _resolve_cross_section(plan, leg="entry", pending={20: self._pending()}, scores=scores, out=out)
         assert (out[0].verdict, out[0].not_evaluable_reason) == ("not_evaluable", "thin_cross_section")
         assert (out[0].fill_bar_date, out[0].fill_price) == (None, None)
 
@@ -310,9 +312,11 @@ class TestCrossSectionalResolution:
             window_dates=(date(2026, 1, 1),),
             decided={date(2026, 1, 1): StrategySignal(verdict="not_fired", signal_index=0)},
             participating=frozenset(),
+            admissible_dates=None,
+            mandatory_dates=None,
         )
         out: list[LedgerRow] = []
-        _resolve_cross_section(plan, pending={20: pending}, scores={}, out=out)
+        _resolve_cross_section(plan, leg="entry", pending={20: pending}, scores={}, out=out)
         assert (out[0].verdict, out[0].signal_bar_date) == ("not_fired", date(2026, 1, 1))
 
     def test_a_selector_naming_a_non_participant_raises(self) -> None:
@@ -339,4 +343,4 @@ class TestCrossSectionalResolution:
         )
         scores = {date(2026, 1, 1): {instrument: float(instrument) for instrument in range(1, 21)}}
         with pytest.raises(ValueError, match="did not participate"):
-            _resolve_cross_section(rogue, pending={20: self._pending()}, scores=scores, out=[])
+            _resolve_cross_section(rogue, leg="entry", pending={20: self._pending()}, scores=scores, out=[])
