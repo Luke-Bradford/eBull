@@ -7,8 +7,10 @@ from decimal import Decimal
 
 from app.services.portfolio_eod import (
     PositionInput,
+    PositionResult,
     compute_eod_equity,
     resolve_snapshot_date,
+    summarise_marks,
 )
 
 # 1 USD = 0.80 GBP; no EUR pair on purpose (exercises the cross-rate skip).
@@ -25,6 +27,7 @@ def _pos(
     open_rate: str = "0",
     is_buy: bool = True,
     open_conversion_rate: str = "1",
+    mark_price_date: date | None = None,
 ) -> PositionInput:
     # Defaults amount=open_rate=0 reduce MTM (amount + units*(close-open_rate))
     # to units*close — the unleveraged-long identity the FX/counter tests assert.
@@ -39,6 +42,7 @@ def _pos(
         open_rate=Decimal(open_rate),
         is_buy=is_buy,
         open_conversion_rate=Decimal(open_conversion_rate),
+        mark_price_date=mark_price_date,
     )
 
 
@@ -159,3 +163,82 @@ class TestComputeEodEquity:
         assert eq.positions_value == Decimal("16.00")
         assert eq.cash_value == Decimal("80.00")
         assert eq.total_value == Decimal("96.00")
+
+
+SNAPSHOT = date(2025, 6, 12)
+EARLIER = date(2025, 6, 10)
+
+
+def _result(status: str, mark: date | None) -> PositionResult:
+    return PositionResult(
+        position_id=1,
+        instrument_id=10,
+        units=Decimal("1"),
+        native_ccy="USD",
+        close=Decimal("1"),
+        value_display=Decimal("1") if status == "priced" else None,
+        price_status=status,
+        mark_price_date=mark,
+    )
+
+
+class TestMarkPriceDateIsCarriedThroughEveryBranch:
+    """#2602 item 4 — the aggregate cannot see a single dropped construction site.
+
+    ``summarise_marks`` reads only the ``priced`` rows, so a test on the bound
+    alone would still pass if the ``no_price`` or ``no_fx`` branches lost the
+    field. There are four ``PositionResult`` construction sites and they were
+    edited separately, which is exactly when a positional field goes missing
+    from one of them.
+    """
+
+    def test_priced_carries_the_mark_date(self) -> None:
+        eq = compute_eod_equity([_pos(1, "2", "USD", "10", mark_price_date=SNAPSHOT)], [], "GBP", RATES)
+        assert [(r.price_status, r.mark_price_date) for r in eq.position_results] == [("priced", SNAPSHOT)]
+
+    def test_no_fx_carries_the_mark_date(self) -> None:
+        # EUR has no pair in RATES, so this prices natively and then fails to convert.
+        eq = compute_eod_equity([_pos(1, "2", "EUR", "10", mark_price_date=EARLIER)], [], "GBP", RATES)
+        assert [(r.price_status, r.mark_price_date) for r in eq.position_results] == [("no_fx", EARLIER)]
+
+    def test_no_currency_carries_the_mark_date(self) -> None:
+        eq = compute_eod_equity([_pos(1, "2", None, "10", mark_price_date=EARLIER)], [], "GBP", RATES)
+        assert [(r.price_status, r.mark_price_date) for r in eq.position_results] == [("no_fx", EARLIER)]
+
+    def test_no_price_carries_the_absent_mark_date(self) -> None:
+        eq = compute_eod_equity([_pos(1, "2", "USD", None)], [], "GBP", RATES)
+        assert [(r.price_status, r.mark_price_date) for r in eq.position_results] == [("no_price", None)]
+
+
+class TestSummariseMarks:
+    def test_all_marks_on_the_session_bound_to_it_with_nothing_stale(self) -> None:
+        marks = summarise_marks([_result("priced", SNAPSHOT), _result("priced", SNAPSHOT)], SNAPSHOT)
+        assert (marks.oldest_mark_date, marks.stale_mark_positions) == (SNAPSHOT, 0)
+
+    def test_the_bound_is_the_OLDEST_mark_not_the_newest(self) -> None:
+        # The whole point: a total stamped SNAPSHOT whose worst input is two days
+        # old is a two-day-old valuation. A max() here would report it as current.
+        marks = summarise_marks([_result("priced", SNAPSHOT), _result("priced", EARLIER)], SNAPSHOT)
+        assert (marks.oldest_mark_date, marks.stale_mark_positions) == (EARLIER, 1)
+
+    def test_unpriced_and_unconvertible_positions_cannot_move_the_bound(self) -> None:
+        # Neither contributed to positions_value, so neither may bound it. A
+        # no_fx row is the trap: it HAS a mark date, just not one that is in the
+        # total, so filtering on `mark_price_date is not None` alone is wrong.
+        marks = summarise_marks(
+            [_result("priced", SNAPSHOT), _result("no_fx", EARLIER), _result("no_price", None)],
+            SNAPSHOT,
+        )
+        assert (marks.oldest_mark_date, marks.stale_mark_positions) == (SNAPSHOT, 0)
+
+    def test_no_priced_position_leaves_the_bound_absent_rather_than_guessing(self) -> None:
+        marks = summarise_marks([_result("no_price", None)], SNAPSHOT)
+        assert (marks.oldest_mark_date, marks.stale_mark_positions) == (None, 0)
+
+    def test_an_all_cash_snapshot_has_no_bound(self) -> None:
+        marks = summarise_marks([], SNAPSHOT)
+        assert (marks.oldest_mark_date, marks.stale_mark_positions) == (None, 0)
+
+    def test_every_priced_mark_stale_counts_all_of_them(self) -> None:
+        marks = summarise_marks([_result("priced", EARLIER), _result("priced", EARLIER)], SNAPSHOT)
+        assert (marks.oldest_mark_date, marks.stale_mark_positions) == (EARLIER, 2)

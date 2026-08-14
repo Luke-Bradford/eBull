@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import psycopg
@@ -14,6 +14,7 @@ from app.services.account_equity_evidence import (
     DOCUMENTED_ACCOUNT_CURRENCIES,
     AccountEquityEvidenceError,
     load_account_equity_evidence,
+    mark_effectiveness_reasons,
     record_account_equity_snapshot,
 )
 
@@ -154,10 +155,15 @@ def test_incomplete_local_valuation_exposes_reasons_not_false_comparison(
     assert evidence.status == "collecting"
     assert not evidence.comparable
     assert evidence.difference is None
+    # ⚠ No `local_eod_effective_time_unknown` here, and its absence is the point
+    # (#2602 item 4). `positions_priced = 0` — the single position failed to
+    # price — so nothing contributed a mark and there is no effective time to be
+    # unknown. The row's real defect is already named twice over. Before sql/350
+    # the caveat was appended unconditionally and said the same thing about every
+    # row, priced or not, which is what made it unactionable.
     assert set(evidence.incomplete_reasons) == {
         "local_eod_currency_mismatch",
         "local_eod_valuation_incomplete",
-        "local_eod_effective_time_unknown",
     }
 
 
@@ -277,3 +283,91 @@ def test_every_documented_currency_id_is_admitted_by_the_check(
         "SELECT account_currency_id,currency FROM broker_account_equity_snapshots WHERE environment='demo'"
     ).fetchone()
     assert stored == (account_currency_id, currency)
+
+
+class TestMarkEffectivenessReasons:
+    """#2602 item 4 — the effective-time caveat is measured, not assumed.
+
+    Pure-logic, because the decision is a three-way branch over two stored
+    columns and a db-tier test per branch would buy nothing the table does not.
+    The two db-tier tests below cover the wiring: that the columns reach it and
+    that the caveat actually leaves the panel.
+    """
+
+    SNAPSHOT = date(2025, 6, 12)
+    EARLIER = date(2025, 6, 10)
+
+    def test_a_row_written_before_the_marks_were_recorded_is_still_unknown(self) -> None:
+        # NULL bound WITH priced positions can only mean "predates sql/350".
+        assert mark_effectiveness_reasons(snapshot_date=self.SNAPSHOT, oldest_mark_date=None, positions_priced=3) == (
+            "local_eod_effective_time_unknown",
+        )
+
+    def test_a_snapshot_with_no_priced_position_has_no_effective_time_to_be_unknown(self) -> None:
+        # All cash, or every position unpriced. Pre- and post-migration rows are
+        # indistinguishable here and need not be distinguished — neither has a mark.
+        assert mark_effectiveness_reasons(snapshot_date=self.SNAPSHOT, oldest_mark_date=None, positions_priced=0) == ()
+
+    def test_marks_on_the_snapshots_own_session_carry_no_caveat(self) -> None:
+        assert (
+            mark_effectiveness_reasons(snapshot_date=self.SNAPSHOT, oldest_mark_date=self.SNAPSHOT, positions_priced=3)
+            == ()
+        )
+
+    def test_a_mark_older_than_the_snapshot_is_named_as_carried_forward(self) -> None:
+        assert mark_effectiveness_reasons(
+            snapshot_date=self.SNAPSHOT, oldest_mark_date=self.EARLIER, positions_priced=3
+        ) == ("local_eod_marks_carried_forward",)
+
+    def test_one_day_of_staleness_is_enough(self) -> None:
+        # No tolerance is applied here on purpose: "the total is a blend of
+        # sessions" is a fact about the valuation, and how much divergence the
+        # operator will accept is item 4's separate tolerance rule.
+        assert mark_effectiveness_reasons(
+            snapshot_date=self.SNAPSHOT,
+            oldest_mark_date=self.SNAPSHOT - timedelta(days=1),
+            positions_priced=1,
+        ) == ("local_eod_marks_carried_forward",)
+
+
+def test_marks_on_the_session_retire_the_effective_time_caveat(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The caveat leaves the panel once the marks are recorded and current."""
+    observed = datetime.now(UTC).replace(microsecond=0)
+    record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=_snapshot(observed_at=observed))
+    ebull_test_conn.execute(
+        """
+        INSERT INTO portfolio_eod_snapshots (
+          snapshot_date,display_currency,total_value,positions_value,cash_value,
+          positions_total,positions_priced,oldest_mark_date,stale_mark_positions,computed_at
+        ) VALUES (%(d)s,'USD',995,495,500,2,2,%(d)s,0,%(c)s)
+        """,
+        {"d": observed.date(), "c": observed + timedelta(minutes=1)},
+    )
+    evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
+    assert evidence.incomplete_reasons == ()
+    # ⚠ Still not comparable. Clearing every named caveat does NOT make the two
+    # totals reconciled — that needs item 4's declared tolerance, which this
+    # slice does not ship. `comparable` staying False with an empty reason list
+    # is the honest state, not a contradiction.
+    assert not evidence.comparable
+    assert evidence.difference == Decimal("5.000000")
+
+
+def test_a_carried_forward_mark_is_named_rather_than_absorbed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    observed = datetime.now(UTC).replace(microsecond=0)
+    record_account_equity_snapshot(ebull_test_conn, environment="demo", snapshot=_snapshot(observed_at=observed))
+    ebull_test_conn.execute(
+        """
+        INSERT INTO portfolio_eod_snapshots (
+          snapshot_date,display_currency,total_value,positions_value,cash_value,
+          positions_total,positions_priced,oldest_mark_date,stale_mark_positions,computed_at
+        ) VALUES (%(d)s,'USD',995,495,500,2,2,%(old)s,1,%(c)s)
+        """,
+        {"d": observed.date(), "old": observed.date() - timedelta(days=3), "c": observed},
+    )
+    evidence = load_account_equity_evidence(ebull_test_conn, environment="demo")
+    assert evidence.incomplete_reasons == ("local_eod_marks_carried_forward",)

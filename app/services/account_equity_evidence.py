@@ -130,6 +130,54 @@ def record_account_equity_snapshot(
     return row is not None
 
 
+def mark_effectiveness_reasons(
+    *,
+    snapshot_date: date,
+    oldest_mark_date: date | None,
+    positions_priced: int,
+) -> tuple[str, ...]:
+    """Name what is unknown about WHEN the local valuation's marks were effective.
+
+    #2602 item 4. Until ``sql/350`` this function did not exist and its caller
+    appended ``local_eod_effective_time_unknown`` **unconditionally**, on the
+    reasoning that ``computed_at`` records when the local job ran rather than
+    when its closing prices were effective. That was true, and it was permanent
+    by construction — nothing recorded the marks' dates, so no evidence could
+    ever retire the caveat. ``portfolio_eod`` now stores them, so the caveat is
+    measured and usually absent.
+
+    ⚠ A DATE, not a timestamp, is the defensible effective time here. The marks
+    are daily closes, and "the close of session D" identifies a market instant
+    exactly; a wall-clock stamp would add precision the input does not have.
+    What the date does NOT settle is whether a same-day bar was final when it was
+    read — deliberately not modelled, because on this corpus it does not arise
+    (``max(price_daily.price_date)`` trails ``current_date``, and the EOD job
+    runs after the US close). Inventing a refusal for a state we have never
+    observed would be the mirror of the defect this replaces.
+
+    ⚠ ``local_eod_effective_time_unknown`` keeps its slug rather than gaining a
+    clearer one. It now means exactly one thing — the row predates ``sql/350`` —
+    and renaming it would make the pre-migration rows, which are the only rows it
+    can describe, read as a new condition.
+    """
+    if oldest_mark_date is None:
+        # Two shapes, one of which is not a caveat at all: no priced position
+        # means nothing carried a mark, so there is no effective time to be
+        # unknown (an all-cash snapshot, or one whose positions all failed to
+        # price — the latter already reported by `local_eod_valuation_incomplete`).
+        return ("local_eod_effective_time_unknown",) if positions_priced > 0 else ()
+    if oldest_mark_date < snapshot_date:
+        # The total is stamped `snapshot_date` but at least one of its inputs is
+        # older, so the valuation is a blend of sessions. ⚠ The verdict is taken
+        # from the DATE BOUND alone and not from `stale_mark_positions`, which
+        # would be a second source of truth for the same fact and could disagree
+        # with it. The count is stored for magnitude — "3 of 7 positions" is what
+        # makes the caveat actionable — and is deliberately not a decision input.
+        return ("local_eod_marks_carried_forward",)
+    # Every priced mark is on the snapshot's own session. Nothing to caveat.
+    return ()
+
+
 def load_account_equity_evidence(
     conn: psycopg.Connection[Any], *, environment: Literal["demo", "real"]
 ) -> AccountEquityEvidence:
@@ -149,7 +197,13 @@ def load_account_equity_evidence(
                coalesce(local.positions_no_price,0) > 0
                  OR coalesce(local.positions_no_fx,0) > 0
                  OR coalesce(local.cash_no_fx_currencies,0) > 0 AS local_valuation_incomplete,
-               latest.account_currency_id
+               latest.account_currency_id,
+               -- ⚠ `stale_mark_positions` is deliberately NOT projected. The
+               -- verdict comes from `oldest_mark_date` alone (see
+               -- `mark_effectiveness_reasons`), and the count has no API
+               -- consumer yet — it is stored evidence for the reconciliation
+               -- write-up, queryable directly. #2602 item 4.
+               local.oldest_mark_date,local.positions_priced
         FROM latest
         LEFT JOIN portfolio_eod_snapshots local ON local.snapshot_date=latest.snapshot_date
         """,
@@ -198,10 +252,13 @@ def load_account_equity_evidence(
             reasons.append("local_eod_currency_mismatch")
         if bool(row[10]):
             reasons.append("local_eod_valuation_incomplete")
-        # computed_at is when the local job ran, not when its closing prices
-        # were effective. Do not call these totals reconciled until the local
-        # valuation carries a defensible effective market timestamp.
-        reasons.append("local_eod_effective_time_unknown")
+        reasons.extend(
+            mark_effectiveness_reasons(
+                snapshot_date=row[1],
+                oldest_mark_date=row[12],
+                positions_priced=int(row[13]),
+            )
+        )
     return AccountEquityEvidence(
         status="collecting",
         days_collected=int(row[0]),
