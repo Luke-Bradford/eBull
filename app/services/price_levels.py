@@ -173,6 +173,18 @@ def levels_at(
     later ATR would size the clustering tolerance with information from after
     the decision, which is the same leak in a subtler place.
     """
+    # ⚠ Alignment is VALIDATED, not assumed — matching `classify_regimes`, which
+    # raises on mismatched inputs. Misaligned arrays here do not fail loudly:
+    # `_swing_indices` reads `highs[i]` and `lows[i]` as the same bar, so a
+    # shorter `lows` silently pairs each high with the WRONG bar's low and the
+    # detector returns confident, wrong pivots. An IndexError deep in `_cluster`
+    # is the lucky outcome; the unlucky one is plausible levels built from two
+    # different bars. Raising rather than returning () because a caller handing
+    # in ragged arrays has a bug, and an empty result reads as "no levels here".
+    if highs.size != lows.size:
+        raise ValueError(f"highs/lows must align: {highs.size} highs against {lows.size} lows")
+    if volumes is not None and volumes.size != highs.size:
+        raise ValueError(f"volumes must align with prices: {volumes.size} volumes against {highs.size} bars")
     if index < 0 or index >= highs.size:
         return ()
     if not np.isfinite(atr) or atr <= 0:
