@@ -50,6 +50,7 @@ SPEC_S4 = "s4-volatility-compression-breakout"
 #: §3 of the S-5..S-10 set. Written out for the same reason as the four above.
 SPEC_S5 = "s5-support-bounce"
 SPEC_S6 = "s6-resistance-breakout"
+SPEC_S7 = "s7-trend-pullback"
 SPEC_S8 = "s8-range-mean-reversion"
 SPEC_S9 = "s9-squeeze-expansion"
 
@@ -64,6 +65,9 @@ SPEC_EXIT_REGIMES: dict[str, tuple[bool, bool, int | None, bool]] = {
     SPEC_S4: (False, True, 40, False),
     SPEC_S5: (False, True, 30, False),
     SPEC_S6: (False, True, 40, False),
+    #: ⚠ The first hybrid: a stop with no target PLUS a `close < 50-SMA` exit
+    #: rule — both close sources declared, per §3 of the S-5..S-10 set.
+    SPEC_S7: (True, True, 60, False),
     SPEC_S8: (False, True, 15, False),
     SPEC_S9: (False, True, 40, False),
 }
@@ -77,6 +81,7 @@ SPEC_SIGNAL_KINDS: dict[str, frozenset[str]] = {
     SPEC_S4: frozenset({"entry"}),
     SPEC_S5: frozenset({"entry"}),
     SPEC_S6: frozenset({"entry"}),
+    SPEC_S7: frozenset({"entry", "exit"}),
     SPEC_S8: frozenset({"entry"}),
     SPEC_S9: frozenset({"entry"}),
 }
@@ -88,13 +93,14 @@ SPEC_CLASSES: dict[str, str] = {
     SPEC_S4: "per_series",
     SPEC_S5: "per_series",
     SPEC_S6: "per_series",
+    SPEC_S7: "per_series",
     SPEC_S8: "per_series",
     SPEC_S9: "per_series",
 }
 
 SPEC_PURPOSES = {
     strategy_id: "harness_validation"
-    for strategy_id in (SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4, SPEC_S5, SPEC_S6, SPEC_S8, SPEC_S9)
+    for strategy_id in (SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4, SPEC_S5, SPEC_S6, SPEC_S7, SPEC_S8, SPEC_S9)
 }
 
 
@@ -169,7 +175,7 @@ class TestManifestIsComplete:
         forever. Pin that it is actually reading the modules it claims to — the
         prevention-log lesson from a probe that matched nothing."""
         declared = self._declared_strategy_ids()
-        assert len(declared) == 8, f"expected the eight catalogue modules, walked {sorted(declared)}"
+        assert len(declared) == 9, f"expected the nine catalogue modules, walked {sorted(declared)}"
         assert declared["s1_time_series_momentum.py"] == SPEC_S1
 
     def test_every_strategy_module_is_registered(self) -> None:
@@ -202,6 +208,7 @@ class TestManifestIsComplete:
             SPEC_S4,
             SPEC_S5,
             SPEC_S6,
+            SPEC_S7,
             SPEC_S8,
             SPEC_S9,
         }
