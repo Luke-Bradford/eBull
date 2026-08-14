@@ -113,6 +113,15 @@ from app.services.strategies.s6_resistance_breakout import (
     s6_identity,
     s6_signals,
 )
+from app.services.strategies.s7_trend_pullback import (
+    MAX_HOLD_BARS as S7_MAX_HOLD_BARS,
+)
+from app.services.strategies.s7_trend_pullback import (
+    S7_STRATEGY_ID,
+    s7_exit_bracket,
+    s7_identity,
+    s7_signals,
+)
 from app.services.strategies.s8_range_mean_reversion import (
     MAX_HOLD_BARS as S8_MAX_HOLD_BARS,
 )
@@ -529,6 +538,62 @@ def _s9_exit_levels(
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
 
+def _s7_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,
+) -> list[StrategySignal]:
+    return s7_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
+
+
+def _s7_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
+    """S-7 exits on its own exit leg, an entry-anchored ATR stop, or the hold cap.
+
+    ⚠⚠ THE FIRST REGIME DECLARING ``signal_pair`` AND ``level_based`` TOGETHER.
+    That is S-7's §3 shape — a stop with no target plus a ``close < 50-SMA``
+    exit rule — not a contradiction: ``build_positions`` evaluates every
+    declared close source together and the earliest wins, so the two compose
+    exactly as S-3's signal pair composes with its hold cap.
+    """
+    _reject_decision_dates(S7_STRATEGY_ID, decision_dates)
+    return ExitRegime(signal_pair=True, level_based=True, max_hold_bars=S7_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s7_exit_levels(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> ExitLevels | UnresolvedReason:
+    """Adapt S-7's stop-only bracket to the outcome reason contract.
+
+    ⚠ ``take_profit=None`` is the STOP-ONLY bracket ``outcome_resolver``
+    documents — rules 2/3/5 of its precedence table are unreachable and the
+    target-side close comes from the exit leg or the hold cap instead.
+    ⚠ ``stop <= 0`` replaces the siblings' ``target <= stop`` orderability
+    check: with no target the only unorderable state is a stop at or below
+    zero, which a low-priced high-ATR name genuinely produces (``ExitLevels``
+    itself refuses it, so it must be a typed refusal here, not a raise that
+    aborts the whole batch).
+    """
+    try:
+        target, stop, max_hold = s7_exit_bracket(
+            series, signal_index=signal_index, entry_price=entry_price, universe=universe
+        )
+    except ValueError, IndexError:
+        # ⚠ BOTH, deliberately — `ValueError` is the bracket's own refusal (no
+        # ATR); `IndexError` is an out-of-range `signal_index` inside
+        # `atr_series`. A narrow except that reads as exhaustive is worse than
+        # none (S-5's recorded lesson).
+        return "unorderable_exit_levels"
+    if stop <= 0:
+        return "unorderable_exit_levels"
+    return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+
+
 def _s8_signals(
     series: BarSeries,
     *,
@@ -743,6 +808,17 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             decision_calendar=_no_decision_calendar,
             signals=_s6_signals,
             exit_levels=_s6_exit_levels,
+        ),
+        S7_STRATEGY_ID: StrategyEntry(
+            strategy_id=S7_STRATEGY_ID,
+            purpose="harness_validation",
+            identity=s7_identity,
+            strategy_class="per_series",
+            signal_kinds=frozenset({"entry", "exit"}),
+            exit_regime=_s7_exit_regime,
+            decision_calendar=_no_decision_calendar,
+            signals=_s7_signals,
+            exit_levels=_s7_exit_levels,
         ),
         S8_STRATEGY_ID: StrategyEntry(
             strategy_id=S8_STRATEGY_ID,

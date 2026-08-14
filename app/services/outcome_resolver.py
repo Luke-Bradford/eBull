@@ -28,10 +28,18 @@ decision. So the discipline is instead:
    favourably (§3.5.4), and a window whose evidence runs out is ``unresolved``
    rather than ``expired``.
 
-⚠ LONG ONLY. ``stop_loss < entry < take_profit`` is validated. That is the
-repo's v1 risk posture (``.claude/CLAUDE.md``), not an oversight — a short
-bracket inverts every comparison below and would be a different rule set with a
-different version, not a flag on this one.
+⚠ LONG ONLY. ``stop_loss < entry`` is validated, and ``entry < take_profit``
+whenever a target exists. That is the repo's v1 risk posture
+(``.claude/CLAUDE.md``), not an oversight — a short bracket inverts every
+comparison below and would be a different rule set with a different version,
+not a flag on this one.
+
+⚠ A bracket may be STOP-ONLY (``take_profit is None``). S-7 is the case: §3
+gives it a stop, an exit signal and a hold cap, and no target — the first
+strategy between the signal-pair shape (S-1/S-3, no levels at all) and the
+full-bracket shape (S-4/S-5/S-6/S-8/S-9). With no target, precedence rows 2, 3
+and 5 below are simply unreachable — nothing reorders — and the close comes
+from the stop, the position layer's exit signal, or the hold cap.
 """
 
 from __future__ import annotations
@@ -116,9 +124,15 @@ class ExitLevels:
     ``entry_timing._compute_take_profit`` reads a thesis ``base_value`` — a
     fundamental valuation target — and returns ``None`` without one. It is not
     ATR-based and does not apply to a TA strategy.
+
+    ⚠ ``take_profit is None`` is a STOP-ONLY bracket (see the module
+    docstring), not an omission: the field has no default, so a caller states
+    the ``None`` visibly (#2288 — a field with a default is a field a writer
+    can forget). A stop is still mandatory; a strategy with neither is not
+    level-based and never constructs this class (S-3's recorded shape).
     """
 
-    take_profit: Decimal
+    take_profit: Decimal | None
     stop_loss: Decimal
     max_hold_bars: int
 
@@ -127,7 +141,7 @@ class ExitLevels:
             raise ValueError(f"max_hold_bars must be >= 1, got {self.max_hold_bars}")
         if self.stop_loss <= 0:
             raise ValueError(f"stop_loss must be > 0, got {self.stop_loss}")
-        if self.stop_loss >= self.take_profit:
+        if self.take_profit is not None and self.stop_loss >= self.take_profit:
             raise ValueError(
                 f"stop_loss {self.stop_loss} is not below take_profit {self.take_profit} "
                 "— this resolver is long-only (.claude/CLAUDE.md risk posture)"
@@ -277,6 +291,11 @@ def resolve_outcome(
     conservative, it is a different bias — it makes TP-first strategies look
     systematically worse, and the distortion scales with how tight the TP is."*
 
+    ⚠ A STOP-ONLY bracket (``take_profit is None``) reaches rules 1 and 4 only;
+    rules 2, 3 and 5 test a target that does not exist and cannot fire. With one
+    level there is no unknowable touch order, so ``ambiguous`` is unreachable
+    for such a bracket by construction — not by a resolution policy.
+
     REFUSALS, and why each is not ``expired``
     -----------------------------------------
     Checked per bar before the rules, in this order: past the end of the series
@@ -377,10 +396,15 @@ def resolve_outcome(
             f"entry_price {entry_price} disagrees with open[{fill_index}] = {fill_open} on "
             f"{series.dates[fill_index]} — the fill and the series must come from the same corpus"
         )
-    if not levels.stop_loss < entry_price < levels.take_profit:
+    if levels.stop_loss >= entry_price:
         raise ValueError(
-            f"levels {levels.stop_loss}/{levels.take_profit} do not bracket the entry {entry_price}: "
-            "a stop at or above entry, or a target at or below it, triggers immediately and is not a trade"
+            f"stop {levels.stop_loss} is not below the entry {entry_price}: "
+            "a stop at or above entry triggers immediately and is not a trade"
+        )
+    if levels.take_profit is not None and entry_price >= levels.take_profit:
+        raise ValueError(
+            f"target {levels.take_profit} is not above the entry {entry_price}: "
+            "a target at or below entry triggers immediately and is not a trade"
         )
     if segment_end_index is not None and segment_end_index < fill_index:
         raise ValueError(
@@ -421,7 +445,7 @@ def resolve_outcome(
                 exit_price=bar_open,
                 entry_price=entry_price,
             )
-        if bar_open >= target:
+        if target is not None and bar_open >= target:
             return _booked(
                 "tp_hit",
                 series=series,
@@ -430,7 +454,8 @@ def resolve_outcome(
                 exit_price=bar_open,
                 entry_price=entry_price,
             )
-        touched_stop, touched_target = low <= stop, high >= target
+        touched_stop = low <= stop
+        touched_target = target is not None and high >= target
         if touched_stop and touched_target:
             return Outcome(
                 outcome="ambiguous",
@@ -450,6 +475,7 @@ def resolve_outcome(
                 entry_price=entry_price,
             )
         if touched_target:
+            assert target is not None  # touched_target requires it
             return _booked(
                 "tp_hit",
                 series=series,

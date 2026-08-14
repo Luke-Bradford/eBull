@@ -521,6 +521,7 @@ def equivalence(conn: psycopg.Connection[tuple]) -> int:
                 sids.append(sid)
                 rns.append(fill_index + 1)  # row_number() is 1-based
                 stops.append(levels.stop_loss)
+                assert levels.take_profit is not None  # _levels always builds a full bracket
                 targets.append(levels.take_profit)
                 mine[(sid, fill_index + 1)] = out.outcome
 

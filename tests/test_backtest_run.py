@@ -194,6 +194,7 @@ class TestRunnableStrategies:
             "s4-volatility-compression-breakout",
             "s5-support-bounce",
             "s6-resistance-breakout",
+            "s7-trend-pullback",
             "s8-range-mean-reversion",
             "s9-squeeze-expansion",
         ]
