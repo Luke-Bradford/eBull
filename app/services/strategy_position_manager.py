@@ -920,8 +920,16 @@ def manage_owned_position(
         # Past this point the signal arm is guaranteed by _LOAD_OWNED_SQL's
         # witnesses: a loaded non-core position has a preflight and an execution
         # policy, so these are non-null.
-        assert owned.entry_stop is not None and owned.entry_take_profit is not None
-        assert owned.max_quote_age_seconds is not None
+        #
+        # ⚠ `raise`, NOT `assert`. `python -O` strips asserts, and this guard is
+        # what stands between a mis-witnessed load predicate and a `NoneType`
+        # comparison inside the stop/take-profit arithmetic below. Stripped, the
+        # failure mode is not "no check" but "a confusing TypeError three lines
+        # later, in the code that decides where a stop goes".
+        if owned.entry_stop is None or owned.entry_take_profit is None or owned.max_quote_age_seconds is None:
+            raise StrategyPositionManagerError(
+                "a non-core owned position must carry its entry preflight and execution policy"
+            )
         current_stop = position.stop_loss_rate
         desired_stop = max(current_stop, owned.entry_stop) if current_stop is not None else owned.entry_stop
         desired_take = owned.entry_take_profit
