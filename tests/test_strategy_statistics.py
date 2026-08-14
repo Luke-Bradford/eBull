@@ -295,13 +295,20 @@ class TestBuyAndHold:
 
 
 class TestTheShippedState:
-    def test_the_effective_sample_size_is_ALWAYS_NULL_from_this_stage(self) -> None:
-        """⚠⚠ Criterion 3's block bootstrap is stage 5e (spec §8), and filling
-        this with a nominal *n* would be worse than leaving it null: criterion 3
-        says *"no bare percentage and no nominal n is reported anywhere"*, so an
-        overlap-ignoring count would be the exact number the criterion forbids,
-        wearing the name of the one it requires. The promotion gate refuses on
-        the null."""
+    def test_the_effective_sample_size_is_NULL_WITHOUT_A_DECLARED_SEED(self) -> None:
+        """⚠⚠ Filling this with a nominal *n* would be worse than leaving it
+        null: criterion 3 says *"no bare percentage and no nominal n is reported
+        anywhere"*, so an overlap-ignoring count would be the exact number the
+        criterion forbids, wearing the name of the one it requires. The
+        promotion gate refuses on the null.
+
+        ⚠ RENAMED from ``..._is_ALWAYS_NULL_from_this_stage`` (#2695). Stage 5e
+        SHIPPED the block bootstrap, so "always null from this stage" became
+        false while the name went on asserting it — a claim that outlived its
+        invariant, which is the same defect class as a revert probe's dead
+        anchor. The rule this pins is the no-seed branch, and the name now says
+        so. See ``test_a_declared_seed_fills_the_sample_size_and_the_interval``
+        for the other half."""
         metrics = compute_metrics(
             _curve([1.0, 1.1, 1.05]), dates=_dates(3), trades=_trades([1.0, -1.0]), buy_and_hold=None
         )

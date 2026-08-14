@@ -43,12 +43,29 @@ test file constructs one by hand, which is what keeps the guard honest.
 
 ⚠ **``METRIC_SET_ID``'s value.** Nothing branches on it; it is stamped and
 reported. ``sql/263``'s ``NOT NULL`` + non-empty CHECK is what keeps it present.
+
+⚠⚠ **THE SEEDED ``effective_sample_size`` BRANCH** (#2695, Codex checkpoint).
+The probe below covers the no-seed half only. Substituting the nominal trade
+count in the SEEDED half is a criterion 3 violation with no test that observes
+it: ``test_a_declared_seed_fills_the_sample_size_and_the_interval`` asserts
+``is not None`` and ``> 0.0``, and a nominal *n* satisfies both. Closing it
+needs an assertion that discriminates an effective *n* from a nominal one —
+``effective_sample_size < trade_count`` is the obvious candidate and is NOT
+universally true of a block bootstrap, so it wants deriving rather than
+assuming. Stated here rather than probed, because a probe over a test that
+cannot fail would report ``NOT CAUGHT`` for a real defect and read as noise.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+# ⚠⚠ The docstring above invokes this file by PATH, which puts ``scripts/`` on
+# sys.path and NOT the repo root — so the cross-script import below raises
+# ModuleNotFoundError under the exact command this file documents. Prepending
+# the root makes both that form and ``-m scripts.<name>`` work (#2357/#2695).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED, run, selected
 
@@ -149,10 +166,20 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # ⚠⚠ §5.4's "rebalanced ONLY on position open/close". Rebalancing every
         # bar is a different — and much busier — strategy, and it charges
         # turnover the declared rule never incurs.
+        # ⚠ RE-ANCHORED (#2695). The predicate is now `rebalance_now`, which is
+        # `(rebalance_events and event) or day in scheduled_rebalance_indices` —
+        # the month-end arm added a second legitimate trigger. The DEFECT is
+        # unchanged and still spans both arms: dropping the predicate entirely
+        # rebalances on every bar under either configuration.
         "the rebalance made unconditional (every bar, not only on an open/close)",
         CURVE,
         CURVE_TESTS,
-        [("        if event and tradeable:\n            held = 0.0", "        if tradeable:\n            held = 0.0")],
+        [
+            (
+                "        if rebalance_now and tradeable:\n            held = 0.0",
+                "        if tradeable:\n            held = 0.0",
+            )
+        ],
         "test_weights_DRIFT_between_event_dates_and_are_not_restored_daily",
     ),
     (
@@ -166,19 +193,59 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # ⚠ §3.3's halt. Overwriting the mark with the `nan` fabricates a
         # valuation of nothing, and every arithmetic downstream becomes NaN
         # silently.
+        # ⚠⚠ RE-ANCHORED, AND THE DUPLICATE IS ITS OWN PROBE (#2695). This block
+        # now exists TWICE — in `_build_strategy_curve` and again in
+        # `build_buy_and_hold_curve` — so the bare copy matched twice and proved
+        # nothing. Disambiguated by the frozen-leg `continue` that only the
+        # strategy curve has; the benchmark's copy is probed separately below,
+        # because a mark-carry defect in the BENCHMARK moves
+        # `return_vs_buy_and_hold_pct` on every result just as surely.
         "a missing bar overwriting the mark with NaN instead of carrying it forward",
         CURVE,
         CURVE_TESTS,
         [
             (
+                "                continue\n"
+                "            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
+                "            mark = marks[offset]\n"
                 "            if np.isnan(mark):\n"
                 "                stale_marks += 1\n"
                 "            else:\n"
                 "                last_price[leg] = mark",
+                "                continue\n"
+                "            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
+                "            mark = marks[offset]\n"
                 "            last_price[leg] = mark",
             )
         ],
         "test_a_missing_bar_carries_the_previous_mark_forward_and_is_counted",
+    ),
+    (
+        # ⚠⚠ CLASS 2 (#2695): the branch no probe named. `build_buy_and_hold_curve`
+        # carries its own copy of §3.3's halt handling, and it had no probe at
+        # all — the duplicate was only visible because the STRATEGY curve's
+        # anchor started matching twice. A NaN mark overwriting the benchmark's
+        # last price makes `buy_and_hold_return_pct` NaN, which propagates into
+        # `return_vs_buy_and_hold_pct` on every result computed against it.
+        "a missing bar overwriting the BENCHMARK's mark with NaN (build_buy_and_hold_curve)",
+        CURVE,
+        CURVE_TESTS,
+        [
+            (
+                "        for leg in open_legs:\n"
+                "            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
+                "            mark = marks[offset]\n"
+                "            if np.isnan(mark):\n"
+                "                stale_marks += 1\n"
+                "            else:\n"
+                "                last_price[leg] = mark",
+                "        for leg in open_legs:\n"
+                "            offset = int(mark_offset[leg]) + (day - int(entry_index[leg]))\n"
+                "            mark = marks[offset]\n"
+                "            last_price[leg] = mark",
+            )
+        ],
+        "test_a_halt_carries_the_previous_mark_and_is_counted",
     ),
     (
         # ⚠⚠ THE BASKET DENOMINATOR. Sizing today's entries one at a time gives
@@ -341,11 +408,30 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # n is reported anywhere", so this fills the field with the exact number
         # the criterion forbids — wearing the name of the one it requires, and
         # clearing the promotion gate's refusal while it does.
-        "the effective sample size filled with the nominal trade count",
+        # ⚠ RE-ANCHORED AND RENAMED (#2695), because the old name outlived its
+        # invariant. Stage 5e's block bootstrap now fills the field when a
+        # `bootstrap_seed` is declared, so the shipped rule is no longer "always
+        # null" — it is "null unless a bootstrap ran", and this probe proves only
+        # the NO-SEED half. Crediting it with criterion 3's full "no nominal n is
+        # reported anywhere" would be exactly the stale claim #2695 is about.
+        #
+        # ⚠⚠ The injected defect is BROADER than the observation: `float(
+        # trade_count) or None` corrupts the seeded branch too, and nothing
+        # catches that — `test_a_declared_seed_fills_the_sample_size_and_the
+        # _interval` asserts only `is not None` and `> 0.0`, both of which the
+        # nominal count satisfies. Recorded in WHAT IS NOT PROBED above rather
+        # than papered over with a second anchor; closing it needs a test that
+        # discriminates an effective n from a nominal one, which does not exist.
+        "the no-bootstrap effective sample size filled with the nominal trade count",
         STATS,
         STATS_TESTS,
-        [("        effective_sample_size=None,", "        effective_sample_size=float(trade_count) or None,")],
-        "test_the_effective_sample_size_is_ALWAYS_NULL_from_this_stage",
+        [
+            (
+                "        effective_sample_size=bootstrap.effective_sample_size if bootstrap else None,",
+                "        effective_sample_size=float(trade_count) or None,",
+            )
+        ],
+        "test_the_effective_sample_size_is_NULL_WITHOUT_A_DECLARED_SEED",
     ),
     (
         # ⚠ §5.4: exposure is invested capital-days over ALLOCATED capital-days.

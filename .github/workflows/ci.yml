@@ -158,6 +158,15 @@ jobs:
         # baseline bump in the same diff.
         run: bash scripts/check_frontend_skip_count.sh
 
+      - name: revert-probe anchor + launchability audit (#2695)
+        # Every anchor in scripts/probe_2240_*.py is a VERBATIM source copy,
+        # so a rename or a `ruff format` kills it silently — the probe stops
+        # proving anything while the "N/N CAUGHT" claim citing it stays
+        # written down. 14 of 284 were dead when first measured, nine in the
+        # M9 promotion gate. Also fails a harness that cannot be started by
+        # path, which the audit's own import path used to hide.
+        run: bash scripts/check_probe_anchors.sh
+
       - name: pre-push <-> ci.yml lint parity (#1329)
         # Self-enforcing mirror: fails if any `bash scripts/check_*.sh`
         # runs in only one of .githooks/pre-push / this file. Stops the

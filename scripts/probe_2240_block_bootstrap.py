@@ -61,6 +61,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# ⚠⚠ The docstring above invokes this file by PATH, which puts ``scripts/`` on
+# sys.path and NOT the repo root — so the cross-script import below raises
+# ModuleNotFoundError under the exact command this file documents. Prepending
+# the root makes both that form and ``-m scripts.<name>`` work (#2357/#2695).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED, run, selected
 
 BOOT = Path("app/services/block_bootstrap.py")

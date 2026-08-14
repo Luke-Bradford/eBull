@@ -1,6 +1,6 @@
 """Revert-probe the phase-5e-1 result-ledger invariant tests (#2240).
 
-    PYTHONPATH=. uv run python scripts/probe_2240_result_ledger.py
+    uv run python scripts/probe_2240_result_ledger.py
 
 ⚠⚠ THE RUNNER IS IMPORTED, NOT COPIED — ``run``, ``selected`` and the two
 exit-code constants come from ``scripts.probe_2240_cost_model``, the harness
@@ -64,6 +64,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+# ⚠⚠ The docstring above invokes this file by PATH, which puts ``scripts/`` on
+# sys.path and NOT the repo root — so the cross-script import below raises
+# ModuleNotFoundError under the exact command this file documents. Prepending
+# the root makes both that form and ``-m scripts.<name>`` work (#2357/#2695).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED, run, selected
 
@@ -195,14 +201,25 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # `recorded_accesses < holdout_evaluations` can never be true, so the
         # gate's refusal becomes unreachable — passing for the wrong reason
         # rather than failing.
+        # ⚠ RE-ANCHORED (#2695). The two counts were two statements when this
+        # probe was written; they are now the two sub-SELECTs of
+        # `_COUNT_HOLDOUT_EVALUATIONS_AND_ACCESSES` — one statement, one
+        # snapshot, so a concurrent write cannot be straddled. Same defect,
+        # injected inside the merged statement: point the ACCESS count at the
+        # results store and both numbers come off one relation.
         "both gate counts read off the same relation (the unrecorded-access refusal goes dead)",
         LEDGER,
         DB_TESTS,
+        # ⚠ TWO ONE-LINE EDITS, not one four-line span (review NITPICK, PR #2700).
+        # The relation and its predicate are what make the count read the access
+        # log; the two `strategy_id` / `strategy_version` lines between them are
+        # shared verbatim with the sibling subquery and identify nothing. Keeping
+        # them in the anchor would have let a rename of either kill this probe
+        # without touching the rule — the decay #2695 exists to stop. Both lines
+        # below are unique on their own indentation.
         [
-            (
-                "    evaluations = conn.execute(_COUNT_HOLDOUT_RESULTS, params).fetchone()",
-                "    evaluations = conn.execute(_COUNT_EVALUATE_ACCESSES, params).fetchone()",
-            )
+            ("           FROM strategy_holdout_accesses\n", "           FROM strategy_results_store\n"),
+            ("            AND access_kind = 'evaluate')", "            AND namespace = 'hold_out')"),
         ],
         "test_the_two_counts_read_different_relations",
     ),

@@ -30,6 +30,17 @@ the count. A full sweep costs ~35 s/probe (two pytest subprocesses each) — nea
 an hour for the 280 probes below. This check is the part of that sweep which
 needs no pytest at all, so it can run on every push.
 
+⚠⚠ IT ALSO CHECKS THE HARNESS CAN BE LAUNCHED AT ALL, which is a THIRD decay
+class and one this file's own access path hides. The anchor sweep reaches a
+harness through ``import_module``, which puts the repo root on ``sys.path`` for
+free — so it happily validates 27 anchors in a file whose ``__main__`` entry
+raises ``ModuleNotFoundError`` under the command its own docstring prints.
+Measured 2026-08-14 (#2695): four of the sixteen were in exactly that state
+(``block_bootstrap``, ``deflated_sharpe``, ``result_model``, ``statistics``),
+because #2357 fixed the seven harnesses it happened to touch and the rest were
+never swept. A harness nobody can start proves as little as one with a dead
+anchor, and it fails LOUDER — which is why it survived: nobody had started it.
+
 WHAT THIS DOES NOT CATCH
 ------------------------
 ⚠ **A branch that no probe names.** The harnesses' two standing guards are
@@ -61,6 +72,8 @@ re-anchoring anything.
 from __future__ import annotations
 
 import importlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -106,6 +119,72 @@ def _anchor_and_source(edit: tuple[Any, ...], probe: tuple[Any, ...], default: P
     return str(edit[0]), default
 
 
+#: Executed by the child in ``_launch_failure``. ``run_name`` is deliberately NOT
+#: ``"__main__"``, so module top level runs (the sibling import, the ``PROBES``
+#: table) while ``main()`` does not — these harnesses mutate tracked source on
+#: disk, and an audit that started one would be a far worse defect than any it
+#: checks for. See the function's docstring for what that leaves unproved.
+_LAUNCH_PROBE = "import runpy, sys; runpy.run_path(sys.argv[1], run_name='__harness_launch_check__')"
+
+#: Generous by three orders of magnitude — a harness's top level is a sibling
+#: import and a table of tuples, measured at ~27 ms. The bound exists so a hang
+#: fails the gate instead of stopping it.
+_LAUNCH_TIMEOUT_SECONDS = 60
+
+
+def _launch_failure(path: Path, root: Path) -> str | None:
+    """The error a harness raises when its top level is executed BY PATH, or ``None``.
+
+    ⚠ A FRESH INTERPRETER, not this one. ``python -c`` with ``cwd=scripts/``
+    puts ``scripts/`` on ``sys.path[0]`` and the repo root nowhere, which is
+    exactly the condition under which ``from scripts.probe_2240_cost_model
+    import …`` raises. ``import_module`` cannot reproduce it — it needs the root
+    on the path to find the harness at all — so every anchor this file checks is
+    validated through an access path the harness's own entry point does not have.
+
+    ⚠⚠ AN IN-PROCESS EMULATION IS NOT ENOUGH, and this is the half that is easy
+    to miss. The first version manipulated ``sys.path`` in this interpreter and
+    passed on a harness with its fix deliberately removed: the sweep had already
+    ``import_module``-ed one, caching ``scripts.probe_2240_cost_model``, so the
+    child import was answered from ``sys.modules`` and never consulted
+    ``sys.path``. Purging ``sys.modules`` fixed that case and still left the
+    warm interpreter's ``app.*`` and third-party caches, its import hooks, and
+    a repo root removable only by exact string match. A subprocess has none of
+    those (#2695; both defects found by revert-probing this function, not by
+    reading it). ``PYTHONPATH`` is stripped from the child for the same reason —
+    a caller exporting ``PYTHONPATH=.`` would otherwise mask the failure.
+
+    ⚠ WHAT THIS STILL DOES NOT PROVE, because ``main()`` never runs: a harness
+    whose ``main()`` is broken, or whose failure lives under its
+    ``if __name__ == "__main__"`` guard, passes here and cannot be started. Only
+    a real sweep settles that. The claim is bounded to "its module top level
+    executes under a path launch", which is where the #2695 defect lived — the
+    import is what raised — and is as far as a check that must not mutate source
+    can go.
+    """
+    env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", _LAUNCH_PROBE, str(root / path)],
+            cwd=str(root / "scripts"),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=_LAUNCH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # ⚠ A HANG IS A FAILURE, NOT A WAIT. Without the bound, a harness whose
+        # module top level blocks — a future edit adding I/O, a `input()`, an
+        # import that reaches the network — would hang the pre-push gate and CI
+        # forever rather than failing. Reported like any other launch failure so
+        # the operator sees which harness, not a killed job that says nothing.
+        return f"module top level did not finish within {_LAUNCH_TIMEOUT_SECONDS}s — it blocks or loops"
+    if proc.returncode == 0:
+        return None
+    stderr = proc.stderr.strip().splitlines()
+    return stderr[-1] if stderr else f"exit {proc.returncode} with no stderr"
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     failures: list[str] = []
@@ -118,6 +197,15 @@ def main() -> int:
         default_src: Path | None = getattr(module, "SRC", None)
         sources: dict[Path, str] = {}
         checked = bad = 0
+
+        launch = _launch_failure(path.relative_to(root), root)
+        if launch is not None:
+            bad += 1
+            failures.append(
+                f"{path.name}: its top level does not execute under a path launch — {launch}. Every anchor "
+                f"below is checked through an import that adds the repo root, so they pass while the harness "
+                f"itself will not start."
+            )
 
         for probe in probes:
             name = probe[0]
