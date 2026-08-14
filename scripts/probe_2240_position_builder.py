@@ -44,6 +44,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+# ⚠⚠ The docstring above invokes this file by PATH, which puts ``scripts/`` on
+# sys.path and NOT the repo root — so the cross-script import below raises
+# ModuleNotFoundError under the exact command this file documents. Prepending
+# the root makes both that form and ``-m scripts.<name>`` work (#2357).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# ⚠ The gate constants live ONCE, in the 5b reference harness. A second
+# hand-written copy of "exit 1 means the test failed" is how this file's
+# gate drifted from it in the first place (#2357).
+from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED  # noqa: E402
+
 SRC = Path("app/services/position_builder.py")
 TESTS = "tests/test_position_builder.py"
 
@@ -277,11 +288,20 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         # The mirror: the ceiling must BOUND the hold, not suppress every later
         # trade in the instrument. Treating an unbookable hold as eternal drops
         # the rest of that series' history over one masked bar.
+        #
+        # ⚠⚠ RE-ANCHORED (#2357). The original anchor was the one-line
+        # ``open_until = ceiling if open_reason == "close_bar_unfillable" else None``.
+        # A later ``series_break`` arm turned that into a three-way conditional and
+        # the formatter split it across lines, so the anchor stopped matching and
+        # this invariant has been UNPROBED ever since — silently, because nothing
+        # re-ran the harness. Anchored on the ``close_bar_unfillable`` arm alone so
+        # the mutation stays scoped to THIS invariant rather than also deleting the
+        # ``series_break`` arm, which is a different rule with its own tests.
         "an unbookable hold left open forever instead of ending at its ceiling",
         [
             (
-                '                open_until = ceiling if open_reason == "close_bar_unfillable" else None',
-                "                open_until = None",
+                '                    ceiling\n                    if open_reason == "close_bar_unfillable"\n',
+                '                    None\n                    if open_reason == "close_bar_unfillable"\n',
             )
         ],
         "test_an_unbookable_hold_does_not_suppress_the_rest_of_history",
@@ -439,13 +459,30 @@ def main() -> int:
             if bad_anchor:
                 print(f"  {'*** BAD ANCHOR ***':<20} {name}", flush=True)
                 continue
+            # ⚠⚠ BASELINE FIRST — assert the selected test PASSES on unmutated
+            # source before mutating anything. Without it a probe cannot tell
+            # "the mutation broke the test" from "the test was already broken",
+            # and the second reads as CAUGHT (prevention log, #2214).
+            rc_baseline = run(selector)
+            if rc_baseline != PYTEST_PASSED:
+                failures.append(f"{name}: baseline exit {rc_baseline} on unmutated source — probe proves nothing")
+                print(f"  {'*** BAD BASELINE ***':<20} {name}  (exit {rc_baseline})", flush=True)
+                continue
             SRC.write_text(mutated)
             rc = run(selector)
             SRC.write_text(original)
-            verdict = "CAUGHT" if rc != 0 else "*** NOT CAUGHT ***"
-            print(f"  {verdict:<20} {name}  ({count} test{'' if count == 1 else 's'})", flush=True)
-            if rc == 0:
+            if rc == PYTEST_TEST_FAILED:
+                verdict = "CAUGHT"
+            elif rc == PYTEST_PASSED:
+                verdict = "*** NOT CAUGHT ***"
                 failures.append(name)
+            else:
+                # ⚠⚠ NOT a catch. 2/3/4/5 are interrupted / internal error /
+                # usage error / no tests collected — a mutation that leaves the
+                # source unparseable exits 4 and was never evaluated.
+                verdict = f"*** HARNESS FAULT {rc} ***"
+                failures.append(f"{name}: pytest exit {rc} is not a test result — probe proves nothing")
+            print(f"  {verdict:<20} {name}  ({count} test{'' if count == 1 else 's'})", flush=True)
     finally:
         # ⚠ Restored even on KeyboardInterrupt. A harness that can leave a
         # tracked source file mutated is one Ctrl-C away from a defect committed
