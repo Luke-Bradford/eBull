@@ -849,6 +849,24 @@ describe("StrategiesPage", () => {
     expect(screen.getByText("3–14 typical · 4 open, 2 unpriced excluded")).toBeInTheDocument();
   });
 
+  it("reports the non-losing share rather than calling a breakeven trade a win", async () => {
+    // `strategy_statistics` counts a losing trade as `value < 0.0` STRICTLY and
+    // stores no winning count, so `trade_count - losing_trade_count` includes
+    // breakevens. 12 trades with 3 losing is 9 NOT AT A LOSS — labelling that a
+    // win rate would report a flat close as a win.
+    const control = structuredClone(OVERVIEW);
+    control.strategies[0]!.purpose = "harness_validation";
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(control);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+
+    expect(await screen.findByText("Not lost")).toBeInTheDocument();
+    expect(screen.getByText("75.00%")).toBeInTheDocument();
+    expect(screen.getByText("9 of 12 not at a loss")).toBeInTheDocument();
+    expect(screen.queryByText("Won")).not.toBeInTheDocument();
+  });
+
   it("counts backtest trades without subtracting exclusions that were never in the total", async () => {
     // `trade_count = len(net_returns)` and `backtest_run` appends a return only
     // on a realised close, so open and unpriced positions are reported alongside

@@ -251,18 +251,27 @@ function StrategyCatalogFacts({
   // ⚠ `trade_count` is ALREADY the resolved count — `backtest_run` appends a
   // return only on a realised close, so open and unpriced positions were never
   // in it. Subtracting them here (as this page used to) understates the figure.
-  const wins = arm ? arm.trade_count - arm.losing_trade_count : 0;
-  // Unsigned for the same reason as the share: a win rate is a composition.
-  const successValue = arm && arm.trade_count > 0 ? formatUnsignedPct(wins / arm.trade_count) : "—";
+  //
+  // ⚠⚠ "Not lost", NOT "won", and the label is the fix rather than a hedge.
+  // `strategy_statistics` computes `losing_trades` as `value < 0.0` strictly, so
+  // a breakeven trade is in `trade_count` and in neither the losing count nor any
+  // stored winning count — there is no winning count. `trade_count - losing` is
+  // therefore the NON-LOSING share, and calling it a win rate would report a
+  // breakeven as a win. A true win rate needs a strictly-positive count stored at
+  // the producer, which is a metric-set change and populate-forward-only; naming
+  // what we actually have is the #2602-item-5 posture: never substitute.
+  const notLost = arm ? arm.trade_count - arm.losing_trade_count : 0;
+  // Unsigned for the same reason as the share: a not-lost rate is a composition.
+  const successValue = arm && arm.trade_count > 0 ? formatUnsignedPct(notLost / arm.trade_count) : "—";
   const successNote = arm && arm.trade_count > 0
-    ? `${formatNumber(wins, 0)} of ${formatNumber(arm.trade_count, 0)} backtest trades`
+    ? `${formatNumber(notLost, 0)} of ${formatNumber(arm.trade_count, 0)} not at a loss`
     : "No completed backtest trades";
 
   return (
     <dl className="mt-2 flex flex-wrap gap-x-6 gap-y-2 text-xs">
       <CatalogFact label="Fires" value={firesValue} note={firesNote} />
       <CatalogFact label="Turnaround" value={turnaroundValue} note={turnaroundNote} />
-      <CatalogFact label="Won" value={successValue} note={successNote} />
+      <CatalogFact label="Not lost" value={successValue} note={successNote} />
     </dl>
   );
 }
