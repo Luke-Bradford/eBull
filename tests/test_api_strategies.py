@@ -227,6 +227,10 @@ def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:
         turnover_annualised=Decimal("1"),
         return_vs_buy_and_hold_pct=Decimal("1"),
         deflated_sharpe=None,
+        metric_set_id="criterion7-v1",
+        median_hold_days=None,
+        hold_days_p25=None,
+        hold_days_p75=None,
         promotion_refusals=[],
     )
 
