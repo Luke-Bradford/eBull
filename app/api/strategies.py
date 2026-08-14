@@ -69,11 +69,12 @@ from app.services.strategy_live_gate import (
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_monitoring import (
-    FireRateUnavailableReason,
+    ShareUnavailableReason,
     StrategyAttribution,
     StrategyControlState,
     StrategyFireRate,
     StrategyPnl,
+    WeeklyRateUnavailableReason,
     load_attribution,
     load_control_state,
     load_entry_block_state,
@@ -293,8 +294,11 @@ class StrategyFireRateView(BaseModel):
     ⚠ ``fired_share_of_evaluable`` is the comparable number — dimensionless, so
     universe size does not move it. ``entries_per_calendar_week`` is throughput and
     is universe-size-dependent by design; it is ``None`` until the version has a
-    bar-date axis that can carry a rate, and ``rate_unavailable_reason`` says which
-    of the two reasons applies.
+    bar-date axis that can carry a rate.
+
+    ⚠ Each nullable value carries its OWN reason, because the two nulls are
+    independent: a version scanned over several days on which every bar was
+    ``not_evaluable`` rates at ``0.00``/week and has no share at all.
     """
 
     universe: str
@@ -307,7 +311,8 @@ class StrategyFireRateView(BaseModel):
     entries_per_calendar_week: Decimal | None
     first_scanned_bar: date | None
     last_scanned_bar: date | None
-    rate_unavailable_reason: FireRateUnavailableReason | None
+    share_unavailable_reason: ShareUnavailableReason | None
+    weekly_rate_unavailable_reason: WeeklyRateUnavailableReason | None
 
 
 class StrategyPnlView(BaseModel):

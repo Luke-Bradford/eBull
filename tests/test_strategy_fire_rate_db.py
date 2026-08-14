@@ -62,6 +62,8 @@ class TestLoaderReadsTheCensus:
         # 40 fires over a 7-day span.
         assert rate.entries_per_calendar_week == Decimal("40.00")
         assert rate.fired_share_of_evaluable == Decimal("0.5000")
+        assert rate.share_unavailable_reason is None
+        assert rate.weekly_rate_unavailable_reason is None
 
     def test_a_version_absent_from_the_census_is_absent_from_the_result(
         self, ebull_test_conn: psycopg.Connection[tuple]

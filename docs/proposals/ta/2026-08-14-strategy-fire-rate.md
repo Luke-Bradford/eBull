@@ -135,18 +135,29 @@ observation about the current four strategies.
 
 ## 3. Null is not zero, and the API says which
 
-| state | `scanned_days` | `fired_share_of_evaluable` | `entries_per_calendar_week` | `rate_unavailable_reason` |
-| --- | --- | --- | --- | --- |
-| never scanned (new version) | 0 | `null` | `null` | `never_scanned` |
-| one scan day | ≥1 | value | `null` | `single_scan_day` |
-| scanned, never fired | ≥2 | `0.0000` | `0.00` | `null` |
-| normal | ≥2 | value | value | `null` |
+| state | `scanned_days` | `fired_share_of_evaluable` | `share_unavailable_reason` | `entries_per_calendar_week` | `weekly_rate_unavailable_reason` |
+| --- | --- | --- | --- | --- | --- |
+| never scanned (new version) | 0 | `null` | `never_scanned` | `null` | `never_scanned` |
+| one scan day | 1 | value | `null` | `null` | `single_scan_day` |
+| multi-day, all `not_evaluable` | ≥2 | `null` | `no_evaluable_decisions` | `0.00` | `null` |
+| scanned, never fired | ≥2 | `0.0000` | `null` | `0.00` | `null` |
+| normal | ≥2 | value | `null` | value | `null` |
 
-`rate_unavailable_reason` exists because `null` otherwise means three different things
-and gap 3 requires empty states to say *which*. ⚠ `sum(row_count) FILTER (WHERE verdict
-= 'fired')` returns **NULL**, not `0`, when a version has no fired bucket at all — s2 is
-exactly that today — so the numerator is coalesced. Getting that wrong reports a scanned
-strategy as unmeasured.
+A reason exists per nullable value because `null` otherwise means several things and gap
+3 requires empty states to say *which*. **Invariant, asserted both directions: a value is
+`null` if and only if its reason is not.**
+
+⚠⚠ **The two nulls are independent, so one reason field cannot serve both.** The third
+row is the proof: a version scanned over several days on which every bar was
+`not_evaluable` has a perfectly good axis — the weekly rate is a real `0.00` — while its
+share is unknowable, because the strategy was never offered a decision. A first draft
+carried a single `rate_unavailable_reason` tracking only the axis, which left that share
+`null` with nothing saying why, breaking this section's own contract. Caught by the
+review bot on PR #2681.
+
+⚠ `sum(row_count) FILTER (WHERE verdict = 'fired')` returns **NULL**, not `0`, when a
+version has no fired bucket at all — s2 is exactly that today — so the numerator is
+coalesced in SQL. Getting that wrong reports a scanned strategy as unmeasured.
 
 ## 4. What ships
 
@@ -165,7 +176,8 @@ matching `load_attribution`'s existing shape — one query, keyed
 | `fired_share_of_evaluable` | §2.2, 4 dp, `null` when no evaluable decisions |
 | `entries_per_calendar_week` | §2.1, 2 dp, `null` per the table above |
 | `first_scanned_bar` / `last_scanned_bar` | the axis the rate is measured on |
-| `rate_unavailable_reason` | `never_scanned` \| `single_scan_day` \| `null` |
+| `share_unavailable_reason` | `never_scanned` \| `no_evaluable_decisions` \| `null` |
+| `weekly_rate_unavailable_reason` | `never_scanned` \| `single_scan_day` \| `null` |
 
 Quantised with `Decimal.quantize` at the stated precision so the JSON is stable rather
 than a repeating expansion.
@@ -196,7 +208,8 @@ than a repeating expansion.
 Pure-logic table tests over the derivation (the loader splits into a pure
 `derive_fire_rate` and a thin query, so every row of §3's table is a unit case):
 never-scanned, single-scan-day, scanned-never-fired (NULL numerator coalesced), zero
-evaluable decisions, a multi-day axis, and `fired_days <= scanned_days`.
+evaluable decisions over a multi-day axis, a multi-day axis, and a parametrised
+both-directions check that every null value names its reason and no present value does.
 
 One DB test that the loader reads the census and not `strategy_signals`, on a fixture
 where the two disagree on days — the 5-vs-1 shape measured in §1.
@@ -204,4 +217,4 @@ where the two disagree on days — the 5-vs-1 shape measured in §1.
 Dev: `GET /strategies/overview` on the live `:8000`. Expected from §1's measurements —
 s1 `fired_share_of_evaluable = 0.5210` (1,740 / 3,340), s2 `0.0000` (0 / 3,273), s3
 `0.0039` (13 / 3,330), s4 `0.0340` (186 / 5,468), and
-`rate_unavailable_reason = single_scan_day` on all four.
+`weekly_rate_unavailable_reason = single_scan_day` on all four.

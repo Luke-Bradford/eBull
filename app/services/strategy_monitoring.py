@@ -28,7 +28,14 @@ _DAYS_PER_WEEK: Final = 7
 _SHARE_PRECISION: Final = Decimal("0.0001")
 _RATE_PRECISION: Final = Decimal("0.01")
 
-FireRateUnavailableReason = Literal["never_scanned", "single_scan_day"]
+#: Why `fired_share_of_evaluable` is null. `no_evaluable_decisions` means every bar
+#: was `not_evaluable`, so the strategy was never offered a decision — its propensity
+#: is unknown rather than zero.
+ShareUnavailableReason = Literal["never_scanned", "no_evaluable_decisions"]
+
+#: Why `entries_per_calendar_week` is null. Independent of the share's reason: a
+#: multi-day all-`not_evaluable` version rates at 0.00/week and has no share at all.
+WeeklyRateUnavailableReason = Literal["never_scanned", "single_scan_day"]
 
 
 @dataclass(frozen=True)
@@ -79,7 +86,10 @@ class StrategyFireRate:
     entries_per_calendar_week: Decimal | None = None
     first_scanned_bar: date | None = None
     last_scanned_bar: date | None = None
-    rate_unavailable_reason: FireRateUnavailableReason | None = "never_scanned"
+    #: Each nullable value above names its own reason. Invariant, both directions:
+    #: a value is None if and only if its reason is not.
+    share_unavailable_reason: ShareUnavailableReason | None = "never_scanned"
+    weekly_rate_unavailable_reason: WeeklyRateUnavailableReason | None = "never_scanned"
 
 
 @dataclass(frozen=True)
@@ -336,25 +346,37 @@ def derive_fire_rate(
     the weekly rate is ``None`` for all four. That is the refusal working, not a
     gap — the prior versions carry 5-date axes and rate fine.
 
-    ``rate_unavailable_reason`` exists because ``None`` would otherwise mean three
-    things at once, and #2623 scope 3 requires an empty state to say which.
+    ⚠⚠ THE TWO NULLS NEED TWO REASONS, BECAUSE THEY ARE INDEPENDENT. A version
+    with two or more scanned days on which EVERY bar was ``not_evaluable`` has a
+    computable weekly rate (no fires over a real span is ``0.00``) and an
+    UNCOMPUTABLE share — its propensity is unknown, not zero, because it was never
+    offered a decision. One enum cannot carry both, so a single
+    ``rate_unavailable_reason`` left that share null with nothing saying why. Each
+    nullable value names its own reason, and the invariant is exact in both
+    directions: a value is ``None`` if and only if its reason is not.
     """
     if scanned_days == 0:
-        return StrategyFireRate(rate_unavailable_reason="never_scanned")
+        return StrategyFireRate(
+            share_unavailable_reason="never_scanned",
+            weekly_rate_unavailable_reason="never_scanned",
+        )
 
     share: Decimal | None = None
+    share_reason: ShareUnavailableReason | None = None
     if evaluable_entry_decisions > 0:
         share = (Decimal(fired_entry_signals) / Decimal(evaluable_entry_decisions)).quantize(_SHARE_PRECISION)
+    else:
+        share_reason = "no_evaluable_decisions"
 
     per_week: Decimal | None = None
-    reason: FireRateUnavailableReason | None = None
+    weekly_reason: WeeklyRateUnavailableReason | None = None
     # `periods_per_year`'s own guard, at the week scale: an axis needs two distinct
     # dates and a positive span before any rate can be measured off it.
     span_days = 0
     if first_scanned_bar is not None and last_scanned_bar is not None:
         span_days = (last_scanned_bar - first_scanned_bar).days
     if scanned_days < 2 or span_days <= 0:
-        reason = "single_scan_day"
+        weekly_reason = "single_scan_day"
     else:
         per_week = (Decimal(fired_entry_signals) * Decimal(_DAYS_PER_WEEK) / Decimal(span_days)).quantize(
             _RATE_PRECISION
@@ -370,7 +392,8 @@ def derive_fire_rate(
         entries_per_calendar_week=per_week,
         first_scanned_bar=first_scanned_bar,
         last_scanned_bar=last_scanned_bar,
-        rate_unavailable_reason=reason,
+        share_unavailable_reason=share_reason,
+        weekly_rate_unavailable_reason=weekly_reason,
     )
 
 
@@ -717,12 +740,13 @@ def load_entry_block_state(conn: psycopg.Connection[Any]) -> StrategyEntryBlockS
 
 
 __all__ = [
-    "FireRateUnavailableReason",
+    "ShareUnavailableReason",
     "StrategyAttribution",
     "StrategyControlState",
     "StrategyEntryBlockState",
     "StrategyFireRate",
     "StrategyPnl",
+    "WeeklyRateUnavailableReason",
     "derive_fire_rate",
     "load_attribution",
     "load_control_state",

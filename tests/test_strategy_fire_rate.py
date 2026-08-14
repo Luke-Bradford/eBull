@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from app.services.strategy_monitoring import StrategyFireRate, derive_fire_rate
 
 
@@ -37,14 +39,16 @@ class TestUnavailableReason:
 
     def test_never_scanned_reports_the_reason_not_a_zero_rate(self) -> None:
         rate = _derive(scanned_days=0, fired_days=0, fired_entry_signals=0, evaluable_entry_decisions=0)
-        assert rate.rate_unavailable_reason == "never_scanned"
+        assert rate.share_unavailable_reason == "never_scanned"
+        assert rate.weekly_rate_unavailable_reason == "never_scanned"
         assert rate.fired_share_of_evaluable is None
         assert rate.entries_per_calendar_week is None
 
     def test_default_state_is_never_scanned(self) -> None:
         # The API substitutes this for a key absent from the census, so the
         # default must be the honest "no evidence" state, not an implied zero.
-        assert StrategyFireRate().rate_unavailable_reason == "never_scanned"
+        assert StrategyFireRate().share_unavailable_reason == "never_scanned"
+        assert StrategyFireRate().weekly_rate_unavailable_reason == "never_scanned"
         assert StrategyFireRate().fired_share_of_evaluable is None
 
     def test_single_scan_day_gives_a_share_but_refuses_a_weekly_rate(self) -> None:
@@ -57,12 +61,15 @@ class TestUnavailableReason:
             first_scanned_bar=date(2026, 8, 10),
             last_scanned_bar=date(2026, 8, 10),
         )
-        assert rate.rate_unavailable_reason == "single_scan_day"
+        assert rate.weekly_rate_unavailable_reason == "single_scan_day"
         assert rate.entries_per_calendar_week is None
+        # The share needs no axis, so one scan day still measures it.
         assert rate.fired_share_of_evaluable == Decimal("0.5210")
+        assert rate.share_unavailable_reason is None
 
     def test_a_measurable_axis_carries_no_reason(self) -> None:
-        assert _derive().rate_unavailable_reason is None
+        assert _derive().weekly_rate_unavailable_reason is None
+        assert _derive().share_unavailable_reason is None
 
 
 class TestScannedButNeverFired:
@@ -72,11 +79,18 @@ class TestScannedButNeverFired:
         rate = _derive(fired_days=0, fired_entry_signals=0, evaluable_entry_decisions=3_273)
         assert rate.fired_share_of_evaluable == Decimal("0.0000")
         assert rate.entries_per_calendar_week == Decimal("0.00")
-        assert rate.rate_unavailable_reason is None
+        assert rate.share_unavailable_reason is None
+        assert rate.weekly_rate_unavailable_reason is None
 
-    def test_no_evaluable_decisions_leaves_the_share_null(self) -> None:
-        # A day on which every bar was `not_evaluable`: the strategy was never
+    def test_no_evaluable_decisions_leaves_the_share_null_WITH_a_reason(self) -> None:
+        # Every bar `not_evaluable` across a MULTI-DAY axis: the strategy was never
         # offered a decision, so its propensity is unknown rather than zero.
+        #
+        # ⚠ This is the state that showed one reason field cannot serve both nulls.
+        # The axis here is perfectly good, so the weekly rate is a real 0.00 — while
+        # the share is null. A single `rate_unavailable_reason` read `None` here and
+        # left the null share unexplained, breaking the spec's own "null is not zero,
+        # and the API says which" contract. Caught by the review bot on PR #2681.
         rate = _derive(
             fired_days=0,
             fired_entry_signals=0,
@@ -84,6 +98,9 @@ class TestScannedButNeverFired:
             not_evaluable_entry_decisions=2_438,
         )
         assert rate.fired_share_of_evaluable is None
+        assert rate.share_unavailable_reason == "no_evaluable_decisions"
+        assert rate.entries_per_calendar_week == Decimal("0.00")
+        assert rate.weekly_rate_unavailable_reason is None
         assert rate.not_evaluable_entry_decisions == 2_438
 
 
@@ -109,7 +126,7 @@ class TestWeeklyRateIsMeasuredOffTheAxis:
             first_scanned_bar=date(2026, 8, 3),
             last_scanned_bar=date(2026, 8, 4),
         )
-        assert rate.rate_unavailable_reason is None
+        assert rate.weekly_rate_unavailable_reason is None
         assert rate.entries_per_calendar_week == Decimal("14.00")
 
     def test_repeated_scans_of_one_date_still_have_no_span(self) -> None:
@@ -121,8 +138,38 @@ class TestWeeklyRateIsMeasuredOffTheAxis:
             first_scanned_bar=date(2026, 8, 4),
             last_scanned_bar=date(2026, 8, 4),
         )
-        assert rate.rate_unavailable_reason == "single_scan_day"
+        assert rate.weekly_rate_unavailable_reason == "single_scan_day"
         assert rate.entries_per_calendar_week is None
+
+
+class TestEveryNullNamesItsReason:
+    """The contract the two reason fields exist to keep, asserted both directions.
+
+    A null value with no reason is an unexplained blank on the operator's page,
+    which #2623 scope 3 forbids; a reason beside a present value is a contradiction.
+    """
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"scanned_days": 0, "fired_entry_signals": 0, "evaluable_entry_decisions": 0}, id="never"),
+            pytest.param(
+                {
+                    "scanned_days": 1,
+                    "first_scanned_bar": date(2026, 8, 10),
+                    "last_scanned_bar": date(2026, 8, 10),
+                },
+                id="one-day",
+            ),
+            pytest.param({"evaluable_entry_decisions": 0, "fired_entry_signals": 0}, id="none-evaluable"),
+            pytest.param({}, id="fully-measured"),
+            pytest.param({"fired_entry_signals": 0, "fired_days": 0}, id="scanned-never-fired"),
+        ],
+    )
+    def test_value_is_none_iff_its_reason_is_not(self, overrides: dict[str, object]) -> None:
+        rate = _derive(**overrides)
+        assert (rate.fired_share_of_evaluable is None) is (rate.share_unavailable_reason is not None)
+        assert (rate.entries_per_calendar_week is None) is (rate.weekly_rate_unavailable_reason is not None)
 
 
 class TestReportedCounts:
