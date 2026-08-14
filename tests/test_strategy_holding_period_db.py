@@ -117,9 +117,34 @@ class TestTheChecks:
 
         Without it a null on a future row is indistinguishable from a legitimate
         legacy null, so a writer defect would be permanently invisible.
+
+        ⚠ The precondition is ESTABLISHED, not inherited. Mutating only
+        ``metric_set_id`` would lean on the probed row happening to have
+        ``trade_count > 0`` and null hold columns — and if that ever stopped
+        holding, the test would pass for the wrong reason and stop guarding
+        anything. So the row is put into the exact state under test first.
         """
+        self._update(
+            ebull_test_conn,
+            "metric_set_id='criterion7-v1', trade_count=5, losing_trade_count=0, profit_factor=NULL, "
+            "median_hold_days=NULL, hold_days_p25=NULL, hold_days_p75=NULL",
+        )
         with pytest.raises(psycopg.errors.CheckViolation):
             self._update(ebull_test_conn, "metric_set_id='criterion7-v2'")
+
+    def test_a_v2_row_with_no_realised_trades_may_keep_its_nulls(
+        self, ebull_test_conn: psycopg.Connection[Any]
+    ) -> None:
+        """The other side of the same CHECK, and it has to stay legal.
+
+        A window in which nothing traded produces a genuine zero-trade result;
+        refusing it would make that unstorable under the current metric set.
+        """
+        self._update(
+            ebull_test_conn,
+            "metric_set_id='criterion7-v2', trade_count=0, losing_trade_count=0, profit_factor=NULL, "
+            "median_hold_days=NULL, hold_days_p25=NULL, hold_days_p75=NULL",
+        )
 
     def test_a_legacy_v1_row_may_keep_its_nulls(self, ebull_test_conn: psycopg.Connection[Any]) -> None:
         # The 324 stored rows are all `criterion7-v1` and cannot be backfilled
