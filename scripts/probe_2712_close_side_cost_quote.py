@@ -134,6 +134,14 @@ def _all_held(broker: EtoroBrokerProvider) -> int:
     with psycopg.connect(settings.database_url) as conn, conn.cursor() as cur:
         cur.execute(
             """
+            -- DISTINCT ON takes the LOWEST position_id per instrument: deterministic,
+            -- so a re-run compares like with like, and arbitrary in the sense that
+            -- nothing here establishes one lot is more representative than another.
+            -- ⚠ The ticket is pinned at $1,000 by `amount` on both arms, so the position
+            -- id selects which LOT to price against, not the size priced.  Whether the
+            -- close cost varies by lot is UNMEASURED -- two instruments hold two lots
+            -- each and only one was quoted -- so read the per-instrument ratios as
+            -- "this lot, this instant", not as the instrument's close cost.
             SELECT DISTINCT ON (bp.instrument_id)
                    bp.instrument_id, i.symbol, bp.position_id, q.spread_pct
             FROM broker_positions bp
