@@ -238,6 +238,24 @@ def _trailing_sma(values: npt.NDArray[np.float64], period: int) -> npt.NDArray[n
     return out
 
 
+def unconstrained_regime(n_bars: int, *, regime: Regime = Regime.BULL_QUIET) -> RegimeSeries:
+    """A uniform regime for callers that must SUPPLY one but do not GATE on one.
+
+    ⚠⚠ NOT A PRODUCTION SHORTCUT, AND THE NAME IS THE WARNING. S-1…S-4 predate
+    the regime and ignore the argument, so a harness exercising them still has to
+    pass something; this is that something. Using it on a path that scans a
+    regime-GATED strategy (S-5…S-10) would assert a market condition nobody
+    measured and let the strategy fire in conditions it declares it avoids.
+
+    The real scan builds its regime from the benchmark via
+    ``market_regime_provider.MarketRegimeProvider``. If you are reaching for this
+    in ``app/``, you are almost certainly reaching for that instead.
+    """
+    if n_bars < 0:
+        raise ValueError(f"n_bars must be non-negative, got {n_bars}")
+    return RegimeSeries(values=(regime,) * n_bars)
+
+
 __all__ = [
     "BOLLINGER_NUM_STD",
     "BOLLINGER_PERIOD",
@@ -248,5 +266,6 @@ __all__ = [
     "RegimeSeries",
     "bandwidth",
     "classify_regimes",
+    "unconstrained_regime",
     "is_squeeze",
 ]

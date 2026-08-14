@@ -74,6 +74,7 @@ from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELL
 from app.services.deflated_sharpe import MIN_MEASURED_TRIALS
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
+from app.services.market_regime import unconstrained_regime
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.position_builder import (
     RULE_SET_VERSION as BUILDER_RULE_SET_VERSION,
@@ -533,7 +534,12 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
             )
 
             mark = time.monotonic()
-            signals = entry.signals(series, universe=UNIVERSE, masked_reason="quarantined_bar")
+            signals = entry.signals(
+                series,
+                universe=UNIVERSE,
+                masked_reason="quarantined_bar",
+                regime=unconstrained_regime(len(series)),
+            )
             rows = resolve_fills(signals, series=series, identity=identity, instrument_id=int(instrument_id))
             entries, exits = _fills(rows, int(instrument_id))
             built = build_positions(

@@ -27,6 +27,7 @@ import pytest
 from app.services import strategies
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
+from app.services.market_regime import unconstrained_regime
 from app.services.position_builder import ExitRegime
 from app.services.strategies.s1_time_series_momentum import s1_identity, s1_signals
 from app.services.strategies.s2_cross_sectional_momentum import rebalance_dates, s2_member
@@ -46,6 +47,8 @@ SPEC_S1 = "s1-time-series-momentum"
 SPEC_S2 = "s2-cross-sectional-momentum"
 SPEC_S3 = "s3-mean-reversion-in-trend"
 SPEC_S4 = "s4-volatility-compression-breakout"
+#: §3 of the S-5..S-10 set. Written out for the same reason as the four above.
+SPEC_S6 = "s6-resistance-breakout"
 
 #: Spec §3's table, verbatim, as ``(signal_pair, level_based, max_hold_bars,
 #: has_rebalance_dates)``. ⚠ Written out for the reason in the module docstring:
@@ -56,6 +59,7 @@ SPEC_EXIT_REGIMES: dict[str, tuple[bool, bool, int | None, bool]] = {
     SPEC_S2: (False, False, None, True),
     SPEC_S3: (True, False, 10, False),
     SPEC_S4: (False, True, 40, False),
+    SPEC_S6: (False, True, 40, False),
 }
 
 #: The legs each strategy emits — §4: S-1 and S-3 have an exit rule, S-2 closes
@@ -65,6 +69,7 @@ SPEC_SIGNAL_KINDS: dict[str, frozenset[str]] = {
     SPEC_S2: frozenset({"entry"}),
     SPEC_S3: frozenset({"entry", "exit"}),
     SPEC_S4: frozenset({"entry"}),
+    SPEC_S6: frozenset({"entry"}),
 }
 
 SPEC_CLASSES: dict[str, str] = {
@@ -72,9 +77,10 @@ SPEC_CLASSES: dict[str, str] = {
     SPEC_S2: "cross_sectional",
     SPEC_S3: "per_series",
     SPEC_S4: "per_series",
+    SPEC_S6: "per_series",
 }
 
-SPEC_PURPOSES = {strategy_id: "harness_validation" for strategy_id in (SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4)}
+SPEC_PURPOSES = {strategy_id: "harness_validation" for strategy_id in (SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4, SPEC_S6)}
 
 
 def _bars(closes: Sequence[float | None], *, start: date = date(2020, 1, 1)) -> BarSeries:
@@ -148,7 +154,7 @@ class TestManifestIsComplete:
         forever. Pin that it is actually reading the modules it claims to — the
         prevention-log lesson from a probe that matched nothing."""
         declared = self._declared_strategy_ids()
-        assert len(declared) == 4, f"expected the four catalogue modules, walked {sorted(declared)}"
+        assert len(declared) == 5, f"expected the five catalogue modules, walked {sorted(declared)}"
         assert declared["s1_time_series_momentum.py"] == SPEC_S1
 
     def test_every_strategy_module_is_registered(self) -> None:
@@ -174,7 +180,7 @@ class TestManifestIsComplete:
         """⚠ THE ONE BRIDGE between this file's literals and the source. Every
         other assertion here is written against the literals, so without this
         the whole file could agree with a renamed strategy."""
-        assert set(self._declared_strategy_ids().values()) == {SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4}
+        assert set(self._declared_strategy_ids().values()) == {SPEC_S1, SPEC_S2, SPEC_S3, SPEC_S4, SPEC_S6}
 
 
 class TestEntriesDescribeTheirStrategy:
@@ -260,7 +266,9 @@ class TestUniformInvocationEqualsTheDirectCall:
     def test_close_reason_strategies_match(self, strategy_id: str, direct: object) -> None:
         entry = STRATEGY_MANIFEST[strategy_id]
         assert entry.signals is not None
-        via_manifest = entry.signals(_bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON)
+        via_manifest = entry.signals(
+            _bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON, regime=unconstrained_regime(len(_bars(_CLOSES)))
+        )
         expected = direct(_bars(_CLOSES), universe=UNIVERSE, close_reason=REASON)  # type: ignore[operator]
         assert via_manifest == expected
         assert any(signal.verdict == "fired" for signal in via_manifest), (
@@ -270,10 +278,12 @@ class TestUniformInvocationEqualsTheDirectCall:
     def test_masked_reason_strategy_matches(self) -> None:
         entry = STRATEGY_MANIFEST[SPEC_S4]
         assert entry.signals is not None
-        via_manifest = entry.signals(_bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON)
+        via_manifest = entry.signals(
+            _bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON, regime=unconstrained_regime(len(_bars(_CLOSES)))
+        )
         assert via_manifest == s4_signals(_bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON)
 
-    @pytest.mark.parametrize("strategy_id", [SPEC_S1, SPEC_S3, SPEC_S4])
+    @pytest.mark.parametrize("strategy_id", [SPEC_S1, SPEC_S3, SPEC_S4, SPEC_S6])
     def test_the_reason_code_reaches_the_verdict(self, strategy_id: str) -> None:
         """⚠ An adapter could accept ``masked_reason`` and drop it, defaulting
         the module's own argument. Equality against the direct call would still
@@ -281,17 +291,30 @@ class TestUniformInvocationEqualsTheDirectCall:
         comes back."""
         entry = STRATEGY_MANIFEST[strategy_id]
         assert entry.signals is not None
-        signals = entry.signals(_bars(_HOLED_CLOSES), universe=UNIVERSE, masked_reason=REASON)
+        signals = entry.signals(
+            _bars(_HOLED_CLOSES),
+            universe=UNIVERSE,
+            masked_reason=REASON,
+            regime=unconstrained_regime(len(_bars(_HOLED_CLOSES))),
+        )
         assert signals[0].verdict == "not_evaluable"
         assert signals[0].reason == REASON
 
-    @pytest.mark.parametrize("strategy_id", [SPEC_S1, SPEC_S3, SPEC_S4])
+    @pytest.mark.parametrize("strategy_id", [SPEC_S1, SPEC_S3, SPEC_S4, SPEC_S6])
     def test_emitted_kinds_are_the_declared_kinds(self, strategy_id: str) -> None:
         """⚠ ``signal_kinds`` is a claim about the strategy, so it is measured
         from what it emits rather than trusted."""
         entry = STRATEGY_MANIFEST[strategy_id]
         assert entry.signals is not None
-        emitted = {signal.kind for signal in entry.signals(_bars(_CLOSES), universe=UNIVERSE, masked_reason=REASON)}
+        emitted = {
+            signal.kind
+            for signal in entry.signals(
+                _bars(_CLOSES),
+                universe=UNIVERSE,
+                masked_reason=REASON,
+                regime=unconstrained_regime(len(_bars(_CLOSES))),
+            )
+        }
         assert emitted == set(entry.signal_kinds)
 
     def test_cross_sectional_member_matches_the_direct_call(self) -> None:

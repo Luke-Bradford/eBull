@@ -74,6 +74,7 @@ from types import MappingProxyType
 from typing import Literal, Protocol, get_args
 
 from app.services.indicator_series import BarSeries, Universe
+from app.services.market_regime import RegimeSeries
 from app.services.outcome_resolver import ExitLevels, UnresolvedReason
 from app.services.position_builder import ExitRegime
 from app.services.strategies.s1_time_series_momentum import S1_STRATEGY_ID, s1_identity, s1_signals
@@ -93,6 +94,15 @@ from app.services.strategies.s4_volatility_compression_breakout import (
     s4_exit_bracket,
     s4_identity,
     s4_signals,
+)
+from app.services.strategies.s6_resistance_breakout import (
+    MAX_HOLD_BARS as S6_MAX_HOLD_BARS,
+)
+from app.services.strategies.s6_resistance_breakout import (
+    S6_STRATEGY_ID,
+    s6_exit_bracket,
+    s6_identity,
+    s6_signals,
 )
 from app.services.strategy_exit_levels_batch import s4_exit_levels_batch
 from app.services.strategy_registry import (
@@ -137,8 +147,27 @@ class PerSeriesSignals(Protocol):
     """
 
     def __call__(
-        self, series: BarSeries, *, universe: Universe, masked_reason: NotEvaluableReason
+        self,
+        series: BarSeries,
+        *,
+        universe: Universe,
+        masked_reason: NotEvaluableReason,
+        regime: RegimeSeries,
     ) -> list[StrategySignal]: ...
+
+    # ⚠⚠ ``regime`` IS ON THE UNIFORM CALL, NOT ON THE STRATEGIES THAT USE IT.
+    # S-1..S-4 ignore it; S-5..S-10 gate on it. Putting it here rather than
+    # branching per strategy is the same choice this module already made for
+    # ``masked_reason``: the adapters absorb the difference, and a runner cannot
+    # forget to supply it for the one strategy that needs it.
+    #
+    # ⚠ The alternative — a ``requires_regime`` flag with a runner branch —
+    # reintroduces exactly the per-strategy ``if`` this module exists to delete,
+    # and the branch would be the thing nobody updates when S-11 arrives.
+    #
+    # ⚠ Safe for identities: ``StrategyIdentity.version`` hashes
+    # ``strategy_registry.py``, NOT this module (see the module docstring,
+    # reason 1). Editing the manifest moves no stored strategy version.
 
 
 class MemberStager(Protocol):
@@ -299,15 +328,33 @@ def _no_decision_calendar(calendar: Iterable[date]) -> frozenset[date] | None:
     return None
 
 
-def _s1_signals(series: BarSeries, *, universe: Universe, masked_reason: NotEvaluableReason) -> list[StrategySignal]:
+def _s1_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-1 does not gate on regime
+) -> list[StrategySignal]:
     return s1_signals(series, universe=universe, close_reason=masked_reason)
 
 
-def _s3_signals(series: BarSeries, *, universe: Universe, masked_reason: NotEvaluableReason) -> list[StrategySignal]:
+def _s3_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-3 does not gate on regime
+) -> list[StrategySignal]:
     return s3_signals(series, universe=universe, close_reason=masked_reason)
 
 
-def _s4_signals(series: BarSeries, *, universe: Universe, masked_reason: NotEvaluableReason) -> list[StrategySignal]:
+def _s4_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,  # noqa: ARG001 - uniform call; S-4 does not gate on regime
+) -> list[StrategySignal]:
     return s4_signals(series, universe=universe, masked_reason=masked_reason)
 
 
@@ -420,6 +467,57 @@ def _s4_exit_levels(
     return scalar
 
 
+def _s6_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,
+) -> list[StrategySignal]:
+    """S-6 is the first strategy that actually reads ``regime`` — passed through."""
+    return s6_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
+
+
+def _s6_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
+    """S-6 exits on a level-anchored stop / ATR target fixed at signal time, or the hold cap."""
+    _reject_decision_dates(S6_STRATEGY_ID, decision_dates)
+    return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=S6_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s6_exit_levels(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> ExitLevels | UnresolvedReason:
+    """Adapt S-6's bracket to the outcome reason contract.
+
+    ⚠ NO ``regime`` PARAMETER, and that is deliberate rather than an omission.
+    A bracket is only ever requested for a signal that ALREADY FIRED, so the
+    regime was permitted by construction at signal time. Threading it here would
+    let a regime that has since moved refuse to produce a stop for a position
+    that is already open — a gate that can retroactively remove an open
+    position's exit is not a safety control. See `_resistance_below`.
+    """
+    try:
+        target, stop, max_hold = s6_exit_bracket(
+            series, signal_index=signal_index, entry_price=entry_price, universe=universe
+        )
+    except ValueError:
+        # The level or ATR is unevaluable at the signal bar. Typed refusal rather
+        # than a raise: the outcome runner records an unresolved outcome, which is
+        # the truthful state, and a raise would abort the whole batch for one bar.
+        return "unorderable_exit_levels"
+    if target <= stop:
+        # Reachable, and not a bug to prevent: the stop is anchored to the LEVEL
+        # while the target is anchored to the ENTRY, so a fill far below the
+        # level can invert them. That asymmetry is the rule (see the S-6 module
+        # docstring), so an inverted bracket is a real state to refuse.
+        return "unorderable_exit_levels"
+    return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+
+
 #: Every strategy in the catalogue, keyed by ``strategy_id``.
 #:
 #: ⚠⚠ COMPLETENESS IS A TEST, NOT A CONVENTION.
@@ -474,6 +572,17 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             signals=_s4_signals,
             exit_levels=_s4_exit_levels,
             exit_levels_batch=s4_exit_levels_batch,
+        ),
+        S6_STRATEGY_ID: StrategyEntry(
+            strategy_id=S6_STRATEGY_ID,
+            purpose="harness_validation",
+            identity=s6_identity,
+            strategy_class="per_series",
+            signal_kinds=frozenset({"entry"}),
+            exit_regime=_s6_exit_regime,
+            decision_calendar=_no_decision_calendar,
+            signals=_s6_signals,
+            exit_levels=_s6_exit_levels,
         ),
     }
 )

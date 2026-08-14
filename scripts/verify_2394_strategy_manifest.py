@@ -54,6 +54,7 @@ import psycopg
 from app.config import settings
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries
+from app.services.market_regime import unconstrained_regime
 from app.services.research_price_structure_store import load_masked_series
 from app.services.strategies.s1_time_series_momentum import s1_signals
 from app.services.strategies.s2_cross_sectional_momentum import s2_member
@@ -190,7 +191,9 @@ def equivalence() -> bool:
             for key, direct in DIRECT_PER_SERIES.items():
                 entry = STRATEGY_MANIFEST[key]
                 assert entry.signals is not None
-                got = entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON)
+                got = entry.signals(
+                    series, universe=UNIVERSE, masked_reason=MASKED_REASON, regime=unconstrained_regime(len(series))
+                )
                 want = direct(series, universe=UNIVERSE, close_reason=MASKED_REASON)
                 if got != want:
                     mismatches.append(f"{key} series {series_id}")
@@ -199,7 +202,9 @@ def equivalence() -> bool:
 
             s4 = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
             assert s4.signals is not None
-            got_s4 = s4.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON)
+            got_s4 = s4.signals(
+                series, universe=UNIVERSE, masked_reason=MASKED_REASON, regime=unconstrained_regime(len(series))
+            )
             if got_s4 != s4_signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON):
                 mismatches.append(f"s4-volatility-compression-breakout series {series_id}")
             for signal in got_s4:

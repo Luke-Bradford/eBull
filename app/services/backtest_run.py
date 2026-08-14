@@ -89,6 +89,7 @@ from app.services.equity_curve import (
     build_month_end_rebalanced_curve,
 )
 from app.services.indicator_series import BarSeries, Universe
+from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.outcome_resolver import ExitLevels, UnresolvedReason, resolve_outcome
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
@@ -1411,6 +1412,7 @@ def evaluate_arm(
     return_basis: str = TOTAL_RETURN_BASIS,
     sizing_rule: str = SIZING_RULE_ID,
     cohort_size: int | None = None,
+    regime_provider: MarketRegimeProvider | None = None,
 ) -> ArmMeasurement:
     """One ``(strategy, quarantine arm)`` corpus pass, end to end.
 
@@ -1432,6 +1434,18 @@ def evaluate_arm(
     avoid the second read is the full-corpus materialisation the §3.1 spec
     already refused.
     """
+    # ⚠ ONE benchmark classification per arm pass, built before the instrument
+    # loop. See `_signals_for` for the material limitation: `price_daily` SPY
+    # starts 2022-05-10 while this axis reaches 1962, so every earlier bar
+    # carries `None` and a regime-gated strategy cannot fire there.
+    #
+    # ⚠ INJECTABLE, defaulting to a read from `conn`. Two callers need to supply
+    # their own: a harness with no real connection, and — when it exists — a
+    # provider sourced from the RESEARCH corpus, which is what actually closes
+    # the pre-2022 gap above. A parameter now costs nothing and is the seam that
+    # fix will use.
+    if regime_provider is None:
+        regime_provider = MarketRegimeProvider.load(conn)
     started = time.monotonic()
     if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
         raise ValueError(f"unknown return basis {return_basis!r}")
@@ -1516,6 +1530,7 @@ def evaluate_arm(
             instrument_id=instrument_id,
             ranking=ranking,
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+            regime_provider=regime_provider,
         )
         rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
         entries, exits = _fills(rows, instrument_id)
@@ -1690,6 +1705,7 @@ def evaluate_level_arms(
     return_basis: str = TOTAL_RETURN_BASIS,
     sizing_rule: str = SIZING_RULE_ID,
     cohort_size: int | None = None,
+    regime_provider: MarketRegimeProvider | None = None,
 ) -> tuple[ArmMeasurement, ...]:
     """Evaluate both daily-OHLC ambiguity projections from one corpus pass.
 
@@ -1705,6 +1721,18 @@ def evaluate_level_arms(
     counters and discarded-position counters remain arm-local, so the two
     measurements cannot influence one another after that common evidence.
     """
+    # ⚠ ONE benchmark classification per arm pass, built before the instrument
+    # loop. See `_signals_for` for the material limitation: `price_daily` SPY
+    # starts 2022-05-10 while this axis reaches 1962, so every earlier bar
+    # carries `None` and a regime-gated strategy cannot fire there.
+    #
+    # ⚠ INJECTABLE, defaulting to a read from `conn`. Two callers need to supply
+    # their own: a harness with no real connection, and — when it exists — a
+    # provider sourced from the RESEARCH corpus, which is what actually closes
+    # the pre-2022 gap above. A parameter now costs nothing and is the seam that
+    # fix will use.
+    if regime_provider is None:
+        regime_provider = MarketRegimeProvider.load(conn)
     started = time.monotonic()
     if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
         raise ValueError(f"unknown return basis {return_basis!r}")
@@ -1790,6 +1818,7 @@ def evaluate_level_arms(
             instrument_id=instrument_id,
             ranking=ranking,
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+            regime_provider=regime_provider,
         )
         rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
         entries, exits = _fills(rows, instrument_id)
@@ -1911,8 +1940,22 @@ def _signals_for(
     instrument_id: int,
     ranking: _CrossSection | None,
     unresolved_breaks: Sequence[date] = (),
+    regime_provider: MarketRegimeProvider,
 ) -> list[StrategySignal]:
-    """One instrument's whole-series verdicts, per-series or cross-sectional."""
+    """One instrument's whole-series verdicts, per-series or cross-sectional.
+
+    ⚠⚠ THE REGIME COMES FROM ``price_daily``, WHICH STARTS 2022-05-10, WHILE THIS
+    BACKTEST'S AXIS REACHES BACK TO 1962. Every bar before the benchmark's first
+    is ``None``, so a regime-gated strategy (S-5…S-10) CANNOT FIRE on the long
+    span and its pre-2022 result is an empty sample rather than a bad one.
+
+    Stated here rather than worked around because the workaround would be worse:
+    defaulting the missing years to a permissive regime would fabricate market
+    conditions for six decades. Closing this needs a benchmark series in the
+    RESEARCH corpus — the same source the bars come from — which is a separate
+    piece of work. Until then, judge S-5…S-10 on the window where the regime
+    exists, which is what §0 of the spec asks for anyway.
+    """
     if entry.signals is not None:
         return segmented_signals(
             entry,
@@ -1920,6 +1963,7 @@ def _signals_for(
             universe=BACKTEST_UNIVERSE,
             masked_reason="quarantined_bar",
             unresolved_breaks=unresolved_breaks,
+            regime=regime_provider.for_dates(series.dates),
         )
     assert entry.member is not None and ranking is not None
     staged = segmented_member(

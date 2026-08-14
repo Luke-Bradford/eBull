@@ -153,6 +153,26 @@ def s6_identity(*, universe: Universe, cost_model_id: str) -> StrategyIdentity:
     )
 
 
+def _close_input(series: BarSeries, *, universe: Universe) -> IndicatorSeries:
+    """The bar closes, in the shape the runner checks for evaluability.
+
+    ⚠⚠ ``not_evaluable_indices`` IS THE POINT, and omitting it was a real bug
+    caught by ``test_the_reason_code_reaches_the_verdict``. A bare
+    ``IndicatorSeries`` of closes carries values but declares no masked bars, so
+    a masked close fell through to whichever input refused first — reporting
+    ``insufficient_warmup`` for a bar that was actually MASKED. The verdict was
+    still "not evaluable", so nothing broke; the RECORDED REASON was simply
+    wrong, which is the kind of defect that survives every test that only checks
+    whether a bar fired.
+    """
+    closes = series.float_closes
+    return IndicatorSeries(
+        values=tuple(closes),
+        universe=universe,
+        not_evaluable_indices=tuple(i for i, value in enumerate(closes) if value is None),
+    )
+
+
 def _volumes(series: BarSeries) -> np.ndarray:
     """Bar volumes as float, with missing volume as NaN.
 
@@ -199,9 +219,15 @@ def s6_exit_bracket(
     signal_index: int,
     entry_price: Decimal,
     universe: Universe,
-    regime: RegimeSeries,
 ) -> tuple[Decimal, Decimal, int]:
-    """``(stop, target, max_hold_bars)`` for a fill against S-6's signal bar.
+    """``(take_profit, stop_loss, max_hold_bars)`` for a fill against S-6's signal bar.
+
+    ⚠⚠ ORDER MATCHES ``s4_exit_bracket`` — TARGET FIRST, THEN STOP. Both return
+    ``tuple[Decimal, Decimal, int]``, so the two are structurally identical and
+    a mismatched order would be invisible to the type checker and to review: the
+    adapter would build ``ExitLevels(take_profit=stop, stop_loss=target)`` and
+    every bracket would be inverted. This repo has already shipped that exact
+    class of defect through positional lists (#2623). Same order, deliberately.
 
     ⚠⚠ THE STOP IS ANCHORED TO THE LEVEL, THE TARGET TO THE ENTRY. See the module
     docstring — this asymmetry is the rule, not an oversight, and normalising it
@@ -215,24 +241,33 @@ def s6_exit_bracket(
     atr_at_signal = atr.values[signal_index]
     if atr_at_signal is None:
         raise ValueError(f"S-6 bracket needs ATR at the signal bar; index {signal_index} is unevaluable")
-    level = _breakout_level(series, index=signal_index, atr=atr_at_signal, regime=regime)
+    level = _resistance_below(series, index=signal_index, atr=atr_at_signal)
     if level is None:
         raise ValueError(f"S-6 bracket needs the resistance level at index {signal_index}; none is live")
     stop = Decimal(str(level - ATR_STOP_MULTIPLE * atr_at_signal))
     target = entry_price + Decimal(str(ATR_TARGET_MULTIPLE * atr_at_signal))
-    return stop, target, MAX_HOLD_BARS
+    return target, stop, MAX_HOLD_BARS
 
 
-def _breakout_level(series: BarSeries, *, index: int, atr: float, regime: RegimeSeries) -> float | None:
-    """The live resistance level this bar is breaking, or ``None``.
+def _resistance_below(series: BarSeries, *, index: int, atr: float) -> float | None:
+    """The nearest live resistance level below this bar's close, or ``None``.
+
+    ⚠⚠ NO REGIME GATE HERE, AND THAT IS THE POINT OF THE SPLIT. The gate belongs
+    to the SIGNAL (`s6_signals`), not to the level lookup, because the two are
+    asked at different times and only one of them is a decision.
+
+    ``s6_exit_bracket`` needs this level to place a stop for a fill against a
+    signal that ALREADY FIRED — so the regime was permitted by construction at
+    signal time. Re-checking it at bracket time would let a regime that has since
+    moved refuse to produce a stop for a position that is already open, which is
+    the worst possible moment to have no stop. A gate that can retroactively
+    invalidate an open position's exit is not a safety control.
 
     ⚠ Levels are recomputed from bars ``<= index`` on every call rather than
     cached across the series. Slower, and deliberately so: a cache keyed by
     anything other than the exact bar index is the standard way lookahead gets
     reintroduced after the causal version was proved correct.
     """
-    if not regime.permits(index, PERMITTED_REGIMES):
-        return None
     highs = series.array_highs
     lows = series.array_lows
     levels = levels_at(highs=highs, lows=lows, volumes=_volumes(series), atr=atr, index=index)
@@ -267,7 +302,7 @@ def s6_signals(
     vols = _volumes(series)
 
     inputs = (
-        StrategyInput(series=IndicatorSeries(values=tuple(closes), universe=universe), reason=masked_reason),
+        StrategyInput(series=_close_input(series, universe=universe), reason=masked_reason),
         StrategyInput(series=atr, reason=masked_reason),
         StrategyInput(series=avg_volume, reason=masked_reason),
     )
@@ -283,7 +318,12 @@ def s6_signals(
             return False
         if volume_now < VOLUME_CONFIRMATION_MULTIPLE * avg:
             return False
-        level = _breakout_level(series, index=index, atr=atr_now, regime=regime)
+        # ⚠ THE REGIME GATE IS HERE, on the decision, not inside the level
+        # lookup — see `_resistance_below`. Checked before the level work
+        # because it is the cheaper refusal and the more fundamental one.
+        if not regime.permits(index, PERMITTED_REGIMES):
+            return False
+        level = _resistance_below(series, index=index, atr=atr_now)
         if level is None or close <= level:
             return False
         # ⚠⚠ THE BREAK IS A CROSSING, NOT A POSITION. `close > level` alone is
