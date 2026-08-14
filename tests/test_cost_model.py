@@ -11,6 +11,9 @@ four functions over it.
 
 from __future__ import annotations
 
+import pathlib
+import subprocess
+import sys
 from decimal import Decimal
 from unittest import mock
 
@@ -317,3 +320,102 @@ class TestCarryIsNullNotZero:
             ):
                 cost_model._check_unmodelled_components_are_not_charged()
         assert "new COST_MODEL_ID" in str(excinfo.value)
+
+
+class TestTheImportTimeGuardsActuallyRun:
+    """⚠⚠ Both module-level guards were UNPROVEN until #2699.
+
+    ``_check_unmodelled_components_are_not_charged`` and ``_check_bands_are_total``
+    each end their definition with a module-level call, and each docstring says why:
+    the thing they guard is *an edit somebody makes to the literal above*, so the
+    check belongs beside the literal rather than in a test file that person may never
+    run. That placement IS the guard's whole value.
+
+    Every existing test reaches them by CALLING THEM DIRECTLY. Delete either
+    invocation and the entire file still passes -- the guards become dead code that
+    reads as live, which is the #2437 R4 shape (*a control on a path the decision
+    does not take*) arriving through a missing call rather than a missing branch.
+
+    These tests execute the SHIPPED SOURCE in a fresh interpreter with one literal
+    substituted, which is exactly what the maintainer making that edit would see.
+    A warm interpreter cannot answer the question -- ``app.services.cost_model`` is
+    already in ``sys.modules`` and ``importlib.reload`` re-reads the same literals --
+    so the subprocess is load-bearing, per ``audit_probe_anchors._launch_failure``.
+    """
+
+    SOURCE = pathlib.Path(cost_model.__file__)
+
+    def _run_with_substitution(self, tmp_path: pathlib.Path, old: str, new: str) -> subprocess.CompletedProcess[str]:
+        """Execute the real module source in a cold interpreter, one literal changed.
+
+        ⚠ Anchored on the literal's exact text and asserted to have matched, so a
+        reshaped declaration fails HERE rather than silently testing an unmodified
+        copy -- the dead-anchor class #2695 spent a session on.
+        """
+        source = self.SOURCE.read_text()
+        assert source.count(old) == 1, f"anchor {old!r} matched {source.count(old)} times, expected 1"
+        probe = tmp_path / "cost_model_probe.py"
+        probe.write_text(source.replace(old, new))
+        return subprocess.run(  # noqa: S603 — fixed argv, path from tmp_path
+            [sys.executable, str(probe)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_the_shipped_source_imports_cleanly(self) -> None:
+        """The control arm: an UNMODIFIED copy must exit 0.
+
+        Without it, a probe that fails for an unrelated reason (a syntax error in the
+        substitution, a missing import) reads as the guard firing, and both tests
+        below would pass while proving nothing.
+        """
+        result = subprocess.run(  # noqa: S603 — fixed argv, no user input
+            [sys.executable, str(self.SOURCE)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert result.returncode == 0, result.stderr
+
+    def test_setting_carry_bps_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
+        """Not merely `the function raises when called` -- THE MODULE WILL NOT LOAD.
+
+        This is the difference the tripwire trades on: someone who measures carry and
+        sets the literal is stopped by their next import, whether or not they run
+        ``tests/test_cost_model.py``.
+        """
+        result = self._run_with_substitution(
+            tmp_path, "CARRY_BPS: Decimal | None = None", 'CARRY_BPS: Decimal | None = Decimal("1.5")'
+        )
+
+        assert result.returncode != 0
+        assert "nothing in this module adds it to a price" in result.stderr
+        assert "new COST_MODEL_ID" in result.stderr
+
+    def test_setting_fx_bps_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
+        """FX shares the guard and had the identical gap (#2699 scope note)."""
+        result = self._run_with_substitution(
+            tmp_path, "FX_BPS: Decimal | None = None", 'FX_BPS: Decimal | None = Decimal("0.25")'
+        )
+
+        assert result.returncode != 0
+        assert "FX_BPS is set" in result.stderr
+
+    def test_a_gap_in_the_band_table_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
+        """``_check_bands_are_total`` had the same asymmetry, for the same reason.
+
+        Its existing tests all pass hand-built tuples, so the ``_check_bands_are_total(BANDS)``
+        call at module level was equally deletable. Widening the lowest band's upper
+        bound without moving its neighbour's lower bound opens a hole that
+        ``half_spread_for`` would raise on for an ordinary price.
+        """
+        result = self._run_with_substitution(
+            tmp_path,
+            'label="<$5", lower=None, upper=Decimal("5")',
+            'label="<$5", lower=None, upper=Decimal("4")',
+        )
+
+        assert result.returncode != 0
+        assert "not contiguous" in result.stderr
