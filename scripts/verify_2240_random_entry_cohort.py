@@ -651,6 +651,7 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int, zero_cost: bo
         book = LegBook()
         returns: list[float] = []
         entry_dates: list[date] = []
+        exit_dates: list[date] = []
         for s in range(series_count):
             lo, hi = int(holds_offset[s]), int(holds_offset[s + 1])
             if lo == hi:
@@ -685,6 +686,7 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int, zero_cost: bo
                 )
                 returns.append(float((exit_net[leg] - entry_net[leg]) / entry_net[leg] * 100.0))
                 entry_dates.append(axis[int(entry_panel[leg])])
+                exit_dates.append(axis[int(exit_panel[leg])])
         # R1 — equality, per member, on the whole book.
         if len(book) != expected_trades:
             problems.append(f"R1 member {index}: {len(book):,} legs against the strategy's {expected_trades:,}")
@@ -695,6 +697,7 @@ def cohort(*, cache_root: Path, label: str, first: int, last: int, zero_cost: bo
             trades=TradeReturns(
                 net_return_pct=tuple(returns),
                 entry_fill_date=tuple(entry_dates),
+                exit_bar_date=tuple(exit_dates),
                 open_count=0,
                 unpriced_count=0,
             ),

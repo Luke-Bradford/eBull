@@ -184,6 +184,7 @@ class _Sleeve:
         # reason for clustering is that signals correlate across instruments on
         # the same day, which is a statement about the day they FIRED.
         self.entry_dates: list[date] = []
+        self.exit_dates: list[date] = []
         self.positions = 0
         self.open_at_end = 0
         self.excluded: Counter[str] = Counter()
@@ -287,8 +288,10 @@ class _Sleeve:
                 marks=marks,
             )
             if realised:
+                assert position.close_bar_date is not None  # `realised` is set only where it is present
                 self.returns.append(float(row.net_return_pct))
                 self.entry_dates.append(position.entry_fill_bar_date)
+                self.exit_dates.append(position.close_bar_date)
 
     def report(self, *, axis: tuple[date, ...], benchmark_curve: EquityCurve) -> StrategyMetrics | None:
         started = time.monotonic()
@@ -326,6 +329,7 @@ class _Sleeve:
                 trades=TradeReturns(
                     net_return_pct=tuple(self.returns),
                     entry_fill_date=tuple(self.entry_dates),
+                    exit_bar_date=tuple(self.exit_dates),
                     open_count=self.open_at_end,
                     unpriced_count=sum(self.excluded.values()),
                 ),

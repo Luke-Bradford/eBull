@@ -63,9 +63,13 @@ def _trades(
     # a single shared date would collapse the whole trade list into one cluster
     # and quietly make every bootstrap in this file degenerate.
     entry_dates = dates if dates is not None else [date(2020, 1, 1) + timedelta(days=i) for i in range(len(returns))]
+    # Default exits are one day after their own entry, so the helper's trades all
+    # hold for exactly 1 day and every existing caller keeps a valid exit axis.
+    exit_dates = [day + timedelta(days=1) for day in entry_dates]
     return TradeReturns(
         net_return_pct=tuple(returns),
         entry_fill_date=tuple(entry_dates),
+        exit_bar_date=tuple(exit_dates),
         open_count=open_count,
         unpriced_count=unpriced_count,
     )
@@ -357,6 +361,9 @@ class TestMetricsRefuse:
             "periods_per_year": 251.7,
             "total_return_pct": 21.0,
             "buy_and_hold_return_pct": 22.5,
+            "hold_days_p25": 3.0,
+            "median_hold_days": 8.0,
+            "hold_days_p75": 21.0,
         }
         base.update(overrides)
         return StrategyMetrics(**base)  # type: ignore[arg-type]
@@ -481,6 +488,7 @@ class TestTradeReturnsParallelism:
             TradeReturns(
                 net_return_pct=(1.0, 2.0, 3.0),
                 entry_fill_date=(date(2020, 1, 1), date(2020, 1, 2)),
+                exit_bar_date=(date(2020, 1, 1), date(2020, 1, 2)),
                 open_count=0,
                 unpriced_count=0,
             )
@@ -510,6 +518,9 @@ class TestBootstrapFieldsAreAllOrNothing:
             "periods_per_year": 251.7,
             "total_return_pct": 21.0,
             "buy_and_hold_return_pct": 22.5,
+            "hold_days_p25": 3.0,
+            "median_hold_days": 8.0,
+            "hold_days_p75": 21.0,
             "effective_sample_size": 41.0,
             "expectancy_ci_low_pct": -0.2,
             "expectancy_ci_high_pct": 1.1,

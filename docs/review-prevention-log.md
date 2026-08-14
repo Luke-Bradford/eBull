@@ -4599,3 +4599,60 @@ with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
   (`core_eligibility_underlying_is_complete`, with the reasoning inline);
   `tests/test_2603_core_eligibility_db.py::test_an_underlying_row_cannot_be_incomplete`
   (revert-probed: swapping `IS NOT DISTINCT FROM` back to `=` turns the two NULL cases red).
+
+### One enum explaining several nullable values is lossy the moment two of them can be null independently
+
+- First seen in: #2623 gap 2 (2026-08-14, PR #2681), review bot on the first push.
+- Symptom: a field named `rate_unavailable_reason` explained why *either* of two derived
+  values was null. The bot found a reachable state it could not express — a version scanned
+  over several days on which every bar was `not_evaluable` has a perfectly good date axis, so
+  its weekly rate is a real `0.00`, while its share-of-evaluable is genuinely unknowable. The
+  reason field read `None` (correct for the rate) and the null share shipped with nothing
+  saying why, breaking the API's own stated "null is not zero, and the API says which"
+  contract.
+- Root cause: the two nulls have **independent causes**. One enum can only ever describe the
+  value it was named after; the other borrows it and is silently wrong whenever they differ.
+  Adding a third member to the single enum does not fix it — it mislabels the row as though
+  the *rate* were the unavailable thing.
+- The tell, and it is visible without running anything: **the reason field is named after ONE
+  of the values it serves.** `rate_unavailable_reason` sitting beside both
+  `fired_share_of_evaluable` and `entries_per_calendar_week` is the smell.
+- Prevention: when one enum explains several nullable values, ask whether any two of them can
+  be null **independently**. If they can, split the enum — one reason per nullable value — and
+  assert the correspondence in **both** directions over a parametrised set of states: a value
+  is `None` if and only if its reason is not. A test asserting only "this value is null here"
+  passes while the reason is missing, which is exactly how the gap survived the first review.
+- Enforced in: this log; `app/services/strategy_monitoring.py` (`share_unavailable_reason` /
+  `weekly_rate_unavailable_reason`, with the independence argument on `derive_fire_rate`);
+  `tests/test_strategy_fire_rate.py::TestEveryNullNamesItsReason`.
+
+### Three positional lists that must agree, edited separately — the INSERT column list, its placeholders, and the reader's unpack tuple
+
+- First seen in: #2623 gap 1 (2026-08-14). Adding three columns to `strategy_results_store`.
+- Symptom: values landed in the **wrong columns**. `median_hold_days` was written into the
+  DSR block, because the three column names were appended to `_RESULT_COLUMNS` after
+  `trial_register_version` while the three placeholders were inserted after
+  `%(bootstrap_model_id)s` — a different position in the same statement. Then the same
+  mistake again, mirrored: the reader's unpack tuple got them at the END while
+  `_RESULT_COLUMNS` (which is shared by the INSERT *and* the SELECT) had them in the middle,
+  so the round trip reconstructed a metric set with no holding period.
+- Why it is easy: nothing types these. The column list, the placeholder list and the unpack
+  tuple are three separately-edited sequences whose only contract is positional, they are
+  tens of lines apart, and both a name and a `%(name)s` read as self-describing at the point
+  of edit. `psycopg` binds placeholders BY NAME, which makes it feel order-independent — the
+  ORDER that matters is the one against the column list, not against the params dict.
+- What caught it, and what did not: types and lint were clean. The write-side misalignment was
+  caught by an unrelated pre-existing `CHECK` (`strategy_results_dsr_all_or_nothing`) firing
+  on a row whose DSR block had been half-filled by the shifted values; the read-side one by a
+  round-trip test. **A schema without all-or-nothing CHECKs would have stored the shifted row
+  silently.**
+- Prevention: after adding a column to a wide INSERT, **count the entries in the column list
+  and the placeholder list and confirm the new names occupy the same ordinal in each**, then
+  do the same against the reader's unpack. Where a constant is shared between the INSERT and a
+  SELECT (`_RESULT_COLUMNS` is), the unpack tuple must match THAT constant, not read
+  naturally. Always land a round-trip test — write then read then compare — for any new stored
+  field; a write-only test passes on a misaligned read.
+- Enforced in: this log; `app/services/result_ledger.py` (a comment on the unpack stating that
+  its order is `_RESULT_COLUMNS`' and not a natural one);
+  `tests/test_strategy_holdout_namespace.py`'s existing round-trip tests, which is what went
+  red.
