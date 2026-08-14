@@ -1444,17 +1444,16 @@ def evaluate_arm(
     already refused.
     """
     # ⚠ ONE benchmark classification per arm pass, built before the instrument
-    # loop. See `_signals_for` for the material limitation: `price_daily` SPY
-    # starts 2022-05-10 while this axis reaches 1962, so every earlier bar
-    # carries `None` and a regime-gated strategy cannot fire there.
+    # loop. Sourced from the RESEARCH corpus (`spy_chain_v1` — see
+    # `MarketRegimeProvider.load_research`), the same source universe the bars
+    # come from, so the regime reaches 1993-11-11 rather than `price_daily`'s
+    # 2023-02 ceiling. Bars before SPY's 1993 inception still carry `None`; see
+    # `_signals_for`.
     #
-    # ⚠ INJECTABLE, defaulting to a read from `conn`. Two callers need to supply
-    # their own: a harness with no real connection, and — when it exists — a
-    # provider sourced from the RESEARCH corpus, which is what actually closes
-    # the pre-2022 gap above. A parameter now costs nothing and is the seam that
-    # fix will use.
+    # ⚠ INJECTABLE, defaulting to the research read from `conn`, for a harness
+    # with no real connection.
     if regime_provider is None:
-        regime_provider = MarketRegimeProvider.load(conn)
+        regime_provider = MarketRegimeProvider.load_research(conn)
     started = time.monotonic()
     if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
         raise ValueError(f"unknown return basis {return_basis!r}")
@@ -1732,17 +1731,16 @@ def evaluate_level_arms(
     measurements cannot influence one another after that common evidence.
     """
     # ⚠ ONE benchmark classification per arm pass, built before the instrument
-    # loop. See `_signals_for` for the material limitation: `price_daily` SPY
-    # starts 2022-05-10 while this axis reaches 1962, so every earlier bar
-    # carries `None` and a regime-gated strategy cannot fire there.
+    # loop. Sourced from the RESEARCH corpus (`spy_chain_v1` — see
+    # `MarketRegimeProvider.load_research`), the same source universe the bars
+    # come from, so the regime reaches 1993-11-11 rather than `price_daily`'s
+    # 2023-02 ceiling. Bars before SPY's 1993 inception still carry `None`; see
+    # `_signals_for`.
     #
-    # ⚠ INJECTABLE, defaulting to a read from `conn`. Two callers need to supply
-    # their own: a harness with no real connection, and — when it exists — a
-    # provider sourced from the RESEARCH corpus, which is what actually closes
-    # the pre-2022 gap above. A parameter now costs nothing and is the seam that
-    # fix will use.
+    # ⚠ INJECTABLE, defaulting to the research read from `conn`, for a harness
+    # with no real connection.
     if regime_provider is None:
-        regime_provider = MarketRegimeProvider.load(conn)
+        regime_provider = MarketRegimeProvider.load_research(conn)
     started = time.monotonic()
     if return_basis not in {LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS}:
         raise ValueError(f"unknown return basis {return_basis!r}")
@@ -1955,17 +1953,15 @@ def _signals_for(
 ) -> list[StrategySignal]:
     """One instrument's whole-series verdicts, per-series or cross-sectional.
 
-    ⚠⚠ THE REGIME COMES FROM ``price_daily``, WHICH STARTS 2022-05-10, WHILE THIS
-    BACKTEST'S AXIS REACHES BACK TO 1962. Every bar before the benchmark's first
-    is ``None``, so a regime-gated strategy (S-5…S-10) CANNOT FIRE on the long
-    span and its pre-2022 result is an empty sample rather than a bad one.
-
-    Stated here rather than worked around because the workaround would be worse:
-    defaulting the missing years to a permissive regime would fabricate market
-    conditions for six decades. Closing this needs a benchmark series in the
-    RESEARCH corpus — the same source the bars come from — which is a separate
-    piece of work. Until then, judge S-5…S-10 on the window where the regime
-    exists, which is what §0 of the spec asks for anyway.
+    ⚠ THE REGIME NOW COMES FROM THE RESEARCH CORPUS (``spy_chain_v1``, see
+    ``MarketRegimeProvider.load_research``) — the same source universe as the
+    bars — and is classifiable 1993-11-11 → the corpus end. The residual bound
+    is SPY's own 1993-01-22 inception: bars before it carry ``None``, so a
+    regime-gated strategy (S-5…S-10) still cannot fire 1962–1992 and that span
+    is an empty sample rather than a bad one. Defaulting those decades to a
+    permissive regime would fabricate market conditions; a pre-1993 regime
+    would need a different benchmark (the S&P 500 index itself) and a new
+    ``spy_chain`` version.
     """
     if entry.signals is not None:
         return segmented_signals(

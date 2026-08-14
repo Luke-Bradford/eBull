@@ -43,6 +43,7 @@ from typing import Literal, Protocol, get_args
 
 from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import IndicatorSeries, MultiIndicatorSeries, Universe
+from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
 
 STRATEGY_SET_ID = "strategy-registry-v1"
 
@@ -84,6 +85,16 @@ def _module_hash() -> str:
 INPUT_RULE_SETS: Mapping[str, str] = MappingProxyType(
     {
         "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
+        # ⚠ Not import-detectable by ``TestInputRuleSetsAreComplete``'s walk —
+        # strategies receive the regime as a constructed ``RegimeSeries``, they
+        # never import the provider — so this entry is maintained by hand and
+        # pinned by ``test_the_stored_mapping_is_the_hashed_one``. It names the
+        # benchmark SOURCE rules (live ``price_daily`` vs the backtest's
+        # ``spy_chain_v1`` research chain): switching the backtest source flips
+        # every pre-2023 bar of a regime-gated strategy from ``not_evaluable``
+        # to a real verdict, which is a changed input under an unchanged
+        # strategy_version unless it is hashed here.
+        "market_regime_provider": BENCHMARK_SOURCE_RULE_SET_VERSION,
     }
 )
 
