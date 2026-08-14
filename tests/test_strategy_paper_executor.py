@@ -506,7 +506,9 @@ def _broker(
         total_invested=Decimal("400"),
         unrealized_pnl=Decimal("0"),
         equity=Decimal("1000"),
-        instrument_investments=(BrokerInstrumentInvestment(2449001, Decimal("250")),),
+        # `unrealized_pnl=0` above, so committed capital and market value coincide
+        # here; the executor reads only `amount` (#2704).
+        instrument_investments=(BrokerInstrumentInvestment(2449001, Decimal("250"), Decimal("250"), 1, 0),),
         observed_at=_NOW,
         raw_payload={},
     )

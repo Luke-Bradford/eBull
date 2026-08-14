@@ -159,9 +159,11 @@ FIXTURE_ACCOUNT_PNL_RESPONSE = {
         # Portal schema: "Currency ID of the account (1 = USD)".
         "accountCurrencyId": 1,
         "credit": 1000,
+        # Portal: `isBuy` is "true for long (buy) positions, false for short (sell)".
+        # Required on every direct position since #2704.
         "positions": [
-            {"instrumentID": 1001, "amount": 200, "unrealizedPnL": {"pnL": 20}},
-            {"instrumentID": 1002, "amount": 100, "unrealizedPnL": {"pnL": -5}},
+            {"instrumentID": 1001, "amount": 200, "isBuy": True, "unrealizedPnL": {"pnL": 20}},
+            {"instrumentID": 1002, "amount": 100, "isBuy": True, "unrealizedPnL": {"pnL": -5}},
         ],
         "mirrors": [
             {
@@ -325,9 +327,131 @@ class TestStrategyAccountRisk:
         assert result.unrealized_pnl == Decimal("27")  # 20-5+2+10
         assert result.equity == Decimal("1393")
         assert [(row.instrument_id, row.amount) for row in result.instrument_investments] == [
-            (1001, Decimal("266")),
-            (1002, Decimal("130")),
+            (1001, Decimal("266")),  # 200 direct + 25 mirror + (40 + 1) pending
+            (1002, Decimal("130")),  # 100 direct + 30 order
         ]
+
+    def test_direct_long_market_value_excludes_mirrors_and_pending_orders(self) -> None:
+        """The core sleeve is a DIRECT holding; `amount` folds in three other things.
+
+        Measured on the live demo account (#2704): 33 of 38 reported instruments had
+        no direct position at all, so this separation is the common case rather than
+        an edge one.
+        """
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_ACCOUNT_PNL_RESPONSE
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            result = broker.get_account_risk_snapshot()
+
+        assert [
+            (row.instrument_id, row.direct_long_market_value, row.direct_long_positions)
+            for row in result.instrument_investments
+        ] == [
+            # 200 + 20, NOT 266: the mirror lot and the pending order are not the sleeve.
+            (1001, Decimal("220"), 1),
+            (1002, Decimal("95"), 1),  # 100 - 5, NOT 130.
+        ]
+        assert all(row.direct_short_positions == 0 for row in result.instrument_investments)
+
+    def test_direct_long_lots_net_and_shorts_are_counted_not_valued(self) -> None:
+        """Two lots net; a short is counted so a caller can REFUSE, never valued.
+
+        ⚠ The short arm is unobserved live -- 7/7 demo positions were `isBuy: true`.
+        The count exists because no money total can carry "a short exists": two lots
+        can offset to zero and one short can sit at `amount + pnL == 0`.
+        """
+        payload = {
+            "clientPortfolio": {
+                "accountCurrencyId": 1,
+                "credit": 1000,
+                "positions": [
+                    {"instrumentID": 1001, "amount": 200, "isBuy": True, "unrealizedPnL": {"pnL": 20}},
+                    {"instrumentID": 1001, "amount": 100, "isBuy": True, "unrealizedPnL": {"pnL": -30}},
+                    # Sums to exactly zero -- invisible to any money-valued short field.
+                    {"instrumentID": 1001, "amount": 50, "isBuy": False, "unrealizedPnL": {"pnL": -50}},
+                ],
+                "mirrors": [],
+                "ordersForOpen": [],
+                "orders": [],
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = payload
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            result = broker.get_account_risk_snapshot()
+
+        (row,) = result.instrument_investments
+        assert row.amount == Decimal("350")  # every direction, committed
+        assert row.direct_long_market_value == Decimal("290")  # (200+20) + (100-30)
+        assert row.direct_long_positions == 2
+        assert row.direct_short_positions == 1
+
+    def test_a_negative_direct_long_market_value_does_not_fail_the_parse(self) -> None:
+        """A signed sum going negative is an extreme state, not response drift.
+
+        `amount` sums documented non-negative terms, so a negative one IS drift and
+        stays fail-closed.  Refusing here instead would take the paper executor's
+        unrelated cash checks down with it; `_state_refusal` owns the refusal.
+        """
+        payload = {
+            "clientPortfolio": {
+                "accountCurrencyId": 1,
+                "credit": 1000,
+                "positions": [
+                    {"instrumentID": 1001, "amount": 200, "isBuy": True, "unrealizedPnL": {"pnL": -250}},
+                ],
+                "mirrors": [],
+                "ordersForOpen": [],
+                "orders": [],
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = payload
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_read = MagicMock()
+            broker._http_read.get.return_value = mock_resp
+            result = broker.get_account_risk_snapshot()
+
+        (row,) = result.instrument_investments
+        assert row.amount == Decimal("200")
+        assert row.direct_long_market_value == Decimal("-50")
+
+    def test_direct_position_direction_fails_closed(self) -> None:
+        """Absent or non-boolean `isBuy` raises: defaulting it books a short as a long."""
+        for position in (
+            {"instrumentID": 1001, "amount": 200, "unrealizedPnL": {"pnL": 20}},
+            {"instrumentID": 1001, "amount": 200, "isBuy": "true", "unrealizedPnL": {"pnL": 20}},
+            {"instrumentID": 1001, "amount": 200, "isBuy": 1, "unrealizedPnL": {"pnL": 20}},
+        ):
+            payload = {
+                "clientPortfolio": {
+                    "accountCurrencyId": 1,
+                    "credit": 1000,
+                    "positions": [position],
+                    "mirrors": [],
+                    "ordersForOpen": [],
+                    "orders": [],
+                }
+            }
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = payload
+
+            with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+                broker._http_read = MagicMock()
+                broker._http_read.get.return_value = mock_resp
+                try:
+                    broker.get_account_risk_snapshot()
+                except TradingPreflightParseError as exc:
+                    assert "isBuy" in str(exc)
+                else:  # pragma: no cover - assertion helper branch
+                    raise AssertionError(f"missing/malformed isBuy must fail closed: {position}")
 
     def test_account_currency_id_is_read_from_the_payload(self) -> None:
         mock_resp = MagicMock()

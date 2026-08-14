@@ -362,10 +362,54 @@ class BrokerPortfolio:
 
 @dataclass(frozen=True)
 class BrokerInstrumentInvestment:
-    """USD capital currently committed to one instrument, any ownership."""
+    """What this account holds in one instrument, under TWO different questions.
+
+    ``amount`` is the *total invested* term: capital currently COMMITTED to this
+    instrument under any ownership -- direct positions, copy-trader mirrors and
+    pending orders alike, exactly as eToro's `calculate-total-invested` formula
+    folds them.  It is cost basis, verified on the live demo account 2026-08-14:
+    ``amount / units`` reproduces the independently reported ``openRate`` to
+    within 0.005% on 7/7 positions.  Three capital controls read it with that
+    meaning and are right to (`_risk_and_amount`'s instrument capacity, and the
+    portfolio-capacity / drawdown gates sharing the snapshot).
+
+    ⚠⚠ It is therefore NOT this instrument's market value, and the gap is not
+    small: measured across the same account, all 38 reported instruments
+    disagreed, direct holdings by -27.42% to +26.66%, and **33 of the 38 had no
+    direct position at all** -- they are copy-trader mirrors folded in by the
+    formula.  Feeding ``amount`` to a weight computation yields a coherent
+    verdict to the wrong question, with every field internally consistent and
+    nothing malformed to refuse on (#2704).
+
+    ``direct_long_market_value`` answers the other question: the DIRECT long
+    holding's market value, ``sum(amount + unrealizedPnL.pnL)`` over this
+    instrument's ``isBuy`` positions, with mirrors and pending orders excluded.
+    That reading is established by independent measurement rather than by
+    decomposing the equity identity -- ``(amount + pnL) / units`` lands on our
+    separately fed ``quotes.last`` at -0.00% on four of seven live positions,
+    the residuals tracking quote staleness, and two lots of one instrument
+    opened at different rates imply the same current price.
+
+    ⚠⚠ The short arm is a COUNT and deliberately not a money total.  No monetary
+    sum can carry "a short exists": two lots can offset to zero and a single
+    short can sit at ``amount + pnL == 0``, either of which would be
+    indistinguishable from absence.  A count is zero only when there is nothing
+    to count.  ``direct_long_positions`` exists for the same reason one level
+    down -- a zero market value is otherwise ambiguous between "no holding" and
+    "a holding wiped out", and the 33 mirror-only rows above are the first case.
+
+    ⚠ A negative ``direct_long_market_value`` is NOT refused at parse time: it
+    sums a signed term, so it is an extreme-but-legitimate state rather than
+    response drift, unlike ``amount`` whose terms are all documented
+    non-negative.  The refusal lives where the number is used, at
+    ``strategy_core_allocator._state_refusal``.
+    """
 
     instrument_id: int
     amount: Decimal
+    direct_long_market_value: Decimal
+    direct_long_positions: int
+    direct_short_positions: int
 
 
 @dataclass(frozen=True)

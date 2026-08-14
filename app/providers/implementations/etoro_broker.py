@@ -1198,6 +1198,27 @@ def _parse_account_risk_snapshot(
             raise TradingPreflightParseError("account P&L instrument id must be positive")
         return value
 
+    def _is_buy(row: dict[str, Any]) -> bool:
+        """Read a direct position's DIRECTION, failing closed on absence.
+
+        The portal documents ``isBuy`` on ``clientPortfolio.positions[]`` as
+        "true for long (buy) positions, false for short (sell) positions", and
+        it was present on 7/7 positions of the live demo account (2026-08-14).
+        ⚠ All seven were ``true``, so the short branch is specified and
+        unit-tested but UNOBSERVED.
+
+        This fails closed where ``_account_currency_id`` deliberately does not,
+        and the difference is not inconsistency: that field is not a formula
+        input, whereas direction decides which side of the sleeve a position
+        lands on.  Defaulting it would silently book a short as a long.
+        """
+        if "isBuy" not in row:
+            raise TradingPreflightParseError("account P&L position isBuy is required")
+        value = row["isBuy"]
+        if not isinstance(value, bool):
+            raise TradingPreflightParseError("account P&L position isBuy must be a boolean")
+        return value
+
     def _account_currency_id(parent: dict[str, Any]) -> int | None:
         """Read the reported account currency id, or None when absent.
 
@@ -1231,6 +1252,12 @@ def _parse_account_risk_snapshot(
         open_orders = _array(portfolio, "ordersForOpen")
         orders = _array(portfolio, "orders")
         investments: dict[int, Decimal] = {}
+        # The DIRECT-position half, kept apart from `investments` on purpose: the
+        # total-invested formula folds mirrors and pending orders in, and a core
+        # sleeve is neither (#2704).
+        direct_long_value: dict[int, Decimal] = {}
+        direct_long_count: dict[int, int] = {}
+        direct_short_count: dict[int, int] = {}
         total_invested = Decimal("0")
         unrealized = Decimal("0")
 
@@ -1239,9 +1266,18 @@ def _parse_account_risk_snapshot(
             amount = _money(row, "amount")
             pnl = _money(_row(row.get("unrealizedPnL"), "positions.unrealizedPnL"), "pnL")
             instrument_id = _instrument_id(row)
+            is_buy = _is_buy(row)
             total_invested += amount
             unrealized += pnl
             investments[instrument_id] = investments.get(instrument_id, Decimal("0")) + amount
+            if is_buy:
+                # `amount + pnL` is this position's contribution to the equity
+                # identity, and for a long holding that IS its market value --
+                # cross-checked against our independent quote feed (#2704).
+                direct_long_value[instrument_id] = direct_long_value.get(instrument_id, Decimal("0")) + amount + pnl
+                direct_long_count[instrument_id] = direct_long_count.get(instrument_id, 0) + 1
+            else:
+                direct_short_count[instrument_id] = direct_short_count.get(instrument_id, 0) + 1
 
         for item in mirrors:
             mirror = _row(item, "mirrors")
@@ -1288,7 +1324,13 @@ def _parse_account_risk_snapshot(
             unrealized_pnl=unrealized,
             equity=equity,
             instrument_investments=tuple(
-                BrokerInstrumentInvestment(instrument_id, amount)
+                BrokerInstrumentInvestment(
+                    instrument_id,
+                    amount,
+                    direct_long_value.get(instrument_id, Decimal("0")),
+                    direct_long_count.get(instrument_id, 0),
+                    direct_short_count.get(instrument_id, 0),
+                )
                 for instrument_id, amount in sorted(investments.items())
             ),
             observed_at=observed_at,
