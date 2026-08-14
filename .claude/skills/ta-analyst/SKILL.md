@@ -16,6 +16,13 @@ Also read it before citing any TA figure in an operator-facing surface or
 prompt — the interpretation rules below are the encoded ones, not textbook
 defaults.
 
+⚠ Domain chart-reading knowledge (what a formulation means, its published
+source and honest evidence status, the layered chart-read protocol) lives in
+`.claude/skills/market-technician/SKILL.md` — this file stays OUR encoding
+only. The platform's regime + level modules (`app/services/market_regime.py`,
+`app/services/price_levels.py`, both 2026-08-14, S5-S10 §1–§2) postdate this
+skill and belong to the strategy platform side of the boundary below.
+
 ## ⚠ Scope boundary — this skill is CURRENT-STATE TA only
 
 Everything below describes TA as it works **today**: indicators computed on the
