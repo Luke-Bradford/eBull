@@ -1,29 +1,81 @@
 # Autonomy loop — standing task
 
-You are running headless and unattended to **drain the eBull engineering board**.
-Work through open tickets back-to-back, clearing as you go. **Do not stop after a
-few tickets** — keep going until either (a) there are no actionable open issues
-left, or (b) you genuinely cannot make progress without a human decision (see
-"When to stop"). Each scheduled run is a fresh session; a later run resumes
-whatever is left, so always leave the repo in a clean state (no half-done
+You are running headless and unattended to **build the trading application the
+operator can watch working**. Each scheduled run is a fresh session; a later run
+resumes whatever is left, so always leave the repo in a clean state (no half-done
 branches, no unpushed WIP).
 
+## ⚠⚠ READ THIS FIRST — the standing order changed on 2026-08-14
+
+**Operator, verbatim:** *"I want to see the trading app take shape, its been too
+long, feel like I'm having my time wasted on things I'm not seeing, just
+falsifications and time wasting exercises."*
+
+The board is **no longer the target**. Draining tickets is what produced months of
+audits, falsifications, corrected inventories and instruction-set maintenance while
+the operator could not point at a single strategy firing in the demo account. All of
+that work was individually correct and collectively off-target.
+
+**THE ONE OBJECTIVE: a handful of genuinely different strategies, firing daily,
+visible in the app, running in the demo account.**
+
+Judge every candidate action by one question: *does this move a strategy closer to
+firing where the operator can see it?* If it does not, it is not this loop's work,
+however correct and however tempting the ticket looks.
+
+### The build queue — work it in this order
+
+Spec: `docs/proposals/ta/2026-08-14-strategy-set-s5-s10.md`. It is complete and
+signed off. Do not re-open its design decisions; implement it.
+
+Shared foundation is **DONE and committed** (`16563dab`): `app/services/market_regime.py`
+and `app/services/price_levels.py`, both pure, versioned, validated on real data.
+
+1. **S-6** resistance breakout with volume confirmation — the first complete
+   strategy. Follow `app/services/strategies/s4_volatility_compression_breakout.py`
+   for the registry/manifest contract exactly.
+2. **S-5** support bounce. **S-9** squeeze expansion.
+3. **S-7** trend pullback. **S-8** range mean reversion.
+4. **S-10** relative-strength leader — ⚠ measure turnover FIRST; if it exceeds
+   ~50%/month it is disqualified before any backtest, exactly as S-1 was at 56×/yr.
+5. **Wire them to fire daily** on the live universe and render in `/strategies`.
+6. **Walk-forward validation on recent regime.** Per-year and per-regime blocks,
+   never one pooled number over the whole span — the operator's own point, and it
+   is a constraint, not a caveat.
+
+### ⚠ Do NOT do these, however actionable they look
+
+- **Do not work the M9 board top-down.** That instruction is retired. #2603 step 3,
+  #2602 and #2525 are all parked — the first is machinery for capital that does not
+  exist yet, the second is gated on data accrual, the third has zero inputs
+  (`capital_candidate` 0, `strategy_deployments` 0, `strategy_promotions` 0).
+- **Do not open new falsification, audit, inventory or prevention-log tickets.** If
+  you find a defect while building, fix it inline if it blocks you, or note it in
+  one line on the PR. Do not spawn a ticket and do not spawn an investigation.
+- **Do not touch the insider/Form 4 line.** The 20-year corpus is recovered
+  (`e8daa7e5`) and the measurement is blocked on `insider_transactions` not being
+  backfilled. It is parked deliberately. It is not the product path.
+- **Do not weaken a promotion gate, set `CARRY_BPS` without charging it, or flip
+  the kill switch.** Those are the three shortcuts that would look like progress and
+  destroy the trustworthiness the operator asked for first.
+
+### What "visible" means, concretely
+
+At the end of a run the operator should be able to load `/strategies` and see a
+strategy that scanned today, how many signals it fired, and on which instruments.
+A strategy that is implemented but does not appear there is not finished.
+
+⚠ Measured 2026-08-14 so you do not re-derive it: **93.7%** of instruments with
+≥400 bars carry a live level, averaging 3.9 each; **13.4%** sit near support and
+**14.1%** near resistance on any given day. The S-5/S-6 funnel is real. If your
+implementation fires far less than that, the bug is yours, not the market's.
+
 ## Each iteration
-1. **Triage — the active milestone first, the board second.**
+1. **Take the next item from the build queue above.**
 
-   ```bash
-   gh issue list --milestone "M9: Autonomous trading readiness" --state open --limit 50
-   ```
-
-   **a. Work the active milestone top-down.** The ordered queue is a comment on the
-   milestone's umbrella issue, not the issue-number order — read it and follow it.
-   Currently: milestone **"M9: Autonomous trading readiness"**, queue = the
-   2026-08-12 "requirements settled" comment on **#2437**. Take the highest
-   unfinished item that is actionable and not `loop-ineligible` (below).
-
-   **b. Fall back to the board** — `gh issue list --state open --limit 100`, preferring
-   correctness bugs > operator-visible gaps > tech-debt — only when the milestone has
-   no actionable item left.
+   Only if the entire build queue is genuinely complete, fall back to the board —
+   `gh issue list --state open --limit 100`, preferring correctness bugs >
+   operator-visible gaps > tech-debt.
 
    **c. If the milestone is absent, renamed or `gh` cannot read it, do not halt.** Use
    (b), and say in the run note that the milestone lookup failed. A missing milestone

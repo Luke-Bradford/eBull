@@ -157,9 +157,19 @@ class TestInventory:
         assert fsnds_q[0].optional is True, "boundary FSNDS quarter must be optional"
         for a in fsnds_q[1:]:
             assert a.optional is False, f"{a.name} must stay required"
-        # Every non-13F, non-FSDS, non-FSNDS archive stays required.
+        # Insider mirrors the same posture (#2701). SEC's publication lag for the
+        # insider data set exceeds one quarter: measured 2026-08-14, the most
+        # recent COMPLETED quarter (2026q2) was still 404 while 2026q1 served.
+        # `last_n_quarters` already excludes the in-progress quarter, so the
+        # newest entry here is a completed-but-unpublished quarter and must be
+        # optional or every run fails on it.
+        insider = [a for a in inventory if a.name.startswith("insider_")]
+        assert insider[0].optional is True, "newest insider quarter must be optional"
+        for a in insider[1:]:
+            assert a.optional is False, f"{a.name} must stay required"
+        # Every archive outside those four families stays required.
         for a in inventory:
-            if not a.name.startswith(("form13f_", "fsds_", "fsnds_")):
+            if not a.name.startswith(("form13f_", "fsds_", "fsnds_", "insider_")):
                 assert a.optional is False, f"{a.name} must stay required"
 
     def test_archive_urls_use_correct_path_prefixes(self) -> None:

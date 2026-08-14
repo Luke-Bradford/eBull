@@ -58,6 +58,20 @@ logger = logging.getLogger(__name__)
 
 SEC_BASE_URL: Final[str] = "https://www.sec.gov"
 
+#: First quarter the SEC's insider-transactions data set actually serves.
+#:
+#: ⚠⚠ MEASURED, NOT DERIVED FROM THE MANDATE DATE (#2701, 2026-08-14). The Form
+#: 3/4/5 XML mandate is 2003-06-30 and `data-sources/sec-edgar.md` speaks of
+#: "decades of XML coverage" — but the DERIVED quarterly data set is a different
+#: artefact with a different start. HEAD probes against the live host with the
+#: app User-Agent: 2003q1, 2004q1, 2005q1, 2005q2, 2005q3, 2005q4 all 404;
+#: 2006q1 serves 17.3 MB. Reproduce with the probe recorded on #2701.
+#:
+#: ⚠ Lexicographic comparison is safe for this label format ONLY because it is
+#: zero-padded `YYYYqN` with a single-digit quarter — "2005q4" < "2006q1" holds.
+#: A change to the label format breaks the clamp silently.
+INSIDER_DATASET_FIRST_QUARTER: Final[str] = "2006q1"
+
 
 # Disk + bandwidth budgets. Configurable by env in callers.
 DEFAULT_MIN_FREE_BYTES: Final[int] = 25 * 1024**3  # 25 GB
@@ -299,11 +313,28 @@ def build_bulk_archive_inventory(
                 optional=(idx == 0),
             )
         )
-    for q in last_n_quarters(n_quarters_insider, today=today):
+    # ⚠ TWO BOUNDARY RULES, BOTH MEASURED AGAINST THE LIVE SEC HOST 2026-08-14
+    # (#2701), not inferred from the Form 4 XML mandate date.
+    #
+    # 1. FLOOR. The XML *mandate* is 2003-06-30, but the SEC's *derived* data set
+    #    begins at 2006q1: 2005q4/q3/q2/q1 and all of 2003-2004 are hard 404s.
+    #    Walking past the floor generates permanent, guaranteed 404s, so the span
+    #    is clamped rather than trusted to the caller's count.
+    # 2. NEWEST IS OPTIONAL. `last_n_quarters` excludes the in-progress quarter,
+    #    but SEC's publication lag exceeds one quarter — on 2026-08-14 the most
+    #    recent completed quarter (2026q2) was still 404 while 2026q1 served.
+    #    `n_quarters_13f` already marks its index 0 optional for exactly this;
+    #    the insider loop did not, so any raise of `n_quarters_insider` made
+    #    every run fail on the current quarter.
+    insider_quarters = [
+        q for q in last_n_quarters(n_quarters_insider, today=today) if q >= INSIDER_DATASET_FIRST_QUARTER
+    ]
+    for idx, q in enumerate(insider_quarters):
         archives.append(
             BulkArchive(
                 name=f"insider_{q}.zip",
                 url=f"{SEC_BASE_URL}/files/structureddata/data/insider-transactions-data-sets/{q}_form345.zip",
+                optional=(idx == 0),
             )
         )
     for q in last_n_quarters(n_quarters_nport, today=today):
@@ -1404,11 +1435,27 @@ async def download_bulk_archives(
         # post-download).
         reuse_decisions = await _preflight_etag_keyed_reuse(client, archives, target_dir, rate_limiter=rate_limiter)
 
-        # Bandwidth probe against the first archive (submissions.zip).
+        # Bandwidth probe against the first archive KNOWN TO BE PUBLISHED.
         # If every archive is reused, the probe is unnecessary (0 bytes
         # to fetch) but still cheap (4 MB range-GET) and confirms SEC
         # is reachable before we declare the run a no-op.
-        probe_url = archives[0].url
+        #
+        # ⚠⚠ NOT `archives[0]` — an OPTIONAL archive is one SEC may not have
+        # published yet, and probing it 404s, which downgrades the ENTIRE run to
+        # mode="fallback": zero downloads, `ok=0`, and **exit code 0**. Marking
+        # an archive optional protects the DOWNLOAD; it never protected the
+        # PROBE, so the two guards disagreed and the weaker one ran first.
+        #
+        # Measured #2701, 2026-08-14: raising `n_quarters_insider` put the
+        # not-yet-published 2026q2 at index 0 and silently disabled bulk
+        # download entirely. `n_quarters_13f` has carried `optional=(idx == 0)`
+        # since #1423 and had the same latent exposure whenever its index-0
+        # window was the probe target.
+        #
+        # Falls back to `archives[0]` only if EVERY archive is optional, which
+        # keeps a genuine connectivity failure observable rather than skipped.
+        probe_archive = next((a for a in archives if not a.optional), archives[0])
+        probe_url = probe_archive.url
         try:
             measured = await measure_bandwidth_mbps(client, probe_url=probe_url, rate_limiter=rate_limiter)
         except Exception as exc:  # noqa: BLE001
