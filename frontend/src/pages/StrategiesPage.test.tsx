@@ -826,6 +826,28 @@ describe("StrategiesPage", () => {
     expect(screen.getByText(/Result version criterion7-v1/)).toBeInTheDocument();
   });
 
+  it("distinguishes a result version that never measured the hold from one that closed no trades", async () => {
+    // The other branch of the same blank. `sql/347` permits a null median under
+    // `criterion7-v2` ONLY when trade_count is 0, so under the current version an
+    // empty cell means "closed nothing" — a different claim from "we never
+    // measured this", and the operator must not read one as the other.
+    const measured = structuredClone(OVERVIEW);
+    const strategy = measured.strategies[0]!;
+    strategy.purpose = "harness_validation";
+    const arm = strategy.evidence_windows[0]!.arms[0]!;
+    arm.metric_set_id = "criterion7-v2";
+    arm.median_hold_days = null;
+    arm.trade_count = 0;
+    arm.losing_trade_count = 0;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(measured);
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+
+    expect(await screen.findByText("No completed trades")).toBeInTheDocument();
+    expect(screen.queryByText(/Result version/)).not.toBeInTheDocument();
+  });
+
   it("never shows a median holding period without both of its exclusion counts", async () => {
     // The median is right-censored and the bias direction is not determinable a
     // priori, so open and unpriced counts are separate exclusions that must both
