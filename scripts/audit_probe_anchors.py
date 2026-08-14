@@ -126,6 +126,11 @@ def _anchor_and_source(edit: tuple[Any, ...], probe: tuple[Any, ...], default: P
 #: checks for. See the function's docstring for what that leaves unproved.
 _LAUNCH_PROBE = "import runpy, sys; runpy.run_path(sys.argv[1], run_name='__harness_launch_check__')"
 
+#: Generous by three orders of magnitude — a harness's top level is a sibling
+#: import and a table of tuples, measured at ~27 ms. The bound exists so a hang
+#: fails the gate instead of stopping it.
+_LAUNCH_TIMEOUT_SECONDS = 60
+
 
 def _launch_failure(path: Path, root: Path) -> str | None:
     """The error a harness raises when its top level is executed BY PATH, or ``None``.
@@ -158,13 +163,22 @@ def _launch_failure(path: Path, root: Path) -> str | None:
     can go.
     """
     env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
-    proc = subprocess.run(  # noqa: S603
-        [sys.executable, "-c", _LAUNCH_PROBE, str(root / path)],
-        cwd=str(root / "scripts"),
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", _LAUNCH_PROBE, str(root / path)],
+            cwd=str(root / "scripts"),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=_LAUNCH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # ⚠ A HANG IS A FAILURE, NOT A WAIT. Without the bound, a harness whose
+        # module top level blocks — a future edit adding I/O, a `input()`, an
+        # import that reaches the network — would hang the pre-push gate and CI
+        # forever rather than failing. Reported like any other launch failure so
+        # the operator sees which harness, not a killed job that says nothing.
+        return f"module top level did not finish within {_LAUNCH_TIMEOUT_SECONDS}s — it blocks or loops"
     if proc.returncode == 0:
         return None
     stderr = proc.stderr.strip().splitlines()

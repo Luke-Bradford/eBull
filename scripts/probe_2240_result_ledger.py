@@ -210,17 +210,16 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "both gate counts read off the same relation (the unrecorded-access refusal goes dead)",
         LEDGER,
         DB_TESTS,
+        # ⚠ TWO ONE-LINE EDITS, not one four-line span (review NITPICK, PR #2700).
+        # The relation and its predicate are what make the count read the access
+        # log; the two `strategy_id` / `strategy_version` lines between them are
+        # shared verbatim with the sibling subquery and identify nothing. Keeping
+        # them in the anchor would have let a rename of either kill this probe
+        # without touching the rule — the decay #2695 exists to stop. Both lines
+        # below are unique on their own indentation.
         [
-            (
-                "           FROM strategy_holdout_accesses\n"
-                "          WHERE strategy_id = %(strategy_id)s\n"
-                "            AND strategy_version = %(strategy_version)s\n"
-                "            AND access_kind = 'evaluate')",
-                "           FROM strategy_results_store\n"
-                "          WHERE strategy_id = %(strategy_id)s\n"
-                "            AND strategy_version = %(strategy_version)s\n"
-                "            AND namespace = 'hold_out')",
-            )
+            ("           FROM strategy_holdout_accesses\n", "           FROM strategy_results_store\n"),
+            ("            AND access_kind = 'evaluate')", "            AND namespace = 'hold_out')"),
         ],
         "test_the_two_counts_read_different_relations",
     ),
