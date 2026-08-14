@@ -69,12 +69,16 @@ from app.services.strategy_live_gate import (
 )
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_monitoring import (
+    ShareUnavailableReason,
     StrategyAttribution,
     StrategyControlState,
+    StrategyFireRate,
     StrategyPnl,
+    WeeklyRateUnavailableReason,
     load_attribution,
     load_control_state,
     load_entry_block_state,
+    load_fire_rate,
     load_owned_pnl,
     realised_pnl_for_keys,
 )
@@ -251,6 +255,7 @@ class StrategyOverview(BaseModel):
     all_recent_evidence_complete: bool
     stage: str | None
     attribution: StrategyAttributionView
+    fire_rate: StrategyFireRateView
     pnl: StrategyPnlView
     allocation: StrategyAllocationView
     allocation_ready: bool
@@ -278,6 +283,36 @@ class StrategyAttributionView(BaseModel):
     average_slippage_pct: Decimal | None
     average_stressed_cost_usd: Decimal | None
     max_observed_account_drawdown_pct: Decimal | None
+
+
+class StrategyFireRateView(BaseModel):
+    """Entry fire evidence for the current version, from the durable census.
+
+    Source and construction: ``app/services/strategy_monitoring.py::derive_fire_rate``
+    and ``docs/proposals/ta/2026-08-14-strategy-fire-rate.md``. #2623 gap 2.
+
+    ⚠ ``fired_share_of_evaluable`` is the comparable number — dimensionless, so
+    universe size does not move it. ``entries_per_calendar_week`` is throughput and
+    is universe-size-dependent by design; it is ``None`` until the version has a
+    bar-date axis that can carry a rate.
+
+    ⚠ Each nullable value carries its OWN reason, because the two nulls are
+    independent: a version scanned over several days on which every bar was
+    ``not_evaluable`` rates at ``0.00``/week and has no share at all.
+    """
+
+    universe: str
+    scanned_days: int
+    fired_days: int
+    fired_entry_signals: int
+    evaluable_entry_decisions: int
+    not_evaluable_entry_decisions: int
+    fired_share_of_evaluable: Decimal | None
+    entries_per_calendar_week: Decimal | None
+    first_scanned_bar: date | None
+    last_scanned_bar: date | None
+    share_unavailable_reason: ShareUnavailableReason | None
+    weekly_rate_unavailable_reason: WeeklyRateUnavailableReason | None
 
 
 class StrategyPnlView(BaseModel):
@@ -1208,6 +1243,9 @@ def get_strategy_overview(
         outcome_version=OUTCOME_RULE_SET_VERSION,
         input_version=QUARANTINE_RULE_SET_VERSION,
     )
+    # Current versions only: a strategy_version is a rule set, so pooling two
+    # would average two arithmetics into one rate (#2670's lesson).
+    fire_rate_by_strategy = load_fire_rate(conn, versions=version_values)
     pnl_versions = sorted({*version_values, *(version for _strategy_id, version in paper_deployment_keys)})
     pnl_by_strategy = load_owned_pnl(conn, versions=pnl_versions)
     control_by_strategy = load_control_state(conn, versions=version_values)
@@ -1355,6 +1393,9 @@ def get_strategy_overview(
         )
         key = (strategy_id, versions[strategy_id])
         attribution = attribution_by_strategy.get(key, StrategyAttribution())
+        # A key absent from the census has never been scanned, which the default
+        # `rate_unavailable_reason` states rather than reading as a zero rate.
+        fire_rate = fire_rate_by_strategy.get(key, StrategyFireRate())
         pnl = pnl_by_strategy.get(key, StrategyPnl())
         control = control_by_strategy.get(key, StrategyControlState())
         allocation_refusals: list[str] = []
@@ -1432,6 +1473,7 @@ def get_strategy_overview(
                 all_recent_evidence_complete=all_complete,
                 stage=control.stage,
                 attribution=StrategyAttributionView(**attribution.__dict__),
+                fire_rate=StrategyFireRateView(**fire_rate.__dict__),
                 pnl=StrategyPnlView(
                     currency="USD",
                     strategy_trade_count=pnl.strategy_trade_count,

@@ -11,14 +11,31 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final, Literal
 
 import psycopg
 import psycopg.rows
 
+from app.services.strategy_signal_scan import SCAN_UNIVERSE
 from app.services.valuation import resolve_quote_price
+
+#: Calendar days per week. Not a trading-day convention — the weekly rate divides
+#: by the measured CALENDAR span of the scanned-bar axis, exactly as
+#: ``strategy_statistics.periods_per_year`` divides by ``span_days / 365.25``.
+_DAYS_PER_WEEK: Final = 7
+_SHARE_PRECISION: Final = Decimal("0.0001")
+_RATE_PRECISION: Final = Decimal("0.01")
+
+#: Why `fired_share_of_evaluable` is null. `no_evaluable_decisions` means every bar
+#: was `not_evaluable`, so the strategy was never offered a decision — its propensity
+#: is unknown rather than zero.
+ShareUnavailableReason = Literal["never_scanned", "no_evaluable_decisions"]
+
+#: Why `entries_per_calendar_week` is null. Independent of the share's reason: a
+#: multi-day all-`not_evaluable` version rates at 0.00/week and has no share at all.
+WeeklyRateUnavailableReason = Literal["never_scanned", "single_scan_day"]
 
 
 @dataclass(frozen=True)
@@ -43,6 +60,36 @@ class StrategyAttribution:
     average_slippage_pct: Decimal | None = None
     average_stressed_cost_usd: Decimal | None = None
     max_observed_account_drawdown_pct: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class StrategyFireRate:
+    """How often a strategy version fired an entry, from the durable census.
+
+    Defaults describe a version the scan has never reached — which is the state a
+    freshly-rotated version is in, so it must be representable rather than absent.
+    """
+
+    #: #2288's labelling contract: a metric computed on a survivor-only universe is
+    #: marked as such. The census carries no `universe` column and does not need
+    #: one — a universe change mints a new `strategy_version` (`strategy_signal_scan`),
+    #: and this reads one version at a time, so every row was written under this label.
+    universe: str = SCAN_UNIVERSE
+    scanned_days: int = 0
+    fired_days: int = 0
+    fired_entry_signals: int = 0
+    evaluable_entry_decisions: int = 0
+    #: Reported, not hidden: these are excluded from `fired_share_of_evaluable`'s
+    #: denominator, and an exclusion nobody can see is an exclusion nobody checks.
+    not_evaluable_entry_decisions: int = 0
+    fired_share_of_evaluable: Decimal | None = None
+    entries_per_calendar_week: Decimal | None = None
+    first_scanned_bar: date | None = None
+    last_scanned_bar: date | None = None
+    #: Each nullable value above names its own reason. Invariant, both directions:
+    #: a value is None if and only if its reason is not.
+    share_unavailable_reason: ShareUnavailableReason | None = "never_scanned"
+    weekly_rate_unavailable_reason: WeeklyRateUnavailableReason | None = "never_scanned"
 
 
 @dataclass(frozen=True)
@@ -216,6 +263,163 @@ def load_attribution(
             max_observed_account_drawdown_pct=row["max_observed_account_drawdown_pct"],
         )
     return result
+
+
+#: Entry-signal census aggregates for one strategy version. The population is
+#: ``strategy_signal_daily_counts`` — the DURABLE census — and NOT
+#: ``strategy_signals``. See ``derive_fire_rate`` for why that distinction is the
+#: whole point of this query.
+#:
+#: ⚠ ``sum(...) FILTER`` returns NULL, not 0, for a version with no matching
+#: bucket. s2 has no fired bucket at all, so an uncoalesced numerator reports a
+#: scanned strategy as unmeasured. Coalesced here rather than at the call site so
+#: the pure derivation never has to distinguish "absent bucket" from "no rows".
+_FIRE_RATE_SQL = """
+    SELECT strategy_id, strategy_version,
+           COUNT(DISTINCT signal_bar_date) AS scanned_days,
+           COUNT(DISTINCT signal_bar_date) FILTER (WHERE verdict = 'fired')
+               AS fired_days,
+           COALESCE(SUM(row_count) FILTER (WHERE verdict = 'fired'), 0)
+               AS fired_entry_signals,
+           COALESCE(SUM(row_count) FILTER (WHERE verdict IN ('fired', 'not_fired')), 0)
+               AS evaluable_entry_decisions,
+           COALESCE(SUM(row_count) FILTER (WHERE verdict = 'not_evaluable'), 0)
+               AS not_evaluable_entry_decisions,
+           MIN(signal_bar_date) AS first_scanned_bar,
+           MAX(signal_bar_date) AS last_scanned_bar
+    FROM strategy_signal_daily_counts
+    WHERE signal_kind = 'entry' AND strategy_version = ANY(%(versions)s)
+    GROUP BY strategy_id, strategy_version
+"""
+
+
+def derive_fire_rate(
+    *,
+    scanned_days: int,
+    fired_days: int,
+    fired_entry_signals: int,
+    evaluable_entry_decisions: int,
+    not_evaluable_entry_decisions: int,
+    first_scanned_bar: date | None,
+    last_scanned_bar: date | None,
+) -> StrategyFireRate:
+    """Turn one version's entry-census aggregates into the two rates.
+
+    Spec: ``docs/proposals/ta/2026-08-14-strategy-fire-rate.md``. Issue #2623 gap 2.
+
+    ⚠⚠ THE SOURCE IS THE CENSUS BECAUSE ``strategy_signals`` IS SPARSE. Fired rows
+    stay in ``strategy_signals`` durably because outcomes refer to ``signal_id``;
+    routine negatives are pruned to a 90-day partition and survive only as
+    ``strategy_signal_daily_counts`` rows. So ``strategy_signals`` can see only the
+    days on which something fired — a correct numerator over an unusable
+    denominator. Measured on the full population 2026-08-14: it shows 1 bar date
+    where the census shows 5 on four of nine version keys (a **5x** overstatement),
+    and s2 — which scanned and fired nothing — has no rows in it at all, so it
+    would vanish from the surface rather than read an honest zero. See
+    ``docs/review-prevention-log.md`` on a sparse table's storage predicate being
+    part of the census definition.
+
+    ⚠⚠ TWO RATES, BECAUSE THEY ANSWER DIFFERENT QUESTIONS AND NEITHER SUBSTITUTES.
+
+    ``fired_share_of_evaluable`` is the propensity: what fraction of the decisions
+    the strategy was actually able to make came out ``fired``. Dimensionless, so
+    universe growth does not move it. ``not_evaluable`` decisions are excluded from
+    its denominator — those bars were never judged (``insufficient_warmup``,
+    ``no_fill_bar`` and six siblings, ``sql/276:20``), and counting them as declined
+    opportunities would suppress the share for a chance never offered.
+
+    ``entries_per_calendar_week`` is the throughput: how many opportunities land per
+    week of market. It is universe-size-dependent BY DESIGN — the operator trades
+    this universe — which is exactly why it cannot stand alone as "the fire rate".
+
+    ⚠⚠ THE WEEKLY RATE IS MEASURED OFF THE BAR-DATE AXIS AND REFUSES A ONE-DAY
+    AXIS. It is NOT ``fires per scanned day x 5``. ``strategy_statistics`` settled
+    this class of decision already: *"the annualisation factor is measured off the
+    date axis, never the 252 convention … 252 is a convention, not a source rule"*,
+    and ``periods_per_year`` raises rather than invent a span for a single-date
+    axis, because *"inventing one would put a divide-by-zero behind a plausible
+    number"*. A frozen trading-week constant is that same mistake at the week
+    scale, so the span comes off the axis and a rate that the axis cannot carry is
+    ``None`` with a stated reason.
+
+    ⚠ Every current strategy version holds exactly one scanned bar date today, so
+    the weekly rate is ``None`` for all four. That is the refusal working, not a
+    gap — the prior versions carry 5-date axes and rate fine.
+
+    ⚠⚠ THE TWO NULLS NEED TWO REASONS, BECAUSE THEY ARE INDEPENDENT. A version
+    with two or more scanned days on which EVERY bar was ``not_evaluable`` has a
+    computable weekly rate (no fires over a real span is ``0.00``) and an
+    UNCOMPUTABLE share — its propensity is unknown, not zero, because it was never
+    offered a decision. One enum cannot carry both, so a single
+    ``rate_unavailable_reason`` left that share null with nothing saying why. Each
+    nullable value names its own reason, and the invariant is exact in both
+    directions: a value is ``None`` if and only if its reason is not.
+    """
+    if scanned_days == 0:
+        return StrategyFireRate(
+            share_unavailable_reason="never_scanned",
+            weekly_rate_unavailable_reason="never_scanned",
+        )
+
+    share: Decimal | None = None
+    share_reason: ShareUnavailableReason | None = None
+    if evaluable_entry_decisions > 0:
+        share = (Decimal(fired_entry_signals) / Decimal(evaluable_entry_decisions)).quantize(_SHARE_PRECISION)
+    else:
+        share_reason = "no_evaluable_decisions"
+
+    per_week: Decimal | None = None
+    weekly_reason: WeeklyRateUnavailableReason | None = None
+    # `periods_per_year`'s own guard, at the week scale: an axis needs two distinct
+    # dates and a positive span before any rate can be measured off it.
+    span_days = 0
+    if first_scanned_bar is not None and last_scanned_bar is not None:
+        span_days = (last_scanned_bar - first_scanned_bar).days
+    if scanned_days < 2 or span_days <= 0:
+        weekly_reason = "single_scan_day"
+    else:
+        per_week = (Decimal(fired_entry_signals) * Decimal(_DAYS_PER_WEEK) / Decimal(span_days)).quantize(
+            _RATE_PRECISION
+        )
+
+    return StrategyFireRate(
+        scanned_days=scanned_days,
+        fired_days=fired_days,
+        fired_entry_signals=fired_entry_signals,
+        evaluable_entry_decisions=evaluable_entry_decisions,
+        not_evaluable_entry_decisions=not_evaluable_entry_decisions,
+        fired_share_of_evaluable=share,
+        entries_per_calendar_week=per_week,
+        first_scanned_bar=first_scanned_bar,
+        last_scanned_bar=last_scanned_bar,
+        share_unavailable_reason=share_reason,
+        weekly_rate_unavailable_reason=weekly_reason,
+    )
+
+
+def load_fire_rate(
+    conn: psycopg.Connection[Any], *, versions: Sequence[str]
+) -> dict[tuple[str, str], StrategyFireRate]:
+    """Entry fire evidence per ``(strategy_id, strategy_version)`` from the census.
+
+    A key absent from the result has never been scanned; the caller supplies
+    ``StrategyFireRate()``, whose default ``rate_unavailable_reason`` says so.
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(_FIRE_RATE_SQL, {"versions": list(versions)})
+        rows = cur.fetchall()
+    return {
+        (str(row["strategy_id"]), str(row["strategy_version"])): derive_fire_rate(
+            scanned_days=int(row["scanned_days"]),
+            fired_days=int(row["fired_days"]),
+            fired_entry_signals=int(row["fired_entry_signals"]),
+            evaluable_entry_decisions=int(row["evaluable_entry_decisions"]),
+            not_evaluable_entry_decisions=int(row["not_evaluable_entry_decisions"]),
+            first_scanned_bar=row["first_scanned_bar"],
+            last_scanned_bar=row["last_scanned_bar"],
+        )
+        for row in rows
+    }
 
 
 _OWNED_LIFECYCLE_SQL = """
@@ -536,12 +740,17 @@ def load_entry_block_state(conn: psycopg.Connection[Any]) -> StrategyEntryBlockS
 
 
 __all__ = [
+    "ShareUnavailableReason",
     "StrategyAttribution",
     "StrategyControlState",
     "StrategyEntryBlockState",
+    "StrategyFireRate",
     "StrategyPnl",
+    "WeeklyRateUnavailableReason",
+    "derive_fire_rate",
     "load_attribution",
     "load_control_state",
     "load_entry_block_state",
+    "load_fire_rate",
     "load_owned_pnl",
 ]
