@@ -128,20 +128,36 @@ def _launch_failure(path: Path, root: Path) -> str | None:
     it is the whole point — ``import_module`` cannot, because it needs the root
     on the path to find the harness in the first place.
 
+    ⚠⚠ ``sys.modules`` MUST BE PURGED TOO, and this is the half that is easy to
+    miss. The sweep above has already ``import_module``-ed a harness, which
+    imports ``scripts.probe_2240_cost_model`` as a dependency and caches it — so
+    the sibling import inside ``run_path`` is answered from the CACHE and never
+    consults ``sys.path`` at all. Reproducing the path without the state is a
+    check that passes on a harness with its fix deliberately removed, which is
+    what the first version of this function did (#2695; found by revert-probing
+    it, not by reading it).
+
     ⚠ ``run_name`` is deliberately NOT ``"__main__"``, so module top level runs
     (the sibling import, the ``PROBES`` table) while ``main()`` does not. These
     harnesses mutate tracked source on disk; an audit that ran one would be a
     far worse defect than the one it is checking for.
     """
-    saved = list(sys.path)
-    sys.path[:] = [str(root / "scripts")] + [entry for entry in saved if entry not in (str(root), "", ".")]
+    saved_path = list(sys.path)
+    saved_modules = {name: mod for name, mod in sys.modules.items() if name == "scripts" or name.startswith("scripts.")}
+    sys.path[:] = [str(root / "scripts")] + [entry for entry in saved_path if entry not in (str(root), "", ".")]
+    for name in saved_modules:
+        del sys.modules[name]
     try:
         runpy.run_path(str(root / path), run_name="__harness_launch_check__")
         return None
     except Exception:
         return traceback.format_exc(limit=2).strip().splitlines()[-1]
     finally:
-        sys.path[:] = saved
+        sys.path[:] = saved_path
+        for name in list(sys.modules):
+            if name == "scripts" or name.startswith("scripts."):
+                del sys.modules[name]
+        sys.modules.update(saved_modules)
 
 
 def main() -> int:
