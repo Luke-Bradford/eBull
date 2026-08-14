@@ -28,13 +28,32 @@ however correct and however tempting the ticket looks.
 Spec: `docs/proposals/ta/2026-08-14-strategy-set-s5-s10.md`. It is complete and
 signed off. Do not re-open its design decisions; implement it.
 
+⚠⚠ **CHECK `STRATEGY_MANIFEST` BEFORE STARTING ANY STRATEGY IN THIS QUEUE.** An
+attended session builds from the same queue, so an item listed below may already
+be on `main` by the time you read this. `python -c "from
+app.services.strategy_manifest import STRATEGY_MANIFEST; print(sorted(STRATEGY_MANIFEST))"`
+settles it in one command. A strategy already in the manifest is DONE — move to
+the next item, do not re-derive it.
+
+Precedent, 2026-08-14: this prompt said "build S-6 first"; S-6 was merged
+attended (#2714) minutes later, and the loop spent an iteration re-doing the
+regime protocol change that was already on main. The queue is a priority order,
+not a claim about what is unbuilt.
+
 Shared foundation is **DONE and committed** (`16563dab`): `app/services/market_regime.py`
 and `app/services/price_levels.py`, both pure, versioned, validated on real data.
 
-1. **S-6** resistance breakout with volume confirmation — the first complete
-   strategy. Follow `app/services/strategies/s4_volatility_compression_breakout.py`
-   for the registry/manifest contract exactly.
-2. **S-5** support bounce. **S-9** squeeze expansion.
+**DONE and on `main` — do NOT rebuild:**
+- **S-6** resistance breakout (#2714) — 2.5 entries/name/yr, 37%/yr turnover.
+- **S-5** support bounce (#2714) — 10.0 entries/name/yr.
+- The regime is already threaded through `PerSeriesSignals`, `segmented_signals`,
+  the scan and both backtest arm passes. `MarketRegimeProvider` exists.
+- **S-9** squeeze expansion — IN FLIGHT attended (PR #2715). Do not touch.
+
+**Your next items:**
+1. **S-7** trend pullback. **S-8** range mean reversion. Follow
+   `app/services/strategies/s6_resistance_breakout.py` for the registry/manifest
+   contract and the regime-gated shape.
 3. **S-7** trend pullback. **S-8** range mean reversion.
 4. **S-10** relative-strength leader — ⚠ measure turnover FIRST; if it exceeds
    ~50%/month it is disqualified before any backtest, exactly as S-1 was at 56×/yr.
@@ -42,6 +61,17 @@ and `app/services/price_levels.py`, both pure, versioned, validated on real data
 6. **Walk-forward validation on recent regime.** Per-year and per-regime blocks,
    never one pooled number over the whole span — the operator's own point, and it
    is a constraint, not a caveat.
+7. **#2720 — measure and CHARGE eToro carry + FX, new COST_MODEL_ID.** Gate 1 of 2
+   between firing strategies and funded paper trades. The four-step order in the
+   ticket is the cost-model guard's own prescription; charging without measuring,
+   or setting without charging, are the two forbidden shortcuts.
+8. **#2721 — position-termination rule + delisting_source coverage.** Gate 2 of 2
+   (the `survivorship_free` label). Its step 3 moves every StrategyIdentity —
+   read the ticket's hard bounds before starting, and do steps 1-2 first.
+
+⚠ Items 7-8 are what stop this queue from dead-ending: with them done, promotion
+stops being structurally refused and the S-5..S-10 evidence can actually gate
+capital. Without them, item 6's walk-forward produces numbers nothing can act on.
 
 ### ⚠ Do NOT do these, however actionable they look
 
