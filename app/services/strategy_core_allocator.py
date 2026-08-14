@@ -3,13 +3,16 @@
 Mandate plus observed sleeve state in, one verdict out.  Pure: no connection, no
 clock, no broker, no persistence.
 
-⚠ This module AUTHORISES NOTHING and has NO CALLER.  It is the first reader of
-``strategy_core_mandate_events`` -- which is what item 1's spec said item 3 would
-be -- but nothing calls ``evaluate_core_rebalance``, and no verdict it returns
-causes anything to happen.  #2437's R4 comment records *a control on a path the
-decision does not take* seven times over, so the state is named here rather than
-left to be inferred.  Its caller is item 3's execution half, which needs the
-operator-attended session #2603 reserves.
+⚠ This module AUTHORISES NOTHING, and that has not changed -- but "has NO CALLER",
+which this docstring said until #2684, has.  ``record_core_rebalance_intent``
+now calls ``evaluate_core_rebalance`` and stores the verdict in
+``strategy_core_rebalance_intents``.  That table is itself read by nothing and
+referenced by nothing, so no verdict returned here still causes anything to
+happen; the chain is one link longer and equally inert.  #2437's R4 comment
+records *a control on a path the decision does not take* seven times over, so the
+state is named here rather than left to be inferred, and re-stated each time it
+moves.  The acting caller is item 3's executor, which needs the operator-attended
+session #2603 reserves.
 
 The verdict is emphatically NOT an eligibility finding: item 2 owns the proof that
 the core instrument is the underlying product and not a CFD, and has no table yet.
@@ -35,6 +38,30 @@ from app.services.strategy_core_mandate import (
 )
 
 CoreRebalanceAction = Literal["hold", "buy_core", "sell_core", "refused"]
+
+#: The closed vocabulary of reasons a verdict can carry.  Declared as a `Literal`
+#: rather than left as `str` so it is a SINGLE SOURCE and not a convention: every
+#: `return "..."` site below is checked against it by pyright, so a new code
+#: cannot be introduced without appearing here.
+#:
+#: ⚠ `sql/348`'s `reason_code` CHECK must list exactly these, and cannot import
+#: them.  `test_the_migration_reason_codes_match_the_allocator_vocabulary` binds
+#: the two in both directions -- which is the enforcement, since a stored value
+#: the allocator can produce but the column refuses is an unwritable verdict, and
+#: the trap that class of defect causes is the one this table was shaped around.
+CoreRebalanceReasonCode = Literal[
+    "core_mandate_absent",
+    "core_mandate_policy_unsupported",
+    "core_mandate_invalid",
+    "core_mandate_disabled",
+    "core_instrument_unset",
+    "sleeve_currency_mismatch",
+    "sleeve_instrument_mismatch",
+    "sleeve_valuation_invalid",
+    "broker_minimum_invalid",
+    "core_sleeve_empty",
+    "below_min_rebalance_amount",
+]
 
 # One quantum of the NUMERIC(18,6) amount shape.  Rounding a rebalance DOWN leaves
 # a residual strictly below this, and `min_rebalance_amount > 0` on the same column
@@ -75,7 +102,7 @@ class CoreRebalanceDecision:
     """One rebalance verdict, carrying the arithmetic that produced it."""
 
     action: CoreRebalanceAction
-    reason_code: str | None
+    reason_code: CoreRebalanceReasonCode | None
     amount: Decimal
     core_pct: Decimal | None
     target_pct: Decimal | None
@@ -92,7 +119,7 @@ class CoreRebalanceDecision:
     three."""
 
 
-def _refused(reason_code: str) -> CoreRebalanceDecision:
+def _refused(reason_code: CoreRebalanceReasonCode) -> CoreRebalanceDecision:
     return CoreRebalanceDecision(
         action="refused",
         reason_code=reason_code,
@@ -108,7 +135,7 @@ def _refused(reason_code: str) -> CoreRebalanceDecision:
     )
 
 
-def _mandate_refusal(mandate: CoreMandate | None) -> str | None:
+def _mandate_refusal(mandate: CoreMandate | None) -> CoreRebalanceReasonCode | None:
     """The mandate half of the precedence order, or None when it is usable.
 
     Order matters and is a construction choice: an unsupported policy version is
@@ -146,7 +173,9 @@ def _mandate_refusal(mandate: CoreMandate | None) -> str | None:
     return None
 
 
-def _state_refusal(mandate: CoreMandate, state: CoreSleeveState, broker_minimum: Decimal | None) -> str | None:
+def _state_refusal(
+    mandate: CoreMandate, state: CoreSleeveState, broker_minimum: Decimal | None
+) -> CoreRebalanceReasonCode | None:
     """The state half of the precedence order, or None when it is usable."""
     if state.currency.strip().upper() != mandate.base_currency:
         # Otherwise the allocator weighs two currencies as if they were one.  #2363
@@ -260,7 +289,7 @@ def evaluate_core_rebalance(
     def _decide(
         action: CoreRebalanceAction,
         amount: Decimal,
-        reason_code: str | None,
+        reason_code: CoreRebalanceReasonCode | None,
         resulting_core_pct: Decimal,
     ) -> CoreRebalanceDecision:
         return CoreRebalanceDecision(
@@ -315,6 +344,7 @@ def evaluate_core_rebalance(
 __all__ = [
     "CoreRebalanceAction",
     "CoreRebalanceDecision",
+    "CoreRebalanceReasonCode",
     "CoreSleeveState",
     "evaluate_core_rebalance",
 ]
