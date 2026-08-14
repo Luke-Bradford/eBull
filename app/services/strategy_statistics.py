@@ -45,6 +45,7 @@ calendar year, inflating Sharpe by ``sqrt(365/196) = 1.37x``. See
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Final
@@ -64,7 +65,18 @@ DAYS_PER_YEAR: Final = 365.25
 #: row's provenance in the same spirit as ``COST_MODEL_ID``: a change to any
 #: definition below is a change to what a stored number MEANS, and a reader
 #: holding a two-year-old row needs to know which definition produced it.
-METRIC_SET_ID: Final = "criterion7-v1"
+#: ⚠⚠ BUMPED v1 → v2 by #2623 gap 1, which added the three holding-period fields.
+#: A version denotes a RULE SET, not a row population (#2670) — a row carrying
+#: metrics `criterion7-v1` never defined cannot truthfully keep that stamp, even
+#: though no pre-existing metric changed value.
+#:
+#: Nothing gates on this VALUE (verified across `app/`, `sql/`, `frontend/src`:
+#: written at `strategy_result.py`, read back at `result_ledger.py`, constrained
+#: only by `CHECK (metric_set_id <> '')` in `sql/263`). What the bump BUYS is that
+#: a null holding period is readable: on a `criterion7-v1` row it is legitimate and
+#: permanent, on a `criterion7-v2` row it is a writer defect unless there are no
+#: realised trades. `sql/347` enforces exactly that.
+METRIC_SET_ID: Final = "criterion7-v2"
 
 
 @dataclass(frozen=True)
@@ -90,6 +102,17 @@ class TradeReturns:
     #: a default would let a caller silently produce a metric set with no
     #: effective sample size and no error.
     entry_fill_date: tuple[date, ...]
+    #: The bar each trade CLOSED on, positionally parallel to the two above.
+    #: #2623 gap 1 — the "expected turnaround" statistic is derived from this.
+    #:
+    #: ⚠ NAMED `exit_bar_date`, NOT `exit_fill_date`. The producers hold
+    #: `position.close_bar_date` and a permuted exit bar respectively — close
+    #: bars, not execution fills. Calling it a fill would quietly equate the two.
+    #:
+    #: ⚠ REQUIRED, not defaulted, for the same reason `entry_fill_date` is: a
+    #: default lets a caller silently produce a metric set whose holding period
+    #: is missing, with no error anywhere.
+    exit_bar_date: tuple[date, ...]
     #: Positions still open at the window end, and positions whose close
     #: carried no price. Counted, never dropped (§3.2 rule 5).
     open_count: int
@@ -101,6 +124,24 @@ class TradeReturns:
                 f"{len(self.net_return_pct)} returns against {len(self.entry_fill_date)} entry dates — the two are "
                 "positionally parallel, and a mismatch would cluster returns under the wrong dates"
             )
+        if len(self.exit_bar_date) != len(self.entry_fill_date):
+            raise ValueError(
+                f"{len(self.exit_bar_date)} exit dates against {len(self.entry_fill_date)} entry dates — the two are "
+                "positionally parallel, and a mismatch would pair holds across different trades"
+            )
+        # A same-day close is legal and holds for 0 days; an exit BEFORE its own
+        # entry is a producer bug, and it must not reach a statistic that would
+        # average it into a plausible-looking median.
+        for index, (entry, exit_bar) in enumerate(zip(self.entry_fill_date, self.exit_bar_date, strict=True)):
+            if exit_bar < entry:
+                raise ValueError(f"trade {index} exits {exit_bar} before it enters {entry}")
+
+    @property
+    def hold_days(self) -> tuple[int, ...]:
+        """Calendar days held per realised trade. See `compute_metrics`' header."""
+        return tuple(
+            (exit_bar - entry).days for entry, exit_bar in zip(self.entry_fill_date, self.exit_bar_date, strict=True)
+        )
 
 
 @dataclass(frozen=True)
@@ -159,6 +200,23 @@ class StrategyMetrics:
     bootstrap_seed: int | None = None
     bootstrap_design_effect: float | None = None
     bootstrap_model_id: str | None = None
+
+    # --- #2623 gap 1: the "expected turnaround" statistic ------------------
+    #: Calendar days held per REALISED trade, at the 25th/50th/75th percentile.
+    #:
+    #: ⚠⚠ RIGHT-CENSORED, and the direction of the resulting bias is NOT
+    #: determinable a priori. `TradeReturns` is realised-only, so a position
+    #: still open at the window end contributes nothing — and such a position may
+    #: be long-running OR merely recently entered. The censoring is informative;
+    #: informative censoring does not fix a sign. Render `open_trade_count` AND
+    #: `unpriced_trade_count` beside these, never the median alone.
+    #:
+    #: ⚠ Null exactly when there are no realised trades. On a `criterion7-v1` row
+    #: they are null because the statistic did not exist; `sql/347` is what keeps
+    #: those two cases apart. See METRIC_SET_ID.
+    median_hold_days: float | None = None
+    hold_days_p25: float | None = None
+    hold_days_p75: float | None = None
     metric_set_id: str = METRIC_SET_ID
 
     def __post_init__(self) -> None:
@@ -167,6 +225,26 @@ class StrategyMetrics:
         if self.losing_trade_count > self.trade_count:
             raise ValueError(
                 f"{self.losing_trade_count} losing trades out of {self.trade_count} — a subset cannot exceed its set"
+            )
+        holds = (self.hold_days_p25, self.median_hold_days, self.hold_days_p75)
+        # All-or-nothing: a partial triple means the derivation half-ran, which is
+        # a defect that would otherwise render as a plausible single number.
+        if any(value is None for value in holds) and any(value is not None for value in holds):
+            raise ValueError(f"holding-period percentiles are all-or-nothing, got {holds}")
+        if all(value is not None for value in holds):
+            p25, median, p75 = (float(value) for value in holds if value is not None)
+            if not 0 <= p25 <= median <= p75:
+                raise ValueError(f"holding-period percentiles must be ordered and non-negative, got {holds}")
+        # ⚠ The same rule `sql/347` enforces, applied HERE so a defect fails at
+        # construction with a named field rather than as an integrity error
+        # mid-batch. A row stamped with the CURRENT metric set claims to carry
+        # the current set's members, so with realised trades the triple is not
+        # optional. A legacy `criterion7-v1` object reconstructed from an old
+        # stored row keeps its own stamp and is untouched by this.
+        if self.metric_set_id == METRIC_SET_ID and self.trade_count > 0 and self.median_hold_days is None:
+            raise ValueError(
+                f"{self.trade_count} realised trades stamped {self.metric_set_id} with no holding period — "
+                "the stamp says this metric set carries one"
             )
         if (self.profit_factor is None) != (self.losing_trade_count == 0):
             raise ValueError(
@@ -413,6 +491,7 @@ def compute_metrics(
             seed=bootstrap_seed,
         )
 
+    holds = _hold_percentiles(trades.hold_days)
     return StrategyMetrics(
         expectancy_per_trade_pct=expectancy,
         profit_factor=profit_factor,
@@ -441,7 +520,32 @@ def compute_metrics(
         bootstrap_seed=bootstrap.seed if bootstrap else None,
         bootstrap_design_effect=bootstrap.design_effect if bootstrap else None,
         bootstrap_model_id=bootstrap.model_id if bootstrap else None,
+        median_hold_days=holds[1],
+        hold_days_p25=holds[0],
+        hold_days_p75=holds[2],
     )
+
+
+def _hold_percentiles(hold_days: Sequence[int]) -> tuple[float | None, float | None, float | None]:
+    """(p25, median, p75) calendar days held, or three Nones with no realised trades.
+
+    ⚠ ``method="linear"`` is numpy's default and is stated anyway, because the
+    point of the choice is that it MATCHES Postgres ``percentile_cont`` — which is
+    what the live path already uses for the same quantity in the same unit
+    (``strategy_monitoring._ATTRIBUTION_SQL``'s ``median_days_to_outcome``). Two
+    adjacent figures on one catalog row disagreeing on identical data because one
+    interpolates and the other picks a nearest rank is the failure being avoided.
+    ``tests/test_strategy_holding_period_db.py`` pins the two engines together.
+
+    ⚠ CALENDAR days, not bars. ``strategy_outcomes.bars_held`` is the competing
+    documented unit and is deliberately not followed: a bar count is not a
+    turnaround an operator can plan against, since five bars is a week or a
+    fortnight depending on halts and holidays. Same reasoning as the live path.
+    """
+    if not hold_days:
+        return (None, None, None)
+    p25, median, p75 = np.percentile(np.asarray(hold_days, dtype=np.float64), [25, 50, 75], method="linear")
+    return (float(p25), float(median), float(p75))
 
 
 __all__ = [

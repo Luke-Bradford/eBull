@@ -170,6 +170,14 @@ def build_metrics(**overrides: object) -> StrategyMetrics:
         "periods_per_year": 251.66446,
         "total_return_pct": -100.0,
         "buy_and_hold_return_pct": 989443125.1,
+        # #2623 gap 1. Awkward and ORDERED, for the same reason as the rest:
+        # a p25/median/p75 of 1/2/3 would survive a conversion bug that these
+        # do not. Required here because `trade_count` is non-zero and the set is
+        # stamped with the current METRIC_SET_ID — `StrategyMetrics` refuses that
+        # combination without a holding period, and so does `sql/347`.
+        "hold_days_p25": 2.0281745,
+        "median_hold_days": 11.83094627,
+        "hold_days_p75": 40.5017283,
     }
     base.update(overrides)
     return StrategyMetrics(**base)  # type: ignore[arg-type]

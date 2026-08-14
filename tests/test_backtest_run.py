@@ -128,6 +128,11 @@ def _metrics(*, sharpe: float = 0.5, ess: float | None = 100.0) -> StrategyMetri
         bootstrap_seed=BACKTEST_BOOTSTRAP_SEED if present else None,
         bootstrap_design_effect=2.0 if present else None,
         bootstrap_model_id="c3-block-bootstrap-v1" if present else None,
+        # #2623 gap 1 — required alongside a non-zero trade_count under the
+        # current METRIC_SET_ID.
+        hold_days_p25=3.0,
+        median_hold_days=8.0,
+        hold_days_p75=21.0,
     )
 
 
@@ -1009,6 +1014,11 @@ class TestNamespaceAxis:
         for offset, value in enumerate((20.0, -5.0, 7.5, -2.0)):
             book.returns.append(value)
             book.entry_dates.append(axis[3 + offset])
+            # #2623 gap 1 — the three axes are positionally parallel and
+            # `TradeReturns` refuses a short one, so a hand-built book has to
+            # fill this too. Exit one bar after entry; the durations are not
+            # what this test is about.
+            book.exit_dates.append(axis[4 + offset])
         outcome = _measure_namespace(
             "in_sample",
             book,
@@ -1046,6 +1056,7 @@ class TestNamespaceAxis:
         )
         book.returns.append(20.0)
         book.entry_dates.append(axis[3])
+        book.exit_dates.append(axis[4])
         with pytest.raises(RuntimeError, match="no effective sample size"):
             _measure_namespace(
                 "in_sample",

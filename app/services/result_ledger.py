@@ -412,7 +412,7 @@ _RESULT_COLUMNS = """
     bootstrap_resamples, bootstrap_seed, bootstrap_design_effect, bootstrap_model_id,
     dsr_trade_sharpe, dsr_skewness, dsr_kurtosis, dsr_expected_max_sharpe, dsr_independent_trials,
     dsr_average_trial_correlation, dsr_trial_sharpe_variance, dsr_measured_trials, dsr_model_id,
-    trial_register_version,
+    trial_register_version, median_hold_days, hold_days_p25, hold_days_p75,
     synthetic_control_model_id, synthetic_control_size, synthetic_control_root_seed,
     synthetic_control_mean_return_pct, synthetic_control_mean_return_ci_low_pct,
     synthetic_control_mean_return_ci_high_pct, synthetic_control_sharpe_percentile,
@@ -440,6 +440,7 @@ _RESULT_VALUES = """
     %(dsr_trade_sharpe)s, %(dsr_skewness)s, %(dsr_kurtosis)s, %(dsr_expected_max_sharpe)s,
     %(dsr_independent_trials)s, %(dsr_average_trial_correlation)s, %(dsr_trial_sharpe_variance)s,
     %(dsr_measured_trials)s, %(dsr_model_id)s, %(trial_register_version)s,
+    %(median_hold_days)s, %(hold_days_p25)s, %(hold_days_p75)s,
     %(synthetic_control_model_id)s, %(synthetic_control_size)s, %(synthetic_control_root_seed)s,
     %(synthetic_control_mean_return_pct)s, %(synthetic_control_mean_return_ci_low_pct)s,
     %(synthetic_control_mean_return_ci_high_pct)s, %(synthetic_control_sharpe_percentile)s,
@@ -589,6 +590,11 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         "total_return_pct": _numeric(metrics.total_return_pct),
         "buy_and_hold_return_pct": _numeric(metrics.buy_and_hold_return_pct),
         "metric_set_id": metrics.metric_set_id,
+        # #2623 gap 1. NULL-preserving: these are legitimately absent on a result
+        # with no realised trades, and `sql/347`'s CHECK ties that to metric_set_id.
+        "median_hold_days": _numeric(metrics.median_hold_days),
+        "hold_days_p25": _numeric(metrics.hold_days_p25),
+        "hold_days_p75": _numeric(metrics.hold_days_p75),
         # ⚠ sql/265's criterion-3 block. All nine columns (including
         # `effective_sample_size` above) are bound by
         # `strategy_results_bootstrap_all_or_nothing`, so omitting these eight
@@ -757,6 +763,11 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         dsr_measured_trials,
         dsr_model_id,
         trial_register_version,
+        # ⚠ POSITION MATTERS: this tuple is unpacked from `_RESULT_COLUMNS`, so
+        # the order here must match that constant exactly, not read naturally.
+        median_hold_days,
+        hold_days_p25,
+        hold_days_p75,
         synthetic_control_model_id,
         synthetic_control_size,
         synthetic_control_root_seed,
@@ -833,6 +844,12 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         bootstrap_seed=None if bootstrap_seed is None else int(bootstrap_seed),  # type: ignore[arg-type]
         bootstrap_design_effect=_as_float(bootstrap_design_effect),  # type: ignore[arg-type]
         bootstrap_model_id=None if bootstrap_model_id is None else str(bootstrap_model_id),
+        # #2623 gap 1 — NULL-preserving for the same reason the bootstrap block
+        # above is: a legacy `criterion7-v1` row genuinely has no holding period,
+        # and `float(None)` would raise while `0.0` would invent a same-day close.
+        median_hold_days=_as_float(median_hold_days),  # type: ignore[arg-type]
+        hold_days_p25=_as_float(hold_days_p25),  # type: ignore[arg-type]
+        hold_days_p75=_as_float(hold_days_p75),  # type: ignore[arg-type]
     )
     # ⚠ sql/266, and the same NULL-preserving rule as the bootstrap block above.
     # The set is all-or-nothing, so ONE probe decides it — `dsr_model_id`, which

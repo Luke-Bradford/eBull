@@ -141,6 +141,11 @@ def _metrics(**overrides: object) -> StrategyMetrics:
         "bootstrap_seed": 20260807,
         "bootstrap_design_effect": 2.44,
         "bootstrap_model_id": "c3-block-bootstrap-v1",
+        # #2623 gap 1 — required alongside a non-zero trade_count under the
+        # current METRIC_SET_ID.
+        "hold_days_p25": 3.0,
+        "median_hold_days": 8.0,
+        "hold_days_p75": 21.0,
     }
     base.update(overrides)
     return StrategyMetrics(**base)  # type: ignore[arg-type]

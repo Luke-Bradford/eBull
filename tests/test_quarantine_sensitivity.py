@@ -111,6 +111,12 @@ def _metrics(**overrides: object) -> StrategyMetrics:
         "periods_per_year": 196.0,
         "total_return_pct": 40.0,
         "buy_and_hold_return_pct": 42.0,
+        # #2623 gap 1. ⚠ NOT one of criterion 7's twelve, so `compare_metrics`
+        # deliberately does not compare it — present here only because
+        # `StrategyMetrics` requires it alongside a non-zero trade_count.
+        "hold_days_p25": 3.0,
+        "median_hold_days": 8.0,
+        "hold_days_p75": 21.0,
     }
     base.update(overrides)
     return StrategyMetrics(**base)  # type: ignore[arg-type]

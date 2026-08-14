@@ -869,6 +869,8 @@ class _NamespaceBook:
     book: LegBook = field(default_factory=LegBook)
     returns: array[float] = field(default_factory=lambda: array("d"))
     entry_dates: list[date] = field(default_factory=list)
+    #: Positionally parallel to `entry_dates`; `TradeReturns` enforces that.
+    exit_dates: list[date] = field(default_factory=list)
     instruments: set[int] = field(default_factory=set)
     positions: int = 0
     open_at_end: int = 0
@@ -1123,8 +1125,14 @@ def _absorb(
             continue
         assert row.exit_price_net is not None and row.net_return_pct is not None
 
+        # ⚠ `close_bar_date` is nullable but `realised` is set True ONLY in this
+        # branch, so a realised trade provably has one. Bound here rather than
+        # re-narrowed at the append below: the guarantee is structural, and
+        # re-deriving it there would let the two drift apart (#2623 gap 1).
+        close_bar_date: date | None = None
         if position.close_bar_date is not None:
-            exit_index = axis_pos.get(position.close_bar_date)
+            close_bar_date = position.close_bar_date
+            exit_index = axis_pos.get(close_bar_date)
             realised = True
         else:
             book.open_at_end += 1
@@ -1170,8 +1178,12 @@ def _absorb(
             marks=list(wealth_span),
         )
         if realised:
+            assert close_bar_date is not None  # realised is set only where it is bound
             book.returns.append((exit_price - entry_price) / entry_price * 100.0)
             book.entry_dates.append(position.entry_fill_bar_date)
+            # #2623 gap 1. The exit bar was never lost here — the namespace split
+            # above already reads it — only never carried into the metric set.
+            book.exit_dates.append(close_bar_date)
 
 
 @dataclass(frozen=True)
@@ -1347,6 +1359,7 @@ def _measure_namespace(
         trades=TradeReturns(
             net_return_pct=tuple(book.returns),
             entry_fill_date=tuple(book.entry_dates),
+            exit_bar_date=tuple(book.exit_dates),
             open_count=book.open_at_end,
             unpriced_count=sum(book.excluded.values()),
         ),

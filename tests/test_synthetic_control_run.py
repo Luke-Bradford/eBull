@@ -270,6 +270,7 @@ def _sleeve_metrics(*, exits_on_spike: bool) -> StrategyMetrics:
     book = LegBook()
     returns: list[float] = []
     entry_dates: list[date] = []
+    exit_dates: list[date] = []
     for series_index in range(_SERIES):
         series = _series(series_index)
         prices = _prices(series_index)
@@ -293,6 +294,8 @@ def _sleeve_metrics(*, exits_on_spike: bool) -> StrategyMetrics:
             )
             returns.append(float(row.net_return_pct or 0.0))
             entry_dates.append(row.position.entry_fill_bar_date)
+            assert row.position.close_bar_date is not None
+            exit_dates.append(row.position.close_bar_date)
     low, high = min(book.entry_index), max(book.exit_index)
     dates = AXIS[low : high + 1]
     return compute_metrics(
@@ -301,6 +304,7 @@ def _sleeve_metrics(*, exits_on_spike: bool) -> StrategyMetrics:
         trades=TradeReturns(
             net_return_pct=tuple(returns),
             entry_fill_date=tuple(entry_dates),
+            exit_bar_date=tuple(exit_dates),
             open_count=0,
             unpriced_count=0,
         ),

@@ -478,7 +478,7 @@ def run_cohort(
     members: list[MemberOutcome] = []
     for index in range(cohort_size):
         rng = np.random.Generator(np.random.PCG64(member_seed(index)))
-        book, returns, entry_dates = _place_member(rng, collector.placements, axis=axis)
+        book, returns, entry_dates, exit_dates = _place_member(rng, collector.placements, axis=axis)
         if len(book) != expected:
             # ⚠ EQUALITY, per member. The permutation preserves the trade count
             # by construction, so a mismatch is the one failure mode it can have
@@ -498,6 +498,7 @@ def run_cohort(
             trades=TradeReturns(
                 net_return_pct=tuple(returns),
                 entry_fill_date=tuple(entry_dates),
+                exit_bar_date=tuple(exit_dates),
                 open_count=0,
                 unpriced_count=0,
             ),
@@ -547,11 +548,12 @@ def _place_member(
     placements: Sequence[SeriesPlacement],
     *,
     axis: Sequence[date],
-) -> tuple[LegBook, array[float], list[date]]:
+) -> tuple[LegBook, array[float], list[date], list[date]]:
     """One member: the same holds, redrawn entry bars, everything else fixed."""
     book = LegBook()
     returns: array[float] = array("d")
     entry_dates: list[date] = []
+    exit_dates: list[date] = []
     for placement in placements:
         entries, permuted = place_entries(rng, eligible=int(placement.panel.size), holds=placement.holds)
         entry_price = net_entry_prices(placement.adjusted_open[entries], np.full(entries.size, _HALF_SPREAD))
@@ -574,7 +576,9 @@ def _place_member(
             )
             returns.append(float((exit_price[leg] - entry_price[leg]) / entry_price[leg] * 100.0))
             entry_dates.append(axis[entry_index])
-    return book, returns, entry_dates
+            # #2623 gap 1 — the permuted exit bar, already in scope above.
+            exit_dates.append(axis[exit_index])
+    return book, returns, entry_dates, exit_dates
 
 
 __all__ = [
