@@ -16,6 +16,9 @@ prior is how a session spends a week on a family the evidence killed in 2016.
 
 ⚠ Companion to `data-sources/market-structure.md`, which owns *indicator
 formulations*. This file owns *whether a strategy family is worth building*.
+A third companion, `market-technician/SKILL.md`, owns *how to read a chart*
+(the layered read protocol + per-concept evidence status, every claim tagged
+PUBLISHED/MEASURED/CONVENTION/REFUTED); it defers to this file on tradability.
 
 ⚠ Storage companion: `quant/data-capability.md` §7. Every logical signal must
 reach the durable daily census, but only fired signals are durable detail;

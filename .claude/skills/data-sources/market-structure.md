@@ -9,7 +9,10 @@ confirmation.
 
 It exists because these terms carry two meanings: the one in a trading book, and the one our
 code computes. Speccing against the first while the second ships is how an invented
-formulation gets past review. `.claude/CLAUDE.md` already carries the precedent — a spec cut
+formulation gets past review. (The trading-book meaning itself — each concept's published
+source and honest evidence status, plus the chart-read protocol — is owned by
+`.claude/skills/market-technician/SKILL.md`; this file owns the mapping to OUR code and the
+measurement traps.) `.claude/CLAUDE.md` already carries the precedent — a spec cut
 the volatility regime at 20th/80th percentile BandWidth; Bollinger's published rule is the
 lowest/highest in **126 trading days**. Caught by Codex, not by any gate.
 
