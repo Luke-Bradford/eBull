@@ -482,6 +482,133 @@ def atr_series(series: BarSeries, *, universe: Universe, period: int = 14) -> In
     return IndicatorSeries(tuple(values), universe, tuple(unevaluable))
 
 
+def adx_series(series: BarSeries, *, universe: Universe, period: int = 14) -> IndicatorSeries:
+    """Wilder's ADX — Average Directional Index.
+
+    SOURCE RULE: J. Welles Wilder Jr., *New Concepts in Technical Trading
+    Systems* (1978), ch. 4. Nothing here is ours to choose, and the steps are
+    named so a reader can check them against the book rather than against this
+    docstring:
+
+    1. ``+DM`` = ``high[i] - high[i-1]`` when that exceeds both
+       ``low[i-1] - low[i]`` and zero, else 0. ``-DM`` mirrors it. ⚠ A bar with
+       BOTH moves larger keeps only the larger one; an inside bar contributes
+       neither. Taking both — the obvious vectorisation — makes every bar
+       directional and drives ADX up.
+    2. ``TR`` exactly as ``atr_series`` computes it.
+    3. Wilder-smooth all three over ``period``.
+    4. ``+DI = 100 * smoothed(+DM) / smoothed(TR)``, ``-DI`` likewise.
+    5. ``DX = 100 * |+DI - -DI| / (+DI + -DI)``.
+    6. ``ADX`` = Wilder average of ``DX``, seeded with the mean of its first
+       ``period`` values.
+
+    ⚠ WILDER'S RUNNING-SUM FORM AND THE AVERAGE FORM ARE INTERCHANGEABLE HERE,
+    and the average form is used to match ``atr_series``. The book smooths as
+    ``S = S_prev - S_prev/period + current`` (a running SUM); this smooths as
+    ``S = (S_prev*(period-1) + current)/period`` (its average, i.e. the sum over
+    ``period``). ``+DI`` is a RATIO of two identically-smoothed series, so the
+    constant factor cancels exactly and the DI values are the book's. Stated
+    because the two forms differ by ``period``x and comparing one to the other
+    looks like a bug.
+
+    ⚠ FAIL-CLOSED FROM THE FIRST MASKED FIELD, matching ``atr_series`` rather
+    than skipping the bar. Wilder smoothing is recursive: a gap does not affect
+    one value, it shifts every value after it. Resuming past a hole would
+    produce numbers that look valid and are not, so everything from the first
+    unusable bar is ``not_evaluable``.
+
+    ⚠ ``DX`` DENOMINATOR OF ZERO is possible — a stretch with no directional
+    movement at all gives ``+DI = -DI = 0``. Wilder does not define DX there.
+    It is reported as unevaluable rather than as ``DX = 0``: zero means "equal
+    directional pressure", which is a measurement, and this is its absence.
+    """
+    _check_period(period)
+    rows = series.rows
+    n = len(rows)
+    values: list[float | None] = [None] * n
+
+    highs, lows, closes_f = series.float_highs, series.float_lows, series.float_closes
+    trs: list[float | None] = [None] * n
+    plus_dm: list[float] = [0.0] * n
+    minus_dm: list[float] = [0.0] * n
+    for i in range(1, n):
+        high, low, prev_high, prev_low = highs[i], lows[i], highs[i - 1], lows[i - 1]
+        prev_close = closes_f[i - 1]
+        # Same guard as `atr_series`, plus the previous bar's range, which the
+        # directional movement needs and the true range does not.
+        if (
+            high is None
+            or low is None
+            or prev_high is None
+            or prev_low is None
+            or prev_close is None
+            or closes_f[i] is None
+        ):
+            continue
+        trs[i] = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        up_move = high - prev_high
+        down_move = prev_low - low
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+
+    first_null = next((i for i in range(1, n) if trs[i] is None), None)
+    horizon = n if first_null is None else first_null
+    unevaluable: list[int] = [] if first_null is None else list(range(first_null, n))
+    # ADX needs `period` smoothed bars, then `period` DX values to seed its own
+    # average: the first reading sits at index `2 * period - 1`.
+    if horizon <= 2 * period - 1:
+        return IndicatorSeries(tuple(values), universe, tuple(unevaluable))
+
+    window = [t for t in trs[1 : period + 1] if t is not None]
+    smooth_tr = sum(window) / period
+    smooth_plus = sum(plus_dm[1 : period + 1]) / period
+    smooth_minus = sum(minus_dm[1 : period + 1]) / period
+
+    dx_values: list[float | None] = [None] * n
+
+    def _dx(tr: float, plus: float, minus: float) -> float | None:
+        if tr <= 0:
+            return None
+        plus_di = 100.0 * plus / tr
+        minus_di = 100.0 * minus / tr
+        total = plus_di + minus_di
+        if total <= 0:
+            return None
+        return 100.0 * abs(plus_di - minus_di) / total
+
+    dx_values[period] = _dx(smooth_tr, smooth_plus, smooth_minus)
+    for i in range(period + 1, horizon):
+        tr = trs[i]
+        assert tr is not None
+        smooth_tr = (smooth_tr * (period - 1) + tr) / period
+        smooth_plus = (smooth_plus * (period - 1) + plus_dm[i]) / period
+        smooth_minus = (smooth_minus * (period - 1) + minus_dm[i]) / period
+        dx_values[i] = _dx(smooth_tr, smooth_plus, smooth_minus)
+
+    seed = dx_values[period : 2 * period]
+    if any(value is None for value in seed):
+        # A flat stretch inside the seed window leaves ADX undefined from the
+        # start. Refusing the whole series is the fail-closed reading and keeps
+        # the recursion from being seeded with a fabricated zero.
+        unevaluable = sorted(set(unevaluable) | set(range(2 * period - 1, n)))
+        return IndicatorSeries(tuple(values), universe, tuple(unevaluable))
+
+    current = sum(value for value in seed if value is not None) / period
+    values[2 * period - 1] = current
+    for i in range(2 * period, horizon):
+        dx = dx_values[i]
+        if dx is None:
+            # An undefined DX mid-series breaks the recursion for everything
+            # after it, for the same reason a masked bar does.
+            unevaluable = sorted(set(unevaluable) | set(range(i, n)))
+            return IndicatorSeries(tuple(values), universe, tuple(unevaluable))
+        current = (current * (period - 1) + dx) / period
+        values[i] = current
+    return IndicatorSeries(tuple(values), universe, tuple(unevaluable))
+
+
 def macd_series(
     series: BarSeries,
     *,
