@@ -212,9 +212,10 @@ def test_a_mandate_absent_refusal_inserts_with_no_event_and_no_valuation(
         ("unknown_action", {"action": "rebalance"}),
         ("unknown_reason", {"reason_code": "made_up", "action": "hold"}),
         ("unknown_floor_source", {"floor_source": "operator"}),
-        # --- the null-valuation rule: unstorable inputs imply a refusal
+        # --- the null-observation rule: unstorable inputs imply a refusal
         ("hold_with_null_core_value", {"core_market_value": None}),
         ("hold_with_null_cash", {"cash_balance": None}),
+        ("hold_with_null_currency", {"currency": None}),
         (
             "buy_with_null_cash",
             {"action": "buy_core", "amount": Decimal("50"), "cash_balance": None},
@@ -381,8 +382,7 @@ def test_a_nan_valuation_is_recorded_rather_than_raising(
     )
     assert intent.decision.reason_code == "sleeve_valuation_invalid"
     row = ebull_test_conn.execute(
-        "SELECT core_market_value FROM strategy_core_rebalance_intents "
-        "WHERE core_rebalance_intent_id=%s",
+        "SELECT core_market_value FROM strategy_core_rebalance_intents WHERE core_rebalance_intent_id=%s",
         (intent.core_rebalance_intent_id,),
     ).fetchone()
     assert row is not None and row[0] is None
@@ -411,3 +411,96 @@ def test_no_mandate_configured_records_the_absent_verdict(
     assert intent.decision.action == "refused"
     assert intent.decision.reason_code == "core_mandate_absent"
     assert intent.core_mandate_event_id is None
+
+
+def test_an_unstorable_currency_is_recorded_rather_than_lost(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The same trap as the valuations, on the column where it is easiest to miss.
+
+    A blank currency never matches the mandate's base currency, so
+    ``_state_refusal`` returns ``sleeve_currency_mismatch`` — and a NOT NULL
+    non-blank column would then make that refusal the one row that cannot be
+    written. Caught by Codex checkpoint 2 after the valuation columns had already
+    been shaped for exactly this.
+    """
+    _seed_mandate(ebull_test_conn)
+    intent = record_core_rebalance_intent(
+        ebull_test_conn,
+        state=CoreSleeveState(
+            core_instrument_id=_INSTRUMENT_ID,
+            core_market_value=Decimal("600"),
+            cash_balance=Decimal("400"),
+            currency="   ",
+            as_of=_PAST,
+        ),
+        recorded_by="test",
+    )
+    assert intent.decision.action == "refused"
+    assert intent.decision.reason_code == "sleeve_currency_mismatch"
+
+    row = ebull_test_conn.execute(
+        "SELECT currency, core_market_value FROM strategy_core_rebalance_intents WHERE core_rebalance_intent_id=%s",
+        (intent.core_rebalance_intent_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None
+    assert row[1] == Decimal("600.000000")
+
+
+def test_the_observed_currency_is_stored_unnormalised(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """What was OBSERVED is the evidence: ``" usd "`` matches and is stored as sent.
+
+    Normalising on the way in would hide the difference between a caller sending
+    ``"USD"`` and one sending ``" usd "`` — which is the kind of thing an
+    unexplained mismatch a month from now turns on.
+    """
+    _seed_mandate(ebull_test_conn)
+    intent = record_core_rebalance_intent(
+        ebull_test_conn,
+        state=CoreSleeveState(
+            core_instrument_id=_INSTRUMENT_ID,
+            core_market_value=Decimal("600"),
+            cash_balance=Decimal("400"),
+            currency=" usd ",
+            as_of=_PAST,
+        ),
+        recorded_by="test",
+    )
+    assert intent.decision.action == "hold"
+    row = ebull_test_conn.execute(
+        "SELECT currency FROM strategy_core_rebalance_intents WHERE core_rebalance_intent_id=%s",
+        (intent.core_rebalance_intent_id,),
+    ).fetchone()
+    assert row is not None and row[0] == " usd "
+
+
+def test_a_snapshot_taken_after_the_transaction_opened_is_not_future_dated(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """``evaluated_at`` defaults to ``clock_timestamp()``, not ``now()``.
+
+    ``now()`` is TRANSACTION start time. A writer called inside a transaction that
+    opened before the sleeve was valued would stamp the evaluation earlier than
+    the observation, and the ``state_as_of <= evaluated_at`` CHECK would reject a
+    perfectly fresh snapshot for no reason but the caller's transaction boundary.
+
+    The 50ms sleep pins the transaction start well behind the wall clock, so the
+    10ms-after-``now()`` snapshot is unambiguously inside the window ``now()``
+    rejects and ``clock_timestamp()`` accepts.
+    """
+    event_id = _seed_mandate(ebull_test_conn)  # opens the transaction
+    ebull_test_conn.execute("SELECT pg_sleep(0.05)")
+    row = ebull_test_conn.execute("SELECT now() + interval '10 milliseconds', now() < clock_timestamp()").fetchone()
+    assert row is not None
+    snapshot_at, clock_has_advanced = row
+    assert clock_has_advanced, "transaction time did not lag the wall clock; test is inert"
+
+    ebull_test_conn.execute(_INSERT, _row(event_id, state_as_of=snapshot_at))
+    stored = ebull_test_conn.execute(
+        "SELECT evaluated_at > now() FROM strategy_core_rebalance_intents "
+        "ORDER BY core_rebalance_intent_id DESC LIMIT 1"
+    ).fetchone()
+    assert stored is not None and stored[0] is True

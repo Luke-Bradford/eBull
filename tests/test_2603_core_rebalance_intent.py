@@ -20,8 +20,8 @@ from pathlib import Path
 import pytest
 
 from app.services.strategy_core_rebalance_intent import (
-    _INTENT_COLUMNS,
     _INSERT_INTENT,
+    _INTENT_COLUMNS,
     _storable_or_none,
 )
 
@@ -95,9 +95,7 @@ def test_the_insert_column_list_and_placeholder_block_cannot_disagree() -> None:
     placeholders = re.search(r"VALUES \((.*?)\) RETURNING", _INSERT_INTENT, re.S)
     assert columns is not None and placeholders is not None
     assert [c.strip() for c in columns.group(1).split(",")] == list(_INTENT_COLUMNS)
-    assert [p.strip() for p in placeholders.group(1).split(",")] == [
-        f"%({column})s" for column in _INTENT_COLUMNS
-    ]
+    assert [p.strip() for p in placeholders.group(1).split(",")] == [f"%({column})s" for column in _INTENT_COLUMNS]
 
 
 def test_no_module_outside_the_writer_reads_the_intents_table() -> None:

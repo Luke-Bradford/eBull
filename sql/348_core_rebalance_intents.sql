@@ -29,9 +29,16 @@
 
 CREATE TABLE IF NOT EXISTS strategy_core_rebalance_intents (
     core_rebalance_intent_id BIGSERIAL PRIMARY KEY,
-    -- DEFAULT now() and never a parameter: a caller supplying its own evaluation
-    -- time can backdate or extend a verdict at will (sql/346's rule, same reason).
-    evaluated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- DEFAULT and never a parameter: a caller supplying its own evaluation time
+    -- can backdate or extend a verdict at will (sql/346's rule, same reason).
+    --
+    -- ⚠ `clock_timestamp()`, NOT `now()`.  `now()` is TRANSACTION start time, so a
+    -- writer called inside a transaction that opened before the sleeve was valued
+    -- would stamp an evaluation EARLIER than the observation it evaluated -- and
+    -- the `state_as_of <= evaluated_at` CHECK below would then reject a perfectly
+    -- fresh snapshot for no reason but the caller's transaction boundary.  The
+    -- wall clock at insert is what "when this was evaluated" means.
+    evaluated_at             TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     -- The mandate revision that GOVERNED this evaluation, by reference and never
     -- copied: `strategy_core_mandate_events` is already append-only and
     -- versioned, so the join is lossless, and copying core_target_pct and friends
@@ -59,8 +66,16 @@ CREATE TABLE IF NOT EXISTS strategy_core_rebalance_intents (
     -- whatever the caller supplied and need not resolve.  This is an observed
     -- input, not a resolved reference.
     core_instrument_id       BIGINT NOT NULL,
-    currency                 TEXT NOT NULL CHECK (btrim(currency) <> ''
-                                                  AND length(currency) <= 16),
+    -- ⚠ NULLABLE for the SAME reason as the two valuations below, and the reason
+    -- is easy to miss on a text column.  `_state_refusal` compares
+    -- `state.currency.strip().upper()` to the mandate's base currency, so a BLANK
+    -- or absurdly long observed currency is refused as `sleeve_currency_mismatch`
+    -- -- and a NOT NULL non-blank CHECK here would then make that refusal the one
+    -- row that cannot be written, which is the exact trap the valuation columns
+    -- were shaped to avoid.
+    currency                 TEXT CHECK (currency IS NULL
+                                         OR (btrim(currency) <> ''
+                                             AND length(currency) <= 16)),
     -- ⚠⚠ NULLABLE, and the reason is the whole point.  `_state_refusal` refuses
     -- `sleeve_valuation_invalid` on a component that is non-finite, negative or
     -- >= 10^12, and the currency/instrument mismatches are checked BEFORE it --
@@ -177,9 +192,12 @@ CREATE TABLE IF NOT EXISTS strategy_core_rebalance_intents (
         (core_mandate_event_id IS NULL)
         = (reason_code IS NOT DISTINCT FROM 'core_mandate_absent')
     ),
-    -- An unstorable observed valuation implies a refusal (see above).
-    CONSTRAINT core_rebalance_intent_null_valuation_implies_refused CHECK (
-        (core_market_value IS NOT NULL AND cash_balance IS NOT NULL)
+    -- An unstorable OBSERVATION -- of either kind -- implies a refusal.  Every
+    -- non-refused path has already passed `_state_refusal`, which requires the
+    -- currency to match the mandate's and both valuations to be finite and inside
+    -- the amount bound, so all three are representable there by construction.
+    CONSTRAINT core_rebalance_intent_null_observation_implies_refused CHECK (
+        (core_market_value IS NOT NULL AND cash_balance IS NOT NULL AND currency IS NOT NULL)
         OR action = 'refused'
     ),
     -- A valuation from the future is a caller bug; the allocator holds no clock

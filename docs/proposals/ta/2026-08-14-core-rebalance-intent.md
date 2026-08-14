@@ -126,6 +126,31 @@ and is therefore storable. That is a CHECK, not a comment.
 the same reason: on `sleeve_instrument_mismatch` the observed id is whatever the caller
 supplied and need not resolve. It is an observed input, not a resolved reference.
 
+⚠ **`currency` is the same trap and the first draft walked straight into it** — caught by
+Codex at checkpoint 2, *after* the valuation columns had already been shaped for exactly
+this. `_state_refusal` compares `state.currency.strip().upper()` to the mandate's base
+currency, so a blank or over-long observed currency is a reachable
+`sleeve_currency_mismatch`; a `NOT NULL` non-blank column would have made that refusal
+the one row that cannot be written. It is nullable under the same rule. **Generalisation
+worth carrying: the trap is not about numeric overflow. It is that any column shaped to
+the VALID domain cannot hold the observation that was refused for being outside it —
+and a text column with a non-blank CHECK is that shape just as much as a `NUMERIC(18,6)`
+is.**
+
+The observed currency is stored **unnormalised** — not stripped, not upper-cased. What
+was observed is the evidence, and normalising would hide the difference between a caller
+sending `"USD"` and one sending `" usd "`.
+
+### `evaluated_at` is `clock_timestamp()`, not `now()` **[by construction]**
+
+Also Codex checkpoint 2. `now()` is **transaction** start time, so a writer called inside
+a transaction that opened before the sleeve was valued would stamp the evaluation earlier
+than the observation it evaluated — and the `state_as_of <= evaluated_at` CHECK would then
+reject a perfectly fresh snapshot for no reason but the caller's transaction boundary. The
+wall clock at insert is what "when this was evaluated" means. It stays a `DEFAULT` and
+never a parameter, per `sql/346`: a caller supplying its own evaluation time can backdate
+a verdict at will.
+
 ## Contract
 
 ### Writer
@@ -210,10 +235,15 @@ omission it was written to catch.
    orphaned by deleting what it cites.
 9. `state_as_of <= evaluated_at`. A valuation from the future is a caller bug, and the
    allocator holds no clock to catch it.
-10. `core_market_value IS NULL OR cash_balance IS NULL` ⟹ `action = 'refused'`
-    (the unstorable-input rule above).
-11. `currency`, `recorded_by`, `allocator_policy_version`: NOT NULL, length-bounded,
-    non-blank.
+10. A NULL in `core_market_value`, `cash_balance` **or** `currency` ⟹
+    `action = 'refused'` (the unstorable-observation rule above). All three are
+    representable on a non-refused path by construction, because `_state_refusal` has
+    already required the currency to match and both valuations to be finite and inside
+    the amount bound.
+11. `recorded_by` and `allocator_policy_version`: NOT NULL, length-bounded, non-blank —
+    unconditionally, because unlike the observation columns these are the writer's own
+    values and a blank one is a bug in us, not evidence about the caller. `currency` is
+    length-bounded and non-blank **when present**.
 
 One constraint test per NULL-bearing combination, not just the happy path — per the
 prevention-log generalisation that a test asserting only the happy path cannot see a

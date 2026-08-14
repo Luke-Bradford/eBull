@@ -50,6 +50,11 @@ from app.services.strategy_core_mandate import (
 _MAX_AMOUNT: Final = Decimal(1).scaleb(AMOUNT_PRECISION - AMOUNT_PLACES)
 _AMOUNT_QUANTUM: Final = Decimal(1).scaleb(-AMOUNT_PLACES)
 
+#: The observed-currency column's length bound, mirroring ``sql/348``.  A value
+#: over it is not an observation worth keeping verbatim; it is a caller bug, and
+#: the reason code still records that the currency was the thing wrong with it.
+_CURRENCY_LIMIT: Final = 16
+
 #: The INSERT column list, in order.  ⚠ ONE tuple, from which both the column list
 #: and the ``%(name)s`` block are generated, because #2623 shipped a value into the
 #: wrong block by maintaining those two lists (and a reader tuple) separately:
@@ -120,6 +125,27 @@ def _storable_or_none(value: Decimal) -> Decimal | None:
     return value.quantize(_AMOUNT_QUANTUM, rounding=ROUND_DOWN)
 
 
+def _storable_currency_or_none(value: str) -> str | None:
+    """The observed currency in the column's shape, or None when it has none.
+
+    The same rule as ``_storable_or_none``, on the column where it is easiest to
+    forget it applies. ``_state_refusal`` compares
+    ``state.currency.strip().upper()`` to the mandate's base currency, so a BLANK
+    or absurdly long observed currency is a reachable
+    ``sleeve_currency_mismatch`` -- and storing it into a NOT NULL non-blank
+    column would make that refusal the one row that cannot be written.
+
+    Not stripped or upper-cased on the way in: what was OBSERVED is the evidence,
+    and normalising it here would hide the difference between a caller sending
+    ``"usd"`` and one sending ``" USD "``.
+    """
+    if not value.strip():
+        return None
+    if len(value) > _CURRENCY_LIMIT:
+        return None
+    return value
+
+
 def record_core_rebalance_intent(
     conn: psycopg.Connection[Any],
     *,
@@ -153,7 +179,7 @@ def record_core_rebalance_intent(
         "allocator_policy_version": CORE_MANDATE_POLICY_VERSION,
         "recorded_by": recorded_by,
         "core_instrument_id": state.core_instrument_id,
-        "currency": state.currency,
+        "currency": _storable_currency_or_none(state.currency),
         "core_market_value": _storable_or_none(state.core_market_value),
         "cash_balance": _storable_or_none(state.cash_balance),
         "state_as_of": state.as_of,
