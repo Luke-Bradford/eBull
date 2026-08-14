@@ -430,10 +430,28 @@ class TestVocabularyIsDefinedOnce:
         """Pins the resolution itself: a helper that silently fell back to 255
         would agree with a stale Python Literal and prove nothing."""
         name, _ = self._defining_migration("strategy_signals", "not_evaluable_reason")
-        assert name == "270_strategy_signals_unusable_fill_price.sql"
+        assert name == "351_strategy_signals_missing_market_context.sql"
 
     def test_sql_reason_codes_match_the_python_vocabulary(self) -> None:
         assert self._check_values("strategy_signals", "not_evaluable_reason") == NOT_EVALUABLE_REASONS
+
+    @pytest.mark.parametrize("table", ["strategy_signal_daily_counts", "strategy_signal_observations"])
+    def test_sql_276_reason_vocabularies_match_too(self, table: str) -> None:
+        """⚠ THE VOCABULARY LIVES IN THREE TABLES, AND ONLY ONE WAS PINNED.
+
+        sql/276 gave `strategy_signal_daily_counts` and
+        `strategy_signal_observations` their own copies of the reason list, and
+        nothing checked either against Python — which is the exact
+        closed-vocabulary-in-N-places defect (#2218) this class was written for,
+        reintroduced one table over. #2437 had to widen all three; without this
+        the eleventh code could have been added to `strategy_signals` alone and
+        the bounded writer would have failed at INSERT with a green suite.
+
+        ⚠ `''` is these two tables' non-null spelling of "no reason" so it can
+        sit in the primary key (sql/276). It is a storage encoding, not a
+        reason, so it is added here rather than to the Python Literal.
+        """
+        assert self._check_values(table, "reason_code") == NOT_EVALUABLE_REASONS | {""}
 
     def test_sql_verdicts_match(self) -> None:
         assert self._check_values("strategy_signals", "verdict") == VERDICTS

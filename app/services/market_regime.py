@@ -96,16 +96,97 @@ class RegimeSeries:
     to fire on ``None`` rather than treat it as permissive. That is the same
     fail-closed posture as an unevaluable indicator, and the reason this is
     ``Regime | None`` rather than a fifth enum member.
+
+    ⚠⚠ TWO DIFFERENT FACTS PRODUCE ``None`` AND ONLY ONE OF THEM IS WARM-UP.
+    ``permits`` collapses both into ``False``, which is the correct *gating*
+    answer and the wrong *bookkeeping* one:
+
+    * the benchmark HAS a bar on this date and it is not yet classifiable — the
+      200-SMA or the 126-bar BandWidth window is still filling. Warm-up.
+    * the benchmark has NO bar on this date at all. Measured on the full
+      validated universe (dev DB, 2026-08-14): **9,688 bars across 360 dates**,
+      worst single date 2026-02-06 with **1,735 instruments trading and SPY
+      absent**. These are holes in our stored benchmark series, not warm-up, and
+      they are a *data-availability fact about a different instrument*.
+
+    ``not_evaluable_indices`` names the second set, and it exists so that
+    ``strategy_registry.evaluate`` can refuse the bar as ``not_evaluable`` before
+    the strategy body runs. Without it the bar reaches ``permits``, returns
+    ``False``, and is stored as ``not_fired`` — parent criterion 8's exact
+    prohibition, a data gap wearing a rule verdict's clothes, silently shrinking
+    the ``not_fired`` denominator of every regime-gated strategy.
+
+    ⚠ THE FIELD NAME MATCHES ``IndicatorSeries.not_evaluable_indices`` ON
+    PURPOSE. That is what lets a ``RegimeSeries`` be declared directly as a
+    ``StrategyInput`` (see ``strategy_registry.EvaluableSeries``) with no adapter
+    — an adapter would have to mint an ``IndicatorSeries``, and an
+    ``IndicatorSeries`` carries ``indicator_series.RULE_SET_VERSION``, which the
+    regime did not come from. Structural agreement beats a converted object
+    stamped with a provenance it does not have.
+
+    ⚠ A regime that IS classifiable and simply is not one the strategy permits
+    stays ``not_fired``. That bar WAS judged, and spec §0 rule 2 makes firing
+    outside a declared domain the defect. Only an *unknown* regime is
+    ``not_evaluable``.
     """
 
     values: tuple[Regime | None, ...]
+    #: Indices where the benchmark contributed no observation at all — see the
+    #: class docstring. ⚠ NOT warm-up, and not every ``None``.
+    not_evaluable_indices: tuple[int, ...] = ()
     rule_set_version: str = REGIME_RULE_VERSION
+
+    def __post_init__(self) -> None:
+        # ⚠ An index outside the series, or one carrying a real regime, would
+        # make this field describe a series other than the one it is attached
+        # to. Both are silent: the first is simply never looked up, and the
+        # second would report a CLASSIFIED bar as a benchmark hole — a refusal
+        # manufactured out of nothing, which is the inverse of the defect this
+        # field closes.
+        for index in self.not_evaluable_indices:
+            if index < 0 or index >= len(self.values):
+                raise ValueError(f"not_evaluable_indices contains {index}, outside a series of {len(self.values)} bars")
+            if self.values[index] is not None:
+                raise ValueError(
+                    f"index {index} is marked not-evaluable but carries regime {self.values[index]!r}; "
+                    "a classified bar is not a benchmark hole"
+                )
 
     def __len__(self) -> int:
         return len(self.values)
 
+    def segment(self, start: int, end: int) -> RegimeSeries:
+        """Bars ``[start, end)`` as a series indexed from zero.
+
+        ⚠⚠ THE INDICES ARE REMAPPED, AND THIS METHOD EXISTS BECAUSE SLICING
+        CANNOT BE. ``RegimeSeries(values=regime.values[start:end])`` is the
+        obvious form, type-checks, and SILENTLY DISCARDS
+        ``not_evaluable_indices`` — every benchmark hole in the segment reverts
+        to a bare ``None`` and is then miscounted as the benchmark's own
+        warm-up. Nothing raises; the count simply moves to the wrong code.
+
+        ``strategy_segmented_evaluation.segmented_signals`` already carries a
+        ⚠⚠ about the same class of bug for ``values`` (a segment starting at bar
+        400 aligning its bar 0 with the market's bar 0), so putting the remap on
+        the data rather than at the call site is what keeps the next resegmenter
+        from re-deriving it.
+        """
+        if start < 0 or end > len(self.values) or start > end:
+            raise ValueError(f"segment [{start}, {end}) is not inside a series of {len(self.values)} bars")
+        return RegimeSeries(
+            values=self.values[start:end],
+            not_evaluable_indices=tuple(index - start for index in self.not_evaluable_indices if start <= index < end),
+            rule_set_version=self.rule_set_version,
+        )
+
     def permits(self, index: int, allowed: frozenset[Regime]) -> bool:
-        """True only when the bar is classifiable AND inside ``allowed``."""
+        """True only when the bar is classifiable AND inside ``allowed``.
+
+        ⚠ The ``None`` branch is now unreachable for any strategy that declares
+        this series as a ``StrategyInput`` — ``evaluate`` refuses such a bar
+        first. It is kept rather than removed: this method is public, a direct
+        caller has no such gate, and the fail-closed posture is the point.
+        """
         if index < 0 or index >= len(self.values):
             return False
         current = self.values[index]

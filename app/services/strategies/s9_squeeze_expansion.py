@@ -257,6 +257,12 @@ def s9_signals(
         StrategyInput(series=_close_input(series, universe=universe), reason=masked_reason),
         StrategyInput(series=atr, reason=masked_reason),
         StrategyInput(series=prior_high, reason=masked_reason),
+        # ⚠⚠ THE REGIME IS AN INPUT, NOT JUST A GATE IN THE BODY (#2437) — see
+        # the identical note in `s6_signals` for why, and why it is declared
+        # LAST. A benchmark hole is `missing_market_context`; a benchmark bar
+        # that exists but is not yet classifiable stays `insufficient_warmup`,
+        # which `evaluate` derives structurally from the bare `None`.
+        StrategyInput(series=regime, reason="missing_market_context"),
     )
 
     def entry(index: int) -> bool:
