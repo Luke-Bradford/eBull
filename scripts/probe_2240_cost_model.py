@@ -107,8 +107,9 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         MODEL_TESTS,
         [
             (
-                'COST_MODEL_ID = "static-p75-insession-v2+split-adjusted-max"',
-                'COST_MODEL_ID = "static-p75-v3"',
+                'COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max'
+                '+carry-fx-structural-zero-long-x1-real-usd"',
+                'COST_MODEL_ID = "static-p75-v4"',
             )
         ],
         "test_the_cost_model_id_is_the_frozen_one",
@@ -215,49 +216,42 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_a_half_spread_at_or_above_one_is_rejected",
     ),
     (
-        # ⚠ #2286's shape, injected: a value that is PRESENT and wrong. Setting
-        # carry to zero also flips CARRY_UNMODELLED, which is what the promotion
-        # gate refuses on — so this one defect quietly promotes every result.
-        # ⚠⚠ A COMPOUND COUNTERFACTUAL, AND THE NAME SAYS SO (#2695, after Codex
-        # called the first wording — "not a weakening" — wrong at mutation
-        # level). #2363 added `_check_unmodelled_components_are_not_charged()` at
-        # MODULE level after this probe was written, so setting `CARRY_BPS` to
-        # zero now raises during import: conftest never loads and pytest exits 4,
-        # which the harness rightly declines to read as CAUGHT because no test
-        # evaluated anything.
-        #
-        # In PRODUCTION the defect is caught at import, and that is the real
-        # defence. This probe therefore no longer reverts one shipped defect — it
-        # removes an independent guard AND injects the value, to answer the
-        # narrower question the harness can still answer: do the two shipped-state
-        # assertions observe zero carry once the stronger guard is out of the way.
-        # ⚠ The guard's own REFUSAL is proved directly by
-        # `test_a_component_may_not_carry_an_amount_that_nothing_charges`; the
-        # presence of its module-level INVOCATION is not, and that gap is
-        # recorded in WHAT IS NOT PROBED above.
-        #
-        # ⚠ Found by running the harness, not by the anchor audit — the anchor was
-        # intact the whole time. That is #2695's third decay class.
-        "the shipped-state carry assertions blind to zero carry (import guard removed to reach them)",
+        # ⚠⚠ #2286's shape in its #2720 form: an unknown closure value would read
+        # as "modelled" and clear a promotion refusal while modelling nothing.
+        # Two independent gates hold it — the marker function's own validation
+        # (which the derivation line runs at import) and `_check_closures()` —
+        # so this probes the MARKER validation: with the loop deleted, an
+        # unknown closure derives (False, False) silently.
+        "the marker vocabulary validation deleted (an unknown closure reads as modelled)",
         MODEL,
         MODEL_TESTS,
         [
-            ("\n_check_unmodelled_components_are_not_charged()\n", "\n"),
-            ("CARRY_BPS: Decimal | None = None", 'CARRY_BPS: Decimal | None = Decimal("0")'),
+            (
+                '    for name, value in (("carry", carry_closure), ("fx", fx_closure)):\n'
+                "        if value not in COST_COMPONENT_CLOSURES:\n"
+                "            raise ValueError(\n"
+                '                f"unknown {name} closure {value!r}; must be one of '
+                '{sorted(COST_COMPONENT_CLOSURES)} — "\n'
+                "                \"an unknown closure must never read as 'modelled'\"\n"
+                "            )\n",
+                "",
+            )
         ],
-        "test_carry_is_none or test_the_unmodelled_marker_is_set",
+        "test_an_unknown_closure_is_refused_by_the_markers",
     ),
     (
         # ⚠⚠ THE INVOCATION ITSELF, probeable since #2699. Deleting this one line
         # leaves the guard defined, imported and directly testable — and never run.
-        # A guard that no longer runs is the #2437 R4 shape arriving through a
-        # missing CALL rather than a missing branch, and it was invisible for the
-        # ordinary reason: every test reached the function by calling it.
-        "the module-level call to the false-promotion tripwire deleted",
+        # ⚠ #2720: the markers validate the closure VOCABULARY independently, so
+        # the observable loss when this call goes is the LANE and EVIDENCE half —
+        # a short/leveraged lane or an evidence-free structural claim imports
+        # silently. The selectors are the subprocess tests that mutate exactly
+        # those literals and expect the import to fail.
+        "the module-level call to the closure guard deleted",
         MODEL,
         MODEL_TESTS,
-        [("\n_check_unmodelled_components_are_not_charged()\n", "\n")],
-        "test_setting_carry_bps_fails_the_import_itself or test_setting_fx_bps_fails_the_import_itself",
+        [("\n_check_closures()\n", "\n")],
+        "test_a_short_lane_fails_the_import_itself or test_empty_carry_evidence_fails_the_import_itself",
     ),
     (
         # ⚠ The SAME asymmetry, found while closing #2699 rather than stated by it:

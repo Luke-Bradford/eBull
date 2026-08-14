@@ -31,8 +31,14 @@ return is computed from those adjusted prices, never by subtracting a cost from
 ``gross_return_pct``"* — ``sql/256`` names that column GROSS precisely so
 nothing averages it as performance.
 
-NOT charged: carry (eToro's overnight/weekend CFD fee) and FX. Both are
-``None``, not zero — see ``CARRY_BPS``.
+Carry and FX are STRUCTURALLY ZERO for the one lane this model prices —
+long, x1, ``real`` settlement, USD order, USD account, USD-quoted universe —
+because eToro's own product rule says no overnight/weekend fee exists on a
+non-leveraged underlying-asset BUY and no currency conversion event occurs on
+an all-USD path. See ``CARRY_CLOSURE`` / ``FX_CLOSURE``: a closure state, never
+a ``Decimal("0")`` pretending to be a measurement (#2720). Any OTHER lane —
+short, leveraged, CFD-resolved, non-USD — is UNPRICED, not free. Dividends and
+corporate-action cash remain outside the model as before: trade costs only.
 
 For an **as-traded** entry price the band is keyed on that entry and fixed for
 the life of the position. A split-adjusted research price cannot select a
@@ -54,7 +60,13 @@ from typing import Literal, get_args
 #: admits only quotes captured inside a real NYSE session, resolved from
 #: ``market_calendar`` rather than from a UTC-hour literal (see
 #: ``SESSION_RULE``).
-COST_MODEL_ID = "static-p75-insession-v2+split-adjusted-max"
+#:
+#: ⚠ v3 (#2720): carry and FX closed as structural zero for the declared lane,
+#: which the id now names. The band table, session rule and calibration figures
+#: are UNCHANGED from v2 — what changed is what the model claims about carry
+#: and FX, and the module rule (a change to what is charged is a new model)
+#: applies to a claim exactly as it does to a number.
+COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max+carry-fx-structural-zero-long-x1-real-usd"
 
 #: Whether a price can honestly select a nominal-price spread band.  The
 #: research corpus is split-adjusted, not as-traded; treating those two as the
@@ -90,10 +102,10 @@ SESSION_RULE = "NYSE regular session 09:30–16:00 ET (13:00 ET on a half day), 
 CALIBRATION_POPULATION = "§4.0 validated universe (app.services.strategies.validated_universe)"
 CALIBRATION_QUOTES_IN_SESSION = 1_159
 
-#: ⚠ FIVE LIMITS, EVERY ONE STILL LIVE — §5.1's four, with its fourth split in
-#: two by #2363 because carry and FX close on different evidence and one of them
-#: will be live while the other is not. They are constants rather than prose so
-#: stage 5c can put them on the result row.
+#: ⚠ SIX LIMITS, EVERY ONE STILL LIVE — §5.1's four, with its fourth split in
+#: two by #2363, and 4/5 REWRITTEN plus 6 ADDED by #2720 when carry and FX
+#: closed as structural zero for the declared lane. They are constants rather
+#: than prose so stage 5c can put them on the result row.
 #:
 #: 1. The sample is one hour of the day — 1,149 of the 1,159 in-session captures
 #:    sit at UTC hour 19 (15:00–15:59 ET), the session's final and most liquid
@@ -102,10 +114,11 @@ CALIBRATION_QUOTES_IN_SESSION = 1_159
 #:    universe, and the ``<$5`` band rests on 76 of them.
 #: 3. Those captures land on 9 distinct NY dates in one summer. Nothing here
 #:    observes a volatile regime.
-#: 4. Carry is NULL, not zero.
-#: 5. FX is NULL, not zero — and it is a SEPARATE limit, not a clause of 4:
-#:    carry closes on a per-order product eligibility proving underlying-at-x1,
-#:    FX on the funding account's currency and a measured conversion markup.
+#: 4. Carry is structurally zero FOR THE DECLARED LANE ONLY; any other lane is
+#:    unpriced, not free.
+#: 5. FX is structurally zero for the same lane, and the account-currency half
+#:    of it is measured on ONE account (the configured demo account).
+#: 6. Real-settlement fills are ASSUMED, not observed, in the backtest.
 #:
 #: ⚠ Every figure in this tuple is printed by ``--calibrate``. It is written
 #: down because 5c has to put it on a result row, and a hand-written statistic
@@ -116,92 +129,178 @@ CALIBRATION_LIMITS: tuple[str, ...] = (
     "one hour of the day — 1,149 of 1,159 in-session captures are at UTC hour 19 (15:00-15:59 ET)",
     "a sample — 1,159 in-session quotes against a 6,735-instrument universe; the <$5 band rests on 76",
     "9 distinct NY capture dates in one summer; no volatile regime is observed",
-    "carry is unmodelled (CARRY_BPS is None, not zero)",
-    "FX is unmodelled (FX_BPS is None, not zero)",
+    "carry is structurally zero for the declared lane ONLY (long x1 real-settlement USD); any other lane"
+    " — short, leveraged, CFD-resolved, non-USD — is UNPRICED, not free",
+    "FX is structurally zero for the same lane; the account currency is measured on the configured demo"
+    " account (account_equity_evidence), not proven for any other account",
+    "the backtest ASSUMES real-settlement fills: eToro resolves some non-leveraged buys as CFDs,"
+    " historical resolution is unobservable, and the order path closes this only forward"
+    " (settlementType is an assertion the platform rejects on mismatch)",
 )
 
-#: ⚠⚠ NULL, NOT ZERO, AND THE DIFFERENCE IS THE #2286 SHAPE — *"a value that is
-#: present and wrong beats a value that is absent and refused"*.
-#:
-#: Criterion 2 requires eToro's overnight/weekend CFD fee and FX conversion, and
-#: says their magnitude *"is not established here"*. The eToro portal is
-#: unreachable from this environment, so it is not established here either.
-#: Zero is a measurement nobody made. #2277 carries the standing re-check.
-#:
-#: ⚠ FX is NULL for a second, independent reason: §4.0 restricts the universe to
-#: ``us_equity``, which quotes in USD — but *"quotes in USD"* and *"needs no
-#: conversion"* coincide only if the ACCOUNT currency is USD, and that has not
-#: been verified.
-CARRY_BPS: Decimal | None = None
-FX_BPS: Decimal | None = None
+#: How a cost component is closed. ⚠ A CLOSED vocabulary, guarded at import:
+#: an unknown value would read as "not unmodelled" to the markers below and
+#: clear a promotion refusal while modelling nothing — #2286's shape arriving
+#: through a typo. A future measured nonzero fee (a CFD lane, a non-USD
+#: account) adds a "charged" member TOGETHER WITH the arithmetic that adds it
+#: to a price and a new ``COST_MODEL_ID`` — there is deliberately no dormant
+#: scalar to set (#2720 deleted ``CARRY_BPS`` / ``FX_BPS`` rather than zeroing
+#: them).
+CostComponentClosure = Literal["unmodelled", "structural_zero"]
+COST_COMPONENT_CLOSURES: frozenset[str] = frozenset(get_args(CostComponentClosure))
 
 
-#: ⚠ DERIVED, never hand-written. When carry is finally measured, setting
-#: ``CARRY_BPS`` flips this by itself — a hand-written ``True`` would have to be
-#: remembered, and §5.1 makes this marker the thing the promotion gate refuses
-#: on: *"statistics are computed and published with an explicit
-#: ``carry_unmodelled`` marker; they are not promotable"*.
+@dataclass(frozen=True)
+class CostLane:
+    """The ONE execution lane this model prices. INTRINSICALLY SINGLE-LANE.
+
+    ⚠ There is exactly one instance (``STRUCTURAL_ZERO_LANE``) and the model id
+    names it, so there is no per-component lane to diverge and no
+    lane-conditional marker state: a consumer outside the lane needs a
+    DIFFERENT cost model, which the identity hash makes a different strategy
+    version. The lane is pinned to the live order writer by test
+    (``tests/test_cost_model.py`` — the executor payload states its literals
+    independently; neither side imports the other's constant).
+    """
+
+    direction: str
+    leverage: int
+    settlement: str
+    order_currency: str
+    account_currency: str
+
+
+#: Matches, field for field, what ``EtoroBrokerProvider.place_demo_strategy_order``
+#: puts on the wire (``transaction: buy`` ⇔ long, ``leverage: 1``,
+#: ``settlementType: real``, ``orderCurrency: usd``) and what
+#: ``BrokerStrategyOrder`` refuses at type level (``settlement_type`` is
+#: ``Literal["real"]``). Held together by test, not by import.
+STRUCTURAL_ZERO_LANE = CostLane(
+    direction="long",
+    leverage=1,
+    settlement="real",
+    order_currency="USD",
+    account_currency="USD",
+)
+
+#: ⚠ The evidence a structural-zero claim stands on, DATED, one tuple per
+#: component because they close on unrelated facts (#2363). Leg 3 of the carry
+#: tuple is deliberately labelled consistent-only: an all-zero component has an
+#: undecodable unit (`.claude/skills/data-sources/etoro-api.md`), so it can
+#: fail to falsify the rule but can never be the rule.
+CARRY_EVIDENCE: tuple[str, ...] = (
+    "etoro.com/trading/fees — 'Overnight fee: Free' for non-leveraged stock/ETF BUYs; overnight/weekend"
+    " financing is a CFD property ('Short-selling orders and leveraged positions on stocks are executed as"
+    " CFDs and incur CFD spreads and overnight fees') (verified 2026-08-14)",
+    "api-portal.etoro.com create-an-order (OpenAPI v1.342.0) — settlementType 'is an assertion, not a"
+    " selector … a mismatch is rejected during execution'; the strategy order writer pins"
+    " settlementType='real', so an order in this lane holds the underlying or is rejected"
+    " (verified 2026-08-14)",
+    "what-if cost census — overnightFee 0.0 on every real-settlement buy observation (n=28);"
+    " CONSISTENT-ONLY, unit undecodable (skill §band-census, 2026-08-12/13)",
+)
+FX_EVIDENCE: tuple[str, ...] = (
+    "account_currency_id = 1 (USD) measured on account_equity_evidence for the configured demo account"
+    " (#2698, 2026-08-14)",
+    "validated universe uniformly USD-quoted — asserted full-population by"
+    " scripts/measure_2605_universe_scope.py (#2605) and re-asserted per run at the stamping site",
+    "order payload pins orderCurrency='usd'; DEPLOYMENT_CURRENCY='USD' enforced at the sql/290 + sql/338"
+    " CHECKs and the executor eligibility/cost currency checks (strategy_base_currency)",
+)
+
+#: ⚠⚠ STRUCTURAL ZERO IS A CLOSURE STATE, NEVER A ``Decimal("0")`` — *"a value
+#: that is present and wrong beats a value that is absent and refused"*
+#: (#2286). For the declared lane no overnight/weekend fee EXISTS (the position
+#: is the underlying, not a financing contract) and no conversion event OCCURS
+#: (USD in, USD held, USD out), so there is no amount to measure and writing
+#: zero would claim a measurement nobody made. #2277's standing re-check
+#: closes with this; the evidence tuples above are its record.
+CARRY_CLOSURE: CostComponentClosure = "structural_zero"
+FX_CLOSURE: CostComponentClosure = "structural_zero"
+
+
+#: ⚠ DERIVED, never hand-written — §5.1 makes these markers the thing the
+#: promotion gate refuses on: *"statistics are computed and published with an
+#: explicit ``carry_unmodelled`` marker; they are not promotable"*.
 #:
-#: ⚠⚠ #2363 NARROWED THIS. It used to be ``CARRY_BPS is None or FX_BPS is
-#: None`` — one flag for two components, so a stored ``True`` could not say
-#: which was missing and neither half could be banked when its evidence
-#: arrived. Promotion still requires BOTH clear; the split is diagnostic, not a
-#: relaxation.
-def unmodelled_markers(carry_bps: Decimal | None, fx_bps: Decimal | None) -> tuple[bool, bool]:
-    """``(carry_unmodelled, fx_unmodelled)`` — EACH FROM ITS OWN AMOUNT ONLY.
+#: ⚠⚠ #2363 NARROWED THIS to one flag per component; #2720 moved the inputs
+#: from bps amounts to closure states. Promotion semantics are unchanged: a
+#: ``True`` marker still hard-refuses via ``structural_promotion_refusals``.
+def unmodelled_markers(carry_closure: str, fx_closure: str) -> tuple[bool, bool]:
+    """``(carry_unmodelled, fx_unmodelled)`` — EACH FROM ITS OWN CLOSURE ONLY.
 
     ⚠⚠ A FUNCTION RATHER THAN TWO INLINE EXPRESSIONS, AND THE REASON IS A FAILED
-    REVERT-PROBE. Re-coupling the carry marker to FX — restoring the pre-#2363
-    ``CARRY_BPS is None or FX_BPS is None`` — changed the value of no test,
-    because both amounts are ``None`` today and the coupled and uncoupled
-    expressions are indistinguishable while that holds. The de-coupling this
-    ticket exists to deliver was therefore unguarded at the point it lives.
+    REVERT-PROBE (#2363): a re-coupled expression was indistinguishable while
+    both inputs held the same value. Taking the closures as ARGUMENTS keeps the
+    de-coupling observable — the test drives all four combinations.
 
-    Taking the amounts as ARGUMENTS is what makes it observable: the test drives
-    all four combinations, so a marker that consults the other component's
-    amount fails immediately rather than in whichever quarter one of them is
-    finally measured.
+    ⚠ An UNKNOWN closure value RAISES rather than defaulting: ``value ==
+    "unmodelled"`` alone would read a typo as "modelled", which clears a
+    promotion refusal while modelling nothing. Validation reads both arguments;
+    each MARKER still derives from its own argument only.
     """
-    return carry_bps is None, fx_bps is None
+    for name, value in (("carry", carry_closure), ("fx", fx_closure)):
+        if value not in COST_COMPONENT_CLOSURES:
+            raise ValueError(
+                f"unknown {name} closure {value!r}; must be one of {sorted(COST_COMPONENT_CLOSURES)} — "
+                "an unknown closure must never read as 'modelled'"
+            )
+    return carry_closure == "unmodelled", fx_closure == "unmodelled"
 
 
 #: The FX half is separate evidence, a separate owner and a separate arrival
 #: date — see the module docstring and #2363.
-CARRY_UNMODELLED, FX_UNMODELLED = unmodelled_markers(CARRY_BPS, FX_BPS)
+CARRY_UNMODELLED, FX_UNMODELLED = unmodelled_markers(CARRY_CLOSURE, FX_CLOSURE)
 
 
-def _check_unmodelled_components_are_not_charged() -> None:
-    """Neither component may carry an amount until something CHARGES it.
+def _check_closures() -> None:
+    """A structural-zero closure must carry its lane and its evidence.
 
-    ⚠⚠ THIS IS THE HOLE #2363's CODEX PASS FOUND, AND IT IS NOT HYPOTHETICAL.
-    ``CARRY_BPS`` and ``FX_BPS`` are referenced nowhere except the two flags
-    above, ``__all__``, and a test asserting they are ``None`` — no price, no
-    return and no equity mark has ever added either of them. So setting one to a
-    measured number would clear its promotion refusal *without charging the
-    cost*, and every result under that model would become promotable while
-    modelling exactly what it modelled the day before. That is #2286's shape
-    ("a value that is present and wrong beats a value that is absent and
-    refused") aimed straight at the gate.
+    Replaces ``_check_unmodelled_components_are_not_charged`` (#2363→#2720):
+    the bps scalars are deleted, so the clause naming them went with them —
+    which is the ticket's own step 4, performed by removing the subject rather
+    than waiving the guard. What still needs guarding at import:
 
-    The guard is at IMPORT for the reason ``_check_bands_are_total`` is: this is
-    an edit somebody makes to the literal above, so the check belongs beside the
-    literal rather than in a test file they may not run.
+    - the closure VALUES are in the vocabulary (an unknown value would clear a
+      refusal — the markers raise too, but this fires beside the literal, in
+      the import of whoever edited it);
+    - a ``structural_zero`` claim carries non-empty, dated evidence — a claim
+      with no record is ceremony;
+    - the single lane is unleveraged and long: leverage above x1 is a CFD and a
+      short accrues financing by construction (risk posture,
+      ``.claude/CLAUDE.md``), so EITHER edit needs a new model, not this one
+      relabelled.
 
-    ⚠ Removing this guard is part of the work of charging a component, not a
-    prerequisite to be waived: charge it in the position arithmetic, ship a new
-    ``COST_MODEL_ID`` (the module rule — a change to what is charged is a new
-    model, not a silent improvement), then delete the clause that names it here.
+    The guard is at IMPORT for the reason ``_check_bands_are_total`` is: these
+    are edits somebody makes to the literals above, so the check belongs beside
+    the literals rather than in a test file they may not run.
     """
-    charged_nowhere = [name for name, value in (("CARRY_BPS", CARRY_BPS), ("FX_BPS", FX_BPS)) if value is not None]
-    if charged_nowhere:
+    for name, closure, evidence in (
+        ("CARRY_CLOSURE", CARRY_CLOSURE, CARRY_EVIDENCE),
+        ("FX_CLOSURE", FX_CLOSURE, FX_EVIDENCE),
+    ):
+        if closure not in COST_COMPONENT_CLOSURES:
+            raise ValueError(
+                f"{name} = {closure!r} is not in the closure vocabulary {sorted(COST_COMPONENT_CLOSURES)} — "
+                "an unknown closure would read as 'not unmodelled' and clear a promotion refusal while "
+                "modelling nothing new (#2286's shape). Fix the literal or widen the vocabulary together "
+                "with the arithmetic and a new COST_MODEL_ID."
+            )
+        if closure == "structural_zero" and not evidence:
+            raise ValueError(
+                f"{name} claims structural_zero with no evidence — a structural claim with no dated record "
+                "is not a closure, it is the flag-clearing shortcut the promotion gate exists to refuse."
+            )
+    if STRUCTURAL_ZERO_LANE.leverage != 1 or STRUCTURAL_ZERO_LANE.direction != "long":
         raise ValueError(
-            f"{', '.join(charged_nowhere)} is set but nothing in this module adds it to a price — clearing the "
-            "promotion refusal without charging the cost would promote every result under this model while "
-            "modelling nothing new. Charge it in the position arithmetic and ship a new COST_MODEL_ID first."
+            f"the structural-zero lane must be long and unleveraged, got direction="
+            f"{STRUCTURAL_ZERO_LANE.direction!r} leverage={STRUCTURAL_ZERO_LANE.leverage} — a short is a CFD "
+            "and leverage above x1 is a CFD, both accrue financing by construction; that lane needs a NEW "
+            "cost model, never this one relabelled."
         )
 
 
-_check_unmodelled_components_are_not_charged()
+_check_closures()
 
 
 @dataclass(frozen=True)
@@ -405,11 +504,17 @@ __all__ = [
     "CALIBRATION_POPULATION",
     "CALIBRATION_QUOTES_IN_SESSION",
     "CALIBRATION_RUN_DATE",
-    "CARRY_BPS",
+    "CARRY_CLOSURE",
+    "CARRY_EVIDENCE",
     "CARRY_UNMODELLED",
+    "COST_COMPONENT_CLOSURES",
     "COST_MODEL_ID",
-    "FX_BPS",
+    "CostComponentClosure",
+    "CostLane",
+    "FX_CLOSURE",
+    "FX_EVIDENCE",
     "FX_UNMODELLED",
+    "STRUCTURAL_ZERO_LANE",
     "PRICE_BASES",
     "SESSION_RULE",
     "PriceBand",

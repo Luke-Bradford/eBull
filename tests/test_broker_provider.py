@@ -628,6 +628,46 @@ class TestDemoStrategyOrder:
         assert result.broker_order_ref == "13902598"
         assert result.reference_id == request_id
 
+    def test_the_order_payload_is_the_cost_model_lane(self) -> None:
+        """⚠ #2720: the cost model's carry/FX structural-zero closure holds for
+        exactly the lane this writer trades, and this is the wire that holds
+        the two together. NOT a tautology (the "#2240 phase 5c" prevention
+        entry): the payload side is built from the writer's own literals, the
+        lane side from ``cost_model``'s — neither imports the other. A future
+        short / leveraged / non-USD writer change fails HERE, naming the cost
+        model as the thing that must move with it.
+        """
+        from app.services.cost_model import STRUCTURAL_ZERO_LANE
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "token": "066faaee-e1e9-49d2-a568-c6e1cc336ad8",
+            "orderId": 13902598,
+            "referenceId": "1c94300c-90aa-4303-9d00-dec376d74efb",
+        }
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+            broker.place_demo_strategy_order(
+                BrokerStrategyOrder(
+                    instrument_id=1001,
+                    amount=Decimal("100"),
+                    settlement_type="real",
+                    stop_loss_rate=Decimal("90"),
+                    take_profit_rate=Decimal("120"),
+                ),
+                request_id=UUID("1c94300c-90aa-4303-9d00-dec376d74efb"),
+            )
+            body = broker._http_write.post.call_args.kwargs["json"]
+
+        # `transaction: buy` opening a position IS the long direction — the
+        # only open transactions are buy (long) and sellShort (short).
+        assert (body["transaction"], STRUCTURAL_ZERO_LANE.direction) == ("buy", "long")
+        assert body["action"] == "open"
+        assert body["leverage"] == STRUCTURAL_ZERO_LANE.leverage
+        assert body["settlementType"] == STRUCTURAL_ZERO_LANE.settlement
+        assert body["orderCurrency"] == STRUCTURAL_ZERO_LANE.order_currency.lower()
+
     def test_real_credentials_cannot_select_a_strategy_writer(self) -> None:
         with EtoroBrokerProvider(api_key="k", user_key="u", env="real") as broker:
             try:

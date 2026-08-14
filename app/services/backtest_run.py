@@ -1248,6 +1248,27 @@ def load_corpus(
             f"{EVALUATION_WINDOW_START} -> {EVALUATION_WINDOW_END}"
         )
     universe = load_validated_universe(conn)
+    # ⚠ THE PER-RUN FX GATE (#2720). The cost model's ``fx_unmodelled = False``
+    # stamp rests on "no conversion event occurs", whose universe half is a
+    # MUTABLE table property — #2605's script asserts it full-population, but a
+    # later ``sync_universe`` could break it without moving the frozen
+    # ``COST_MODEL_ID``. So the run that stamps the flag re-asserts it on its
+    # own evaluated set, against the instrument's OWN quote currency rather
+    # than the ``exchanges.currency`` proxy, and refuses loudly rather than
+    # stamping a claim it did not check. NULL is a violation, not a pass.
+    non_usd = conn.execute(
+        "SELECT instrument_id, currency FROM instruments "
+        "WHERE instrument_id = ANY(%(ids)s) AND (currency IS NULL OR upper(currency) <> 'USD')",
+        {"ids": list(universe)},
+    ).fetchall()
+    if non_usd:
+        sample = ", ".join(f"{int(row[0])}={row[1]!r}" for row in non_usd[:5])
+        raise RuntimeError(
+            f"{len(non_usd)} validated-universe instruments are not USD-quoted ({sample}…) — the cost model "
+            f"({COST_MODEL_ID}) closes FX as structurally zero for an all-USD lane, so stamping "
+            "fx_unmodelled=false over a non-USD instrument would clear a promotion refusal the run did not "
+            "earn. Fix the universe or ship a cost model that prices conversion."
+        )
     bounds = {"ids": list(universe), "start": window.start, "end": window.end}
     axis = tuple(row[0] for row in conn.execute(_AXIS_SQL, bounds).fetchall())
     pairs = [(int(row[0]), int(row[1])) for row in conn.execute(_SERIES_SQL, {"ids": list(universe)}).fetchall()]

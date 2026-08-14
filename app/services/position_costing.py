@@ -175,6 +175,14 @@ def cost_position(position: Position, *, price_basis: PriceBasis) -> CostedPosit
     ``price_basis`` is mandatory: nominal prices select their calibrated band;
     split-adjusted research prices cannot and receive the maximum band. The
     selected ``h`` goes to both sides and never re-keys during the position.
+
+    ⚠ LONG-ONLY BY ITS OWN ARITHMETIC, and that is the backtest half of the
+    cost model's declared lane (#2720): the entry is charged as ``buy_price``
+    and the exit as ``sell_price``, so a short — whose entry is a sale — cannot
+    pass through here meaningfully. The model's carry/FX structural-zero
+    closure holds for exactly this lane (``cost_model.STRUCTURAL_ZERO_LANE``);
+    a short is a CFD, accrues financing by construction, and needs a NEW cost
+    model plus its own costing arithmetic, never this function reused.
     """
     band = cost_band_for(position.entry_fill_price, price_basis=price_basis)
     half_spread = band.half_spread
