@@ -95,6 +95,15 @@ from app.services.strategies.s4_volatility_compression_breakout import (
     s4_identity,
     s4_signals,
 )
+from app.services.strategies.s5_support_bounce import (
+    MAX_HOLD_BARS as S5_MAX_HOLD_BARS,
+)
+from app.services.strategies.s5_support_bounce import (
+    S5_STRATEGY_ID,
+    s5_exit_bracket,
+    s5_identity,
+    s5_signals,
+)
 from app.services.strategies.s6_resistance_breakout import (
     MAX_HOLD_BARS as S6_MAX_HOLD_BARS,
 )
@@ -467,6 +476,46 @@ def _s4_exit_levels(
     return scalar
 
 
+def _s5_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,
+) -> list[StrategySignal]:
+    return s5_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
+
+
+def _s5_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
+    """S-5 exits on a level-anchored stop / ATR target fixed at signal time, or the hold cap."""
+    _reject_decision_dates(S5_STRATEGY_ID, decision_dates)
+    return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=S5_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s5_exit_levels(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> ExitLevels | UnresolvedReason:
+    """Adapt S-5's bracket to the outcome reason contract. No ``regime`` — see `_s6_exit_levels`."""
+    try:
+        target, stop, max_hold = s5_exit_bracket(
+            series, signal_index=signal_index, entry_price=entry_price, universe=universe
+        )
+    except ValueError, IndexError:
+        # ⚠ BOTH, deliberately. `ValueError` is the bracket's own refusal (no ATR,
+        # no level); `IndexError` is what an out-of-range `signal_index` produces
+        # inside `atr_series` / `levels_at`. Catching only the first let a
+        # per-bar failure abort the WHOLE outcome batch — a narrow except that
+        # reads as exhaustive is worse than no except at all.
+        return "unorderable_exit_levels"
+    if target <= stop:
+        return "unorderable_exit_levels"
+    return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+
+
 def _s6_signals(
     series: BarSeries,
     *,
@@ -504,10 +553,15 @@ def _s6_exit_levels(
         target, stop, max_hold = s6_exit_bracket(
             series, signal_index=signal_index, entry_price=entry_price, universe=universe
         )
-    except ValueError:
+    except ValueError, IndexError:
         # The level or ATR is unevaluable at the signal bar. Typed refusal rather
         # than a raise: the outcome runner records an unresolved outcome, which is
         # the truthful state, and a raise would abort the whole batch for one bar.
+        #
+        # ⚠ BOTH exception types, deliberately. `ValueError` is the bracket's own
+        # refusal; `IndexError` is what an out-of-range `signal_index` produces
+        # inside `atr_series` / `levels_at`. A narrow except that reads as
+        # exhaustive is worse than none.
         return "unorderable_exit_levels"
     if target <= stop:
         # Reachable, and not a bug to prevent: the stop is anchored to the LEVEL
@@ -572,6 +626,17 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             signals=_s4_signals,
             exit_levels=_s4_exit_levels,
             exit_levels_batch=s4_exit_levels_batch,
+        ),
+        S5_STRATEGY_ID: StrategyEntry(
+            strategy_id=S5_STRATEGY_ID,
+            purpose="harness_validation",
+            identity=s5_identity,
+            strategy_class="per_series",
+            signal_kinds=frozenset({"entry"}),
+            exit_regime=_s5_exit_regime,
+            decision_calendar=_no_decision_calendar,
+            signals=_s5_signals,
+            exit_levels=_s5_exit_levels,
         ),
         S6_STRATEGY_ID: StrategyEntry(
             strategy_id=S6_STRATEGY_ID,

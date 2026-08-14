@@ -105,7 +105,24 @@ class MarketRegimeProvider:
         ).fetchall()
         if not rows:
             raise BenchmarkUnavailableError(f"benchmark {symbol!r} has no priced bars; the regime cannot be classified")
+        # ⚠⚠ DUPLICATE DATES ARE A LIVE RISK HERE, NOT A HYPOTHETICAL. This repo
+        # already records that SPY and SPY.RTH are the SAME FUND with no column
+        # separating them, so a symbol match can return two instrument_ids and
+        # two rows per date. Building the map without this check keeps whichever
+        # row survives the dict insert — silently, and the corrupted regime is
+        # then SHARED by every strategy that gates on it.
+        #
+        # Raising rather than de-duplicating: picking one of two candidate
+        # benchmarks is a decision about which series the regime means, and it
+        # belongs to whoever pins the symbol, not to a tie-break here.
         dates = [row[0] for row in rows]
+        if len(set(dates)) != len(dates):
+            duplicated = sorted({day for day in dates if dates.count(day) > 1})[:5]
+            raise BenchmarkUnavailableError(
+                f"benchmark {symbol!r} returned multiple rows for the same date "
+                f"(first few: {duplicated}); more than one instrument matches this symbol, "
+                "so the regime series is ambiguous — pin the instrument_id rather than the symbol"
+            )
         closes = np.array([float(row[1]) for row in rows])
         upper, middle, lower = _bollinger(closes)
         series = classify_regimes(closes=closes, band_upper=upper, band_middle=middle, band_lower=lower)

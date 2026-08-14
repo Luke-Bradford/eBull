@@ -192,6 +192,7 @@ class TestRunnableStrategies:
             "s2-cross-sectional-momentum",
             "s3-mean-reversion-in-trend",
             "s4-volatility-compression-breakout",
+            "s5-support-bounce",
             "s6-resistance-breakout",
         ]
         assert excluded == ()
@@ -1617,13 +1618,6 @@ class TestSeriesBreakBoundary:
             for index in range(260)
         )
         series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
-
-        # S-4 predates the regime and ignores it, but `_signals_for` now requires
-        # a provider. A uniform stand-in keeps this test about SEGMENTATION rather
-        # than about the benchmark, and avoids a DB read in a pure-logic test.
-        class _UniformRegimeProvider:
-            def for_dates(self, dates: tuple[date, ...]) -> RegimeSeries:
-                return unconstrained_regime(len(dates))
 
         provider = _UniformRegimeProvider()
         entry = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
