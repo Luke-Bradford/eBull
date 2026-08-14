@@ -28,13 +28,32 @@ however correct and however tempting the ticket looks.
 Spec: `docs/proposals/ta/2026-08-14-strategy-set-s5-s10.md`. It is complete and
 signed off. Do not re-open its design decisions; implement it.
 
+⚠⚠ **CHECK `STRATEGY_MANIFEST` BEFORE STARTING ANY STRATEGY IN THIS QUEUE.** An
+attended session builds from the same queue, so an item listed below may already
+be on `main` by the time you read this. `python -c "from
+app.services.strategy_manifest import STRATEGY_MANIFEST; print(sorted(STRATEGY_MANIFEST))"`
+settles it in one command. A strategy already in the manifest is DONE — move to
+the next item, do not re-derive it.
+
+Precedent, 2026-08-14: this prompt said "build S-6 first"; S-6 was merged
+attended (#2714) minutes later, and the loop spent an iteration re-doing the
+regime protocol change that was already on main. The queue is a priority order,
+not a claim about what is unbuilt.
+
 Shared foundation is **DONE and committed** (`16563dab`): `app/services/market_regime.py`
 and `app/services/price_levels.py`, both pure, versioned, validated on real data.
 
-1. **S-6** resistance breakout with volume confirmation — the first complete
-   strategy. Follow `app/services/strategies/s4_volatility_compression_breakout.py`
-   for the registry/manifest contract exactly.
-2. **S-5** support bounce. **S-9** squeeze expansion.
+**DONE and on `main` — do NOT rebuild:**
+- **S-6** resistance breakout (#2714) — 2.5 entries/name/yr, 37%/yr turnover.
+- **S-5** support bounce (#2714) — 10.0 entries/name/yr.
+- The regime is already threaded through `PerSeriesSignals`, `segmented_signals`,
+  the scan and both backtest arm passes. `MarketRegimeProvider` exists.
+- **S-9** squeeze expansion — IN FLIGHT attended (PR #2715). Do not touch.
+
+**Your next items:**
+1. **S-7** trend pullback. **S-8** range mean reversion. Follow
+   `app/services/strategies/s6_resistance_breakout.py` for the registry/manifest
+   contract and the regime-gated shape.
 3. **S-7** trend pullback. **S-8** range mean reversion.
 4. **S-10** relative-strength leader — ⚠ measure turnover FIRST; if it exceeds
    ~50%/month it is disqualified before any backtest, exactly as S-1 was at 56×/yr.
