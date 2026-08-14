@@ -72,9 +72,12 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         "ambiguity resolved favourably",
         [
             (
-                "        touched_stop, touched_target = low <= stop, high >= target\n"
+                "        touched_stop = low <= stop\n"
+                "        touched_target = target is not None and high >= target\n"
                 "        if touched_stop and touched_target:",
-                "        touched_stop, touched_target = low <= stop, high >= target\n        if False:",
+                "        touched_stop = low <= stop\n"
+                "        touched_target = target is not None and high >= target\n"
+                "        if False:",
             )
         ],
         "test_one_bar_spanning_both_levels_is_ambiguous or "
