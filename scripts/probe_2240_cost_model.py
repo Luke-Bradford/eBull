@@ -206,10 +206,24 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # ⚠ #2286's shape, injected: a value that is PRESENT and wrong. Setting
         # carry to zero also flips CARRY_UNMODELLED, which is what the promotion
         # gate refuses on — so this one defect quietly promotes every result.
+        # ⚠⚠ TWO EDITS, AND THE FIRST ONE IS NOT A WEAKENING (#2695). #2363 added
+        # `_check_unmodelled_components_are_not_charged()` at MODULE level, which
+        # refuses this exact mutation before any test runs — conftest fails to
+        # import and pytest exits 4, which the harness correctly declines to read
+        # as CAUGHT because no test evaluated anything. The invariant is therefore
+        # guarded harder than when this probe was written, and the guard has its
+        # own direct test (`test_a_component_may_not_carry_an_amount_that_nothing
+        # _charges`). What was left unproved is whether the two selected tests
+        # observe the defect at all, so the first edit removes the stronger guard
+        # purely to REACH them. Found by running the harness, not by the anchor
+        # audit — the anchor was intact the whole time.
         "carry set to zero instead of NULL (which also clears the unmodelled marker)",
         MODEL,
         MODEL_TESTS,
-        [("CARRY_BPS: Decimal | None = None", 'CARRY_BPS: Decimal | None = Decimal("0")')],
+        [
+            ("\n_check_unmodelled_components_are_not_charged()\n", "\n"),
+            ("CARRY_BPS: Decimal | None = None", 'CARRY_BPS: Decimal | None = Decimal("0")'),
+        ],
         "test_carry_is_none or test_the_unmodelled_marker_is_set",
     ),
     (
