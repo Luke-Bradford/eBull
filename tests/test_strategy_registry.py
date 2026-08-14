@@ -21,6 +21,7 @@ from app.services.indicator_series import (
     IndicatorSeries,
     sma_series,
 )
+from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
 from app.services.strategy_registry import (
     INPUT_RULE_SETS,
     NOT_EVALUABLE_REASONS,
@@ -244,7 +245,10 @@ class TestIdentityCoversMoreThanSource:
         """The writer stores ``identity.input_rule_set_versions`` and the hash
         is built from the same object, so a disagreement is not expressible."""
         assert self._identity().input_rule_set_versions is strategy_registry.INPUT_RULE_SETS
-        assert dict(INPUT_RULE_SETS) == {"indicator_series": INDICATOR_SERIES_RULE_SET_VERSION}
+        assert dict(INPUT_RULE_SETS) == {
+            "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
+            "market_regime_provider": BENCHMARK_SOURCE_RULE_SET_VERSION,
+        }
 
     def test_the_registry_constant_is_read_only(self) -> None:
         """A plain dict would let any importer mutate the identity of every

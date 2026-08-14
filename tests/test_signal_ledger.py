@@ -20,6 +20,7 @@ import pytest
 
 from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import BarSeries
+from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategy_registry import StrategyIdentity, StrategySignal
 from app.services.technical_analysis import OHLCVRow
@@ -252,7 +253,10 @@ class TestBatchIntegrity:
         object is what stops the column disagreeing with the hash beside it."""
         rows = resolve_fills([_fired_at(0)], series=_series(_CONSECUTIVE), identity=_IDENTITY, instrument_id=7)
         assert rows[0].input_rule_set_versions == _IDENTITY.input_rule_set_versions
-        assert dict(rows[0].input_rule_set_versions) == {"indicator_series": INDICATOR_SERIES_RULE_SET_VERSION}
+        assert dict(rows[0].input_rule_set_versions) == {
+            "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
+            "market_regime_provider": BENCHMARK_SOURCE_RULE_SET_VERSION,
+        }
 
 
 class TestLedgerRowRejects:
