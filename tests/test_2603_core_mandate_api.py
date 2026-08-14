@@ -16,12 +16,19 @@ service tests cannot see:
 
 from __future__ import annotations
 
+import inspect
 from decimal import Decimal
 
 import pytest
+from fastapi.params import Depends as DependsParam
 from fastapi.routing import APIRoute
 
-from app.api.strategies import CoreMandateUpdateRequest, _core_mandate_response, router
+from app.api.strategies import (
+    CoreMandateUpdateRequest,
+    _core_mandate_response,
+    router,
+    update_core_mandate,
+)
 from app.services.broker_credentials import (
     CredentialValidationError,
     normalise_environment,
@@ -94,10 +101,30 @@ class TestTheAuthDependency:
 
         Asserted on the dependency NAMES rather than on behaviour, because the
         defect this guards is someone deleting the override — which changes no
-        test that exercises the happy path as an operator."""
-        put = next(route for route in _routes() if route.path == CORE_MANDATE_PATH and "PUT" in route.methods)
-        names = {dependency.call.__name__ for dependency in put.dependant.dependencies if dependency.call is not None}
-        assert "require_session" in names
+        test that exercises the happy path as an operator.
+
+        ⚠ READ OFF THE ENDPOINT'S OWN SIGNATURE, not off `route.dependant`
+        (review NITPICK, PR #2702). `Depends.dependency` is FastAPI's public
+        surface; the resolved dependant tree is an internal it is free to
+        reshape. It is also the more precise question: the dependant tree
+        contains BOTH `require_session_or_service_token` (inherited from the
+        router) and `require_session`, because both run — measured, not assumed.
+        The security claim rests on the STRICTER one being present, since it
+        401s a caller with no session whatever the router-level one allowed.
+
+        ⚠ On the failure direction: if FastAPI ever composed these differently,
+        `require_session` would go MISSING from the set and this test would
+        fail. That is the safe direction — a false fail, which gets triaged, not
+        a false pass, which does not. The anti-vacuity assert below makes it so
+        explicitly rather than by luck."""
+        signature = inspect.signature(update_core_mandate)
+        declared = {
+            parameter.default.dependency.__name__
+            for parameter in signature.parameters.values()
+            if isinstance(parameter.default, DependsParam) and parameter.default.dependency is not None
+        }
+        assert declared, "no Depends markers on the endpoint — this test can no longer fail"
+        assert "require_session" in declared
 
 
 class TestTheAccountSelector:
