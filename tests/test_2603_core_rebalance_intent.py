@@ -147,6 +147,15 @@ _SANCTIONED_READERS = {
     # as consumers multiply -- and the requirements (actionable verdict, paper
     # mandate) cannot drift between them.
     "app/services/strategy_core_arc_sql.py",
+    # The submission gate (#2603 step 3a), and it is deliberately NOT routed
+    # through `strategy_core_arc_sql`. Those fragments answer "may this stored
+    # TRADE be acted on", starting from `strategy_trades`; the gate answers "may
+    # this stored INTENT become a trade at all", starting from the intent and
+    # reading facts -- supersession, the current mandate revision, an existing
+    # trade, the in-flight population -- that no load predicate has any business
+    # carrying. Composing them would put admission requirements on every read
+    # path that loads a position.
+    "app/services/strategy_core_submission_gate.py",
 }
 
 

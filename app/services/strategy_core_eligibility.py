@@ -118,6 +118,16 @@ class CoreEligibilityProof:
     verdict: CoreEligibilityVerdict
     reason_code: str | None
     age_seconds: Decimal
+    #: ⚠ READ BACK SINCE #2603 step 3a, and NOT part of ``verdict``.  A passing
+    #: verdict requires ``allow_open_position`` (``evaluate_core_eligibility``) and says
+    #: nothing about closing.  A rebalance SELL is a partial close -- never a full
+    #: one, because ``validate_core_mandate`` requires
+    #: ``core_target_pct - rebalance_band_pct > 0`` and the allocator sells only to
+    #: the lower band edge -- so the submission gate tests
+    #: ``allow_partial_close_position`` separately.  ``None`` means the response did
+    #: not say, which is why the gate compares ``IS TRUE`` rather than truthiness.
+    allow_close_position: bool | None
+    allow_partial_close_position: bool | None
     policy_version: str
 
 
@@ -304,7 +314,8 @@ def load_latest_core_eligibility_proof(
         """
         SELECT core_eligibility_proof_id, instrument_id, operator_id, provider, environment,
                api_key_credential_id, user_key_credential_id, observed_at, verdict, reason_code,
-               EXTRACT(EPOCH FROM (now() - observed_at))::numeric AS age_seconds, policy_version
+               EXTRACT(EPOCH FROM (now() - observed_at))::numeric AS age_seconds, policy_version,
+               allow_close_position, allow_partial_close_position
         FROM strategy_core_eligibility_proofs
         WHERE instrument_id = %s AND operator_id = %s AND provider = %s AND environment = %s
         ORDER BY observed_at DESC, core_eligibility_proof_id DESC
@@ -327,6 +338,12 @@ def load_latest_core_eligibility_proof(
         reason_code=None if row[9] is None else str(row[9]),
         age_seconds=Decimal(str(row[10])),
         policy_version=str(row[11]),
+        # Nullable in sql/346 and left as None rather than coerced: False means the
+        # broker said no, None means the response did not answer, and collapsing
+        # them would let an unanswered question read as a refusal (or worse, the
+        # other way round once someone writes `not proof.allow_partial_close`).
+        allow_close_position=None if row[12] is None else bool(row[12]),
+        allow_partial_close_position=None if row[13] is None else bool(row[13]),
     )
 
 
