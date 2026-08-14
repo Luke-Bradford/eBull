@@ -7,10 +7,21 @@ Run from repo root:
     uv run python -m scripts.build_2282_form25_register --year 2023 --emit-fixture
     uv run python -m scripts.build_2282_form25_register --year 2023 --census
 
-⚠ Rate limited against the SHARED SEC budget. The jobs daemon issues SEC
-requests from the same 10 req/s allowance, so this uses the same Postgres GCRA
-gate rather than a local sleep — a local limiter would be correct in isolation
-and would still get us blocked.
+Multi-year expansion (#2721) runs strictly sequentially, one year at a time,
+gating each year on its harvest failure count before touching the next:
+
+    uv run python -m scripts.build_2282_form25_register --years 2013-2024 \
+        --harvest --resolve-symbols --census
+
+⚠ Rate limited against the SHARED SEC budget: SEC's published limit is
+10 req/s and the jobs daemon draws from the same allowance. This script does
+NOT use the app's Postgres GCRA gate — that gate lives behind the app's
+connection pool and this is a one-shot script outside the app lifespan.
+Instead ``_Fetcher`` enforces a local 0.2 s floor (5 req/s), a deliberate
+PARTITION of the budget: this run takes half and leaves the other half to the
+daemon, so the two clocks interleave safely without sharing state. (An
+earlier version of this header claimed the GCRA gate was used — it never was;
+ckpt-1 on #2721 caught the contradiction with ``_Fetcher``'s own docstring.)
 
 Expected shape for 2023, from #2284's spike and reproduced here:
 
@@ -30,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import sys
 import time
@@ -154,44 +166,80 @@ def harvest(conn: psycopg.Connection[tuple], fetcher: _Fetcher, year: int) -> in
     """
     rows = _index_rows(fetcher, year)
     started = time.time()
-    failures = 0
 
-    for i, row in enumerate(rows.values(), start=1):
-        status, body = fetcher.get(_submission_url(row))
-        if status != 200:
-            logger.warning("%s: status %d", row.accession_number, status)
-            failures += 1
-            continue
-        filing = parse_submission(row, body)
-        conn.execute(
-            _UPSERT,
-            (
-                filing.accession_number,
-                filing.form,
-                filing.filed_date,
-                filing.exchange_cik,
-                filing.exchange_name,
-                filing.issuer_cik,
-                filing.issuer_name,
-                filing.file_number,
-                filing.description_class_security,
-                filing.rule_provision,
-                filing.provision_class,
-                filing.security_class,
-                filing.signature_date,
-                filing.suspension_date,
-            ),
+    def _fetch_and_store(batch: dict[str, Form25IndexRow]) -> list[Form25IndexRow]:
+        failed: list[Form25IndexRow] = []
+        for i, row in enumerate(batch.values(), start=1):
+            status, body = fetcher.get(_submission_url(row))
+            if status != 200:
+                logger.warning("%s: status %d", row.accession_number, status)
+                failed.append(row)
+                continue
+            filing = parse_submission(row, body)
+            conn.execute(
+                _UPSERT,
+                (
+                    filing.accession_number,
+                    filing.form,
+                    filing.filed_date,
+                    filing.exchange_cik,
+                    filing.exchange_name,
+                    filing.issuer_cik,
+                    filing.issuer_name,
+                    filing.file_number,
+                    filing.description_class_security,
+                    filing.rule_provision,
+                    filing.provision_class,
+                    filing.security_class,
+                    filing.signature_date,
+                    filing.suspension_date,
+                ),
+            )
+            if i % 100 == 0:
+                conn.commit()
+                logger.info("  %d/%d filings (%.0fs)", i, len(batch), time.time() - started)
+        conn.commit()
+        return failed
+
+    failed = _fetch_and_store(rows)
+    if failed:
+        # One retry pass after a pause — transient 429/5xx are the common
+        # case at this volume. Anything that fails twice is a real failure
+        # and the YEAR is incomplete: the caller must gate on the return
+        # value, not shrug (ckpt-1 on #2721 — `main` used to discard it, so
+        # a partial year read as complete).
+        logger.warning("%d filing fetch(es) failed; retrying once in 30s", len(failed))
+        time.sleep(30)
+        failed = _fetch_and_store({r.accession_number: r for r in failed})
+    if failed:
+        logger.error(
+            "%d filing(s) failed twice — year %d is INCOMPLETE: %s",
+            len(failed),
+            year,
+            ", ".join(r.accession_number for r in failed[:10]),
         )
-        if i % 100 == 0:
-            conn.commit()
-            logger.info("  %d/%d filings (%.0fs)", i, len(rows), time.time() - started)
-    conn.commit()
-    if failures:
-        logger.warning("%d filing fetch(es) failed", failures)
-    return failures
+    return len(failed)
 
 
 _SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik}.json"
+
+
+def _cover_page_candidates(columnar: dict[str, list[str]], before: date) -> list[tuple[str, str, str]]:
+    """(filing_date, accession, primary_doc) for cover-page forms at/before the delisting."""
+    candidates: list[tuple[str, str, str]] = []
+    for form, filing_date, accession, primary in zip(
+        columnar.get("form", []),
+        columnar.get("filingDate", []),
+        columnar.get("accessionNumber", []),
+        columnar.get("primaryDocument", []),
+        strict=False,
+    ):
+        if form not in COVER_PAGE_FORMS or not primary:
+            continue
+        if filing_date > before.isoformat():
+            continue
+        candidates.append((filing_date, accession, primary))
+    return candidates
 
 
 def _resolve_symbol(fetcher: _Fetcher, cik: str, before: date) -> tuple[str, str] | None:
@@ -202,27 +250,30 @@ def _resolve_symbol(fetcher: _Fetcher, cik: str, before: date) -> tuple[str, str
     company APIs serve numeric facts only). So walk the filing history for the
     newest cover-page form filed at or before the delisting and read
     ``dei:TradingSymbol`` off its primary document.
+
+    ``filings.recent`` is capped at ~1000 filings / ≥1 year; older history
+    lives in the ``filings.files[]`` pages (sec-edgar.md: "Always check
+    ``files`` and recurse"). For old delisting years the miss is BIASED, not
+    random: an issuer that failed stops filing (its cover pages stay in
+    ``recent`` forever), while an ``(a)(3)`` survivor keeps filing and pushes
+    its pre-delisting cover pages out — resolution would skew along exactly
+    the failure-vs-acquisition axis the census z-tests (Codex ckpt-2, #2721).
     """
     status, body = fetcher.get(_SUBMISSIONS.format(cik=cik))
     if status != 200:
         return None
-    import json
-
-    payload = json.loads(body)
-    recent = payload.get("filings", {}).get("recent", {})
-    candidates: list[tuple[str, str, str]] = []
-    for form, filing_date, accession, primary in zip(
-        recent.get("form", []),
-        recent.get("filingDate", []),
-        recent.get("accessionNumber", []),
-        recent.get("primaryDocument", []),
-        strict=False,
-    ):
-        if form not in COVER_PAGE_FORMS or not primary:
-            continue
-        if filing_date > before.isoformat():
-            continue
-        candidates.append((filing_date, accession, primary))
+    filings = json.loads(body).get("filings", {})
+    candidates = _cover_page_candidates(filings.get("recent", {}), before)
+    if not candidates:
+        for page in filings.get("files", []):
+            name = page.get("name")
+            # Pages carry their span; skip any that begins after the delisting.
+            if not name or page.get("filingFrom", "9999") > before.isoformat():
+                continue
+            page_status, page_body = fetcher.get(f"https://data.sec.gov/submissions/{name}")
+            if page_status != 200:
+                continue
+            candidates.extend(_cover_page_candidates(json.loads(page_body), before))
 
     for _, accession, primary in sorted(candidates, reverse=True)[:5]:
         url = f"{_ARCHIVES}/edgar/data/{int(cik)}/{accession.replace('-', '')}/{primary}"
@@ -474,9 +525,33 @@ def census(conn: psycopg.Connection[tuple], year: int) -> None:
     )
 
 
+def parse_years(spec: str) -> list[int]:
+    """``2013-2024`` -> [2013, ..., 2024]. Pure so the CLI contract is testable."""
+    start_s, _, end_s = spec.partition("-")
+    start, end = int(start_s), int(end_s or start_s)
+    if end < start:
+        raise ValueError(f"years range is backwards: {spec}")
+    return list(range(start, end + 1))
+
+
+#: The year whose cohort the committed acceptance fixture was frozen from.
+#: `--emit-fixture` for any other year against the DEFAULT path would silently
+#: overwrite the vendor acceptance test (ckpt-1 on #2721) — a different year's
+#: cohort is a different test, and it gets an explicit `--fixture-path`.
+_FIXTURE_YEAR = 2023
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--year", type=int, default=2023)
+    parser.add_argument(
+        "--years",
+        type=str,
+        default=None,
+        help="Inclusive range, e.g. 2013-2024. Runs the selected actions per "
+        "year, strictly sequentially, aborting if a year's harvest is "
+        "incomplete after retry. Excludes --emit-fixture.",
+    )
     parser.add_argument("--harvest", action="store_true")
     parser.add_argument("--reclassify", action="store_true")
     parser.add_argument("--resolve-symbols", action="store_true")
@@ -489,19 +564,37 @@ def main(argv: list[str] | None = None) -> int:
     if not any((args.harvest, args.reclassify, args.resolve_symbols, args.emit_fixture, args.census)):
         parser.error("pick at least one action")
 
+    years = parse_years(args.years) if args.years else [args.year]
+    if args.emit_fixture:
+        if args.years:
+            parser.error("--emit-fixture is single-year; it is an acceptance fixture, not a log")
+        if args.year != _FIXTURE_YEAR and args.fixture_path == _FIXTURE:
+            parser.error(
+                f"--emit-fixture --year {args.year} would overwrite the frozen "
+                f"{_FIXTURE_YEAR} acceptance fixture at {_FIXTURE}; pass an "
+                "explicit --fixture-path"
+            )
+
     fetcher = _Fetcher()
     try:
         with psycopg.connect(settings.database_url) as conn:
-            if args.harvest:
-                harvest(conn, fetcher, args.year)
-            if args.reclassify:
-                reclassify(conn, args.year)
-            if args.resolve_symbols:
-                resolve_symbols(conn, fetcher, args.year)
-            if args.emit_fixture:
-                emit_fixture(conn, args.year, args.fixture_path)
-            if args.census:
-                census(conn, args.year)
+            for year in years:
+                if args.harvest:
+                    failures = harvest(conn, fetcher, year)
+                    if failures:
+                        # The year is incomplete; its census would understate
+                        # and its resolution would run against a partial
+                        # cohort. Stop rather than continue on bad data.
+                        logger.error("aborting at year %d: %d unfetched filings", year, failures)
+                        return 1
+                if args.reclassify:
+                    reclassify(conn, year)
+                if args.resolve_symbols:
+                    resolve_symbols(conn, fetcher, year)
+                if args.emit_fixture:
+                    emit_fixture(conn, year, args.fixture_path)
+                if args.census:
+                    census(conn, year)
     finally:
         fetcher.close()
     return 0

@@ -213,14 +213,31 @@ on March 02, 2023"* — and LIN trades now.
 truncates — at ingest or at read time. `link_form25_delistings` in
 `app/services/research_corpus_ingest.py`.
 
+**#2721 extended this to the EVIDENCE model (sql/353):** `delisting_source` +
+`delisting_provision` + `delisting_filed_date` now persist WITHOUT a suspension date —
+`(b)` states one on 0 of 105 cohort rows, so the date-paired schema held the
+exchange-failure class at zero coverage by construction. `delisting_date` is still never
+back-filled from `filed_date`, a bare date is still unrepresentable, and a DATED
+'sec_form25' row still must carry its provision. Measured on the 2023 register alone the
+re-link moved terminating-Intrader coverage 37 → 249 series, `(b)` 0 → 89. What a held
+position REALISES at a termination is `app/services/series_termination.py` (pure,
+versioned, UNWIRED until the `BACKTEST_UNIVERSE` parameterisation wires it): linked
+`(b)`/`(a)(4)` → last close × (1 − 0.55) (Shumway JF 1997 Table V −30% NYSE/AMEX;
+Shumway & Warther JF 1999 −55% Nasdaq; adverse anchor, venue unknown), `(a)(3)` → last
+close, unlinked → two-armed bounds.
+
 **What is actually detectable, and it is the OTHER half of the guard.** "First bar precedes
 the known listing date" was thought unimplementable because the schema holds no listing date.
 A proxy needs neither a listing date nor a threshold: a series whose first bar postdates a
 Form 25 on the same symbol cannot be the series of the security that filing removed. Four
 today — `ALPS` (filed 2023-07-27, first bar 2025-10-31), `ATCX` (2023-04-19 → 2026-01-09),
-`USX` (2023-07-03 → 2026-06-03), `DBD` (2023-06-20 → 2023-08-14). ⚠ It is reported, never
-acted on: `DBD` is Diebold Nixdorf relisting after Chapter 11, the SAME company. The honest
-output is "identity unverified" — which is the FIRST guard (label it), not the second.
+`USX` (2023-07-03 → 2026-06-03), `DBD` (2023-06-20 → 2023-08-14). ⚠ Since #2721 the
+linkage REFUSES to write evidence onto these (`classify_form25_match` →
+`identity_unverified`): the filing removed a security whose price history the series
+demonstrably is not, and under the evidence model an unrefused write would mark a live,
+running series as delisted. `DBD` is Diebold Nixdorf relisting after Chapter 11, the SAME
+company — which is exactly why the verdict is "identity unverified" (censused), never
+"different company" (asserted).
 
 ⚠ **No corpus series is currently known to be welded.** `REED` and `SRAX` span their `(b)`
 filings with no gap at all (last bar the day before, first bar the day of) — both moved to

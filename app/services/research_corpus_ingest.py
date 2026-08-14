@@ -1118,10 +1118,13 @@ class DelistingLinkCensus:
     overlap_series: int = 0
     #: Series given a ``delisting_date``. Requires a stated suspension date.
     suspension_dates_written: int = 0
-    #: Overlapping series left NULL because the filing states no suspension
-    #: date. NOT back-filled from ``filed_date``: that is a different event and
-    #: mistruncates every series it touches (sec-edgar.md §2.6 trap 5).
-    no_suspension_date: int = 0
+    #: Series given source + provision + filed date but NO ``delisting_date``,
+    #: because the filing states no suspension date. The date is NOT
+    #: back-filled from ``filed_date``: that is a different event and
+    #: mistruncates every series it touches (sec-edgar.md §2.6 trap 5). Before
+    #: #2721 these wrote nothing at all, which held the exchange-failure
+    #: class ``(b)`` — 0 stated dates on 105 cohort rows — at zero coverage.
+    undated_evidence_written: int = 0
     #: Symbols whose cohort filings disagree on provision or suspension date.
     #: Left NULL rather than tie-broken — two different delisting events on one
     #: ticker is precisely the ambiguity the guard exists to surface.
@@ -1129,27 +1132,41 @@ class DelistingLinkCensus:
     #: Overlap by rule provision. `(b)` here with a zero write count is the
     #: measurement that kills provision-blind truncation.
     by_provision: dict[str, int] = field(default_factory=dict)
-    #: (symbol, earliest filing, first bar) where the series starts AFTER a
-    #: Form 25 on that symbol. Identity unverified — may be a later occupant
-    #: or the same issuer relisting.
+    #: (symbol, latest filing, first bar) where the series starts AFTER every
+    #: Form 25 on that symbol (the classifier's ``identity_unverified``
+    #: verdict — nothing is written). May be a later occupant or the same
+    #: issuer relisting. A series starting BETWEEN two filings is a conflict,
+    #: not an identity refusal, and appears under ``conflicting`` only.
     identity_unverified: list[tuple[str, date, date]] = field(default_factory=list)
     #: (symbol, earliest filing, last bar) where the series ends BEFORE the
     #: filing — a genuine termination, the shape the acceptance test expects
     #: and has never yet observed on this archive.
     terminating: list[tuple[str, date, date]] = field(default_factory=list)
+    #: Measured register span at link time — (filings, first filed, last
+    #: filed). Measured rather than written into the note below because the
+    #: 2013-2024 expansion (#2721) moves it, and a hardcoded "2023 only"
+    #: would go stale in the sentence a reader trusts most.
+    register_filings: int = 0
+    register_first_filed: date | None = None
+    register_last_filed: date | None = None
 
     @property
     def coverage_note(self) -> str:
+        span = (
+            f"{self.register_filings:,} filings, {self.register_first_filed} to {self.register_last_filed}"
+            if self.register_filings
+            else "EMPTY register"
+        )
         return (
-            "Form 25 coverage is 2023 ONLY (1,282 filings, 2023-01-03 to "
-            "2023-12-29) against a corpus spanning 1962-2026, and Form 25 is "
-            "US-only — there is no free authoritative equivalent for EU/UK/"
-            "Asia/MENA, where #2290's forward record is the only future "
-            "source. The cohort also excludes the 128 issuer-filed paragraph "
-            "(c) filings, which are delistings but carry no "
-            "descriptionClassSecurity and so cannot be verified as COMMON "
-            "EQUITY (sql/252's view comment). A series absent from this "
-            "linkage is therefore UNCHECKED, never 'checked and clean'."
+            f"Form 25 register coverage: {span} — measured at link time, "
+            "against a corpus spanning 1962-2026. Form 25 is US-only — there "
+            "is no free authoritative equivalent for EU/UK/Asia/MENA, where "
+            "#2290's forward record is the only future source. The cohort "
+            "also excludes issuer-filed paragraph (c) filings, which are "
+            "delistings but carry no descriptionClassSecurity and so cannot "
+            "be verified as COMMON EQUITY (sql/252's view comment). A series "
+            "absent from this linkage is therefore UNCHECKED, never 'checked "
+            "and clean'."
         )
 
 
@@ -1161,6 +1178,7 @@ class Form25Match:
     first_bar: date | None
     last_bar: date | None
     earliest_filed: date
+    latest_filed: date
     provision_variants: int
     provision: str | None
     suspension_variants: int
@@ -1168,26 +1186,59 @@ class Form25Match:
 
 
 def classify_form25_match(match: Form25Match) -> str:
-    """What to do with one match: ``write`` / ``conflict`` / ``no_suspension``.
+    """One match's verdict: ``write`` / ``conflict`` / ``identity_unverified``
+    / ``no_suspension``.
 
-    Pure so the policy is table-testable without a corpus. Three rules, and the
-    two refusals matter more than the write:
+    Pure so the policy is table-testable without a corpus. Four rules, and
+    the two refusals matter more than either write:
 
     ``conflict`` — the cohort's filings for this symbol disagree on the
     provision or on the suspension date. Two different delisting events on one
     ticker is exactly the ambiguity the guard exists to surface, so it is
     counted and left NULL rather than tie-broken. There is no source rule
     saying which of two filings wins, and inventing a precedence order
-    (latest-filed? the /A amendment?) would be a fabricated citation.
+    (latest-filed? the /A amendment?) would be a fabricated citation. The only
+    verdict that writes nothing at all.
 
-    ``no_suspension`` — the filing states no suspension date. NULL is the
-    correct value: ``filed_date`` is a DIFFERENT event (a Form 25 carries up to
-    three dates, sec-edgar.md §2.6 trap 5), and substituting it mistruncates
-    every series it touches. This is the common case, not the exception —
-    ``(b)`` supplies a suspension date on 0 of 105 cohort rows.
+    ``identity_unverified`` — the series STARTS after every Form 25 on its
+    symbol (``first_bar > latest_filed``), so it may be a later occupant of
+    the ticker (ALPS: filed 2023-07, first bar 2025-10) or the same issuer
+    relisting post-Chapter-11 (DBD). Either way the filings removed a security
+    whose price history this is demonstrably NOT, and writing the evidence
+    would mark a live, running series as delisted. Refused and censused. This
+    gate predates nothing: the dated writer always had the hole (it wrote
+    unconditionally) and it simply never fired — none of the four 2023
+    identity-unverified overlaps carries a stated suspension date. The
+    evidence write #2721 added would have fired on all four.
+
+    A series that STRADDLES the filings — starts after the earliest but not
+    after the latest — is a ``conflict``, not an identity refusal: the later
+    filing may well describe this series' security (a relist-then-delist
+    cycle), but the aggregate collapses the events, so the evidence cannot be
+    attributed to one of them without inventing a precedence order. Refusing
+    beats attributing: an unlinked terminating series degrades to the
+    termination rule's honest two-armed bounds, while a mis-attributed write
+    stamps a filed date that PRECEDES the series' own first bar. Zero cases
+    in the 2023 register (no resolved symbol carries two distinct filed
+    dates); the 2013-2024 expansion is what makes the branch reachable, and
+    it must exist BEFORE the data that exercises it (Codex ckpt-2 on #2721).
+
+    ``no_suspension`` — the filing states no suspension date. Since #2721 this
+    WRITES the evidence (source, provision, filed date) and leaves only
+    ``delisting_date`` NULL: ``filed_date`` is a DIFFERENT event (a Form 25
+    carries up to three dates, sec-edgar.md §2.6 trap 5), and substituting it
+    mistruncates every series it touches. This is the common case, not the
+    exception — ``(b)`` supplies a suspension date on 0 of 105 cohort rows,
+    which is why refusing to store the undated link held the exchange-failure
+    class at zero coverage.
     """
     if match.provision_variants > 1 or match.suspension_variants > 1:
         return "conflict"
+    if match.first_bar is not None:
+        if match.first_bar > match.latest_filed:
+            return "identity_unverified"
+        if match.first_bar > match.earliest_filed:
+            return "conflict"
     if match.suspension_date is None:
         return "no_suspension"
     return "write"
@@ -1207,6 +1258,12 @@ def link_form25_delistings(
     function has no evidence about them.
     """
     census = DelistingLinkCensus()
+
+    span = conn.execute("SELECT count(*), min(filed_date), max(filed_date) FROM sec_form25_register").fetchone()
+    if span is not None:
+        census.register_filings = int(span[0])
+        census.register_first_filed = span[1]
+        census.register_last_filed = span[2]
 
     # Scoped to the common-equity VIEW, never the raw register: a Form 25 is
     # per-SECURITY, so `sec_form25_register` contains bond and warrant
@@ -1261,13 +1318,15 @@ def link_form25_delistings(
         # fabricated conflict.
         provisions = {p for _f, p, _s in events if p is not None}
         suspensions = {s for _f, _p, s in events if s is not None}
+        filed_dates = [f for f, _p, _s in events]
         rows.append(
             (
                 series_id,
                 matched,
                 first_bar,
                 last_bar,
-                min(f for f, _p, _s in events),
+                min(filed_dates),
+                max(filed_dates),
                 len(provisions),
                 min(provisions, default=None),
                 len(suspensions),
@@ -1279,7 +1338,8 @@ def link_form25_delistings(
         """
         UPDATE research_price_series
            SET delisting_date = NULL, delisting_source = NULL,
-               delisting_provision = NULL, updated_at = now()
+               delisting_provision = NULL, delisting_filed_date = NULL,
+               updated_at = now()
          WHERE vendor = %s AND delisting_source = 'sec_form25'
         """,
         (vendor,),
@@ -1291,6 +1351,7 @@ def link_form25_delistings(
         first_bar,
         last_bar,
         earliest_filed,
+        latest_filed,
         provision_variants,
         provision,
         suspension_variants,
@@ -1301,6 +1362,7 @@ def link_form25_delistings(
             first_bar=first_bar,
             last_bar=last_bar,
             earliest_filed=earliest_filed,
+            latest_filed=latest_filed,
             provision_variants=provision_variants,
             provision=provision,
             suspension_variants=suspension_variants,
@@ -1315,47 +1377,67 @@ def link_form25_delistings(
         # suspension date is a conflict the classifier refuses to write, and
         # it would still have been filed under its provision — a census that
         # disagrees with the writer about what happened.
-        key = "conflicting" if action == "conflict" else provision
+        # `provision` is None where the filing carries no <ruleProvision>
+        # (the 25-NSE form omits it by design); label it rather than key on
+        # None, which would TypeError the census consumers' sorted() calls.
+        key = "conflicting" if action == "conflict" else (provision or "(unparsed)")
         census.by_provision[key] = census.by_provision.get(key, 0) + 1
 
-        # ``earliest_filed`` is min() over the symbol's cohort filings, and the
-        # min is deliberate rather than incidental. Both tests below are
-        # one-sided, so the earliest filing is the CONSERVATIVE bound: "the
-        # series begins after a Form 25 on this symbol" and "the series ends
-        # before any Form 25 on this symbol" are each true against min() for
-        # every filing, including when a conflicted symbol carries two events.
-        if first_bar is not None and first_bar > earliest_filed:
-            census.identity_unverified.append((symbol, earliest_filed, first_bar))
+        # The identity census keys on the CLASSIFIER's verdict — a straddling
+        # series (starts after the earliest filing, not after the latest) is a
+        # `conflict`, and reporting it under identity_unverified as well would
+        # file one series in two categories (Codex ckpt-2 on #2721). The
+        # terminating test keeps min() as its bound: "the series ends before
+        # any Form 25 on this symbol" is one-sided, and the earliest filing is
+        # the conservative side of it.
+        if action == "identity_unverified":
+            census.identity_unverified.append((symbol, latest_filed, first_bar))
         if last_bar is not None and last_bar < earliest_filed:
             census.terminating.append((symbol, earliest_filed, last_bar))
 
         if action == "conflict":
             census.conflicting.append(symbol)
             continue
-        if action == "no_suspension":
-            census.no_suspension_date += 1
+        if action == "identity_unverified":
+            # Recorded above. Nothing is written: the series starts after
+            # every filing, so the removed security's history is not this.
             continue
 
+        # Both remaining verdicts persist the EVIDENCE (source, provision,
+        # earliest filed date); they differ only in whether a suspension date
+        # exists to write. ``delisting_date`` is never fabricated from
+        # ``filed_date`` — for ``no_suspension`` it stays NULL, which sql/353
+        # made representable (source without date) precisely so the undated
+        # ``(b)`` links stop being dropped on the floor.
         conn.execute(
             """
             UPDATE research_price_series
                SET delisting_date = %s,
                    delisting_source = 'sec_form25',
                    delisting_provision = %s,
+                   delisting_filed_date = %s,
                    updated_at = now()
              WHERE series_id = %s
             """,
-            (suspension_date, provision, series_id),
+            (
+                suspension_date if action == "write" else None,
+                provision,
+                earliest_filed,
+                series_id,
+            ),
         )
-        census.suspension_dates_written += 1
+        if action == "write":
+            census.suspension_dates_written += 1
+        else:
+            census.undated_evidence_written += 1
 
     conn.commit()
     logger.info(
-        "form25 linkage: %d overlapping series, %d dated, %d with no stated "
-        "suspension date, %d conflicting, %d identity-unverified",
+        "form25 linkage: %d overlapping series, %d dated, %d undated evidence "
+        "(no stated suspension date), %d conflicting, %d identity-unverified",
         census.overlap_series,
         census.suspension_dates_written,
-        census.no_suspension_date,
+        census.undated_evidence_written,
         len(census.conflicting),
         len(census.identity_unverified),
     )

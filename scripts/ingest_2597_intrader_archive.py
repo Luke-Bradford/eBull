@@ -105,7 +105,7 @@ def link_delistings(conn: psycopg.Connection[tuple]) -> int:
     print("\n=== #2597 Form 25 delisting linkage (Intrader) ===")
     print(f"  overlapping series      : {census.overlap_series:,}")
     print(f"  suspension dates written: {census.suspension_dates_written:,}")
-    print(f"  no suspension date (NULL, not back-filled): {census.no_suspension_date:,}")
+    print(f"  undated evidence written (date NULL, not back-filled): {census.undated_evidence_written:,}")
     print(f"  conflicting symbols     : {census.conflicting or 'none'}")
     print("  overlap by rule provision:")
     for provision, count in sorted(census.by_provision.items()):
