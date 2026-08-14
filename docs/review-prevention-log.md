@@ -4656,3 +4656,70 @@ with `verify_2598_preflight_quote_crosscheck.py --replay <fixture>`:
   its order is `_RESULT_COLUMNS`' and not a natural one);
   `tests/test_strategy_holdout_namespace.py`'s existing round-trip tests, which is what went
   red.
+
+### A column shaped to the VALID domain cannot store the observation that was refused for leaving it
+
+- First seen in: #2603 item 3 step 1 (2026-08-14), `sql/348_core_rebalance_intents.sql`.
+  Twice in one diff, on two different column types — which is why this is filed as its own
+  entry rather than as an instance of an overflow gotcha.
+- Symptom: `strategy_core_rebalance_intents` stores one row per rebalance evaluation,
+  **including refusals**, because a verdict is evidence. But `_state_refusal` refuses
+  `sleeve_valuation_invalid` on a component that is non-finite or `>= 10^12`, and
+  `sleeve_currency_mismatch` on a blank or over-long currency. Storing those observations
+  into `NUMERIC(18,6) NOT NULL` and `TEXT NOT NULL CHECK (btrim(currency) <> '')`
+  respectively makes the INSERT raise — so the evidence for an unrepresentable observation
+  is exactly the row that cannot be written. #2437's standing pattern: *the control cannot
+  express a state the system can reach.*
+- Why it is easy, and why catching it once is not enough: the numeric case reads as an
+  overflow bug and gets fixed as one. The **text** case is the same defect and does not look
+  like it — a non-blank CHECK feels like hygiene, not like a domain restriction. The first
+  draft here shaped the two valuation columns correctly for this exact reason and then wrote
+  `currency TEXT NOT NULL CHECK (btrim(currency) <> '')` twenty lines later. The trigger is
+  not "could this number overflow"; it is **"is this column shaped to the values I accept,
+  on a table that also stores the ones I reject".**
+- What caught it, and what did not: the numeric half was caught by writing the spec's
+  refusal-storage section — i.e. by thinking about it in advance. The currency half survived
+  that, survived self-review, survived `ruff`/`pyright`, and survived a 48-case constraint
+  test suite that included `("blank_currency", {"currency": ""})` as a **rejection** case —
+  the test asserted the CHECK worked, which it did; nobody asked whether the writer could
+  reach it. Codex checkpoint 2 found it. **A constraint test that only asserts a bad value
+  is refused cannot see that a legitimate writer path produces that value.**
+- Prevention: for any table that stores refusals/rejections alongside accepted rows, list the
+  refusal reason codes and, for each, ask which observed column the refusal is ABOUT. Every
+  such column must be able to hold the value that triggered its own refusal — in practice
+  nullable, with `NULL` meaning "no representation in this column's shape; the reason code
+  says what was wrong" and an enforceable `NULL ⟹ refused` CHECK. Store observations
+  **unnormalised**; normalising on the way in hides the difference the refusal was about.
+  ⚠ Distinguish the writer's OWN fields (`recorded_by`, a policy version) — those stay
+  `NOT NULL` and non-blank unconditionally, because a blank one is a bug in us rather than
+  evidence about the caller.
+- Enforced in: this log; `sql/348_core_rebalance_intents.sql` (three nullable observation
+  columns with the reason stated at each, plus
+  `core_rebalance_intent_null_observation_implies_refused`);
+  `app/services/strategy_core_rebalance_intent.py::_storable_or_none` and
+  `_storable_currency_or_none`; `tests/test_2603_core_rebalance_intent_db.py`
+  (`test_an_unstorable_valuation_is_recorded_rather_than_lost`,
+  `test_a_nan_valuation_is_recorded_rather_than_raising`,
+  `test_an_unstorable_currency_is_recorded_rather_than_lost` — all three drive the REAL
+  writer, which is what the rejection-only cases could not do).
+
+### `now()` in a DEFAULT is transaction start time, and a freshness CHECK against it rejects fresh data
+
+- First seen in: #2603 item 3 step 1 (2026-08-14), `sql/348`, found by Codex checkpoint 2.
+- Symptom: `evaluated_at TIMESTAMPTZ NOT NULL DEFAULT now()` alongside
+  `CHECK (state_as_of <= evaluated_at)`. A writer called inside a transaction that opened
+  before the sleeve snapshot was taken stamps the evaluation at the **transaction's** start,
+  which is earlier than the observation it just evaluated — so the constraint rejects a
+  perfectly current snapshot for no reason but the caller's transaction boundary. The longer
+  the enclosing unit of work, the wider the window.
+- Why it is easy: `now()` reads as "the current time" and is the repo's habitual default. It
+  is only wrong where the value is compared against something the caller measured *during*
+  the same transaction — which is precisely what an as-of / observed-at column is.
+- Prevention: when a `DEFAULT now()` column is compared in a CHECK against a caller-supplied
+  timestamp, use `clock_timestamp()` (wall clock at insert) or `statement_timestamp()`.
+  Keep it a DEFAULT and never a parameter regardless — a caller supplying its own stamp can
+  backdate the record at will (`sql/346`'s rule). Test it by opening the transaction,
+  `SELECT pg_sleep(...)`, and inserting a row whose as-of falls between `now()` and
+  `clock_timestamp()`; assert `now() < clock_timestamp()` first so the test cannot go inert.
+- Enforced in: this log; `sql/348_core_rebalance_intents.sql`;
+  `tests/test_2603_core_rebalance_intent_db.py::test_a_snapshot_taken_after_the_transaction_opened_is_not_future_dated`.
