@@ -101,10 +101,18 @@ def test_the_std_predicate_would_not_have_fired_on_this_series() -> None:
 
 
 def test_both_trials_constant_names_both(capsys: pytest.CaptureFixture[str]) -> None:
-    """The reason lists every degenerate trial, not the first one found."""
+    """The reason lists every degenerate trial, not the first one found.
+
+    ⚠ Asserts the refusal and the absence of a correlation as well as the two
+    names — checking names alone would pass on any output that happened to
+    mention both trials, which several of this function's other prints do.
+    """
     problems, out = _run([0.1, 0.1, 0.1], [0.2, 0.2, 0.2], capsys)
     assert problems == []
+    assert "refused" in out
+    assert "constant return series" in out
     assert "'S-1'" in out and "'S-3'" in out
+    assert "avg trial correlation" not in out
 
 
 def test_varying_trials_still_measure_a_correlation(capsys: pytest.CaptureFixture[str]) -> None:
