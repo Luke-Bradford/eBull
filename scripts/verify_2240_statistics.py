@@ -500,13 +500,42 @@ def _criterion6(sleeves: dict[str, _Sleeve], measured: dict[str, StrategyMetrics
     if len(common) < 2:
         print("      → refused: the trials share fewer than 2 active dates, so no correlation exists")
         return problems
-    matrix = np.corrcoef(np.array([[series[label][day] for day in common] for label in labels]))
-    # ⚠ `np.corrcoef` returns NaN for a CONSTANT series — its denominator is that
-    # series' own standard deviation. Reachable: a trial whose per-date mean
-    # return never varies over the shared dates. `average_trial_correlation`
-    # would then raise on the range check rather than report, so it is caught.
-    if not np.all(np.isfinite(matrix)):
-        print("      → refused: a trial's return series is constant over the shared dates, so no correlation exists")
+    panel = np.array([[series[label][day] for day in common] for label in labels])
+    # ⚠⚠ TESTED ON THE INPUT, NOT ON THE SYMPTOM IN THE OUTPUT (#2420). The
+    # previous guard read `np.all(np.isfinite(np.corrcoef(panel)))` on the premise
+    # that `corrcoef` returns NaN for a constant series. **That premise is false
+    # on the installed numpy** — measured on 2.4.4:
+    #
+    #     >>> np.corrcoef(np.array([[0.1, 0.1, 0.1], [0.1, -0.2, 0.3]]))
+    #     array([[1., 0.], [0., 1.]])
+    #
+    # A constant row yields a finite 0.0, so the branch was unreachable and a
+    # trial whose per-date mean return never varies read as UNCORRELATED. That
+    # feeds `implied_independent_trials` as rho_hat = 0 and returns N_hat ≈ M —
+    # the conservative direction, which is exactly why nothing surfaced it: the
+    # harness reported a number nobody measured and it happened to lean safe.
+    #
+    # ⚠ `ptp` (max - min) AND NOT `std == 0.0`. The standard deviation does not
+    # fire on `[0.1, 0.1, 0.1]`: the mean of three binary 0.1s is
+    # 0.10000000000000002, so the deviations are ~1e-17 and the std is a denormal
+    # rather than a zero. "All values equal" is the property that actually means
+    # "no variation", it is exact in floating point, and it invents no tolerance.
+    #
+    # Mirrors `app/services/backtest_run.py::deflate_group` (#2394 §3.2), which is
+    # where this repair was worked out; the guard here was copied from the version
+    # that predates it.
+    degenerate = sorted(label for index, label in enumerate(labels) if float(np.ptp(panel[index])) == 0.0)
+    if degenerate:
+        print(
+            f"      → refused: trials {degenerate} have a constant return series over the "
+            f"{len(common)} shared dates, so there is no correlation to measure"
+        )
+        return problems
+    matrix = np.corrcoef(panel)
+    # Retained as a BACKSTOP, not as the live guard: a future numpy could restore
+    # NaN here, and the zero-spread check above is what actually fires today.
+    if not np.all(np.isfinite(matrix)):  # pragma: no cover - the zero-spread check above is the live guard
+        print("      → refused: the correlation matrix is not finite, so no average correlation exists")
         return problems
     rho = average_trial_correlation(matrix)
     print(f"      shared active dates    {len(common):>12,}   (dates BOTH trials traded)")
