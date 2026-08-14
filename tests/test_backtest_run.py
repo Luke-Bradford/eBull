@@ -192,7 +192,24 @@ class TestRunnableStrategies:
             "s3-mean-reversion-in-trend",
             "s4-volatility-compression-breakout",
         ]
-        assert excluded == ()
+        assert [item.strategy_id for item in excluded] == ["s6-resistance-breakout-volume"]
+
+    def test_the_regime_gated_strategy_is_excluded_by_name_not_dropped(self) -> None:
+        """⚠⚠ #2437. S-6 gates on a benchmark regime built from the LIVE corpus;
+        this job runs over the research corpus, which has no classified benchmark
+        series. Running it ungated would not measure S-6 — it would measure a
+        strictly more permissive rule and store it under S-6's identity.
+
+        The exclusion must be NAMED. ``runnable_strategies``' own docstring:
+        *"A strategy that is BLOCKED is returned as a named exclusion, never
+        dropped. A three-of-four run reporting '3 strategies evaluated' is
+        exactly the silent narrowing criterion 9 forbids."*
+        """
+        runnable, excluded = runnable_strategies()
+        assert "s6-resistance-breakout-volume" not in runnable
+        (gated,) = [item for item in excluded if item.strategy_id == "s6-resistance-breakout-volume"]
+        assert "MarketContext" in gated.reason
+        assert "regime gate" in gated.reason
 
     def test_every_manifest_entry_is_accounted_for(self) -> None:
         from app.services.strategy_manifest import STRATEGY_MANIFEST

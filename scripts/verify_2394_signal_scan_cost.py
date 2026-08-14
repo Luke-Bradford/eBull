@@ -322,12 +322,12 @@ def arrears() -> bool:
             same_day_index = len(same_day) - 1
             with_next = {
                 (s.kind, s.verdict, s.reason)
-                for s in entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON)
+                for s in entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON, market=None)
                 if s.signal_index == index
             }
             without = {
                 (s.kind, s.verdict, s.reason)
-                for s in entry.signals(same_day, universe=UNIVERSE, masked_reason=MASKED_REASON)
+                for s in entry.signals(same_day, universe=UNIVERSE, masked_reason=MASKED_REASON, market=None)
                 if s.signal_index == same_day_index
             }
             compared[entry.strategy_id] += len(with_next)
@@ -406,7 +406,7 @@ def cost() -> bool:
         identity = entry.identity(universe=UNIVERSE, cost_model_id=COST_MODEL_ID)
         started = time.monotonic()
         for instrument_id, series in loaded.items():
-            signals = entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON)
+            signals = entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON, market=None)
             if instrument_id not in at_frontier:
                 continue
             rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
@@ -516,7 +516,7 @@ def truncation() -> bool:
         assert entry.signals is not None
         for series in eligible.values():
             index = len(series) - 1
-            emitted = entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON)
+            emitted = entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON, market=None)
             full = {(s.kind, s.verdict, s.reason) for s in emitted if s.signal_index == index}
             for window in TRUNCATION_WINDOWS:
                 if len(series) <= window:
@@ -526,7 +526,7 @@ def truncation() -> bool:
                 tail_index = len(tail) - 1
                 got = {
                     (s.kind, s.verdict, s.reason)
-                    for s in entry.signals(tail, universe=UNIVERSE, masked_reason=MASKED_REASON)
+                    for s in entry.signals(tail, universe=UNIVERSE, masked_reason=MASKED_REASON, market=None)
                     if s.signal_index == tail_index
                 }
                 compared[(window, entry.strategy_id)] += 1

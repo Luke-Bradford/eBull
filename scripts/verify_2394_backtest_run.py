@@ -533,7 +533,7 @@ def arm(*, limit: int | None, strategy_id: str) -> int:
             )
 
             mark = time.monotonic()
-            signals = entry.signals(series, universe=UNIVERSE, masked_reason="quarantined_bar")
+            signals = entry.signals(series, universe=UNIVERSE, masked_reason="quarantined_bar", market=None)
             rows = resolve_fills(signals, series=series, identity=identity, instrument_id=int(instrument_id))
             entries, exits = _fills(rows, int(instrument_id))
             built = build_positions(

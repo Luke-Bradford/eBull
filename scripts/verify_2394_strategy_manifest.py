@@ -190,7 +190,7 @@ def equivalence() -> bool:
             for key, direct in DIRECT_PER_SERIES.items():
                 entry = STRATEGY_MANIFEST[key]
                 assert entry.signals is not None
-                got = entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON)
+                got = entry.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON, market=None)
                 want = direct(series, universe=UNIVERSE, close_reason=MASKED_REASON)
                 if got != want:
                     mismatches.append(f"{key} series {series_id}")
@@ -199,7 +199,7 @@ def equivalence() -> bool:
 
             s4 = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
             assert s4.signals is not None
-            got_s4 = s4.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON)
+            got_s4 = s4.signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON, market=None)
             if got_s4 != s4_signals(series, universe=UNIVERSE, masked_reason=MASKED_REASON):
                 mismatches.append(f"s4-volatility-compression-breakout series {series_id}")
             for signal in got_s4:

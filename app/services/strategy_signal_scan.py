@@ -51,6 +51,7 @@ import psycopg
 
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries, Universe
+from app.services.market_context import MarketContext, MarketContextUnavailable, load_market_context
 from app.services.price_masked_bars import (
     MASKED_REASON,
     load_bar_spans,
@@ -113,6 +114,12 @@ StrategyScanStatus = Literal[
     "written",
     "up_to_date",
     "refused_frontier_regressed",
+    #: ⚠ A regime-gated strategy whose benchmark could not be built (#2437). It
+    #: is a NAMED refusal and not a silent omission, and it is not "failed":
+    #: nothing went wrong with the strategy, its market context is missing. The
+    #: distinction is what tells an operator to fix the benchmark series rather
+    #: than to debug the rule.
+    "refused_no_market_context",
     "failed",
 ]
 
@@ -440,6 +447,21 @@ def run_signal_scan(
             "depends on would collapse into one batch"
         )
     universe = load_validated_universe(conn)
+    # ⚠ Built ONCE, before the instrument loop, and never per instrument. It is
+    # one classification of one benchmark shared by every gated strategy and
+    # every name they judge — rebuilding it inside the loop would reload and
+    # re-classify SPY 6,774 times to get the same answer.
+    #
+    # ⚠ A failure here does NOT stop the scan. S-1…S-4 read only their own bars
+    # and must still run; only the gated strategies are refused, by name, below.
+    market: MarketContext | None
+    market_context_error: str | None
+    try:
+        market = load_market_context(conn, universe=SCAN_UNIVERSE)
+        market_context_error = None
+    except MarketContextUnavailable as exc:
+        market, market_context_error = None, str(exc)
+        logger.warning("strategy_signal_scan: no market context — regime-gated strategies refused: %s", exc)
     spans = load_bar_spans(conn, universe)
     frontier = choose_frontier({instrument_id: span.last_bar for instrument_id, span in spans.items()})
     if frontier is None:
@@ -501,6 +523,17 @@ def run_signal_scan(
                     strategy_version=version,
                     status="refused_frontier_regressed" if regressed else "up_to_date",
                     resumed_from=watermark,
+                )
+            )
+            continue
+        if entry.requires_market_context and market is None:
+            results.append(
+                StrategyScanResult(
+                    strategy_id=strategy_id,
+                    strategy_version=version,
+                    status="refused_no_market_context",
+                    resumed_from=watermark,
+                    error=market_context_error,
                 )
             )
             continue
@@ -571,6 +604,7 @@ def run_signal_scan(
                     window,
                     rows[plan.entry.strategy_id],
                     unresolved_breaks=unresolved_breaks.get(instrument_id, ()),
+                    market=market,
                 )
             else:
                 assert panel_dates is not None
@@ -630,6 +664,7 @@ def _scan_per_series(
     out: list[LedgerRow],
     *,
     unresolved_breaks: Sequence[date] = (),
+    market: MarketContext | None = None,
 ) -> None:
     """Full-history recompute, filtered to the window, resolved through the writer.
 
@@ -651,6 +686,7 @@ def _scan_per_series(
         universe=SCAN_UNIVERSE,
         masked_reason=MASKED_REASON,
         unresolved_breaks=unresolved_breaks,
+        market=market,
     )
     windowed = [signal for signal in signals if signal.signal_index in window]
     out.extend(resolve_fills(windowed, series=series, identity=plan.identity, instrument_id=instrument_id))

@@ -74,6 +74,7 @@ from types import MappingProxyType
 from typing import Literal, Protocol, get_args
 
 from app.services.indicator_series import BarSeries, Universe
+from app.services.market_context import MarketContext
 from app.services.outcome_resolver import ExitLevels, UnresolvedReason
 from app.services.position_builder import ExitRegime
 from app.services.strategies.s1_time_series_momentum import S1_STRATEGY_ID, s1_identity, s1_signals
@@ -93,6 +94,13 @@ from app.services.strategies.s4_volatility_compression_breakout import (
     s4_exit_bracket,
     s4_identity,
     s4_signals,
+)
+from app.services.strategies.s6_resistance_breakout import MAX_HOLD_BARS as S6_MAX_HOLD_BARS
+from app.services.strategies.s6_resistance_breakout import (
+    S6_STRATEGY_ID,
+    s6_exit_bracket,
+    s6_identity,
+    s6_signals,
 )
 from app.services.strategy_exit_levels_batch import s4_exit_levels_batch
 from app.services.strategy_registry import (
@@ -134,10 +142,24 @@ class PerSeriesSignals(Protocol):
     adapters below are exactly where that difference is absorbed — a runner
     passing ``close_reason=`` to S-4 is a ``TypeError`` at call time, which is
     the 19-call-site problem wearing a keyword.
+
+    ⚠⚠ ``market`` IS ON THE UNIFORM CALL AND NOT ON A SECOND PROTOCOL (#2437).
+    S-5…S-10 gate on the market regime measured on a benchmark; S-1…S-4 do not.
+    The alternative shape — a separate ``MarketGatedSignals`` protocol and a
+    second arm on the tagged union — would put a per-strategy ``if`` back in the
+    runner, which is the exact defect this manifest exists to remove. So every
+    per-series strategy takes the parameter and the ones with no use for it
+    ignore it, while ``StrategyEntry.requires_market_context`` is what makes the
+    absence of a context a REFUSAL rather than a silently unfiltered scan.
     """
 
     def __call__(
-        self, series: BarSeries, *, universe: Universe, masked_reason: NotEvaluableReason
+        self,
+        series: BarSeries,
+        *,
+        universe: Universe,
+        masked_reason: NotEvaluableReason,
+        market: MarketContext | None,
     ) -> list[StrategySignal]: ...
 
 
@@ -234,6 +256,15 @@ class StrategyEntry:
     signal_kinds: frozenset[SignalKind]
     exit_regime: ExitRegimeFactory
     decision_calendar: DecisionCalendar
+    #: Whether this strategy's verdict depends on a benchmark's market regime.
+    #:
+    #: ⚠ DECLARED, not inferred from the signature. Every per-series adapter now
+    #: ACCEPTS ``market``, so "does it take the parameter" no longer answers "does
+    #: it need one" — and a runner that guessed from the signature would scan a
+    #: regime-gated strategy ungated the moment a context failed to build. It is
+    #: the operational contract, not tuning: a runner cannot know whether to
+    #: refuse the whole strategy without it.
+    requires_market_context: bool = False
     #: ``per_series`` only.
     signals: PerSeriesSignals | None = None
     #: ``cross_sectional`` only, all three together.
@@ -294,21 +325,95 @@ class StrategyEntry:
             )
 
 
+def reject_missing_market_context(entry: StrategyEntry, market: MarketContext | None) -> None:
+    """A regime-gated strategy with no context is REFUSED, never scanned ungated.
+
+    ⚠ Fail-closed, and the direction matters. Running S-6 without its gate does
+    not produce fewer signals — it produces MORE, in every market including the
+    ``bull_volatile`` Bulge the rule excludes by name. A silently ungated scan
+    would write a ledger that looks healthy and measures a different strategy.
+    """
+    if entry.requires_market_context and market is None:
+        raise ValueError(
+            f"{entry.strategy_id} declares requires_market_context and was given none — a regime-gated "
+            "strategy run without its gate fires in markets its rule excludes, so this refuses rather "
+            "than scanning; build one with market_context.load_market_context(conn)"
+        )
+
+
 def _no_decision_calendar(calendar: Iterable[date]) -> frozenset[date] | None:
     """A per-series strategy acts on every bar it is evaluable at, not on a calendar."""
     return None
 
 
-def _s1_signals(series: BarSeries, *, universe: Universe, masked_reason: NotEvaluableReason) -> list[StrategySignal]:
+def _s1_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    market: MarketContext | None = None,
+) -> list[StrategySignal]:
+    """⚠ ``market`` is accepted and IGNORED: S-1 reads only its own bars.
+
+    Not rejected when supplied. The runner builds one context and hands it to
+    every strategy uniformly, so a non-``None`` here is the ordinary case and
+    refusing it — the ``_reject_decision_dates`` shape — would be wrong: a
+    decision calendar is a per-strategy artefact a caller could only produce
+    deliberately, whereas the market context is one shared object.
+    """
     return s1_signals(series, universe=universe, close_reason=masked_reason)
 
 
-def _s3_signals(series: BarSeries, *, universe: Universe, masked_reason: NotEvaluableReason) -> list[StrategySignal]:
+def _s3_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    market: MarketContext | None = None,
+) -> list[StrategySignal]:
+    """⚠ ``market`` is accepted and IGNORED: S-3 reads only its own bars.
+
+    Not rejected when supplied. The runner builds one context and hands it to
+    every strategy uniformly, so a non-``None`` here is the ordinary case and
+    refusing it — the ``_reject_decision_dates`` shape — would be wrong: a
+    decision calendar is a per-strategy artefact a caller could only produce
+    deliberately, whereas the market context is one shared object.
+    """
     return s3_signals(series, universe=universe, close_reason=masked_reason)
 
 
-def _s4_signals(series: BarSeries, *, universe: Universe, masked_reason: NotEvaluableReason) -> list[StrategySignal]:
+def _s4_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    market: MarketContext | None = None,
+) -> list[StrategySignal]:
+    """⚠ ``market`` accepted and IGNORED — see ``_s1_signals``."""
     return s4_signals(series, universe=universe, masked_reason=masked_reason)
+
+
+def _s6_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    market: MarketContext | None = None,
+) -> list[StrategySignal]:
+    """⚠ S-6 REQUIRES the context and refuses rather than scanning ungated.
+
+    ``requires_market_context`` already makes ``segmented_signals`` refuse before
+    reaching here, so this raise is the second of two. It is kept because a
+    direct caller bypasses the runner, and a regime-gated strategy silently
+    running with no regime gate would fire in every market — a strictly wrong
+    result that looks like a working scan.
+    """
+    if market is None:
+        raise ValueError(
+            f"{S6_STRATEGY_ID} is gated on the market regime and cannot be evaluated without a MarketContext; "
+            "pass market_context.load_market_context(conn)"
+        )
+    return s6_signals(series, universe=universe, masked_reason=masked_reason, market=market)
 
 
 def _s2_member(
@@ -384,6 +489,47 @@ def _s4_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
     """
     _reject_decision_dates(S4_STRATEGY_ID, decision_dates)
     return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=S4_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s6_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
+    """S-6 exits on a level-anchored stop / entry-anchored target, or the hold cap.
+
+    Same shape as S-4's — ``level_based=True`` and ``StrategyEntry.exit_levels``
+    move together — but the levels themselves are not: S-6's stop is measured
+    from the broken resistance and only its target from the fill. ``ExitRegime``
+    records THAT there is a bracket; the strategy-owned factory records what it is.
+    """
+    _reject_decision_dates(S6_STRATEGY_ID, decision_dates)
+    return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=S6_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s6_exit_levels(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> ExitLevels | UnresolvedReason:
+    """Adapt S-6's hashed scalar bracket to the outcome reason contract.
+
+    ⚠ EVERY refusal ``s6_exit_bracket`` raises becomes ``unorderable_exit_levels``
+    here rather than propagating. S-6 has a refusal S-4 does not — a fill that
+    gapped more than 1xATR above the broken level puts the stop at or above the
+    entry — and an unorderable bracket is an outcome the resolver already has a
+    vocabulary for, not a crash. Converting it here keeps the typed refusal out of
+    the hashed module, exactly as ``_s4_exit_levels`` does for the same reason:
+    adding an exception class to the strategy would mint a new strategy version.
+    """
+    try:
+        target, stop, max_hold = s6_exit_bracket(
+            series,
+            signal_index=signal_index,
+            entry_price=entry_price,
+            universe=universe,
+        )
+    except ValueError:
+        return "unorderable_exit_levels"
+    return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
 
 def _s4_exit_levels(
@@ -475,12 +621,25 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             exit_levels=_s4_exit_levels,
             exit_levels_batch=s4_exit_levels_batch,
         ),
+        S6_STRATEGY_ID: StrategyEntry(
+            strategy_id=S6_STRATEGY_ID,
+            purpose="harness_validation",
+            identity=s6_identity,
+            strategy_class="per_series",
+            signal_kinds=frozenset({"entry"}),
+            exit_regime=_s6_exit_regime,
+            decision_calendar=_no_decision_calendar,
+            signals=_s6_signals,
+            exit_levels=_s6_exit_levels,
+            requires_market_context=True,
+        ),
     }
 )
 
 
 __all__ = [
     "STRATEGY_CLASSES",
+    "reject_missing_market_context",
     "STRATEGY_MANIFEST",
     "DecisionCalendar",
     "ExitRegimeFactory",

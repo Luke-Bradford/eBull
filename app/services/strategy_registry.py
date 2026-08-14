@@ -43,6 +43,8 @@ from typing import Literal, get_args
 
 from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import IndicatorSeries, MultiIndicatorSeries, Universe
+from app.services.market_regime import REGIME_RULE_VERSION
+from app.services.price_levels import LEVEL_RULE_VERSION
 
 STRATEGY_SET_ID = "strategy-registry-v1"
 
@@ -81,9 +83,20 @@ def _module_hash() -> str:
 #: series still moves with them. Both make stored signals visibly stale instead
 #: of silently mixed, which is the trade this epic has already taken three times
 #: (``price_quarantine``, ``price_structure``, ``indicator_series``).
+#:
+#: ⚠ ``market_regime`` and ``price_levels`` join it with S-6 (#2437), and adding
+#: them MOVES S-1…S-4's identities even though none of the four reads either.
+#: That is the registry-wide trade above being paid, not a mistake: the
+#: alternative — a per-strategy declaration so only S-6 moves — is exactly the
+#: "field they must remember to fill" this constant exists to remove. The cost
+#: was measured before taking it: 10,524 stored ``strategy_signals`` rows across
+#: the three strategies that have any, already spread over 2-3 versions each, so
+#: version churn is the normal state here rather than a track record being lost.
 INPUT_RULE_SETS: Mapping[str, str] = MappingProxyType(
     {
         "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
+        "market_regime": REGIME_RULE_VERSION,
+        "price_levels": LEVEL_RULE_VERSION,
     }
 )
 
@@ -120,6 +133,23 @@ SignalKind = Literal["entry", "exit"]
 #: measured in sql/270), so this is the split it pre-registered. The pair is
 #: exactly criterion 8's distinction: the edge of the series is a real absence,
 #: an unpriceable bar is a data gap.
+#:
+#: ⚠ ``missing_market_context`` is an ELEVENTH (#2437, sql/351 widens the CHECK),
+#: flagged as an addition for the same reason as the three above. It is the first
+#: code that is a property of a DIFFERENT INSTRUMENT than the one being judged:
+#: S-6 gates on the market regime measured on SPY, so a bar of AAPL is unjudgeable
+#: when SPY has no classifiable session that day. None of the ten describes it —
+#: the instrument's own bar is fine, its data is complete, and the strategy still
+#: cannot decide.
+#:
+#: ⚠ It is NOT ``insufficient_warmup``, and the split is MEASURED rather than
+#: assumed. Over all 3,650,325 loadable bars in the validated universe: 85.26%
+#: have a known regime; 14.48% fall before the benchmark's first classifiable bar,
+#: which genuinely IS warm-up and stays ``insufficient_warmup``; and **9,405 bars
+#: across 353 dates** fall after it with no SPY session at all (worst single date
+#: 2026-02-06, 1,735 instruments trading). That last class is a hole in a series
+#: the strategy does not own, and collapsing it into warm-up would make a
+#: permanent gap read as a series that had not started yet.
 NotEvaluableReason = Literal[
     "missing_volume",
     "missing_spread",
@@ -131,6 +161,7 @@ NotEvaluableReason = Literal[
     "no_fill_bar",
     "thin_cross_section",
     "unusable_fill_price",
+    "missing_market_context",
 ]
 
 # ⚠ DERIVED from the Literals above, never restated. Review flagged the
@@ -143,11 +174,13 @@ VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
 SIGNAL_KINDS: frozenset[str] = frozenset(get_args(SignalKind))
 NOT_EVALUABLE_REASONS: frozenset[str] = frozenset(get_args(NotEvaluableReason))
 
-#: The seven from parent criterion 8. `no_fill_bar`, `thin_cross_section` and
-#: `unusable_fill_price` are OURS and are excluded deliberately — see
-#: NotEvaluableReason. Kept as an explicit subtraction so adding a parent code
-#: later cannot silently land on our side of the line.
-OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset({"no_fill_bar", "thin_cross_section", "unusable_fill_price"})
+#: The seven from parent criterion 8. `no_fill_bar`, `thin_cross_section`,
+#: `unusable_fill_price` and `missing_market_context` are OURS and are excluded
+#: deliberately — see NotEvaluableReason. Kept as an explicit subtraction so
+#: adding a parent code later cannot silently land on our side of the line.
+OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset(
+    {"no_fill_bar", "thin_cross_section", "unusable_fill_price", "missing_market_context"}
+)
 PARENT_REASON_CODES: frozenset[str] = NOT_EVALUABLE_REASONS - OUR_ADDITIONAL_REASON_CODES
 
 

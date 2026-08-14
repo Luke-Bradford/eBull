@@ -579,6 +579,30 @@ def runnable_strategies(
     excluded: list[ExcludedStrategy] = []
     for strategy_id in sorted(manifest):
         entry = manifest[strategy_id]
+        # ⚠ A REGIME-GATED STRATEGY IS EXCLUDED FROM THE BACKTEST BY NAME, not
+        # run ungated (#2437). The market context is built from `price_daily`
+        # via `market_context.load_market_context`; this job runs over the
+        # RESEARCH corpus (`research_price_*`), whose benchmark series are a
+        # separate store, so no context exists here yet. Running S-6 without its
+        # gate would not measure S-6 — it would measure a strictly more
+        # permissive strategy that also fires in the `bull_volatile` Bulge its
+        # rule excludes by name, and it would store that under S-6's identity.
+        #
+        # Reported through `ExcludedStrategy` because that is what this function
+        # exists for: "a three-of-four run reporting '3 strategies evaluated' is
+        # exactly the silent narrowing criterion 9 forbids".
+        if entry.requires_market_context:
+            excluded.append(
+                ExcludedStrategy(
+                    strategy_id=strategy_id,
+                    reason=(
+                        "requires a MarketContext, which is built from the live corpus; the research corpus "
+                        "has no classified benchmark series yet, and running the strategy without its regime "
+                        "gate would measure a different, more permissive rule under this identity"
+                    ),
+                )
+            )
+            continue
         regime = _regime_for(entry, calendar)
         if not regime.level_based:
             if entry.exit_levels is not None or entry.exit_levels_batch is not None:

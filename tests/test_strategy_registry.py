@@ -21,6 +21,8 @@ from app.services.indicator_series import (
     IndicatorSeries,
     sma_series,
 )
+from app.services.market_regime import REGIME_RULE_VERSION
+from app.services.price_levels import LEVEL_RULE_VERSION
 from app.services.strategy_registry import (
     INPUT_RULE_SETS,
     NOT_EVALUABLE_REASONS,
@@ -244,7 +246,11 @@ class TestIdentityCoversMoreThanSource:
         """The writer stores ``identity.input_rule_set_versions`` and the hash
         is built from the same object, so a disagreement is not expressible."""
         assert self._identity().input_rule_set_versions is strategy_registry.INPUT_RULE_SETS
-        assert dict(INPUT_RULE_SETS) == {"indicator_series": INDICATOR_SERIES_RULE_SET_VERSION}
+        assert dict(INPUT_RULE_SETS) == {
+            "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
+            "market_regime": REGIME_RULE_VERSION,
+            "price_levels": LEVEL_RULE_VERSION,
+        }
 
     def test_the_registry_constant_is_read_only(self) -> None:
         """A plain dict would let any importer mutate the identity of every
@@ -315,6 +321,20 @@ class TestInputRuleSetsAreComplete:
     versioned pipeline is not caught, and no static rule short of a full import
     graph would catch it. Stated rather than implied — a guard whose blind spot
     is undocumented reads as covering more than it does.
+
+    ⚠⚠ THE GUARD USED TO MATCH ON THE NAME ``RULE_SET_VERSION`` AND WOULD HAVE
+    MISSED S-6 ENTIRELY (#2437). ``market_regime`` and ``price_levels`` name
+    their constants ``REGIME_RULE_VERSION`` and ``LEVEL_RULE_VERSION``, so a
+    strategy reading both would have passed a guard whose entire purpose is to
+    catch that — the #2333 defect evading its own detector on a naming
+    convention. It now matches any module-level ASSIGNMENT whose name ends in
+    ``_VERSION``.
+
+    ⚠ Assignments only, never ``hasattr``. ``strategy_registry`` imports
+    ``INDICATOR_SERIES_RULE_SET_VERSION``, which is a module attribute ending in
+    ``_VERSION`` that the module does not OWN — ``hasattr`` would demand
+    ``strategy_registry`` register itself in its own constant. The AST sees the
+    difference between defining a version and re-exporting one.
     """
 
     _STRATEGIES_DIR = Path(strategies.__file__).parent
@@ -341,12 +361,37 @@ class TestInputRuleSetsAreComplete:
         assert {"s1_time_series_momentum.py", "s3_mean_reversion_in_trend.py"} <= set(imports)
         assert "app.services.indicator_series" in imports["s1_time_series_momentum.py"]
 
+    @staticmethod
+    def _owned_version_constants(dotted: str) -> list[str]:
+        """Module-level ``*_VERSION`` names ASSIGNED by ``dotted`` itself."""
+        module = importlib.import_module(dotted)
+        assert module.__file__ is not None
+        found: list[str] = []
+        for node in ast.parse(Path(module.__file__).read_text()).body:
+            if isinstance(node, ast.Assign):
+                found += [t.id for t in node.targets if isinstance(t, ast.Name) and t.id.endswith("_VERSION")]
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                if node.target.id.endswith("_VERSION"):
+                    found.append(node.target.id)
+        return found
+
+    def test_the_version_walk_distinguishes_owned_from_reexported(self) -> None:
+        """⚠ Pin the AST rule itself, or the widening above is untested.
+
+        ``indicator_series`` DEFINES ``RULE_SET_VERSION``; ``strategy_registry``
+        merely imports one under an alias. A guard that could not tell them apart
+        would demand the registry register itself.
+        """
+        assert self._owned_version_constants("app.services.indicator_series") == ["RULE_SET_VERSION"]
+        assert self._owned_version_constants("app.services.market_regime") == ["REGIME_RULE_VERSION"]
+        assert self._owned_version_constants("app.services.price_levels") == ["LEVEL_RULE_VERSION"]
+        assert self._owned_version_constants("app.services.strategy_registry") == []
+
     def test_every_versioned_pipeline_a_strategy_reads_is_in_the_hash(self) -> None:
         missing: list[str] = []
         for strategy_module, imported in sorted(self._imported_service_modules().items()):
             for dotted in sorted(imported):
-                module = importlib.import_module(dotted)
-                if not hasattr(module, "RULE_SET_VERSION"):
+                if not self._owned_version_constants(dotted):
                     continue
                 if dotted.rsplit(".", 1)[-1] not in INPUT_RULE_SETS:
                     missing.append(f"{strategy_module} reads {dotted}")
@@ -430,7 +475,7 @@ class TestVocabularyIsDefinedOnce:
         """Pins the resolution itself: a helper that silently fell back to 255
         would agree with a stale Python Literal and prove nothing."""
         name, _ = self._defining_migration("strategy_signals", "not_evaluable_reason")
-        assert name == "270_strategy_signals_unusable_fill_price.sql"
+        assert name == "351_strategy_signals_missing_market_context.sql"
 
     def test_sql_reason_codes_match_the_python_vocabulary(self) -> None:
         assert self._check_values("strategy_signals", "not_evaluable_reason") == NOT_EVALUABLE_REASONS

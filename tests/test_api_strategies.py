@@ -426,4 +426,10 @@ def test_overview_declares_only_level_strategies_forward_resolvable(
         "s2-cross-sectional-momentum": False,
         "s3-mean-reversion-in-trend": False,
         "s4-volatility-compression-breakout": True,
+        # ⚠ S-6 is level-based and ships its own causal bracket factory, so the
+        # operator-facing overview declares it forward-resolvable (#2437). Being
+        # regime-gated does not change that: the gate decides whether a bar may
+        # FIRE, while this flag says an entry that did fire has a producer for
+        # its outcome.
+        "s6-resistance-breakout-volume": True,
     }

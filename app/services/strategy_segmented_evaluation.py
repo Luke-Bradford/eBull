@@ -7,8 +7,9 @@ from collections.abc import Sequence
 from datetime import date
 
 from app.services.indicator_series import BarSeries, Universe
+from app.services.market_context import MarketContext
 from app.services.price_segments import series_segment_bounds
-from app.services.strategy_manifest import StrategyEntry
+from app.services.strategy_manifest import StrategyEntry, reject_missing_market_context
 from app.services.strategy_registry import (
     NotEvaluableReason,
     StagedMember,
@@ -24,10 +25,19 @@ def segmented_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     unresolved_breaks: Sequence[date],
+    market: MarketContext | None = None,
 ) -> list[StrategySignal]:
-    """Evaluate every per-series leg with fresh state inside each segment."""
+    """Evaluate every per-series leg with fresh state inside each segment.
+
+    ⚠ ``market`` is passed straight through to each SEGMENT, not re-sliced. The
+    context is keyed by date and each segment is a ``BarSeries`` carrying its own
+    dates, so a regime-gated strategy finds the right day inside a segment with
+    no re-basing — which is the whole reason the context is date-keyed rather
+    than index-aligned (``market_context`` module docstring).
+    """
     if entry.signals is None:
         raise ValueError(f"{entry.strategy_id} has no per-series signal function")
+    reject_missing_market_context(entry, market)
     signals: list[StrategySignal] = []
     for start, end in series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
         segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
@@ -38,7 +48,7 @@ def segmented_signals(
                 kind=signal.kind,
                 reason=signal.reason,
             )
-            for signal in entry.signals(segment, universe=universe, masked_reason=masked_reason)
+            for signal in entry.signals(segment, universe=universe, masked_reason=masked_reason, market=market)
         )
     per_kind = Counter(signal.kind for signal in signals)
     if not per_kind or any(count != len(series) for count in per_kind.values()):
