@@ -72,9 +72,9 @@ re-anchoring anything.
 from __future__ import annotations
 
 import importlib
-import runpy
+import os
+import subprocess
 import sys
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -119,45 +119,56 @@ def _anchor_and_source(edit: tuple[Any, ...], probe: tuple[Any, ...], default: P
     return str(edit[0]), default
 
 
+#: Executed by the child in ``_launch_failure``. ``run_name`` is deliberately NOT
+#: ``"__main__"``, so module top level runs (the sibling import, the ``PROBES``
+#: table) while ``main()`` does not — these harnesses mutate tracked source on
+#: disk, and an audit that started one would be a far worse defect than any it
+#: checks for. See the function's docstring for what that leaves unproved.
+_LAUNCH_PROBE = "import runpy, sys; runpy.run_path(sys.argv[1], run_name='__harness_launch_check__')"
+
+
 def _launch_failure(path: Path, root: Path) -> str | None:
-    """The traceback a harness raises when started BY PATH, or ``None``.
+    """The error a harness raises when its top level is executed BY PATH, or ``None``.
 
-    ⚠ Emulates ``python scripts/<harness>.py`` exactly: ``sys.path[0]`` becomes
-    ``scripts/`` and the repo root is REMOVED, which is the condition under
-    which a ``from scripts.probe_2240_cost_model import …`` raises. Reproducing
-    it is the whole point — ``import_module`` cannot, because it needs the root
-    on the path to find the harness in the first place.
+    ⚠ A FRESH INTERPRETER, not this one. ``python -c`` with ``cwd=scripts/``
+    puts ``scripts/`` on ``sys.path[0]`` and the repo root nowhere, which is
+    exactly the condition under which ``from scripts.probe_2240_cost_model
+    import …`` raises. ``import_module`` cannot reproduce it — it needs the root
+    on the path to find the harness at all — so every anchor this file checks is
+    validated through an access path the harness's own entry point does not have.
 
-    ⚠⚠ ``sys.modules`` MUST BE PURGED TOO, and this is the half that is easy to
-    miss. The sweep above has already ``import_module``-ed a harness, which
-    imports ``scripts.probe_2240_cost_model`` as a dependency and caches it — so
-    the sibling import inside ``run_path`` is answered from the CACHE and never
-    consults ``sys.path`` at all. Reproducing the path without the state is a
-    check that passes on a harness with its fix deliberately removed, which is
-    what the first version of this function did (#2695; found by revert-probing
-    it, not by reading it).
+    ⚠⚠ AN IN-PROCESS EMULATION IS NOT ENOUGH, and this is the half that is easy
+    to miss. The first version manipulated ``sys.path`` in this interpreter and
+    passed on a harness with its fix deliberately removed: the sweep had already
+    ``import_module``-ed one, caching ``scripts.probe_2240_cost_model``, so the
+    child import was answered from ``sys.modules`` and never consulted
+    ``sys.path``. Purging ``sys.modules`` fixed that case and still left the
+    warm interpreter's ``app.*`` and third-party caches, its import hooks, and
+    a repo root removable only by exact string match. A subprocess has none of
+    those (#2695; both defects found by revert-probing this function, not by
+    reading it). ``PYTHONPATH`` is stripped from the child for the same reason —
+    a caller exporting ``PYTHONPATH=.`` would otherwise mask the failure.
 
-    ⚠ ``run_name`` is deliberately NOT ``"__main__"``, so module top level runs
-    (the sibling import, the ``PROBES`` table) while ``main()`` does not. These
-    harnesses mutate tracked source on disk; an audit that ran one would be a
-    far worse defect than the one it is checking for.
+    ⚠ WHAT THIS STILL DOES NOT PROVE, because ``main()`` never runs: a harness
+    whose ``main()`` is broken, or whose failure lives under its
+    ``if __name__ == "__main__"`` guard, passes here and cannot be started. Only
+    a real sweep settles that. The claim is bounded to "its module top level
+    executes under a path launch", which is where the #2695 defect lived — the
+    import is what raised — and is as far as a check that must not mutate source
+    can go.
     """
-    saved_path = list(sys.path)
-    saved_modules = {name: mod for name, mod in sys.modules.items() if name == "scripts" or name.startswith("scripts.")}
-    sys.path[:] = [str(root / "scripts")] + [entry for entry in saved_path if entry not in (str(root), "", ".")]
-    for name in saved_modules:
-        del sys.modules[name]
-    try:
-        runpy.run_path(str(root / path), run_name="__harness_launch_check__")
+    env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _LAUNCH_PROBE, str(root / path)],
+        cwd=str(root / "scripts"),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if proc.returncode == 0:
         return None
-    except Exception:
-        return traceback.format_exc(limit=2).strip().splitlines()[-1]
-    finally:
-        sys.path[:] = saved_path
-        for name in list(sys.modules):
-            if name == "scripts" or name.startswith("scripts."):
-                del sys.modules[name]
-        sys.modules.update(saved_modules)
+    stderr = proc.stderr.strip().splitlines()
+    return stderr[-1] if stderr else f"exit {proc.returncode} with no stderr"
 
 
 def main() -> int:
@@ -177,8 +188,9 @@ def main() -> int:
         if launch is not None:
             bad += 1
             failures.append(
-                f"{path.name}: cannot be started by path — {launch}. Every anchor below is checked through "
-                f"an import that adds the repo root, so they pass while the harness itself will not run."
+                f"{path.name}: its top level does not execute under a path launch — {launch}. Every anchor "
+                f"below is checked through an import that adds the repo root, so they pass while the harness "
+                f"itself will not start."
             )
 
         for probe in probes:

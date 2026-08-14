@@ -44,6 +44,22 @@ it through the public path. The check that makes it unreachable IS probed.
 reported, not enforced; nothing branches on them, so there is no behaviour to
 revert. ``--calibrate`` prints the live figures beside them, which is the
 mechanism that keeps them honest.
+
+⚠⚠ **THE PRESENCE OF ``_check_unmodelled_components_are_not_charged()``'s
+MODULE-LEVEL CALL** (#2695, Codex checkpoint). Its refusal is proved directly by
+``test_a_component_may_not_carry_an_amount_that_nothing_charges``, which patches
+a value and calls the function. Nothing proves the call still runs AT IMPORT —
+delete the one-line invocation and every test in the file still passes, because
+each reaches the guard by calling it. That is the #2363 tripwire's whole value
+(it fires on an edit somebody makes to the literal, in a file they may not test),
+and it is currently unguarded.
+
+⚠ It is deliberately NOT probed here rather than probed and reported ``NOT
+CAUGHT``. A probe whose selector cannot fail is noise in a sweep whose signal is
+the failures. Closing it needs a test that imports the module in a SUBPROCESS
+with the constant patched and asserts the import raises — the guard runs at
+import, so no in-process fixture can observe it without a reload dance that
+would itself need probing. Worth a ticket, not a widened diff.
 """
 
 from __future__ import annotations
@@ -206,18 +222,27 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # ⚠ #2286's shape, injected: a value that is PRESENT and wrong. Setting
         # carry to zero also flips CARRY_UNMODELLED, which is what the promotion
         # gate refuses on — so this one defect quietly promotes every result.
-        # ⚠⚠ TWO EDITS, AND THE FIRST ONE IS NOT A WEAKENING (#2695). #2363 added
-        # `_check_unmodelled_components_are_not_charged()` at MODULE level, which
-        # refuses this exact mutation before any test runs — conftest fails to
-        # import and pytest exits 4, which the harness correctly declines to read
-        # as CAUGHT because no test evaluated anything. The invariant is therefore
-        # guarded harder than when this probe was written, and the guard has its
-        # own direct test (`test_a_component_may_not_carry_an_amount_that_nothing
-        # _charges`). What was left unproved is whether the two selected tests
-        # observe the defect at all, so the first edit removes the stronger guard
-        # purely to REACH them. Found by running the harness, not by the anchor
-        # audit — the anchor was intact the whole time.
-        "carry set to zero instead of NULL (which also clears the unmodelled marker)",
+        # ⚠⚠ A COMPOUND COUNTERFACTUAL, AND THE NAME SAYS SO (#2695, after Codex
+        # called the first wording — "not a weakening" — wrong at mutation
+        # level). #2363 added `_check_unmodelled_components_are_not_charged()` at
+        # MODULE level after this probe was written, so setting `CARRY_BPS` to
+        # zero now raises during import: conftest never loads and pytest exits 4,
+        # which the harness rightly declines to read as CAUGHT because no test
+        # evaluated anything.
+        #
+        # In PRODUCTION the defect is caught at import, and that is the real
+        # defence. This probe therefore no longer reverts one shipped defect — it
+        # removes an independent guard AND injects the value, to answer the
+        # narrower question the harness can still answer: do the two shipped-state
+        # assertions observe zero carry once the stronger guard is out of the way.
+        # ⚠ The guard's own REFUSAL is proved directly by
+        # `test_a_component_may_not_carry_an_amount_that_nothing_charges`; the
+        # presence of its module-level INVOCATION is not, and that gap is
+        # recorded in WHAT IS NOT PROBED above.
+        #
+        # ⚠ Found by running the harness, not by the anchor audit — the anchor was
+        # intact the whole time. That is #2695's third decay class.
+        "the shipped-state carry assertions blind to zero carry (import guard removed to reach them)",
         MODEL,
         MODEL_TESTS,
         [

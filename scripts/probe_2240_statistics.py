@@ -43,6 +43,17 @@ test file constructs one by hand, which is what keeps the guard honest.
 
 ⚠ **``METRIC_SET_ID``'s value.** Nothing branches on it; it is stamped and
 reported. ``sql/263``'s ``NOT NULL`` + non-empty CHECK is what keeps it present.
+
+⚠⚠ **THE SEEDED ``effective_sample_size`` BRANCH** (#2695, Codex checkpoint).
+The probe below covers the no-seed half only. Substituting the nominal trade
+count in the SEEDED half is a criterion 3 violation with no test that observes
+it: ``test_a_declared_seed_fills_the_sample_size_and_the_interval`` asserts
+``is not None`` and ``> 0.0``, and a nominal *n* satisfies both. Closing it
+needs an assertion that discriminates an effective *n* from a nominal one —
+``effective_sample_size < trade_count`` is the obvious candidate and is NOT
+universally true of a block bootstrap, so it wants deriving rather than
+assuming. Stated here rather than probed, because a probe over a test that
+cannot fail would report ``NOT CAUGHT`` for a real defect and read as noise.
 """
 
 from __future__ import annotations
@@ -397,13 +408,21 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # n is reported anywhere", so this fills the field with the exact number
         # the criterion forbids — wearing the name of the one it requires, and
         # clearing the promotion gate's refusal while it does.
-        # ⚠ RE-ANCHORED (#2695). Stage 5e's block bootstrap now fills the field
-        # when a `bootstrap_seed` is declared, so the shipped rule is no longer
-        # "always null" — it is "null unless a bootstrap ran". The selected test
-        # supplies no seed, so it still pins the null branch, and the injected
-        # defect is unchanged: fill the branch with the nominal n criterion 3
-        # forbids.
-        "the effective sample size filled with the nominal trade count",
+        # ⚠ RE-ANCHORED AND RENAMED (#2695), because the old name outlived its
+        # invariant. Stage 5e's block bootstrap now fills the field when a
+        # `bootstrap_seed` is declared, so the shipped rule is no longer "always
+        # null" — it is "null unless a bootstrap ran", and this probe proves only
+        # the NO-SEED half. Crediting it with criterion 3's full "no nominal n is
+        # reported anywhere" would be exactly the stale claim #2695 is about.
+        #
+        # ⚠⚠ The injected defect is BROADER than the observation: `float(
+        # trade_count) or None` corrupts the seeded branch too, and nothing
+        # catches that — `test_a_declared_seed_fills_the_sample_size_and_the
+        # _interval` asserts only `is not None` and `> 0.0`, both of which the
+        # nominal count satisfies. Recorded in WHAT IS NOT PROBED above rather
+        # than papered over with a second anchor; closing it needs a test that
+        # discriminates an effective n from a nominal one, which does not exist.
+        "the no-bootstrap effective sample size filled with the nominal trade count",
         STATS,
         STATS_TESTS,
         [
@@ -412,7 +431,7 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
                 "        effective_sample_size=float(trade_count) or None,",
             )
         ],
-        "test_the_effective_sample_size_is_ALWAYS_NULL_from_this_stage",
+        "test_the_effective_sample_size_is_NULL_WITHOUT_A_DECLARED_SEED",
     ),
     (
         # ⚠ §5.4: exposure is invested capital-days over ALLOCATED capital-days.
