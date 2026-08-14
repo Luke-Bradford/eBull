@@ -51,6 +51,7 @@ import psycopg
 
 from app.services.cost_model import COST_MODEL_ID
 from app.services.indicator_series import BarSeries, Universe
+from app.services.market_regime_provider import MarketRegimeProvider
 from app.services.price_masked_bars import (
     MASKED_REASON,
     load_bar_spans,
@@ -542,6 +543,14 @@ def run_signal_scan(
     moved_mid_scan = 0
     evaluated = 0
 
+    # ⚠ ONCE PER SCAN, before the loop. Re-loading per instrument would be
+    # thousands of redundant benchmark reads, and would let two instruments in
+    # one cycle disagree about what the market was doing. Raises rather than
+    # degrading to an all-`None` regime: a benchmark outage that rendered as a
+    # quiet market would refuse every gated strategy and look like a legitimate
+    # verdict.
+    regime_provider = MarketRegimeProvider.load(conn)
+
     for instrument_id in eligible:
         series = load_masked_bars(conn, instrument_id).series
         # ⚠ The span query and this load are two reads of a corpus
@@ -571,6 +580,7 @@ def run_signal_scan(
                     window,
                     rows[plan.entry.strategy_id],
                     unresolved_breaks=unresolved_breaks.get(instrument_id, ()),
+                    regime_provider=regime_provider,
                 )
             else:
                 assert panel_dates is not None
@@ -630,6 +640,7 @@ def _scan_per_series(
     out: list[LedgerRow],
     *,
     unresolved_breaks: Sequence[date] = (),
+    regime_provider: MarketRegimeProvider,
 ) -> None:
     """Full-history recompute, filtered to the window, resolved through the writer.
 
@@ -645,12 +656,17 @@ def _scan_per_series(
     ``signal_index``, so a subset of signals against the full series resolves
     each fill from the same bar it always would.
     """
+    # ⚠ ALIGNED TO THIS INSTRUMENT'S OWN DATES, not to the benchmark's index.
+    # A non-US venue trades on days SPY does not; those bars get `None` and a
+    # gated strategy refuses to fire on them rather than inheriting a stale
+    # verdict. See `market_regime_provider`.
     signals = segmented_signals(
         plan.entry,
         series,
         universe=SCAN_UNIVERSE,
         masked_reason=MASKED_REASON,
         unresolved_breaks=unresolved_breaks,
+        regime=regime_provider.for_dates(series.dates),
     )
     windowed = [signal for signal in signals if signal.signal_index in window]
     out.extend(resolve_fills(windowed, series=series, identity=plan.identity, instrument_id=instrument_id))

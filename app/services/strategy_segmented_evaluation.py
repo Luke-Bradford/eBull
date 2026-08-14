@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import date
 
 from app.services.indicator_series import BarSeries, Universe
+from app.services.market_regime import RegimeSeries
 from app.services.price_segments import series_segment_bounds
 from app.services.strategy_manifest import StrategyEntry
 from app.services.strategy_registry import (
@@ -24,13 +25,29 @@ def segmented_signals(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     unresolved_breaks: Sequence[date],
+    regime: RegimeSeries,
 ) -> list[StrategySignal]:
-    """Evaluate every per-series leg with fresh state inside each segment."""
+    """Evaluate every per-series leg with fresh state inside each segment.
+
+    ⚠⚠ THE REGIME IS SLICED WITH THE SEGMENT, NOT PASSED WHOLE. Each segment is
+    a fresh ``BarSeries`` indexed from zero, so a full-length regime handed to a
+    segment starting at bar 400 would align bar 0 of the segment with bar 0 of
+    the market — every regime verdict off by the segment offset, and a strategy
+    gated on it would fire in the wrong conditions with no error anywhere.
+
+    S-6 validates ``len(regime) == len(series)`` and would raise on most
+    mismatches, which is why that check exists — but a segment whose length
+    happens to match a prefix of the regime would pass the check and still be
+    wrong. Slicing here is the fix; the length check is the backstop.
+    """
     if entry.signals is None:
         raise ValueError(f"{entry.strategy_id} has no per-series signal function")
+    if len(regime) != len(series):
+        raise ValueError(f"regime has {len(regime)} bars against {len(series)} price bars; they must align")
     signals: list[StrategySignal] = []
     for start, end in series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
         segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
+        segment_regime = RegimeSeries(values=regime.values[start:end])
         signals.extend(
             StrategySignal(
                 verdict=signal.verdict,
@@ -38,7 +55,7 @@ def segmented_signals(
                 kind=signal.kind,
                 reason=signal.reason,
             )
-            for signal in entry.signals(segment, universe=universe, masked_reason=masked_reason)
+            for signal in entry.signals(segment, universe=universe, masked_reason=masked_reason, regime=segment_regime)
         )
     per_kind = Counter(signal.kind for signal in signals)
     if not per_kind or any(count != len(series) for count in per_kind.values()):

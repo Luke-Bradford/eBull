@@ -57,6 +57,7 @@ from app.services.cost_model import COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
+from app.services.market_regime import RegimeSeries, unconstrained_regime
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.position_builder import Position, Window
 from app.services.position_costing import cost_position
@@ -191,6 +192,8 @@ class TestRunnableStrategies:
             "s2-cross-sectional-momentum",
             "s3-mean-reversion-in-trend",
             "s4-volatility-compression-breakout",
+            "s5-support-bounce",
+            "s6-resistance-breakout",
         ]
         assert excluded == ()
 
@@ -242,6 +245,20 @@ class TestArmVocabularyCoverage:
         assert QUARANTINE_ARM_ORDER[0] == "admitted"
 
 
+class _UniformRegimeProvider:
+    """A regime stand-in for pure-logic tests that have no database.
+
+    ⚠ The strategies these tests exercise (S-1…S-4) predate the regime and ignore
+    the argument, so a uniform value keeps the test about what it is actually
+    testing. A test covering a regime-GATED strategy (S-5…S-10) must NOT use
+    this — it would assert a market condition nobody measured and the strategy
+    would fire in conditions it declares it avoids.
+    """
+
+    def for_dates(self, dates: tuple[date, ...]) -> RegimeSeries:
+        return unconstrained_regime(len(dates))
+
+
 class TestLevelArmSharedPass:
     """The S-4 fast path is result-equivalent to two isolated arm passes."""
 
@@ -285,6 +302,7 @@ class TestLevelArmSharedPass:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         corpus, loaded = self._fixture()
+
         entry = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
         identity = entry.identity(universe="survivor_only", cost_model_id=COST_MODEL_ID)
         calls: list[int] = []
@@ -303,6 +321,7 @@ class TestLevelArmSharedPass:
                 ambiguity_arm=ambiguity,
                 identity=identity,
                 namespaces=("hold_out",),
+                regime_provider=_UniformRegimeProvider(),  # type: ignore[arg-type]
             )
             for ambiguity in AMBIGUITY_ARM_ORDER
         )
@@ -316,6 +335,7 @@ class TestLevelArmSharedPass:
             quarantine_arm="admitted",
             identity=identity,
             namespaces=("hold_out",),
+            regime_provider=_UniformRegimeProvider(),  # type: ignore[arg-type]
         )
 
         assert calls == [10]
@@ -1598,14 +1618,17 @@ class TestSeriesBreakBoundary:
             for index in range(260)
         )
         series = BarSeries(dates=dates, rows=rows)  # type: ignore[arg-type]
+
+        provider = _UniformRegimeProvider()
         entry = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
-        whole = _signals_for(entry, series, instrument_id=1, ranking=None)
+        whole = _signals_for(entry, series, instrument_id=1, ranking=None, regime_provider=provider)  # type: ignore[arg-type]
         segmented = _signals_for(
             entry,
             series,
             instrument_id=1,
             ranking=None,
             unresolved_breaks=(dates[150],),
+            regime_provider=provider,  # type: ignore[arg-type]
         )
         assert whole[200].verdict == "fired"
         assert (segmented[149].verdict, segmented[149].reason) == ("not_evaluable", "no_fill_bar")
