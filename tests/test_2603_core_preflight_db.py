@@ -31,8 +31,18 @@ from app.services.strategy_core_preflight import (
     preflight_core_submission,
 )
 
-INSTRUMENT_ID = 920_605
-MISSING_INSTRUMENT_ID = 920_606
+# ⚠ Distinct from every other core-arc DB module's ids, and checked rather than
+# assumed: `test_2603_core_trade_arc_db.py` already uses 920605/920606 and
+# `test_2603_core_{eligibility,rebalance_intent}_db.py` use 920604.  Worker DBs are
+# private and `_reset_planner_tables` wipes between tests, so a shared id is not a
+# live race — but the seeding helper is `ON CONFLICT DO UPDATE`, so a reused id
+# would silently absorb a cleanup leak instead of failing on it.
+#
+# ⚠ MISSING_INSTRUMENT_ID must be one that NOTHING in the suite ever inserts: the
+# tests that use it assert absence, so an id another module seeds would turn a real
+# regression into a confusing failure in this file.
+INSTRUMENT_ID = 920_611
+MISSING_INSTRUMENT_ID = 920_612
 
 
 def _seed_instrument(conn: psycopg.Connection[Any], *, tradable: bool = True) -> None:
