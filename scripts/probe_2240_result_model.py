@@ -159,8 +159,8 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
         MODEL,
         [
             (
-                "    elif result.universe_basis not in PROMOTABLE_UNIVERSE_BASES:",
-                '    elif result.universe_basis == "survivor_only":',
+                "    elif universe_basis not in PROMOTABLE_UNIVERSE_BASES:",
+                '    elif universe_basis == "survivor_only":',
             )
         ],
         "test_an_unrecognised_basis_is_refused_not_raised",
@@ -168,7 +168,7 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
     (
         "the carry refusal removed (§5.1's unmodelled carry promotes)",
         MODEL,
-        [('    if result.carry_unmodelled:\n        refusals.append("carry_unmodelled")\n', "")],
+        [('    if carry_unmodelled:\n        refusals.append("carry_unmodelled")\n', "")],
         "test_carry_unmodelled_is_refused",
     ),
     (
@@ -201,7 +201,7 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
     (
         "the never-evaluated hold-out admitted (< 1 became < 0)",
         MODEL,
-        [("    if candidate.holdout_evaluations < 1:", "    if candidate.holdout_evaluations < 0:")],
+        [("    if holdout_evaluations < 1:", "    if holdout_evaluations < 0:")],
         "test_a_never_evaluated_holdout_is_refused",
     ),
     (
@@ -213,9 +213,8 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
         MODEL,
         [
             (
-                "    elif candidate.recorded_accesses < candidate.holdout_evaluations:",
-                "    elif candidate.holdout_evaluations > 1 and "
-                "candidate.recorded_accesses < candidate.holdout_evaluations:",
+                "    if recorded_accesses < holdout_evaluations:",
+                "    if holdout_evaluations > 1 and recorded_accesses < holdout_evaluations:",
             )
         ],
         "test_an_evaluation_without_a_recorded_access_is_refused",
@@ -223,13 +222,13 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
     (
         "the Deflated Sharpe refusal removed (criterion 6)",
         MODEL,
-        [('    if result.deflated_sharpe is None:\n        refusals.append("deflated_sharpe_not_computed")\n', "")],
+        [('    if deflated_sharpe is None:\n        refusals.append("deflated_sharpe_not_computed")\n', "")],
         "test_a_missing_deflated_sharpe_is_refused",
     ),
     (
         "the trial-count refusal removed (an undeclared count promotes)",
         MODEL,
-        [('    if result.trial_count is None:\n        refusals.append("trial_count_undeclared")\n', "")],
+        [('    if trial_count is None:\n        refusals.append("trial_count_undeclared")\n', "")],
         "test_an_undeclared_trial_count_is_refused_even_with_a_deflated_sharpe",
     ),
     (
@@ -248,9 +247,21 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
         "test_an_uncompared_ambiguity_pair_is_refused",
     ),
     (
+        # ⚠ ANCHORED ON WHAT FOLLOWS, not on what precedes. `return
+        # tuple(refusals)` has FOUR sites since #2639 split the gate into
+        # per-criterion helpers, and the one this probe means is
+        # `check_promotable`'s own. Trailing context survives a new refusal
+        # block being appended INSIDE the function — which is how the gate
+        # grows — whereas anchoring on the preceding statement would die on
+        # exactly that edit (#2695).
         "the gate short-circuited to its first refusal",
         MODEL,
-        [("    return tuple(refusals)", "    return tuple(refusals[:1])")],
+        [
+            (
+                "    return tuple(refusals)\n\n\ndef is_promotable(candidate: PromotionCandidate) -> bool:",
+                "    return tuple(refusals[:1])\n\n\ndef is_promotable(candidate: PromotionCandidate) -> bool:",
+            )
+        ],
         "test_every_refusal_is_returned_not_just_the_first",
     ),
     (
@@ -264,13 +275,13 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
         # let a different strategy inherit a track record".
         "the sizing rule dropped from the result identity hash",
         MODEL,
-        [('                "sizing_rule": self.sizing_rule,\n', "")],
+        [('            "sizing_rule": self.sizing_rule,\n', "")],
         "test_the_sizing_rule_moves_it",
     ),
     (
         "the ambiguity arm dropped from the result identity hash (§3.4's two arms collide)",
         MODEL,
-        [('                "ambiguity_arm": self.ambiguity_arm,\n', "")],
+        [('            "ambiguity_arm": self.ambiguity_arm,\n', "")],
         "test_the_ambiguity_arm_moves_it",
     ),
     (

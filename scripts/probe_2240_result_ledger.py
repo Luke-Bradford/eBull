@@ -195,13 +195,25 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         # `recorded_accesses < holdout_evaluations` can never be true, so the
         # gate's refusal becomes unreachable — passing for the wrong reason
         # rather than failing.
+        # ⚠ RE-ANCHORED (#2695). The two counts were two statements when this
+        # probe was written; they are now the two sub-SELECTs of
+        # `_COUNT_HOLDOUT_EVALUATIONS_AND_ACCESSES` — one statement, one
+        # snapshot, so a concurrent write cannot be straddled. Same defect,
+        # injected inside the merged statement: point the ACCESS count at the
+        # results store and both numbers come off one relation.
         "both gate counts read off the same relation (the unrecorded-access refusal goes dead)",
         LEDGER,
         DB_TESTS,
         [
             (
-                "    evaluations = conn.execute(_COUNT_HOLDOUT_RESULTS, params).fetchone()",
-                "    evaluations = conn.execute(_COUNT_EVALUATE_ACCESSES, params).fetchone()",
+                "           FROM strategy_holdout_accesses\n"
+                "          WHERE strategy_id = %(strategy_id)s\n"
+                "            AND strategy_version = %(strategy_version)s\n"
+                "            AND access_kind = 'evaluate')",
+                "           FROM strategy_results_store\n"
+                "          WHERE strategy_id = %(strategy_id)s\n"
+                "            AND strategy_version = %(strategy_version)s\n"
+                "            AND namespace = 'hold_out')",
             )
         ],
         "test_the_two_counts_read_different_relations",

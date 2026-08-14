@@ -84,10 +84,21 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_every_band_matches_the_frozen_calibration",
     ),
     (
+        # ⚠ THIS ANCHOR IS THE FROZEN VALUE, so a LEGITIMATE re-freeze breaks it
+        # by construction — there is no smaller span, because the rule being
+        # reverted IS the literal. That is the intended cost: `audit_probe_anchors`
+        # now fails at push time on a re-freeze that did not update this probe,
+        # where before the probe simply stopped proving anything in silence
+        # (#2695 — it had been stranded on `-v1` since the v2 split).
         "the cost model id renamed without the table moving",
         MODEL,
         MODEL_TESTS,
-        [('COST_MODEL_ID = "static-p75-insession-v1"', 'COST_MODEL_ID = "static-p75-v2"')],
+        [
+            (
+                'COST_MODEL_ID = "static-p75-insession-v2+split-adjusted-max"',
+                'COST_MODEL_ID = "static-p75-v3"',
+            )
+        ],
         "test_the_cost_model_id_is_the_frozen_one",
     ),
     (
