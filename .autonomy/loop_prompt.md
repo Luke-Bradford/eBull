@@ -61,6 +61,17 @@ and `app/services/price_levels.py`, both pure, versioned, validated on real data
 6. **Walk-forward validation on recent regime.** Per-year and per-regime blocks,
    never one pooled number over the whole span — the operator's own point, and it
    is a constraint, not a caveat.
+7. **#2720 — measure and CHARGE eToro carry + FX, new COST_MODEL_ID.** Gate 1 of 2
+   between firing strategies and funded paper trades. The four-step order in the
+   ticket is the cost-model guard's own prescription; charging without measuring,
+   or setting without charging, are the two forbidden shortcuts.
+8. **#2721 — position-termination rule + delisting_source coverage.** Gate 2 of 2
+   (the `survivorship_free` label). Its step 3 moves every StrategyIdentity —
+   read the ticket's hard bounds before starting, and do steps 1-2 first.
+
+⚠ Items 7-8 are what stop this queue from dead-ending: with them done, promotion
+stops being structurally refused and the S-5..S-10 evidence can actually gate
+capital. Without them, item 6's walk-forward produces numbers nothing can act on.
 
 ### ⚠ Do NOT do these, however actionable they look
 
