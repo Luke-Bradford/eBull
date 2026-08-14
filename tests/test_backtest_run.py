@@ -194,6 +194,7 @@ class TestRunnableStrategies:
             "s4-volatility-compression-breakout",
             "s5-support-bounce",
             "s6-resistance-breakout",
+            "s9-squeeze-expansion",
         ]
         assert excluded == ()
 
