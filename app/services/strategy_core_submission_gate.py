@@ -207,7 +207,7 @@ WHERE intent.core_rebalance_intent_id = %(intent_id)s
 _TERMINAL_TRADE_STATUSES: Final = ("closed", "failed")
 
 
-def _lock_held(conn: psycopg.Connection[Any], key: tuple[int, int]) -> bool:
+def core_lock_held(conn: psycopg.Connection[Any], key: tuple[int, int]) -> bool:
     """Does THIS backend currently hold ``key`` as a two-int4 advisory lock?
 
     ⚠ ``objsubid = 2`` is required, not tidiness.  Postgres encodes a two-``int4``
@@ -342,12 +342,12 @@ def admit_core_rebalance_intent(
     and submission reopens the credential-swap window; keep the two in one
     transaction or re-admit afterwards.
     """
-    if not _lock_held(conn, CORE_SUBMISSION_ADVISORY_LOCK):
+    if not core_lock_held(conn, CORE_SUBMISSION_ADVISORY_LOCK):
         raise StrategyCoreSubmissionError(
             "core submission admission requires core_submission_lock to be held; "
             "without it the UNIQUE index refuses the second INSERT only after both callers reached the broker"
         )
-    if not _lock_held(conn, CORE_MANDATE_ADVISORY_LOCK):
+    if not core_lock_held(conn, CORE_MANDATE_ADVISORY_LOCK):
         raise StrategyCoreSubmissionError(
             "core submission admission requires the core mandate advisory lock to be held; "
             "without it a mandate revision can be appended between this check and the trade INSERT"
@@ -483,5 +483,6 @@ __all__ = [
     "CoreSubmissionRefusal",
     "StrategyCoreSubmissionError",
     "admit_core_rebalance_intent",
+    "core_lock_held",
     "core_submission_lock",
 ]

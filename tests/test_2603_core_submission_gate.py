@@ -82,7 +82,7 @@ def test_both_advisory_keys_are_positive_because_the_assertion_compares_unsigned
     """``pg_locks.classid``/``objid`` are OID-width; the lock functions take signed int4.
 
     A negative key component would be stored as its uint32 image and would not
-    compare equal to the signed literal, so ``_lock_held`` would return False for
+    compare equal to the signed literal, so ``core_lock_held`` would return False for
     a lock that IS held — and the gate would raise on every call.  Cheap to pin,
     invisible if it ever changes.
     """

@@ -3229,6 +3229,25 @@ def quotes_refresh() -> None:
                 WHERE p.instrument_id IS NOT NULL
                    OR (i.is_tradable = TRUE AND c.coverage_tier IN (1, 2))
                    OR (i.is_tradable = TRUE AND i.symbol = ANY(%(benchmarks)s))
+                   -- #2603 step 3b-1: the ENABLED core mandate's instrument, which
+                   -- none of the three arms above reaches on the first rebalance.
+                   -- The first core buy is by definition not yet HELD, and a
+                   -- mandate may name any tradable instrument -- measured on dev,
+                   -- IVV / VTI / SPY.RTH are all Tier 3, unheld and absent from
+                   -- BENCHMARK_SYMBOLS, so a mandate naming one of them would
+                   -- never be quoted and `core_quote_missing` would be PERMANENT
+                   -- rather than transient (strategy_core_preflight.py).
+                   -- `ORDER BY revision DESC LIMIT 1` (no WHERE) matches
+                   -- load_core_mandate: THE mandate is the latest revision, not the
+                   -- latest enabled one. The CASE yields NULL when that revision is
+                   -- disabled, and `instrument_id = NULL` is never true -- so a
+                   -- disabled mandate drops out of scope without a second subquery.
+                   OR (i.is_tradable = TRUE AND i.instrument_id = (
+                          SELECT CASE WHEN m.enabled THEN m.core_instrument_id END
+                          FROM strategy_core_mandate_events m
+                          ORDER BY m.revision DESC
+                          LIMIT 1
+                       ))
                 ORDER BY i.instrument_id, i.symbol
                 """,
                 {"benchmarks": sorted(BENCHMARK_SYMBOLS)},
@@ -3241,8 +3260,8 @@ def quotes_refresh() -> None:
                 # no T1/T2 coverage, no benchmarks) and must not read as a
                 # healthy no-op.
                 logger.warning(
-                    "quotes_refresh: scope is EMPTY (0 held + 0 T1/T2 + 0 benchmark) — nothing to quote; "
-                    "universe/coverage may not be seeded"
+                    "quotes_refresh: scope is EMPTY (0 held + 0 T1/T2 + 0 benchmark + no enabled core "
+                    "mandate) — nothing to quote; universe/coverage may not be seeded"
                 )
                 tracker.row_count = 0
                 return
