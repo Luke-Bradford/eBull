@@ -110,8 +110,9 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     failures: list[str] = []
     total = 0
+    harnesses = sorted((root / "scripts").glob(HARNESS_GLOB))
 
-    for path in sorted((root / "scripts").glob(HARNESS_GLOB)):
+    for path in harnesses:
         module = importlib.import_module(f"scripts.{path.stem}")
         probes: list[tuple[Any, ...]] = getattr(module, "PROBES", [])
         default_src: Path | None = getattr(module, "SRC", None)
@@ -133,7 +134,19 @@ def main() -> int:
                     bad += 1
                     continue
                 if src not in sources:
-                    sources[src] = (root / src).read_text()
+                    try:
+                        sources[src] = (root / src).read_text()
+                    except OSError as exc:
+                        # ⚠ REPORTED, never raised. A source file that has been
+                        # renamed or deleted is the MOST complete form of the
+                        # decay this audit exists to find — letting it abort the
+                        # run would surface the worst case as a traceback and
+                        # hide every other finding behind it. Not cached, so the
+                        # next probe naming the same file reports it too rather
+                        # than KeyError-ing on a half-populated cache.
+                        bad += 1
+                        failures.append(f"{path.name}: {name}: cannot read {src} — {type(exc).__name__}")
+                        continue
                 occurrences = sources[src].count(anchor)
                 checked += 1
                 total += 1
@@ -147,7 +160,7 @@ def main() -> int:
         marker = "OK " if bad == 0 else "***"
         print(f"  {marker} {path.name:<45} {len(probes):>3} probes, {checked:>3} anchors", flush=True)
 
-    print(f"\n{total} anchors checked across {len(list((root / 'scripts').glob(HARNESS_GLOB)))} harnesses", flush=True)
+    print(f"\n{total} anchors checked across {len(harnesses)} harnesses", flush=True)
     if failures:
         print("\nSTALE:\n  " + "\n  ".join(failures), file=sys.stderr, flush=True)
         print(

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.audit_probe_anchors import _anchor_and_source, _edits_of
+from scripts.audit_probe_anchors import _anchor_and_source, _edits_of, main
 
 SRC_A = Path("app/services/alpha.py")
 SRC_B = Path("app/services/beta.py")
@@ -87,3 +87,31 @@ def test_every_harness_in_the_tree_contributes_at_least_one_anchor() -> None:
                 anchor, source = _anchor_and_source(edit, probe, getattr(module, "SRC", None))
                 assert anchor, f"{path.name}: {probe[0]}: empty anchor"
                 assert (root / source).exists(), f"{path.name}: {probe[0]}: {source} does not exist"
+
+
+def test_an_unreadable_source_is_reported_not_raised(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """⚠ A deleted or renamed source is the MOST complete form of this decay.
+
+    Letting `read_text` propagate would surface the worst case as a traceback and
+    hide every other finding behind it — the audit would fail loudest exactly
+    where it has the most to say. Every read is made to fail here, so the run
+    must still complete, return 1, and attribute a failure per probe.
+    """
+    original = Path.read_text
+
+    def _refuse(self: Path, *args: object, **kwargs: object) -> str:
+        if self.suffix == ".py" and "app/services" in self.as_posix():
+            raise OSError("no such file (synthetic)")
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _refuse)
+    assert main() == 1
+    # ⚠ The exit code alone does not discriminate: the audit returns 1 today for
+    # genuinely stale anchors too, so a test asserting only that would pass with
+    # the guard removed (it would ERROR on the raise, but for the wrong reason,
+    # and would go green the day the anchors are all fixed). Assert the reason.
+    stderr = capsys.readouterr().err
+    assert "cannot read" in stderr
+    assert "OSError" in stderr
