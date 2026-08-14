@@ -307,6 +307,28 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         "test_an_unbookable_hold_does_not_suppress_the_rest_of_history",
     ),
     (
+        # The THIRD arm of the same expression, and the one that had no probe at
+        # all (#2689). It post-dates this harness: when the probe above was
+        # written the expression was a two-way `ceiling if ... else None`, so
+        # `series_break` was added without anything asking whether it was
+        # covered. ⚠ Nothing in the harness can notice that — the guards check
+        # that an anchor matches and that a replacement changes behaviour, and
+        # both are silent about a branch no probe names.
+        #
+        # A `series_break` hold must suppress entries only until the series
+        # RESUMES (`unresolved_until`), not forever. Deleting the bound sends the
+        # arm to None, which the suppression check reads as "open indefinitely"
+        # and drops the whole next segment of that instrument's history.
+        "a series-break hold suppressing the resumed segment instead of ending at its resume boundary",
+        [
+            (
+                '                    else unresolved_until\n                    if open_reason == "series_break"\n',
+                '                    else None\n                    if open_reason == "series_break"\n',
+            )
+        ],
+        "test_a_series_break_outcome_is_unmarked_but_does_not_suppress_the_new_segment",
+    ),
+    (
         # ⚠ MEASURED: 16 bars across 9 series carry `open = 0`, all already
         # quarantined on both axes. A fill at 0 is not a trade — it makes every
         # downstream return infinite.
