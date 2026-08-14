@@ -59,6 +59,7 @@ from app.services.strategy_control_plane import (
     mandate_for_profile,
     promote_strategy,
 )
+from app.services.strategy_core_mandate import CORE_MANDATE_SERIES_ID, CORE_MANDATE_SERIES_TITLE
 from app.services.strategy_live_gate import (
     REQUIRED_KILL_DRILLS,
     LiveGateReport,
@@ -560,8 +561,13 @@ class StrategyWealthHistoryResponse(BaseModel):
 class StrategyOwnedPosition(BaseModel):
     strategy_trade_id: int
     broker_position_id: int
-    strategy_id: str
-    strategy_version: str
+    # NULL on the core/cash arm (#2603, sql/349): a mandate holding is authorised
+    # by a rebalance intent, not by a signal, so it has no strategy identity to
+    # report.  `strategy_title` stays non-null and carries a mandate label
+    # instead, because the column is what the operator reads to tell the two
+    # populations apart -- a blank there would render as an unexplained gap.
+    strategy_id: str | None
+    strategy_version: str | None
     strategy_title: str
     instrument_id: int
     symbol: str
@@ -1856,14 +1862,15 @@ def get_strategy_owned_positions(
             """
             SELECT ownership.strategy_trade_id,ownership.broker_position_id,
                    trade.status AS trade_status,
+                   trade.core_rebalance_intent_id,
                    signal.strategy_id,signal.strategy_version,
                    instrument.instrument_id,instrument.symbol,instrument.company_name
             FROM strategy_position_ownership ownership
             JOIN strategy_trades trade
               ON trade.strategy_trade_id=ownership.strategy_trade_id
-            JOIN strategy_funding_decisions funding
+            LEFT JOIN strategy_funding_decisions funding
               ON funding.funding_decision_id=trade.funding_decision_id
-            JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
+            LEFT JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
             JOIN instruments instrument ON instrument.instrument_id=trade.instrument_id
             WHERE ownership.status='active'
               AND trade.status IN ('open','closing','reconcile_required')
@@ -1885,14 +1892,20 @@ def get_strategy_owned_positions(
             if unrealised is not None and assigned is not None and assigned != 0
             else None
         )
-        strategy_id = str(row["strategy_id"])
+        # The core arm is identified by its AUTHORISATION column, not by
+        # strategy_id being NULL -- the two would coincide today, but only the
+        # former stays true if a signal row ever goes missing.
+        is_core = row["core_rebalance_intent_id"] is not None
+        strategy_id = None if row["strategy_id"] is None else str(row["strategy_id"])
         positions.append(
             StrategyOwnedPosition(
                 strategy_trade_id=int(row["strategy_trade_id"]),
                 broker_position_id=broker_position_id,
                 strategy_id=strategy_id,
-                strategy_version=str(row["strategy_version"]),
-                strategy_title=_TITLES.get(strategy_id, strategy_id),
+                strategy_version=(None if row["strategy_version"] is None else str(row["strategy_version"])),
+                strategy_title=(
+                    CORE_MANDATE_SERIES_TITLE if is_core else _TITLES.get(strategy_id or "", strategy_id or "")
+                ),
                 instrument_id=int(row["instrument_id"]),
                 symbol=str(row["symbol"]),
                 company_name=(str(row["company_name"]) if row["company_name"] is not None else None),
@@ -2049,19 +2062,32 @@ def get_strategy_pnl_history(
         list[tuple[date, str, Decimal]],
         conn.execute(
             """
+        -- A core close has no signal, so the arm is folded into one presentation
+        -- series rather than dropped -- this endpoint's docstring promises EVERY
+        -- exact-owned lifecycle, and an INNER JOIN to funding quietly broke that
+        -- promise the moment sql/349 made a core trade storable.
+        --
+        -- GROUP BY / ORDER BY use ORDINALS, not a repeated COALESCE: repeating it
+        -- would need the same positional parameter three times, and a positional
+        -- list that has to stay aligned across three sites is the exact shape
+        -- that shipped #2623's wrong-column bug. Naming the output column here
+        -- would be worse -- Postgres resolves an ambiguous GROUP BY name to the
+        -- INPUT column, so `GROUP BY strategy_id` would silently mean
+        -- `signal.strategy_id`.
         SELECT (event.executed_at AT TIME ZONE 'UTC')::date AS pnl_date,
-               signal.strategy_id,SUM(event.realized_pnl_usd) AS daily_pnl
+               COALESCE(signal.strategy_id, %(core_series)s) AS strategy_id,
+               SUM(event.realized_pnl_usd) AS daily_pnl
         FROM strategy_position_ownership ownership
         JOIN strategy_trades trade ON trade.strategy_trade_id=ownership.strategy_trade_id
-        JOIN strategy_funding_decisions funding ON funding.funding_decision_id=trade.funding_decision_id
-        JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
+        LEFT JOIN strategy_funding_decisions funding ON funding.funding_decision_id=trade.funding_decision_id
+        LEFT JOIN strategy_signals signal ON signal.signal_id=funding.signal_id
         JOIN trade_events event ON event.position_id=ownership.broker_position_id
         WHERE event.event_kind='close' AND event.realized_pnl_usd IS NOT NULL
-          AND event.executed_at >= now() - make_interval(days => %s)
-        GROUP BY pnl_date,signal.strategy_id
-        ORDER BY pnl_date,signal.strategy_id
+          AND event.executed_at >= now() - make_interval(days => %(days)s)
+        GROUP BY 1,2
+        ORDER BY 1,2
         """,
-            (days,),
+            {"core_series": CORE_MANDATE_SERIES_ID, "days": days},
         ).fetchall(),
     )
     daily: dict[date, dict[str, Decimal]] = defaultdict(dict)

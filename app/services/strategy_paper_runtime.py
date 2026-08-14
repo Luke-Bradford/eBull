@@ -23,6 +23,7 @@ from app.providers.broker import BrokerProvider
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
+from app.services.strategy_core_arc_sql import core_arm_authorised, core_arm_joins
 from app.services.strategy_forecast_outcome_resolution import RESOLVER_VERSION as FORECAST_OUTCOME_RESOLVER_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_opportunity_forecast import FORECAST_POLICY_VERSION
@@ -36,6 +37,43 @@ from app.services.strategy_paper_executor import execute_fired_paper_signal
 from app.services.strategy_position_manager import manage_owned_position
 
 logger = logging.getLogger(__name__)
+
+# The batch that SELECTS the positions to manage.  ⚠⚠ This query, not
+# ``manage_owned_position``, is what decides whether a core position is managed
+# at all: the manager is never called for a trade this does not return.  Widening
+# the worker and not the dispatcher looks complete at every level a diff review
+# inspects, and is the defect this slice exists to avoid (#2603, and #2437's R4
+# pattern one level up).
+#
+# The core arm uses the AUTHORISED predicate -- this path acts on what it loads,
+# so a non-actionable intent or a non-paper mandate must not load, exactly as a
+# non-paper deployment does not load on the signal arm.
+#
+# Signal-arm behaviour is unchanged.  The former INNER ``fd``/``d`` pair filtered
+# by ``d.mode='paper'``; the LEFT pair witnessed by ``d.deployment_id IS NOT
+# NULL`` admits precisely the same rows, because the FK makes ``fd`` total for a
+# non-null ``funding_decision_id`` and ``mode`` now filters inside the ON clause.
+_OWNED_BATCH_SQL = f"""
+        WITH active AS (
+          SELECT own.strategy_trade_id,own.broker_position_id,
+                 row_number() OVER (ORDER BY own.ownership_id) AS ordinal,
+                 count(*) OVER () AS total
+          FROM strategy_position_ownership own
+          JOIN strategy_trades t ON t.strategy_trade_id=own.strategy_trade_id
+          LEFT JOIN strategy_funding_decisions fd ON fd.funding_decision_id=t.funding_decision_id
+          LEFT JOIN strategy_deployments d ON d.deployment_id=fd.deployment_id AND d.mode='paper'
+{core_arm_joins("t")}
+          WHERE own.status='active'
+            AND (
+              d.deployment_id IS NOT NULL
+              OR {core_arm_authorised("t")}
+            )
+        )
+        SELECT strategy_trade_id,broker_position_id
+        FROM active
+        ORDER BY mod(ordinal-1-%s+total,total)
+        LIMIT %s
+"""
 
 
 @dataclass(frozen=True)
@@ -231,6 +269,13 @@ def refresh_strategy_health(
         )
         scan = cur.fetchone()
         assert scan is not None
+        # Core arm admitted by PRESENCE, not by the authorised witness chain
+        # (app/services/strategy_core_arc_sql.py).  This population feeds an
+        # execution BLOCK, so counting a position makes the block more likely to
+        # trip -- presence is the fail-closed choice here, and the authorised
+        # predicate would be the fail-open one.  The signal arm's own predicate
+        # is unchanged: the INNER fd/d pair under `d.mode='paper' AND d.enabled`
+        # is exactly the LEFT pair under `d.deployment_id IS NOT NULL`.
         cur.execute(
             """
             SELECT count(*) FILTER (
@@ -239,10 +284,12 @@ def refresh_strategy_health(
                    count(*) AS total
             FROM strategy_position_ownership own
             JOIN strategy_trades t ON t.strategy_trade_id=own.strategy_trade_id
-            JOIN strategy_funding_decisions fd ON fd.funding_decision_id=t.funding_decision_id
-            JOIN strategy_deployments d ON d.deployment_id=fd.deployment_id
+            LEFT JOIN strategy_funding_decisions fd ON fd.funding_decision_id=t.funding_decision_id
+            LEFT JOIN strategy_deployments d ON d.deployment_id=fd.deployment_id
+             AND d.mode='paper' AND d.enabled
             LEFT JOIN quotes q ON q.instrument_id=t.instrument_id
-            WHERE own.status='active' AND d.mode='paper' AND d.enabled
+            WHERE own.status='active'
+              AND (d.deployment_id IS NOT NULL OR t.core_rebalance_intent_id IS NOT NULL)
             """,
             {"cutoff": observed_at - timedelta(seconds=int(policy["quote_age"]))},
         )
@@ -390,22 +437,7 @@ def run_strategy_paper_cycle(
     # and starve later positions once the sleeve grows past the cap.
     position_offset = (int(observed_at.timestamp()) // 300) * position_limit
     owned = conn.execute(
-        """
-        WITH active AS (
-          SELECT own.strategy_trade_id,own.broker_position_id,
-                 row_number() OVER (ORDER BY own.ownership_id) AS ordinal,
-                 count(*) OVER () AS total
-          FROM strategy_position_ownership own
-          JOIN strategy_trades t ON t.strategy_trade_id=own.strategy_trade_id
-          JOIN strategy_funding_decisions fd ON fd.funding_decision_id=t.funding_decision_id
-          JOIN strategy_deployments d ON d.deployment_id=fd.deployment_id
-          WHERE own.status='active' AND d.mode='paper'
-        )
-        SELECT strategy_trade_id,broker_position_id
-        FROM active
-        ORDER BY mod(ordinal-1-%s+total,total)
-        LIMIT %s
-        """,
+        _OWNED_BATCH_SQL,
         (position_offset, position_limit),
     ).fetchall()
     conn.commit()

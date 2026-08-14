@@ -131,35 +131,57 @@ def _mentions_table_in_code(path: Path) -> bool:
     )
 
 
-def test_no_module_outside_the_writer_reads_the_intents_table() -> None:
-    """The enforceable half of "authorises nothing".
+#: Every module allowed to name this table in EXECUTED SQL, and why.
+#:
+#: ⚠ Step 1 asserted this list was EMPTY apart from the writer -- that was the
+#: enforceable half of "authorises nothing", and step 2 (sql/349) deliberately
+#: ends it: the arc gives a row here a way to become a trade. The guard is kept
+#: rather than deleted, converted from "nobody reads it" to "exactly these do",
+#: because the hazard it was really tracking never went away -- an UNREVIEWED
+#: reader is what turns a stored verdict into an action nobody agreed to.
+_SANCTIONED_READERS = {
+    # The writer.
+    "app/services/strategy_core_rebalance_intent.py",
+    # The shared load fragments. Every act-path consumer composes its predicate
+    # from here rather than naming the table, so this stays a one-line list even
+    # as consumers multiply -- and the requirements (actionable verdict, paper
+    # mandate) cannot drift between them.
+    "app/services/strategy_core_arc_sql.py",
+}
 
-    A durable ``buy_core`` row is only safe to ship ahead of an executor because
-    nothing can act on it. When the executor lands it will read this table, and
-    this test is what forces that change to arrive alongside the trade linkage
-    and the position-manager change rather than on its own.
-    """
-    offenders = [
-        str(path) for path in Path("app").rglob("*.py") if str(path) != _WRITER and _mentions_table_in_code(path)
-    ]
+
+def test_only_sanctioned_modules_read_the_intents_table() -> None:
+    """A new reader must be added here deliberately, in the PR that adds it."""
+    offenders = sorted(
+        str(path)
+        for path in Path("app").rglob("*.py")
+        if str(path) not in _SANCTIONED_READERS and _mentions_table_in_code(path)
+    )
     assert offenders == [], (
-        f"{_TABLE} gained a reader outside {_WRITER}: {offenders}. "
-        "It authorises nothing only while nothing reads it — see #2603 item 3."
+        f"{_TABLE} gained an unsanctioned reader: {offenders}. "
+        "Add it to _SANCTIONED_READERS with its reason, or route it through "
+        "strategy_core_arc_sql so the load predicate stays single-sourced."
     )
 
 
-def test_no_table_references_the_intents_table() -> None:
-    """The other half: an FK would let a row here become a row somewhere real.
+def test_only_the_trade_arc_references_the_intents_table() -> None:
+    """An FK is what lets a row here become a row somewhere real.
 
-    The next slice adds exactly that FK, from ``strategy_trades``, together with
-    the manager change. Until then a reference is the whole hazard.
+    ⚠ Step 1 asserted NO table referenced it. ``sql/349`` adds exactly one, from
+    ``strategy_trades``, which is the arc. Pinned to that single migration so a
+    SECOND referencing table -- a sibling design this slice explicitly rejected,
+    because it would need every arm-agnostic consumer dual-written -- cannot land
+    without this failing.
     """
-    referencing = [
+    referencing = sorted(
         path.name
         for path in Path("sql").glob("*.sql")
         if re.search(rf"REFERENCES\s+{_TABLE}\b", path.read_text(encoding="utf-8"))
-    ]
-    assert referencing == [], f"a table now references {_TABLE}: {referencing}"
+    )
+    assert referencing == ["349_core_trade_arc.sql"], (
+        f"the set of tables referencing {_TABLE} changed: {referencing}. "
+        "The arc is deliberately the only one — see docs/proposals/ta/2026-08-14-core-trade-arc.md."
+    )
 
 
 def test_the_migration_reason_codes_match_the_allocator_vocabulary() -> None:

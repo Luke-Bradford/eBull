@@ -21,6 +21,7 @@ import psycopg
 import pytest
 
 from app.services.strategy_core_mandate import (
+    CORE_MANDATE_MODE,
     CORE_MANDATE_POLICY_VERSION,
     CoreMandateError,
     configure_core_mandate,
@@ -31,11 +32,11 @@ _INSERT = """
 INSERT INTO strategy_core_mandate_events (
     revision,enabled,base_currency,core_instrument_id,core_target_pct,
     liquidity_reserve_pct,rebalance_band_pct,min_rebalance_amount,
-    policy_version,changed_by,reason
+    policy_version,changed_by,reason,mode
 ) VALUES (
     1,%(enabled)s,%(base_currency)s,%(core_instrument_id)s,%(core_target_pct)s,
     %(liquidity_reserve_pct)s,%(rebalance_band_pct)s,%(min_rebalance_amount)s,
-    %(policy_version)s,'test','test'
+    %(policy_version)s,'test','test',%(mode)s
 )
 """
 
@@ -51,6 +52,9 @@ _VALID_ROW: dict[str, Any] = {
     # CHECK and not merely assumed: a literal here would make a stale version
     # untestable at the only layer that can still be handed one.
     "policy_version": CORE_MANDATE_POLICY_VERSION,
+    # sql/349. Parameterised for the same reason as policy_version: the CHECK
+    # pins it to 'paper', and a literal here could not exercise a wrong value.
+    "mode": CORE_MANDATE_MODE,
 }
 
 

@@ -2743,8 +2743,13 @@ export interface StrategyPnlHistoryResponse {
 export interface StrategyOwnedPosition {
   strategy_trade_id: number;
   broker_position_id: number;
-  strategy_id: string;
-  strategy_version: string;
+  /**
+   * Null on the core/cash arm (#2603): a mandate holding is authorised by a
+   * rebalance intent, not a signal, so it has no strategy identity. Use
+   * `strategy_title`, which is never null and carries the mandate label.
+   */
+  strategy_id: string | null;
+  strategy_version: string | null;
   strategy_title: string;
   instrument_id: number;
   symbol: string;

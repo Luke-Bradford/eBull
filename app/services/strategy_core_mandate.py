@@ -50,6 +50,28 @@ CORE_MANDATE_BASE_CURRENCY = "USD"
 # (ticket, sub) per strategy_control_plane's PAPER_ALLOCATOR_ADVISORY_LOCK.
 CORE_MANDATE_ADVISORY_LOCK = (2603, 1)
 
+# The core arm's identity in operator-facing series that key on `strategy_id`
+# (#2603 item 3, step 2).  A core position has no strategy, but the P&L history
+# and the owned-positions list both group by one, so the arm needs a stable key
+# rather than each endpoint inventing a literal.
+#
+# ⚠ Deliberately NOT a value that could collide with a real strategy id: every
+# manifest id is a bare slug, and this one is namespaced.  It is a presentation
+# key only -- nothing joins on it and nothing stores it.
+CORE_MANDATE_SERIES_ID = "core:mandate"
+CORE_MANDATE_SERIES_TITLE = "Core / cash mandate"
+
+# The execution mode this authority DECLARES (sql/349), CHECK-pinned to 'paper'.
+#
+# ⚠ Required on insert with no column default, deliberately: a writer that forgets
+# it must fail rather than inherit safety it never asked for.
+#
+# ⚠⚠ It records the AUTHORITY'S DECLARATION and nothing more. It does not record
+# which account, environment or broker credentials a resulting trade actually
+# used -- the real backstop stays the demo-only credential configuration and
+# `app/security/unattended_guard.py`. Do not cite this as the demo gate.
+CORE_MANDATE_MODE = "paper"
+
 PERCENT_BASIS = Decimal("100")
 # NUMERIC(8,4) percentages and NUMERIC(18,6) amounts, matching sql/311.  Both
 # halves of each column type are enforced: scale, so a value cannot be silently
@@ -368,11 +390,15 @@ def configure_core_mandate(
         INSERT INTO strategy_core_mandate_events (
             revision,enabled,base_currency,core_instrument_id,core_target_pct,
             liquidity_reserve_pct,rebalance_band_pct,min_rebalance_amount,
-            policy_version,changed_by,reason
+            policy_version,changed_by,reason,mode
         )
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING core_mandate_event_id
         """,
+        # ⚠ THREE lists that must stay aligned: the column list, the placeholder
+        # count, and this tuple. #2623 shipped a value into the wrong column by
+        # appending at a different ordinal in one of them. `mode` is appended
+        # LAST in all three; check all three when adding a field here.
         (
             revision,
             values.enabled,
@@ -385,6 +411,7 @@ def configure_core_mandate(
             CORE_MANDATE_POLICY_VERSION,
             changed_by,
             reason,
+            CORE_MANDATE_MODE,
         ),
     ).fetchone()
     assert row is not None
@@ -406,6 +433,9 @@ __all__ = [
     "AMOUNT_PLACES",
     "AMOUNT_PRECISION",
     "CORE_MANDATE_ADVISORY_LOCK",
+    "CORE_MANDATE_MODE",
+    "CORE_MANDATE_SERIES_ID",
+    "CORE_MANDATE_SERIES_TITLE",
     "CORE_MANDATE_BASE_CURRENCY",
     "CORE_MANDATE_POLICY_VERSION",
     "PERCENT_BASIS",
