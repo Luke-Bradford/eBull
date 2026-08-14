@@ -28,7 +28,10 @@ from app.services.backtest_run import BACKTEST_UNIVERSE, runnable_strategies
 from app.services.broker_credentials import (
     CredentialDecryptError,
     CredentialNotFound,
+    CredentialValidationError,
     load_credential_for_provider_use,
+    normalise_environment,
+    normalise_provider,
 )
 from app.services.cost_model import COST_MODEL_ID
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
@@ -59,7 +62,15 @@ from app.services.strategy_control_plane import (
     mandate_for_profile,
     promote_strategy,
 )
-from app.services.strategy_core_mandate import CORE_MANDATE_SERIES_ID, CORE_MANDATE_SERIES_TITLE
+from app.services.strategy_core_eligibility import CoreEligibilityError
+from app.services.strategy_core_mandate import (
+    CORE_MANDATE_SERIES_ID,
+    CORE_MANDATE_SERIES_TITLE,
+    CoreMandate,
+    CoreMandateError,
+    configure_core_mandate,
+    load_core_mandate,
+)
 from app.services.strategy_live_gate import (
     REQUIRED_KILL_DRILLS,
     LiveGateReport,
@@ -524,6 +535,76 @@ class StrategyPaperPoolUpdateRequest(BaseModel):
         if self.enabled and self.risk_profile == "unconfigured":
             raise ValueError("enabled paper pool requires a configured portfolio risk mandate")
         return self
+
+
+class CoreMandateUpdateRequest(BaseModel):
+    """One core/cash mandate revision, plus the ACCOUNT to prove it against.
+
+    ⚠ The mandate itself is account-agnostic — one series of revisions, no
+    account column — but its eligibility proof is not: ``require_core_eligibility``
+    resolves the live credential pair for ``(operator, provider, environment)``
+    and refuses a proof observed under any other. So the account has to be named
+    on the request. Same shape as ``app/api/broker_credentials.py``, including
+    the ``"demo"`` default, rather than a second convention.
+
+    ⚠⚠ NO MANDATE INVARIANT IS RESTATED HERE. The percentage bounds, the
+    complement rule and the enabled-needs-an-instrument rule all live in
+    ``validate_core_mandate``, which is also what the tests and any future caller
+    exercise. A Pydantic copy would be a second place for them to drift, and the
+    #2623 lesson is that the copy nobody edits is the one that goes wrong. These
+    fields carry SHAPE only.
+    """
+
+    enabled: bool
+    core_instrument_id: int | None = None
+    core_target_pct: Decimal = Field(max_digits=9, decimal_places=6)
+    liquidity_reserve_pct: Decimal = Field(max_digits=9, decimal_places=6)
+    rebalance_band_pct: Decimal = Field(max_digits=9, decimal_places=6)
+    min_rebalance_amount: Decimal = Field(max_digits=18, decimal_places=6)
+    reason: str = Field(min_length=1, max_length=1000)
+    provider: str = Field(default="etoro", min_length=1, max_length=64)
+    environment: str = Field(default="demo", min_length=1, max_length=16)
+
+
+class CoreMandateResponse(BaseModel):
+    """The stored mandate, or its absence.
+
+    ⚠ ``cash_target_pct`` is the service's derived complement, never a stored
+    second column — rendering it beside the target is what stops a reader
+    inventing their own subtraction against a different basis.
+    """
+
+    configured: bool
+    event_id: int | None = None
+    revision: int | None = None
+    enabled: bool | None = None
+    base_currency: str | None = None
+    core_instrument_id: int | None = None
+    core_target_pct: Decimal | None = None
+    cash_target_pct: Decimal | None = None
+    liquidity_reserve_pct: Decimal | None = None
+    rebalance_band_pct: Decimal | None = None
+    min_rebalance_amount: Decimal | None = None
+    policy_version: str | None = None
+
+
+def _core_mandate_response(mandate: CoreMandate | None) -> CoreMandateResponse:
+    if mandate is None:
+        return CoreMandateResponse(configured=False)
+    return CoreMandateResponse(
+        configured=True,
+        event_id=mandate.event_id,
+        revision=mandate.revision,
+        enabled=mandate.enabled,
+        base_currency=mandate.base_currency,
+        core_instrument_id=mandate.core_instrument_id,
+        core_target_pct=mandate.core_target_pct,
+        cash_target_pct=mandate.cash_target_pct,
+        liquidity_reserve_pct=mandate.liquidity_reserve_pct,
+        rebalance_band_pct=mandate.rebalance_band_pct,
+        min_rebalance_amount=mandate.min_rebalance_amount,
+        policy_version=mandate.policy_version,
+    )
 
 
 class StrategyPnlHistoryPoint(BaseModel):
@@ -2179,6 +2260,87 @@ def update_strategy_paper_pool(
     except (StrategyControlError, RuntimeConfigCorrupt, RuntimeConfigNoOp) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return get_strategy_overview(conn).paper_pool
+
+
+@router.get("/core-mandate", response_model=CoreMandateResponse, status_code=status.HTTP_200_OK)
+def read_core_mandate(
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CoreMandateResponse:
+    """The current core/cash mandate revision, or ``configured=false``.
+
+    ⚠ Absence is a 200, not a 404. "No mandate has ever been configured" is a
+    legitimate steady state of this system — it is where every install starts,
+    and it is where the tree stood until this endpoint existed — so a reader must
+    be able to distinguish it from a broken lookup. A 404 conflates the two.
+    """
+    return _core_mandate_response(load_core_mandate(conn))
+
+
+@router.put("/core-mandate", response_model=CoreMandateResponse, status_code=status.HTTP_200_OK)
+def update_core_mandate(
+    body: CoreMandateUpdateRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> CoreMandateResponse:
+    """Append one operator-authenticated core/cash mandate revision.
+
+    ⚠⚠ THIS IS THE ENTRY CONDITION FOR #2603 ITEM 3, AND ITS ABSENCE WAS THE
+    BLOCKER. ``configure_core_mandate`` had no caller anywhere in ``app/`` or
+    ``scripts/`` — only tests — so no mandate could be configured, therefore no
+    rebalance intent could cite one, therefore no core trade could exist. The
+    whole arc was unreachable from outside the test suite.
+
+    ⚠ Wiring this endpoint deliberately does NOT make the executor act on a
+    mandate. That is the correct intermediate state (step 1's posture), not a
+    gap to route around: a mandate becomes configurable here, and every
+    execution-time control — the one-trade-per-intent guard, the
+    no-open-core-trade precondition, the intent freshness bound — remains
+    unbuilt and is tracked on #2603.
+
+    ⚠ ``require_session``, not the router's ``require_session_or_service_token``.
+    A mandate revision is an operator authorisation and is recorded with a named
+    ``changed_by``; a service token has no operator identity to attribute it to,
+    and ``configure_core_mandate`` needs a real ``operator_id`` to select the
+    right eligibility proof.
+
+    Both refusal families are 409 rather than 400: the request may be perfectly
+    well formed and still be refused because the eligibility proof is stale, was
+    observed under swapped credentials, or because nothing material changed.
+    Those are states of the system, not faults in the payload.
+    """
+    # ⚠ NORMALISED BEFORE THE TRANSACTION, AND CAUGHT SEPARATELY (Codex ckpt-2).
+    # `normalise_provider` / `normalise_environment` raise
+    # `CredentialValidationError` on an unrecognised value, which is a 400 — a
+    # malformed selector — and NOT one of the 409s below. Folding it into that
+    # clause would report "the mandate was refused" for a typo in the account
+    # name, and leaving it uncaught returned a 500 for ordinary bad input.
+    # Hoisting it out of the transaction also keeps a pure-validation failure
+    # from opening and rolling back a transaction for nothing.
+    try:
+        provider = normalise_provider(body.provider)
+        environment = normalise_environment(body.environment)
+    except CredentialValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        with conn.transaction():
+            mandate = configure_core_mandate(
+                conn,
+                enabled=body.enabled,
+                core_instrument_id=body.core_instrument_id,
+                core_target_pct=body.core_target_pct,
+                liquidity_reserve_pct=body.liquidity_reserve_pct,
+                rebalance_band_pct=body.rebalance_band_pct,
+                min_rebalance_amount=body.min_rebalance_amount,
+                changed_by=session.username,
+                reason=body.reason,
+                operator_id=session.operator_id,
+                provider=provider,
+                environment=environment,
+            )
+    except (CoreMandateError, CoreEligibilityError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _core_mandate_response(mandate)
 
 
 @router.put(
