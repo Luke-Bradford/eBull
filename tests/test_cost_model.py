@@ -22,12 +22,16 @@ import pytest
 from app.services import cost_model
 from app.services.cost_model import (
     BANDS,
-    CARRY_BPS,
+    CARRY_CLOSURE,
+    CARRY_EVIDENCE,
     CARRY_UNMODELLED,
+    COST_COMPONENT_CLOSURES,
     COST_MODEL_ID,
-    FX_BPS,
+    FX_CLOSURE,
+    FX_EVIDENCE,
     FX_UNMODELLED,
     PRICE_BASES,
+    STRUCTURAL_ZERO_LANE,
     UNKNOWN_NOMINAL_PRICE_BAND,
     PriceBand,
     _check_bands_are_total,
@@ -54,7 +58,17 @@ SPEC_BANDS: tuple[tuple[str, str | None, str | None, str, int], ...] = (
     (">=$100", "100", None, "0.322", 210),
 )
 
-SPEC_COST_MODEL_ID = "static-p75-insession-v2+split-adjusted-max"
+SPEC_COST_MODEL_ID = "static-p75-insession-v3+split-adjusted-max+carry-fx-structural-zero-long-x1-real-usd"
+
+#: ⚠ THE LANE, RESTATED AS LITERALS AND NOT IMPORTED — the same second-copy
+#: rule as ``SPEC_BANDS``. These are also, field for field, the literals
+#: ``EtoroBrokerProvider.place_demo_strategy_order`` puts on the wire
+#: (``transaction: buy`` ⇔ long, ``leverage: 1``, ``settlementType: "real"``,
+#: ``orderCurrency: "usd"``) — ``tests/test_broker_provider.py``'s
+#: ``test_the_order_payload_is_the_cost_model_lane`` captures that payload
+#: independently, so an executor change that leaves the lane fails there and a
+#: lane change that leaves the executor fails here.
+SPEC_LANE = ("long", 1, "real", "USD", "USD")
 
 
 class TestTheFrozenTable:
@@ -248,84 +262,115 @@ class TestTheArithmetic:
             sell_price(Decimal("100"), half_spread=Decimal("1"))
 
 
-class TestCarryIsNullNotZero:
-    """§5.1: *"Writing zero would be the #2286 shape: a value that is present
-    and wrong beats a value that is absent and refused."*"""
+class TestTheStructuralClosure:
+    """#2720: carry and FX close as STRUCTURAL ZERO for the declared lane —
+    a closure state, never a ``Decimal("0")`` pretending to be a measurement
+    (#2286's shape)."""
 
-    def test_carry_is_none(self) -> None:
-        assert CARRY_BPS is None
+    def test_both_closures_are_structural_zero(self) -> None:
+        assert CARRY_CLOSURE == "structural_zero"
+        assert FX_CLOSURE == "structural_zero"
 
-    def test_fx_is_none(self) -> None:
-        assert FX_BPS is None
+    def test_the_closure_vocabulary_is_closed(self) -> None:
+        assert COST_COMPONENT_CLOSURES == {"unmodelled", "structural_zero"}
 
-    def test_the_unmodelled_marker_is_set(self) -> None:
-        """⚠ The marker the promotion gate refuses on (§6 clause 4). It is
-        DERIVED from the two constants above, so measuring carry flips it
-        without anybody remembering to."""
-        assert CARRY_UNMODELLED is True
+    def test_the_markers_are_cleared(self) -> None:
+        """⚠ The markers the promotion gate refuses on (§6 clause 4). DERIVED
+        from the closures, so the closure IS the single source — a hand-written
+        ``False`` would have to be remembered."""
+        assert CARRY_UNMODELLED is False
+        assert FX_UNMODELLED is False
 
-    def test_the_fx_marker_is_set_and_is_its_own_flag(self) -> None:
-        """#2363 — FX has its own marker rather than riding on carry's.
+    def test_the_lane_is_the_frozen_one(self) -> None:
+        """The second copy, as literals — a lane edit (short, leveraged,
+        non-USD) must fail a test and force a human to decide whether the
+        ``cost_model_id`` should have moved with it. It should: either edit is
+        a NEW model by the module rule."""
+        lane = STRUCTURAL_ZERO_LANE
+        assert (
+            lane.direction,
+            lane.leverage,
+            lane.settlement,
+            lane.order_currency,
+            lane.account_currency,
+        ) == SPEC_LANE
 
-        ⚠ Both are asserted TRUE here and that is the current state, not the
-        invariant. The invariant is that they are INDEPENDENT, which this file
-        cannot show because both are derived at import; it is shown by
-        ``test_prereg_declaration_gate``'s four-state parametrisation over
-        ``structural_promotion_refusals``, which is the function the gate and
-        the preregistration freeze both call.
-        """
-        assert FX_UNMODELLED is True
+    def test_the_lane_account_currency_matches_the_deployment_currency(self) -> None:
+        """Literal vs literal — ``strategy_base_currency`` states USD in its own
+        constant (enforced at the sql/290 + sql/338 CHECKs and the executor
+        currency checks); the lane states it independently. Divergence means
+        one of the two contracts moved without the other."""
+        from app.services.strategy_base_currency import DEPLOYMENT_CURRENCY
+
+        assert STRUCTURAL_ZERO_LANE.account_currency == DEPLOYMENT_CURRENCY
+        assert STRUCTURAL_ZERO_LANE.order_currency == DEPLOYMENT_CURRENCY
+
+    def test_the_evidence_is_present_and_dated(self) -> None:
+        """A structural claim with no dated record is ceremony (§ckpt-1 #21)."""
+        for evidence in (CARRY_EVIDENCE, FX_EVIDENCE):
+            assert evidence
+            assert any("2026-08-14" in item or "#2698" in item or "#2605" in item for item in evidence)
 
     @pytest.mark.parametrize(
-        "carry_bps,fx_bps,expected",
+        "carry_closure,fx_closure,expected",
         [
-            (None, None, (True, True)),
-            (Decimal("1.5"), None, (False, True)),
-            (None, Decimal("2.5"), (True, False)),
-            (Decimal("1.5"), Decimal("2.5"), (False, False)),
+            ("unmodelled", "unmodelled", (True, True)),
+            ("structural_zero", "unmodelled", (False, True)),
+            ("unmodelled", "structural_zero", (True, False)),
+            ("structural_zero", "structural_zero", (False, False)),
         ],
     )
-    def test_each_marker_reads_only_its_own_amount(
-        self, carry_bps: Decimal | None, fx_bps: Decimal | None, expected: tuple[bool, bool]
+    def test_each_marker_reads_only_its_own_closure(
+        self, carry_closure: str, fx_closure: str, expected: tuple[bool, bool]
     ) -> None:
-        """⚠⚠ THE DE-COUPLING ITSELF, which was unguarded until a revert-probe
-        said so: restoring the pre-#2363 ``CARRY_BPS is None or FX_BPS is None``
-        broke no test, because both amounts are ``None`` today and the two
-        expressions cannot be told apart while that holds. The two mixed rows
-        below are the ones that matter — under the coupled rule each would
-        return ``(True, ...)``.
-        """
-        assert cost_model.unmodelled_markers(carry_bps, fx_bps) == expected
+        """⚠⚠ THE #2363 DE-COUPLING, preserved across #2720's input change: the
+        two mixed rows are the ones that matter — under a re-coupled rule each
+        would return ``(True, ...)``."""
+        assert cost_model.unmodelled_markers(carry_closure, fx_closure) == expected
 
-    def test_a_component_may_not_carry_an_amount_that_nothing_charges(self) -> None:
-        """⚠⚠ THE FALSE-PROMOTION TRIPWIRE (#2363, found by Codex checkpoint 1).
+    @pytest.mark.parametrize("bad", ["charged", "zero", "", "STRUCTURAL_ZERO"])
+    def test_an_unknown_closure_is_refused_by_the_markers(self, bad: str) -> None:
+        """⚠⚠ THE FALSE-PROMOTION TRIPWIRE'S NEW SHAPE. ``== "unmodelled"``
+        alone would read a typo as "modelled" — clearing a promotion refusal
+        while modelling nothing. Unknown values must RAISE, never default."""
+        with pytest.raises(ValueError, match="unknown carry closure"):
+            cost_model.unmodelled_markers(bad, "unmodelled")
+        with pytest.raises(ValueError, match="unknown fx closure"):
+            cost_model.unmodelled_markers("unmodelled", bad)
 
-        ``CARRY_BPS`` and ``FX_BPS`` are added to no price anywhere — verified
-        by grep, not assumed — so setting one to a measured number would clear
-        its promotion refusal WITHOUT charging the cost, making every result
-        under this model promotable while modelling exactly what it modelled
-        before. The guard runs at import; this asserts it actually refuses,
-        because a guard nobody has seen fail is a comment.
-        """
-        with pytest.raises(ValueError, match="nothing in this module adds it to a price"):
-            with mock.patch.object(cost_model, "CARRY_BPS", Decimal("0.5")):
-                cost_model._check_unmodelled_components_are_not_charged()
+    def test_the_closure_guard_refuses_an_unknown_value(self) -> None:
+        with pytest.raises(ValueError, match="not in the closure vocabulary"):
+            with mock.patch.object(cost_model, "CARRY_CLOSURE", "charged"):
+                cost_model._check_closures()
 
-    def test_the_tripwire_names_every_component_that_is_set(self) -> None:
-        """Both, not just the first — an operator fixing one must see the other."""
-        with pytest.raises(ValueError, match="CARRY_BPS, FX_BPS") as excinfo:
-            with (
-                mock.patch.object(cost_model, "CARRY_BPS", Decimal("0.5")),
-                mock.patch.object(cost_model, "FX_BPS", Decimal("0.25")),
+    def test_the_closure_guard_requires_evidence(self) -> None:
+        """A structural_zero with an empty evidence tuple is the flag-clearing
+        shortcut wearing a new name; the guard refuses it beside the literal."""
+        with pytest.raises(ValueError, match="no evidence"):
+            with mock.patch.object(cost_model, "FX_EVIDENCE", ()):
+                cost_model._check_closures()
+
+    def test_the_closure_guard_refuses_a_short_or_leveraged_lane(self) -> None:
+        """⚠ Risk posture (`.claude/CLAUDE.md`): a short is a CFD and accrues
+        financing by construction; leverage above x1 the same. Either lane
+        needs a NEW cost model, never this one relabelled."""
+        with pytest.raises(ValueError, match="must be long and unleveraged"):
+            with mock.patch.object(
+                cost_model, "STRUCTURAL_ZERO_LANE", cost_model.CostLane("short", 1, "cfd", "USD", "USD")
             ):
-                cost_model._check_unmodelled_components_are_not_charged()
-        assert "new COST_MODEL_ID" in str(excinfo.value)
+                cost_model._check_closures()
+        with pytest.raises(ValueError, match="must be long and unleveraged"):
+            with mock.patch.object(
+                cost_model, "STRUCTURAL_ZERO_LANE", cost_model.CostLane("long", 2, "cfd", "USD", "USD")
+            ):
+                cost_model._check_closures()
 
 
 class TestTheImportTimeGuardsActuallyRun:
     """⚠⚠ Both module-level guards were UNPROVEN until #2699.
 
-    ``_check_unmodelled_components_are_not_charged`` and ``_check_bands_are_total``
+    ``_check_closures`` (#2720; previously ``_check_unmodelled_components_are_not_charged``)
+    and ``_check_bands_are_total``
     each end their definition with a module-level call, and each docstring says why:
     the thing they guard is *an edit somebody makes to the literal above*, so the
     check belongs beside the literal rather than in a test file that person may never
@@ -379,29 +424,49 @@ class TestTheImportTimeGuardsActuallyRun:
 
         assert result.returncode == 0, result.stderr
 
-    def test_setting_carry_bps_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
+    def test_an_unknown_closure_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
         """Not merely `the function raises when called` -- THE MODULE WILL NOT LOAD.
 
-        This is the difference the tripwire trades on: someone who measures carry and
-        sets the literal is stopped by their next import, whether or not they run
-        ``tests/test_cost_model.py``.
+        Someone who widens a closure literal without widening the vocabulary
+        (and the arithmetic, and the model id) is stopped by their next import,
+        whether or not they run ``tests/test_cost_model.py``. The marker
+        derivation fires first (it sits before ``_check_closures()``), so the
+        message asserted is its.
         """
         result = self._run_with_substitution(
-            tmp_path, "CARRY_BPS: Decimal | None = None", 'CARRY_BPS: Decimal | None = Decimal("1.5")'
+            tmp_path,
+            'CARRY_CLOSURE: CostComponentClosure = "structural_zero"',
+            'CARRY_CLOSURE: CostComponentClosure = "charged"',
         )
 
         assert result.returncode != 0
-        assert "nothing in this module adds it to a price" in result.stderr
-        assert "new COST_MODEL_ID" in result.stderr
+        assert "unknown carry closure" in result.stderr
 
-    def test_setting_fx_bps_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
-        """FX shares the guard and had the identical gap (#2699 scope note)."""
+    def test_a_short_lane_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
+        """⚠⚠ THE LANE HALF OF THE GUARD, reachable only through the module-level
+        ``_check_closures()`` call — the markers cannot see the lane, so deleting
+        that invocation would let a short/leveraged lane import silently. This
+        subprocess is what the probe harness's guard-deletion probe selects.
+        """
         result = self._run_with_substitution(
-            tmp_path, "FX_BPS: Decimal | None = None", 'FX_BPS: Decimal | None = Decimal("0.25")'
+            tmp_path,
+            '    direction="long",\n    leverage=1,',
+            '    direction="short",\n    leverage=1,',
         )
 
         assert result.returncode != 0
-        assert "FX_BPS is set" in result.stderr
+        assert "must be long and unleveraged" in result.stderr
+
+    def test_empty_carry_evidence_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
+        """The evidence half, same reasoning: only the module-level call sees it."""
+        result = self._run_with_substitution(
+            tmp_path,
+            "CARRY_EVIDENCE: tuple[str, ...] = (",
+            "CARRY_EVIDENCE: tuple[str, ...] = ()\n_UNUSED_EVIDENCE = (",
+        )
+
+        assert result.returncode != 0
+        assert "no evidence" in result.stderr
 
     def test_a_gap_in_the_band_table_fails_the_import_itself(self, tmp_path: pathlib.Path) -> None:
         """``_check_bands_are_total`` had the same asymmetry, for the same reason.

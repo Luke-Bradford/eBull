@@ -77,12 +77,13 @@ from app.services.cost_model import (
     BANDS,
     CALIBRATION_QUOTES_IN_SESSION,
     CALIBRATION_RUN_DATE,
-    CARRY_BPS,
+    CARRY_CLOSURE,
     CARRY_UNMODELLED,
     COST_MODEL_ID,
-    FX_BPS,
+    FX_CLOSURE,
     FX_UNMODELLED,
     SESSION_RULE,
+    STRUCTURAL_ZERO_LANE,
     UNKNOWN_NOMINAL_PRICE_BAND,
     _check_bands_are_total,
     band_for,
@@ -317,8 +318,9 @@ def calibrate() -> int:
     _report_bounding_statistics(by_band, top_hour=top_hour, top_count=top_count)
 
     print(
-        f"\n  carry_bps {CARRY_BPS}   fx_bps {FX_BPS}   "
-        f"carry_unmodelled {CARRY_UNMODELLED}   fx_unmodelled {FX_UNMODELLED}"
+        f"\n  carry_closure {CARRY_CLOSURE}   fx_closure {FX_CLOSURE}   "
+        f"carry_unmodelled {CARRY_UNMODELLED}   fx_unmodelled {FX_UNMODELLED}   "
+        f"lane {STRUCTURAL_ZERO_LANE}"
     )
     print(f"  problems: {len(problems)}")
     for problem in problems:

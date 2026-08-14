@@ -52,8 +52,11 @@ def _inputs() -> dict[str, object]:
 
 def test_definition_is_complete_stable_and_contains_no_measured_result() -> None:
     payload = definition_json()
-    assert definition_hash() == "32dae77ea948d553589b98f42feb117f3efee25871e37c21aa0b3741a60e97d1"
-    assert CANDIDATE_VERSION == "residual-confluence-v1+32dae77ea948"
+    # ⚠ Moved by #2720 (cost_model_id is a definition input; the carry/FX
+    # structural closure is a new model, so the candidate version moves with
+    # it — that is the pin doing its job, not collateral).
+    assert definition_hash() == "6173442ec8ed4c8518b9e8f9baea9e3aaf5d92b2cb2f58f7fce776e9c800ccc8"
+    assert CANDIDATE_VERSION == "residual-confluence-v1+6173442ec8ed"
     assert DEFINITION.market_vol_long_lookback == 252
     assert DEFINITION.model_features == MODEL_FEATURE_NAMES
     assert "expectancy" not in payload

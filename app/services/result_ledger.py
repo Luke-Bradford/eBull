@@ -57,6 +57,7 @@ from typing import Final, Literal, NoReturn, cast, get_args
 import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
+from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELLED
 from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.prereg_contract import (
     ForwardShadowFloor,
@@ -68,6 +69,7 @@ from app.services.prereg_contract import (
     supersession_refusals,
 )
 from app.services.random_entry_cohort import SyntheticControl
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import (
     PromotionRefusal,
     ResultIdentity,
@@ -1122,6 +1124,32 @@ def freeze_preregistration(conn: psycopg.Connection[tuple], declaration: PreregD
         raise PreregDeclarationRefused(
             declaration.strategy_id, declaration.strategy_version, tuple(str(code) for code in refusals)
         )
+    # ⚠ FREEZE-TIME ONLY, deliberately not in ``PreregDeclaration.__post_init__``:
+    # that class is also the read-back of stored rows, and rows frozen under an
+    # earlier cost model legitimately declare stamps today's constants do not
+    # produce. A NEW freeze of a MANIFEST strategy has no such licence — its
+    # runs go through ``backtest_run``, which stamps the ``cost_model`` module
+    # constants on every row, so a declaration that cannot match burns an
+    # immutable trial (sql/333 bars UPDATE and DELETE; sql/337 chains cost a
+    # supersession). Added by #2720, whose closure flipped both constants to
+    # False.
+    #
+    # ⚠ SCOPED TO THE MANIFEST on purpose: a bespoke contract trial (the #2582
+    # schedule-13D catalyst charges its own flat 50 bps and models no carry)
+    # OWNS its stamps — declaring ``True`` there is the honest state, not a
+    # stale copy of this module's, and refusing it would force a false
+    # "modelled" claim onto a run that charges no carry.
+    if declaration.strategy_id in STRATEGY_MANIFEST:
+        current = (CARRY_UNMODELLED, FX_UNMODELLED)
+        declared = (declaration.declared_carry_unmodelled, declaration.declared_fx_unmodelled)
+        if declared != current:
+            raise ValueError(
+                f"declaration for {declaration.strategy_id}@{declaration.strategy_version} declares "
+                f"(carry_unmodelled, fx_unmodelled) = {declared}, but the current cost model "
+                f"({COST_MODEL_ID}) stamps {current} on every manifest-strategy row — freezing it would "
+                "burn an immutable trial on stamps its run cannot produce. Re-derive the declaration "
+                "from the current cost_model constants."
+            )
     _lock_trial(conn, declaration.strategy_id, declaration.strategy_version)
     row = conn.execute(
         _FREEZE_DECLARATION,

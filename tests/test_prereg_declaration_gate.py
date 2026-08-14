@@ -37,7 +37,13 @@ _INELIGIBLE = ("universe_basis_not_survivorship_free", "carry_unmodelled", "fx_u
 
 
 def _declaration(**overrides: object) -> PreregDeclaration:
-    """A coherent falsification declaration over today's actual stamps."""
+    """A coherent falsification declaration over the PRE-#2720 stamps.
+
+    ⚠ Still a valid fixture: ``declaration_refusals`` judges internal coherence
+    and stored rows of this shape must keep loading. A NEW freeze of this shape
+    for a MANIFEST strategy is refused by ``freeze_preregistration``'s stamp
+    check — ``tests/test_2720_freeze_stamp_validation.py`` owns that side
+    ("S-1" here is not a manifest id, so these fixtures stay freezable)."""
     base: dict[str, object] = {
         "strategy_id": "S-1",
         "strategy_version": "strategy-registry-v1+abc123",

@@ -251,6 +251,8 @@ PromotionRefusal = Literal[
     #: absent; what the split buys is that an operator can act on the one that
     #: is actually blocking, and that whichever evidence lands first can be
     #: banked. Same argument as the `synthetic_control_*` trio below.
+    #: (#2720 closed both for the declared lane — new rows stamp false — but
+    #: the codes stay: every pre-#2720 row still carries true and refuses here.)
     "carry_unmodelled",
     "fx_unmodelled",
     "no_instruments_evaluated",
