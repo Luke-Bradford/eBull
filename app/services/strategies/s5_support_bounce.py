@@ -53,7 +53,7 @@ from app.services.indicator_series import (
     atr_series,
 )
 from app.services.market_regime import REGIME_RULE_VERSION, Regime, RegimeSeries
-from app.services.price_levels import LEVEL_RULE_VERSION, levels_at
+from app.services.price_levels import LEVEL_RULE_VERSION, LevelScan
 from app.services.strategy_registry import (
     NOT_EVALUABLE_REASONS,
     NotEvaluableReason,
@@ -160,7 +160,7 @@ def _volumes(series: BarSeries) -> np.ndarray:
     return out
 
 
-def _support_below(series: BarSeries, *, index: int, atr: float) -> float | None:
+def _support_below(series: BarSeries, *, index: int, atr: float, scan: LevelScan | None = None) -> float | None:
     """The nearest live support level within tolerance of this bar's action.
 
     ⚠ NO REGIME GATE — the gate belongs to the signal, not the level lookup, so
@@ -170,18 +170,32 @@ def _support_below(series: BarSeries, *, index: int, atr: float) -> float | None
     ⚠ The level must sit at or below the CLOSE and at or above the LOW: it is the
     level the bar wicked through and reclaimed. A support above the close was not
     reclaimed; one below the low was never touched.
+
+    ⚠⚠ ``scan`` REPLACES THE PER-CALL RECOMPUTE, AND IT IS NOT THE CACHE THIS
+    DOCSTRING PREVIOUSLY REFUSED. The objection was exact and correct: *"a cache
+    keyed by anything other than the exact bar index is the standard way lookahead
+    gets reintroduced"*. ``LevelScan`` has NO KEY. It precomputes swing-pivot
+    DETECTION for the whole series — legal because whether bar ``i`` is a pivot
+    depends only on bars ``i-5 .. i+5`` and never on where the observer stands —
+    and ``at(index)`` then filters to pivots confirmed by ``index`` on every call.
+    The causal filter still runs per bar; only the detection is shared, so there is
+    nothing to invalidate and no key to get wrong.
+
+    Measured rather than asserted: ``scripts/verify_2437_level_scan.py
+    --equivalence`` compares the two forms over 45,094 (instrument, bar, arm)
+    comparisons — including quarantine-masked instruments and the ``volumes=None``
+    arm — and reports 0 mismatches.
+
+    ⚠ ``scan`` defaults to ``None`` and is built internally when omitted, so a
+    direct caller keeps the standalone contract.
     """
     close = series.float_closes[index]
     low = series.float_lows[index]
     if close is None or low is None:
         return None
-    levels = levels_at(
-        highs=series.array_highs,
-        lows=series.array_lows,
-        volumes=_volumes(series),
-        atr=atr,
-        index=index,
-    )
+    if scan is None:
+        scan = LevelScan.build(highs=series.array_highs, lows=series.array_lows, volumes=_volumes(series))
+    levels = scan.at(atr=atr, index=index)
     candidates = [lvl.price for lvl in levels if lvl.kind == "support" and low < lvl.price <= close]
     if not candidates:
         return None
@@ -236,6 +250,8 @@ def s5_signals(
     closes = series.float_closes
     lows = series.float_lows
     atr = atr_series(series, universe=universe, period=ATR_PERIOD)
+    # ⚠ ONE scan for the whole series — see the note in `_support_below`.
+    scan = LevelScan.build(highs=series.array_highs, lows=series.array_lows, volumes=_volumes(series))
 
     inputs = (
         StrategyInput(series=_close_input(series, universe=universe), reason=masked_reason),
@@ -255,7 +271,7 @@ def s5_signals(
         # `_support_below` already requires low < level <= close, so the
         # rejection is expressed once, in the level selection, rather than
         # restated here where the two could drift apart.
-        return _support_below(series, index=index, atr=atr_now) is not None
+        return _support_below(series, index=index, atr=atr_now, scan=scan) is not None
 
     return evaluate(entry, inputs=inputs, n_bars=len(series), kind="entry")
 
