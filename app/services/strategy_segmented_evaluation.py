@@ -12,6 +12,7 @@ from app.services.price_segments import series_segment_bounds
 from app.services.strategy_manifest import StrategyEntry
 from app.services.strategy_registry import (
     NotEvaluableReason,
+    SignalKind,
     StagedMember,
     StrategySignal,
     stage_cross_sectional_member,
@@ -77,21 +78,50 @@ def segmented_member(
     universe: Universe,
     masked_reason: NotEvaluableReason,
     unresolved_breaks: Sequence[date],
+    regime: RegimeSeries,
+    leg: SignalKind = "entry",
 ) -> StagedMember:
-    """Stage one ranked member with fresh state inside each scale segment."""
-    if entry.member is None:
-        raise ValueError(f"{entry.strategy_id} has no cross-sectional member function")
+    """Stage one ranked member with fresh state inside each scale segment.
+
+    ``leg`` selects which member function stages — ``"entry"`` is
+    ``entry.member``, ``"exit"`` is ``entry.exit_leg.member`` — and is also
+    the ``kind`` stamped on every verdict, so a leg cannot be staged under
+    the other leg's name. The regime is SLICED with the segment, exactly as
+    ``segmented_signals`` does and for its stated reason.
+
+    ⚠ ``admissible_dates`` / ``mandatory_dates`` merge by UNION across
+    segments — they are DATE-keyed on ``StagedMember`` precisely so this
+    merge needs no index remapping. ``None`` (unrefined) survives only when
+    EVERY segment returned ``None``; the same member function produces the
+    same shape per segment, so a mix is a bug and raises.
+    """
+    if leg == "entry":
+        member_stager = entry.member
+    elif entry.exit_leg is not None:
+        member_stager = entry.exit_leg.member
+    else:
+        member_stager = None
+    if member_stager is None:
+        raise ValueError(f"{entry.strategy_id} has no cross-sectional member function for the {leg!r} leg")
+    if len(regime) != len(series):
+        raise ValueError(f"regime has {len(regime)} bars against {len(series)} price bars; they must align")
     verdicts: list[StrategySignal | None] = []
     scores: dict[date, float] = {}
+    admissible: set[date] | None = None
+    mandatory: set[date] | None = None
+    segments = 0
     for start, end in series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
+        segments += 1
         segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
         staged = stage_cross_sectional_member(
-            entry.member(
+            member_stager(
                 segment,
                 panel_decision_dates=panel_decision_dates,
                 universe=universe,
                 masked_reason=masked_reason,
-            )
+                regime=regime.segment(start, end),
+            ),
+            kind=leg,
         )
         verdicts.extend(
             None
@@ -108,9 +138,27 @@ def segmented_member(
         if overlap:  # pragma: no cover - BarSeries dates and segments are disjoint
             raise RuntimeError(f"{entry.strategy_id} produced duplicate segmented score dates {sorted(overlap)}")
         scores.update(staged.scores)
+        for label, merged, this_segment in (
+            ("admissible_dates", admissible, staged.admissible_dates),
+            ("mandatory_dates", mandatory, staged.mandatory_dates),
+        ):
+            if segments > 1 and (merged is None) != (this_segment is None):
+                raise RuntimeError(
+                    f"{entry.strategy_id} {leg} leg produced {label}={'None' if this_segment is None else 'a set'} "
+                    "in one segment and the opposite in another — one member function must be one shape"
+                )
+        if staged.admissible_dates is not None:
+            admissible = (admissible or set()) | staged.admissible_dates
+        if staged.mandatory_dates is not None:
+            mandatory = (mandatory or set()) | staged.mandatory_dates
     if len(verdicts) != len(series):
         raise RuntimeError(f"{entry.strategy_id} staged {len(verdicts)} segmented bars for {len(series)} inputs")
-    return StagedMember(verdicts=tuple(verdicts), scores=scores)
+    return StagedMember(
+        verdicts=tuple(verdicts),
+        scores=scores,
+        admissible_dates=None if admissible is None else frozenset(admissible),
+        mandatory_dates=None if mandatory is None else frozenset(mandatory),
+    )
 
 
 __all__ = ["segmented_member", "segmented_signals"]

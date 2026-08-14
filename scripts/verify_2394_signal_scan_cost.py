@@ -444,7 +444,13 @@ def cost() -> bool:
     s2_participants = 0
     s2_rows = 0
     for instrument_id, series in loaded.items():
-        member = s2.member(series, panel_decision_dates=panel_dates, universe=UNIVERSE, masked_reason=MASKED_REASON)
+        member = s2.member(
+            series,
+            panel_decision_dates=panel_dates,
+            universe=UNIVERSE,
+            masked_reason=MASKED_REASON,
+            regime=unconstrained_regime(len(series)),
+        )
         if instrument_id not in at_frontier:
             continue
         index = len(series) - 2

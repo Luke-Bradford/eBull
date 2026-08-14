@@ -189,6 +189,7 @@ class TestRunnableStrategies:
         runnable, excluded = runnable_strategies()
         assert list(runnable) == [
             "s1-time-series-momentum",
+            "s10-relative-strength-leader",
             "s2-cross-sectional-momentum",
             "s3-mean-reversion-in-trend",
             "s4-volatility-compression-breakout",
@@ -1658,6 +1659,7 @@ class TestSeriesBreakBoundary:
             universe="survivor_only",
             masked_reason="quarantined_bar",
             unresolved_breaks=(),
+            regime=unconstrained_regime(len(series)),
         )
         segmented = segmented_member(
             entry,
@@ -1666,6 +1668,7 @@ class TestSeriesBreakBoundary:
             universe="survivor_only",
             masked_reason="quarantined_bar",
             unresolved_breaks=(dates[300],),
+            regime=unconstrained_regime(len(series)),
         )
         assert whole.verdicts[400] is None
         before_break = segmented.verdicts[299]
