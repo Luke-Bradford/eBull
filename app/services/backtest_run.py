@@ -760,6 +760,10 @@ def _resolved_level_outcomes_for_arms(
             outcome_name = outcome.outcome
             exit_price = outcome.exit_price
             if outcome_name == "ambiguous":
+                # An ambiguous outcome needs BOTH levels touched in one bar, so a
+                # stop-only bracket (take_profit=None, S-7) can never reach here —
+                # the resolver's rule 3 tests a target that does not exist.
+                assert levels.take_profit is not None
                 outcome_name = "tp_hit" if ambiguity_arm == "best_case" else "sl_hit"
                 exit_price = levels.take_profit if ambiguity_arm == "best_case" else levels.stop_loss
             resolved[ambiguity_arm].append(

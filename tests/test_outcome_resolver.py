@@ -70,7 +70,7 @@ def _resolve(
     masked_bar_reasons: dict[int, str] | None = None,
     segment_end_index: int | None = None,
     stop: Decimal = _STOP,
-    target: Decimal = _TARGET,
+    target: Decimal | None = _TARGET,
 ) -> Outcome:
     return resolve_outcome(
         series=_series(rows),
@@ -143,6 +143,45 @@ def test_gap_above_the_target_resolves_at_the_open_even_when_the_low_breaks_the_
     assert out.outcome == "tp_hit"
     assert out.exit_price == Decimal("120")  # the OPEN, better than the 110 target
     assert out.gross_return_pct == Decimal("0.2")
+
+
+def test_a_stop_only_bracket_books_sl_at_the_level() -> None:
+    """S-7's shape: ``take_profit=None``. The stop side is unchanged."""
+    out = _resolve([_bar(), _bar(low=Decimal("90"))], target=None)
+    assert out.outcome == "sl_hit"
+    assert out.exit_price == _STOP
+
+
+def test_a_stop_only_bracket_gap_below_the_stop_books_at_the_open() -> None:
+    out = _resolve([_bar(), _bar(open_=Decimal("92"), low=Decimal("90"))], target=None)
+    assert out.outcome == "sl_hit"
+    assert out.exit_price == Decimal("92")  # rule 1: the open, not the level
+
+
+def test_a_stop_only_bracket_never_books_tp_or_ambiguous() -> None:
+    """With one level there is no unknowable touch order: a bar that would have
+    spanned BOTH levels of a full bracket is a plain stop touch here, and a
+    huge high alone decides nothing."""
+    spanning = _resolve([_bar(), _bar(high=Decimal("500"), low=Decimal("90"))], target=None)
+    assert spanning.outcome == "sl_hit"
+    soaring = _resolve([_bar(), _bar(high=Decimal("500")), _bar()], target=None, max_hold_bars=2)
+    assert soaring.outcome == "expired"
+
+
+def test_a_stop_only_bracket_expires_at_the_next_open() -> None:
+    out = _resolve([_bar(), _bar(), _bar(), _bar(open_=Decimal("104"))], target=None)
+    assert out.outcome == "expired"
+    assert out.exit_price == Decimal("104")
+
+
+def test_a_stop_only_bracket_still_requires_the_stop_below_the_entry() -> None:
+    with pytest.raises(ValueError, match="not below the entry"):
+        _resolve([_bar()], target=None, stop=Decimal("100"))
+
+
+def test_stop_only_levels_still_validate_the_stop() -> None:
+    with pytest.raises(ValueError, match="stop_loss must be > 0"):
+        ExitLevels(take_profit=None, stop_loss=Decimal("0"), max_hold_bars=3)
 
 
 def test_the_fill_bar_is_inside_the_window() -> None:
@@ -321,7 +360,7 @@ def test_levels_validate_themselves(stop: Decimal, target: Decimal, max_hold: in
 def test_levels_must_bracket_the_entry(stop: Decimal, target: Decimal) -> None:
     """Acceptance 11. A stop at or above entry, or a target at or below it,
     triggers immediately and is not a trade."""
-    with pytest.raises(ValueError, match="do not bracket the entry"):
+    with pytest.raises(ValueError, match="triggers immediately and is not a trade"):
         _resolve([_bar(), _bar()], stop=stop, target=target)
 
 
