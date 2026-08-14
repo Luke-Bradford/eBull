@@ -21,6 +21,14 @@ COMMENT ON COLUMN strategy_results.carry_unmodelled IS
     're-derived: rows computed under an earlier model stay unpromotable. The '
     'promotion gate refuses on it (§5.1).';
 
+COMMENT ON COLUMN strategy_results.fx_unmodelled IS
+    'True when the run''s cost model left FX unmodelled '
+    '(cost_model.FX_CLOSURE = unmodelled). False from #2720''s v3 model on: FX '
+    'is STRUCTURALLY ZERO for the all-USD lane — no conversion event occurs. '
+    '⚠ This column carried NO comment before #2720 (sql/335 commented only the '
+    'store table); added here for symmetry. Stamped AS AT COMPUTE TIME and '
+    'never re-derived.';
+
 COMMENT ON COLUMN strategy_results_store.carry_unmodelled IS
     'True when the run''s cost model left carry unmodelled '
     '(cost_model.CARRY_CLOSURE = unmodelled). False from #2720''s v3 model on: '
