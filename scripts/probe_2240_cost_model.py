@@ -45,21 +45,17 @@ reported, not enforced; nothing branches on them, so there is no behaviour to
 revert. ``--calibrate`` prints the live figures beside them, which is the
 mechanism that keeps them honest.
 
-⚠⚠ **THE PRESENCE OF ``_check_unmodelled_components_are_not_charged()``'s
-MODULE-LEVEL CALL** (#2695, Codex checkpoint). Its refusal is proved directly by
-``test_a_component_may_not_carry_an_amount_that_nothing_charges``, which patches
-a value and calls the function. Nothing proves the call still runs AT IMPORT —
-delete the one-line invocation and every test in the file still passes, because
-each reaches the guard by calling it. That is the #2363 tripwire's whole value
-(it fires on an edit somebody makes to the literal, in a file they may not test),
-and it is currently unguarded.
+✅ **CLOSED #2699 (2026-08-14): the module-level INVOCATIONS are now probed.** The
+note here used to record that deleting ``_check_unmodelled_components_are_not_charged()``
+left every test passing, because each reached the guard by calling it — so the
+#2363 tripwire's whole value (firing on an edit somebody makes to the literal, in
+a file they may not test) rested on a line nothing defended.
 
-⚠ It is deliberately NOT probed here rather than probed and reported ``NOT
-CAUGHT``. A probe whose selector cannot fail is noise in a sweep whose signal is
-the failures. Closing it needs a test that imports the module in a SUBPROCESS
-with the constant patched and asserts the import raises — the guard runs at
-import, so no in-process fixture can observe it without a reload dance that
-would itself need probing. Worth a ticket, not a widened diff.
+``TestTheImportTimeGuardsActuallyRun`` closes it by executing the SHIPPED SOURCE in
+a cold interpreter with one literal substituted, which is exactly what that
+maintainer would see. Two probes above now revert the invocations, and both report
+CAUGHT. ⚠ The same asymmetry held for ``_check_bands_are_total(BANDS)`` — every one
+of its tests passes a hand-built tuple — and is probed alongside it.
 """
 
 from __future__ import annotations
@@ -250,6 +246,29 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
             ("CARRY_BPS: Decimal | None = None", 'CARRY_BPS: Decimal | None = Decimal("0")'),
         ],
         "test_carry_is_none or test_the_unmodelled_marker_is_set",
+    ),
+    (
+        # ⚠⚠ THE INVOCATION ITSELF, probeable since #2699. Deleting this one line
+        # leaves the guard defined, imported and directly testable — and never run.
+        # A guard that no longer runs is the #2437 R4 shape arriving through a
+        # missing CALL rather than a missing branch, and it was invisible for the
+        # ordinary reason: every test reached the function by calling it.
+        "the module-level call to the false-promotion tripwire deleted",
+        MODEL,
+        MODEL_TESTS,
+        [("\n_check_unmodelled_components_are_not_charged()\n", "\n")],
+        "test_setting_carry_bps_fails_the_import_itself or test_setting_fx_bps_fails_the_import_itself",
+    ),
+    (
+        # ⚠ The SAME asymmetry, found while closing #2699 rather than stated by it:
+        # every `_check_bands_are_total` test passes a hand-built tuple, so its
+        # module-level call was equally deletable. A gap in the band table then
+        # makes `half_spread_for` raise on an ordinary price at run time.
+        "the module-level call to the band-totality guard deleted",
+        MODEL,
+        MODEL_TESTS,
+        [("\n_check_bands_are_total(BANDS)\n", "\n")],
+        "test_a_gap_in_the_band_table_fails_the_import_itself",
     ),
     (
         # ⚠⚠ THE RE-KEY. §5.1: *"re-keying mid-hold would make the cost depend
