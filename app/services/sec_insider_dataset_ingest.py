@@ -445,6 +445,7 @@ def ingest_insider_dataset_archive(
     archive_path: Path,
     cik_to_instrument: dict[str, list[int]] | None = None,
     ingest_run_id: UUID | None = None,
+    retention_cutoff_override: date | None = None,
 ) -> InsiderIngestResult:
     """Walk one Insider Transactions Data Set ZIP and append observations.
 
@@ -480,8 +481,25 @@ def ingest_insider_dataset_archive(
     # whole archive so a long walk crossing midnight UTC uses one
     # boundary. Form 3 rows are NOT gated here — Form 3 is read-side
     # latest-per-pair via ``list_baseline_only_insider_holdings``.
-    retention_cutoff = form4_retention_cutoff()
-    retention_cutoff_form5 = form5_retention_cutoff()
+    #
+    # ⚠⚠ `retention_cutoff_override` EXISTS FOR RESEARCH AND CHANGES NO DEFAULT.
+    # #1233's 3-year cap is correct for its consumer — the operator ALERTING
+    # path, where "90d is the alert window, 12mo the thesis window, 3y the
+    # cluster-buy window" and pre-3y trades genuinely earn nothing. It is wrong
+    # for a research measurement, where the sample length IS the deliverable:
+    # the cap is the sole reason ~92% of `insider_filings` is 2023-onward and
+    # the insider forward-return test sits at t = 1.06 on ~4 usable years
+    # (#2701).
+    #
+    # ⚠ Its stated cost premise no longer holds on THIS route either. "Days of
+    # SEC bandwidth" described per-CIK fetching; the quarterly bulk data sets
+    # download the full 20-year span in ~2 minutes and 1.2 GB.
+    #
+    # Injected rather than flipped so both consumers keep the boundary they
+    # need, and so a research run has to ASK — a widened default would quietly
+    # change what the alerting path stores.
+    retention_cutoff = retention_cutoff_override or form4_retention_cutoff()
+    retention_cutoff_form5 = retention_cutoff_override or form5_retention_cutoff()
 
     # PR-3: CREATE TEMP TABLE before opening the COPY context.
     with conn.cursor() as cur:
