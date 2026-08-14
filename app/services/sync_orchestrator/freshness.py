@@ -19,7 +19,7 @@ BEFORE ordering would hide a newer failure behind an older success.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
 import psycopg
 
@@ -103,14 +103,24 @@ def _format_age(delta: timedelta) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Weekly cadence (#277). eToro's /instruments endpoint has no delta filter — we
+#: pull the whole list (~15k rows) every refresh. The universe rarely changes
+#: day-to-day (new listings are rare, ticker changes rarer still), so a daily
+#: refresh was write amplification for no information gain. A 7-day window catches
+#: meaningful changes without re-pulling weekly volumes of identical rows.
+#:
+#: ⚠ NAMED rather than inline because ``ops_monitor._STALENESS_THRESHOLDS`` has to
+#: stay LOOSER than it: this window is what decides how old the universe layer is
+#: ALLOWED to get, so an alert threshold below it fires on the intended state.
+#: They cannot import each other (``sync_orchestrator.adapters`` already imports
+#: ``ops_monitor``), so the relationship is asserted by
+#: ``tests/test_2407_universe_staleness_contract.py`` instead of by a shared
+#: constant. #2407.
+UNIVERSE_REFRESH_WINDOW: Final = timedelta(days=7)
+
+
 def universe_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:
-    # Weekly cadence (#277). eToro's /instruments endpoint has no delta
-    # filter — we pull the whole list (~15k rows) every refresh. The
-    # universe rarely changes day-to-day (new listings are rare, ticker
-    # changes rarer still), so a daily refresh was write amplification
-    # for no information gain. A 7-day window catches meaningful
-    # changes without re-pulling weekly volumes of identical rows.
-    return _fresh_by_audit(conn, "nightly_universe_sync", timedelta(days=7))
+    return _fresh_by_audit(conn, "nightly_universe_sync", UNIVERSE_REFRESH_WINDOW)
 
 
 def candles_is_fresh(conn: psycopg.Connection[Any]) -> tuple[bool, str]:

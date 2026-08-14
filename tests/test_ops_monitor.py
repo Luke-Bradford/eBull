@@ -89,8 +89,11 @@ class TestCheckLayerStaleness:
         assert "no data rows" in result.detail
 
     def test_fresh_layer_returns_ok(self) -> None:
-        # Universe threshold is 2 days; set latest to 1 hour ago.
-        latest = _NOW - timedelta(hours=1)
+        # ⚠ Derived from the threshold, not from a hand-written age. Both of
+        # these cases hard-coded "2 days" until #2407 moved the universe
+        # threshold to 9 days, and the stale case then silently became a fresh
+        # one — a test asserting a boundary must move with the boundary.
+        latest = _NOW - (_STALENESS_THRESHOLDS["universe"] / 2)
         conn = _make_conn([_make_cursor([{"latest": latest}])])
         result = check_layer_staleness(conn, "universe", now=_NOW)
         assert result.status == "ok"
@@ -99,8 +102,8 @@ class TestCheckLayerStaleness:
         assert result.age < _STALENESS_THRESHOLDS["universe"]
 
     def test_stale_layer_returns_stale(self) -> None:
-        # Universe threshold is 2 days; set latest to 3 days ago.
-        latest = _NOW - timedelta(days=3)
+        # One hour past the threshold, whatever the threshold currently is.
+        latest = _NOW - (_STALENESS_THRESHOLDS["universe"] + timedelta(hours=1))
         conn = _make_conn([_make_cursor([{"latest": latest}])])
         result = check_layer_staleness(conn, "universe", now=_NOW)
         assert result.status == "stale"
