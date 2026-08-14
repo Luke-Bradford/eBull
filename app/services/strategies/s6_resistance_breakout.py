@@ -327,6 +327,19 @@ def s6_signals(
         StrategyInput(series=_close_input(series, universe=universe), reason=masked_reason),
         StrategyInput(series=atr, reason=masked_reason),
         StrategyInput(series=avg_volume, reason=masked_reason),
+        # ⚠⚠ THE REGIME IS AN INPUT, NOT JUST A GATE IN THE BODY (#2437). Without
+        # this line a date on which the benchmark contributed no bar reaches
+        # `entry`, `regime.permits` returns False, and `evaluate` stores
+        # `not_fired` — a bar this strategy COULD NOT JUDGE, recorded as one it
+        # judged and declined. Declaring it here lets `evaluate` refuse the bar
+        # first, which is the guarantee that function exists for.
+        #
+        # ⚠ DECLARED LAST on purpose. `_unevaluable_reason_at` returns the FIRST
+        # matching input's reason, and a bar that is both quarantined and
+        # missing its market context should be counted under the instrument's
+        # own defect — the more specific fact, and the one an operator can act
+        # on. The market-context code is the fallback, not the headline.
+        StrategyInput(series=regime, reason="missing_market_context"),
     )
 
     def entry(index: int) -> bool:

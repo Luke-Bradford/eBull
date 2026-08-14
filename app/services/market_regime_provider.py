@@ -134,8 +134,25 @@ class MarketRegimeProvider:
         return cls(regime_by_date=dict(zip(dates, series.values, strict=True)))
 
     def for_dates(self, dates: tuple[date, ...]) -> RegimeSeries:
-        """The regime on each of ``dates``, ``None`` where the benchmark has no bar."""
-        return RegimeSeries(values=tuple(self._by_date.get(day) for day in dates))
+        """The regime on each of ``dates``, ``None`` where the benchmark has no bar.
+
+        ⚠⚠ THE TWO KINDS OF ``None`` ARE SEPARATED HERE, AND THIS IS THE ONLY
+        PLACE THAT CAN SEPARATE THEM. ``dict.get`` returns ``None`` both for a
+        date the benchmark never traded and for a date it traded but could not
+        yet be classified — and only this map knows which. By the time a
+        strategy sees the ``RegimeSeries`` the distinction is gone.
+
+        Membership in ``self._by_date`` is the discriminator: present means the
+        benchmark contributed an observation (warm-up if its value is ``None``),
+        absent means it contributed nothing (``not_evaluable``).
+
+        ⚠ ``in`` rather than ``get() is None`` — a benchmark bar that classified
+        to ``None`` is IN the map, so the two tests disagree exactly on the
+        population this method exists to split.
+        """
+        values = tuple(self._by_date.get(day) for day in dates)
+        unobserved = tuple(index for index, day in enumerate(dates) if day not in self._by_date)
+        return RegimeSeries(values=values, not_evaluable_indices=unobserved)
 
     @property
     def classified_days(self) -> int:

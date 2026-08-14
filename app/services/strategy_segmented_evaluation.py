@@ -47,7 +47,11 @@ def segmented_signals(
     signals: list[StrategySignal] = []
     for start, end in series_segment_bounds(series, unresolved_breaks=unresolved_breaks):
         segment = BarSeries(dates=series.dates[start:end], rows=series.rows[start:end])
-        segment_regime = RegimeSeries(values=regime.values[start:end])
+        # ⚠ `regime.segment(...)`, NOT `RegimeSeries(values=regime.values[start:end])`.
+        # The latter type-checks and silently drops `not_evaluable_indices`, so
+        # every benchmark hole inside the segment would be re-counted as the
+        # benchmark's own warm-up (#2437). The remap lives on the data.
+        segment_regime = regime.segment(start, end)
         signals.extend(
             StrategySignal(
                 verdict=signal.verdict,

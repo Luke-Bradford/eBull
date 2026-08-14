@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, get_args
+from typing import Literal, Protocol, get_args
 
 from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import IndicatorSeries, MultiIndicatorSeries, Universe
@@ -120,6 +120,22 @@ SignalKind = Literal["entry", "exit"]
 #: measured in sql/270), so this is the split it pre-registered. The pair is
 #: exactly criterion 8's distinction: the edge of the series is a real absence,
 #: an unpriceable bar is a data gap.
+#:
+#: ⚠ ``missing_market_context`` is an ELEVENTH (#2437, sql/351 widens the three
+#: CHECKs), and it is the first code that is a property of a DIFFERENT
+#: INSTRUMENT than the one being judged. S-5…S-10 gate on a market regime
+#: classified from the benchmark; when the benchmark contributed no bar at all
+#: on a date the instrument traded, the strategy cannot judge that bar.
+#: ``thin_cross_section`` is the nearest relative and is still wrong — that
+#: describes a panel which EXISTS and is too small, not a series that is absent.
+#:
+#: ⚠ Measured before it was minted, full validated universe (dev DB,
+#: 2026-08-14): 9,688 bars over 360 dates, worst 2026-02-06 with 1,735
+#: instruments trading against no SPY bar. Every one was stored as
+#: ``not_fired`` — a bar the strategy could not judge, recorded as one it judged
+#: and declined. ⚠ A benchmark bar that EXISTS and is merely unclassifiable
+#: (200-SMA still warming) stays ``insufficient_warmup``; only an absent
+#: benchmark observation earns this code. See ``market_regime.RegimeSeries``.
 NotEvaluableReason = Literal[
     "missing_volume",
     "missing_spread",
@@ -131,6 +147,7 @@ NotEvaluableReason = Literal[
     "no_fill_bar",
     "thin_cross_section",
     "unusable_fill_price",
+    "missing_market_context",
 ]
 
 # ⚠ DERIVED from the Literals above, never restated. Review flagged the
@@ -143,11 +160,13 @@ VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
 SIGNAL_KINDS: frozenset[str] = frozenset(get_args(SignalKind))
 NOT_EVALUABLE_REASONS: frozenset[str] = frozenset(get_args(NotEvaluableReason))
 
-#: The seven from parent criterion 8. `no_fill_bar`, `thin_cross_section` and
-#: `unusable_fill_price` are OURS and are excluded deliberately — see
-#: NotEvaluableReason. Kept as an explicit subtraction so adding a parent code
-#: later cannot silently land on our side of the line.
-OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset({"no_fill_bar", "thin_cross_section", "unusable_fill_price"})
+#: The seven from parent criterion 8. `no_fill_bar`, `thin_cross_section`,
+#: `unusable_fill_price` and `missing_market_context` are OURS and are excluded
+#: deliberately — see NotEvaluableReason. Kept as an explicit subtraction so
+#: adding a parent code later cannot silently land on our side of the line.
+OUR_ADDITIONAL_REASON_CODES: frozenset[str] = frozenset(
+    {"no_fill_bar", "thin_cross_section", "unusable_fill_price", "missing_market_context"}
+)
 PARENT_REASON_CODES: frozenset[str] = NOT_EVALUABLE_REASONS - OUR_ADDITIONAL_REASON_CODES
 
 
@@ -259,6 +278,52 @@ class StrategyIdentity:
 StrategyBody = Callable[[int], bool]
 
 
+class EvaluableSeries(Protocol):
+    """What ``evaluate`` actually needs from a declared input.
+
+    ⚠⚠ A PROTOCOL RATHER THAN A UNION, AND THE ALTERNATIVE IS WHY (#2437).
+
+    ``StrategyInput`` was typed ``IndicatorSeries | MultiIndicatorSeries``, so a
+    ``market_regime.RegimeSeries`` — the one input S-5…S-10 gate on — could not
+    be declared at all, and the regime check ended up INSIDE each strategy body
+    instead. That is not a style difference: ``evaluate``'s whole guarantee is
+    that evaluability is decided before the body runs, so an input checked
+    inside the body has no way to report ``not_evaluable`` and reports
+    ``not_fired`` instead. 9,688 bars were stored that way.
+
+    The two ways to let a regime in were both worse:
+
+    * **Widen the union.** ``strategy_registry`` is the generic contract and
+      ``market_regime`` is one strategy family's rule; importing the second into
+      the first inverts the layering, and every future family would add another
+      arm.
+    * **Adapt to an ``IndicatorSeries``.** That object carries
+      ``indicator_series.RULE_SET_VERSION``, which the regime did not come from,
+      so the adapter would have to stamp a provenance that is false — and
+      ``market_regime`` deliberately does not import ``indicator_series`` (see
+      its ``_trailing_sma``) precisely to keep the two versions uncoupled.
+
+    A structural protocol needs neither. Any object exposing per-bar values plus
+    the indices it could not support satisfies the contract, and nothing has to
+    know about anything else.
+
+    ⚠ ``values`` is ``Sequence[object | None]``, not ``float | None`` — a regime
+    value is a ``Regime`` enum member. ``evaluate`` only ever asks whether it
+    ``is None``, never what it is.
+
+    ⚠ ``MultiIndicatorSeries`` does NOT satisfy this (it exposes ``components``,
+    not ``values``) and is kept as an explicit union arm below.
+    """
+
+    @property
+    def values(self) -> Sequence[object | None]: ...
+
+    @property
+    def not_evaluable_indices(self) -> tuple[int, ...]: ...
+
+    def __len__(self) -> int: ...
+
+
 @dataclass(frozen=True)
 class StrategyInput:
     """One indicator series a strategy depends on, WITH the reason code to
@@ -283,7 +348,7 @@ class StrategyInput:
     up, and is always ``insufficient_warmup``.
     """
 
-    series: IndicatorSeries | MultiIndicatorSeries
+    series: EvaluableSeries | MultiIndicatorSeries
     #: Recorded when this input is unevaluable for a data reason.
     reason: NotEvaluableReason
 
@@ -300,12 +365,18 @@ def _unevaluable_reason_at(inputs: Sequence[StrategyInput], index: int) -> NotEv
         series = declared.series
         if index in series.not_evaluable_indices:
             return declared.reason
-        if isinstance(series, IndicatorSeries):
-            if series.values[index] is None:
-                warming = True
-        else:
+        # ⚠ The isinstance test is on the MULTI arm, not the single one. It used
+        # to read `isinstance(series, IndicatorSeries)` with the multi case in
+        # `else`, which silently treated any non-`IndicatorSeries` as having
+        # `.components` — so the `EvaluableSeries` protocol widening (#2437)
+        # would have sent a `RegimeSeries` down the multi branch and raised
+        # `AttributeError` on the first warm-up bar. Testing the arm that has
+        # the distinctive shape leaves the protocol as the default.
+        if isinstance(series, MultiIndicatorSeries):
             if any(component[index] is None for component in series.components.values()):
                 warming = True
+        elif series.values[index] is None:
+            warming = True
     return "insufficient_warmup" if warming else None
 
 
