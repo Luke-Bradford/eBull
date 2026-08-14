@@ -30,6 +30,17 @@ the count. A full sweep costs ~35 s/probe (two pytest subprocesses each) — nea
 an hour for the 280 probes below. This check is the part of that sweep which
 needs no pytest at all, so it can run on every push.
 
+⚠⚠ IT ALSO CHECKS THE HARNESS CAN BE LAUNCHED AT ALL, which is a THIRD decay
+class and one this file's own access path hides. The anchor sweep reaches a
+harness through ``import_module``, which puts the repo root on ``sys.path`` for
+free — so it happily validates 27 anchors in a file whose ``__main__`` entry
+raises ``ModuleNotFoundError`` under the command its own docstring prints.
+Measured 2026-08-14 (#2695): four of the sixteen were in exactly that state
+(``block_bootstrap``, ``deflated_sharpe``, ``result_model``, ``statistics``),
+because #2357 fixed the seven harnesses it happened to touch and the rest were
+never swept. A harness nobody can start proves as little as one with a dead
+anchor, and it fails LOUDER — which is why it survived: nobody had started it.
+
 WHAT THIS DOES NOT CATCH
 ------------------------
 ⚠ **A branch that no probe names.** The harnesses' two standing guards are
@@ -61,7 +72,9 @@ re-anchoring anything.
 from __future__ import annotations
 
 import importlib
+import runpy
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +119,31 @@ def _anchor_and_source(edit: tuple[Any, ...], probe: tuple[Any, ...], default: P
     return str(edit[0]), default
 
 
+def _launch_failure(path: Path, root: Path) -> str | None:
+    """The traceback a harness raises when started BY PATH, or ``None``.
+
+    ⚠ Emulates ``python scripts/<harness>.py`` exactly: ``sys.path[0]`` becomes
+    ``scripts/`` and the repo root is REMOVED, which is the condition under
+    which a ``from scripts.probe_2240_cost_model import …`` raises. Reproducing
+    it is the whole point — ``import_module`` cannot, because it needs the root
+    on the path to find the harness in the first place.
+
+    ⚠ ``run_name`` is deliberately NOT ``"__main__"``, so module top level runs
+    (the sibling import, the ``PROBES`` table) while ``main()`` does not. These
+    harnesses mutate tracked source on disk; an audit that ran one would be a
+    far worse defect than the one it is checking for.
+    """
+    saved = list(sys.path)
+    sys.path[:] = [str(root / "scripts")] + [entry for entry in saved if entry not in (str(root), "", ".")]
+    try:
+        runpy.run_path(str(root / path), run_name="__harness_launch_check__")
+        return None
+    except Exception:
+        return traceback.format_exc(limit=2).strip().splitlines()[-1]
+    finally:
+        sys.path[:] = saved
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     failures: list[str] = []
@@ -118,6 +156,14 @@ def main() -> int:
         default_src: Path | None = getattr(module, "SRC", None)
         sources: dict[Path, str] = {}
         checked = bad = 0
+
+        launch = _launch_failure(path.relative_to(root), root)
+        if launch is not None:
+            bad += 1
+            failures.append(
+                f"{path.name}: cannot be started by path — {launch}. Every anchor below is checked through "
+                f"an import that adds the repo root, so they pass while the harness itself will not run."
+            )
 
         for probe in probes:
             name = probe[0]
