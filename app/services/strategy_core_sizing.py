@@ -19,12 +19,18 @@ what-if response and does arithmetic.
 step of this arc has been, because #2437's R4 comment records *a control that exists, is
 tested, and sits on a path the decision does not take* many times over on this ticket.
 
-⚠⚠ AND THE SELL PATH CANNOT BE FED.  ``EtoroBrokerProvider.get_what_if_costs`` hardcodes
-``"action": "open"`` and ``TradeDirection`` is ``Literal["buy", "sellShort"]`` -- both arms
-are opens, so nothing in this repo can price a partial close of a long.  ``sell_core`` is
-sized correctly the moment a bound arrives and no code path produces one.  Named because
-that is the 3b-1 shape -- a refusal that looks transient and is not -- aimed at the
-direction that restores the reserve.  The close-side quote is 3b-2 item 3's.
+⚠⚠ THE SELL PATH IS NOW FEEDABLE -- corrected 2026-08-14 (#2712), and this docstring said
+the opposite for one merge.  ``get_what_if_costs`` DID hardcode ``"action": "open"``, but
+the endpoint has a close arm: it requires ``positionIds`` (400 without, 200 with, measured
+on demo) and ``BrokerWhatIfOrder`` now carries both.
+
+⚠⚠ AND THE TWO ARMS DO NOT AGREE, so a sell must be quoted on the SELL arm.  Measured over
+every held demo position -- 5 instruments, both arms decodable on all 5, same ticket
+seconds apart -- the close was dearer on 4 of the 5 (5.7x, 8.5x, 13.0x, 18.5x) and cheaper
+on the fifth (0.5x).  Feeding a buy-arm quote to a ``sell_core`` would under-state ``gamma``
+by an order of magnitude, which is the one direction the ``mu <= gamma`` guarantee cannot
+survive.  The spec declined to fabricate that substitution on the grounds that it was
+plausible and unmeasured; it is now measured, and it is wrong.
 
 Spec: ``docs/proposals/ta/2026-08-14-core-rebalance-cost-sizing.md``
 """

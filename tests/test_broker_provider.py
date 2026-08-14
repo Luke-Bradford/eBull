@@ -292,6 +292,77 @@ class TestTradingPreflight:
             ]
             assert result.last_updated.tzinfo is not None
 
+    def test_what_if_costs_sends_the_CLOSE_arm_with_its_position_ids(self) -> None:
+        """The close arm exists and needs the position named — measured 2026-08-14
+        (#2712): 400 "PositionIds must be provided for close action" without it, 200 with
+        it.  ⚠ The live portal documents `positionIds` as "currently rejected"; the
+        endpoint disagrees and the endpoint won.
+        """
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = FIXTURE_WHAT_IF_COST_RESPONSE
+
+        with EtoroBrokerProvider(api_key="k", user_key="u", env="demo") as broker:
+            broker._http_write = MagicMock()
+            broker._http_write.post.return_value = mock_resp
+            broker.get_what_if_costs(
+                BrokerWhatIfOrder(
+                    instrument_id=1001,
+                    transaction="sell",
+                    settlement_type="real",
+                    amount=Decimal("1000"),
+                    action="close",
+                    position_ids=(3308441892,),
+                )
+            )
+
+            body = broker._http_write.post.call_args.kwargs["json"]
+            assert body["action"] == "close"
+            assert body["transaction"] == "sell"
+            assert body["positionIds"] == [3308441892]
+
+    def test_the_close_arm_refuses_locally_rather_than_spending_a_doomed_request(self) -> None:
+        """Validated in the dataclass, not left to the server: the 20/60s informational
+        lane is a shared budget and a request that CANNOT succeed should not consume it.
+        """
+        with pytest.raises(ValueError, match="close arm requires position_ids"):
+            BrokerWhatIfOrder(
+                instrument_id=1001,
+                transaction="sell",
+                settlement_type="real",
+                amount=Decimal("1000"),
+                action="close",
+            )
+
+    def test_position_ids_are_rejected_on_the_OPEN_arm(self) -> None:
+        """Both directions, so the presence of the tuple IS the arm and the two cannot
+        drift apart in the request builder.
+        """
+        with pytest.raises(ValueError, match="meaningless on the open arm"):
+            BrokerWhatIfOrder(
+                instrument_id=1001,
+                transaction="buy",
+                settlement_type="real",
+                amount=Decimal("1000"),
+                position_ids=(3308441892,),
+            )
+
+    def test_an_action_and_transaction_that_do_not_pair_are_refused(self) -> None:
+        """`Literal` is static only, so a dynamically built order arrives unvalidated.
+        ⚠ The pairing is INFERRED from the vocabulary's structure, not measured — the
+        probe never sent open/sell — so this is a local refusal of a meaningless
+        combination, relaxable at the cost of one request if the inference is wrong.
+        """
+        for action, transaction in (("open", "sell"), ("close", "buy")):
+            with pytest.raises(ValueError, match="not a"):
+                BrokerWhatIfOrder(
+                    instrument_id=1001,
+                    transaction=transaction,  # type: ignore[arg-type]
+                    settlement_type="real",
+                    amount=Decimal("1000"),
+                    action=action,  # type: ignore[arg-type]
+                    position_ids=(1,) if action == "close" else (),
+                )
+
     def test_what_if_order_requires_exactly_one_positive_size(self) -> None:
         for amount, units in (
             (None, None),

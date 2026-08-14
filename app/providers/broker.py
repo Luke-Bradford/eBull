@@ -24,6 +24,18 @@ TradeDirection = Literal["buy", "sellShort"]
 SettlementType = Literal["cfd", "real", "realFutures", "marginTrade"]
 PreflightOrderType = Literal["mkt", "mit", "limitIOC"]
 
+#: The what-if COST endpoint's action, which is wider than the execution vocabulary above
+#: and is informational on both arms -- pricing a close is not closing anything.
+#: Measured 2026-08-14 (#2712), demo.
+PreflightAction = Literal["open", "close"]
+
+#: The what-if endpoint's own transaction vocabulary.  ⚠ WIDER than ``TradeDirection``,
+#: which lists the two OPEN transactions the execution path supports; ``sell`` and
+#: ``buyToCover`` are the close-side pair and exist here ONLY for cost preflight.
+#: Deliberately a separate alias rather than a widening of ``TradeDirection``: that type
+#: gates what may be EXECUTED, and shorting is barred outside research (`.claude/CLAUDE.md`).
+PreflightTransaction = Literal["buy", "sellShort", "sell", "buyToCover"]
+
 
 @dataclass(frozen=True)
 class BrokerOrderResult:
@@ -166,28 +178,65 @@ class OrderParams:
     leverage: int = 1
 
 
+#: Which transactions belong to which arm.  Used to reject a meaningless combination
+#: locally rather than spending a request from the 20/60s informational lane on it.
+_PREFLIGHT_TRANSACTIONS_BY_ACTION: dict[PreflightAction, frozenset[str]] = {
+    "open": frozenset({"buy", "sellShort"}),
+    "close": frozenset({"sell", "buyToCover"}),
+}
+
+
 @dataclass(frozen=True)
 class BrokerWhatIfOrder:
     """A non-executing order shape for eToro's v2 cost preflight.
 
-    v1 deliberately supports the two transactions the current endpoint accepts
-    for an ``open`` action.  This type is evidence collection, not permission to
-    execute shorts: the execution path remains long-only until a separately
-    validated strategy and guard contract promote it.
+    This type is evidence collection, not permission to execute: the execution path
+    remains long-only until a separately validated strategy and guard contract promote it.
+
+    ⚠⚠ **The CLOSE arm requires ``position_ids``, measured 2026-08-14 (#2712).** Sending
+    ``action="close"`` without it returns 400 *"PositionIds must be provided for close
+    action"*; with a real position id it returns 200 and real cost rows.  The live portal
+    documents that field as *"For `close` action; currently rejected"* -- the doc and the
+    endpoint disagree, and the endpoint won.  Validated here rather than left to the
+    server, so a doomed request is never spent against the 20/60s lane.
+
+    ⚠⚠ **An open-arm quote does NOT bound the close-arm cost, and must never be
+    substituted for one.**  Measured on every held demo position (5 instruments, both arms
+    decodable on all 5, same ticket seconds apart): the close was DEARER on 4 of the 5, by
+    5.7x, 8.5x, 13.0x and 18.5x, and cheaper on the fifth (0.5x).  Substituting would
+    under-state a bound by an order of magnitude, which is the one direction a cost bound
+    cannot be wrong in.  See `.claude/skills/data-sources/etoro-api.md`.
     """
 
     instrument_id: int
-    transaction: TradeDirection
+    transaction: PreflightTransaction
     settlement_type: SettlementType
     amount: Decimal | None = None
     units: Decimal | None = None
     order_type: PreflightOrderType = "mkt"
     leverage: int = 1
     order_currency: str = "usd"
+    action: PreflightAction = "open"
+    position_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.instrument_id <= 0:
             raise ValueError("instrument_id must be positive")
+        if self.transaction not in _PREFLIGHT_TRANSACTIONS_BY_ACTION[self.action]:
+            # `Literal` is a static check only, so a dynamically built order reaches here
+            # unvalidated.  ⚠ The PAIRING is inferred from the vocabulary's structure --
+            # `buy`/`sellShort` are the two ways to OPEN and `sell`/`buyToCover` close
+            # them respectively -- NOT measured: the probe exercised open/buy,
+            # close/sell and close/buyToCover, never open/sell.  It is a local refusal
+            # of a combination that has no meaning, so relaxing it costs one request if
+            # the inference is ever wrong.
+            raise ValueError(f"transaction {self.transaction!r} is not a {self.action!r} transaction")
+        if self.action == "close" and not self.position_ids:
+            raise ValueError("the close arm requires position_ids (measured: 400 without them)")
+        if self.action == "open" and self.position_ids:
+            raise ValueError("position_ids is meaningless on the open arm")
+        if any(position_id <= 0 for position_id in self.position_ids):
+            raise ValueError("position_ids must be positive")
         if (self.amount is None) == (self.units is None):
             raise ValueError("exactly one of amount or units must be provided")
         value = self.amount if self.amount is not None else self.units
