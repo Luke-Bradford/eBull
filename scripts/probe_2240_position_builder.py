@@ -44,10 +44,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+# ⚠⚠ The docstring above invokes this file by PATH, which puts ``scripts/`` on
+# sys.path and NOT the repo root — so the cross-script import below raises
+# ModuleNotFoundError under the exact command this file documents. Prepending
+# the root makes both that form and ``-m scripts.<name>`` work (#2357).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 # ⚠ The gate constants live ONCE, in the 5b reference harness. A second
 # hand-written copy of "exit 1 means the test failed" is how this file's
 # gate drifted from it in the first place (#2357).
-from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED
+from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED  # noqa: E402
 
 SRC = Path("app/services/position_builder.py")
 TESTS = "tests/test_position_builder.py"
@@ -282,11 +288,20 @@ PROBES: list[tuple[str, list[tuple[str, str]], str]] = [
         # The mirror: the ceiling must BOUND the hold, not suppress every later
         # trade in the instrument. Treating an unbookable hold as eternal drops
         # the rest of that series' history over one masked bar.
+        #
+        # ⚠⚠ RE-ANCHORED (#2357). The original anchor was the one-line
+        # ``open_until = ceiling if open_reason == "close_bar_unfillable" else None``.
+        # A later ``series_break`` arm turned that into a three-way conditional and
+        # the formatter split it across lines, so the anchor stopped matching and
+        # this invariant has been UNPROBED ever since — silently, because nothing
+        # re-ran the harness. Anchored on the ``close_bar_unfillable`` arm alone so
+        # the mutation stays scoped to THIS invariant rather than also deleting the
+        # ``series_break`` arm, which is a different rule with its own tests.
         "an unbookable hold left open forever instead of ending at its ceiling",
         [
             (
-                '                open_until = ceiling if open_reason == "close_bar_unfillable" else None',
-                "                open_until = None",
+                '                    ceiling\n                    if open_reason == "close_bar_unfillable"\n',
+                '                    None\n                    if open_reason == "close_bar_unfillable"\n',
             )
         ],
         "test_an_unbookable_hold_does_not_suppress_the_rest_of_history",

@@ -47,10 +47,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+# ⚠⚠ The docstring above invokes this file by PATH, which puts ``scripts/`` on
+# sys.path and NOT the repo root — so the cross-script import below raises
+# ModuleNotFoundError under the exact command this file documents. Prepending
+# the root makes both that form and ``-m scripts.<name>`` work (#2357).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 # ⚠ The gate constants live ONCE, in the 5b reference harness. A second
 # hand-written copy of "exit 1 means the test failed" is how this file's
 # gate drifted from it in the first place (#2357).
-from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED
+from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED  # noqa: E402
 
 SRC = Path("app/services/strategies/s3_mean_reversion_in_trend.py")
 TESTS = "tests/test_strategy_s3.py"
