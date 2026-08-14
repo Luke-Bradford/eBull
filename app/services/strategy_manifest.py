@@ -113,6 +113,15 @@ from app.services.strategies.s6_resistance_breakout import (
     s6_identity,
     s6_signals,
 )
+from app.services.strategies.s9_squeeze_expansion import (
+    MAX_HOLD_BARS as S9_MAX_HOLD_BARS,
+)
+from app.services.strategies.s9_squeeze_expansion import (
+    S9_STRATEGY_ID,
+    s9_exit_bracket,
+    s9_identity,
+    s9_signals,
+)
 from app.services.strategy_exit_levels_batch import s4_exit_levels_batch
 from app.services.strategy_registry import (
     SIGNAL_KINDS,
@@ -476,6 +485,41 @@ def _s4_exit_levels(
     return scalar
 
 
+def _s9_signals(
+    series: BarSeries,
+    *,
+    universe: Universe,
+    masked_reason: NotEvaluableReason,
+    regime: RegimeSeries,
+) -> list[StrategySignal]:
+    return s9_signals(series, universe=universe, masked_reason=masked_reason, regime=regime)
+
+
+def _s9_exit_regime(decision_dates: frozenset[date] | None) -> ExitRegime:
+    """S-9 exits on an entry-anchored ATR bracket fixed at signal time, or the hold cap."""
+    _reject_decision_dates(S9_STRATEGY_ID, decision_dates)
+    return ExitRegime(signal_pair=False, level_based=True, max_hold_bars=S9_MAX_HOLD_BARS, rebalance_dates=None)
+
+
+def _s9_exit_levels(
+    series: BarSeries,
+    *,
+    signal_index: int,
+    entry_price: Decimal,
+    universe: Universe,
+) -> ExitLevels | UnresolvedReason:
+    """Adapt S-9's bracket to the outcome reason contract."""
+    try:
+        target, stop, max_hold = s9_exit_bracket(
+            series, signal_index=signal_index, entry_price=entry_price, universe=universe
+        )
+    except ValueError, IndexError:
+        return "unorderable_exit_levels"
+    if target <= stop:
+        return "unorderable_exit_levels"
+    return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
+
+
 def _s5_signals(
     series: BarSeries,
     *,
@@ -648,6 +692,17 @@ STRATEGY_MANIFEST: Mapping[str, StrategyEntry] = MappingProxyType(
             decision_calendar=_no_decision_calendar,
             signals=_s6_signals,
             exit_levels=_s6_exit_levels,
+        ),
+        S9_STRATEGY_ID: StrategyEntry(
+            strategy_id=S9_STRATEGY_ID,
+            purpose="harness_validation",
+            identity=s9_identity,
+            strategy_class="per_series",
+            signal_kinds=frozenset({"entry"}),
+            exit_regime=_s9_exit_regime,
+            decision_calendar=_no_decision_calendar,
+            signals=_s9_signals,
+            exit_levels=_s9_exit_levels,
         ),
     }
 )
