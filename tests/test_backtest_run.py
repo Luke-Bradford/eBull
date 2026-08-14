@@ -532,12 +532,18 @@ class TestDeflateGroup:
     def test_a_constant_return_series_refuses_and_is_not_read_as_uncorrelated(self) -> None:
         """⚠⚠ A ZERO-VARIANCE TRIAL IS DETECTED ON THE INPUT, NOT ON THE MATRIX.
 
-        ``verify_2240_statistics.py``'s P11 comment says ``np.corrcoef``
-        returns NaN for a constant series. Measured on **numpy 2.4.4**
-        (2026-08-08) it returns a finite **0.0** — pinned below — so an
-        ``isfinite`` guard is dead code and the trial would be read as
-        UNCORRELATED, pushing the implied independent trial count toward ``M``
-        on evidence that does not exist.
+        ``np.corrcoef`` is widely believed to return NaN for a constant series.
+        Measured on **numpy 2.4.4** (2026-08-08) it returns a finite **0.0** —
+        pinned below — so an ``isfinite`` guard is dead code and the trial would
+        be read as UNCORRELATED, pushing the implied independent trial count
+        toward ``M`` on evidence that does not exist.
+
+        ⚠ ``scripts/verify_2240_statistics.py::_criterion6`` carried exactly that
+        dead guard until #2420; it now tests the input the same way this does, and
+        keeps ``isfinite`` only as a backstop against a future numpy restoring
+        NaN. This docstring named that script as the counter-example until the
+        fix landed — kept as the reference the two implementations share, since a
+        pin whose subject silently changes is how the next copy gets made.
         """
         flat = {date(2010, 1, 4): 0.1, date(2010, 1, 5): 0.1, date(2010, 1, 6): 0.1}
         # The behaviour the guard cannot rely on, pinned so a numpy change that
