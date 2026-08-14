@@ -106,6 +106,48 @@ Before citing, speccing, or implementing against ANY eToro API capability (endpo
     nothing about the unit. The long-only v1 lane has a unit; the short side
     does not.
 
+  ⚠⚠ **THE WHAT-IF ENDPOINT HAS A CLOSE ARM, AND ITS COST IS A DIFFERENT NUMBER —
+  measured 2026-08-14 (#2712), demo.** Everything above this line was measured on
+  `action: "open"` only, and does not carry over.
+
+  - **`action` is a required enum, `open | close`**, and `transaction` is
+    `buy | sell | sellShort | buyToCover` — both wider than our `TradeDirection`
+    (`app/providers/broker.py`), which lists only the two OPEN transactions the
+    execution path supports. Closing a long is `action: close, transaction: sell`.
+  - ⚠ **The close arm REQUIRES `positionIds`.** Without it: `400`, *"PositionIds must be
+    provided for close action"*, on both `sell` and `buyToCover`. With a real position
+    id: `200` and real cost rows. **The portal documents that field as *"For `close`
+    action; currently rejected"*** — the doc and the endpoint disagree and the endpoint
+    won. The portal page was re-verified the same day, so this is current drift, not a
+    stale snapshot.
+  - ⚠⚠ **AN OPEN-ARM QUOTE DOES NOT BOUND THE CLOSE-ARM COST.** Every held demo
+    position, both arms, same $1,000 ticket seconds apart — 5 instruments, both arms
+    decodable on all 5:
+
+    | symbol | open | close | close/open | our quoted spread |
+    | --- | --- | --- | --- | --- |
+    | BBBY | 2.28 | 13.05 | 5.7x | 22.91 bps |
+    | IEP | 1.34 | 0.72 | **0.5x** | 13.47 bps |
+    | GME | 0.54 | 10.00 | 18.5x | 5.38 bps |
+    | QQQ | 0.04 | 0.52 | 13.0x | 0.41 bps |
+    | VOO | 0.04 | 0.34 | 8.5x | 0.42 bps |
+
+    Close **dearer on 4 of the 5**, by up to 18.5x — and cheaper on the fifth, so it is
+    not a uniform markup either. Substituting the open arm for a missing close quote
+    would under-state a bound by an order of magnitude, which is the one direction a cost
+    bound cannot be wrong in. ⚠ This is 5 instruments, one observation each, one instant
+    — a count about our held set, **not a rate about eToro**. Enough to falsify "the arms
+    agree"; not a calibration.
+  - **The open arm reproduced our separately observed spread at ~1.0x on all five**
+    (22.8 vs 22.91, 13.4 vs 13.47, 5.4 vs 5.38, 0.4 vs 0.41, 0.4 vs 0.42) — tighter than
+    the 60-instrument census's median-0.995x-with-wide-dispersion, because every one of
+    these sits well above the rounding floor. The close arm tracks it not at all.
+  - The close arm returns **two** components (`markup`, `marketSpread`) where the open arm
+    returns three (plus `overnightFee`) — consistent with a close accruing no carry, and
+    another reason not to assume the arms are the same shape.
+  - Probe: `scripts/probe_2712_close_side_cost_quote.py --all-held` (informational; it
+    never sends an execution request).
+
   ⚠ **Do NOT upgrade this to `marketSpread == the quoted spread`.** On the most
   actively quoted names both sides move between runs minutes apart: AAPL read
   0.3 → 1.3 → 1.3 bps implied while its own observed quote went 0.33 → 3.63.

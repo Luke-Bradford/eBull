@@ -745,9 +745,16 @@ class EtoroBrokerProvider(BrokerProvider):
         return _parse_eligibility_response(raw)
 
     def get_what_if_costs(self, order: BrokerWhatIfOrder) -> BrokerWhatIfCostResponse:
-        """Call the current v2 what-if endpoint without placing an order."""
+        """Call the current v2 what-if endpoint without placing an order.
+
+        ⚠ Informational on BOTH arms.  Pricing a close is not closing anything -- this is
+        ``/trading/info/{demo/}costs``, whose whole contract is "what would this cost";
+        the close endpoint is a different path entirely.  That is why this method is not
+        covered by ``refuse_broker_mutation_if_unattended`` and must not become so: #2645's
+        other half was that ruling informational work out was itself the error.
+        """
         body: dict[str, Any] = {
-            "action": "open",
+            "action": order.action,
             "transaction": order.transaction,
             "instrumentId": order.instrument_id,
             "settlementType": order.settlement_type,
@@ -755,6 +762,10 @@ class EtoroBrokerProvider(BrokerProvider):
             "leverage": order.leverage,
             "orderCurrency": order.order_currency.lower(),
         }
+        if order.position_ids:
+            # Required by the close arm, rejected on the open arm; `BrokerWhatIfOrder`
+            # enforces both directions, so the presence of the tuple IS the arm.
+            body["positionIds"] = list(order.position_ids)
         if order.amount is not None:
             body["amount"] = float(order.amount)
         else:

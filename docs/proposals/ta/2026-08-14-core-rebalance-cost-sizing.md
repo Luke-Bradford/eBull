@@ -266,13 +266,25 @@ be dead code that reads as a control. This is sound for the floor **as the alloc
 it** — a currency amount. Conversion to units, unit rounding, and any broker minimum
 expressed in units are the execution half's, and are not done here.
 
-### ⚠⚠ The sell path cannot be quoted at all today — and that is a real blocker
+### ⚠⚠ The sell path — RESOLVED 2026-08-14 by #2712, and the answer was not the one assumed
 
 `EtoroBrokerProvider.get_what_if_costs` hardcodes `"action": "open"`
 (`app/providers/implementations/etoro_broker.py:750`) and `TradeDirection` is
 `Literal["buy", "sellShort"]` (`app/providers/broker.py:23`). Both arms are **opens**.
 A core `sell_core` is a partial close of a long, and there is no endpoint call in this repo
 that will price one.
+
+> **Superseded.** The paragraph above was right about the code and wrong about the
+> endpoint. #2712 measured it: `action: "close"` is a documented, working arm — it requires
+> `positionIds` (400 without, 200 with), which the portal documents as *"currently
+> rejected"*. `BrokerWhatIfOrder` now carries `action` and `position_ids`.
+>
+> ⚠⚠ **And the arms disagree, which retroactively justifies this section's last sentence.**
+> Over every held demo position (5 instruments, both arms decodable on all 5, same ticket
+> seconds apart) the close was dearer on 4 of 5 — 5.7x, 8.5x, 13.0x, 18.5x — and cheaper on
+> the fifth at 0.5x. This spec declined to fabricate a sell bound from the buy arm because
+> the substitution was *plausible and unmeasured*. It is now measured, and it would have
+> under-stated `γ` by up to 18.5x — the one direction `μ ≤ γ` cannot survive.
 
 So `resolve_core_trade_size` will size a sell correctly the moment it is handed a bound,
 and nothing can hand it one. Naming it here rather than letting the sell path look
