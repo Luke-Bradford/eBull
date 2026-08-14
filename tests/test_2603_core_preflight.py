@@ -365,8 +365,11 @@ def test_an_unknown_action_raises_rather_than_guessing_a_side() -> None:
 
     The action decides which price a trade is sized off, so there is no safe
     default — and a refusal would let the caller log it and carry on.
+
+    ⚠ The ``ignore`` is the POINT of the test, not a workaround: pyright rejects
+    this call, which is exactly why an unchecked runtime path would never be
+    exercised by anything except a caller that had already lost its types.
     """
+    bad_action: Any = "sell_everything"
     with pytest.raises(StrategyCorePreflightError, match="unknown core rebalance action"):
-        decide_core_preflight(  # type: ignore[arg-type]
-            _healthy(), core_instrument_id=3138, action="sell_everything", now=_OPEN
-        )
+        decide_core_preflight(_healthy(), core_instrument_id=3138, action=bad_action, now=_OPEN)

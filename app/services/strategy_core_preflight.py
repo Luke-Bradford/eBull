@@ -303,7 +303,7 @@ def _usable_price(value: Any) -> Decimal | None:
         return None
     try:
         price = Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError):
+    except InvalidOperation, TypeError, ValueError:
         return None
     if not price.is_finite() or price <= 0:
         return None
@@ -393,9 +393,7 @@ def preflight_core_submission(
         )
 
     def refuse(code: CorePreflightRefusal, detail: str | None = None) -> CorePreflightVerdict:
-        return _refused(
-            code, core_instrument_id=core_instrument_id, action=action, now=now, detail=detail
-        )
+        return _refused(code, core_instrument_id=core_instrument_id, action=action, now=now, detail=detail)
 
     try:
         runtime = get_runtime_config(conn)
@@ -421,9 +419,7 @@ def preflight_core_submission(
         ask=row[10],
         spread_flag=row[11],
     )
-    return decide_core_preflight(
-        observation, core_instrument_id=core_instrument_id, action=action, now=now
-    )
+    return decide_core_preflight(observation, core_instrument_id=core_instrument_id, action=action, now=now)
 
 
 def decide_core_preflight(
@@ -446,9 +442,7 @@ def decide_core_preflight(
     _require_known_action(action)
 
     def refuse(code: CorePreflightRefusal, detail: str | None = None) -> CorePreflightVerdict:
-        return _refused(
-            code, core_instrument_id=core_instrument_id, action=action, now=now, detail=detail
-        )
+        return _refused(code, core_instrument_id=core_instrument_id, action=action, now=now, detail=detail)
 
     # `is_active IS NULL` means no kill_switch row at all.  An ABSENT kill switch is
     # not an inactive one -- same rule as strategy_paper_executor.py:1077.  Read

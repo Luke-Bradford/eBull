@@ -61,9 +61,7 @@ def test_the_observation_returns_one_row_even_for_an_instrument_that_does_not_ex
     an emergency stop still has to be reported.  The decision function would then
     have to re-read them in a SECOND statement, from a different snapshot.
     """
-    row = ebull_test_conn.execute(
-        _PREFLIGHT_SQL, {"core_instrument_id": MISSING_INSTRUMENT_ID}
-    ).fetchone()
+    row = ebull_test_conn.execute(_PREFLIGHT_SQL, {"core_instrument_id": MISSING_INSTRUMENT_ID}).fetchone()
     assert row is not None
     assert row[0] is False, "instrument_present must report absence, not vanish"
     ebull_test_conn.rollback()
@@ -82,9 +80,7 @@ def test_the_observation_reads_the_kill_switch_alongside_a_missing_instrument(
         "INSERT INTO kill_switch (id, is_active, reason) VALUES (true, true, 'test') "
         "ON CONFLICT (id) DO UPDATE SET is_active = true"
     )
-    row = ebull_test_conn.execute(
-        _PREFLIGHT_SQL, {"core_instrument_id": MISSING_INSTRUMENT_ID}
-    ).fetchone()
+    row = ebull_test_conn.execute(_PREFLIGHT_SQL, {"core_instrument_id": MISSING_INSTRUMENT_ID}).fetchone()
     assert row is not None
     assert row[0] is False  # instrument_present
     assert row[4] is True  # kill_switch_active — still readable
@@ -195,9 +191,7 @@ def test_an_enabled_mandate_puts_its_core_instrument_in_the_quote_scope(
     _seed_instrument(ebull_test_conn)
     assert _in_scope(ebull_test_conn) is False, "no mandate — must not be in scope"
 
-    ebull_test_conn.execute(
-        _MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID}
-    )
+    ebull_test_conn.execute(_MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID})
     assert _in_scope(ebull_test_conn) is True
     ebull_test_conn.rollback()
 
@@ -214,14 +208,10 @@ def test_a_disabled_LATEST_revision_drops_the_instrument_from_the_quote_scope(
     mandate", which is how the two silently diverge.
     """
     _seed_instrument(ebull_test_conn)
-    ebull_test_conn.execute(
-        _MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID}
-    )
+    ebull_test_conn.execute(_MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID})
     assert _in_scope(ebull_test_conn) is True
 
-    ebull_test_conn.execute(
-        _MANDATE_INSERT, {"revision": 2, "enabled": False, "instrument_id": INSTRUMENT_ID}
-    )
+    ebull_test_conn.execute(_MANDATE_INSERT, {"revision": 2, "enabled": False, "instrument_id": INSTRUMENT_ID})
     assert _in_scope(ebull_test_conn) is False
     ebull_test_conn.rollback()
 
@@ -231,9 +221,7 @@ def test_a_non_tradable_core_instrument_stays_out_of_the_quote_scope(
 ) -> None:
     """Consistent with the other three arms, all of which require ``is_tradable``."""
     _seed_instrument(ebull_test_conn, tradable=False)
-    ebull_test_conn.execute(
-        _MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID}
-    )
+    ebull_test_conn.execute(_MANDATE_INSERT, {"revision": 1, "enabled": True, "instrument_id": INSTRUMENT_ID})
     assert _in_scope(ebull_test_conn) is False
     ebull_test_conn.rollback()
 
