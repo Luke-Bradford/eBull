@@ -502,6 +502,18 @@ class TestTheMatchIsExact:
         assert result.control.cohort_size == _TEST_COHORT
         assert result.placement_space_id == PLACEMENT_SPACE_ID
 
+    def test_progress_reports_each_completed_member_without_metrics(self) -> None:
+        events: list[tuple[int, int]] = []
+        run_cohort(
+            _collector(exits_on_spike=True),
+            axis=AXIS,
+            strategy_metrics=_sleeve_metrics(exits_on_spike=True),
+            benchmark=None,
+            cohort_size=_TEST_COHORT,
+            progress=lambda completed, total: events.append((completed, total)),
+        )
+        assert events == [(completed, _TEST_COHORT) for completed in range(1, _TEST_COHORT + 1)]
+
     def test_the_holding_period_multiset_survives_the_permutation(self) -> None:
         """⚠ RE-DERIVED FROM THE PLACED LEGS, never read back off the input."""
         collector = _collector(exits_on_spike=True)

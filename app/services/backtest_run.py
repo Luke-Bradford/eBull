@@ -216,7 +216,7 @@ from app.services.walk_forward import (
 
 logger = logging.getLogger(__name__)
 
-BacktestPhase = Literal["corpus", "ranking", "evaluation", "deflation", "write"]
+BacktestPhase = Literal["corpus", "ranking", "evaluation", "synthetic_control", "deflation", "write"]
 
 
 @dataclass(frozen=True)
@@ -1935,6 +1935,10 @@ def evaluate_arm(
             corpus=corpus,
             cohort_size=cohort_size,
             label=f"{entry.strategy_id}/{ambiguity_arm or 'shared'}/{quarantine_arm}",
+            progress=progress,
+            strategy_id=entry.strategy_id,
+            quarantine_arm=quarantine_arm,
+            ambiguity_arm=ambiguity_arm,
         ),
     )
 
@@ -1965,6 +1969,10 @@ def _run_cohort_for(
     corpus: _Corpus,
     cohort_size: int | None,
     label: str,
+    strategy_id: str,
+    quarantine_arm: QuarantineArm,
+    ambiguity_arm: AmbiguityArm | None = None,
+    progress: ProgressCallback | None = None,
 ) -> CohortResult | None:
     """§9's control for this arm, once the sleeve it is compared against exists.
 
@@ -1984,12 +1992,27 @@ def _run_cohort_for(
         )
     if outcome.metrics.trade_count == 0:
         return None
+
+    def report_member(member_seen: int, member_total: int) -> None:
+        _emit_progress(
+            progress,
+            BacktestProgressEvent(
+                phase="synthetic_control",
+                strategy_id=strategy_id,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=ambiguity_arm,
+                series_seen=member_seen,
+                series_total=member_total,
+            ),
+        )
+
     result = run_cohort(
         collector,
         axis=outcome.axis_dates,
         strategy_metrics=outcome.metrics,
         benchmark=None,
         cohort_size=cohort_size,
+        progress=report_member if progress is not None else None,
     )
     logger.info(
         "strategy_backtest_run: %s synthetic control — %d members over %d series in %.1fs (%.3fs/member), "
@@ -2273,6 +2296,10 @@ def evaluate_level_arms(
                     corpus=corpus,
                     cohort_size=cohort_size,
                     label=f"{entry.strategy_id}/{ambiguity}/{quarantine_arm}",
+                    progress=progress,
+                    strategy_id=entry.strategy_id,
+                    quarantine_arm=quarantine_arm,
+                    ambiguity_arm=ambiguity,
                 ),
             )
         )

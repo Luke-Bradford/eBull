@@ -5684,17 +5684,31 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                     else f"completed {newly_completed} missing recent evidence window(s)"
                 )
                 return
-            report = run_backtest(
-                conn,
-                strategy_id=_optional_str(params.get("strategy_id")),
-                holdout_purpose=_optional_str(params.get("holdout_purpose")),
-                holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
-                trial_register_version=_optional_str(params.get("trial_register_version")),
-                evidence_window_id=evidence_window_id,
-                synthetic_control=synthetic_control,
-                release_read_locks=True,
+            progress_writer = _open_backtest_progress_writer(
+                run_id=tracker.run_id,
+                total_windows=1,
+                already_complete=0,
             )
-            tracker.row_count = report.rows_written
+            if progress_writer is not None:
+                progress_writer.start_window(evidence_window_id or "in_sample")
+            try:
+                report = run_backtest(
+                    conn,
+                    strategy_id=_optional_str(params.get("strategy_id")),
+                    holdout_purpose=_optional_str(params.get("holdout_purpose")),
+                    holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
+                    trial_register_version=_optional_str(params.get("trial_register_version")),
+                    evidence_window_id=evidence_window_id,
+                    synthetic_control=synthetic_control,
+                    progress=progress_writer,
+                    release_read_locks=True,
+                )
+                tracker.row_count = report.rows_written
+                if progress_writer is not None:
+                    progress_writer.record_window_commit(rows_written=report.rows_written, completed=1)
+            finally:
+                if progress_writer is not None:
+                    progress_writer.close()
 
 
 def _recent_evidence_completion(

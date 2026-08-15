@@ -216,6 +216,60 @@ def test_refresh_progress_is_transient_until_evidence_commit(
     assert conn.execute.call_count == 0
 
 
+def test_single_run_reports_progress_and_only_checkpoints_after_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = SimpleNamespace(row_count=None, run_id=9, progress=None, note=None)
+    conn = MagicMock()
+    events: list[str] = []
+
+    class Writer:
+        def start_window(self, window_id: str) -> None:
+            events.append(f"start:{window_id}")
+
+        def __call__(self, event: BacktestProgressEvent) -> None:
+            events.append(f"progress:{event.phase}:{event.series_seen}/{event.series_total}")
+
+        def record_window_commit(self, *, rows_written: int, completed: int) -> bool:
+            events.append(f"checkpoint:{rows_written}:{completed}")
+            return True
+
+        def close(self) -> None:
+            events.append("closed")
+
+    @contextmanager
+    def tracked(_job_name: str) -> Iterator[SimpleNamespace]:
+        yield tracker
+
+    @contextmanager
+    def connected() -> Iterator[MagicMock]:
+        yield conn
+
+    def run_backtest(_conn: object, **kwargs: object) -> SimpleNamespace:
+        progress = kwargs["progress"]
+        assert callable(progress)
+        progress(BacktestProgressEvent(phase="synthetic_control", series_seen=17, series_total=1000))
+        events.append("evidence_returned")
+        return SimpleNamespace(rows_written=40)
+
+    writer = Writer()
+    monkeypatch.setattr(scheduler, "_tracked_job", tracked)
+    monkeypatch.setattr(scheduler, "connect_job", connected)
+    monkeypatch.setattr(scheduler, "_open_backtest_progress_writer", lambda **_kwargs: writer)
+    monkeypatch.setattr("app.services.backtest_run.run_backtest", run_backtest)
+
+    scheduler.strategy_backtest_run({"synthetic_control": True})
+
+    assert events == [
+        "start:in_sample",
+        "progress:synthetic_control:17/1000",
+        "evidence_returned",
+        "checkpoint:40:1",
+        "closed",
+    ]
+    assert tracker.row_count == 40
+
+
 def test_refresh_failure_before_commit_never_publishes_a_window_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

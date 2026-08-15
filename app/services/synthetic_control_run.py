@@ -104,7 +104,7 @@ import logging
 import time
 from array import array
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Final
@@ -135,6 +135,8 @@ from app.services.strategy_result import ResultNamespace, namespace_for_position
 from app.services.strategy_statistics import DatedEquityCurve, StrategyMetrics, TradeReturns, compute_metrics
 
 logger = logging.getLogger(__name__)
+
+CohortProgressCallback = Callable[[int, int], None]
 
 #: How the eligible fill bars were selected, frozen. ⚠ A member is only
 #: comparable with another member placed into the SAME space, and this space is
@@ -430,6 +432,7 @@ def run_cohort(
     strategy_metrics: StrategyMetrics,
     benchmark: DatedEquityCurve | None,
     cohort_size: int = SPEC_COHORT_SIZE,
+    progress: CohortProgressCallback | None = None,
 ) -> CohortResult:
     """Place, price and measure ``cohort_size`` members. Pure; reads no database.
 
@@ -506,6 +509,13 @@ def run_cohort(
                 trade_count=metrics.trade_count,
             )
         )
+        if progress is not None:
+            # Transient telemetry only: member outcomes remain local and the
+            # callback receives counts, never performance. Emit every member
+            # because one full-population member can itself take long enough
+            # to cross the operator's stale threshold; the DB writer applies
+            # its own wall-clock throttle.
+            progress(index + 1, cohort_size)
     frozen = tuple(members)
     return CohortResult(
         control=evaluate_control(
@@ -577,6 +587,7 @@ __all__ = [
     "HOLDOUT_CONTROL_REASON",
     "PLACEMENT_SPACE_ID",
     "CohortCollector",
+    "CohortProgressCallback",
     "CohortResult",
     "SeriesPlacement",
     "run_cohort",

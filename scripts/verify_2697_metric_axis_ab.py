@@ -53,7 +53,7 @@ from app.services.equity_curve import (
 )
 from app.services.random_entry_cohort import MemberOutcome, SyntheticControl, evaluate_control, member_seed
 from app.services.strategy_manifest import STRATEGY_MANIFEST
-from app.services.strategy_result import ResultNamespace
+from app.services.strategy_result import AmbiguityArm, QuarantineArm, ResultNamespace
 from app.services.strategy_statistics import DatedEquityCurve, StrategyMetrics, TradeReturns, compute_metrics
 from app.services.synthetic_control_run import CohortCollector, CohortResult, _place_member
 
@@ -243,6 +243,10 @@ def main() -> None:
             corpus: _Corpus,
             cohort_size: int | None,
             label: str,
+            strategy_id: str,
+            quarantine_arm: QuarantineArm,
+            ambiguity_arm: AmbiguityArm | None = None,
+            progress: backtest_run.ProgressCallback | None = None,
         ) -> CohortResult | None:
             current_result = original_run_cohort_for(
                 collector,
@@ -250,6 +254,10 @@ def main() -> None:
                 corpus=corpus,
                 cohort_size=cohort_size,
                 label=label,
+                progress=progress,
+                strategy_id=strategy_id,
+                quarantine_arm=quarantine_arm,
+                ambiguity_arm=ambiguity_arm,
             )
             legacy = captured[len(cohort_pairs)]
             legacy_control = None
