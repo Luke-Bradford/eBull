@@ -264,11 +264,21 @@ def _resolve_symbol(fetcher: _Fetcher, cik: str, before: date) -> tuple[str, str
         return None
     filings = json.loads(body).get("filings", {})
     candidates = _cover_page_candidates(filings.get("recent", {}), before)
-    if not candidates:
+    # ``recent`` holds the NEWEST filings, so any candidate it yields outranks
+    # everything in the (strictly older) ``files[]`` pages for the
+    # newest-at-or-before-the-delisting scan below. The pages matter when
+    # ``recent`` yields fewer than the scan's five-candidate capacity — zero
+    # because the issuer kept filing past the cap, or too few to survive a
+    # fetch/parse failure on the top pick.
+    if len(candidates) < 5:
         for page in filings.get("files", []):
             name = page.get("name")
-            # Pages carry their span; skip any that begins after the delisting.
-            if not name or page.get("filingFrom", "9999") > before.isoformat():
+            if not name:
+                continue
+            # Pages carry their span; skip any that BEGINS after the
+            # delisting. A page missing ``filingFrom`` is unknown-but-
+            # possibly-relevant and is fetched, not skipped.
+            if page.get("filingFrom", "") > before.isoformat():
                 continue
             page_status, page_body = fetcher.get(f"https://data.sec.gov/submissions/{name}")
             if page_status != 200:
