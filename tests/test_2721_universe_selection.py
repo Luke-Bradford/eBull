@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
 import pytest
 
+from app.services import backtest_run
 from app.services.backtest_run import (
     BACKTEST_UNIVERSE,
     STANDING_REFUSALS,
@@ -46,6 +48,7 @@ from app.services.universe_selection import (
     SURVIVORSHIP_FREE_VENDOR,
     vendor_for,
 )
+from app.services.walk_forward import FoldRecord
 
 
 def _series(closes: list[float | None]) -> BarSeries:
@@ -194,6 +197,60 @@ class TestWriteBoundary:
             with pytest.raises(ValueError, match="positive"):
                 ResultUniverseRecord(universe_rule_version="v", **kwargs)
 
+    def test_the_actual_result_writer_splits_synthetic_keys_before_persistence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exercise the writer boundary, not merely the record constructor.
+
+        Synthetic keys legitimately travel through the in-memory signal/fill
+        path.  The aggregate result and fold shapes carry no instrument id at
+        all; the universe record is the only result-time persistence of name
+        membership, and it must split ``-series_id`` from real ids here.
+        """
+        captured: list[ResultUniverseRecord] = []
+        monkeypatch.setattr(
+            backtest_run,
+            "store_result_universe",
+            lambda _conn, *, result_id, record: captured.append(record),
+        )
+        outcome = SimpleNamespace(evaluated_instrument_ids=frozenset({7, -42}))
+        measurement = SimpleNamespace(
+            strategy_id="s-test",
+            quarantine_arm="masked",
+            ambiguity_arm=None,
+            namespaces={"in_sample": outcome},
+        )
+        identity = SimpleNamespace(
+            strategy_id="s-test",
+            quarantine_arm="masked",
+            ambiguity_arm="best_case",
+            namespace="in_sample",
+            version="test-result",
+        )
+        result = SimpleNamespace(identity=identity, evaluated_instrument_count=2, universe_basis="survivorship_free")
+
+        backtest_run._store_universe_record(  # noqa: SLF001 - this IS the persistence-boundary regression test
+            object(),  # type: ignore[arg-type]
+            11,
+            result,  # type: ignore[arg-type]
+            arms=[measurement],  # type: ignore[list-item]
+            validated=frozenset({7}),
+        )
+
+        assert captured == [
+            ResultUniverseRecord(
+                universe_rule_version=backtest_run.UNIVERSE_SELECTION_RULE_VERSION,
+                evaluated_instrument_ids=frozenset({7}),
+                validated_universe_ids=frozenset({7}),
+                evaluated_series_ids=frozenset({42}),
+            )
+        ]
+        # These two other persistence paths are aggregate-only by schema: a
+        # future scalar instrument id added to either makes this test fail and
+        # forces the synthetic-key boundary to be revisited.
+        assert "instrument_id" not in backtest_run.StrategyResult.__dataclass_fields__
+        assert "instrument_id" not in FoldRecord.__dataclass_fields__
+
     def test_the_census_vocabulary_is_closed_and_refused_before_any_write(self) -> None:
         with pytest.raises(ValueError, match="closed vocabulary"):
             store_termination_census(_RefusingConn(), result_id=1, census={"free_text": 1})  # type: ignore[arg-type]
@@ -203,6 +260,27 @@ class TestWriteBoundary:
                 result_id=1,
                 census={"terminated_exchange_failure": -1},
             )
+
+    def test_a_partial_or_unreconciled_census_is_refused_before_any_write(self) -> None:
+        complete = {
+            "universe_admitted_total": 7,
+            "universe_unlinked_alive_excluded": 2,
+            "universe_linked_early_reuse_suspect": 1,
+            "universe_unharvested_excluded": 1,
+            "universe_vendor_series_total": 10,
+        }
+        missing = dict(complete)
+        del missing["universe_unharvested_excluded"]
+        with pytest.raises(ValueError, match="missing reconciliation terms"):
+            store_termination_census(_RefusingConn(), result_id=1, census=missing)  # type: ignore[arg-type]
+
+        mismatched = {**complete, "universe_vendor_series_total": 11}
+        with pytest.raises(ValueError, match="does not reconcile"):
+            store_termination_census(_RefusingConn(), result_id=1, census=mismatched)  # type: ignore[arg-type]
+
+        impossible_subset = {**complete, "universe_linked_early_reuse_suspect": 8}
+        with pytest.raises(ValueError, match="subset exceeds admitted"):
+            store_termination_census(_RefusingConn(), result_id=1, census=impossible_subset)  # type: ignore[arg-type]
 
     def test_the_stratum_vocabulary_mirrors_the_termination_classes(self) -> None:
         """A class added to ``series_termination`` without a migration must fail

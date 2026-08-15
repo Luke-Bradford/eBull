@@ -182,6 +182,16 @@ TERMINATION_CENSUS_STRATA: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: The MECE universe terms carried by every survivorship-free result.  The
+#: reuse-suspect count is deliberately absent: it is a diagnostic SUBSET of
+#: ``universe_admitted_total`` and adding it would double-count those series.
+_TERMINATION_CENSUS_RECONCILIATION_TERMS: Final[tuple[str, ...]] = (
+    "universe_admitted_total",
+    "universe_unlinked_alive_excluded",
+    "universe_unharvested_excluded",
+    "universe_vendor_series_total",
+)
+
 
 def store_termination_census(conn: psycopg.Connection[Any], *, result_id: int, census: Mapping[str, int]) -> None:
     """Insert one result's termination census rows (#2721 step 3).
@@ -189,7 +199,9 @@ def store_termination_census(conn: psycopg.Connection[Any], *, result_id: int, c
     Runs in the CALLER's transaction, atomically with the result's arm pair —
     the same contract as ``store_result_universe``. The writer (not this
     function) decides that a ``survivorship_free`` row REQUIRES a census; this
-    function only refuses malformed content.
+    function refuses malformed content AND proves the selection terms reconcile
+    before the first write.  A caller cannot turn a partial census into a
+    durable result merely by omitting the denominator or one exclusion bucket.
     """
     unknown = set(census) - TERMINATION_CENSUS_STRATA
     if unknown:
@@ -197,6 +209,26 @@ def store_termination_census(conn: psycopg.Connection[Any], *, result_id: int, c
     negative = {stratum for stratum, count in census.items() if count < 0}
     if negative:
         raise ValueError(f"termination census carries negative counts: {sorted(negative)}")
+    required_terms: set[str] = set(_TERMINATION_CENSUS_RECONCILIATION_TERMS)
+    missing = required_terms - set(census)
+    if missing:
+        raise ValueError(f"termination census is missing reconciliation terms: {sorted(missing)}")
+    admitted = census["universe_admitted_total"]
+    unlinked_alive = census["universe_unlinked_alive_excluded"]
+    unharvested = census["universe_unharvested_excluded"]
+    vendor_total = census["universe_vendor_series_total"]
+    reconciled = admitted + unlinked_alive + unharvested
+    if reconciled != vendor_total:
+        raise ValueError(
+            "termination census does not reconcile to the vendor series total: "
+            f"admitted {admitted} + unlinked-alive {unlinked_alive} + unharvested {unharvested} "
+            f"= {reconciled}, vendor total {vendor_total}"
+        )
+    reuse_suspects = census.get("universe_linked_early_reuse_suspect", 0)
+    if reuse_suspects > admitted:
+        raise ValueError(
+            f"termination census reuse-suspect subset exceeds admitted total: {reuse_suspects} > {admitted}"
+        )
     for stratum in sorted(census):
         conn.execute(
             "INSERT INTO strategy_result_termination_census (result_id, stratum, count) VALUES (%s, %s, %s)",
