@@ -226,7 +226,12 @@ def _load_intent(
     ranking_member_id: int | None,
     now: datetime,
 ) -> tuple[_Intent | None, str | None, bool]:
-    """Load DB gates as one observation; return reason and halt-rule provenance."""
+    """Load one DB observation; the bool says its halt SQL expression ran.
+
+    A fetched row carries ``True`` even when an earlier Python gate rejects it:
+    ``is_halted`` was still selected by the same SQL statement. No row means the
+    halt identity rule was not observed and its audit version must remain NULL.
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             f"""
