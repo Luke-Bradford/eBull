@@ -133,8 +133,7 @@ def audit_records(records: list[dict[str, Any]], *, candidate_head: str) -> Audi
         if current_present != ("current_axis" in row):
             failures.append(f"{label}: current result/axis presence disagrees")
         if not current_present:
-            if row.get("result_note") != "current fixed-axis result is unexpectedly absent":
-                failures.append(f"{label}: missing current result lacks an explicit reason")
+            failures.append(f"{label}: current fixed-axis result is absent")
             continue
         if not legacy_present:
             if row.get("legacy_result") is not False or row.get("current_result") is not True:
@@ -143,6 +142,21 @@ def audit_records(records: list[dict[str, Any]], *, candidate_head: str) -> Audi
                 failures.append(f"{label}: absent legacy result is not explicitly identified as all-cash")
         elif not _valid_metric_payload(row.get("legacy")):
             failures.append(f"{label}: legacy metric payload is incomplete or non-finite")
+        if legacy_present:
+            legacy_axis = row.get("legacy_axis")
+            if (
+                not isinstance(legacy_axis, list)
+                or len(legacy_axis) != 2
+                or not all(isinstance(item, str) for item in legacy_axis)
+            ):
+                failures.append(f"{label}: legacy axis endpoints are malformed")
+            legacy_population = row.get("legacy_comparator_population")
+            if (
+                not isinstance(legacy_population, int)
+                or isinstance(legacy_population, bool)
+                or legacy_population < 1
+            ):
+                failures.append(f"{label}: legacy comparator population is not positive")
         if not _valid_metric_payload(row.get("current")):
             failures.append(f"{label}: current metric payload is incomplete or non-finite")
         if not _valid_metric_payload(row.get("delta_current_minus_legacy")) and legacy_present:
@@ -159,6 +173,15 @@ def audit_records(records: list[dict[str, Any]], *, candidate_head: str) -> Audi
             failures.append(f"{label}: opportunity population is not positive")
         if comparator != opportunity:
             failures.append(f"{label}: comparator population differs from opportunity population")
+        if (
+            legacy_present
+            and isinstance(row.get("legacy_comparator_population"), int)
+            and not isinstance(row.get("legacy_comparator_population"), bool)
+            and isinstance(opportunity, int)
+            and not isinstance(opportunity, bool)
+            and row["legacy_comparator_population"] > opportunity
+        ):
+            failures.append(f"{label}: legacy comparator population exceeds the frozen opportunity population")
 
         legacy_control = row.get("legacy_synthetic_thresholds")
         current_control = row.get("current_synthetic_thresholds")
