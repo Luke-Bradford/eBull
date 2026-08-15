@@ -33,5 +33,10 @@ def test_demand_plus_reserve_exactly_fits_usable():
 
 def test_execution_gates_fit_the_modeled_cadence_burst():
     assert pg_settings.JOBS_NON_SEC_MAX_CONCURRENCY == 2
+    assert pg_settings.JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY == 1
+    assert pg_settings.JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY == 1
+    assert pg_settings.JOBS_NON_SEC_MAX_CONCURRENCY == (
+        pg_settings.JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY + pg_settings.JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY
+    )
     assert pg_settings.JOBS_NON_SEC_CONNECTIONS_PER_EXECUTION == 2
     assert pg_settings.JOBS_BACKTEST_PROGRESS_CONNECTIONS == 1
