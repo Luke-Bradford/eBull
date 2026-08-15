@@ -278,28 +278,29 @@ def test_paved_run_checks_authority_before_corpus_and_builds_only_the_complete_i
         events.append(("evaluate", strategy_id, quarantine, kwargs["namespaces"]))
         return tuple(_measurement(strategy_id, ambiguity, quarantine) for ambiguity in ("best_case", "worst_case"))
 
-    bundle = cast(runner.MT1HistoricalBundle, object())
+    prepared = cast(runner.MT1PreparedBundle, object())
 
-    def assemble(**kwargs: object):
+    def prepare(**kwargs: object):
         events.append(
             (
-                "assemble",
+                "prepare",
                 len(cast(tuple[object, ...], kwargs["mt1_source_measurements"])),
                 len(cast(tuple[object, ...], kwargs["s8_source_measurements"])),
             )
         )
-        return bundle
+        return prepared
 
     monkeypatch.setattr(runner, "validate_mt1_preregistrations", validate)
     monkeypatch.setattr(runner, "load_corpus", load_corpus)
     monkeypatch.setattr(runner.MarketRegimeProvider, "load_research", load_regime)
     monkeypatch.setattr(runner, "evaluate_level_arms", evaluate)
-    monkeypatch.setattr(runner, "assemble_mt1_in_sample_bundle", assemble)
+    monkeypatch.setattr(runner, "prepare_mt1_in_sample_bundle", prepare)
+    monkeypatch.setattr(runner, "evaluate_mt1_prepared_bundle", lambda value: cast(runner.MT1HistoricalBundle, value))
 
     result = runner.run_mt1_in_sample_evaluation(cast(object, object()))  # type: ignore[arg-type]
 
     assert result.authorities == authority
-    assert result.bundle is bundle
+    assert result.bundle is cast(runner.MT1HistoricalBundle, prepared)
     assert events[0] == "authority"
     assert events[1] == (
         "corpus",
@@ -313,7 +314,7 @@ def test_paved_run_checks_authority_before_corpus_and_builds_only_the_complete_i
         ("evaluate", runner.S8_SOURCE_STRATEGY_ID, "admitted", ("in_sample",)),
         ("evaluate", runner.S8_SOURCE_STRATEGY_ID, "masked", ("in_sample",)),
     ]
-    assert events[7] == ("assemble", 4, 4)
+    assert events[7] == ("prepare", 4, 4)
 
 
 def test_paved_run_loads_no_corpus_when_preregistration_refuses(monkeypatch: pytest.MonkeyPatch) -> None:

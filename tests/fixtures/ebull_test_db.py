@@ -380,11 +380,18 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "report_snapshots",
 )
 
-# DELETE intentionally cannot remove these immutable audit children. Test DB
-# cleanup is allowed to empty them, but must do so explicitly before deleting
-# their parents; otherwise every test that stores real promotion evidence falls
-# through to the much slower whole-schema TRUNCATE recovery path (#2737).
-_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset({"strategy_result_universe"})
+# DELETE intentionally cannot remove these immutable audit roots/children.
+# Test DB cleanup is allowed to empty them, but must do so explicitly before
+# deleting their parents; otherwise every evidence test falls through to the
+# much slower whole-schema TRUNCATE recovery path (#2737, #2769).  The grouped
+# CASCADE below is confined to the asserted per-worker test database.
+_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset(
+    {
+        "strategy_mt1_structural_attempts",
+        "strategy_preregistration_declarations",
+        "strategy_result_universe",
+    }
+)
 
 
 # #1401 — worker-DB relation-count tripwire ceiling.
@@ -1240,9 +1247,14 @@ def _reset_planner_tables(conn: psycopg.Connection[tuple]) -> None:
         with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
             cur.execute(plan.probe_sql)
             dirty = {row[0] for row in cur.fetchall()}
-            for table in sorted(_TRUNCATE_BEFORE_DELETE & dirty):
-                cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(table)))
-                dirty.remove(table)
+            truncate_first = sorted(_TRUNCATE_BEFORE_DELETE & dirty)
+            if truncate_first:
+                cur.execute(
+                    sql.SQL("TRUNCATE TABLE {} CASCADE").format(
+                        sql.SQL(", ").join(sql.Identifier(table) for table in truncate_first)
+                    )
+                )
+                dirty.difference_update(truncate_first)
             for table in plan.delete_order:
                 if table in dirty:
                     cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(table)))

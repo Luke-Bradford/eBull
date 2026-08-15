@@ -38,10 +38,14 @@ from app.services.prereg_contract import changed_supersession_terms, declaration
 from app.services.research_price_structure_store import QuarantineArm
 from app.services.result_ledger import FrozenPreregistration, holdout_access_counts, load_preregistration
 from app.services.strategy_manifest import STRATEGY_MANIFEST
-from app.services.strategy_mt1_books import MT1FourArmBooks, build_mt1_four_arm_books
+from app.services.strategy_mt1_books import (
+    MT1BookConstructionRefused,
+    MT1FourArmBooks,
+    build_mt1_four_arm_books,
+)
 from app.services.strategy_mt1_identity import mt1_identity, s8_control_identity
 from app.services.strategy_mt1_preregistration import build_declarations
-from app.services.strategy_mt1_trial import MT1TrialResult, evaluate_mt1_trial
+from app.services.strategy_mt1_trial import MT1TrialRefused, MT1TrialResult, evaluate_mt1_trial
 from app.services.strategy_result import EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY, AmbiguityArm
 from app.services.strategy_result_universe import ResultUniverseRecord
 
@@ -62,12 +66,36 @@ class MT1RunnerRefused(ValueError):
     """The supplied source pass is not the complete frozen MT-1 experiment."""
 
 
+class _MT1BundleStructuralRefused(MT1RunnerRefused):
+    def __init__(self, detail: str, axis_dates: tuple[date, ...], opportunity: ResultUniverseRecord) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.axis_dates = axis_dates
+        self.opportunity = opportunity
+
+
 @dataclass(frozen=True)
 class MT1PreregistrationAuthority:
     strategy_id: str
     strategy_version: str
     declaration_id: int
     declaration_sha256: str
+
+
+@dataclass(frozen=True)
+class MT1PreparedCell:
+    ambiguity_arm: AmbiguityArm
+    quarantine_arm: QuarantineArm
+    books: MT1FourArmBooks
+
+
+@dataclass(frozen=True)
+class MT1PreparedBundle:
+    """Complete outcome-free structural fan, ready for one frozen evaluation."""
+
+    cells: tuple[MT1PreparedCell, ...]
+    axis_dates: tuple[date, ...]
+    opportunity_record: ResultUniverseRecord
 
 
 @dataclass(frozen=True)
@@ -100,6 +128,36 @@ class MT1InSampleEvaluation:
     mt1_source_strategy_version: str
     s8_source_strategy_version: str
     corpus_version: str
+
+
+@dataclass(frozen=True)
+class MT1InSamplePreparation:
+    authorities: tuple[MT1PreregistrationAuthority, MT1PreregistrationAuthority]
+    prepared: MT1PreparedBundle
+    mt1_strategy_version: str
+    s8_control_strategy_version: str
+    mt1_source_strategy_version: str
+    s8_source_strategy_version: str
+    corpus_version: str
+
+
+@dataclass(frozen=True)
+class MT1InSampleStructuralRefusal:
+    authorities: tuple[MT1PreregistrationAuthority, MT1PreregistrationAuthority]
+    axis_dates: tuple[date, ...]
+    opportunity_record: ResultUniverseRecord
+    detail: str
+    mt1_strategy_version: str
+    s8_control_strategy_version: str
+    mt1_source_strategy_version: str
+    s8_source_strategy_version: str
+    corpus_version: str
+
+
+class MT1InSampleStructuralRefused(MT1RunnerRefused):
+    def __init__(self, evidence: MT1InSampleStructuralRefusal) -> None:
+        super().__init__(evidence.detail)
+        self.evidence = evidence
 
 
 def validate_mt1_preregistrations(
@@ -179,12 +237,12 @@ def _source_cells(
     return cells
 
 
-def assemble_mt1_in_sample_bundle(
+def prepare_mt1_in_sample_bundle(
     *,
     mt1_source_measurements: Sequence[ArmMeasurement],
     s8_source_measurements: Sequence[ArmMeasurement],
-) -> MT1HistoricalBundle:
-    """Construct and evaluate the complete frozen fan, structural gates first."""
+) -> MT1PreparedBundle:
+    """Construct the complete frozen fan without calculating a return statistic."""
     mt1 = _source_cells(mt1_source_measurements, expected_strategy_id=MT1_SOURCE_STRATEGY_ID)
     s8 = _source_cells(s8_source_measurements, expected_strategy_id=S8_SOURCE_STRATEGY_ID)
 
@@ -204,25 +262,37 @@ def assemble_mt1_in_sample_bundle(
     # Phase 1 is intentionally complete before phase 2 begins.  The book
     # constructor applies the outcome-free structural clock/exposure/turnover
     # gate.  If cell four refuses, no return evaluator has seen cells one-three.
-    prepared: list[tuple[RobustnessKey, MT1FourArmBooks]] = []
-    for key in _EXPECTED_KEYS:
-        mt1_book = mt1[key].source_book
-        s8_book = s8[key].source_book
-        assert mt1_book is not None and s8_book is not None  # narrowed by _source_cells
-        prepared.append(
-            (
-                key,
-                build_mt1_four_arm_books(
-                    mt1_book=mt1_book,
-                    s8_book=s8_book,
-                    dates=axis_dates,
-                    expected_first_month=first_month,
-                ),
+    prepared: list[MT1PreparedCell] = []
+    try:
+        for key in _EXPECTED_KEYS:
+            mt1_book = mt1[key].source_book
+            s8_book = s8[key].source_book
+            assert mt1_book is not None and s8_book is not None  # narrowed by _source_cells
+            prepared.append(
+                MT1PreparedCell(
+                    ambiguity_arm=key[0],
+                    quarantine_arm=key[1],
+                    books=build_mt1_four_arm_books(
+                        mt1_book=mt1_book,
+                        s8_book=s8_book,
+                        dates=axis_dates,
+                        expected_first_month=first_month,
+                    ),
+                )
             )
-        )
+    except (MT1BookConstructionRefused, MT1TrialRefused) as exc:
+        raise _MT1BundleStructuralRefused(str(exc), axis_dates, opportunity) from exc
+    return MT1PreparedBundle(cells=tuple(prepared), axis_dates=axis_dates, opportunity_record=opportunity)
+
+
+def evaluate_mt1_prepared_bundle(prepared: MT1PreparedBundle) -> MT1HistoricalBundle:
+    """Evaluate every cell of one already-complete structural fan."""
+    if tuple((cell.ambiguity_arm, cell.quarantine_arm) for cell in prepared.cells) != _EXPECTED_KEYS:
+        raise MT1RunnerRefused("prepared MT-1 robustness fan is incomplete or out of frozen order")
 
     cells: list[MT1RobustnessCell] = []
-    for (ambiguity, quarantine), books in prepared:
+    for prepared_cell in prepared.cells:
+        books = prepared_cell.books
         result = evaluate_mt1_trial(
             mt1_scaled=books.mt1.scaled,
             mt1_unscaled=books.mt1.unscaled,
@@ -233,21 +303,39 @@ def assemble_mt1_in_sample_bundle(
         )
         cells.append(
             MT1RobustnessCell(
-                ambiguity_arm=ambiguity,
-                quarantine_arm=quarantine,
+                ambiguity_arm=prepared_cell.ambiguity_arm,
+                quarantine_arm=prepared_cell.quarantine_arm,
                 books=books,
                 result=result,
             )
         )
-    return MT1HistoricalBundle(cells=tuple(cells), axis_dates=axis_dates, opportunity_record=opportunity)
+    return MT1HistoricalBundle(
+        cells=tuple(cells),
+        axis_dates=prepared.axis_dates,
+        opportunity_record=prepared.opportunity_record,
+    )
 
 
-def run_mt1_in_sample_evaluation(
+def assemble_mt1_in_sample_bundle(
+    *,
+    mt1_source_measurements: Sequence[ArmMeasurement],
+    s8_source_measurements: Sequence[ArmMeasurement],
+) -> MT1HistoricalBundle:
+    """Compatibility composition: complete all structural cells, then evaluate."""
+    return evaluate_mt1_prepared_bundle(
+        prepare_mt1_in_sample_bundle(
+            mt1_source_measurements=mt1_source_measurements,
+            s8_source_measurements=s8_source_measurements,
+        )
+    )
+
+
+def prepare_mt1_in_sample_evaluation(
     conn: psycopg.Connection[Any],
     *,
     progress: ProgressCallback | None = None,
-) -> MT1InSampleEvaluation:
-    """Run the one full-population in-sample MT-1 experiment; never holdout."""
+) -> MT1InSamplePreparation:
+    """Build the one full-population in-sample structural fan; never holdout."""
     # This is deliberately the first DB-facing call. Tests pin the ordering so
     # a future convenience corpus preload cannot burn the pre-outcome boundary.
     authorities = validate_mt1_preregistrations(conn)
@@ -305,18 +393,51 @@ def run_mt1_in_sample_evaluation(
                 )
             )
 
-    bundle = assemble_mt1_in_sample_bundle(
-        mt1_source_measurements=measured[MT1_SOURCE_STRATEGY_ID],
-        s8_source_measurements=measured[S8_SOURCE_STRATEGY_ID],
-    )
-    return MT1InSampleEvaluation(
+    try:
+        prepared = prepare_mt1_in_sample_bundle(
+            mt1_source_measurements=measured[MT1_SOURCE_STRATEGY_ID],
+            s8_source_measurements=measured[S8_SOURCE_STRATEGY_ID],
+        )
+    except _MT1BundleStructuralRefused as exc:
+        raise MT1InSampleStructuralRefused(
+            MT1InSampleStructuralRefusal(
+                authorities=authorities,
+                axis_dates=exc.axis_dates,
+                opportunity_record=exc.opportunity,
+                detail=exc.detail,
+                mt1_strategy_version=mt1_trial_identity.version,
+                s8_control_strategy_version=s8_trial_identity.version,
+                mt1_source_strategy_version=source_identities[MT1_SOURCE_STRATEGY_ID].version,
+                s8_source_strategy_version=source_identities[S8_SOURCE_STRATEGY_ID].version,
+                corpus_version=corpus_version_for(BACKTEST_UNIVERSE),
+            )
+        ) from exc
+    return MT1InSamplePreparation(
         authorities=authorities,
-        bundle=bundle,
+        prepared=prepared,
         mt1_strategy_version=mt1_trial_identity.version,
         s8_control_strategy_version=s8_trial_identity.version,
         mt1_source_strategy_version=source_identities[MT1_SOURCE_STRATEGY_ID].version,
         s8_source_strategy_version=source_identities[S8_SOURCE_STRATEGY_ID].version,
         corpus_version=corpus_version_for(BACKTEST_UNIVERSE),
+    )
+
+
+def run_mt1_in_sample_evaluation(
+    conn: psycopg.Connection[Any],
+    *,
+    progress: ProgressCallback | None = None,
+) -> MT1InSampleEvaluation:
+    """Build and evaluate in memory; durable callers must use the two-phase store."""
+    preparation = prepare_mt1_in_sample_evaluation(conn, progress=progress)
+    return MT1InSampleEvaluation(
+        authorities=preparation.authorities,
+        bundle=evaluate_mt1_prepared_bundle(preparation.prepared),
+        mt1_strategy_version=preparation.mt1_strategy_version,
+        s8_control_strategy_version=preparation.s8_control_strategy_version,
+        mt1_source_strategy_version=preparation.mt1_source_strategy_version,
+        s8_source_strategy_version=preparation.s8_source_strategy_version,
+        corpus_version=preparation.corpus_version,
     )
 
 
@@ -326,10 +447,18 @@ __all__ = [
     "S8_SOURCE_STRATEGY_ID",
     "MT1HistoricalBundle",
     "MT1InSampleEvaluation",
+    "MT1InSamplePreparation",
+    "MT1InSampleStructuralRefusal",
+    "MT1InSampleStructuralRefused",
+    "MT1PreparedBundle",
+    "MT1PreparedCell",
     "MT1PreregistrationAuthority",
     "MT1RobustnessCell",
     "MT1RunnerRefused",
     "assemble_mt1_in_sample_bundle",
+    "evaluate_mt1_prepared_bundle",
+    "prepare_mt1_in_sample_bundle",
+    "prepare_mt1_in_sample_evaluation",
     "run_mt1_in_sample_evaluation",
     "validate_mt1_preregistrations",
 ]
