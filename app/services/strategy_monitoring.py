@@ -642,11 +642,16 @@ _CONTROL_SQL = """
                    AND r.trial_count IS NOT NULL
                    AND r.deflated_sharpe IS NOT NULL
                    AND r.effective_sample_size IS NOT NULL
-                   AND r.synthetic_control_passed = true
+                   AND control_support.candidate_count = 1
+                   AND control_result.synthetic_control_passed = true
                ) AS qualified_result_count
         FROM strategy_promotions p
         JOIN strategy_promotion_results pr ON pr.promotion_id = p.promotion_id
         JOIN strategy_results_store r ON r.result_id = pr.result_id
+        LEFT JOIN strategy_result_control_support control_support
+          ON control_support.holdout_result_id = r.result_id
+        LEFT JOIN strategy_results_store control_result
+          ON control_result.result_id = control_support.control_result_id
         WHERE p.strategy_version = ANY(%(versions)s)
         GROUP BY p.strategy_id, p.strategy_version
     ), reserved AS (

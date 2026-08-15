@@ -133,6 +133,39 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
     ]
 
 
+def test_holdout_display_uses_derived_control_and_not_its_empty_own_columns() -> None:
+    row: dict[str, object] = {
+        "namespace": "hold_out",
+        "purpose": "capital_candidate",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "fx_unmodelled": False,
+        "evaluated_instrument_count": 3,
+        "deflated_sharpe": 0.8,
+        "trial_count": TRIAL_REGISTER.declared_count,
+        "effective_sample_size": 200,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+        "synthetic_control_model_id": None,
+        "synthetic_control_passed": None,
+        "control_support_candidate_count": 1,
+        "control_synthetic_control_model_id": "random-entry-v1",
+        "control_synthetic_control_mean_return_ci_low_pct": -1,
+        "control_synthetic_control_mean_return_ci_high_pct": 1,
+        "control_sharpe": 0.8,
+        "control_synthetic_control_sharpe_threshold": 0.5,
+    }
+
+    assert (
+        _promotion_refusals(
+            row,
+            ambiguity_complete=True,
+            quarantine_complete=True,
+            accesses_complete=True,
+        )
+        == []
+    )
+
+
 def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing() -> None:
     row: dict[str, object] = {
         "purpose": "capital_candidate",

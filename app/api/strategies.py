@@ -969,8 +969,9 @@ def _promotion_refusals(
 
     The writer already proved evaluated membership against the validated
     universe before insert; the table intentionally stores only its count.  We
-    do not fabricate a second population snapshot here.  All current rows are
-    refused independently by survivorship, carry and synthetic-control gaps.
+    do not fabricate a second population snapshot here. Hold-out controls are
+    composed from the same exact in-sample support view promotion and execution
+    use; the withheld row itself correctly keeps its control columns empty.
     """
     refusals: list[str] = []
     if row["purpose"] == "harness_validation":
@@ -1004,13 +1005,16 @@ def _promotion_refusals(
         refusals.append("ambiguity_arms_not_compared")
     if not quarantine_complete:
         refusals.append("quarantine_arms_not_compared")
-    if row["synthetic_control_model_id"] is None:
+    is_holdout = row.get("namespace") == "hold_out"
+    control_prefix = "control_" if is_holdout else ""
+    support_is_unique = row.get("control_support_candidate_count") == 1 if is_holdout else True
+    if not support_is_unique or row.get(f"{control_prefix}synthetic_control_model_id") is None:
         refusals.append("synthetic_control_not_run")
     else:
-        ci_low = cast(Decimal, row["synthetic_control_mean_return_ci_low_pct"])
-        ci_high = cast(Decimal, row["synthetic_control_mean_return_ci_high_pct"])
-        strategy_sharpe = cast(Decimal, row["sharpe"])
-        cohort_threshold = cast(Decimal, row["synthetic_control_sharpe_threshold"])
+        ci_low = cast(Decimal, row[f"{control_prefix}synthetic_control_mean_return_ci_low_pct"])
+        ci_high = cast(Decimal, row[f"{control_prefix}synthetic_control_mean_return_ci_high_pct"])
+        strategy_sharpe = cast(Decimal, row[f"{control_prefix}sharpe"])
+        cohort_threshold = cast(Decimal, row[f"{control_prefix}synthetic_control_sharpe_threshold"])
         if ci_low > 0 or ci_high < 0:
             refusals.append("synthetic_control_cohort_shows_edge")
         if strategy_sharpe <= cohort_threshold:
@@ -1022,7 +1026,16 @@ _RESULTS_SQL = """
     SELECT
         r.*,
         COALESCE(a.accesses, 0) AS accesses,
-        COALESCE(a.evaluations, 0) AS evaluations
+        COALESCE(a.evaluations, 0) AS evaluations,
+        COALESCE(control_support.candidate_count, 0) AS control_support_candidate_count,
+        control_result.synthetic_control_model_id AS control_synthetic_control_model_id,
+        control_result.synthetic_control_mean_return_ci_low_pct
+            AS control_synthetic_control_mean_return_ci_low_pct,
+        control_result.synthetic_control_mean_return_ci_high_pct
+            AS control_synthetic_control_mean_return_ci_high_pct,
+        control_result.sharpe AS control_sharpe,
+        control_result.synthetic_control_sharpe_threshold
+            AS control_synthetic_control_sharpe_threshold
     FROM strategy_results_store r
     LEFT JOIN (
         SELECT strategy_id, strategy_version,
@@ -1031,6 +1044,10 @@ _RESULTS_SQL = """
         FROM strategy_holdout_accesses
         GROUP BY strategy_id, strategy_version
     ) a USING (strategy_id, strategy_version)
+    LEFT JOIN strategy_result_control_support control_support
+      ON control_support.holdout_result_id = r.result_id
+    LEFT JOIN strategy_results_store control_result
+      ON control_result.result_id = control_support.control_result_id
     WHERE r.strategy_version = ANY(%(versions)s)
       AND r.namespace = 'hold_out'
       AND r.corpus_version = %(corpus_version)s

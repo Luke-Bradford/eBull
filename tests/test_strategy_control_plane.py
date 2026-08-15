@@ -15,6 +15,7 @@ from app.api.strategies import get_strategy_overview
 from app.services.backtest_run import BACKTEST_UNIVERSE
 from app.services.cost_model import COST_MODEL_ID
 from app.services.result_ledger import (
+    store_holdout_arm_pair,
     store_holdout_result,
     store_in_sample_arm_pair,
     store_in_sample_result,
@@ -57,7 +58,7 @@ from app.services.strategy_promotion_evidence_store import (
     load_promotion_evidences,
     store_promotion_evidence,
 )
-from app.services.strategy_result import StrategyResult
+from app.services.strategy_result import EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY, StrategyResult
 from app.services.strategy_result_ambiguity import (
     AMBIGUITY_RULE_VERSION,
     AmbiguityRecord,
@@ -1554,3 +1555,254 @@ def test_a_missing_row_in_the_batch_raises_rather_than_refusing(
 
     with pytest.raises(RuntimeError, match="no stored result row for result_id 99999999"):
         stored_result_promotion_refusals_for(conn, [*result_ids, 99999999])
+
+
+def _holdout_with_control_support(
+    conn: psycopg.Connection[Any],
+    *,
+    support_control: bool = True,
+    strategy_id: str = "S-CONTROL-SUPPORT",
+    support_evaluated: frozenset[int] = frozenset({1, 2, 3}),
+    holdout_evaluated: frozenset[int] = frozenset({1, 2, 3}),
+    support_validated: frozenset[int] = frozenset({1, 2, 3, 4, 5}),
+    input_rule_set_version: str | None = None,
+) -> tuple[int, int]:
+    """Store one exact in-sample control pair and its control-free holdout pair."""
+
+    shared = {
+        "strategy_id": strategy_id,
+        "strategy_version": "v1",
+        "result_scope": "sleeve",
+        "ambiguity_arm": "worst_case",
+    }
+    if input_rule_set_version is not None:
+        shared["input_rule_set_version"] = input_rule_set_version
+    support_metrics = build_metrics(profit_factor=1.2, **BOOTSTRAP_BLOCK)
+    control = build_control(
+        support_metrics,
+        mean_return_ci_low_pct=-1.0 if support_control else 0.2,
+        mean_return_ci_high_pct=1.0,
+        cohort_sharpe_threshold=-9.0,
+    )
+    support_masked = _promotable_row(
+        **shared,
+        namespace="in_sample",
+        quarantine_arm="masked",
+        purpose="harness_validation",
+        evaluated_instrument_count=len(support_evaluated),
+        metrics=support_metrics,
+        synthetic_control=control,
+    )
+    support_admitted = _promotable_row(
+        **shared,
+        namespace="in_sample",
+        quarantine_arm="admitted",
+        purpose="harness_validation",
+        evaluated_instrument_count=len(support_evaluated),
+        metrics=support_metrics,
+        synthetic_control=control,
+    )
+    support_id, support_admitted_id = store_in_sample_arm_pair(conn, support_masked, support_admitted)
+    _universe_record(conn, support_id, evaluated=support_evaluated, universe=support_validated)
+    _universe_record(conn, support_admitted_id, evaluated=support_evaluated, universe=support_validated)
+
+    holdout_window = {"window_start": date(2022, 1, 1), "window_end": date(2024, 9, 27)}
+    holdout_masked = _promotable_row(
+        **shared,
+        **holdout_window,
+        namespace="hold_out",
+        quarantine_arm="masked",
+        evaluated_instrument_count=len(holdout_evaluated),
+        synthetic_control=None,
+    )
+    holdout_admitted = _promotable_row(
+        **shared,
+        **holdout_window,
+        namespace="hold_out",
+        quarantine_arm="admitted",
+        evaluated_instrument_count=len(holdout_evaluated),
+        synthetic_control=None,
+    )
+    holdout_id, holdout_admitted_id = store_holdout_arm_pair(
+        conn,
+        holdout_masked,
+        holdout_admitted,
+        accessed_by="tests/test_strategy_control_plane.py",
+        purpose="#2737 exact control support",
+    )
+    _universe_record(conn, holdout_id, evaluated=holdout_evaluated)
+    _universe_record(conn, holdout_admitted_id, evaluated=holdout_evaluated)
+    return support_id, holdout_id
+
+
+def test_holdout_replay_uses_the_exact_in_sample_control_without_copying_it(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    support_id, holdout_id = _holdout_with_control_support(ebull_test_conn)
+
+    refusals = stored_result_promotion_refusals(ebull_test_conn, holdout_id)
+
+    assert "synthetic_control_not_run" not in refusals
+    assert not {
+        "synthetic_control_cohort_shows_edge",
+        "synthetic_control_sharpe_below_cohort",
+    } & set(refusals)
+    assert ebull_test_conn.execute(
+        "SELECT synthetic_control_model_id FROM strategy_results_store WHERE result_id=%s",
+        (holdout_id,),
+    ).fetchone() == (None,)
+    assert ebull_test_conn.execute(
+        "SELECT candidate_count,control_result_id FROM strategy_result_control_support WHERE holdout_result_id=%s",
+        (holdout_id,),
+    ).fetchone() == (1, support_id)
+
+
+def test_a_failing_in_sample_control_fails_the_composed_holdout_verdict(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    _support_id, holdout_id = _holdout_with_control_support(ebull_test_conn, support_control=False)
+
+    refusals = stored_result_promotion_refusals(ebull_test_conn, holdout_id)
+
+    assert "synthetic_control_not_run" not in refusals
+    assert "synthetic_control_cohort_shows_edge" in refusals
+
+
+def test_a_different_validated_universe_is_not_control_support(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    _support_id, holdout_id = _holdout_with_control_support(
+        ebull_test_conn,
+        support_evaluated=frozenset({6, 7, 8}),
+        support_validated=frozenset({6, 7, 8, 9, 10}),
+    )
+
+    assert ebull_test_conn.execute(
+        "SELECT candidate_count,control_result_id FROM strategy_result_control_support WHERE holdout_result_id=%s",
+        (holdout_id,),
+    ).fetchone() == (0, None)
+    assert "synthetic_control_not_run" in stored_result_promotion_refusals(ebull_test_conn, holdout_id)
+
+
+def test_declared_holdout_subset_uses_the_full_in_sample_falsification(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    support_id, holdout_id = _holdout_with_control_support(
+        ebull_test_conn,
+        holdout_evaluated=frozenset({1, 2}),
+    )
+
+    assert ebull_test_conn.execute(
+        "SELECT candidate_count,control_result_id FROM strategy_result_control_support WHERE holdout_result_id=%s",
+        (holdout_id,),
+    ).fetchone() == (1, support_id)
+    assert "synthetic_control_not_run" not in stored_result_promotion_refusals(ebull_test_conn, holdout_id)
+
+
+def test_control_support_window_literals_track_the_runner_contract(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    row = ebull_test_conn.execute("SELECT pg_get_viewdef('strategy_result_control_support'::regclass, true)").fetchone()
+    assert row is not None
+    definition = str(row[0])
+
+    assert EVALUATION_WINDOW_START.isoformat() in definition
+    assert HOLDOUT_BOUNDARY.isoformat() in definition
+
+
+def test_ambiguous_control_support_fails_closed(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    _support_id, holdout_id = _holdout_with_control_support(ebull_test_conn)
+    # A second full-corpus-looking in-sample identity differs only in its end
+    # date. The derived view counts both; it never picks MIN(result_id).
+    second_masked = _promotable_row(
+        strategy_id="S-CONTROL-SUPPORT",
+        strategy_version="v1",
+        result_scope="sleeve",
+        namespace="in_sample",
+        ambiguity_arm="worst_case",
+        quarantine_arm="masked",
+        purpose="harness_validation",
+        window_end=date(2025, 12, 31),
+    )
+    second_admitted = _promotable_row(
+        strategy_id="S-CONTROL-SUPPORT",
+        strategy_version="v1",
+        result_scope="sleeve",
+        namespace="in_sample",
+        ambiguity_arm="worst_case",
+        quarantine_arm="admitted",
+        purpose="harness_validation",
+        window_end=date(2025, 12, 31),
+    )
+    second_masked_id, second_admitted_id = store_in_sample_arm_pair(
+        ebull_test_conn,
+        second_masked,
+        second_admitted,
+    )
+    _universe_record(ebull_test_conn, second_masked_id)
+    _universe_record(ebull_test_conn, second_admitted_id)
+
+    assert ebull_test_conn.execute(
+        "SELECT candidate_count,control_result_id FROM strategy_result_control_support WHERE holdout_result_id=%s",
+        (holdout_id,),
+    ).fetchone() == (2, None)
+    assert "synthetic_control_not_run" in stored_result_promotion_refusals(ebull_test_conn, holdout_id)
+
+
+def test_historical_promotion_accepts_control_free_holdout_with_exact_support(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    """The actual transition consumes the composed verdict, not just its helper."""
+
+    promote_strategy(
+        ebull_test_conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="research_candidate",
+        promoted_by="operator",
+        reason="register candidate",
+    )
+    _support_id, holdout_id = _holdout_with_control_support(
+        ebull_test_conn,
+        strategy_id="S-GOV",
+    )
+    _ambiguity_record(ebull_test_conn, holdout_id)
+    store_promotion_evidence(
+        ebull_test_conn,
+        result_id=holdout_id,
+        evidence=_passing_promotion_evidence(),
+    )
+
+    promotion = promote_strategy(
+        ebull_test_conn,
+        strategy_id="S-GOV",
+        strategy_version="v1",
+        to_stage="historical_validated",
+        promoted_by="operator",
+        reason="exact in-sample control supports withheld evidence",
+        evidence_ref="result:test-2737-composed",
+        result_ids=(holdout_id,),
+    )
+
+    assert promotion.to_stage == "historical_validated"
+
+
+def test_holdout_control_support_reads_do_not_scale_with_the_batch(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    holdout_ids = [
+        _holdout_with_control_support(
+            ebull_test_conn,
+            input_rule_set_version=f"price-quarantine-v1+2737batch{index}",
+        )[1]
+        for index in range(3)
+    ]
+
+    one = _CountingConn(ebull_test_conn)
+    stored_result_promotion_refusals_for(cast(Any, one), holdout_ids[:1])
+    three = _CountingConn(ebull_test_conn)
+    stored_result_promotion_refusals_for(cast(Any, three), holdout_ids)
+
+    assert one.statements == three.statements == 4
