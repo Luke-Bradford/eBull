@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -80,7 +81,7 @@ from app.services.random_entry_cohort import SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
 from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION, LEGACY_AMBIGUITY_RULE_VERSION
 from app.services.strategy_promotion_evidence import PromotionEvidence, evidence_refusals
-from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
+from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics, periods_per_year
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
 # ---------------------------------------------------------------------------
@@ -555,6 +556,8 @@ class ResultIdentity:
             raise ValueError("metric-axis endpoints do not match the stored tuple")
         if self.metric_axis_digest != metric_axis_sha256(self.metric_axis_dates):
             raise ValueError("metric-axis digest does not match the stored tuple")
+        if self.metric_axis_dates[0] < self.window_start or self.metric_axis_dates[-1] > self.window_end:
+            raise ValueError("metric-axis dates must be contained in the declared evaluation window")
         if (
             self.opportunity_set_digest is None
             or len(self.opportunity_set_digest) != 64
@@ -563,6 +566,8 @@ class ResultIdentity:
             raise ValueError("opportunity-set digest must be a lower-case SHA-256 hex digest")
         if self.namespace == "in_sample" and self.evidence_window_id is not None:
             raise ValueError("an in-sample result cannot carry an evidence-window ID")
+        if self.namespace == "in_sample" and self.metric_axis_dates[-1] >= HOLDOUT_BOUNDARY:
+            raise ValueError("an in-sample metric axis cannot reach the frozen hold-out boundary")
         if self.namespace == "hold_out" and not (self.evidence_window_id and self.evidence_window_id.strip()):
             raise ValueError("a current hold-out result requires a non-blank evidence-window ID")
 
@@ -819,9 +824,9 @@ class PromotionCandidate:
 
     ⚠ Each of the three is OFF the row on purpose:
 
-    - the evaluated instrument ids and the validated universe are SETS of
-      thousands, and a row cannot carry either; the gate compares them and the
-      row keeps only the count;
+    - the evaluated instrument/series ids and the validated universe are SETS
+      of thousands, and a row cannot carry them; the gate compares the linked
+      ids and the row keeps only the combined name count;
     - the hold-out access counts are properties of the STRATEGY's history, not
       of one row — they live in stage 5e's access log;
     - ``ambiguity_material`` is a property of the ARM PAIR (§3.4 computes the
@@ -840,6 +845,11 @@ class PromotionCandidate:
     #: guard must be able to evaluate it without a database round-trip in the
     #: order path.
     validated_universe_ids: frozenset[int]
+    #: Admitted dead/unlinked series are opportunity names too, but have no
+    #: instrument foreign key against which the validated set can be checked.
+    #: Their presence prevents an unlinked-only result being misclassified as
+    #: an empty evaluation by the pure/write-time gate.
+    evaluated_series_ids: frozenset[int] = frozenset()
     #: How many times this strategy's hold-out arm has been evaluated (5e).
     holdout_evaluations: int = 0
     #: How many of those evaluations have a recorded access (timestamp +
@@ -889,9 +899,8 @@ class PromotionCandidate:
 STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v4-metric-axis"
 
 
-def metric_axis_promotion_refusals(result: StrategyResult) -> tuple[PromotionRefusal, ...]:
-    """Fail closed unless the result carries the current coherent axis identity."""
-    identity = result.identity
+def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> bool:
+    """Reconcile current provenance and annualisation from one shared rule."""
     if (
         identity.metric_axis_rule_version != METRIC_AXIS_RULE_VERSION
         or identity.metric_axis_dates is None
@@ -900,8 +909,26 @@ def metric_axis_promotion_refusals(result: StrategyResult) -> tuple[PromotionRef
         or identity.metric_axis_end != identity.metric_axis_dates[-1]
         or identity.opportunity_set_digest is None
     ):
-        return ("metric_axis_unproven",)
-    return ()
+        return False
+    dates = identity.metric_axis_dates
+    if dates[0] < identity.window_start or dates[-1] > identity.window_end:
+        return False
+    if identity.namespace == "in_sample" and dates[-1] >= HOLDOUT_BOUNDARY:
+        return False
+    expected_ppy = periods_per_year(dates)
+    if not math.isclose(metrics.periods_per_year, expected_ppy, rel_tol=1e-12, abs_tol=1e-12):
+        return False
+    final_multiple = 1.0 + metrics.total_return_pct / 100.0
+    if final_multiple < 0.0:
+        return False
+    years = (len(dates) - 1) / expected_ppy
+    expected_cagr = -100.0 if final_multiple == 0.0 else (final_multiple ** (1.0 / years) - 1.0) * 100.0
+    return math.isclose(metrics.cagr_pct, expected_cagr, rel_tol=1e-10, abs_tol=1e-10)
+
+
+def metric_axis_promotion_refusals(result: StrategyResult) -> tuple[PromotionRefusal, ...]:
+    """Fail closed unless the result carries the current coherent axis identity."""
+    return () if metric_axis_is_valid(result.identity, result.metrics) else ("metric_axis_unproven",)
 
 
 def structural_promotion_refusals(
@@ -1103,7 +1130,7 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
     # ⚠ An EMPTY evaluated set is refused separately and is not vacuously fine:
     # `set() - anything` is empty, so a result over no instruments would sail
     # through the subset test while being no evidence at all.
-    if not candidate.evaluated_instrument_ids:
+    if not candidate.evaluated_instrument_ids and not candidate.evaluated_series_ids:
         refusals.append("no_instruments_evaluated")
     elif candidate.evaluated_instrument_ids - candidate.validated_universe_ids:
         refusals.append("instrument_outside_validated_universe")
@@ -1241,6 +1268,7 @@ __all__ = [
     "holdout_count_promotion_refusals",
     "is_promotable",
     "metric_axis_promotion_refusals",
+    "metric_axis_is_valid",
     "metric_axis_sha256",
     "purpose_promotion_refusals",
     "structural_promotion_refusals",

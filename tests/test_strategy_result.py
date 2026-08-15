@@ -67,7 +67,7 @@ from app.services.strategy_result import (
     synthetic_control_promotion_refusals,
 )
 from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION, LEGACY_AMBIGUITY_RULE_VERSION
-from app.services.strategy_statistics import StrategyMetrics
+from app.services.strategy_statistics import StrategyMetrics, periods_per_year
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
 # --- transcribed from the spec, never imported -----------------------------
@@ -85,6 +85,9 @@ SPEC_CORPUS_VENDOR = "paperswithbacktest/Stocks-Daily-Price"
 SPEC_SIZING_RULE = "equal_weight_concurrent_v1"
 #: sql/255's vocabulary, which §6 reuses for the result row.
 SPEC_UNIVERSE_BASES = {"survivor_only", "survivorship_free"}
+_CURRENT_TEST_AXIS = (EVALUATION_WINDOW_START, date(2021, 6, 28))
+_CURRENT_TEST_PPY = periods_per_year(_CURRENT_TEST_AXIS)
+_CURRENT_TEST_CAGR = (1.21 ** (1.0 / ((len(_CURRENT_TEST_AXIS) - 1) / _CURRENT_TEST_PPY)) - 1.0) * 100.0
 
 
 def _identity(**overrides: object) -> ResultIdentity:
@@ -120,7 +123,7 @@ def _metrics(**overrides: object) -> StrategyMetrics:
     base: dict[str, object] = {
         "expectancy_per_trade_pct": 0.5,
         "profit_factor": 1.2,
-        "cagr_pct": 4.0,
+        "cagr_pct": _CURRENT_TEST_CAGR,
         "annualised_volatility_pct": 12.0,
         "sharpe": 0.33,
         "sortino": 0.44,
@@ -134,7 +137,7 @@ def _metrics(**overrides: object) -> StrategyMetrics:
         "losing_period_count": 300,
         "open_trade_count": 2,
         "unpriced_trade_count": 1,
-        "periods_per_year": 251.7,
+        "periods_per_year": _CURRENT_TEST_PPY,
         "total_return_pct": 21.0,
         "buy_and_hold_return_pct": 22.5,
         "expectancy_ci_low_pct": -0.2,
@@ -182,7 +185,7 @@ def _metrics_without_bootstrap(**overrides: object) -> StrategyMetrics:
 
 
 def _result(**overrides: object) -> StrategyResult:
-    axis = (EVALUATION_WINDOW_START, date(2021, 6, 28))
+    axis = _CURRENT_TEST_AXIS
     base: dict[str, object] = {
         "identity": _identity(
             namespace="in_sample",
@@ -597,6 +600,34 @@ class TestResultIdentity:
         with pytest.raises(ValueError, match="non-blank evidence-window ID"):
             current(first_axis, window_id="   ")
 
+    def test_current_axis_must_stay_inside_its_declared_window(self) -> None:
+        axis = (date(2019, 12, 31), date(2020, 1, 2))
+        with pytest.raises(ValueError, match="contained in the declared evaluation window"):
+            _identity(
+                namespace="in_sample",
+                window_start=date(2020, 1, 1),
+                window_end=date(2020, 1, 3),
+                metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+                metric_axis_dates=axis,
+                metric_axis_start=axis[0],
+                metric_axis_end=axis[-1],
+                metric_axis_digest=metric_axis_sha256(axis),
+                opportunity_set_digest="a" * 64,
+            )
+
+    def test_in_sample_axis_must_stop_before_the_holdout_boundary(self) -> None:
+        axis = (date(2021, 6, 28), HOLDOUT_BOUNDARY)
+        with pytest.raises(ValueError, match="cannot reach the frozen hold-out boundary"):
+            _identity(
+                namespace="in_sample",
+                metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+                metric_axis_dates=axis,
+                metric_axis_start=axis[0],
+                metric_axis_end=axis[-1],
+                metric_axis_digest=metric_axis_sha256(axis),
+                opportunity_set_digest="a" * 64,
+            )
+
 
 class TestStrategyResultValidation:
     """The writer-side shape, which RAISES — unlike the gate."""
@@ -744,6 +775,14 @@ class TestPromotionGateRefusals:
         candidate = _clean_candidate(result=_result(identity=_identity(), **_CLEAN_RESULT_FIELDS))
         assert "metric_axis_unproven" in check_promotable(candidate)
 
+    def test_metrics_that_do_not_reconcile_with_the_axis_are_unproven(self) -> None:
+        result = _result(
+            **_CLEAN_RESULT_FIELDS,
+            metrics=_metrics(periods_per_year=_CURRENT_TEST_PPY + 1.0),
+            synthetic_control=_passing_control(),
+        )
+        assert "metric_axis_unproven" in check_promotable(_clean_candidate(result=result))
+
     def test_a_harness_control_is_permanently_refused(self) -> None:
         assert (
             check_promotable(
@@ -806,6 +845,15 @@ class TestPromotionGateRefusals:
         refusals = check_promotable(_clean_candidate(evaluated_instrument_ids=frozenset()))
         assert "no_instruments_evaluated" in refusals
         assert "instrument_outside_validated_universe" not in refusals
+
+    def test_an_unlinked_only_opportunity_set_is_not_vacuously_empty(self) -> None:
+        refusals = check_promotable(
+            _clean_candidate(
+                evaluated_instrument_ids=frozenset(),
+                evaluated_series_ids=frozenset({101}),
+            )
+        )
+        assert "no_instruments_evaluated" not in refusals
 
     def test_a_never_evaluated_holdout_is_refused(self) -> None:
         refusals = check_promotable(_clean_candidate(holdout_evaluations=0, recorded_accesses=0))

@@ -1203,6 +1203,14 @@ def _benchmark_book(
         wealth_window = np.frombuffer(wealth_closes, dtype=np.float64)[
             start - first_axis_index : end - first_axis_index + 1
         ]
+        raw_observed = ~np.isnan(window)
+        if np.any(
+            raw_observed
+            & ((~np.isfinite(window)) | (~np.isfinite(wealth_window)) | (window <= 0.0) | (wealth_window <= 0.0))
+        ):
+            raise RuntimeError(
+                f"opportunity name {instrument_id} has invalid raw or wealth beside an observed raw close"
+            )
         usable = np.flatnonzero(
             np.isfinite(window) & np.isfinite(wealth_window) & (window > 0.0) & (wealth_window > 0.0)
         )
@@ -1210,14 +1218,7 @@ def _benchmark_book(
             raise RuntimeError(f"opportunity name {instrument_id} has fewer than two usable comparator endpoints")
         entry_offset = int(usable[0])
         exit_offset = int(usable[-1])
-        raw_span = window[entry_offset : exit_offset + 1]
         wealth_span = wealth_window[entry_offset : exit_offset + 1]
-        raw_observed = ~np.isnan(raw_span)
-        if np.any(
-            raw_observed
-            & ((~np.isfinite(raw_span)) | (~np.isfinite(wealth_span)) | (raw_span <= 0.0) | (wealth_span <= 0.0))
-        ):
-            raise RuntimeError(f"opportunity name {instrument_id} has invalid wealth beside an observed raw close")
         entry_close = float(window[entry_offset])
         entry_wealth = float(wealth_window[entry_offset])
         exit_wealth = float(wealth_window[exit_offset])
@@ -2770,6 +2771,7 @@ def _candidate(
     *,
     validated: frozenset[int],
     evaluated: frozenset[int],
+    evaluated_series: frozenset[int] = frozenset(),
     holdout_evaluations: int,
     recorded_accesses: int,
     ambiguity_material: bool | None,
@@ -2794,6 +2796,7 @@ def _candidate(
         result=result,
         evaluated_instrument_ids=evaluated,
         validated_universe_ids=validated,
+        evaluated_series_ids=evaluated_series,
         holdout_evaluations=holdout_evaluations,
         recorded_accesses=recorded_accesses,
         ambiguity_material=ambiguity_material,
@@ -3516,7 +3519,6 @@ def _write_rows(
     _preflight_gate(
         pending,
         arms=arms,
-        validated=validated,
         holdout_requested=holdout_requested,
         prior_holdout=prior_holdout,
     )
@@ -3650,6 +3652,7 @@ def _write_rows(
                 result,
                 validated=record.validated_universe_ids,
                 evaluated=record.evaluated_instrument_ids,
+                evaluated_series=record.evaluated_series_ids,
                 holdout_evaluations=evaluations,
                 recorded_accesses=accesses,
                 ambiguity_material=ambiguity_material,
@@ -3916,7 +3919,6 @@ def _preflight_gate(
     pending: Sequence[tuple[str, ResultNamespace, AmbiguityArm, StrategyResult, StrategyResult]],
     *,
     arms: Sequence[ArmMeasurement],
-    validated: frozenset[int],
     holdout_requested: bool,
     prior_holdout: Mapping[tuple[str, str], int],
 ) -> None:
@@ -3944,16 +3946,13 @@ def _preflight_gate(
         for result in (masked, admitted):
             count = projected[(result.identity.strategy_id, result.identity.strategy_version)]
             ambiguity_material = _ambiguity_material_for(arms, result)
+            record = _universe_record_for(arms, result)
             outcome = check_promotable(
                 _candidate(
                     result,
-                    validated=validated,
-                    # ⚠ The row's OWN evaluated set is not needed to predict the
-                    # refusal list — only whether it is empty and inside the
-                    # validated universe — and both hold for any namespace this
-                    # job measured. A non-empty subset is supplied so the two
-                    # universe clauses are exercised rather than skipped.
-                    evaluated=frozenset({next(iter(validated))}) if validated else frozenset(),
+                    validated=record.validated_universe_ids,
+                    evaluated=record.evaluated_instrument_ids,
+                    evaluated_series=record.evaluated_series_ids,
                     holdout_evaluations=count,
                     recorded_accesses=count,
                     ambiguity_material=ambiguity_material,

@@ -9,7 +9,7 @@ import psycopg
 import psycopg.sql
 import pytest
 
-from app.services.result_ledger import store_in_sample_result
+from app.services.result_ledger import store_in_sample_result, stored_result_promotion_refusals
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import (
     METRIC_AXIS_RULE_VERSION,
@@ -108,7 +108,10 @@ def test_current_axis_round_trips_through_the_view(ebull_test_conn: psycopg.Conn
     ("column", "value"),
     (
         ("metric_axis_dates", [date(2020, 1, 2), date(2020, 1, 2)]),
+        ("metric_axis_dates", [date(2020, 1, 3), date(2020, 1, 2)]),
         ("metric_axis_rule_version", "invented"),
+        ("metric_axis_rule_version", None),
+        ("metric_axis_start", None),
         ("metric_axis_digest", None),
     ),
 )
@@ -124,6 +127,48 @@ def test_malformed_direct_writes_are_refused(
                 ),
                 (value, result_id),
             )
+
+
+def test_a_current_axis_outside_the_declared_window_is_refused(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    result_id = store_in_sample_result(ebull_test_conn, _current_result())
+    outside = [date(2019, 12, 30), date(2019, 12, 31)]
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with ebull_test_conn.transaction():
+            ebull_test_conn.execute(
+                """
+                UPDATE strategy_results_store
+                   SET metric_axis_dates = %s,
+                       metric_axis_start = %s,
+                       metric_axis_end = %s,
+                       metric_axis_digest = %s
+                 WHERE result_id = %s
+                """,
+                (outside, outside[0], outside[-1], metric_axis_sha256(tuple(outside)), result_id),
+            )
+
+
+def test_a_legacy_row_cannot_carry_axis_dates(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    result_id = store_in_sample_result(ebull_test_conn, build_result(namespace="in_sample"))
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with ebull_test_conn.transaction():
+            ebull_test_conn.execute(
+                "UPDATE strategy_results_store SET metric_axis_dates = %s WHERE result_id = %s",
+                ([date(2020, 1, 2), date(2020, 1, 3)], result_id),
+            )
+
+
+def test_a_well_formed_but_wrong_axis_digest_refuses_application_replay(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    result_id = store_in_sample_result(ebull_test_conn, _current_result())
+    ebull_test_conn.execute(
+        "UPDATE strategy_results_store SET metric_axis_digest = %s WHERE result_id = %s",
+        ("c" * 64, result_id),
+    )
+    with pytest.raises(ValueError, match="metric-axis digest"):
+        stored_result_promotion_refusals(ebull_test_conn, result_id)
 
 
 def test_sql_recent_window_mirror_is_closed(ebull_test_conn: psycopg.Connection[Any]) -> None:

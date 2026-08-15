@@ -48,7 +48,6 @@ check somebody has to remember to run.
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -76,11 +75,12 @@ from app.services.strategy_result import (
     ResultIdentity,
     StrategyResult,
     deflation_promotion_refusals,
+    metric_axis_is_valid,
     metric_axis_promotion_refusals,
     purpose_promotion_refusals,
     synthetic_control_promotion_refusals,
 )
-from app.services.strategy_statistics import StrategyMetrics, periods_per_year
+from app.services.strategy_statistics import StrategyMetrics
 from app.services.walk_forward import (
     WALK_FORWARD_MODEL_ID,
     Fold,
@@ -641,19 +641,11 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
 
 
 def _assert_axis_metric_reconciliation(identity: ResultIdentity, metrics: StrategyMetrics) -> None:
-    """Recompute the annualisation facts from the exact stored tuple."""
+    """Apply the same axis rule used by both promotion paths before storage."""
     if identity.metric_axis_dates is None:
         return
-    expected_ppy = periods_per_year(identity.metric_axis_dates)
-    if not math.isclose(metrics.periods_per_year, expected_ppy, rel_tol=1e-12, abs_tol=1e-12):
-        raise ValueError(
-            f"periods_per_year {metrics.periods_per_year} does not reconcile with metric axis ({expected_ppy})"
-        )
-    years = (len(identity.metric_axis_dates) - 1) / expected_ppy
-    final_multiple = 1.0 + metrics.total_return_pct / 100.0
-    expected_cagr = -100.0 if final_multiple == 0.0 else (final_multiple ** (1.0 / years) - 1.0) * 100.0
-    if not math.isclose(metrics.cagr_pct, expected_cagr, rel_tol=1e-10, abs_tol=1e-10):
-        raise ValueError(f"cagr_pct {metrics.cagr_pct} does not reconcile with total return and metric axis")
+    if not metric_axis_is_valid(identity, metrics):
+        raise ValueError("stored metrics do not reconcile with current metric-axis provenance")
 
 
 def _dsr_params(deflated: DeflatedSharpeResult | None) -> dict[str, object]:

@@ -127,6 +127,16 @@ REPLAY_TEMPORAL_POLICY: Final[Mapping[str, ReplayPolicyEntry]] = {
             "the execution guard's job, not promotion's."
         ),
     ),
+    "evaluated_series_ids": ReplayPolicyEntry(
+        rule="frozen",
+        replayed_at_transition=True,
+        source="strategy_result_universe.evaluated_series_ids (#2721/#2697, sql/349)",
+        reason=(
+            "Unlinked admitted dead series are names in the same pre-mask opportunity population. They have no "
+            "instrument foreign key, so the transition replays their frozen set for non-empty/count/digest "
+            "integrity while applying the validated-universe subset rule only to linked instrument IDs."
+        ),
+    ),
     "validated_universe_ids": ReplayPolicyEntry(
         rule="frozen",
         replayed_at_transition=True,

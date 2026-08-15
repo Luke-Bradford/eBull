@@ -175,6 +175,7 @@ def _measurement(
     trade_sharpe: float = 0.05,
     ess: float | None = 100.0,
     daily: dict[date, float] | None = None,
+    axis_dates: tuple[date, ...] = (date(2010, 1, 4), date(2010, 1, 5), date(2010, 1, 6)),
 ) -> NamespaceMeasurement:
     return NamespaceMeasurement(
         namespace=namespace,  # type: ignore[arg-type]
@@ -189,7 +190,7 @@ def _measurement(
             validated_universe_ids=frozenset({1, 2}),
         ),
         position_count=200,
-        axis_dates=(date(2010, 1, 4), date(2010, 1, 5), date(2010, 1, 6)),
+        axis_dates=axis_dates,
     )
 
 
@@ -743,19 +744,13 @@ class TestBuildResult:
 
         assert replace(masked.identity, quarantine_arm="admitted") == admitted.identity
 
-    def test_a_recent_window_is_part_of_the_result_identity(self) -> None:
-        recent = Window(date(2024, 7, 9), EVALUATION_WINDOW_END)
-        legacy = build_result(
-            _measurement(),
-            strategy_id="s1-time-series-momentum",
-            strategy_version="strategy-v1+abc",
-            purpose="capital_candidate",
-            ambiguity_arm="worst_case",
-            quarantine_arm="masked",
-            deflated=None,
-        )
+    def test_a_registered_recent_window_is_part_of_the_result_identity(self) -> None:
+        recent = Window(date(2022, 1, 1), date(2024, 9, 27))
         result = build_result(
-            _measurement(),
+            _measurement(
+                namespace="hold_out",
+                axis_dates=(date(2022, 1, 3), date(2024, 9, 27)),
+            ),
             strategy_id="s1-time-series-momentum",
             strategy_version="strategy-v1+abc",
             purpose="capital_candidate",
@@ -763,9 +758,13 @@ class TestBuildResult:
             quarantine_arm="masked",
             deflated=None,
             evaluation_window=recent,
+            evidence_window_id="primary-2022-plus",
         )
         assert (result.identity.window_start, result.identity.window_end) == (recent.start, recent.end)
-        assert result.identity.version != legacy.identity.version
+        assert result.identity.evidence_window_id == "primary-2022-plus"
+        from dataclasses import replace
+
+        assert result.identity.version != replace(result.identity, evidence_window_id="successor-window").version
 
 
 class TestRecentWindowNamespace:
@@ -970,6 +969,26 @@ class TestBenchmarkBook:
                 hi=9,
             )
 
+    def test_a_missing_opportunity_history_is_refused(self) -> None:
+        with pytest.raises(RuntimeError, match="price history is missing"):
+            _benchmark_book(
+                instruments=frozenset({1, 2}),
+                raw_closes_by_instrument={1: self._closes()[1]},
+                wealth_closes_by_instrument={1: self._closes()[1]},
+                lo=0,
+                hi=5,
+            )
+
+    def test_raw_and_wealth_axes_must_match(self) -> None:
+        with pytest.raises(RuntimeError, match="price axes disagree"):
+            _benchmark_book(
+                instruments=frozenset({1}),
+                raw_closes_by_instrument={1: (0, array("d", [10.0, 11.0]))},
+                wealth_closes_by_instrument={1: (1, array("d", [10.0, 11.0]))},
+                lo=0,
+                hi=2,
+            )
+
     def test_a_single_usable_bar_is_refused(self) -> None:
         with pytest.raises(RuntimeError, match="fewer than two usable comparator endpoints"):
             _benchmark_book(
@@ -1008,7 +1027,7 @@ class TestBenchmarkBook:
         assert book.marks.tolist() == [100.0, 120.0]
 
     def test_non_finite_wealth_observation_refuses_the_benchmark(self) -> None:
-        with pytest.raises(RuntimeError, match="invalid wealth"):
+        with pytest.raises(RuntimeError, match="invalid raw or wealth"):
             _benchmark_book(
                 instruments=frozenset({1}),
                 raw_closes_by_instrument={1: (0, array("d", [10.0, 11.0, 12.0]))},
@@ -1016,6 +1035,30 @@ class TestBenchmarkBook:
                 lo=0,
                 hi=2,
             )
+
+    @pytest.mark.parametrize("invalid", [0.0, -1.0, math.inf])
+    def test_an_invalid_observed_value_before_two_good_endpoints_is_not_silently_skipped(self, invalid: float) -> None:
+        with pytest.raises(RuntimeError, match="invalid raw or wealth"):
+            _benchmark_book(
+                instruments=frozenset({1}),
+                raw_closes_by_instrument={1: (0, array("d", [invalid, 10.0, 11.0]))},
+                wealth_closes_by_instrument={1: (0, array("d", [100.0, 110.0, 120.0]))},
+                lo=0,
+                hi=2,
+            )
+
+    def test_a_missing_raw_interior_gap_is_allowed(self) -> None:
+        book = _benchmark_book(
+            instruments=frozenset({1}),
+            raw_closes_by_instrument={1: (0, array("d", [10.0, math.nan, 12.0]))},
+            wealth_closes_by_instrument={1: (0, array("d", [100.0, math.nan, 120.0]))},
+            lo=0,
+            hi=2,
+        )
+        assert len(book) == 1
+        assert book.marks[0] == 100.0
+        assert math.isnan(book.marks[1])
+        assert book.marks[2] == 120.0
 
 
 class TestTotalReturnStrategyLeg:
@@ -1307,7 +1350,11 @@ class TestAmbiguityMateriality:
     @staticmethod
     def _holdout_result(*, sharpe: float) -> StrategyResult:
         return build_result(
-            _measurement(namespace="hold_out", sharpe=sharpe),
+            _measurement(
+                namespace="hold_out",
+                sharpe=sharpe,
+                axis_dates=(date(2022, 1, 3), date(2024, 9, 27)),
+            ),
             strategy_id="s4",
             strategy_version="v1",
             purpose="capital_candidate",
