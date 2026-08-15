@@ -53,6 +53,7 @@ Fixed order, each layer conditioning the next — full contract + worked example
 | [candles](candles.md) | anatomy as intrabar narrative, Nison's actual criteria, the negative empirical record, candles as confirmation-only |
 | [market-dynamics](market-dynamics.md) | regimes, impulse/correction, breakout→retest, reversion after extension, relative strength, gap dynamics, short-side asymmetries, failure modes |
 | [chart-read-protocol](chart-read-protocol.md) | the synthesis: the seven-step read + a MEASURED worked example (AAPL 2026-08-13) |
+| [quant-methods](quant-methods.md) | the systematic mathematics: spread estimators from bars (Roll/Corwin-Schultz/Abdi-Ranaldo, with our measured level-vs-ranking verdict), range volatility (Parkinson/GK/RS/Yang-Zhang), forecast vol (EWMA/GARCH), sizing (Kelly/Thorp, vol targeting), trend strength (Clenow, Kaufman ER, Hurst/Lo negative) — constants verified against author sources |
 
 ## Refuted on our data — read before proposing anything TA-shaped
 
