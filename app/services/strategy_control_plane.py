@@ -451,9 +451,7 @@ def validate_result_evidence_bundle(
     found = {int(row[0]) for row in rows}
     missing = set(result_ids) - found
     if missing:
-        raise StrategyControlError(
-            f"result_ids do not belong to {strategy_id}@{strategy_version}: {sorted(missing)}"
-        )
+        raise StrategyControlError(f"result_ids do not belong to {strategy_id}@{strategy_version}: {sorted(missing)}")
 
     counts = holdout_access_counts(conn, strategy_id, strategy_version)
     holdout_refusals = holdout_count_promotion_refusals(

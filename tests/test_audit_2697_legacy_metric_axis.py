@@ -120,3 +120,17 @@ def test_retry_invocation_refuses_missing_linked_request() -> None:
         request=None,
     )
     assert failures == ("linked request 408 is missing",)
+
+
+def test_retry_invocation_refuses_a_different_identical_request() -> None:
+    expected = {
+        "synthetic_control": True,
+        "trial_register_version": "trial-register-2026-08-15-r6",
+    }
+    failures = invocation_failures(
+        job_name="strategy_backtest_run",
+        params=expected,
+        request_id=409,
+        request=("strategy_backtest_run", {"control": {}, "params": expected}),
+    )
+    assert failures == ("linked request 409 is not exact request 408",)

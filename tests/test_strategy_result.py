@@ -783,6 +783,37 @@ class TestPromotionGateRefusals:
         )
         assert "metric_axis_unproven" in check_promotable(_clean_candidate(result=result))
 
+    @pytest.mark.parametrize("window_id", ["invented", "year-2023"])
+    def test_holdout_axis_requires_the_exact_registered_evidence_window(self, window_id: str) -> None:
+        axis = (date(2022, 1, 3), date(2024, 9, 27))
+        ppy = periods_per_year(axis)
+        metrics = _metrics(
+            periods_per_year=ppy,
+            cagr_pct=(1.21 ** (1.0 / ((len(axis) - 1) / ppy)) - 1.0) * 100.0,
+        )
+        identity = _identity(
+            namespace="hold_out",
+            window_start=date(2022, 1, 1),
+            window_end=date(2024, 9, 27),
+            return_basis=TOTAL_RETURN_BASIS,
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+            metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+            metric_axis_dates=axis,
+            metric_axis_start=axis[0],
+            metric_axis_end=axis[-1],
+            metric_axis_digest=metric_axis_sha256(axis),
+            opportunity_set_digest="a" * 64,
+            evidence_window_id=window_id,
+        )
+        result = _result(
+            identity=identity,
+            metrics=metrics,
+            **_CLEAN_RESULT_FIELDS,
+            synthetic_control=_passing_control(),
+        )
+
+        assert "metric_axis_unproven" in check_promotable(_clean_candidate(result=result))
+
     def test_a_harness_control_is_permanently_refused(self) -> None:
         assert (
             check_promotable(

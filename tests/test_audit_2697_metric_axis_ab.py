@@ -97,6 +97,34 @@ def test_non_finite_metric_refuses() -> None:
     assert any("current metric payload" in failure for failure in report.failures)
 
 
+def test_a_missing_current_result_never_becomes_acceptable_by_explaining_its_absence() -> None:
+    rows = _complete()
+    row = rows[0]
+    row.pop("current")
+    row.pop("current_axis")
+    row["result_note"] = "current fixed-axis result is unexpectedly absent"
+
+    report = audit_records(rows, candidate_head=_HEAD)
+
+    assert any("current fixed-axis result is absent" in failure for failure in report.failures)
+
+
+def test_legacy_axis_and_comparator_population_are_structural_evidence() -> None:
+    malformed_axis = _complete()
+    malformed_axis[0]["legacy_axis"] = ["2000-01-03"]
+    assert any(
+        "legacy axis endpoints are malformed" in failure
+        for failure in audit_records(malformed_axis, candidate_head=_HEAD).failures
+    )
+
+    impossible_population = _complete()
+    impossible_population[0]["legacy_comparator_population"] = 11
+    assert any(
+        "legacy comparator population exceeds" in failure
+        for failure in audit_records(impossible_population, candidate_head=_HEAD).failures
+    )
+
+
 def test_declared_sortino_null_is_structurally_complete() -> None:
     rows = _complete()
     rows[0]["legacy"]["sortino"] = None

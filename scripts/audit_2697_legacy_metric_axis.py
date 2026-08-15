@@ -38,6 +38,7 @@ _EXPECTED_PARAMS: Final = {
     "synthetic_control": True,
     "trial_register_version": "trial-register-2026-08-15-r6",
 }
+_EXPECTED_REQUEST_ID: Final = 408
 
 _AXIS_FIELDS: Final = (
     "metric_axis_rule_version",
@@ -178,6 +179,8 @@ def invocation_failures(
         failures.append(f"unexpected job name {job_name!r}")
     if params != _EXPECTED_PARAMS:
         failures.append("job params_snapshot is not the exact declared r6 payload")
+    if request_id != _EXPECTED_REQUEST_ID:
+        failures.append(f"linked request {request_id!r} is not exact request {_EXPECTED_REQUEST_ID}")
     if request is None:
         failures.append(f"linked request {request_id!r} is missing")
     else:

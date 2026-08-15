@@ -437,7 +437,7 @@ def _load_intent(
             strategy_id=str(row["strategy_id"]),
             strategy_version=str(row["strategy_version"]),
         )
-    except (StrategyControlError, RuntimeError):
+    except StrategyControlError, RuntimeError:
         return None, "pinned_promotion_evidence_invalid", True
     checks = (
         (bool(row["is_tradable"]), "instrument_not_tradable"),

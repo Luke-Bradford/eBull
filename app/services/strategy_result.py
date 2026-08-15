@@ -915,6 +915,21 @@ def metric_axis_is_valid(identity: ResultIdentity, metrics: StrategyMetrics) -> 
         return False
     if identity.namespace == "in_sample" and dates[-1] >= HOLDOUT_BOUNDARY:
         return False
+    if identity.namespace == "hold_out":
+        # Local import avoids making the append-only registry's import of this
+        # module cyclic. A non-blank label is not provenance by itself: the ID
+        # must name the exact declared window, matching sql/359's constraint.
+        from app.services.strategy_recent_evidence import recent_evidence_window
+
+        try:
+            registered = recent_evidence_window(identity.evidence_window_id or "")
+        except ValueError:
+            return False
+        if (identity.window_start, identity.window_end) != (
+            registered.window.start,
+            registered.window.end,
+        ):
+            return False
     expected_ppy = periods_per_year(dates)
     if not math.isclose(metrics.periods_per_year, expected_ppy, rel_tol=1e-12, abs_tol=1e-12):
         return False

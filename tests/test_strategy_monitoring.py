@@ -1530,9 +1530,7 @@ def test_live_enable_waits_for_concurrent_paper_enable_then_refuses(
             with pytest.raises(HTTPException) as exc_info:
                 future.result(timeout=5)
         assert exc_info.value.status_code == 409
-        assert exc_info.value.detail == (
-            "live trading cannot be enabled while strategy paper automation is enabled"
-        )
+        assert exc_info.value.detail == ("live trading cannot be enabled while strategy paper automation is enabled")
         assert not get_runtime_config(conn).enable_live_trading
     finally:
         blocker.rollback()

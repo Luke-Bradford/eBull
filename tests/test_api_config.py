@@ -240,9 +240,7 @@ class TestPatchConfig:
             )
 
         assert resp.status_code == 409
-        assert resp.json()["detail"] == (
-            "live trading cannot be enabled while strategy paper automation is enabled"
-        )
+        assert resp.json()["detail"] == ("live trading cannot be enabled while strategy paper automation is enabled")
         mock_update.assert_not_called()
 
     def test_disable_live_does_not_require_confirm(self) -> None:

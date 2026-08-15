@@ -223,6 +223,7 @@ def patch_config(
     Returns the post-update runtime config (not the full /config response;
     the caller can re-GET if they need kill switch state too).
     """
+
     def apply_patch() -> RuntimeConfig:
         return update_runtime_config(
             conn,

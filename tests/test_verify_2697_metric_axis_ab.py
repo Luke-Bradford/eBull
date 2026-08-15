@@ -5,10 +5,59 @@ import pytest
 
 from app.services.equity_curve import LegBook, build_equity_curve
 from app.services.position_builder import Window
+from app.services.strategy_result import HOLDOUT_BOUNDARY
 from app.services.strategy_statistics import DatedEquityCurve, TradeReturns, compute_metrics
 from app.services.synthetic_control_run import CohortCollector, SeriesPlacement
 from scripts import verify_2697_metric_axis_ab
-from scripts.verify_2697_metric_axis_ab import _exact_candidate_head, _legacy_cohort_control, _population_label
+from scripts.verify_2697_metric_axis_ab import (
+    _IN_SAMPLE_WINDOW,
+    _assert_candidate_head_unchanged,
+    _completion_record,
+    _exact_candidate_head,
+    _legacy_cohort_control,
+    _load_sealed_inputs,
+    _population_label,
+)
+
+
+def test_acceptance_corpus_stops_before_the_first_holdout_bar() -> None:
+    assert _IN_SAMPLE_WINDOW.end < HOLDOUT_BOUNDARY
+
+
+def test_acceptance_loads_both_price_and_regime_inputs_through_the_sealed_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    corpus = object()
+    regime = object()
+
+    def load_corpus(_conn: object, **kwargs: object) -> object:
+        calls.append(("corpus", kwargs))
+        return corpus
+
+    def load_regime(_conn: object, *, through_date: date | None = None) -> object:
+        calls.append(("regime", through_date))
+        return regime
+
+    monkeypatch.setattr(verify_2697_metric_axis_ab, "load_corpus", load_corpus)
+    monkeypatch.setattr(
+        verify_2697_metric_axis_ab.MarketRegimeProvider,
+        "load_research",
+        staticmethod(load_regime),
+    )
+
+    assert _load_sealed_inputs(object(), limit=50) == (corpus, regime)  # type: ignore[arg-type,comparison-overlap]
+    assert calls == [
+        (
+            "corpus",
+            {
+                "universe_basis": verify_2697_metric_axis_ab.BACKTEST_UNIVERSE,
+                "limit": 50,
+                "evaluation_window": _IN_SAMPLE_WINDOW,
+            },
+        ),
+        ("regime", _IN_SAMPLE_WINDOW.end),
+    ]
 
 
 def test_legacy_cohort_ab_arm_runs_the_declared_member_count() -> None:
@@ -68,6 +117,20 @@ def test_exact_head_refuses_a_dirty_worktree(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(RuntimeError, match="clean worktree"):
         _exact_candidate_head()
+
+
+def test_completion_refuses_when_the_source_head_moved(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_2697_metric_axis_ab, "_exact_candidate_head", lambda: "b" * 40)
+
+    with pytest.raises(RuntimeError, match="started on .* and ended on"):
+        _assert_candidate_head_unchanged("a" * 40)
+
+
+def test_completion_manifest_cannot_bypass_the_final_head_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_2697_metric_axis_ab, "_exact_candidate_head", lambda: "b" * 40)
+
+    with pytest.raises(RuntimeError, match="started on .* and ended on"):
+        _completion_record("a" * 40, population="full", expected_rows=40, observed_rows=40)
 
 
 def test_the_legacy_arm_refuses_a_member_that_drops_a_declared_trade(

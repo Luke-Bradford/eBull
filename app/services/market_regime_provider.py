@@ -335,9 +335,7 @@ class MarketRegimeProvider:
                 if index and day <= chained[index - 1][0]:
                     raise BenchmarkUnavailableError(f"chain dates are not strictly increasing at {day}")
                 if not math.isfinite(close) or close <= 0:
-                    raise BenchmarkUnavailableError(
-                        f"chain close on {day} is {close!r} — not a positive finite price"
-                    )
+                    raise BenchmarkUnavailableError(f"chain close on {day} is {close!r} — not a positive finite price")
         else:
             chained = _chain_closes(segments["primary"], segments["fallback"])
         return cls._classify([day for day, _ in chained], [close for _, close in chained], label="spy_chain_v1")

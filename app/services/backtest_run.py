@@ -1810,7 +1810,7 @@ def evaluate_arm(
                 series_total=total,
             )
             continue
-        price_arms = load_arms(conn, series_id)
+        price_arms = load_arms(conn, series_id, through_date=corpus.window.end)
         masked = price_arms[quarantine_arm]
         benchmark_source = price_arms["admitted"]
         benchmark_history = _dense_price_history(
@@ -2142,7 +2142,7 @@ def evaluate_level_arms(
                 series_total=total,
             )
             continue
-        price_arms = load_arms(conn, series_id)
+        price_arms = load_arms(conn, series_id, through_date=corpus.window.end)
         masked = price_arms[quarantine_arm]
         benchmark_source = price_arms["admitted"]
         benchmark_history = _dense_price_history(
@@ -2483,7 +2483,12 @@ def _rank_cross_section(
                 series_total=total,
             )
             continue
-        masked = load_masked_series(conn, series_id, arm=quarantine_arm)
+        masked = load_masked_series(
+            conn,
+            series_id,
+            arm=quarantine_arm,
+            through_date=corpus.window.end,
+        )
         if not masked.bars:
             _emit_series_progress(
                 progress,

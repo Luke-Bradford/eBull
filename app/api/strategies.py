@@ -1779,7 +1779,7 @@ def get_strategy_overview(
                     strategy_id=strategy_id,
                     strategy_version=versions[strategy_id],
                 )
-            except (StrategyControlError, RuntimeError):
+            except StrategyControlError, RuntimeError:
                 pinned_evidence_ready = False
         promotion_action = next_promotion_action(control.stage) if entry.purpose == "capital_candidate" else None
         promotion_refusals: list[str] = []
