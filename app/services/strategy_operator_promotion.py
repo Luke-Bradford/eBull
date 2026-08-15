@@ -179,6 +179,41 @@ def _load_complete_result_bundle(
     return tuple(item["result_id"] for item in payload), _canonical_ref("strategy-result-bundle", payload)
 
 
+def _require_preserved_result_bundle(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    stage: Literal["historical_validated", "forward_observation", "paper_enabled"],
+    result_ids: tuple[int, ...],
+    evidence_ref: str,
+) -> None:
+    """Prove a later transition still names the exact earlier denominator."""
+    rows = conn.execute(
+        """
+        SELECT p.promotion_id,p.evidence_ref,pr.result_id
+        FROM strategy_promotions p
+        LEFT JOIN strategy_promotion_results pr ON pr.promotion_id=p.promotion_id
+        WHERE p.strategy_id=%s AND p.strategy_version=%s AND p.to_stage=%s
+        ORDER BY p.promotion_id,pr.result_id
+        """,
+        (strategy_id, strategy_version, stage),
+    ).fetchall()
+    if not rows:
+        raise StrategyControlError(f"{stage} evidence event is missing")
+    promotion_ids = {int(row[0]) for row in rows}
+    if len(promotion_ids) != 1:
+        raise StrategyControlError(f"{stage} evidence event is ambiguous")
+    pinned_ids = tuple(int(row[2]) for row in rows if row[2] is not None)
+    if pinned_ids != tuple(sorted(result_ids)):
+        raise StrategyControlError(f"{stage} does not preserve the exact current historical evidence bundle")
+    # Paper approval has a composite evidence reference that includes the
+    # forward floor and prospective assessment. Earlier stages must retain the
+    # canonical result-bundle reference itself.
+    if stage != "paper_enabled" and str(rows[0][1]) != evidence_ref:
+        raise StrategyControlError(f"{stage} evidence reference does not match its pinned result bundle")
+
+
 def load_forward_floor_evidence(
     conn: psycopg.Connection[Any],
     *,
@@ -384,6 +419,41 @@ def advance_strategy_for_operator(
     lock_strategy_control(conn, strategy_id, strategy_version)
     stage = current_stage(conn, strategy_id, strategy_version)
     if stage == target:
+        current_ids: tuple[int, ...] = ()
+        current_ref = ""
+        if target in {"historical_validated", "forward_observation", "paper_enabled"}:
+            current_ids, current_ref = _load_complete_result_bundle(
+                conn, strategy_id=strategy_id, strategy_version=strategy_version
+            )
+            _require_preserved_result_bundle(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                stage=cast(
+                    Literal["historical_validated", "forward_observation", "paper_enabled"],
+                    target,
+                ),
+                result_ids=current_ids,
+                evidence_ref=current_ref,
+            )
+        if target in {"forward_observation", "paper_enabled"}:
+            _require_preserved_result_bundle(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                stage="historical_validated",
+                result_ids=current_ids,
+                evidence_ref=current_ref,
+            )
+        if target == "paper_enabled":
+            _require_preserved_result_bundle(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                stage="forward_observation",
+                result_ids=current_ids,
+                evidence_ref=current_ref,
+            )
         row = conn.execute(
             """
             SELECT promotion_id,from_stage,evidence_ref
@@ -407,6 +477,7 @@ def advance_strategy_for_operator(
         raise StrategyControlError(f"action {action!r} is not allowed from stage {stage!r}")
 
     result_ids: tuple[int, ...] = ()
+    result_ref = ""
     evidence_ref: str | None = None
     prospective: ProspectiveEvidence | None = None
     forward_floor: ForwardFloorEvidence | None = None
@@ -416,7 +487,24 @@ def advance_strategy_for_operator(
             conn, strategy_id=strategy_id, strategy_version=strategy_version
         )
         evidence_ref = result_ref
+    if action in {"start_forward_observation", "approve_paper"}:
+        _require_preserved_result_bundle(
+            conn,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            stage="historical_validated",
+            result_ids=result_ids,
+            evidence_ref=result_ref,
+        )
     if action == "approve_paper":
+        _require_preserved_result_bundle(
+            conn,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            stage="forward_observation",
+            result_ids=result_ids,
+            evidence_ref=result_ref,
+        )
         observed_at = (now or datetime.now(UTC)).astimezone(UTC)
         forward_floor = load_forward_floor_evidence(
             conn,
