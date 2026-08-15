@@ -77,6 +77,7 @@ class _LegacyMeasurement:
 class _LegacyCohortInputs:
     collector: CohortCollector
     axis: tuple[date, ...]
+    expected_trade_count: int
 
 
 _LEGACY_WORKER_INPUTS: _LegacyCohortInputs | None = None
@@ -183,7 +184,11 @@ def _legacy_cohort_control(
     if workers < 1:
         raise ValueError(f"max_workers must be positive, got {workers}")
     workers = min(workers, cohort_size)
-    inputs = _LegacyCohortInputs(collector=collector, axis=axis)
+    inputs = _LegacyCohortInputs(
+        collector=collector,
+        axis=axis,
+        expected_trade_count=collector.matchable_trade_count,
+    )
     by_index: dict[int, MemberOutcome] = {}
 
     def accept(expected_index: int, outcome: MemberOutcome) -> None:
@@ -250,6 +255,11 @@ def _legacy_member(index: int, inputs: _LegacyCohortInputs) -> MemberOutcome:
         inputs.collector.placements,
         axis=inputs.axis,
     )
+    if len(book) != inputs.expected_trade_count:
+        raise RuntimeError(
+            f"legacy cohort member {index} placed {len(book):,} legs against the strategy's "
+            f"{inputs.expected_trade_count:,} matchable positions"
+        )
     low = min(book.entry_index)
     high = max(book.exit_index)
     dates = inputs.axis[low : high + 1]
@@ -291,6 +301,17 @@ def _control_delta(old: SyntheticControl, new: SyntheticControl) -> dict[str, fl
     }
 
 
+def _population_label(*, limit: int | None, strategy: str | None) -> str:
+    if limit is None and strategy is None:
+        return "full"
+    parts = ["smoke"]
+    if limit is not None:
+        parts.append(f"limit-{limit}")
+    if strategy is not None:
+        parts.append(f"strategy-{strategy}")
+    return "-".join(parts)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None, help="series limit; makes this a smoke, not acceptance")
@@ -310,9 +331,18 @@ def main() -> None:
 
     with psycopg.connect(settings.database_url) as conn:
         corpus = load_corpus(conn, universe_basis=BACKTEST_UNIVERSE, limit=args.limit, evaluation_window=None)
-        runnable, _ = runnable_strategies()
+        runnable, excluded = runnable_strategies()
+        if not runnable:
+            raise RuntimeError("no runnable strategies exist; an empty A/B is not acceptance evidence")
         if args.strategy is not None:
+            if args.strategy not in runnable:
+                raise RuntimeError(f"{args.strategy} is not runnable under the current manifest")
             runnable = (args.strategy,)
+        elif args.limit is None and excluded:
+            raise RuntimeError(
+                f"full-population A/B requires every manifest strategy to be runnable; excluded={excluded}"
+            )
+        population = _population_label(limit=args.limit, strategy=args.strategy)
 
         original_measure = backtest_run._measure_namespace
         original_run_cohort_for = backtest_run._run_cohort_for
@@ -411,7 +441,7 @@ def main() -> None:
                         current = arm.namespaces.get("in_sample")
                         legacy_control, current_control = controls
                         row: dict[str, object] = {
-                            "population": "full" if args.limit is None else f"smoke-limit-{args.limit}",
+                            "population": population,
                             "strategy_id": strategy_id,
                             "ambiguity_arm": arm.ambiguity_arm or "shared",
                             "quarantine_arm": quarantine_arm,
