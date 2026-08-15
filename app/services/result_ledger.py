@@ -2018,6 +2018,12 @@ _SELECT_RESULTS_BY_IDS = f"""
     WHERE result_id = ANY(%(result_ids)s::bigint[])
 """  # noqa: S608 - a module-level literal, no caller input reaches the fragment
 
+_SELECT_CONTROL_SUPPORT = """
+    SELECT holdout_result_id, candidate_count, control_result_id
+    FROM strategy_result_control_support
+    WHERE holdout_result_id = ANY(%(result_ids)s::bigint[])
+"""
+
 
 def stored_result_promotion_refusals(conn: psycopg.Connection[tuple], result_id: int) -> tuple[PromotionRefusal, ...]:
     """Every refusal the STORED ROW itself decides, for the transition (#2639).
@@ -2063,7 +2069,12 @@ def stored_result_promotion_refusals(conn: psycopg.Connection[tuple], result_id:
     return stored_result_promotion_refusals_for(conn, [result_id])[result_id]
 
 
-def _refusals_for_result(result: StrategyResult, *, arm_pair_present: bool) -> tuple[PromotionRefusal, ...]:
+def _refusals_for_result(
+    result: StrategyResult,
+    *,
+    arm_pair_present: bool,
+    control_support: StrategyResult | None = None,
+) -> tuple[PromotionRefusal, ...]:
     """The pure half: ``check_promotable``'s order over one rebuilt row.
 
     Split out so the single and batch reads apply the same clauses in the same
@@ -2088,18 +2099,28 @@ def _refusals_for_result(result: StrategyResult, *, arm_pair_present: bool) -> t
     # door is not the one the transition uses.
     if not arm_pair_present:
         refusals.append("quarantine_arms_not_compared")
-    refusals.extend(synthetic_control_promotion_refusals(result.synthetic_control))
+    # #2737 — a hold-out row deliberately owns no 1,000-member random-entry
+    # cohort: running it there would be 1,000 outcome looks. Its control clause
+    # is replayed from the exact in-sample companion derived by the database
+    # view. An in-sample result continues to stand on its own control. Missing,
+    # ambiguous or control-free support remains `synthetic_control_not_run`.
+    control = result.synthetic_control
+    if result.identity.namespace == "hold_out":
+        control = None if control_support is None else control_support.synthetic_control
+    refusals.extend(synthetic_control_promotion_refusals(control))
     return tuple(refusals)
 
 
 def stored_result_promotion_refusals_for(
     conn: psycopg.Connection[tuple], result_ids: Sequence[int]
 ) -> dict[int, tuple[PromotionRefusal, ...]]:
-    """``stored_result_promotion_refusals`` for a whole batch, in TWO statements (#2641).
+    """``stored_result_promotion_refusals`` for a whole batch (#2641/#2737).
 
-    One row read for every result, one arm-version read for every identity —
-    where the per-result form issued two per result. The verdict, its codes and
-    their order are unchanged; only the statement count moves.
+    One row read for every result and one arm-version read for every identity.
+    A batch containing hold-out rows adds one derived-support census and one
+    batched read of the distinct in-sample support rows: at most four statements,
+    never one pair per result. The hold-out control verdict comes from those
+    support rows; every other clause and its order are unchanged.
 
     ⚠ Same ``RuntimeError`` on a missing row, and the same masking cost: a
     corrupt or absent row anywhere in the batch now raises BEFORE any result's
@@ -2122,8 +2143,39 @@ def stored_result_promotion_refusals_for(
             # list of things to fix about a strategy.
             raise RuntimeError(f"no stored result row for result_id {result_id}")
     pairs = _arm_pairs_present(conn, [results[result_id].identity for result_id in result_ids])
+
+    # The view derives candidates from immutable identity pins; the caller
+    # cannot supply a favourable support id. `candidate_count != 1` is the
+    # fail-closed state and deliberately maps to a missing control below.
+    holdout_ids = [result_id for result_id in result_ids if results[result_id].identity.namespace == "hold_out"]
+    support_ids_by_result: dict[int, int] = {}
+    if holdout_ids:
+        support_rows = conn.execute(_SELECT_CONTROL_SUPPORT, {"result_ids": holdout_ids}).fetchall()
+        support_census = {int(row[0]): (int(row[1]), None if row[2] is None else int(row[2])) for row in support_rows}
+        for result_id in holdout_ids:
+            candidate_count, support_id = support_census.get(result_id, (0, None))
+            if candidate_count == 1 and support_id is not None:
+                support_ids_by_result[result_id] = support_id
+
+    support_results: dict[int, StrategyResult] = {}
+    if support_ids_by_result:
+        support_rows = conn.execute(
+            _SELECT_RESULTS_BY_IDS,
+            {"result_ids": sorted(set(support_ids_by_result.values()))},
+        ).fetchall()
+        support_results = {int(row[0]): _result_from_row(row[1:]) for row in support_rows}
+        missing_support = set(support_ids_by_result.values()) - set(support_results)
+        if missing_support:
+            raise RuntimeError(f"derived control support result(s) disappeared: {sorted(missing_support)}")
+
     return {
-        result_id: _refusals_for_result(results[result_id], arm_pair_present=pairs[results[result_id].identity])
+        result_id: _refusals_for_result(
+            results[result_id],
+            arm_pair_present=pairs[results[result_id].identity],
+            control_support=(
+                support_results[support_ids_by_result[result_id]] if result_id in support_ids_by_result else None
+            ),
+        )
         for result_id in result_ids
     }
 

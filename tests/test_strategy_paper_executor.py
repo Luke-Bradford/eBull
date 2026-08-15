@@ -29,7 +29,8 @@ from app.providers.broker import (
 )
 from app.services.cost_model import COST_MODEL_ID
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
-from app.services.result_ledger import store_holdout_result
+from app.services.result_ledger import store_holdout_result, store_in_sample_result
+from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
 from app.services.strategy_control_plane import (
     configure_deployment,
     configure_execution_policy,
@@ -54,6 +55,10 @@ from app.services.strategy_paper_executor import (
     PaperExecutionResult,
     _effective_capital_bases,
     execute_fired_paper_signal,
+)
+from app.services.strategy_result_universe import (
+    ResultUniverseRecord,
+    store_result_universe,
 )
 from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_result_ledger import (
@@ -170,23 +175,27 @@ def _seed(
         }
     )
     deflated = build_deflated()
-    result_id = store_holdout_result(
+    shared_result = {
+        "strategy_id": "S-ALLOC",
+        "strategy_version": "v1",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "fx_unmodelled": False,
+        "metrics": metrics,
+        "evaluated_instrument_count": 3,
+        "deflated": deflated,
+        "trial_count": deflated.declared_trials,
+        "deflated_sharpe": Decimal(repr(deflated.deflated_sharpe)),
+    }
+    # The random-entry cohort is an in-sample falsification.  The withheld row
+    # must remain control-free; production derives this exact support rather
+    # than spending 1,000 additional looks at holdout outcomes (#2737).
+    support_id = store_in_sample_result(
         conn,
         build_result(
-            strategy_id="S-ALLOC",
-            strategy_version="v1",
-            namespace="hold_out",
-            window_start=date(2022, 1, 1),
-            universe_basis="survivorship_free",
-            carry_unmodelled=False,
-            # ⚠ BOTH, since #2363: the funding sweep requires each component
-            # cleared, so a fixture that only cleared carry would stop
-            # qualifying — which is the widened predicate working.
-            fx_unmodelled=False,
-            metrics=metrics,
-            deflated=deflated,
-            trial_count=deflated.declared_trials,
-            deflated_sharpe=Decimal(repr(deflated.deflated_sharpe)),
+            **shared_result,
+            namespace="in_sample",
+            purpose="harness_validation",
             synthetic_control=build_control(
                 metrics,
                 mean_return_pct=0.0,
@@ -196,9 +205,25 @@ def _seed(
                 cohort_return_threshold_pct=-101.0,
             ),
         ),
+    )
+    universe_record = ResultUniverseRecord(
+        universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+        evaluated_instrument_ids=frozenset({1, 2, 3}),
+        validated_universe_ids=frozenset({1, 2, 3}),
+    )
+    store_result_universe(conn, result_id=support_id, record=universe_record)
+    result_id = store_holdout_result(
+        conn,
+        build_result(
+            **shared_result,
+            namespace="hold_out",
+            window_start=date(2022, 1, 1),
+            synthetic_control=None,
+        ),
         accessed_by="tests/test_strategy_paper_executor.py",
         purpose="paper allocation evidence fixture",
     )
+    store_result_universe(conn, result_id=result_id, record=universe_record)
     promotion_rows = conn.execute(
         """
         INSERT INTO strategy_promotions (

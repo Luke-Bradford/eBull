@@ -319,7 +319,8 @@ def _load_intent(
                            AND r.trial_count IS NOT NULL
                            AND r.deflated_sharpe IS NOT NULL
                            AND r.effective_sample_size IS NOT NULL
-                           AND r.synthetic_control_passed = true
+                           AND control_support.candidate_count = 1
+                           AND control_result.synthetic_control_passed = true
                        ) AS qualified_result_count,
                        min(r.expectancy_ci_low_pct) FILTER (WHERE
                            r.expectancy_ci_low_pct IS NOT NULL
@@ -331,11 +332,16 @@ def _load_intent(
                            AND r.trial_count IS NOT NULL
                            AND r.deflated_sharpe IS NOT NULL
                            AND r.effective_sample_size IS NOT NULL
-                           AND r.synthetic_control_passed = true
+                           AND control_support.candidate_count = 1
+                           AND control_result.synthetic_control_passed = true
                        ) AS expectancy_ci_low_pct
                 FROM strategy_promotion_results pr
                 JOIN strategy_promotions promotion ON promotion.promotion_id = pr.promotion_id
                 JOIN strategy_results_store r ON r.result_id = pr.result_id
+                LEFT JOIN strategy_result_control_support control_support
+                  ON control_support.holdout_result_id = r.result_id
+                LEFT JOIN strategy_results_store control_result
+                  ON control_result.result_id = control_support.control_result_id
                 WHERE promotion.strategy_id = s.strategy_id
                   AND promotion.strategy_version = s.strategy_version
             ) evidence ON true
