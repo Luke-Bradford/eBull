@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import pytest
 
+from app.services.strategies.s10_relative_strength_leader import s10_rebalance_dates
 from app.services.strategy_mt1_trial import (
     BLOCK_LENGTH_MONTHS,
     BOOTSTRAP_RESAMPLES,
@@ -34,7 +35,13 @@ def _arm(values: list[float], *, offset: int = 0) -> PortfolioArm:
 
 
 def _audit(*, turnover: float = 1.0, reconciled: bool = True) -> ScaledBookStructuralAudit:
-    decisions = tuple(date(2010 + index // 12, index % 12 + 1, 28) for index in range(24))
+    def first_weekday(month: date) -> date:
+        while month.weekday() >= 5:
+            month += timedelta(days=1)
+        return month
+
+    panel_calendar = tuple(first_weekday(_month(index + 119)) for index in range(25))
+    decisions = tuple(sorted(s10_rebalance_dates(panel_calendar)))
     return ScaledBookStructuralAudit(decisions, decisions, turnover, 1_000_000.0, reconciled)
 
 
@@ -145,7 +152,7 @@ def test_fewer_than_120_common_months_refuses() -> None:
             ScaledBookStructuralAudit(
                 _audit().decision_dates[:-1], _audit().expected_decision_dates, 1.0, 1_000_000.0, True
             ),
-            "do not equal the frozen month-end clock",
+            "do not equal the frozen first-session monthly clock",
         ),
     ],
 )
@@ -168,7 +175,7 @@ def test_the_negative_control_must_share_mt1s_frozen_exposure_clock() -> None:
     shifted_dates = tuple(date(day.year, day.month, 27) for day in shifted.decision_dates)
     shifted = ScaledBookStructuralAudit(shifted_dates, shifted_dates, 1.0, 1_000_000.0, True)
 
-    with pytest.raises(MT1TrialRefused, match="same frozen month-end exposure clock"):
+    with pytest.raises(MT1TrialRefused, match="same frozen first-session monthly exposure clock"):
         structural_gate(_audit(), shifted)
 
 
