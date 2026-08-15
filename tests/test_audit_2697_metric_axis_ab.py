@@ -11,7 +11,7 @@ from scripts.audit_2697_metric_axis_ab import _CONTROL, _CONTROL_DELTA, _METRICS
 _HEAD = "a" * 40
 
 
-def _numbers(keys: frozenset[str]) -> dict[str, float]:
+def _numbers(keys: frozenset[str]) -> dict[str, object]:
     return {key: float(index + 1) for index, key in enumerate(sorted(keys))}
 
 
