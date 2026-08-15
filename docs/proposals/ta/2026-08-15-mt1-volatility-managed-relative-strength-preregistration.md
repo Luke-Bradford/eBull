@@ -54,6 +54,17 @@ the book implementation or any outcome access showed that phrase contradicted
 the clock: the binding was and remains the source rule's exact dates; no price outcome was
 read and no choice was made between measured variants.
 
+The exposure statistic for that date uses information only through the prior completed
+calendar month and is therefore fixed before the decision bar opens. The synthetic sizing
+trade executes after that decision bar's close mark, using the holdings-level engine's
+existing per-leg half-spread, sell-before-buy ordering and cash cap. The new target applies
+only to the following close-to-close return; it never scales the decision bar's return.
+This is identified as
+`capped_target_exposure_after_decision_close_v1`. Source-strategy entries and exits retain
+their original stored open fills. When a source event and an exposure decision share a
+date, step 4 performs one closing rebalance over the post-fill holdings rather than two
+synthetic rebalances.
+
 ## Frozen volatility construction
 
 For each complete calendar month `m`, let `f[m,d]` be the unscaled reference portfolio's
@@ -128,8 +139,10 @@ cap, clock, signal family or history policy is a new trial and a new strategy ve
 
 - Full `survivorship_free` research population and its point-in-time termination treatment.
 - Raw prices for signals/fills/cost bands; aligned total-return wealth prices for returns.
-- Signal at the declared first-session monthly decision bar; fills and exits exactly as the
-  source rule permits. No shared signal/outcome print.
+- Exposure input ends at the prior completed month and the target is fixed before the
+  declared first-session monthly decision bar; its synthetic sizing trade uses that bar's
+  close and affects only later returns. Underlying signal fills and exits remain exactly as
+  the source rule permits. No input return is also an outcome return under the new target.
 - Current complete cost-model identity, including spread, carry and FX stamps. A missing
   cost term is a structural refusal, never zero.
 - The fixed in-sample/hold-out boundary and all code-pinned recent windows used by the

@@ -18,11 +18,13 @@ import pytest
 
 from app.services.equity_curve import (
     BENCHMARK_RULE_ID,
+    CAPPED_TARGET_EXPOSURE_RULE_ID,
     ENTRY_WEIGHT_DRIFT_RULE_ID,
     MONTH_END_REBALANCE_RULE_ID,
     SIZING_RULE_ID,
     LegBook,
     build_buy_and_hold_curve,
+    build_capped_target_exposure_curve,
     build_entry_weight_drift_curve,
     build_equity_curve,
     build_month_end_rebalanced_curve,
@@ -35,6 +37,7 @@ SPEC_SIZING_RULE = "equal_weight_concurrent_v1"
 #: #2430's frozen research arm. It is deliberately not production evidence.
 SPEC_ENTRY_WEIGHT_DRIFT_RULE = "entry_weight_drift_v1"
 SPEC_MONTH_END_REBALANCE_RULE = "calendar_month_end_equal_weight_v1"
+SPEC_CAPPED_TARGET_EXPOSURE_RULE = "capped_target_exposure_after_decision_close_v1"
 
 #: #2426's benchmark rule, transcribed from
 #: ``docs/proposals/ta/2026-08-08-buy-and-hold-benchmark.md`` §2.4.
@@ -86,6 +89,14 @@ class TestSpecConstants:
     def test_the_month_end_arm_has_a_distinct_declared_identity(self) -> None:
         assert MONTH_END_REBALANCE_RULE_ID == SPEC_MONTH_END_REBALANCE_RULE
         assert MONTH_END_REBALANCE_RULE_ID not in {SIZING_RULE_ID, ENTRY_WEIGHT_DRIFT_RULE_ID}
+
+    def test_the_capped_exposure_engine_has_a_distinct_declared_identity(self) -> None:
+        assert CAPPED_TARGET_EXPOSURE_RULE_ID == SPEC_CAPPED_TARGET_EXPOSURE_RULE
+        assert CAPPED_TARGET_EXPOSURE_RULE_ID not in {
+            SIZING_RULE_ID,
+            ENTRY_WEIGHT_DRIFT_RULE_ID,
+            MONTH_END_REBALANCE_RULE_ID,
+        }
 
 
 class TestLegBookRefuses:
@@ -605,3 +616,115 @@ class TestBuyAndHoldComposition:
         curve = build_buy_and_hold_curve(book, date_count=4)
         # Opens on 0 and 2, both close on 3.
         assert curve.event_dates == 3
+
+
+class TestCappedTargetExposureCurve:
+    DATES = (
+        date(2020, 1, 2),
+        date(2020, 1, 3),
+        date(2020, 1, 6),
+        date(2020, 1, 7),
+        date(2020, 1, 8),
+    )
+
+    @staticmethod
+    def _rising_book(*, half_spread: float = 0.0, realised: bool = True) -> LegBook:
+        book = LegBook()
+        _leg(
+            book,
+            entry=0,
+            exit_=4,
+            entry_price=100.0,
+            exit_price=146.41,
+            marks=[100.0, 110.0, 121.0, 133.1, 146.41],
+            half_spread=half_spread,
+            realised=realised,
+        )
+        return book
+
+    def test_a_new_target_applies_only_after_the_decision_bars_return(self) -> None:
+        curve = build_capped_target_exposure_curve(
+            self._rising_book(),
+            dates=self.DATES,
+            target_exposure_by_date={self.DATES[0]: 0.5, self.DATES[2]: 0.25},
+        )
+
+        # The first target trades after day 0's mark. Two subsequent 10% source
+        # moves therefore add 5% each; day 2's lower target only affects day 3.
+        assert list(curve.equity[:4]) == pytest.approx([1.0, 1.05, 1.105, 1.132625])
+        assert list(curve.invested[:4]) == pytest.approx([0.5, 0.55, 0.27625, 0.303875])
+        assert list(curve.traded_notional[:4]) == pytest.approx([0.5, 0.0, 0.32875, 0.0])
+
+    def test_exposure_changes_charge_each_holding_spread_and_preserve_cash(self) -> None:
+        book = LegBook()
+        _leg(
+            book,
+            entry=0,
+            exit_=2,
+            entry_price=100.0,
+            exit_price=100.0,
+            marks=[100.0, 100.0, 100.0],
+            half_spread=0.01,
+        )
+        curve = build_capped_target_exposure_curve(
+            book,
+            dates=self.DATES[:3],
+            target_exposure_by_date={self.DATES[0]: 0.5, self.DATES[1]: 0.0},
+        )
+
+        assert list(curve.equity) == pytest.approx([0.995, 0.99, 0.99])
+        assert list(curve.traded_notional) == pytest.approx([0.5, 0.5, 0.0])
+        assert curve.rebalance_costs == pytest.approx(0.01)
+        assert min(curve.equity - curve.invested) >= 0.0
+
+    def test_intramonth_source_events_keep_the_last_target_and_net_once(self) -> None:
+        book = LegBook()
+        _leg(book, entry=0, exit_=4, entry_price=100.0, exit_price=100.0, marks=[100.0] * 5)
+        _leg(book, entry=2, exit_=4, entry_price=100.0, exit_price=100.0, marks=[100.0] * 3)
+
+        curve = build_capped_target_exposure_curve(
+            book,
+            dates=self.DATES,
+            target_exposure_by_date={self.DATES[0]: 0.5},
+        )
+
+        assert curve.equity[2] == pytest.approx(1.0)
+        assert curve.invested[2] == pytest.approx(0.5)
+        # 0.25 buys the new leg and 0.25 sells the old one: the event is one
+        # netted uniform rebalance under the unchanged 50% aggregate target.
+        assert curve.traded_notional[2] == pytest.approx(0.5)
+
+    @pytest.mark.parametrize(
+        ("schedule", "message"),
+        [
+            ({}, "schedule is empty"),
+            ({date(2019, 12, 31): 0.5}, "outside the curve date axis"),
+            ({DATES[0]: -0.01}, "in \\[0, 1\\]"),
+            ({DATES[0]: 1.01}, "in \\[0, 1\\]"),
+            ({DATES[0]: math.nan}, "finite"),
+            ({DATES[0]: True}, "not boolean"),
+        ],
+    )
+    def test_invalid_or_levered_schedules_refuse(self, schedule: dict[date, float], message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            build_capped_target_exposure_curve(
+                self._rising_book(),
+                dates=self.DATES,
+                target_exposure_by_date=schedule,
+            )
+
+    def test_an_untradeable_frozen_leg_refuses_uniform_scaling(self) -> None:
+        with pytest.raises(ValueError, match="untradeable frozen leg"):
+            build_capped_target_exposure_curve(
+                self._rising_book(realised=False),
+                dates=self.DATES,
+                target_exposure_by_date={self.DATES[0]: 0.5},
+            )
+
+    def test_a_non_increasing_axis_refuses(self) -> None:
+        with pytest.raises(ValueError, match="strictly increasing"):
+            build_capped_target_exposure_curve(
+                self._rising_book(),
+                dates=(self.DATES[0], self.DATES[0], *self.DATES[2:]),
+                target_exposure_by_date={self.DATES[0]: 0.5},
+            )
