@@ -595,6 +595,10 @@ const REFUSAL_LABELS: Record<string, string> = {
   position_operation_reconciliation_not_found: "Latest operation was not found at the broker",
   position_operation_reconciliation_ambiguous: "Latest operation has ambiguous broker reconciliation",
   position_operation_reconciliation_error: "Latest operation reconciliation failed",
+  entry_order_reconciliation_not_found: "Entry order was not found at the broker",
+  entry_order_reconciliation_ambiguous: "Entry order has ambiguous broker reconciliation",
+  entry_order_reconciliation_rejected: "Entry order was rejected by the broker",
+  entry_order_reconciliation_error: "Entry order reconciliation failed",
 };
 
 function refusalLabel(refusal: string): string {
@@ -1000,6 +1004,9 @@ function StrategyActivity({
               <tbody>
                 {items.map((signal) => {
                   const funding = fundingPresentation(signal);
+                  const operationalLifecycleReasons = (signal.trade_lifecycle?.incomplete_reasons ?? []).filter(
+                    (reason) => reason.startsWith("entry_order_") || reason.startsWith("position_operation_"),
+                  );
                   return (
                     <tr key={signal.signal_id} className="border-t border-slate-200 align-top dark:border-slate-800">
                       <td className="px-4 py-3">
@@ -1053,6 +1060,9 @@ function StrategyActivity({
                               </span>
                             ) : null}
                             {signal.trade_lifecycle.latest_reconciliation_error ? <span className="block text-red-700 dark:text-red-300">{refusalLabel(signal.trade_lifecycle.latest_reconciliation_error)}</span> : null}
+                            {operationalLifecycleReasons.length > 0 ? (
+                              <span className="block text-red-700 dark:text-red-300">{operationalLifecycleReasons.map(refusalLabel).join(" · ")}</span>
+                            ) : null}
                           </>
                         ) : null}
                       </td>

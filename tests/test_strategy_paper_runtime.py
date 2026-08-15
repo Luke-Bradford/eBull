@@ -10,6 +10,8 @@ import psycopg
 import pytest
 from psycopg.pq import TransactionStatus
 
+from app.api.strategies import get_fired_signals, get_strategy_owned_positions
+from app.providers.broker import BrokerPortfolio
 from app.services.cost_model import COST_MODEL_ID
 from app.services.strategy_live_gate import assess_live_gate
 from app.services.strategy_opportunity_forecast import OpportunityForecast, record_opportunity_forecast
@@ -21,7 +23,13 @@ from app.services.strategy_paper_runtime import (
     run_strategy_paper_cycle,
 )
 from tests.test_strategy_paper_executor import _NOW, _REQUEST_ID, _authorise_forecast_scope, _broker, _seed
-from tests.test_strategy_position_manager import _opened_trade
+from tests.test_strategy_position_manager import (
+    _MANUAL_POSITION_ID,
+    _POSITION_ID,
+    _opened_trade,
+    _order_detail,
+    _position,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
 
@@ -111,6 +119,160 @@ def test_cycle_refreshes_health_then_executes_one_current_paper_candidate(
         ("quote_freshness", False),
         ("scan_freshness", False),
     ]
+
+
+def test_generated_demo_trade_is_auditable_through_reconciliation_and_operator_reads(
+    ebull_test_conn: psycopg.Connection[tuple], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execution-plumbing acceptance only; ``S-ALLOC`` is a synthetic test candidate."""
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    broker = _broker()
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+
+    submitted = run_strategy_paper_cycle(conn, broker=broker, now=_NOW, strategy_versions=["v1"])
+
+    assert submitted.evaluated_signals == 1
+    broker.place_demo_strategy_order.assert_called_once()
+    order_row = conn.execute(
+        """
+        SELECT t.strategy_trade_id,o.order_id,o.strategy_request_id,o.broker_order_ref,
+               pf.forecast_id,pf.ranking_member_id,pf.verdict,fd.amount
+        FROM strategy_funding_decisions fd
+        JOIN strategy_entry_preflights pf ON pf.signal_id=fd.signal_id
+        JOIN strategy_trades t ON t.funding_decision_id=fd.funding_decision_id
+        JOIN strategy_trade_orders sto ON sto.strategy_trade_id=t.strategy_trade_id
+        JOIN orders o ON o.order_id=sto.order_id
+        WHERE fd.signal_id=%s
+        """,
+        (signal_id,),
+    ).fetchone()
+    assert order_row is not None
+    trade_id, order_id, request_id, broker_order_ref, forecast_id, ranking_member_id, verdict, amount = order_row
+    assert request_id == _REQUEST_ID
+    assert broker_order_ref == "13902598"
+    assert forecast_id is not None and ranking_member_id is not None
+    assert verdict == "allocated"
+    assert amount == Decimal("50.000000")
+    conn.commit()
+
+    # The next bounded cycle observes the broker fill, claims only its exact
+    # execution and manages it. A same-instrument manual position is visible to
+    # the broker but must never be claimed by strategy ownership.
+    broker.lookup_order.return_value = _order_detail()
+    manual = _position(_MANUAL_POSITION_ID, stop=None, take=None)
+    broker.get_portfolio.return_value = BrokerPortfolio(
+        positions=(
+            _position(_POSITION_ID, stop=Decimal("95"), take=Decimal("110")),
+            manual,
+        ),
+        available_cash=Decimal("500"),
+        raw_payload={},
+    )
+    reconciled = run_strategy_paper_cycle(
+        conn,
+        broker=broker,
+        now=_NOW + timedelta(minutes=5),
+        strategy_versions=["v1"],
+    )
+
+    assert reconciled.reconciled_orders == 1
+    assert reconciled.managed_positions == 1
+    assert reconciled.evaluated_signals == 0
+    broker.place_demo_strategy_order.assert_called_once()
+    assert conn.execute(
+        """
+        SELECT ownership.broker_position_id,t.status,reconciliation.state,
+               reconciliation.broker_status
+        FROM strategy_position_ownership ownership
+        JOIN strategy_trades t ON t.strategy_trade_id=ownership.strategy_trade_id
+        JOIN strategy_trade_orders sto ON sto.strategy_trade_id=t.strategy_trade_id
+        JOIN strategy_order_reconciliation_state reconciliation ON reconciliation.order_id=sto.order_id
+        WHERE ownership.strategy_trade_id=%s
+        """,
+        (trade_id,),
+    ).fetchall() == [(_POSITION_ID, "open", "resolved", "Filled")]
+    assert conn.execute(
+        "SELECT count(*) FROM strategy_position_ownership WHERE broker_position_id=%s",
+        (_MANUAL_POSITION_ID,),
+    ).fetchone() == (0,)
+
+    # The production endpoint intentionally filters to current manifest
+    # versions. Admit only this synthetic fixture version at that boundary;
+    # this is plumbing proof, never production strategy registration.
+    #
+    # ⚠ SCAN basis, not the result basis (#2814). ``_FIRED_SIGNALS_SQL`` reads
+    # ``strategy_signals``, written only by ``signal_ledger`` under
+    # ``SCAN_UNIVERSE``, and the two bases are disjoint — patching
+    # ``_current_versions`` here binds an identity this SQL never matches, so
+    # the page comes back empty and the assertion below dies on StopIteration
+    # rather than on anything the fixture did.
+    monkeypatch.setattr("app.api.strategies._current_scan_versions", lambda: {"S-ALLOC": "v1"})
+    signals = get_fired_signals(cursor=None, limit=50, strategy_id="S-ALLOC", conn=conn)
+    visible = next(item for item in signals.items if item.signal_id == signal_id)
+    assert visible.funding_status == "funded"
+    assert visible.funded_amount == amount
+    assert visible.strategy_trade_id == trade_id
+    assert visible.trade_lifecycle is not None
+    assert visible.trade_lifecycle.trade_status == "open"
+    assert visible.trade_lifecycle.ownership_count == 1
+    assert visible.trade_lifecycle.broker_position_id == _POSITION_ID
+    assert visible.trade_lifecycle.latest_reconciliation_state == "resolved"
+
+    conn.execute(
+        """
+        UPDATE strategy_order_reconciliation_state
+        SET state='ambiguous',reconciled_at=NULL,last_error_code='multiple_position_executions'
+        WHERE order_id=%s
+        """,
+        (order_id,),
+    )
+    ambiguous_signals = get_fired_signals(cursor=None, limit=50, strategy_id="S-ALLOC", conn=conn)
+    ambiguous = next(item for item in ambiguous_signals.items if item.signal_id == signal_id)
+    assert ambiguous.trade_lifecycle is not None
+    assert ambiguous.trade_lifecycle.incomplete_reasons == ["entry_order_reconciliation_ambiguous"]
+    conn.execute(
+        """
+        UPDATE strategy_order_reconciliation_state
+        SET state='resolved',reconciled_at=now(),last_error_code=NULL
+        WHERE order_id=%s
+        """,
+        (order_id,),
+    )
+
+    positions = get_strategy_owned_positions(conn)
+    owned = next(item for item in positions.positions if item.strategy_trade_id == trade_id)
+    assert owned.broker_position_id == _POSITION_ID
+    assert owned.strategy_id == "S-ALLOC"
+    assert owned.trade_status == "open"
+    # The operator can see the owned identity immediately; valuation stays
+    # explicitly unavailable until the independent portfolio sync persists it.
+    assert not owned.valuation_available
+    assert positions.live_quote_instrument_ids == [2449001]
+    conn.commit()
+
+    # A third replay is read-only for this signal/order and remains one owned
+    # lifecycle. It may manage the already-open position again, but cannot mint
+    # another funding decision, trade, order or broker submission.
+    replay = run_strategy_paper_cycle(
+        conn,
+        broker=broker,
+        now=_NOW + timedelta(minutes=10),
+        strategy_versions=["v1"],
+    )
+    assert replay.reconciled_orders == 0
+    assert replay.evaluated_signals == 0
+    broker.place_demo_strategy_order.assert_called_once()
+    assert conn.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM strategy_funding_decisions WHERE signal_id=%s),
+          (SELECT count(*) FROM strategy_trades WHERE strategy_trade_id=%s),
+          (SELECT count(*) FROM strategy_trade_orders WHERE order_id=%s),
+          (SELECT count(*) FROM strategy_position_ownership WHERE strategy_trade_id=%s)
+        """,
+        (signal_id, trade_id, order_id, trade_id),
+    ).fetchone() == (1, 1, 1, 1)
 
 
 def test_runtime_ranks_the_complete_set_before_applying_its_execution_limit(
