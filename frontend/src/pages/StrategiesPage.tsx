@@ -4,6 +4,7 @@ import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "rec
 
 import {
   closeStrategyOwnedPosition,
+  fetchFiredSignals,
   fetchStrategyOverview,
   fetchStrategyOwnedPositions,
   fetchStrategyPnlHistory,
@@ -13,6 +14,8 @@ import {
   updateStrategySizing,
 } from "@/api/strategies";
 import type {
+  FiredSignal,
+  FiredSignalsResponse,
   StrategyEvidenceWindow,
   StrategyFireRate,
   StrategyOverview,
@@ -530,6 +533,150 @@ function EmptyPnlChart() {
         </p>
       </div>
     </div>
+  );
+}
+
+function fundingPresentation(signal: FiredSignal): { label: string; tone: "ok" | "neutral" | "warn" } {
+  if (signal.funding_status === "funded") return { label: "Funded", tone: "ok" };
+  if (signal.funding_status === "rejected") return { label: "Not funded", tone: "warn" };
+  return { label: "No capital needed", tone: "neutral" };
+}
+
+function executionLabel(signal: FiredSignal): string {
+  if (signal.execution_status) return signal.execution_status.replaceAll("_", " ");
+  if (signal.funding_status === "rejected") return "No order submitted";
+  if (signal.funding_status === "not_applicable") return "Exit observation";
+  return "Awaiting broker state";
+}
+
+function outcomeLabel(signal: FiredSignal): string {
+  if (signal.outcome === null) return "Outcome unresolved";
+  return signal.outcome.replaceAll("_", " ");
+}
+
+function StrategyActivity({
+  response,
+  strategyTitles,
+  onRetry,
+}: {
+  response: FiredSignalsResponse;
+  strategyTitles: Record<string, string>;
+  onRetry: () => void;
+}) {
+  const [olderItems, setOlderItems] = useState<FiredSignal[]>([]);
+  const [nextCursor, setNextCursor] = useState(response.next_cursor);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false);
+
+  useEffect(() => {
+    setOlderItems([]);
+    setNextCursor(response.next_cursor);
+    setLoadMoreFailed(false);
+  }, [response]);
+
+  const items = [...response.items, ...olderItems];
+
+  async function loadMore() {
+    if (nextCursor === null || loadingMore) return;
+    setLoadingMore(true);
+    setLoadMoreFailed(false);
+    try {
+      const page = await fetchFiredSignals(nextCursor);
+      const seen = new Set(items.map((item) => item.signal_id));
+      setOlderItems((current) => [...current, ...page.items.filter((item) => !seen.has(item.signal_id))]);
+      setNextCursor(page.next_cursor);
+    } catch (error) {
+      console.error("Strategy activity pagination failed:", error);
+      setLoadMoreFailed(true);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  return (
+    <section className="border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-4">
+        <div>
+          <h2 className="text-sm font-semibold">Generated trade activity</h2>
+          <p className="mt-1 max-w-3xl text-xs text-slate-500">
+            Fired signals through allocation and demo execution. The final column is the rule-defined signal outcome, not realised broker P&amp;L. Rejected decisions are retained as the unfunded shadow record; they never created an order.
+          </p>
+        </div>
+        <button type="button" onClick={onRetry} className="min-h-10 border border-slate-300 px-3 text-xs font-medium hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">
+          Refresh activity
+        </button>
+      </div>
+      {items.length === 0 ? (
+        <div className="border-t border-slate-200 px-5 py-5 dark:border-slate-800">
+          <EmptyState title="No generated decisions yet" description="Fired entry and exit signals will appear here after the daily strategy scan." />
+        </div>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[72rem]">
+              <thead className="border-t border-slate-200 text-left text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:border-slate-800">
+                <tr>
+                  <th className="px-4 py-2">Signal</th>
+                  <th className="px-4 py-2">Strategy</th>
+                  <th className="px-4 py-2">Allocation</th>
+                  <th className="px-4 py-2">Execution</th>
+                  <th className="px-4 py-2 text-right">Model / actual fill</th>
+                  <th className="px-4 py-2 text-right">Signal outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((signal) => {
+                  const funding = fundingPresentation(signal);
+                  return (
+                    <tr key={signal.signal_id} className="border-t border-slate-200 align-top dark:border-slate-800">
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <strong className="text-sm">{signal.symbol}</strong>
+                          <Badge tone="neutral">{signal.signal_kind}</Badge>
+                        </div>
+                        <span className="mt-1 block text-xs text-slate-500">Signal #{signal.signal_id} · {formatDate(signal.signal_bar_date)}</span>
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        <span className="block font-medium text-slate-800 dark:text-slate-100">{strategyTitles[signal.strategy_id] ?? signal.strategy_id}</span>
+                        <span className="text-slate-500">{shortVersion(signal.strategy_version)} · {signal.universe}</span>
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        <Badge tone={funding.tone}>{funding.label}</Badge>
+                        <span className="mt-1 block max-w-64 text-slate-500">{refusalLabel(signal.funding_reason)}</span>
+                        {signal.funded_amount !== null ? <span className="mt-1 block tabular-nums">{money(signal.funded_amount)} assigned</span> : null}
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        <span className="capitalize">{executionLabel(signal)}</span>
+                        <span className="mt-1 block text-slate-500">{signal.strategy_trade_id === null ? "No strategy trade" : `Trade #${signal.strategy_trade_id}`}</span>
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs tabular-nums">
+                        <span className="block">{money(signal.fill_price)}</span>
+                        <span className="text-slate-500">{signal.actual_fill_price === null ? "Actual —" : `${money(signal.actual_fill_price)} actual`}</span>
+                        {signal.slippage_pct !== null ? <span className="block text-slate-500">{pctPoints(signal.slippage_pct)} slippage</span> : null}
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs">
+                        <span className="block capitalize">{outcomeLabel(signal)}</span>
+                        <span className="mt-1 block tabular-nums">{pctPoints(signal.gross_return_pct)}</span>
+                        {signal.outcome_reason ? <span className="block text-slate-500">{refusalLabel(signal.outcome_reason)}</span> : null}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-5 py-3 dark:border-slate-800">
+            <span className="text-xs text-slate-500">{items.length} decision{items.length === 1 ? "" : "s"} shown</span>
+            {nextCursor !== null ? (
+              <button type="button" disabled={loadingMore} onClick={() => void loadMore()} className="min-h-10 border border-slate-300 px-3 text-xs font-medium disabled:opacity-50 dark:border-slate-700">
+                {loadingMore ? "Loading…" : loadMoreFailed ? "Retry older activity" : "Load older activity"}
+              </button>
+            ) : null}
+          </div>
+          {loadMoreFailed ? <p role="alert" className="px-5 pb-3 text-xs text-red-700 dark:text-red-300">Older activity could not be loaded. Current rows remain unchanged.</p> : null}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -1186,10 +1333,15 @@ export function StrategiesPage() {
   const overview = useAsync(fetchStrategyOverview, []);
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
   const ownedPositions = useAsync(fetchStrategyOwnedPositions, []);
+  const activity = useAsync(() => fetchFiredSignals(null), []);
   const [closeFor, setCloseFor] = useState<StrategyOwnedPosition | null>(null);
   const [refreshingEvidence, setRefreshingEvidence] = useState(false);
   const [refreshEvidenceError, setRefreshEvidenceError] = useState<string | null>(null);
   const summary = useMemo(() => overview.data ? aggregate(overview.data) : null, [overview.data]);
+  const strategyTitles = useMemo(
+    () => Object.fromEntries((overview.data?.strategies ?? []).map((strategy) => [strategy.strategy_id, strategy.title])),
+    [overview.data],
+  );
   const capitalCandidates = overview.data?.strategies.filter((strategy) => strategy.purpose === "capital_candidate") ?? [];
   const approvedStrategies = capitalCandidates.filter((strategy) => strategy.allocation_ready || strategy.allocation.enabled);
   const researchCandidates = capitalCandidates.filter((strategy) => !strategy.allocation_ready && !strategy.allocation.enabled);
@@ -1275,6 +1427,17 @@ export function StrategiesPage() {
             <LiveQuoteProvider instrumentIds={ownedPositions.data.live_quote_instrument_ids}>
               <OpenStrategyPositions positions={ownedPositions.data.positions} onClose={setCloseFor} />
             </LiveQuoteProvider>
+          ) : null}
+
+          {activity.loading ? (
+            <SectionSkeleton rows={4} />
+          ) : activity.error ? (
+            <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <h2 className="mb-3 text-sm font-semibold">Generated trade activity</h2>
+              <SectionError onRetry={activity.refetch} />
+            </section>
+          ) : activity.data ? (
+            <StrategyActivity response={activity.data} strategyTitles={strategyTitles} onRetry={activity.refetch} />
           ) : null}
 
           {forwardCandidates.length ? <SignalValidation overview={overview.data} strategies={forwardCandidates} /> : null}
@@ -1379,6 +1542,7 @@ export function StrategiesPage() {
               ownedPositions.refetch();
               overview.refetch();
               pnlHistory.refetch();
+              activity.refetch();
             }}
           />
         </>

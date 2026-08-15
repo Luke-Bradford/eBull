@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as strategiesApi from "@/api/strategies";
-import type { StrategyOverviewResponse, StrategyOwnedPosition, StrategyResultArm } from "@/api/types";
+import type { FiredSignal, StrategyOverviewResponse, StrategyOwnedPosition, StrategyResultArm } from "@/api/types";
 import { StrategiesPage } from "@/pages/StrategiesPage";
 
 const ARM: StrategyResultArm = {
@@ -278,6 +278,32 @@ const OWNED_POSITION: StrategyOwnedPosition = {
   valuation_available: true,
 };
 
+const FUNDED_SIGNAL: FiredSignal = {
+  signal_id: 91,
+  strategy_id: "s1-time-series-momentum",
+  strategy_version: "strategy-registry-v1+abc",
+  instrument_id: 101,
+  symbol: "ACME",
+  company_name: "Acme Corp",
+  signal_bar_date: "2026-08-08",
+  signal_kind: "entry",
+  fill_bar_date: "2026-08-09",
+  fill_price: "20",
+  universe: "validated_us_equity",
+  outcome: "target_first",
+  exit_bar_date: "2026-08-12",
+  exit_price: "22",
+  gross_return_pct: "10",
+  outcome_reason: "take_profit_reached",
+  funding_status: "funded",
+  funding_reason: "all_paper_entry_gates_passed",
+  funded_amount: "100",
+  strategy_trade_id: 41,
+  execution_status: "filled",
+  actual_fill_price: "20.10",
+  slippage_pct: "0.5",
+};
+
 function approvedOverview(): StrategyOverviewResponse {
   const strategy = OVERVIEW.strategies[0]!;
   return {
@@ -340,6 +366,7 @@ describe("StrategiesPage", () => {
       positions: [],
       live_quote_instrument_ids: [],
     });
+    vi.spyOn(strategiesApi, "fetchFiredSignals").mockResolvedValue({ items: [], next_cursor: null });
   });
 
   it("keeps unapproved backtests out of portfolio performance", async () => {
@@ -688,6 +715,99 @@ describe("StrategiesPage", () => {
     expect(screen.getByText("A separate manual position in ACME is not part of this request and will remain untouched.")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Close position" }));
     await waitFor(() => expect(close).toHaveBeenCalledWith(41, 7001));
+    await waitFor(() => expect(strategiesApi.fetchFiredSignals).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows funded and rejected decisions through execution and outcome without inventing orders", async () => {
+    const rejected: FiredSignal = {
+      ...FUNDED_SIGNAL,
+      signal_id: 90,
+      symbol: "SAFE",
+      outcome: null,
+      exit_bar_date: null,
+      exit_price: null,
+      gross_return_pct: null,
+      outcome_reason: null,
+      funding_status: "rejected",
+      funding_reason: "paper_pool_disabled",
+      funded_amount: null,
+      strategy_trade_id: null,
+      execution_status: null,
+      actual_fill_price: null,
+      slippage_pct: null,
+    };
+    vi.mocked(strategiesApi.fetchFiredSignals).mockResolvedValue({
+      items: [FUNDED_SIGNAL, rejected],
+      next_cursor: null,
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const section = (await screen.findByText("Generated trade activity")).closest("section")!;
+    expect(within(section).getByText("Funded")).toBeInTheDocument();
+    expect(within(section).getByText("Not funded")).toBeInTheDocument();
+    expect(within(section).getByText("Trade #41")).toBeInTheDocument();
+    expect(within(section).getByText("No order submitted")).toBeInTheDocument();
+    expect(within(section).getByText("No strategy trade")).toBeInTheDocument();
+    expect(within(section).getByText("US$100.00 assigned")).toBeInTheDocument();
+    expect(within(section).getByText("US$20.10 actual")).toBeInTheDocument();
+    expect(within(section).getByText("+0.50% slippage")).toBeInTheDocument();
+    expect(within(section).getByText("target first")).toBeInTheDocument();
+    expect(within(section).getByText("+10.00%")).toBeInTheDocument();
+    expect(within(section).getByText("Outcome unresolved")).toBeInTheDocument();
+    expect(within(section).getByText("paper pool disabled")).toBeInTheDocument();
+  });
+
+  it("loads older generated decisions through the bounded cursor", async () => {
+    const older = { ...FUNDED_SIGNAL, signal_id: 75, symbol: "OLD" };
+    vi.mocked(strategiesApi.fetchFiredSignals)
+      .mockResolvedValueOnce({ items: [FUNDED_SIGNAL], next_cursor: 91 })
+      .mockResolvedValueOnce({ items: [older], next_cursor: null });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+
+    expect(await screen.findByText("OLD")).toBeInTheDocument();
+    expect(strategiesApi.fetchFiredSignals).toHaveBeenNthCalledWith(2, 91);
+    expect(screen.getByText("2 decisions shown")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load older activity" })).not.toBeInTheDocument();
+  });
+
+  it("keeps current activity visible when an older page fails and retries the same cursor", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const older = { ...FUNDED_SIGNAL, signal_id: 75, symbol: "OLD" };
+    vi.mocked(strategiesApi.fetchFiredSignals)
+      .mockResolvedValueOnce({ items: [FUNDED_SIGNAL], next_cursor: 91 })
+      .mockRejectedValueOnce(new Error("older page unavailable"))
+      .mockResolvedValueOnce({ items: [older], next_cursor: null });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "Load older activity" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Older activity could not be loaded");
+    expect(screen.getByText("ACME")).toBeInTheDocument();
+    expect(screen.getByText("1 decision shown")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Retry older activity" }));
+    expect(await screen.findByText("OLD")).toBeInTheDocument();
+    expect(strategiesApi.fetchFiredSignals).toHaveBeenNthCalledWith(3, 91);
+  });
+
+  it("renders an honest empty activity state", async () => {
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    expect(await screen.findByText("No generated decisions yet")).toBeInTheDocument();
+    expect(screen.getByText("Fired entry and exit signals will appear here after the daily strategy scan.")).toBeInTheDocument();
+  });
+
+  it("isolates an activity failure and recovers on explicit retry", async () => {
+    vi.mocked(strategiesApi.fetchFiredSignals)
+      .mockRejectedValueOnce(new Error("activity unavailable"))
+      .mockResolvedValueOnce({ items: [], next_cursor: null });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const heading = await screen.findByText("Generated trade activity");
+    const section = heading.closest("section")!;
+    expect(within(section).getByRole("alert")).toHaveTextContent("Failed to load");
+    await userEvent.click(within(section).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No generated decisions yet")).toBeInTheDocument();
   });
 
   it("toggles an approved strategy for the next run", async () => {
