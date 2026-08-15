@@ -249,3 +249,83 @@ def test_source_fans_must_share_the_exact_axis_and_opportunity_population() -> N
             mt1_source_measurements=_fan(runner.MT1_SOURCE_STRATEGY_ID),
             s8_source_measurements=tuple(wrong_population),
         )
+
+
+def test_paved_run_checks_authority_before_corpus_and_builds_only_the_complete_in_sample_fan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+    authority = (
+        runner.MT1PreregistrationAuthority("mt1", "v1", 10, "a" * 64),
+        runner.MT1PreregistrationAuthority("s8", "v1", 11, "b" * 64),
+    )
+
+    def validate(_conn: object):
+        events.append("authority")
+        return authority
+
+    def load_corpus(_conn: object, **kwargs: object):
+        events.append(("corpus", kwargs))
+        return SimpleNamespace(universe_basis="survivorship_free")
+
+    def load_regime(_conn: object):
+        events.append("regime")
+        return object()
+
+    def evaluate(_conn: object, entry: object, **kwargs: object):
+        strategy_id = cast(str, getattr(entry, "strategy_id"))
+        quarantine = cast(str, kwargs["quarantine_arm"])
+        events.append(("evaluate", strategy_id, quarantine, kwargs["namespaces"]))
+        return tuple(_measurement(strategy_id, ambiguity, quarantine) for ambiguity in ("best_case", "worst_case"))
+
+    bundle = cast(runner.MT1HistoricalBundle, object())
+
+    def assemble(**kwargs: object):
+        events.append(
+            (
+                "assemble",
+                len(cast(tuple[object, ...], kwargs["mt1_source_measurements"])),
+                len(cast(tuple[object, ...], kwargs["s8_source_measurements"])),
+            )
+        )
+        return bundle
+
+    monkeypatch.setattr(runner, "validate_mt1_preregistrations", validate)
+    monkeypatch.setattr(runner, "load_corpus", load_corpus)
+    monkeypatch.setattr(runner.MarketRegimeProvider, "load_research", load_regime)
+    monkeypatch.setattr(runner, "evaluate_level_arms", evaluate)
+    monkeypatch.setattr(runner, "assemble_mt1_in_sample_bundle", assemble)
+
+    result = runner.run_mt1_in_sample_evaluation(cast(object, object()))  # type: ignore[arg-type]
+
+    assert result.authorities == authority
+    assert result.bundle is bundle
+    assert events[0] == "authority"
+    assert events[1] == (
+        "corpus",
+        {"universe_basis": "survivorship_free", "evaluation_window": runner.MT1_IN_SAMPLE_WINDOW},
+    )
+    assert runner.MT1_IN_SAMPLE_WINDOW.end < runner.HOLDOUT_BOUNDARY
+    assert events[2] == "regime"
+    assert events[3:7] == [
+        ("evaluate", runner.MT1_SOURCE_STRATEGY_ID, "admitted", ("in_sample",)),
+        ("evaluate", runner.MT1_SOURCE_STRATEGY_ID, "masked", ("in_sample",)),
+        ("evaluate", runner.S8_SOURCE_STRATEGY_ID, "admitted", ("in_sample",)),
+        ("evaluate", runner.S8_SOURCE_STRATEGY_ID, "masked", ("in_sample",)),
+    ]
+    assert events[7] == ("assemble", 4, 4)
+
+
+def test_paved_run_loads_no_corpus_when_preregistration_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner,
+        "validate_mt1_preregistrations",
+        lambda _conn: (_ for _ in ()).throw(runner.MT1RunnerRefused("authority refused")),
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_corpus",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("corpus must remain sealed")),
+    )
+    with pytest.raises(runner.MT1RunnerRefused, match="authority refused"):
+        runner.run_mt1_in_sample_evaluation(cast(object, object()))  # type: ignore[arg-type]

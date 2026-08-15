@@ -15,28 +15,42 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Final
 
 import psycopg
 
 from app.services.backtest_run import (
     AMBIGUITY_ARM_ORDER,
+    BACKTEST_UNIVERSE,
     QUARANTINE_ARM_ORDER,
     ArmMeasurement,
     NamespaceMeasurement,
+    ProgressCallback,
+    corpus_version_for,
+    evaluate_level_arms,
+    load_corpus,
 )
+from app.services.cost_model import COST_MODEL_ID
+from app.services.market_regime_provider import MarketRegimeProvider
+from app.services.position_builder import Window
 from app.services.prereg_contract import changed_supersession_terms, declaration_refusals
 from app.services.research_price_structure_store import QuarantineArm
 from app.services.result_ledger import FrozenPreregistration, holdout_access_counts, load_preregistration
+from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_mt1_books import MT1FourArmBooks, build_mt1_four_arm_books
+from app.services.strategy_mt1_identity import mt1_identity, s8_control_identity
 from app.services.strategy_mt1_preregistration import build_declarations
 from app.services.strategy_mt1_trial import MT1TrialResult, evaluate_mt1_trial
-from app.services.strategy_result import AmbiguityArm
+from app.services.strategy_result import EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY, AmbiguityArm
 from app.services.strategy_result_universe import ResultUniverseRecord
 
 MT1_SOURCE_STRATEGY_ID: Final = "s10-relative-strength-leader"
 S8_SOURCE_STRATEGY_ID: Final = "s8-range-mean-reversion"
+MT1_IN_SAMPLE_WINDOW: Final = Window(
+    start=EVALUATION_WINDOW_START,
+    end=HOLDOUT_BOUNDARY - timedelta(days=1),
+)
 
 RobustnessKey = tuple[AmbiguityArm, QuarantineArm]
 _EXPECTED_KEYS: Final[tuple[RobustnessKey, ...]] = tuple(
@@ -75,6 +89,17 @@ class MT1HistoricalBundle:
     @property
     def historical_statistical_conjuncts_pass(self) -> bool:
         return all(cell.result.historical_statistical_conjuncts_pass for cell in self.cells)
+
+
+@dataclass(frozen=True)
+class MT1InSampleEvaluation:
+    authorities: tuple[MT1PreregistrationAuthority, MT1PreregistrationAuthority]
+    bundle: MT1HistoricalBundle
+    mt1_strategy_version: str
+    s8_control_strategy_version: str
+    mt1_source_strategy_version: str
+    s8_source_strategy_version: str
+    corpus_version: str
 
 
 def validate_mt1_preregistrations(
@@ -217,13 +242,94 @@ def assemble_mt1_in_sample_bundle(
     return MT1HistoricalBundle(cells=tuple(cells), axis_dates=axis_dates, opportunity_record=opportunity)
 
 
+def run_mt1_in_sample_evaluation(
+    conn: psycopg.Connection[Any],
+    *,
+    progress: ProgressCallback | None = None,
+) -> MT1InSampleEvaluation:
+    """Run the one full-population in-sample MT-1 experiment; never holdout."""
+    # This is deliberately the first DB-facing call. Tests pin the ordering so
+    # a future convenience corpus preload cannot burn the pre-outcome boundary.
+    authorities = validate_mt1_preregistrations(conn)
+
+    corpus = load_corpus(
+        conn,
+        universe_basis=BACKTEST_UNIVERSE,
+        evaluation_window=MT1_IN_SAMPLE_WINDOW,
+    )
+    if corpus.universe_basis != "survivorship_free":  # pragma: no cover - fixed argument and loader contract
+        raise MT1RunnerRefused(f"MT-1 corpus returned unexpected universe {corpus.universe_basis!r}")
+    regime_provider = MarketRegimeProvider.load_research(conn)
+
+    source_entries = {
+        MT1_SOURCE_STRATEGY_ID: STRATEGY_MANIFEST[MT1_SOURCE_STRATEGY_ID],
+        S8_SOURCE_STRATEGY_ID: STRATEGY_MANIFEST[S8_SOURCE_STRATEGY_ID],
+    }
+    source_identities = {
+        strategy_id: entry.identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID)
+        for strategy_id, entry in source_entries.items()
+    }
+    mt1_trial_identity = mt1_identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID)
+    s8_trial_identity = s8_control_identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID)
+    if mt1_trial_identity.params.get("source_strategy_version") != source_identities[MT1_SOURCE_STRATEGY_ID].version:
+        raise MT1RunnerRefused("MT-1 trial identity is not bound to the current S-10 source version")
+    if (
+        mt1_trial_identity.params.get("decision_clock_strategy_version")
+        != source_identities[MT1_SOURCE_STRATEGY_ID].version
+    ):
+        raise MT1RunnerRefused("MT-1 trial identity is not bound to the current S-10 decision clock")
+    if s8_trial_identity.params.get("source_strategy_version") != source_identities[S8_SOURCE_STRATEGY_ID].version:
+        raise MT1RunnerRefused("S-8 control identity is not bound to the current S-8 source version")
+    if (
+        s8_trial_identity.params.get("decision_clock_strategy_version")
+        != source_identities[MT1_SOURCE_STRATEGY_ID].version
+    ):
+        raise MT1RunnerRefused("S-8 control identity is not bound to the current S-10 decision clock")
+
+    measured: dict[str, list[ArmMeasurement]] = {
+        MT1_SOURCE_STRATEGY_ID: [],
+        S8_SOURCE_STRATEGY_ID: [],
+    }
+    for strategy_id in (MT1_SOURCE_STRATEGY_ID, S8_SOURCE_STRATEGY_ID):
+        for quarantine in QUARANTINE_ARM_ORDER:
+            measured[strategy_id].extend(
+                evaluate_level_arms(
+                    conn,
+                    source_entries[strategy_id],
+                    corpus=corpus,
+                    quarantine_arm=quarantine,
+                    identity=source_identities[strategy_id],
+                    namespaces=("in_sample",),
+                    progress=progress,
+                    regime_provider=regime_provider,
+                )
+            )
+
+    bundle = assemble_mt1_in_sample_bundle(
+        mt1_source_measurements=measured[MT1_SOURCE_STRATEGY_ID],
+        s8_source_measurements=measured[S8_SOURCE_STRATEGY_ID],
+    )
+    return MT1InSampleEvaluation(
+        authorities=authorities,
+        bundle=bundle,
+        mt1_strategy_version=mt1_trial_identity.version,
+        s8_control_strategy_version=s8_trial_identity.version,
+        mt1_source_strategy_version=source_identities[MT1_SOURCE_STRATEGY_ID].version,
+        s8_source_strategy_version=source_identities[S8_SOURCE_STRATEGY_ID].version,
+        corpus_version=corpus_version_for(BACKTEST_UNIVERSE),
+    )
+
+
 __all__ = [
     "MT1_SOURCE_STRATEGY_ID",
+    "MT1_IN_SAMPLE_WINDOW",
     "S8_SOURCE_STRATEGY_ID",
     "MT1HistoricalBundle",
+    "MT1InSampleEvaluation",
     "MT1PreregistrationAuthority",
     "MT1RobustnessCell",
     "MT1RunnerRefused",
     "assemble_mt1_in_sample_bundle",
+    "run_mt1_in_sample_evaluation",
     "validate_mt1_preregistrations",
 ]
