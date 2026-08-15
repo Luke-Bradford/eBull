@@ -354,10 +354,15 @@ class TestLevelArmSharedPass:
 
         entry = STRATEGY_MANIFEST["s4-volatility-compression-breakout"]
         identity = entry.identity(universe="survivor_only", cost_model_id=COST_MODEL_ID)
-        calls: list[int] = []
+        calls: list[tuple[int, date | None]] = []
 
-        def load(_conn: object, series_id: int) -> dict[str, MaskedSeries]:
-            calls.append(series_id)
+        def load(
+            _conn: object,
+            series_id: int,
+            *,
+            through_date: date | None = None,
+        ) -> dict[str, MaskedSeries]:
+            calls.append((series_id, through_date))
             return {
                 "admitted": replace(loaded, arm="admitted"),
                 "masked": replace(loaded, arm="masked"),
@@ -377,7 +382,7 @@ class TestLevelArmSharedPass:
             )
             for ambiguity in AMBIGUITY_ARM_ORDER
         )
-        assert calls == [10, 10]
+        assert calls == [(10, corpus.window.end), (10, corpus.window.end)]
 
         calls.clear()
         shared = evaluate_level_arms(
@@ -390,7 +395,7 @@ class TestLevelArmSharedPass:
             regime_provider=_UniformRegimeProvider(),  # type: ignore[arg-type]
         )
 
-        assert calls == [10]
+        assert calls == [(10, corpus.window.end)]
         assert tuple(replace(item, elapsed_s=0.0) for item in shared) == tuple(
             replace(item, elapsed_s=0.0) for item in isolated
         )
@@ -2041,10 +2046,16 @@ class TestCrossSectionOpportunityPopulation:
             axis_pos={when: index for index, when in enumerate(axis)},
             pairs=((1, 10), (2, 20)),
         )
-        loaded: list[int] = []
+        loaded: list[tuple[int, date | None]] = []
 
-        def load_only_opportunity(_conn: object, series_id: int, *, arm: str) -> MaskedSeries:
-            loaded.append(series_id)
+        def load_only_opportunity(
+            _conn: object,
+            series_id: int,
+            *,
+            arm: str,
+            through_date: date | None = None,
+        ) -> MaskedSeries:
+            loaded.append((series_id, through_date))
             if series_id == 20:
                 raise AssertionError("an excluded name reached cross-sectional ranking")
             return MaskedSeries(
@@ -2069,5 +2080,5 @@ class TestCrossSectionOpportunityPopulation:
             opportunity_keys=frozenset({1}),
         )
 
-        assert loaded == [10]
+        assert loaded == [(10, corpus.window.end)]
         assert outcome.winners == {}

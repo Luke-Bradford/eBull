@@ -27,7 +27,12 @@ from app.services.quarantine_sensitivity import (
     QuarantineCensus,
     compare_metrics,
 )
-from app.services.research_price_structure_store import MaskedSeries, _apply_arm
+from app.services.research_price_structure_store import (
+    QUARANTINE_RULE_SET_VERSION,
+    MaskedSeries,
+    _apply_arm,
+    load_arms,
+)
 from app.services.strategy_statistics import StrategyMetrics
 
 #: ⚠ TRANSCRIBED from parent criterion 7's own sentence, not imported from the
@@ -86,6 +91,34 @@ def _one_bar() -> tuple[StructureBar, ...]:
             volume=1000,
         ),
     )
+
+
+def test_both_quarantine_arms_apply_the_outcome_boundary_in_the_database_read() -> None:
+    boundary = date(2021, 6, 28)
+
+    class _Rows:
+        def fetchall(self) -> list[object]:
+            return []
+
+    class _Connection:
+        params: object = None
+        query = ""
+
+        def execute(self, query: str, params: object) -> _Rows:
+            self.query = query
+            self.params = params
+            return _Rows()
+
+    conn = _Connection()
+    arms = load_arms(conn, 17, through_date=boundary)  # type: ignore[arg-type]
+
+    assert set(arms) == {"masked", "admitted"}
+    assert "d.bar_date <= %(through_date)s::date" in conn.query
+    assert conn.params == {
+        "series_id": 17,
+        "quarantine_version": QUARANTINE_RULE_SET_VERSION,
+        "through_date": boundary,
+    }
 
 
 def _metrics(**overrides: object) -> StrategyMetrics:

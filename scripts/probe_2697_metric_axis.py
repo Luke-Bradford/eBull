@@ -19,8 +19,14 @@ from scripts.probe_2240_cost_model import PYTEST_PASSED, PYTEST_TEST_FAILED, run
 
 BACKTEST_RUN = Path("app/services/backtest_run.py")
 SYNTHETIC_CONTROL_RUN = Path("app/services/synthetic_control_run.py")
+PRICE_STORE = Path("app/services/research_price_structure_store.py")
+REGIME_PROVIDER = Path("app/services/market_regime_provider.py")
+AB_RUNNER = Path("scripts/verify_2697_metric_axis_ab.py")
 BACKTEST_TESTS = "tests/test_backtest_run.py"
 CONTROL_TESTS = "tests/test_synthetic_control_run.py"
+QUARANTINE_TESTS = "tests/test_quarantine_sensitivity.py"
+REGIME_TESTS = "tests/test_market_regime_benchmark_chain.py"
+AB_TESTS = "tests/test_verify_2697_metric_axis_ab.py"
 
 PROBES: list[tuple[str, Path, str, str, str, str]] = [
     (
@@ -56,6 +62,38 @@ PROBES: list[tuple[str, Path, str, str, str, str]] = [
         ),
         CONTROL_TESTS,
         "test_every_member_is_measured_on_the_complete_fixed_axis",
+    ),
+    (
+        "the A/B corpus opens the full window instead of its sealed in-sample prefix",
+        AB_RUNNER,
+        "        evaluation_window=_IN_SAMPLE_WINDOW,\n",
+        "        evaluation_window=None,\n",
+        AB_TESTS,
+        "test_acceptance_loads_both_price_and_regime_inputs_through_the_sealed_ceiling",
+    ),
+    (
+        "the A/B regime benchmark reads beyond the sealed in-sample prefix",
+        AB_RUNNER,
+        "    regime_provider = MarketRegimeProvider.load_research(conn, through_date=_IN_SAMPLE_WINDOW.end)\n",
+        "    regime_provider = MarketRegimeProvider.load_research(conn)\n",
+        AB_TESTS,
+        "test_acceptance_loads_both_price_and_regime_inputs_through_the_sealed_ceiling",
+    ),
+    (
+        "the strategy price loader drops its database-side outcome ceiling",
+        PRICE_STORE,
+        "      AND (%(through_date)s::date IS NULL OR d.bar_date <= %(through_date)s::date)\n",
+        "      AND TRUE\n",
+        QUARANTINE_TESTS,
+        "test_both_quarantine_arms_apply_the_outcome_boundary_in_the_database_read",
+    ),
+    (
+        "the regime price loader drops its database-side outcome ceiling",
+        REGIME_PROVIDER,
+        "                  AND (%s::date IS NULL OR bar_date <= %s::date)\n",
+        "                  AND TRUE\n",
+        REGIME_TESTS,
+        "test_a_sealed_research_regime_query_never_reads_beyond_its_boundary",
     ),
 ]
 

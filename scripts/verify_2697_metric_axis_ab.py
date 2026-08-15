@@ -21,7 +21,7 @@ import sys
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
@@ -56,9 +56,17 @@ from app.services.equity_curve import (
     build_equity_curve,
     build_month_end_rebalanced_curve,
 )
+from app.services.market_regime_provider import MarketRegimeProvider
+from app.services.position_builder import Window
 from app.services.random_entry_cohort import MemberOutcome, SyntheticControl, evaluate_control, member_seed
 from app.services.strategy_manifest import STRATEGY_MANIFEST
-from app.services.strategy_result import AmbiguityArm, QuarantineArm, ResultNamespace
+from app.services.strategy_result import (
+    EVALUATION_WINDOW_START,
+    HOLDOUT_BOUNDARY,
+    AmbiguityArm,
+    QuarantineArm,
+    ResultNamespace,
+)
 from app.services.strategy_statistics import DatedEquityCurve, StrategyMetrics, TradeReturns, compute_metrics
 from app.services.synthetic_control_run import (
     SYNTHETIC_CONTROL_MAX_WORKERS,
@@ -84,6 +92,7 @@ class _LegacyCohortInputs:
 
 _LEGACY_WORKER_INPUTS: _LegacyCohortInputs | None = None
 _REPO = Path(__file__).resolve().parents[1]
+_IN_SAMPLE_WINDOW = Window(EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY - timedelta(days=1))
 
 
 def _exact_candidate_head() -> str:
@@ -335,6 +344,22 @@ def _population_label(*, limit: int | None, strategy: str | None) -> str:
     return "-".join(parts)
 
 
+def _load_sealed_inputs(
+    conn: psycopg.Connection[Any],
+    *,
+    limit: int | None,
+) -> tuple[_Corpus, MarketRegimeProvider]:
+    """Read the A/B corpus and benchmark only through the in-sample ceiling."""
+    corpus = load_corpus(
+        conn,
+        universe_basis=BACKTEST_UNIVERSE,
+        limit=limit,
+        evaluation_window=_IN_SAMPLE_WINDOW,
+    )
+    regime_provider = MarketRegimeProvider.load_research(conn, through_date=_IN_SAMPLE_WINDOW.end)
+    return corpus, regime_provider
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None, help="series limit; makes this a smoke, not acceptance")
@@ -354,7 +379,7 @@ def main() -> None:
             )
 
     with psycopg.connect(settings.database_url) as conn:
-        corpus = load_corpus(conn, universe_basis=BACKTEST_UNIVERSE, limit=args.limit, evaluation_window=None)
+        corpus, regime_provider = _load_sealed_inputs(conn, limit=args.limit)
         runnable, excluded = runnable_strategies()
         if not runnable:
             raise RuntimeError("no runnable strategies exist; an empty A/B is not acceptance evidence")
@@ -447,6 +472,7 @@ def main() -> None:
                             namespaces=("in_sample",),
                             cohort_size=backtest_run.SPEC_COHORT_SIZE,
                             progress=report_progress,
+                            regime_provider=regime_provider,
                         )
                     else:
                         arms = (
@@ -460,6 +486,7 @@ def main() -> None:
                                 namespaces=("in_sample",),
                                 cohort_size=backtest_run.SPEC_COHORT_SIZE,
                                 progress=report_progress,
+                                regime_provider=regime_provider,
                             ),
                         )
                     if len(captured) != len(arms) or len(cohort_pairs) != len(arms):
