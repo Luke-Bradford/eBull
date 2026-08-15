@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
-from typing import Literal
+from typing import Any, Literal, cast
 
 import psycopg
 import psycopg.rows
@@ -256,6 +256,7 @@ class JobsProcessSubsystemHealth(BaseModel):
     last_beat_at: datetime | None
     age_seconds: float | None
     is_stale: bool
+    notes: dict[str, Any] | None
 
 
 class JobsProcessHealthResponse(BaseModel):
@@ -502,7 +503,7 @@ def _build_jobs_process_health(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT subsystem, last_beat_at
+            SELECT subsystem, last_beat_at, notes
             FROM job_runtime_heartbeat
             ORDER BY subsystem
             """
@@ -526,6 +527,7 @@ def _build_jobs_process_health(
                 last_beat_at=last_beat,
                 age_seconds=age,
                 is_stale=is_stale,
+                notes=cast(dict[str, Any] | None, row["notes"]),
             )
         )
 

@@ -74,7 +74,7 @@ from app.jobs.credential_health_listener import (
 from app.jobs.heartbeat import HeartbeatWriter, heartbeat_loop
 from app.jobs.listener import ListenerState, listener_loop
 from app.jobs.locks import JOBS_PROCESS_LOCK_KEY
-from app.jobs.runtime import JobRuntime
+from app.jobs.runtime import JobRuntime, execution_slot_wait_snapshot
 from app.jobs.supervisor import supervise
 from app.security import master_key
 from app.security.secrets_crypto import set_active_key as set_broker_encryption_key
@@ -1222,10 +1222,11 @@ def serve(stop_event: threading.Event | None = None) -> int:
         # it. The fresh beats also overwrite the prior boot's stale rows
         # immediately, so a restart no longer shows a stale pid.
         for subsystem in ("scheduler", "manual_listener", "queue_drainer", "main"):
+            notes_provider = execution_slot_wait_snapshot if subsystem == "scheduler" else None
             t = threading.Thread(
                 target=heartbeat_loop,
                 args=(heartbeat, subsystem, stop_event),
-                kwargs={"tick_seconds": 10.0},
+                kwargs={"tick_seconds": 10.0, "notes_provider": notes_provider},
                 name=f"jobs-heartbeat-{subsystem}",
                 daemon=True,
             )

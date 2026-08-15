@@ -169,6 +169,24 @@ export interface JobOverviewResponse {
 export interface JobsListResponse {
   checked_at: string;
   jobs: JobOverviewResponse[];
+  jobs_process: {
+    state: "healthy" | "degraded" | "down";
+    subsystems: Array<{
+      subsystem: string;
+      last_beat_at: string | null;
+      age_seconds: number | null;
+      is_stale: boolean;
+      notes: {
+        execution_slot_wait_count?: number;
+        execution_slot_waits?: Array<{
+          job_name: string;
+          lane: string;
+          waiting_since: string;
+          wait_age_seconds: number;
+        }>;
+      } | null;
+    }>;
+  };
 }
 
 // ---------------------------------------------------------------------------

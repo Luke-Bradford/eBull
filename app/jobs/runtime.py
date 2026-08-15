@@ -46,8 +46,9 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, TypedDict
 
 import psycopg
 import psycopg.sql
@@ -59,7 +60,10 @@ from psycopg_pool import ConnectionPool
 
 from app.config import settings
 from app.db.background_write import background_write_connection
-from app.db.pg_settings import JOBS_NON_SEC_MAX_CONCURRENCY
+from app.db.pg_settings import (
+    JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY,
+    JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY,
+)
 from app.jobs.background_pool import BackgroundConnectionPool
 from app.jobs.locks import JobAlreadyRunning, JobLock
 from app.jobs.sec_lane_gate import SEC_LANE_MAX_CONCURRENCY
@@ -646,7 +650,58 @@ _RECURRING_JOB_ID_PREFIX: Final[str] = "recurring:"
 _MAX_INSTANCES_SKIP_REASON: Final[str] = "max_instances_active"
 
 _SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(SEC_LANE_MAX_CONCURRENCY)
-_NON_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_NON_SEC_MAX_CONCURRENCY)
+_GENERAL_NON_SEC_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_GENERAL_NON_SEC_MAX_CONCURRENCY)
+_PAPER_LIFECYCLE_EXECUTION_SLOTS = threading.BoundedSemaphore(JOBS_PAPER_LIFECYCLE_MAX_CONCURRENCY)
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionSlotWait:
+    job_name: str
+    lane: str
+    waiting_since: datetime
+    started_monotonic: float
+
+
+_EXECUTION_SLOT_WAITS_LOCK = threading.Lock()
+_EXECUTION_SLOT_WAITS: dict[int, _ExecutionSlotWait] = {}
+
+
+class ExecutionSlotWaitView(TypedDict):
+    job_name: str
+    lane: str
+    waiting_since: str
+    wait_age_seconds: float
+
+
+class ExecutionSlotWaitSnapshot(TypedDict):
+    execution_slot_wait_count: int
+    execution_slot_waits: list[ExecutionSlotWaitView]
+
+
+def execution_slot_wait_snapshot() -> ExecutionSlotWaitSnapshot:
+    """Return heartbeat-safe visibility for work waiting before ``job_runs``.
+
+    Slot admission deliberately precedes every database connection, so a
+    waiting fire cannot write a ``job_runs`` row without defeating the
+    connection ceiling. The scheduler heartbeat publishes this process-local
+    snapshot instead; logs also record the wait immediately and on admission.
+    """
+    observed_monotonic = time.monotonic()
+    with _EXECUTION_SLOT_WAITS_LOCK:
+        waits = tuple(_EXECUTION_SLOT_WAITS.values())
+    payload: list[ExecutionSlotWaitView] = [
+        {
+            "job_name": wait.job_name,
+            "lane": wait.lane,
+            "waiting_since": wait.waiting_since.isoformat(),
+            "wait_age_seconds": round(max(0.0, observed_monotonic - wait.started_monotonic), 3),
+        }
+        for wait in sorted(waits, key=lambda item: (item.waiting_since, item.job_name))
+    ]
+    return {
+        "execution_slot_wait_count": len(payload),
+        "execution_slot_waits": payload,
+    }
 
 
 @contextmanager
@@ -660,12 +715,45 @@ def _job_execution_slot(job_name: str) -> Iterator[None]:
         # unknown name.  For connection budgeting, the conservative safe
         # classification is the smaller non-SEC allowance.
         source = None
-    slots = _SEC_EXECUTION_SLOTS if source == "sec_rate" else _NON_SEC_EXECUTION_SLOTS
-    slots.acquire()
+    if source == "sec_rate":
+        slots = _SEC_EXECUTION_SLOTS
+        lane = "sec_rate"
+    elif job_name == JOB_STRATEGY_PAPER_CYCLE:
+        slots = _PAPER_LIFECYCLE_EXECUTION_SLOTS
+        lane = "paper_lifecycle_reserved"
+    else:
+        slots = _GENERAL_NON_SEC_EXECUTION_SLOTS
+        lane = "general_non_sec"
+
+    acquired = slots.acquire(blocking=False)
+    if not acquired:
+        thread_id = threading.get_ident()
+        wait = _ExecutionSlotWait(
+            job_name=job_name,
+            lane=lane,
+            waiting_since=datetime.now(UTC),
+            started_monotonic=time.monotonic(),
+        )
+        with _EXECUTION_SLOT_WAITS_LOCK:
+            _EXECUTION_SLOT_WAITS[thread_id] = wait
+        logger.warning("job %r waiting for %s execution capacity", job_name, lane)
+        try:
+            slots.acquire()
+            acquired = True
+        finally:
+            with _EXECUTION_SLOT_WAITS_LOCK:
+                _EXECUTION_SLOT_WAITS.pop(thread_id, None)
+        logger.info(
+            "job %r acquired %s execution capacity after %.3fs",
+            job_name,
+            lane,
+            time.monotonic() - wait.started_monotonic,
+        )
     try:
         yield
     finally:
-        slots.release()
+        if acquired:
+            slots.release()
 
 
 # ---------------------------------------------------------------------------
