@@ -1141,8 +1141,6 @@ def _execute_fired_paper_signal_locked(
         conn.commit()
     except RuntimeConfigCorrupt:
         return _persist_rejection(conn, signal_id=signal_id, reason_code="runtime_config_corrupt", now=evaluated_at)
-    if not runtime.enable_auto_trading:
-        return _persist_rejection(conn, signal_id=signal_id, reason_code="auto_trading_disabled", now=evaluated_at)
     if runtime.enable_live_trading:
         return _persist_rejection(conn, signal_id=signal_id, reason_code="live_trading_enabled", now=evaluated_at)
     if kill_row is None or bool(kill_row[0]):

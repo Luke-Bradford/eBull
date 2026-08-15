@@ -807,6 +807,17 @@ describe("StrategiesPage", () => {
     })));
   });
 
+  it("shows an enabled strategy paper pool independently of the legacy automation flag", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...approvedOverview(),
+      execution_enabled: false,
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("checkbox", { name: "Allow new automated entries" })).toBeChecked();
+  });
+
   it("keeps first enable disabled when strategy evidence is not ready", async () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
       ...OVERVIEW,
