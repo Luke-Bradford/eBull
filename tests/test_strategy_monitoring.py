@@ -15,6 +15,7 @@ import psycopg
 import pytest
 from fastapi import HTTPException, Request
 
+from app.api.config import ConfigPatchRequest, patch_config
 from app.api.strategies import (
     AllocationUpdateRequest,
     StrategyPaperPoolUpdateRequest,
@@ -1487,6 +1488,65 @@ def test_paper_enable_waits_for_concurrent_live_update_then_refuses(
                     if current.enable_live_trading != runtime_before.enable_live_trading
                     else None
                 ),
+            )
+        conn.commit()
+
+
+def test_live_enable_waits_for_concurrent_paper_enable_then_refuses(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    conn = ebull_test_conn
+    runtime_before = get_runtime_config(conn)
+    if runtime_before.enable_live_trading:
+        update_runtime_config(
+            conn,
+            updated_by="test-precondition",
+            reason="establish live-off reciprocal-race precondition",
+            enable_live_trading=False,
+        )
+    conn.commit()
+    blocker = psycopg.connect(test_database_url())
+    worker = psycopg.connect(test_database_url())
+    configure_paper_pool(
+        blocker,
+        enabled=True,
+        capital_limit=Decimal("750"),
+        risk_profile="balanced",
+        changed_by="paper-operator",
+        reason="concurrent bounded strategy enable",
+    )
+    request = ConfigPatchRequest(
+        updated_by="live-operator",
+        reason="must serialize behind strategy paper enable",
+        enable_live_trading=True,
+        confirm_live_enable=True,
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(patch_config, request, worker)
+            with pytest.raises(FutureTimeoutError):
+                future.result(timeout=0.1)
+            blocker.commit()
+            with pytest.raises(HTTPException) as exc_info:
+                future.result(timeout=5)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == (
+            "live trading cannot be enabled while strategy paper automation is enabled"
+        )
+        assert not get_runtime_config(conn).enable_live_trading
+    finally:
+        blocker.rollback()
+        worker.rollback()
+        blocker.close()
+        worker.close()
+        conn.rollback()
+        current = get_runtime_config(conn)
+        if current.enable_live_trading != runtime_before.enable_live_trading:
+            update_runtime_config(
+                conn,
+                updated_by="test-cleanup",
+                reason="restore runtime live flag after reciprocal-race proof",
+                enable_live_trading=runtime_before.enable_live_trading,
             )
         conn.commit()
 

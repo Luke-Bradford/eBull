@@ -204,9 +204,12 @@ class TestPatchConfig:
 
     def test_enable_live_with_confirm_succeeds(self) -> None:
         _override_conn(_mock_conn())
-        with patch(
-            "app.api.config.update_runtime_config",
-            return_value=_runtime(auto=True, live=True),
+        with (
+            patch("app.api.config.load_paper_pool", return_value=MagicMock(enabled=False)),
+            patch(
+                "app.api.config.update_runtime_config",
+                return_value=_runtime(auto=True, live=True),
+            ),
         ):
             resp = client.patch(
                 "/config",
@@ -219,6 +222,28 @@ class TestPatchConfig:
             )
         assert resp.status_code == 200
         assert resp.json()["enable_live_trading"] is True
+
+    def test_enable_live_refuses_while_strategy_paper_automation_is_enabled(self) -> None:
+        _override_conn(_mock_conn())
+        with (
+            patch("app.api.config.load_paper_pool", return_value=MagicMock(enabled=True)),
+            patch("app.api.config.update_runtime_config") as mock_update,
+        ):
+            resp = client.patch(
+                "/config",
+                json={
+                    "updated_by": "op",
+                    "reason": "go live",
+                    "enable_live_trading": True,
+                    "confirm_live_enable": True,
+                },
+            )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == (
+            "live trading cannot be enabled while strategy paper automation is enabled"
+        )
+        mock_update.assert_not_called()
 
     def test_disable_live_does_not_require_confirm(self) -> None:
         _override_conn(_mock_conn())
