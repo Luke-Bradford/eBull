@@ -419,6 +419,126 @@ def current_stage(conn: psycopg.Connection[Any], strategy_id: str, strategy_vers
     return cast(Stage, row[0]) if row is not None else None
 
 
+def validate_result_evidence_bundle(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    result_ids: Sequence[int],
+    as_of: date | None = None,
+) -> None:
+    """Replay the complete current promotion policy over exact stored results.
+
+    This is the shared authority check used both when a stage is promoted and
+    immediately before paper execution. A paper approval therefore cannot keep
+    authorising entries after a supersedable rule or dated cost record has
+    become invalid.
+    """
+    if not result_ids:
+        raise StrategyControlError("result evidence bundle is empty")
+    if len(set(result_ids)) != len(result_ids):
+        raise StrategyControlError("result_ids must be unique")
+    rows = conn.execute(
+        """
+        SELECT result_id, profit_factor, evaluated_instrument_count,
+               universe_basis, carry_unmodelled, fx_unmodelled
+        FROM strategy_results_store
+        WHERE strategy_id = %s AND strategy_version = %s
+          AND result_id = ANY(%s)
+        """,
+        (strategy_id, strategy_version, list(result_ids)),
+    ).fetchall()
+    found = {int(row[0]) for row in rows}
+    missing = set(result_ids) - found
+    if missing:
+        raise StrategyControlError(
+            f"result_ids do not belong to {strategy_id}@{strategy_version}: {sorted(missing)}"
+        )
+
+    counts = holdout_access_counts(conn, strategy_id, strategy_version)
+    holdout_refusals = holdout_count_promotion_refusals(
+        holdout_evaluations=counts.holdout_evaluations,
+        recorded_accesses=counts.recorded_accesses,
+    )
+    profit_factor_by_result = {int(row[0]): None if row[1] is None else Decimal(str(row[1])) for row in rows}
+    evaluated_count_by_result = {int(row[0]): int(row[2]) for row in rows}
+    stamps_by_result = {
+        int(row[0]): (
+            None if row[3] is None else str(row[3]),
+            True if row[4] is None else bool(row[4]),
+            True if row[5] is None else bool(row[5]),
+        )
+        for row in rows
+    }
+    universes = load_result_universes(conn, result_ids)
+    ambiguity_refusals = load_promotion_ambiguity_refusals(conn, result_ids)
+    stored_refusals = stored_result_promotion_refusals_for(conn, result_ids)
+    evidences = load_promotion_evidences(conn, result_ids)
+    observed_on = as_of or date.today()
+    for result_id in result_ids:
+        refusals = list(
+            universe_promotion_refusals(
+                universes.get(result_id),
+                evaluated_instrument_count=evaluated_count_by_result[result_id],
+            )
+        )
+        refusals.extend(ambiguity_refusals[result_id])
+        universe_basis, carry_unmodelled, fx_unmodelled = stamps_by_result[result_id]
+        refusals.extend(
+            structural_promotion_refusals(
+                universe_basis=universe_basis,
+                carry_unmodelled=carry_unmodelled,
+                fx_unmodelled=fx_unmodelled,
+            )
+        )
+        refusals.extend(stored_refusals[result_id])
+        refusals.extend(holdout_refusals)
+        evidence = evidences.get(result_id)
+        if evidence is None:
+            refusals.append("promotion_evidence_missing")
+        else:
+            refusals.extend(
+                evidence_refusals(
+                    evidence,
+                    profit_factor=profit_factor_by_result[result_id],
+                    as_of=observed_on,
+                )
+            )
+        if refusals:
+            raise StrategyControlError(f"result {result_id} fails promotion evidence: {', '.join(refusals)}")
+
+
+def validate_paper_promotion_evidence(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    as_of: date | None = None,
+) -> None:
+    """Replay full authority over the exact result pins of paper approval."""
+    rows = conn.execute(
+        """
+        SELECT pr.result_id
+        FROM strategy_promotions promotion
+        JOIN strategy_promotion_results pr ON pr.promotion_id=promotion.promotion_id
+        WHERE promotion.strategy_id=%s AND promotion.strategy_version=%s
+          AND promotion.to_stage='paper_enabled'
+        ORDER BY pr.result_id
+        """,
+        (strategy_id, strategy_version),
+    ).fetchall()
+    result_ids = [int(row[0]) for row in rows]
+    if not result_ids:
+        raise StrategyControlError("paper promotion has no pinned result evidence")
+    validate_result_evidence_bundle(
+        conn,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        result_ids=result_ids,
+        as_of=as_of,
+    )
+
+
 def promote_strategy(
     conn: psycopg.Connection[Any],
     *,
@@ -496,130 +616,29 @@ def promote_strategy(
         raise StrategyControlError(f"{to_stage} requires at least one pinned result_id")
 
     if result_ids:
-        rows = conn.execute(
-            """
-            SELECT result_id, profit_factor, evaluated_instrument_count,
-                   universe_basis, carry_unmodelled, fx_unmodelled
-            FROM strategy_results_store
-            WHERE strategy_id = %s AND strategy_version = %s
-              AND result_id = ANY(%s)
-            """,
-            (strategy_id, strategy_version, list(result_ids)),
-        ).fetchall()
-        found = {int(row[0]) for row in rows}
-        missing = set(result_ids) - found
-        if missing:
-            raise StrategyControlError(
-                f"result_ids do not belong to {strategy_id}@{strategy_version}: {sorted(missing)}"
-            )
         if to_stage in _RESULT_EVIDENCE_STAGES:
-            # #2639 — criterion 5's two counts, read ONCE for the whole
-            # transition. They are scoped to (strategy_id, strategy_version),
-            # which is exactly what this call promotes, so they are a property
-            # of the promotion rather than of any one pinned result — and every
-            # result's refusal list carries them so that the raise names them.
-            #
-            # ⚠ AGAINST TODAY'S COUNTS, NOT A FROZEN PAIR. Freezing defeats the
-            # criterion: a pair frozen at result time is blind to a later
-            # unrecorded look at the same version's hold-out, which is the leak
-            # criterion 5 exists to catch. `holdout_access_counts` records
-            # nothing, so asking is safe. Reasoning in
-            # `app.services.strategy_promotion_replay`.
-            counts = holdout_access_counts(conn, strategy_id, strategy_version)
-            holdout_refusals = holdout_count_promotion_refusals(
-                holdout_evaluations=counts.holdout_evaluations,
-                recorded_accesses=counts.recorded_accesses,
+            validate_result_evidence_bundle(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                result_ids=result_ids,
             )
-            profit_factor_by_result = {int(row[0]): None if row[1] is None else Decimal(str(row[1])) for row in rows}
-            evaluated_count_by_result = {int(row[0]): int(row[2]) for row in rows}
-            # ⚠ A NULL COST STAMP READS AS *UNMODELLED*, NEVER AS MODELLED.
-            # `bool(None)` is False, and False means "carry is modelled" — so the
-            # obvious coercion turns an unset stamp into a PASS on the clause it
-            # exists to enforce, which is fail-open on the Tier 1 refusals. Both
-            # columns are NOT NULL today (verified against dev, 2026-08-13), so
-            # this is defence in depth rather than a live bug; it is written this
-            # way because the failure direction is silent and the schema is one
-            # migration away from changing. `universe_basis` needs no such care —
-            # it preserves None, which `structural_promotion_refusals` already
-            # refuses as `universe_basis_absent`.
-            stamps_by_result = {
-                int(row[0]): (
-                    None if row[3] is None else str(row[3]),
-                    True if row[4] is None else bool(row[4]),
-                    True if row[5] is None else bool(row[5]),
+        else:
+            rows = conn.execute(
+                """
+                SELECT result_id
+                FROM strategy_results_store
+                WHERE strategy_id = %s AND strategy_version = %s
+                  AND result_id = ANY(%s)
+                """,
+                (strategy_id, strategy_version, list(result_ids)),
+            ).fetchall()
+            found = {int(row[0]) for row in rows}
+            missing = set(result_ids) - found
+            if missing:
+                raise StrategyControlError(
+                    f"result_ids do not belong to {strategy_id}@{strategy_version}: {sorted(missing)}"
                 )
-                for row in rows
-            }
-            # #2641 — every per-result record type is read for the WHOLE batch
-            # before the loop, one statement each, where the loop previously
-            # issued five round trips per pinned result. ⚠ The reordering this
-            # buys is named on `stored_result_promotion_refusals_for`: a corrupt
-            # record anywhere in the batch now raises before ANY result's
-            # refusals are gathered. Within a result nothing moves.
-            universes = load_result_universes(conn, result_ids)
-            ambiguity_refusals = load_promotion_ambiguity_refusals(conn, result_ids)
-            stored_refusals = stored_result_promotion_refusals_for(conn, result_ids)
-            evidences = load_promotion_evidences(conn, result_ids)
-            for result_id in result_ids:
-                # #2621 — the transition REPLAYS the universe check from the
-                # frozen record instead of trusting the write-time refusal that
-                # died with ``WrittenRow``. Frozen at result time, deliberately:
-                # today's date enters this gate only where a validity window was
-                # declared (the cost staleness clause inside
-                # ``evidence_refusals``); the universe declares none, and the
-                # order-time rule against the CURRENT universe is the execution
-                # guard's, not promotion's. Both refusal lists are gathered
-                # before raising so one missing input cannot mask the other.
-                refusals = list(
-                    universe_promotion_refusals(
-                        universes.get(result_id),
-                        evaluated_instrument_count=evaluated_count_by_result[result_id],
-                    )
-                )
-                # #2625 — the §3.4 ambiguity comparison, re-derived from the
-                # frozen record rather than trusted. Same shape and the same
-                # argument as the universe replay above; the record stores the
-                # comparison's INPUTS so the verdict can be disagreed with.
-                refusals.extend(ambiguity_refusals[result_id])
-                # #2625 — the row's own STRUCTURAL stamps. ⚠ These were
-                # persisted and never replayed: before this, a result stamped
-                # `survivor_only` / `carry_unmodelled` / `fx_unmodelled` — which
-                # is all 324 rows in dev — could be pinned to a promotion
-                # without the transition ever looking. Routed through the SHARED
-                # `structural_promotion_refusals`, the single copy #2599's
-                # preregistration freeze also calls, so the freeze's expectation
-                # and the transition's verdict cannot drift apart.
-                universe_basis, carry_unmodelled, fx_unmodelled = stamps_by_result[result_id]
-                refusals.extend(
-                    structural_promotion_refusals(
-                        universe_basis=universe_basis,
-                        carry_unmodelled=carry_unmodelled,
-                        fx_unmodelled=fx_unmodelled,
-                    )
-                )
-                # #2639 — the row's OWN remaining clauses: its stamped purpose,
-                # criteria 6 and 3, criterion 9's arm pair and §9's acceptance.
-                # Every one is a column on the row already pinned above, and
-                # every one was trusting the write-time verdict that died with
-                # `WrittenRow`. ⚠ Deliberately does NOT return the structural
-                # stamps — see `stored_result_promotion_refusals` for why the
-                # read directly above is kept rather than sourced from the
-                # rebuilt object.
-                refusals.extend(stored_refusals[result_id])
-                refusals.extend(holdout_refusals)
-                evidence = evidences.get(result_id)
-                if evidence is None:
-                    refusals.append("promotion_evidence_missing")
-                else:
-                    refusals.extend(
-                        evidence_refusals(
-                            evidence,
-                            profit_factor=profit_factor_by_result[result_id],
-                            as_of=date.today(),
-                        )
-                    )
-                if refusals:
-                    raise StrategyControlError(f"result {result_id} fails promotion evidence: {', '.join(refusals)}")
 
     row = conn.execute(
         """
@@ -1206,4 +1225,6 @@ __all__ = [
     "registered_strategy_purpose",
     "record_order_position_execution",
     "release_exact_position",
+    "validate_paper_promotion_evidence",
+    "validate_result_evidence_bundle",
 ]

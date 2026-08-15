@@ -380,11 +380,18 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "report_snapshots",
 )
 
-# DELETE intentionally cannot remove these immutable audit children. Test DB
-# cleanup is allowed to empty them, but must do so explicitly before deleting
-# their parents; otherwise every test that stores real promotion evidence falls
-# through to the much slower whole-schema TRUNCATE recovery path (#2737).
-_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset({"strategy_result_universe"})
+# DELETE intentionally cannot remove these immutable audit children.
+# Test DB cleanup is allowed to empty them, but must do so explicitly before
+# deleting their parents; otherwise evidence tests fall through to the much
+# slower whole-schema TRUNCATE recovery path. The grouped CASCADE below is
+# confined to the asserted per-worker test database.
+_TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset(
+    {
+        "strategy_promotion_evidence",
+        "strategy_result_ambiguity",
+        "strategy_result_universe",
+    }
+)
 
 
 # #1401 — worker-DB relation-count tripwire ceiling.

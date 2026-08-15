@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier, Event
 from time import sleep
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -14,6 +16,7 @@ from uuid import UUID
 import psycopg
 import pytest
 
+from app.api import strategies as strategies_api
 from app.providers.broker import (
     BrokerAccountRiskSnapshot,
     BrokerCostComponent,
@@ -31,6 +34,7 @@ from app.services.cost_model import COST_MODEL_ID
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
 from app.services.result_ledger import store_holdout_result, store_in_sample_result
 from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
+from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION
 from app.services.strategy_control_plane import (
     configure_deployment,
     configure_execution_policy,
@@ -57,6 +61,7 @@ from app.services.strategy_paper_executor import (
     _effective_capital_bases,
     execute_fired_paper_signal,
 )
+from app.services.strategy_promotion_evidence_store import store_promotion_evidence
 from app.services.strategy_result_universe import (
     ResultUniverseRecord,
     store_result_universe,
@@ -70,6 +75,7 @@ from tests.test_result_ledger import (
     build_metrics,
     build_result,
 )
+from tests.test_strategy_control_plane import _arm_ambiguity_record, _passing_promotion_evidence
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("registered_strategy_test_candidates")]
 
@@ -146,6 +152,7 @@ def _seed(
     conn: psycopg.Connection[Any],
     *,
     ticket_sizing_mode: str = "percent",
+    promotion_evidence_valid_through: date | None = None,
 ) -> int:
     if conn.execute("SELECT 1 FROM strategy_paper_pool_events LIMIT 1").fetchone() is None:
         configure_paper_pool(
@@ -173,6 +180,7 @@ def _seed(
             **BOOTSTRAP_BLOCK,
             "expectancy_ci_low_pct": 5.0,
             "expectancy_ci_high_pct": 6.0,
+            "profit_factor": 1.5,
         }
     )
     deflated = build_deflated(
@@ -185,6 +193,7 @@ def _seed(
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
         "fx_unmodelled": False,
+        "ambiguity_rule_version": AMBIGUITY_RULE_VERSION,
         "evaluated_instrument_count": 3,
         "deflated": deflated,
         "trial_count": deflated.declared_trials,
@@ -218,6 +227,7 @@ def _seed(
             ),
         )
         store_result_universe(conn, result_id=support_id, record=universe_record)
+        _arm_ambiguity_record(conn, support_id, threshold=0.5)
     result_ids: list[int] = []
     for quarantine_arm in ("masked", "admitted"):
         result_id = store_holdout_result(
@@ -236,6 +246,15 @@ def _seed(
         )
         result_ids.append(result_id)
         store_result_universe(conn, result_id=result_id, record=universe_record)
+        _arm_ambiguity_record(conn, result_id, threshold=None)
+        promotion_evidence = _passing_promotion_evidence()
+        if promotion_evidence_valid_through is not None:
+            promotion_evidence = replace(
+                promotion_evidence,
+                cost_observed_on=promotion_evidence_valid_through,
+                cost_valid_through=promotion_evidence_valid_through,
+            )
+        store_promotion_evidence(conn, result_id=result_id, evidence=promotion_evidence)
     promotion_rows = conn.execute(
         """
         INSERT INTO strategy_promotions (
@@ -720,6 +739,38 @@ def test_current_result_policy_supersession_refuses_before_broker_access(
     broker.check_instrument_eligibility.assert_not_called()
     broker.get_what_if_costs.assert_not_called()
     broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_expired_promotion_cost_evidence_blocks_runtime_and_operator_readiness(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(
+        conn,
+        promotion_evidence_valid_through=date.today() - timedelta(days=1),
+    )
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "pinned_promotion_evidence_invalid"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.check_instrument_eligibility.assert_not_called()
+    broker.get_what_if_costs.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+
+    versions = strategies_api._current_versions()
+    versions["S-ALLOC"] = "v1"
+    manifest = dict(strategies_api.STRATEGY_MANIFEST)
+    manifest["S-ALLOC"] = cast(Any, SimpleNamespace(purpose="capital_candidate", exit_levels=object()))
+    monkeypatch.setattr(strategies_api, "_current_versions", lambda: versions)
+    monkeypatch.setattr(strategies_api, "STRATEGY_MANIFEST", manifest)
+    overview = strategies_api.get_strategy_overview(conn)
+    strategy = next(item for item in overview.strategies if item.strategy_id == "S-ALLOC")
+    assert "pinned_promotion_evidence_invalid" in strategy.allocation_refusals
+    assert not strategy.allocation_ready
 
 
 def test_missing_opportunity_forecast_refuses_before_broker_access(
