@@ -873,7 +873,7 @@ class StrategyInitialPaperSetupRequest(BaseModel):
     max_instrument_exposure_pct: Decimal = Field(gt=0, le=100)
     max_portfolio_exposure_pct: Decimal = Field(gt=0, le=100)
     max_drawdown_pct: Decimal = Field(gt=0, lt=100)
-    min_net_expectancy_pct: Decimal
+    min_net_expectancy_pct: Decimal = Field(ge=0)
     cost_stress_multiplier: Decimal = Field(ge=1)
     reason: str = Field(min_length=1, max_length=1000)
 

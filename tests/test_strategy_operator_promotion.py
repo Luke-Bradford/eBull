@@ -527,6 +527,34 @@ def test_execution_policy_rejects_non_finite_limits_before_database_access(
         )
 
 
+def test_execution_policy_rejects_negative_net_expectancy_floor_before_database_access(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    with pytest.raises(StrategyControlError, match="must be non-negative"):
+        configure_execution_policy(
+            ebull_test_conn,
+            deployment_id=1,
+            ticket_sizing_mode="percent",
+            ticket_fraction=Decimal("0.1"),
+            fixed_ticket_amount=None,
+            max_ticket_amount=Decimal("10"),
+            stop_loss_pct=Decimal("5"),
+            take_profit_pct=Decimal("10"),
+            max_quote_age_seconds=30,
+            max_scan_age_seconds=300,
+            max_halt_feed_age_seconds=300,
+            max_cost_age_seconds=3600,
+            max_reconciliation_age_seconds=60,
+            max_instrument_exposure_pct=Decimal("20"),
+            max_portfolio_exposure_pct=Decimal("50"),
+            max_drawdown_pct=Decimal("10"),
+            min_net_expectancy_pct=Decimal("-0.01"),
+            cost_stress_multiplier=Decimal("2"),
+            changed_by="operator",
+            reason="must reject negative expectancy authority",
+        )
+
+
 def test_paper_retry_refuses_an_unresolvable_prospective_evidence_reference(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

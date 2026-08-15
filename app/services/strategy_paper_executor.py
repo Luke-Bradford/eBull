@@ -610,6 +610,8 @@ def _persist_rejection(
     intent: _Intent | None = None,
     risk: BrokerAccountRiskSnapshot | None = None,
     halt_identity_evaluated: bool = False,
+    costs_at: datetime | None = None,
+    cost_assessment: _CostAssessment | None = None,
 ) -> PaperExecutionResult:
     existing = _existing_result(conn, signal_id)
     conn.commit()
@@ -623,9 +625,14 @@ def _persist_rejection(
                 signal_id, deployment_id, policy_revision, forecast_id, ranking_member_id,
                 verdict, reason_code,
                 evaluated_at, quote_at, scan_at, halt_feed_at, halt_identity_rule_version,
+                costs_at,
                 broker_available_cash, account_equity, account_invested,
-                instrument_invested, gross_expectancy_ci_low_pct
-            ) VALUES (%s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                instrument_invested, gross_expectancy_ci_low_pct,
+                stressed_cost_amount, net_expectancy_pct, cost_basis
+            ) VALUES (
+                %s, %s, %s, %s, %s, 'rejected', %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             """,
             (
                 signal_id,
@@ -639,6 +646,7 @@ def _persist_rejection(
                 intent.scan_at if intent else None,
                 intent.halt_feed_at if intent else None,
                 HALT_IDENTITY_RULE_VERSION if intent is not None or halt_identity_evaluated else None,
+                costs_at,
                 risk.available_cash if risk else None,
                 risk.equity if risk else None,
                 risk.total_invested if risk else None,
@@ -649,6 +657,9 @@ def _persist_rejection(
                 if risk and intent
                 else None,
                 intent.gross_expectancy_ci_low_pct if intent else None,
+                cost_assessment.stressed if cost_assessment else None,
+                cost_assessment.net if cost_assessment else None,
+                cost_assessment.basis if cost_assessment else None,
             ),
         )
     return PaperExecutionResult(signal_id, "rejected", reason_code)
@@ -1228,6 +1239,17 @@ def _execute_fired_paper_signal_locked(
             conn, signal_id=signal_id, reason_code=assessed, now=evaluated_at, intent=intent, risk=risk
         )
     stressed_cost, net_expectancy = assessed.stressed, assessed.net
+    if net_expectancy <= 0:
+        return _persist_rejection(
+            conn,
+            signal_id=signal_id,
+            reason_code="net_expectancy_not_positive",
+            now=evaluated_at,
+            intent=intent,
+            risk=risk,
+            costs_at=costs.last_updated,
+            cost_assessment=assessed,
+        )
     if net_expectancy < intent.min_net_expectancy_pct:
         return _persist_rejection(
             conn,
@@ -1236,6 +1258,8 @@ def _execute_fired_paper_signal_locked(
             now=evaluated_at,
             intent=intent,
             risk=risk,
+            costs_at=costs.last_updated,
+            cost_assessment=assessed,
         )
     stop_rate = (intent.ask * (Decimal("1") - intent.stop_loss_pct / Decimal("100"))).quantize(
         Decimal("0.000001"), rounding=ROUND_DOWN
