@@ -78,6 +78,7 @@ from app.services.deflated_sharpe import DeflatedSharpeResult
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.random_entry_cohort import SyntheticControl
 from app.services.research_price_structure_store import QUARANTINE_ARMS, QuarantineArm
+from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION, LEGACY_AMBIGUITY_RULE_VERSION
 from app.services.strategy_promotion_evidence import PromotionEvidence, evidence_refusals
 from app.services.strategy_statistics import METRIC_SET_ID, StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -422,6 +423,7 @@ def namespace_for_position(entry_fill_bar_date: date, close_bar_date: date | Non
 #: a stored hash says what KIND of thing produced it, plus 12 hex of payload.
 RESULT_SET_ID = "strategy-result-v1"
 TOTAL_RETURN_RESULT_SET_ID = "strategy-result-v2"
+AMBIGUITY_AWARE_RESULT_SET_ID = "strategy-result-v3"
 LEGACY_RETURN_BASIS = "raw-close-price-return-v1"
 TOTAL_RETURN_BASIS = "split-dividend-adjusted-wealth-v1"
 RETURN_BASES: Final[frozenset[str]] = frozenset({LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS})
@@ -503,6 +505,10 @@ class ResultIdentity:
     #: the historical v1 hash byte-identical; any corrected total-return result
     #: is a v2 identity. Raw OHLC execution remains an independent invariant.
     return_basis: str
+    #: §3.4's arm-comparison semantics. Added by #2747 after v1 records proved
+    #: unable to carry the matched-control threshold. The legacy default exists
+    #: only so old stored hashes can be reconstructed byte-for-byte.
+    ambiguity_rule_version: str = LEGACY_AMBIGUITY_RULE_VERSION
 
     @property
     def version(self) -> str:
@@ -534,12 +540,17 @@ class ResultIdentity:
         }
         if self.return_basis != LEGACY_RETURN_BASIS:
             fields["return_basis"] = self.return_basis
+        if self.ambiguity_rule_version != LEGACY_AMBIGUITY_RULE_VERSION:
+            fields["ambiguity_rule_version"] = self.ambiguity_rule_version
         payload = json.dumps(
             fields,
             sort_keys=True,
             separators=(",", ":"),
         )
-        prefix = RESULT_SET_ID if self.return_basis == LEGACY_RETURN_BASIS else TOTAL_RETURN_RESULT_SET_ID
+        if self.ambiguity_rule_version != LEGACY_AMBIGUITY_RULE_VERSION:
+            prefix = AMBIGUITY_AWARE_RESULT_SET_ID
+        else:
+            prefix = RESULT_SET_ID if self.return_basis == LEGACY_RETURN_BASIS else TOTAL_RETURN_RESULT_SET_ID
         return f"{prefix}+{hashlib.sha256(payload.encode()).hexdigest()[:12]}"
 
 
@@ -655,6 +666,7 @@ class StrategyResult:
             "outcome_rule_set_version",
             "input_rule_set_version",
             "return_basis",
+            "ambiguity_rule_version",
         ):
             if not getattr(self.identity, field_name):
                 raise ValueError(f"{field_name} is blank — a present-but-empty identity field merges two results")
@@ -1096,12 +1108,14 @@ CURRENT_RESULT_PROVENANCE: Mapping[str, object] = {
     "sizing_rule": SIZING_RULE,
     "benchmark_rule": BENCHMARK_RULE,
     "return_basis": TOTAL_RETURN_BASIS,
+    "ambiguity_rule_version": AMBIGUITY_RULE_VERSION,
     "window_start": EVALUATION_WINDOW_START,
     "window_end": EVALUATION_WINDOW_END,
 }
 
 
 __all__ = [
+    "AMBIGUITY_AWARE_RESULT_SET_ID",
     "AMBIGUITY_ARMS",
     "BENCHMARK_RULE",
     "CORPUS_FROZEN_LAST_BAR",

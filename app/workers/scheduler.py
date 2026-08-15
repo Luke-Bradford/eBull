@@ -5728,6 +5728,7 @@ def _recent_evidence_completion(
         AmbiguityArm,
         ResultIdentity,
     )
+    from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION
 
     runnable, _excluded = runnable_strategies()
     expected: dict[str, set[str]] = {}
@@ -5756,6 +5757,7 @@ def _recent_evidence_completion(
                             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
                             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
                             return_basis=TOTAL_RETURN_BASIS,
+                            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
                         ).version
                     )
         expected[window_id] = versions

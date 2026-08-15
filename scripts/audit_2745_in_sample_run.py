@@ -76,6 +76,7 @@ EXPECTED_IDENTITY: Final = MappingProxyType(
         "outcome_rule_set_version": "outcome-resolver-v1+54aa83427048",
         "input_rule_set_version": "price-quarantine-v1+d0423dbd9cb5",
         "return_basis": "split-dividend-adjusted-wealth-v1",
+        "ambiguity_rule_version": "ambiguity-verdict-2026-08-13-v1-no-cohort-threshold",
         "metric_set_id": "criterion7-v2",
         "trial_register_version": "trial-register-2026-08-15-r6",
     }
@@ -178,6 +179,7 @@ def _identity_failures(row: dict[str, Any]) -> list[str]:
         outcome_rule_set_version=str(row["outcome_rule_set_version"]),
         input_rule_set_version=str(row["input_rule_set_version"]),
         return_basis=str(row["return_basis"]),
+        ambiguity_rule_version=str(row["ambiguity_rule_version"]),
     ).version
     if row["result_version"] != recomputed:
         failures.append(f"{strategy_id}: result_version {row['result_version']!r} != recomputed {recomputed!r}")
@@ -318,7 +320,7 @@ SELECT result_id, strategy_id, strategy_version, result_version, result_scope, n
        synthetic_control_model_id, synthetic_control_size, synthetic_control_root_seed,
        synthetic_control_mean_return_ci_low_pct, synthetic_control_mean_return_ci_high_pct,
        synthetic_control_sharpe_threshold, synthetic_control_passed,
-       benchmark_rule, purpose, return_basis
+       benchmark_rule, purpose, return_basis, ambiguity_rule_version
 FROM strategy_results
 WHERE strategy_id = ANY(%(strategy_ids)s)
   AND namespace = 'in_sample'

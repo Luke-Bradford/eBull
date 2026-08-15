@@ -25,8 +25,17 @@ from app.services.result_ledger import store_holdout_result, store_in_sample_res
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS
+from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.test_result_ledger import build_metrics, build_result
+
+_IMMATERIAL_AMBIGUITY: dict[str, object] = {
+    "ambiguity_record_rule_version": AMBIGUITY_RULE_VERSION,
+    "ambiguity_comparison_basis": "shared_measurement",
+    "ambiguity_best_case_sharpe": None,
+    "ambiguity_worst_case_sharpe": None,
+    "ambiguity_cohort_gap_threshold": None,
+}
 
 
 def test_current_versions_cover_the_manifest_including_s4() -> None:
@@ -47,6 +56,7 @@ def test_every_manifest_strategy_has_operator_readable_presentation() -> None:
 
 def test_result_refusals_fail_closed_without_expanding_the_database() -> None:
     row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
         "purpose": "capital_candidate",
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
@@ -80,6 +90,7 @@ def test_result_refusals_fail_closed_without_expanding_the_database() -> None:
 
 def test_harness_result_carries_a_permanent_refusal() -> None:
     row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
         "purpose": "harness_validation",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
@@ -103,8 +114,66 @@ def test_harness_result_carries_a_permanent_refusal() -> None:
     ) == ["harness_validation_only"]
 
 
+def test_the_operator_view_recomputes_a_material_ambiguity_gap() -> None:
+    row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
+        "ambiguity_comparison_basis": "arm_sharpes",
+        "ambiguity_best_case_sharpe": 0.75,
+        "ambiguity_worst_case_sharpe": 0.25,
+        "ambiguity_cohort_gap_threshold": 0.125,
+        "purpose": "capital_candidate",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "fx_unmodelled": False,
+        "evaluated_instrument_count": 1,
+        "deflated_sharpe": 1,
+        "trial_count": TRIAL_REGISTER.declared_count,
+        "effective_sample_size": 10,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+        "synthetic_control_model_id": "control-v1",
+        "synthetic_control_mean_return_ci_low_pct": -1,
+        "synthetic_control_mean_return_ci_high_pct": 1,
+        "sharpe": 1,
+        "synthetic_control_sharpe_threshold": 0,
+    }
+    assert _promotion_refusals(
+        row,
+        ambiguity_complete=True,
+        quarantine_complete=True,
+        accesses_complete=True,
+    ) == ["ambiguity_material"]
+
+
+def test_a_structurally_complete_pair_with_no_frozen_verdict_still_refuses() -> None:
+    row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
+        "ambiguity_record_rule_version": None,
+        "purpose": "capital_candidate",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "fx_unmodelled": False,
+        "evaluated_instrument_count": 1,
+        "deflated_sharpe": 1,
+        "trial_count": TRIAL_REGISTER.declared_count,
+        "effective_sample_size": 10,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+        "synthetic_control_model_id": "control-v1",
+        "synthetic_control_mean_return_ci_low_pct": -1,
+        "synthetic_control_mean_return_ci_high_pct": 1,
+        "sharpe": 1,
+        "synthetic_control_sharpe_threshold": 0,
+    }
+    assert _promotion_refusals(
+        row,
+        ambiguity_complete=True,
+        quarantine_complete=True,
+        accesses_complete=True,
+    ) == ["ambiguity_verdict_unrecorded"]
+
+
 def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
     row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
         "purpose": "capital_candidate",
         "universe_basis": "survivor_only",
         "carry_unmodelled": True,
@@ -136,6 +205,7 @@ def test_a_complete_measured_result_still_exposes_standing_refusals() -> None:
 
 def test_holdout_display_uses_derived_control_and_not_its_empty_own_columns() -> None:
     row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
         "namespace": "hold_out",
         "purpose": "capital_candidate",
         "universe_basis": "survivorship_free",
@@ -169,6 +239,7 @@ def test_holdout_display_uses_derived_control_and_not_its_empty_own_columns() ->
 
 def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing() -> None:
     row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
         "purpose": "capital_candidate",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
@@ -194,6 +265,7 @@ def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing()
 
 def test_a_current_register_label_cannot_hide_a_stale_trial_count() -> None:
     row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
         "purpose": "capital_candidate",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
@@ -220,6 +292,7 @@ def test_a_current_register_label_cannot_hide_a_stale_trial_count() -> None:
 
 def test_a_missing_count_is_not_also_described_as_superseded_when_the_version_is_current() -> None:
     row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
         "purpose": "capital_candidate",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
@@ -256,6 +329,7 @@ def test_result_arm_accepts_valid_undefined_downside_metrics() -> None:
         sizing_rule="equal-weight",
         benchmark_rule="buy-and-hold",
         return_basis=TOTAL_RETURN_BASIS,
+        ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
         position_rule_set_version="position-v1",
         outcome_rule_set_version="outcome-v1",
         input_rule_set_version="input-v1",
@@ -406,6 +480,7 @@ def test_overview_maps_only_exact_current_holdout_provenance(
         "sizing_rule": SIZING_RULE_ID,
         "benchmark_rule": BENCHMARK_RULE_ID,
         "return_basis": TOTAL_RETURN_BASIS,
+        "ambiguity_rule_version": AMBIGUITY_RULE_VERSION,
         "position_rule_set_version": POSITION_RULE_SET_VERSION,
         "outcome_rule_set_version": OUTCOME_RULE_SET_VERSION,
         "input_rule_set_version": QUARANTINE_RULE_SET_VERSION,

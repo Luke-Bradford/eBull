@@ -16,6 +16,7 @@ from collections import Counter
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -1158,7 +1159,7 @@ class TestAmbiguityMateriality:
     """A real level-arm delta cannot be waved through without its threshold."""
 
     @staticmethod
-    def _arm(ambiguity: str | None, sharpe: float) -> ArmMeasurement:
+    def _arm(ambiguity: str | None, sharpe: float, *, control: SyntheticControl | None = None) -> ArmMeasurement:
         return ArmMeasurement(
             strategy_id="s4",
             strategy_version="v1",
@@ -1169,6 +1170,7 @@ class TestAmbiguityMateriality:
             close_sources={},
             series_evaluated=1,
             elapsed_s=0.0,
+            cohort=None if control is None else SimpleNamespace(control=control),  # type: ignore[arg-type]
         )
 
     @staticmethod
@@ -1198,6 +1200,23 @@ class TestAmbiguityMateriality:
             deflated=True,
             ambiguity_material=None,
         )
+
+    def test_two_matched_controls_attach_the_weaker_margin_and_decide_materiality(self) -> None:
+        arms = (
+            self._arm(
+                "best_case",
+                0.6,
+                control=_control(ci_low=-0.1, ci_high=0.1, cohort_sharpe=0.2, strategy_sharpe=0.6),
+            ),
+            self._arm(
+                "worst_case",
+                0.4,
+                control=_control(ci_low=-0.1, ci_high=0.1, cohort_sharpe=0.3, strategy_sharpe=0.4),
+            ),
+        )
+        record = _ambiguity_record_for(arms, self._result())
+        assert record.cohort_gap_threshold == pytest.approx(0.1)
+        assert _ambiguity_material_for(arms, self._result()) is True
 
     def test_a_non_finite_sharpe_reads_as_unpriced_rather_than_crashing(self) -> None:
         # ⚠ The old code reached `None` here BY ACCIDENT — `nan == nan` is

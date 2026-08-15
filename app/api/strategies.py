@@ -44,6 +44,7 @@ from app.services.runtime_config import (
     get_runtime_config,
     update_runtime_config,
 )
+from app.services.strategy_ambiguity_policy import AMBIGUITY_RULE_VERSION
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
     SUPPORTED_DEPLOYMENT_CURRENCIES,
@@ -100,6 +101,11 @@ from app.services.strategy_position_manager import (
 )
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import TOTAL_RETURN_BASIS
+from app.services.strategy_result_ambiguity import (
+    AmbiguityRecord,
+    ComparisonBasis,
+    ambiguity_promotion_refusals,
+)
 from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -244,6 +250,7 @@ class ResultArm(BaseModel):
     sizing_rule: str
     benchmark_rule: str
     return_basis: str
+    ambiguity_rule_version: str
     position_rule_set_version: str
     outcome_rule_set_version: str
     input_rule_set_version: str
@@ -999,10 +1006,31 @@ def _promotion_refusals(
         refusals.append("trial_register_superseded")
     if row["effective_sample_size"] is None:
         refusals.append("effective_sample_size_not_computed")
-    # Runnable v1 strategies are non-level regimes: ambiguity is unreachable,
-    # so the two labelled rows are intentionally the same measurement.
     if not ambiguity_complete:
         refusals.append("ambiguity_arms_not_compared")
+    elif row.get("ambiguity_record_rule_version") is None:
+        refusals.append("ambiguity_verdict_unrecorded")
+    else:
+        record = AmbiguityRecord(
+            ambiguity_rule_version=str(row["ambiguity_record_rule_version"]),
+            comparison_basis=cast(ComparisonBasis, row["ambiguity_comparison_basis"]),
+            best_case_sharpe=(
+                None
+                if row.get("ambiguity_best_case_sharpe") is None
+                else float(cast(Decimal, row["ambiguity_best_case_sharpe"]))
+            ),
+            worst_case_sharpe=(
+                None
+                if row.get("ambiguity_worst_case_sharpe") is None
+                else float(cast(Decimal, row["ambiguity_worst_case_sharpe"]))
+            ),
+            cohort_gap_threshold=(
+                None
+                if row.get("ambiguity_cohort_gap_threshold") is None
+                else float(cast(Decimal, row["ambiguity_cohort_gap_threshold"]))
+            ),
+        )
+        refusals.extend(ambiguity_promotion_refusals(record))
     if not quarantine_complete:
         refusals.append("quarantine_arms_not_compared")
     is_holdout = row.get("namespace") == "hold_out"
@@ -1035,7 +1063,12 @@ _RESULTS_SQL = """
             AS control_synthetic_control_mean_return_ci_high_pct,
         control_result.sharpe AS control_sharpe,
         control_result.synthetic_control_sharpe_threshold
-            AS control_synthetic_control_sharpe_threshold
+            AS control_synthetic_control_sharpe_threshold,
+        ambiguity.ambiguity_rule_version AS ambiguity_record_rule_version,
+        ambiguity.comparison_basis AS ambiguity_comparison_basis,
+        ambiguity.best_case_sharpe AS ambiguity_best_case_sharpe,
+        ambiguity.worst_case_sharpe AS ambiguity_worst_case_sharpe,
+        ambiguity.cohort_gap_threshold AS ambiguity_cohort_gap_threshold
     FROM strategy_results_store r
     LEFT JOIN (
         SELECT strategy_id, strategy_version,
@@ -1048,6 +1081,8 @@ _RESULTS_SQL = """
       ON control_support.holdout_result_id = r.result_id
     LEFT JOIN strategy_results_store control_result
       ON control_result.result_id = control_support.control_result_id
+    LEFT JOIN strategy_result_ambiguity ambiguity
+      ON ambiguity.result_id = r.result_id
     WHERE r.strategy_version = ANY(%(versions)s)
       AND r.namespace = 'hold_out'
       AND r.corpus_version = %(corpus_version)s
@@ -1055,6 +1090,7 @@ _RESULTS_SQL = """
       AND r.sizing_rule = %(sizing_rule)s
       AND r.benchmark_rule = %(benchmark_rule)s
       AND r.return_basis = %(return_basis)s
+      AND r.ambiguity_rule_version = %(ambiguity_rule_version)s
       AND r.position_rule_set_version = %(position_version)s
       AND r.outcome_rule_set_version = %(outcome_version)s
       AND r.input_rule_set_version = %(input_version)s
@@ -1109,6 +1145,7 @@ _PRIOR_VERSION_RESULTS_SQL = """
         r.sizing_rule,
         r.benchmark_rule,
         r.return_basis,
+        r.ambiguity_rule_version,
         r.position_rule_set_version,
         r.outcome_rule_set_version,
         r.input_rule_set_version,
@@ -1119,7 +1156,7 @@ _PRIOR_VERSION_RESULTS_SQL = """
           SELECT 1 FROM unnest(%(strategy_ids)s::text[], %(versions)s::text[]) AS cur(id, version)
           WHERE cur.id = r.strategy_id AND cur.version = r.strategy_version
       )
-    GROUP BY 1,2,3,4,5,6,7,8,9,10,11
+    GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12
 """
 
 # Watermarks for versions OTHER than the current one, newest frontier first.
@@ -1252,6 +1289,7 @@ def _current_identity_pins() -> dict[str, str]:
         "sizing_rule": SIZING_RULE_ID,
         "benchmark_rule": BENCHMARK_RULE_ID,
         "return_basis": TOTAL_RETURN_BASIS,
+        "ambiguity_rule_version": AMBIGUITY_RULE_VERSION,
         "position_rule_set_version": POSITION_RULE_SET_VERSION,
         "outcome_rule_set_version": OUTCOME_RULE_SET_VERSION,
         "input_rule_set_version": QUARANTINE_RULE_SET_VERSION,
@@ -1345,6 +1383,7 @@ def get_strategy_overview(
         "sizing_rule": SIZING_RULE_ID,
         "benchmark_rule": BENCHMARK_RULE_ID,
         "return_basis": TOTAL_RETURN_BASIS,
+        "ambiguity_rule_version": AMBIGUITY_RULE_VERSION,
         "position_version": POSITION_RULE_SET_VERSION,
         "outcome_version": OUTCOME_RULE_SET_VERSION,
         "input_version": QUARANTINE_RULE_SET_VERSION,

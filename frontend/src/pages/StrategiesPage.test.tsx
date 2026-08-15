@@ -18,6 +18,7 @@ const ARM: StrategyResultArm = {
   sizing_rule: "size-v1",
   benchmark_rule: "benchmark-v1",
   return_basis: "split-dividend-adjusted-wealth-v1",
+  ambiguity_rule_version: "ambiguity-verdict-2026-08-15-v2-matched-control-margin",
   position_rule_set_version: "position-v1",
   outcome_rule_set_version: "outcome-v1",
   input_rule_set_version: "input-v1",

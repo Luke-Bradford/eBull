@@ -128,6 +128,7 @@ const PIN_LABELS: Record<string, string> = {
   sizing_rule: "sizing rule",
   benchmark_rule: "benchmark",
   return_basis: "return basis",
+  ambiguity_rule_version: "ambiguity rule",
   position_rule_set_version: "position rules",
   outcome_rule_set_version: "outcome rules",
   input_rule_set_version: "input rules",

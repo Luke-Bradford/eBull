@@ -2410,6 +2410,7 @@ export interface StrategyResultArm {
   sizing_rule: string;
   benchmark_rule: string;
   return_basis: string;
+  ambiguity_rule_version: string;
   position_rule_set_version: string;
   outcome_rule_set_version: string;
   input_rule_set_version: string;

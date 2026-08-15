@@ -196,6 +196,7 @@ _PROMOTABLE_STAMPS: dict[str, Any] = {
     "universe_basis": "survivorship_free",
     "carry_unmodelled": False,
     "fx_unmodelled": False,
+    "ambiguity_rule_version": AMBIGUITY_RULE_VERSION,
 }
 
 
