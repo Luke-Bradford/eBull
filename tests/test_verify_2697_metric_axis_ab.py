@@ -36,8 +36,17 @@ def test_legacy_cohort_ab_arm_runs_the_declared_member_count() -> None:
         axis=axis,
         strategy_metrics=strategy_metrics,
         cohort_size=3,
+        max_workers=1,
+    )
+    spawned = _legacy_cohort_control(
+        collector,
+        axis=axis,
+        strategy_metrics=strategy_metrics,
+        cohort_size=3,
+        max_workers=2,
     )
 
     assert control.cohort_size == 3
     assert np.isfinite(control.cohort_sharpe_threshold)
     assert np.isfinite(control.cohort_return_threshold_pct)
+    assert spawned == control

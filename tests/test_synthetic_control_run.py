@@ -549,6 +549,32 @@ class TestTheMatchIsExact:
         assert first.control.root_seed == COHORT_ROOT_SEED
         assert first.control == second.control
 
+    def test_spawned_workers_are_byte_for_byte_equivalent_to_serial_members(self) -> None:
+        """Execution order and process boundaries cannot move a draw or float."""
+        collector = _collector(exits_on_spike=True)
+        metrics = _sleeve_metrics(exits_on_spike=True)
+        serial = run_cohort(
+            collector,
+            axis=AXIS,
+            strategy_metrics=metrics,
+            benchmark=None,
+            cohort_size=12,
+            max_workers=1,
+        )
+        progress: list[tuple[int, int]] = []
+        spawned = run_cohort(
+            collector,
+            axis=AXIS,
+            strategy_metrics=metrics,
+            benchmark=None,
+            cohort_size=12,
+            max_workers=2,
+            progress=lambda completed, total: progress.append((completed, total)),
+        )
+        assert spawned.control == serial.control
+        assert spawned.residual == serial.residual
+        assert progress == [(completed, 12) for completed in range(1, 13)]
+
     def test_the_run_offers_no_seed_override(self) -> None:
         """⚠⚠ THE OVERRIDE STAYED DELETED. An earlier draft took a ``root_seed``,
         recorded it on the row and still drew every member from

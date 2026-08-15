@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Mapping
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
+from multiprocessing import get_context
 from typing import Any
 
 import numpy as np
@@ -55,7 +58,12 @@ from app.services.random_entry_cohort import MemberOutcome, SyntheticControl, ev
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_result import AmbiguityArm, QuarantineArm, ResultNamespace
 from app.services.strategy_statistics import DatedEquityCurve, StrategyMetrics, TradeReturns, compute_metrics
-from app.services.synthetic_control_run import CohortCollector, CohortResult, _place_member
+from app.services.synthetic_control_run import (
+    SYNTHETIC_CONTROL_MAX_WORKERS,
+    CohortCollector,
+    CohortResult,
+    _place_member,
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,15 @@ class _LegacyMeasurement:
     dates: tuple[date, ...]
     comparator_population: int
     metrics: StrategyMetrics
+
+
+@dataclass(frozen=True)
+class _LegacyCohortInputs:
+    collector: CohortCollector
+    axis: tuple[date, ...]
+
+
+_LEGACY_WORKER_INPUTS: _LegacyCohortInputs | None = None
 
 
 def _legacy_first_index_last_index_measurement(
@@ -145,6 +162,8 @@ def _legacy_cohort_control(
     axis: tuple[date, ...],
     strategy_metrics: StrategyMetrics,
     cohort_size: int,
+    max_workers: int | None = None,
+    label: str = "legacy",
 ) -> SyntheticControl:
     """Reproduce the removed per-member position-span annualisation rule.
 
@@ -154,40 +173,106 @@ def _legacy_cohort_control(
     """
     if not collector.placements:
         raise ValueError("the legacy cohort cannot be measured from an empty placement space")
-    members: list[MemberOutcome] = []
-    for index in range(cohort_size):
-        rng = np.random.Generator(np.random.PCG64(member_seed(index)))
-        book, returns, entry_dates, exit_dates = _place_member(rng, collector.placements, axis=axis)
-        low = min(book.entry_index)
-        high = max(book.exit_index)
-        dates = axis[low : high + 1]
-        curve = build_equity_curve(book.rebased(low), date_count=len(dates))
-        metrics = compute_metrics(
-            DatedEquityCurve(dates=dates, curve=curve),
-            trades=TradeReturns(
-                net_return_pct=tuple(returns),
-                entry_fill_date=tuple(entry_dates),
-                exit_bar_date=tuple(exit_dates),
-                open_count=0,
-                unpriced_count=0,
-            ),
-            buy_and_hold=None,
-            bootstrap_seed=None,
+    workers = (
+        min(SYNTHETIC_CONTROL_MAX_WORKERS, cohort_size)
+        if max_workers is None and cohort_size == backtest_run.SPEC_COHORT_SIZE
+        else 1
+        if max_workers is None
+        else max_workers
+    )
+    if workers < 1:
+        raise ValueError(f"max_workers must be positive, got {workers}")
+    workers = min(workers, cohort_size)
+    inputs = _LegacyCohortInputs(collector=collector, axis=axis)
+    by_index: dict[int, MemberOutcome] = {}
+
+    def accept(expected_index: int, outcome: MemberOutcome) -> None:
+        if outcome.index != expected_index:
+            raise RuntimeError(f"legacy cohort task {expected_index} returned member {outcome.index}")
+        if outcome.index in by_index:
+            raise RuntimeError(f"legacy cohort member {outcome.index} completed more than once")
+        by_index[outcome.index] = outcome
+        completed = len(by_index)
+        if completed == 1 or completed % 10 == 0 or completed == cohort_size:
+            print(f"[{label}] legacy synthetic control {completed}/{cohort_size}", file=sys.stderr, flush=True)
+
+    if workers == 1:
+        for index in range(cohort_size):
+            accept(index, _legacy_member(index, inputs))
+    else:
+        # Same spawn-only boundary as production. The verifier holds a psycopg
+        # connection while measuring but children receive only immutable cohort
+        # arrays; no database handle or transaction crosses the process edge.
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=get_context("spawn"),
+            initializer=_initialise_legacy_worker,
+            initargs=(inputs,),
+        ) as pool:
+            pending = {pool.submit(_legacy_member_in_worker, index): index for index in range(cohort_size)}
+            try:
+                for future in as_completed(pending):
+                    accept(pending[future], future.result())
+            except BaseException:
+                for future in pending:
+                    future.cancel()
+                raise
+
+    expected_indices = set(range(cohort_size))
+    if set(by_index) != expected_indices:
+        raise RuntimeError(
+            f"legacy cohort member set is incomplete: missing={sorted(expected_indices - set(by_index))[:20]}, "
+            f"extra={sorted(set(by_index) - expected_indices)[:20]}"
         )
-        members.append(
-            MemberOutcome(
-                index=index,
-                sharpe=metrics.sharpe,
-                total_return_pct=metrics.total_return_pct,
-                exposure_time_pct=metrics.exposure_time_pct,
-                turnover_annualised=metrics.turnover_annualised,
-                trade_count=metrics.trade_count,
-            )
-        )
+    members = tuple(by_index[index] for index in range(cohort_size))
     return evaluate_control(
-        tuple(members),
+        members,
         strategy_sharpe=strategy_metrics.sharpe,
         strategy_return_pct=strategy_metrics.total_return_pct,
+    )
+
+
+def _initialise_legacy_worker(inputs: _LegacyCohortInputs) -> None:
+    global _LEGACY_WORKER_INPUTS
+    _LEGACY_WORKER_INPUTS = inputs
+
+
+def _legacy_member_in_worker(index: int) -> MemberOutcome:
+    if _LEGACY_WORKER_INPUTS is None:  # pragma: no cover - executor owns initialization
+        raise RuntimeError("legacy cohort worker started without member inputs")
+    return _legacy_member(index, _LEGACY_WORKER_INPUTS)
+
+
+def _legacy_member(index: int, inputs: _LegacyCohortInputs) -> MemberOutcome:
+    rng = np.random.Generator(np.random.PCG64(member_seed(index)))
+    book, returns, entry_dates, exit_dates = _place_member(
+        rng,
+        inputs.collector.placements,
+        axis=inputs.axis,
+    )
+    low = min(book.entry_index)
+    high = max(book.exit_index)
+    dates = inputs.axis[low : high + 1]
+    curve = build_equity_curve(book.rebased(low), date_count=len(dates))
+    metrics = compute_metrics(
+        DatedEquityCurve(dates=dates, curve=curve),
+        trades=TradeReturns(
+            net_return_pct=tuple(returns),
+            entry_fill_date=tuple(entry_dates),
+            exit_bar_date=tuple(exit_dates),
+            open_count=0,
+            unpriced_count=0,
+        ),
+        buy_and_hold=None,
+        bootstrap_seed=None,
+    )
+    return MemberOutcome(
+        index=index,
+        sharpe=metrics.sharpe,
+        total_return_pct=metrics.total_return_pct,
+        exposure_time_pct=metrics.exposure_time_pct,
+        turnover_annualised=metrics.turnover_annualised,
+        trade_count=metrics.trade_count,
     )
 
 
@@ -211,6 +296,17 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="series limit; makes this a smoke, not acceptance")
     parser.add_argument("--strategy", choices=tuple(sorted(STRATEGY_MANIFEST)), default=None)
     args = parser.parse_args()
+
+    def report_progress(event: backtest_run.BacktestProgressEvent) -> None:
+        if event.phase != "synthetic_control" or event.series_seen is None or event.series_total is None:
+            return
+        if event.series_seen == 1 or event.series_seen % 10 == 0 or event.series_seen == event.series_total:
+            print(
+                f"[{event.strategy_id}/{event.ambiguity_arm or 'shared'}/{event.quarantine_arm}] "
+                f"current synthetic control {event.series_seen}/{event.series_total}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     with psycopg.connect(settings.database_url) as conn:
         corpus = load_corpus(conn, universe_basis=BACKTEST_UNIVERSE, limit=args.limit, evaluation_window=None)
@@ -267,6 +363,7 @@ def main() -> None:
                     axis=corpus.axis,
                     strategy_metrics=legacy.metrics,
                     cohort_size=cohort_size,
+                    label=label,
                 )
             cohort_pairs.append((legacy_control, None if current_result is None else current_result.control))
             return current_result
@@ -289,6 +386,7 @@ def main() -> None:
                             identity=identity,
                             namespaces=("in_sample",),
                             cohort_size=backtest_run.SPEC_COHORT_SIZE,
+                            progress=report_progress,
                         )
                     else:
                         arms = (
@@ -301,6 +399,7 @@ def main() -> None:
                                 identity=identity,
                                 namespaces=("in_sample",),
                                 cohort_size=backtest_run.SPEC_COHORT_SIZE,
+                                progress=report_progress,
                             ),
                         )
                     if len(captured) != len(arms) or len(cohort_pairs) != len(arms):

@@ -105,8 +105,10 @@ import time
 from array import array
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
+from multiprocessing import get_context
 from typing import Final
 
 import numpy as np
@@ -161,6 +163,15 @@ HOLDOUT_CONTROL_REASON: Final = (
 #: exactly that constant, so reading it here is sharing the cost model rather
 #: than assuming one.
 _HALF_SPREAD: Final = float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)
+
+#: A resource bound, not an estimator parameter. Four workers leave CPU capacity
+#: for the jobs daemon and bound the number of simultaneously materialised
+#: member books. ``spawn`` is load-bearing: the job is invoked from a
+#: ThreadPoolExecutor and forking a multithreaded process would inherit psycopg
+#: connections and locks in an undefined state. Each child receives the
+#: collector once in its initializer; member tasks carry only their integer
+#: index, so the large placement arrays are never pickled 1,000 times.
+SYNTHETIC_CONTROL_MAX_WORKERS: Final = 4
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +444,7 @@ def run_cohort(
     benchmark: DatedEquityCurve | None,
     cohort_size: int = SPEC_COHORT_SIZE,
     progress: CohortProgressCallback | None = None,
+    max_workers: int | None = None,
 ) -> CohortResult:
     """Place, price and measure ``cohort_size`` members. Pure; reads no database.
 
@@ -462,6 +474,12 @@ def run_cohort(
     NOT the cohort it sits beside, so §9's *"with the seed recorded"* would be
     satisfied by a number that reproduces neither. (Codex checkpoint 2.) The
     root is the module constant, one value, used for both.
+
+    ``max_workers`` changes execution only. The production default uses a
+    bounded spawned pool for the declared 1,000-member cohort and keeps smaller
+    diagnostic/test cohorts serial; callers may force a worker count to verify
+    equivalence. Member identity and random state remain keyed only by index,
+    and aggregation refuses any incomplete or duplicate index set.
     """
     if cohort_size < 1:
         raise ValueError(f"cohort size must be positive, got {cohort_size}")
@@ -472,51 +490,23 @@ def run_cohort(
         )
     started = time.monotonic()
     expected = collector.matchable_trade_count
-    members: list[MemberOutcome] = []
-    for index in range(cohort_size):
-        rng = np.random.Generator(np.random.PCG64(member_seed(index)))
-        book, returns, entry_dates, exit_dates = _place_member(rng, collector.placements, axis=axis)
-        if len(book) != expected:
-            # ⚠ EQUALITY, per member. The permutation preserves the trade count
-            # by construction, so a mismatch is the one failure mode it can have
-            # — a series whose holds were silently dropped — and a tolerance
-            # here would hide exactly that.
-            raise RuntimeError(
-                f"cohort member {index} placed {len(book):,} legs against the strategy's {expected:,} matchable "
-                "positions — the permutation is supposed to preserve the count per series"
-            )
-        dates = tuple(axis)
-        curve = build_equity_curve(book, date_count=len(dates))
-        metrics = compute_metrics(
-            DatedEquityCurve(dates=dates, curve=curve),
-            trades=TradeReturns(
-                net_return_pct=tuple(returns),
-                entry_fill_date=tuple(entry_dates),
-                exit_bar_date=tuple(exit_dates),
-                open_count=0,
-                unpriced_count=0,
-            ),
-            buy_and_hold=benchmark,
-            bootstrap_seed=None,
-        )
-        members.append(
-            MemberOutcome(
-                index=index,
-                sharpe=metrics.sharpe,
-                total_return_pct=metrics.total_return_pct,
-                exposure_time_pct=metrics.exposure_time_pct,
-                turnover_annualised=metrics.turnover_annualised,
-                trade_count=metrics.trade_count,
-            )
-        )
-        if progress is not None:
-            # Transient telemetry only: member outcomes remain local and the
-            # callback receives counts, never performance. Emit every member
-            # because one full-population member can itself take long enough
-            # to cross the operator's stale threshold; the DB writer applies
-            # its own wall-clock throttle.
-            progress(index + 1, cohort_size)
-    frozen = tuple(members)
+    workers = (
+        min(SYNTHETIC_CONTROL_MAX_WORKERS, cohort_size)
+        if max_workers is None and cohort_size == SPEC_COHORT_SIZE
+        else 1
+        if max_workers is None
+        else max_workers
+    )
+    if workers < 1:
+        raise ValueError(f"max_workers must be positive, got {workers}")
+    workers = min(workers, cohort_size)
+    inputs = _MemberInputs(
+        placements=tuple(collector.placements),
+        axis=tuple(axis),
+        benchmark=benchmark,
+        expected_trade_count=expected,
+    )
+    frozen = _run_members(inputs, cohort_size=cohort_size, max_workers=workers, progress=progress)
     return CohortResult(
         control=evaluate_control(
             frozen,
@@ -542,6 +532,132 @@ def run_cohort(
         series_placed=len(collector.placements),
         elapsed_s=time.monotonic() - started,
     )
+
+
+@dataclass(frozen=True)
+class _MemberInputs:
+    """Read-only inputs installed once in each spawned cohort worker."""
+
+    placements: tuple[SeriesPlacement, ...]
+    axis: tuple[date, ...]
+    benchmark: DatedEquityCurve | None
+    expected_trade_count: int
+
+
+_WORKER_INPUTS: _MemberInputs | None = None
+
+
+def _initialise_member_worker(inputs: _MemberInputs) -> None:
+    """Install the large collector payload once, never once per member."""
+    global _WORKER_INPUTS
+    _WORKER_INPUTS = inputs
+
+
+def _measure_member_in_worker(index: int) -> MemberOutcome:
+    if _WORKER_INPUTS is None:  # pragma: no cover - ProcessPoolExecutor owns initialization
+        raise RuntimeError("synthetic-control worker started without member inputs")
+    return _measure_member(index, _WORKER_INPUTS)
+
+
+def _measure_member(index: int, inputs: _MemberInputs) -> MemberOutcome:
+    """One index-keyed draw through the unchanged placement/curve/metric path."""
+    rng = np.random.Generator(np.random.PCG64(member_seed(index)))
+    book, returns, entry_dates, exit_dates = _place_member(rng, inputs.placements, axis=inputs.axis)
+    if len(book) != inputs.expected_trade_count:
+        # ⚠ EQUALITY, per member. The permutation preserves the trade count by
+        # construction, so a tolerance would hide exactly the dropped-hold
+        # failure this check exists to expose.
+        raise RuntimeError(
+            f"cohort member {index} placed {len(book):,} legs against the strategy's "
+            f"{inputs.expected_trade_count:,} matchable positions — the permutation is supposed to preserve the "
+            "count per series"
+        )
+    curve = build_equity_curve(book, date_count=len(inputs.axis))
+    metrics = compute_metrics(
+        DatedEquityCurve(dates=inputs.axis, curve=curve),
+        trades=TradeReturns(
+            net_return_pct=tuple(returns),
+            entry_fill_date=tuple(entry_dates),
+            exit_bar_date=tuple(exit_dates),
+            open_count=0,
+            unpriced_count=0,
+        ),
+        buy_and_hold=inputs.benchmark,
+        bootstrap_seed=None,
+    )
+    return MemberOutcome(
+        index=index,
+        sharpe=metrics.sharpe,
+        total_return_pct=metrics.total_return_pct,
+        exposure_time_pct=metrics.exposure_time_pct,
+        turnover_annualised=metrics.turnover_annualised,
+        trade_count=metrics.trade_count,
+    )
+
+
+def _run_members(
+    inputs: _MemberInputs,
+    *,
+    cohort_size: int,
+    max_workers: int,
+    progress: CohortProgressCallback | None,
+) -> tuple[MemberOutcome, ...]:
+    """Measure every member and return the canonical ``0..N-1`` ordering.
+
+    Completion order is deliberately irrelevant to the estimator. Seeds are a
+    pure function of the member index, outcomes are keyed by that index, and the
+    complete exact index set is checked before aggregation. The callback reports
+    completion counts only and therefore cannot leak performance mid-run.
+    """
+
+    completed = 0
+    by_index: dict[int, MemberOutcome] = {}
+
+    def accept(expected_index: int, outcome: MemberOutcome) -> None:
+        nonlocal completed
+        if outcome.index != expected_index:
+            raise RuntimeError(
+                f"cohort task {expected_index} returned member {outcome.index}; execution reordered identity"
+            )
+        if outcome.index in by_index:
+            raise RuntimeError(f"cohort member {outcome.index} completed more than once")
+        by_index[outcome.index] = outcome
+        completed += 1
+        if progress is not None:
+            # Transient telemetry only: outcomes remain local and the callback
+            # receives counts, never performance. Emit every completion because
+            # a member can cross the stale threshold; the DB writer throttles.
+            progress(completed, cohort_size)
+
+    if max_workers == 1:
+        for index in range(cohort_size):
+            accept(index, _measure_member(index, inputs))
+    else:
+        # ⚠ ``spawn`` rather than ``fork``. Production reaches this code from a
+        # ThreadPoolExecutor in a process holding psycopg connections and job
+        # locks; a fork would clone those unsafe resources into every child.
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=get_context("spawn"),
+            initializer=_initialise_member_worker,
+            initargs=(inputs,),
+        ) as pool:
+            pending = {pool.submit(_measure_member_in_worker, index): index for index in range(cohort_size)}
+            try:
+                for future in as_completed(pending):
+                    accept(pending[future], future.result())
+            except BaseException:
+                for future in pending:
+                    future.cancel()
+                raise
+
+    wanted = set(range(cohort_size))
+    actual = set(by_index)
+    if actual != wanted:
+        missing = sorted(wanted - actual)
+        extra = sorted(actual - wanted)
+        raise RuntimeError(f"cohort member set is incomplete: missing={missing[:20]}, extra={extra[:20]}")
+    return tuple(by_index[index] for index in range(cohort_size))
 
 
 def _place_member(
@@ -586,6 +702,7 @@ __all__ = [
     "CONTROL_NAMESPACE",
     "HOLDOUT_CONTROL_REASON",
     "PLACEMENT_SPACE_ID",
+    "SYNTHETIC_CONTROL_MAX_WORKERS",
     "CohortCollector",
     "CohortProgressCallback",
     "CohortResult",
