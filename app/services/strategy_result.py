@@ -798,7 +798,12 @@ class PromotionCandidate:
 #: not a re-freeze. Measured 2026-08-12 before the bump —
 #: ``select count(*) from strategy_preregistration_declarations`` returned 0, so
 #: no trial pays that cost here.
-STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-12-v2-carry-fx-split"
+#: v3 (#2721 step 3): ``universe_basis_not_survivorship_free`` became
+#: SATISFIABLE — a ``survivorship_free`` run with the termination rule wired
+#: no longer carries it. The policy's reachable outcomes changed, so the
+#: version moves: frozen declarations pin this string precisely so a change
+#: like this cannot reinterpret them silently.
+STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v3-survivorship-free-satisfiable"
 
 
 def structural_promotion_refusals(

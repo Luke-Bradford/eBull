@@ -71,7 +71,12 @@ RULE_SET_VERSION = f"{RULE_SET_ID}+{_code_hash()}"
 #: ``level`` because it breaks that source's ``(date, price)`` shape: ``sql/256``
 #: gives an ambiguous outcome a date and withholds the price BY CONSTRAINT, so
 #: the position closes on a known bar with an unknown return (§3.4).
-CloseSource = Literal["signal_pair", "level", "max_hold", "calendar", "ambiguous"]
+#: ⚠ ``series_termination`` is EMITTED BY ``backtest_run``, never by this
+#: builder: a terminating series' still-open ``window_end`` positions are
+#: converted to realised closes at the series' last admissible close ×
+#: ``series_termination.terminal_value_fraction`` (#2721 step 3). It lives in
+#: this vocabulary because ``Position.__post_init__`` validates against it.
+CloseSource = Literal["signal_pair", "level", "max_hold", "calendar", "ambiguous", "series_termination"]
 
 #: Why a position is still open at the end of the window. ⚠ These are counted
 #: SEPARATELY (§3.2 rule 5) because they say different things: one is a window
@@ -82,17 +87,32 @@ CloseSource = Literal["signal_pair", "level", "max_hold", "calendar", "ambiguous
 #: smuggled in, the same way ``strategy_registry`` flags ``no_fill_bar``. The
 #: former exists because a forced close bar can be present and UNPRICED. The
 #: latter refuses to compare prices on opposite sides of a known scale break.
-OpenReason = Literal["unresolved_outcome", "series_break", "window_end", "close_bar_unfillable"]
+#: ⚠ ``termination_price_unlocatable`` is SET BY ``backtest_run``, never by
+#: this builder: a ``window_end`` open on a terminating series whose span from
+#: fill to terminal bar carries no admissible close cannot be realised by the
+#: termination rule and is re-labelled so the census can count it apart from an
+#: ordinary window-end open (#2721 step 3).
+OpenReason = Literal[
+    "unresolved_outcome", "series_break", "window_end", "close_bar_unfillable", "termination_price_unlocatable"
+]
 
 #: Kept as an explicit subtraction so adopting a spec reason later cannot
 #: silently land on our side of the line — ``strategy_registry``'s construction.
-OUR_ADDITIONAL_OPEN_REASONS: frozenset[str] = frozenset({"close_bar_unfillable", "series_break"})
+OUR_ADDITIONAL_OPEN_REASONS: frozenset[str] = frozenset(
+    {"close_bar_unfillable", "series_break", "termination_price_unlocatable"}
+)
 
 # ⚠ DERIVED from the Literals, never restated — the closed-vocabulary-in-N-places
 # defect the prevention log carries from #2218.
 CLOSE_SOURCES: frozenset[str] = frozenset(get_args(CloseSource))
 OPEN_REASONS: frozenset[str] = frozenset(get_args(OpenReason))
 SPEC_OPEN_REASONS: frozenset[str] = OPEN_REASONS - OUR_ADDITIONAL_OPEN_REASONS
+
+#: ``series_termination`` is OUR addition to the spec's close vocabulary
+#: (#2721 step 3), declared apart exactly as the open reasons are — adopting a
+#: spec source later cannot silently land on our side of the line.
+OUR_ADDITIONAL_CLOSE_SOURCES: frozenset[str] = frozenset({"series_termination"})
+SPEC_CLOSE_SOURCES: frozenset[str] = CLOSE_SOURCES - OUR_ADDITIONAL_CLOSE_SOURCES
 
 #: Which label a tie carries. ⚠ Only reachable once the tied candidates have
 #: been checked to AGREE on the price, so this decides the label and never the
@@ -828,9 +848,11 @@ def build_positions(
 __all__ = [
     "CLOSE_SOURCES",
     "OPEN_REASONS",
+    "OUR_ADDITIONAL_CLOSE_SOURCES",
     "OUR_ADDITIONAL_OPEN_REASONS",
     "RULE_SET_ID",
     "RULE_SET_VERSION",
+    "SPEC_CLOSE_SOURCES",
     "SPEC_OPEN_REASONS",
     "CloseSource",
     "EntryFill",

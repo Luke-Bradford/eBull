@@ -22,12 +22,14 @@ def build_universe_record(
     *,
     version: str = VALIDATED_UNIVERSE_RULE_VERSION,
     evaluated: frozenset[int] = frozenset({1, 2, 3}),
+    evaluated_series: frozenset[int] = frozenset(),
     universe: frozenset[int] = frozenset({1, 2, 3, 4, 5}),
 ) -> ResultUniverseRecord:
     return ResultUniverseRecord(
         universe_rule_version=version,
         evaluated_instrument_ids=evaluated,
         validated_universe_ids=universe,
+        evaluated_series_ids=evaluated_series,
     )
 
 
@@ -47,6 +49,20 @@ class TestTheRefusalFunction:
     def test_a_record_that_disagrees_with_its_row_refuses(self) -> None:
         refusals = universe_promotion_refusals(build_universe_record(), evaluated_instrument_count=4)
         assert refusals == ("evaluated_universe_count_mismatch",)
+
+    def test_unlinked_dead_series_count_as_evaluated_names(self) -> None:
+        record = build_universe_record(
+            evaluated=frozenset({1, 2}),
+            evaluated_series=frozenset({101, 102, 103}),
+        )
+        assert universe_promotion_refusals(record, evaluated_instrument_count=5) == ()
+
+    def test_an_unlinked_only_result_is_not_vacuously_empty(self) -> None:
+        record = build_universe_record(
+            evaluated=frozenset(),
+            evaluated_series=frozenset({101}),
+        )
+        assert universe_promotion_refusals(record, evaluated_instrument_count=1) == ()
 
     def test_an_empty_evaluated_set_is_not_vacuously_inside(self) -> None:
         refusals = universe_promotion_refusals(

@@ -21,9 +21,11 @@ import pytest
 from app.services.indicator_series import RULE_SET_VERSION as INDICATOR_SERIES_RULE_SET_VERSION
 from app.services.indicator_series import BarSeries
 from app.services.market_regime_provider import RULE_SET_VERSION as BENCHMARK_SOURCE_RULE_SET_VERSION
+from app.services.series_termination import TERMINATION_RULE_VERSION
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategy_registry import StrategyIdentity, StrategySignal
 from app.services.technical_analysis import OHLCVRow
+from app.services.universe_selection import UNIVERSE_SELECTION_RULE_VERSION
 
 _IDENTITY = StrategyIdentity(
     strategy_id="S-TEST",
@@ -256,6 +258,8 @@ class TestBatchIntegrity:
         assert dict(rows[0].input_rule_set_versions) == {
             "indicator_series": INDICATOR_SERIES_RULE_SET_VERSION,
             "market_regime_provider": BENCHMARK_SOURCE_RULE_SET_VERSION,
+            "series_termination": TERMINATION_RULE_VERSION,
+            "universe_selection": UNIVERSE_SELECTION_RULE_VERSION,
         }
 
 

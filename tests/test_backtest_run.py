@@ -53,7 +53,7 @@ from app.services.backtest_run import (
     evaluate_level_arms,
     runnable_strategies,
 )
-from app.services.cost_model import COST_MODEL_ID, UNKNOWN_NOMINAL_PRICE_BAND
+from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELLED, UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
@@ -389,18 +389,33 @@ class TestExpectedRefusals:
 
     def test_full_holdout_run_with_a_dsr_leaves_only_the_standing_refusals(self) -> None:
         assert _expected_refusals(holdout_requested=True, deflated=True) == STANDING_REFUSALS | {
-            "synthetic_control_not_run"
+            "universe_basis_not_survivorship_free",
+            "synthetic_control_not_run",
         }
+
+    def test_a_survivorship_free_run_drops_the_universe_refusal_and_nothing_else(self) -> None:
+        """#2721 step 3 — the refusal became CONDITIONAL on the run's universe:
+        a ``survivorship_free`` corpus has defined its termination treatment,
+        which is exactly what the refusal existed to demand."""
+        survivor = _expected_refusals(holdout_requested=True, deflated=True, universe_basis="survivor_only")
+        free = _expected_refusals(holdout_requested=True, deflated=True, universe_basis="survivorship_free")
+        assert survivor - free == {"universe_basis_not_survivorship_free"}
+        assert free - survivor == set()
 
     def test_harness_validation_purpose_is_predicted_before_the_write(self) -> None:
         assert _expected_refusals(
             holdout_requested=True,
             deflated=True,
             purpose="harness_validation",
-        ) == STANDING_REFUSALS | {"harness_validation_only", "synthetic_control_not_run"}
+        ) == STANDING_REFUSALS | {
+            "universe_basis_not_survivorship_free",
+            "harness_validation_only",
+            "synthetic_control_not_run",
+        }
 
     def test_in_sample_run_adds_holdout_never_evaluated(self) -> None:
         assert _expected_refusals(holdout_requested=False, deflated=True) == STANDING_REFUSALS | {
+            "universe_basis_not_survivorship_free",
             "holdout_never_evaluated",
             "synthetic_control_not_run",
         }
@@ -434,6 +449,7 @@ class TestExpectedRefusals:
         assert _expected_refusals(
             holdout_requested=False, deflated=False, prior_holdout_evaluations=12
         ) == STANDING_REFUSALS | {
+            "universe_basis_not_survivorship_free",
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "synthetic_control_not_run",
@@ -444,22 +460,29 @@ class TestExpectedRefusals:
         DSR at all, and collapsing them would make "which of the two is missing"
         unanswerable."""
         assert _expected_refusals(holdout_requested=True, deflated=False) == STANDING_REFUSALS | {
+            "universe_basis_not_survivorship_free",
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "synthetic_control_not_run",
         }
 
     def test_the_standing_refusals_are_the_ones_this_cut_cannot_close(self) -> None:
-        """⚠ THREE, not four. ``synthetic_control_not_run`` left this set in #2601:
-        the run can now build the cohort off its own corpus pass, so the refusal
-        is conditional on the invocation asking for it — see the tests below."""
-        assert STANDING_REFUSALS == {
-            "universe_basis_not_survivorship_free",
-            "carry_unmodelled",
-            "fx_unmodelled",
-            "promotion_evidence_missing",
-        }
-        assert "synthetic_control_not_run" not in STANDING_REFUSALS
+        """⚠ ONE member. ``synthetic_control_not_run`` left this set in #2601;
+        ``carry_unmodelled``/``fx_unmodelled`` closed structurally in #2720
+        (predicted from the cost-model constants, the same source the row is
+        stamped from); ``universe_basis_not_survivorship_free`` left in #2721
+        step 3 — conditional on the run's universe, not standing."""
+        assert STANDING_REFUSALS == {"promotion_evidence_missing"}
+        assert not CARRY_UNMODELLED and not FX_UNMODELLED
+
+    def test_carry_and_fx_are_predicted_from_the_stamping_constants(self) -> None:
+        """#2720's structural closure: under cost model v3 no run carries
+        either refusal, and the prediction reads the SAME constants
+        ``build_result`` stamps — a standing entry mis-predicted every
+        post-#2720 run (caught by the #2721 smoke)."""
+        refusals = _expected_refusals(holdout_requested=True, deflated=True)
+        assert "carry_unmodelled" not in refusals
+        assert "fx_unmodelled" not in refusals
 
     def test_a_run_without_the_control_still_declares_it_unrun(self) -> None:
         assert "synthetic_control_not_run" in _expected_refusals(holdout_requested=True, deflated=True)
@@ -496,7 +519,8 @@ class TestExpectedRefusals:
                 strategy_sharpe=strategy_sharpe,
             ),
         )
-        assert refusals - STANDING_REFUSALS == expected
+        extra = {str(code) for code in refusals - STANDING_REFUSALS}
+        assert extra - {"universe_basis_not_survivorship_free"} == expected
         assert "synthetic_control_not_run" not in refusals
 
 

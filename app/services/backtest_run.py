@@ -48,6 +48,7 @@ change.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import time
@@ -98,6 +99,7 @@ from app.services.position_builder import (
     ExitFill,
     ExitRegime,
     OutcomePin,
+    Position,
     ResolvedOutcome,
     Window,
     build_positions,
@@ -121,6 +123,11 @@ from app.services.result_ledger import (
     store_holdout_arm_pair,
     store_in_sample_arm_pair,
     store_walk_forward_folds,
+)
+from app.services.series_termination import (
+    TerminationEvidence,
+    classify_termination,
+    terminal_value_fraction,
 )
 from app.services.signal_ledger import LedgerRow, resolve_fills
 from app.services.strategies.validated_universe import (
@@ -162,6 +169,7 @@ from app.services.strategy_result_universe import (
     ResultUniverseRecord,
     load_result_universe,
     store_result_universe,
+    store_termination_census,
 )
 from app.services.strategy_segmented_evaluation import segmented_member, segmented_signals
 from app.services.strategy_statistics import StrategyMetrics, TradeReturns, compute_metrics
@@ -174,6 +182,14 @@ from app.services.synthetic_control_run import (
 )
 from app.services.technical_analysis import OHLCVRow
 from app.services.trial_register import TRIAL_REGISTER
+from app.services.universe_selection import (
+    INTRADER_CAPTURE_DATE,
+    SURVIVORSHIP_FREE_VENDOR,
+    UNIVERSE_SELECTION_RULE_VERSION,
+    AdmittedSeries,
+    UniverseSelection,
+    load_universe_selection,
+)
 from app.services.walk_forward import (
     FOLD_COUNT,
     WALK_FORWARD_MODEL_ID,
@@ -241,6 +257,19 @@ def _emit_series_progress(
 #: basis says what the gate refuses on.
 BACKTEST_UNIVERSE: Universe = "survivor_only"
 
+
+def _corpus_version_for(universe_basis: Universe) -> str:
+    """The frozen corpus version a result under this universe stamps (#2721).
+
+    ``CORPUS_VENDORS``'s own docstring declares *"A SECOND VENDOR MOVES THIS
+    STRING"* — the survivorship-free vendor gets its OWN version string, keyed
+    on its capture date, rather than pooling under the survivor constant.
+    """
+    if universe_basis == "survivor_only":
+        return CORPUS_VERSION
+    return f"{SURVIVORSHIP_FREE_VENDOR}@{INTRADER_CAPTURE_DATE.isoformat()}"
+
+
 #: §6 — ``portfolio`` scope is out. It is a statement about a cross-strategy
 #: allocator and nothing in ``app/`` allocates across strategies.
 RESULT_SCOPE: Final = "sleeve"
@@ -261,32 +290,27 @@ RESULT_SCOPE: Final = "sleeve"
 #: input.
 BACKTEST_BOOTSTRAP_SEED: Final = 20260808
 
-#: §9/#2505 — the three refusals no invocation of this job can close, whatever
-#: it measures. ``universe_basis_not_survivorship_free`` is blocked on #2284's
-#: corpus purchase, ``carry_unmodelled`` on #2277's carry measurement and
-#: ``fx_unmodelled`` on #2363's FX measurement — SEPARATE members since #2363,
-#: because they close on unrelated evidence and one will be live while the
-#: other is not.
+#: §9/#2505's standing set, now ONE member. The original three each became
+#: CONDITIONAL as their evidence landed, and the docstring keeps the ledger:
 #:
-#: ⚠⚠ ``synthetic_control_not_run`` WAS A FOURTH MEMBER HERE AND IS NOT ANY MORE
-#: (#2601). It stood on the stated grounds that *"the only cohort that exists
-#: lives in a developer cache no job may depend on"* — which was true of the
-#: cohort, not of the control: ``synthetic_control_run`` now builds the cohort's
-#: inputs by riding the corpus pass this job already makes, so the refusal is
-#: closable by an invocation that asks for it. It is still added by
-#: ``_expected_refusals`` for a run that does not, and for every hold-out row
-#: (``HOLDOUT_CONTROL_REASON``) — a CONDITIONAL refusal rather than a standing
-#: one, which is the whole difference.
+#: - ``synthetic_control_not_run`` left in #2601 — the control rides the corpus
+#:   pass, so the refusal is closable by an invocation that asks for it (still
+#:   added by ``_expected_refusals`` for one that does not, and for hold-out
+#:   rows via ``HOLDOUT_CONTROL_REASON``).
+#: - ``carry_unmodelled`` and ``fx_unmodelled`` closed STRUCTURALLY in #2720
+#:   (cost model v3: long x1 real-USD lane; ``CARRY_UNMODELLED`` /
+#:   ``FX_UNMODELLED`` are ``False``). ⚠ ``_expected_refusals`` predicts them
+#:   FROM THOSE CONSTANTS — the same source ``build_result`` stamps the row
+#:   from — never from this set: a standing entry here failed every
+#:   post-#2720 run's preflight cross-check, caught by the #2721 smoke.
+#: - ``universe_basis_not_survivorship_free`` became conditional in #2721
+#:   step 3 — a ``survivorship_free`` run defines its termination treatment,
+#:   which is exactly what the refusal existed to demand.
 #:
-#: ⚠ The job still cannot make anything promotable on this corpus, and that is
-#: correct rather than a shortfall — §6 of the bounded-backtester spec states
-#: the intended initial state in those words. What it changes is that the
-#: refusals become SPECIFIC AND FEW instead of a generic failure.
+#: ``promotion_evidence_missing`` remains: a fresh result row has no promotion
+#: evidence by construction, whatever the invocation measures.
 STANDING_REFUSALS: Final[frozenset[PromotionRefusal]] = frozenset(
     {
-        "universe_basis_not_survivorship_free",
-        "carry_unmodelled",
-        "fx_unmodelled",
         "promotion_evidence_missing",
     }
 )
@@ -332,20 +356,17 @@ _PROBE_CALENDAR: Final = tuple(
     date.fromordinal(n) for n in range(date(2020, 1, 1).toordinal(), date(2021, 1, 1).toordinal())
 )
 
+#: ⚠ Keyed by the ADMITTED SERIES IDS, never ``instrument_id = ANY(...)``
+#: (#2721 step 3, ckpt-1): admission is series-based and vendor-pinned in
+#: ``universe_selection``, unlinked series carry no instrument id at all, and
+#: an axis cut over a different population than the pairs would make a
+#: smoke-limited run's fold weights describe names it never evaluated.
 _AXIS_SQL = """
     SELECT DISTINCT d.bar_date
-    FROM research_price_series s
-    JOIN research_price_daily d ON d.series_id = s.series_id
-    WHERE s.instrument_id = ANY(%(ids)s)
+    FROM research_price_daily d
+    WHERE d.series_id = ANY(%(series_ids)s)
       AND d.bar_date BETWEEN %(start)s AND %(end)s
     ORDER BY 1
-"""
-
-_SERIES_SQL = """
-    SELECT instrument_id, series_id
-    FROM research_price_series
-    WHERE instrument_id = ANY(%(ids)s)
-    ORDER BY instrument_id, series_id
 """
 
 #: The IN-SAMPLE axis and its per-date bar count — criterion 5's fold cut is
@@ -362,9 +383,8 @@ _SERIES_SQL = """
 #: what makes criterion 9's two arms comparable — see ``load_corpus``.
 _INSAMPLE_AXIS_SQL = """
     SELECT d.bar_date, count(*)
-    FROM research_price_series s
-    JOIN research_price_daily d ON d.series_id = s.series_id
-    WHERE s.instrument_id = ANY(%(ids)s)
+    FROM research_price_daily d
+    WHERE d.series_id = ANY(%(series_ids)s)
       AND d.bar_date >= %(start)s
       AND d.bar_date <= %(end)s
       AND d.bar_date < %(boundary)s
@@ -441,6 +461,11 @@ class NamespaceMeasurement:
     rebalance_costs: float = 0.0
     short_funded_entries: int = 0
     traded_notional_total: float = 0.0
+    #: #2721 step 3 — this namespace's termination treatment counts
+    #: (``terminated_<class>`` / ``termination_skipped_<open_reason>``), empty
+    #: on a survivor universe. Stored per result row by the ledger writer,
+    #: which refuses a ``survivorship_free`` row without one.
+    termination_census: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -678,6 +703,7 @@ def _resolved_level_outcomes(
     ambiguity_arm: AmbiguityArm,
     quarantine_arm: QuarantineArm,
     unresolved_breaks: Sequence[date],
+    universe: Universe,
 ) -> list[ResolvedOutcome]:
     """Resolve a level strategy with causal levels and a declared OHLC bound.
 
@@ -692,6 +718,7 @@ def _resolved_level_outcomes(
         ambiguity_arms=(ambiguity_arm,),
         quarantine_arm=quarantine_arm,
         unresolved_breaks=unresolved_breaks,
+        universe=universe,
     )[ambiguity_arm]
 
 
@@ -703,6 +730,7 @@ def _resolved_level_outcomes_for_arms(
     ambiguity_arms: Sequence[AmbiguityArm],
     quarantine_arm: QuarantineArm,
     unresolved_breaks: Sequence[date],
+    universe: Universe,
 ) -> dict[AmbiguityArm, list[ResolvedOutcome]]:
     """Resolve one filled population once, then project declared OHLC arms.
 
@@ -723,6 +751,7 @@ def _resolved_level_outcomes_for_arms(
         entries,
         series=series,
         unresolved_breaks=unresolved_breaks,
+        universe=universe,
     )
     bar_index = {when: index for index, when in enumerate(series.dates)}
     missing_reason: UnresolvedReason = "quarantined_bar" if quarantine_arm == "masked" else "missing_bar_data"
@@ -796,6 +825,7 @@ def _exit_levels_for_entries(
     *,
     series: BarSeries,
     unresolved_breaks: Sequence[date],
+    universe: Universe,
 ) -> tuple[ExitLevels | UnresolvedReason, ...]:
     """Build level objects in entry order, batching only within one segment.
 
@@ -823,7 +853,7 @@ def _exit_levels_for_entries(
                 entry.exit_levels_batch(
                     signal_series,
                     requests=requests,
-                    universe=BACKTEST_UNIVERSE,
+                    universe=universe,
                 )
             )
         else:
@@ -832,7 +862,7 @@ def _exit_levels_for_entries(
                     signal_series,
                     signal_index=local_index,
                     entry_price=fill.fill_price,
-                    universe=BACKTEST_UNIVERSE,
+                    universe=universe,
                 )
                 for _, fill, local_index in segment_entries
             )
@@ -866,6 +896,74 @@ def _mark_index(series: BarSeries, *, window: Window, not_before: date) -> int |
     return None
 
 
+def _terminate_open_positions(
+    positions: Sequence[Position],
+    *,
+    series: BarSeries,
+    evidence: TerminationEvidence,
+    ambiguity_arm: AmbiguityArm,
+) -> tuple[Position, ...]:
+    """#2721 step 3 — realise a terminating series' still-open positions.
+
+    The survivorship treatment itself: the series STOPS, and a position the
+    strategy never closed realises ``last admissible close ×
+    terminal_value_fraction(class, arm)`` at the series' last bar, becoming an
+    ordinary realised trade that flows through costing and namespace routing
+    unchanged. Runs BEFORE ``cost_positions`` (ckpt-1) so the terminal close is
+    costed exactly like every other exit — the Shumway prescription is a
+    return anchor, not a cost waiver.
+
+    Precedence, in order:
+
+    - a position the builder closed (any source, including a normal exit on
+      the last bar) is NEVER touched — the builder's own close outranks
+      termination;
+    - only ``window_end`` opens terminate. ``series_break``,
+      ``unresolved_outcome`` and ``close_bar_unfillable`` each carry a
+      data-integrity story a haircut cannot fix (a post-break close is on a
+      different price scale) — they stay open and the census counts them;
+    - a ``window_end`` open with no admissible close between its fill and the
+      terminal bar is re-labelled ``termination_price_unlocatable`` — counted,
+      never priced off nothing.
+
+    ⚠ The terminal bar is the LAST BAR OF THE SERIES AS LOADED, which under
+    the ``masked`` quarantine arm is the last ADMISSIBLE bar — the spec's
+    masked-terminal-bar rule falls out of the arm construction rather than
+    needing its own branch. The three-date trap stands: no filing date is a
+    clock; the last bar is.
+    """
+    termination_class = classify_termination(evidence)
+    terminal_index: int | None = None
+    for index in range(len(series) - 1, -1, -1):
+        if series.rows[index].get("close") is not None:
+            terminal_index = index
+            break
+    date_index = {when: index for index, when in enumerate(series.dates)}
+    out: list[Position] = []
+    for position in positions:
+        if position.close_source is not None or position.open_reason != "window_end":
+            out.append(position)
+            continue
+        fill_index = date_index.get(position.entry_fill_bar_date)
+        if terminal_index is None or fill_index is None or terminal_index < fill_index:
+            out.append(dataclasses.replace(position, open_reason="termination_price_unlocatable"))
+            continue
+        fraction = terminal_value_fraction(termination_class, ambiguity_arm)
+        terminal_close = Decimal(str(series.rows[terminal_index]["close"])) * Decimal(str(fraction))
+        out.append(
+            dataclasses.replace(
+                position,
+                close_source="series_termination",
+                close_bar_date=series.dates[terminal_index],
+                close_price=terminal_close,
+                bars_held=terminal_index - fill_index,
+                open_reason=None,
+                mark_price=None,
+            )
+        )
+    return tuple(out)
+
+
 @dataclass
 class _NamespaceBook:
     """One namespace's legs and trades, accumulated on the FULL evaluation axis.
@@ -885,6 +983,11 @@ class _NamespaceBook:
     positions: int = 0
     open_at_end: int = 0
     excluded: Counter[str] = field(default_factory=Counter)
+    #: #2721 step 3 — criterion 9 over the survivorship treatment: per
+    #: termination class, how many of THIS namespace's positions the rule
+    #: realised (``terminated_<class>``), and how many opens on a terminating
+    #: series it declined to touch (``termination_skipped_<open_reason>``).
+    terminations: Counter[str] = field(default_factory=Counter)
     first_index: int | None = None
     last_index: int | None = None
     #: Whether to accumulate criterion 5's label windows off this book. Set for
@@ -1103,6 +1206,7 @@ def _absorb(
     books: Mapping[ResultNamespace, _NamespaceBook],
     close_sources: Counter[str],
     discarded: Counter[str],
+    termination_class: str | None = None,
 ) -> None:
     """Route one instrument's costed positions into their namespace books.
 
@@ -1122,6 +1226,17 @@ def _absorb(
             continue
         book.positions += 1
         book.instruments.add(instrument_id)
+        # #2721 step 3 — the census counts every treatment decision on a
+        # terminating series, INCLUDING positions later excluded as uncosted:
+        # it describes what the rule did, not what reached the curve.
+        if termination_class is not None:
+            if position.close_source == "series_termination":
+                book.terminations[f"terminated_{termination_class}"] += 1
+            elif position.close_source is None:
+                if position.open_reason == "termination_price_unlocatable":
+                    book.terminations["termination_price_unlocatable"] += 1
+                else:
+                    book.terminations[f"termination_skipped_{position.open_reason}"] += 1
 
         entry_index = axis_pos.get(position.entry_fill_bar_date)
         if entry_index is None:  # pragma: no cover - every fill bar is a corpus bar
@@ -1213,6 +1328,10 @@ class _Corpus:
     universe: tuple[int, ...]
     axis: tuple[date, ...]
     axis_pos: Mapping[date, int]
+    #: ``(name_key, series_id)`` — the name key is the real ``instrument_id``
+    #: for a linked live series and ``-series_id`` for a series admitted
+    #: without one (#2721 step 3). ⚠ IN-PASS ONLY; no negative key may reach a
+    #: column typed as an instrument id.
     pairs: tuple[tuple[int, int], ...]
     evaluation_start: date = EVALUATION_WINDOW_START
     evaluation_end: date = EVALUATION_WINDOW_END
@@ -1223,6 +1342,21 @@ class _Corpus:
     #: Unresolved scale transitions keyed by instrument. Each date is the first
     #: bar at the new scale and therefore bounds a position opened before it.
     unresolved_breaks: Mapping[int, tuple[date, ...]] = field(default_factory=dict)
+    #: Which ``Universe`` this corpus was admitted under, and its TERMINATING
+    #: admissions keyed by ``series_id`` — empty for ``survivor_only`` (#2721
+    #: step 3). A non-empty map is what routes EVERY strategy through the
+    #: per-ambiguity-arm evaluation path: the two-armed termination classes
+    #: genuinely diverge the arms even for non-level strategies. The admission
+    #: record carries the STORED ``last_bar``, which is what the evaluation
+    #: gates against the window — never the loaded series' own last date
+    #: (ckpt-2: a masked arm or any future clipping could pull that earlier
+    #: and realise a termination the window never reached).
+    universe_basis: Universe = "survivor_only"
+    termination: Mapping[int, AdmittedSeries] = field(default_factory=dict)
+    #: The selection's census strata, carried verbatim onto every stored row's
+    #: termination census (criterion 9 — the exclusions are counted, not
+    #: narrated). ``None`` only on a hand-built harness corpus.
+    selection: UniverseSelection | None = None
 
     @property
     def window(self) -> Window:
@@ -1232,20 +1366,31 @@ class _Corpus:
 def load_corpus(
     conn: psycopg.Connection[Any],
     *,
+    universe_basis: Universe = BACKTEST_UNIVERSE,
     limit: int | None = None,
     evaluation_window: Window | None = None,
 ) -> _Corpus:
-    """The corpus ∩ §4.0 validated-universe slice, and its union calendar.
+    """The admitted corpus slice for ``universe_basis``, and its union calendar.
 
     ⚠ ``limit`` exists for a smoke run and the caller must say so in its report.
     A limited pass is not a full-population figure and no row written from one
-    describes the population its ``evaluated_instrument_count`` claims.
+    describes the population its ``evaluated_instrument_count`` claims. The
+    axis is derived from the LIMITED admitted set (ckpt-1) so even a smoke
+    run's calendar describes exactly the names it evaluates.
+
+    ⚠ A ``survivorship_free`` window REFUSES — never clamps — an end after the
+    vendor's capture date: a name that dies between capture and window end is
+    invisible, which is survivorship bias re-entering through the calendar
+    (#2721's hard bound). The default window for that basis ends AT capture.
     """
-    window = evaluation_window or Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
-    if window.start < EVALUATION_WINDOW_START or window.end > EVALUATION_WINDOW_END:
+    frozen_end = EVALUATION_WINDOW_END
+    if universe_basis == "survivorship_free":
+        frozen_end = INTRADER_CAPTURE_DATE
+    window = evaluation_window or Window(start=EVALUATION_WINDOW_START, end=frozen_end)
+    if window.start < EVALUATION_WINDOW_START or window.end > frozen_end:
         raise ValueError(
             f"evaluation window {window.start} -> {window.end} lies outside the frozen corpus window "
-            f"{EVALUATION_WINDOW_START} -> {EVALUATION_WINDOW_END}"
+            f"{EVALUATION_WINDOW_START} -> {frozen_end} for universe {universe_basis!r}"
         )
     universe = load_validated_universe(conn)
     # ⚠ THE PER-RUN FX GATE (#2720). The cost model's ``fx_unmodelled = False``
@@ -1256,6 +1401,11 @@ def load_corpus(
     # own evaluated set, against the instrument's OWN quote currency rather
     # than the ``exchanges.currency`` proxy, and refuses loudly rather than
     # stamping a claim it did not check. NULL is a violation, not a pass.
+    #
+    # ⚠ Unlinked dead series have no ``instruments`` row to assert against —
+    # their USD claim rests on the vendor being a US-venue archive (the corpus
+    # skill's directory evidence), which the ``survivorship_free`` label's
+    # census carries rather than this gate.
     non_usd = conn.execute(
         "SELECT instrument_id, currency FROM instruments "
         "WHERE instrument_id = ANY(%(ids)s) AND (currency IS NULL OR upper(currency) <> 'USD')",
@@ -1269,17 +1419,21 @@ def load_corpus(
             "fx_unmodelled=false over a non-USD instrument would clear a promotion refusal the run did not "
             "earn. Fix the universe or ship a cost model that prices conversion."
         )
-    bounds = {"ids": list(universe), "start": window.start, "end": window.end}
-    axis = tuple(row[0] for row in conn.execute(_AXIS_SQL, bounds).fetchall())
-    pairs = [(int(row[0]), int(row[1])) for row in conn.execute(_SERIES_SQL, {"ids": list(universe)}).fetchall()]
+    selection = load_universe_selection(conn, universe=universe_basis, validated_ids=frozenset(universe))
+    admitted = selection.admitted
     if limit is not None:
-        pairs = pairs[:limit]
-    included_ids = sorted({instrument_id for instrument_id, _series_id in pairs})
+        admitted = admitted[:limit]
+    pairs = [(series.name_key, series.series_id) for series in admitted]
+    series_ids = [series.series_id for series in admitted]
+    termination = {series.series_id: series for series in admitted if series.termination is not None}
+    bounds = {"series_ids": series_ids, "start": window.start, "end": window.end}
+    axis = tuple(row[0] for row in conn.execute(_AXIS_SQL, bounds).fetchall())
+    included_ids = sorted({series.instrument_id for series in admitted if series.instrument_id is not None})
     unresolved_breaks = load_unresolved_breaks(conn, included_ids)
 
     in_sample = conn.execute(
         _INSAMPLE_AXIS_SQL,
-        {"ids": list(universe), "start": window.start, "end": window.end, "boundary": HOLDOUT_BOUNDARY},
+        {"series_ids": series_ids, "start": window.start, "end": window.end, "boundary": HOLDOUT_BOUNDARY},
     ).fetchall()
     in_sample_axis = tuple(row[0] for row in in_sample)
     # ⚠⚠ THE PREFIX INVARIANT, ASSERTED AND NOT ASSUMED. Both queries run over
@@ -1307,6 +1461,9 @@ def load_corpus(
         in_sample_axis=in_sample_axis,
         in_sample_bar_counts=tuple(int(row[1]) for row in in_sample),
         unresolved_breaks=unresolved_breaks,
+        universe_basis=universe_basis,
+        termination=termination,
+        selection=selection,
     )
 
 
@@ -1426,6 +1583,7 @@ def _measure_namespace(
         rebalance_costs=curve.rebalance_costs,
         short_funded_entries=curve.short_funded_entries,
         traded_notional_total=float(curve.traded_notional.sum()),
+        termination_census=dict(book.terminations),
     )
 
 
@@ -1484,6 +1642,17 @@ def evaluate_arm(
     if regime.level_based != (ambiguity_arm is not None):
         raise ValueError(
             f"{entry.strategy_id} level_based={regime.level_based} received ambiguity arm {ambiguity_arm!r}"
+        )
+    if corpus.termination:
+        # #2721 step 3 — a terminating universe diverges the ambiguity arms for
+        # EVERY strategy (the two-armed termination classes price per arm), so
+        # a shared-arm pass here would stamp one measurement onto two arm rows
+        # that are not equal. ``run_backtest`` routes such corpora to
+        # ``evaluate_level_arms``; reaching this guard is a caller defect.
+        raise ValueError(
+            f"{entry.strategy_id}: corpus universe {corpus.universe_basis!r} admits {len(corpus.termination)} "
+            "terminating series — a shared ambiguity pass cannot price their two-armed terminations; use "
+            "evaluate_level_arms"
         )
     books: dict[ResultNamespace, _NamespaceBook] = {
         name: _NamespaceBook(records_label_windows=(name == "in_sample")) for name in namespaces
@@ -1561,6 +1730,7 @@ def evaluate_arm(
             ranking=ranking,
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
             regime_provider=regime_provider,
+            universe=corpus.universe_basis,
         )
         rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
         entries, exits = _fills(rows, instrument_id)
@@ -1572,6 +1742,7 @@ def evaluate_arm(
                 ambiguity_arm=ambiguity_arm,
                 quarantine_arm=quarantine_arm,
                 unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+                universe=corpus.universe_basis,
             )
             if ambiguity_arm is not None
             else []
@@ -1768,7 +1939,12 @@ def evaluate_level_arms(
     if sizing_rule not in {SIZING_RULE_ID, ENTRY_WEIGHT_DRIFT_RULE_ID, MONTH_END_REBALANCE_RULE_ID}:
         raise ValueError(f"unknown sizing rule {sizing_rule!r}")
     regime = _regime_for(entry, corpus.axis)
-    if not regime.level_based:
+    if not regime.level_based and not corpus.termination:
+        # ⚠ #2721 step 3 widened this path: on a terminating universe the
+        # two-armed termination classes genuinely diverge the ambiguity arms
+        # even for a non-level strategy, so EVERY strategy evaluates here with
+        # per-arm books. On a survivor universe a non-level strategy still has
+        # nothing to split over and belongs in ``evaluate_arm``'s shared pass.
         raise ValueError(f"{entry.strategy_id} is not level-based and has no ambiguity arms to share")
     books: dict[AmbiguityArm, dict[ResultNamespace, _NamespaceBook]] = {
         ambiguity: {name: _NamespaceBook(records_label_windows=(name == "in_sample")) for name in namespaces}
@@ -1849,17 +2025,40 @@ def evaluate_level_arms(
             ranking=ranking,
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
             regime_provider=regime_provider,
+            universe=corpus.universe_basis,
         )
         rows = resolve_fills(signals, series=series, identity=identity, instrument_id=instrument_id)
         entries, exits = _fills(rows, instrument_id)
-        outcomes = _resolved_level_outcomes_for_arms(
-            entry,
-            entries,
-            series=series,
-            ambiguity_arms=AMBIGUITY_ARM_ORDER,
-            quarantine_arm=quarantine_arm,
-            unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
-        )
+        outcomes: Mapping[AmbiguityArm, Sequence[ResolvedOutcome]]
+        if regime.level_based:
+            outcomes = _resolved_level_outcomes_for_arms(
+                entry,
+                entries,
+                series=series,
+                ambiguity_arms=AMBIGUITY_ARM_ORDER,
+                quarantine_arm=quarantine_arm,
+                unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
+                universe=corpus.universe_basis,
+            )
+        else:
+            outcomes = {ambiguity: () for ambiguity in AMBIGUITY_ARM_ORDER}
+        # #2721 step 3 — one class per series, computed once; the arms differ
+        # only in the terminal fraction the two-armed classes realise. Gated on
+        # the ADMISSION's stored last_bar, not the loaded series' last date:
+        # a narrowed window that ends before the series actually dies leaves
+        # its positions as ordinary window-end opens (no look-ahead), and a
+        # masked terminal bar cannot fake an earlier death.
+        admitted_termination = corpus.termination.get(series_id)
+        termination_evidence: TerminationEvidence | None = None
+        termination_label: str | None = None
+        if (
+            admitted_termination is not None
+            and admitted_termination.last_bar is not None
+            and admitted_termination.last_bar <= corpus.window.end
+        ):
+            termination_evidence = admitted_termination.termination
+            assert termination_evidence is not None  # the map holds terminating admissions only
+            termination_label = classify_termination(termination_evidence).value
         for ambiguity in AMBIGUITY_ARM_ORDER:
             built = build_positions(
                 strategy_id=entry.strategy_id,
@@ -1867,12 +2066,21 @@ def evaluate_level_arms(
                 entries=entries,
                 exits=exits,
                 outcomes=outcomes[ambiguity],
-                outcome_pin=_OUTCOME_PIN,
+                outcome_pin=_OUTCOME_PIN if regime.level_based else None,
                 series={instrument_id: series},
                 regime=regime,
                 window=corpus.window,
             )
-            costed = list(cost_positions(built.positions, price_basis="split_adjusted"))
+            positions = built.positions
+            if termination_label is not None:
+                assert termination_evidence is not None  # narrowed with termination_label
+                positions = _terminate_open_positions(
+                    built.positions,
+                    series=series,
+                    evidence=termination_evidence,
+                    ambiguity_arm=ambiguity,
+                )
+            costed = list(cost_positions(positions, price_basis="split_adjusted"))
             _absorb(
                 costed,
                 series=series,
@@ -1885,6 +2093,7 @@ def evaluate_level_arms(
                 books=books[ambiguity],
                 close_sources=close_sources[ambiguity],
                 discarded=discarded[ambiguity],
+                termination_class=termination_label,
             )
             arm_collector = collectors[ambiguity]
             if arm_collector is not None:
@@ -1971,6 +2180,7 @@ def _signals_for(
     ranking: Mapping[SignalKind, _CrossSection] | None,
     unresolved_breaks: Sequence[date] = (),
     regime_provider: MarketRegimeProvider,
+    universe: Universe = BACKTEST_UNIVERSE,
 ) -> list[StrategySignal]:
     """One instrument's whole-series verdicts, per-series or cross-sectional.
 
@@ -1988,7 +2198,7 @@ def _signals_for(
         return segmented_signals(
             entry,
             series,
-            universe=BACKTEST_UNIVERSE,
+            universe=universe,
             masked_reason="quarantined_bar",
             unresolved_breaks=unresolved_breaks,
             regime=regime_provider.for_dates(series.dates),
@@ -2000,7 +2210,7 @@ def _signals_for(
             entry,
             series,
             panel_decision_dates=leg_ranking.decision_dates,
-            universe=BACKTEST_UNIVERSE,
+            universe=universe,
             masked_reason="quarantined_bar",
             unresolved_breaks=unresolved_breaks,
             regime=regime_provider.for_dates(series.dates),
@@ -2127,7 +2337,7 @@ def _rank_cross_section(
             entry,
             series,
             panel_decision_dates=decision_dates,
-            universe=BACKTEST_UNIVERSE,
+            universe=corpus.universe_basis,
             masked_reason="quarantined_bar",
             unresolved_breaks=corpus.unresolved_breaks.get(instrument_id, ()),
             regime=regime_provider.for_dates(series.dates),
@@ -2309,6 +2519,7 @@ def build_result(
     deflated: DeflatedSharpeResult | None,
     evaluation_window: Window | None = None,
     synthetic_control: SyntheticControl | None = None,
+    universe_basis: Universe = BACKTEST_UNIVERSE,
 ) -> StrategyResult:
     """One ``strategy_results`` row. §7's fourteen identity members, all pinned.
 
@@ -2332,6 +2543,7 @@ def build_result(
     silently merge two results (the #2286 shape).
     """
     window = evaluation_window or Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
+    corpus_version = _corpus_version_for(universe_basis)
     return StrategyResult(
         identity=ResultIdentity(
             strategy_id=strategy_id,
@@ -2343,7 +2555,7 @@ def build_result(
             sizing_rule=SIZING_RULE_ID,
             benchmark_rule=BENCHMARK_RULE_ID,
             cost_model_id=COST_MODEL_ID,
-            corpus_version=CORPUS_VERSION,
+            corpus_version=corpus_version,
             window_start=window.start,
             window_end=window.end,
             position_rule_set_version=POSITION_RULE_SET_VERSION,
@@ -2353,7 +2565,7 @@ def build_result(
         ),
         purpose=purpose,
         metrics=outcome.metrics,
-        universe_basis=BACKTEST_UNIVERSE,
+        universe_basis=universe_basis,
         # ⚠ ``CARRY_UNMODELLED`` AS AT COMPUTE TIME, stamped per row. When carry
         # is finally measured every row computed before that measurement must
         # STAY unpromotable, which a gate reading today's module constant would
@@ -2502,6 +2714,7 @@ def _expected_refusals(
     ambiguity_material: bool | None = False,
     prior_holdout_evaluations: int = 0,
     synthetic_control: SyntheticControl | None = None,
+    universe_basis: Universe = BACKTEST_UNIVERSE,
 ) -> frozenset[PromotionRefusal]:
     """What §9's table says a row from this run must still refuse on.
 
@@ -2527,6 +2740,21 @@ def _expected_refusals(
     buy-and-hold run rejected here after a full corpus pass.
     """
     expected = set(STANDING_REFUSALS)
+    # #2721 step 3 — the universe refusal became CONDITIONAL: a
+    # ``survivorship_free`` run has defined its termination treatment, which is
+    # exactly what the refusal existed to demand. ``check_promotable`` derives
+    # the same answer independently via ``structural_promotion_refusals``, and
+    # the deliberate duplication (docstring above) is what keeps criterion 8's
+    # re-measurement honest.
+    if universe_basis != "survivorship_free":
+        expected.add("universe_basis_not_survivorship_free")
+    # Predicted from the SAME constants ``build_result`` stamps the row from
+    # (#2720 closed both structurally; a standing entry would mis-predict
+    # every run under cost model v3).
+    if CARRY_UNMODELLED:
+        expected.add("carry_unmodelled")
+    if FX_UNMODELLED:
+        expected.add("fx_unmodelled")
     if purpose == "harness_validation":
         expected.add("harness_validation_only")
     if not holdout_requested and prior_holdout_evaluations <= 0:
@@ -2604,6 +2832,7 @@ def run_backtest(
     conn: psycopg.Connection[Any],
     *,
     strategy_id: str | None = None,
+    universe: Universe = BACKTEST_UNIVERSE,
     holdout_purpose: str | None = None,
     holdout_accessed_by: str | None = None,
     trial_register_version: str | None = None,
@@ -2708,7 +2937,7 @@ def run_backtest(
         raise RuntimeError("no manifest strategy is runnable — every entry is blocked, so there is nothing to store")
 
     _emit_progress(progress, BacktestProgressEvent(phase="corpus"))
-    corpus = load_corpus(conn, limit=limit, evaluation_window=evaluation_window)
+    corpus = load_corpus(conn, universe_basis=universe, limit=limit, evaluation_window=evaluation_window)
     _emit_progress(
         progress,
         BacktestProgressEvent(
@@ -2718,8 +2947,7 @@ def run_backtest(
         ),
     )
     identities = {
-        entry_id: manifest[entry_id].identity(universe=BACKTEST_UNIVERSE, cost_model_id=COST_MODEL_ID)
-        for entry_id in runnable
+        entry_id: manifest[entry_id].identity(universe=universe, cost_model_id=COST_MODEL_ID) for entry_id in runnable
     }
     planned = [
         ResultIdentity(
@@ -2732,7 +2960,7 @@ def run_backtest(
             sizing_rule=SIZING_RULE_ID,
             benchmark_rule=BENCHMARK_RULE_ID,
             cost_model_id=COST_MODEL_ID,
-            corpus_version=CORPUS_VERSION,
+            corpus_version=_corpus_version_for(universe),
             window_start=corpus.window.start,
             window_end=corpus.window.end,
             position_rule_set_version=POSITION_RULE_SET_VERSION,
@@ -2774,7 +3002,7 @@ def run_backtest(
     for entry_id in runnable:
         regime = _regime_for(manifest[entry_id], corpus.axis)
         for quarantine in QUARANTINE_ARM_ORDER:
-            if regime.level_based:
+            if regime.level_based or corpus.termination:
                 measurements = evaluate_level_arms(
                     conn,
                     manifest[entry_id],
@@ -3038,6 +3266,7 @@ def _write_rows(
                     ),
                     evaluation_window=corpus.window,
                     synthetic_control=_control_for(masked_arm, namespace),
+                    universe_basis=corpus.universe_basis,
                 )
                 admitted = build_result(
                     admitted_arm.namespaces[namespace],
@@ -3052,6 +3281,7 @@ def _write_rows(
                     ),
                     evaluation_window=corpus.window,
                     synthetic_control=_control_for(admitted_arm, namespace),
+                    universe_basis=corpus.universe_basis,
                 )
                 pending.append((strategy_id, namespace, ambiguity, masked, admitted))
 
@@ -3091,6 +3321,12 @@ def _write_rows(
                 for result_id, result in zip(ids, (masked, admitted), strict=True):
                     _store_universe_record(conn, result_id, result, arms=arms, validated=validated)
                     _store_ambiguity_record(conn, result_id, result, arms=arms)
+                    if corpus.universe_basis == "survivorship_free":
+                        store_termination_census(
+                            conn,
+                            result_id=result_id,
+                            census=_termination_census_for(arms, result, selection=corpus.selection),
+                        )
             stored.extend((result_id, result, 0) for result_id, result in zip(ids, (masked, admitted), strict=True))
             continue
         # ⚠ ONE SPLIT PER ARM, NOT PER PAIR. The two rows of a pair differ in
@@ -3112,6 +3348,12 @@ def _write_rows(
                 )
                 _store_universe_record(conn, result_id, result, arms=arms, validated=validated)
                 _store_ambiguity_record(conn, result_id, result, arms=arms)
+                if corpus.universe_basis == "survivorship_free":
+                    store_termination_census(
+                        conn,
+                        result_id=result_id,
+                        census=_termination_census_for(arms, result, selection=corpus.selection),
+                    )
                 stored.append((result_id, result, folds))
 
     # Criterion 8 — RE-MEASURED on every written row, with the hold-out counts
@@ -3190,6 +3432,7 @@ def _write_rows(
             ambiguity_material=ambiguity_material,
             prior_holdout_evaluations=evaluations,
             synthetic_control=result.synthetic_control,
+            universe_basis=cast("Universe", result.universe_basis),
         )
         if set(outcome) != expected:
             raise RuntimeError(
@@ -3321,6 +3564,36 @@ def _evaluated_ids(arms: Sequence[ArmMeasurement], result: StrategyResult) -> fr
     )
 
 
+def _termination_census_for(
+    arms: Sequence[ArmMeasurement], result: StrategyResult, *, selection: UniverseSelection | None
+) -> dict[str, int]:
+    """One result row's termination census (#2721 step 3).
+
+    The namespace's own treatment counts plus the run-constant universe
+    selection strata — repeated on every row deliberately, so each census is
+    self-contained and reconciles to the vendor total without a join.
+    """
+    for measurement in arms:
+        if (
+            measurement.strategy_id == result.identity.strategy_id
+            and measurement.quarantine_arm == result.identity.quarantine_arm
+            and measurement.ambiguity_arm in {None, result.identity.ambiguity_arm}
+        ):
+            outcome = measurement.namespaces.get(result.identity.namespace)
+            if outcome is not None:
+                census = dict(outcome.termination_census)
+                if selection is not None:
+                    census["universe_admitted_total"] = len(selection.admitted)
+                    census["universe_unlinked_alive_excluded"] = selection.unlinked_alive_excluded
+                    census["universe_linked_early_reuse_suspect"] = selection.linked_early_reuse_suspect
+                    census["universe_unharvested_excluded"] = selection.unharvested_excluded
+                    census["universe_vendor_series_total"] = selection.vendor_series_total
+                return census
+    raise RuntimeError(  # pragma: no cover - every stored row came from a measurement
+        f"no measurement matches the stored row {result.identity.version}"
+    )
+
+
 def _store_ambiguity_record(
     conn: psycopg.Connection[Any],
     result_id: int,
@@ -3368,16 +3641,28 @@ def _store_universe_record(
     evaluated = _evaluated_ids(arms, result)
     if len(evaluated) != result.evaluated_instrument_count:
         raise RuntimeError(
-            f"{result.identity.version} would freeze {len(evaluated)} evaluated instruments against a row "
+            f"{result.identity.version} would freeze {len(evaluated)} evaluated names against a row "
             f"claiming {result.evaluated_instrument_count} — the universe record must describe its own row"
         )
+    # #2721 step 3 — the in-pass name key splits at the write boundary: real
+    # instrument ids persist as instrument ids, and a negative key (an
+    # unlinked dead series) persists as its SERIES id. No negative value may
+    # reach a column typed as an instrument id.
+    instrument_ids = frozenset(key for key in evaluated if key > 0)
+    series_ids = frozenset(-key for key in evaluated if key < 0)
+    rule_version = (
+        UNIVERSE_SELECTION_RULE_VERSION
+        if result.universe_basis == "survivorship_free"
+        else VALIDATED_UNIVERSE_RULE_VERSION
+    )
     store_result_universe(
         conn,
         result_id=result_id,
         record=ResultUniverseRecord(
-            universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
-            evaluated_instrument_ids=evaluated,
+            universe_rule_version=rule_version,
+            evaluated_instrument_ids=instrument_ids,
             validated_universe_ids=validated,
+            evaluated_series_ids=series_ids,
         ),
     )
 
@@ -3438,6 +3723,7 @@ def _preflight_gate(
                     (result.identity.strategy_id, result.identity.strategy_version), 0
                 ),
                 synthetic_control=result.synthetic_control,
+                universe_basis=cast("Universe", result.universe_basis),
             )
             if set(outcome) != expected:
                 raise RuntimeError(

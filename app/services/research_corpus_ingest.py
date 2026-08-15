@@ -279,6 +279,19 @@ def archive_symbol_candidates(filing_symbol: str) -> list[str]:
     return out
 
 
+def vendor_symbol_has_bankruptcy_suffix(vendor_symbol: str) -> bool:
+    """The INVERSE read of ``archive_symbol_candidates``' ``Q``-strip: does this
+    ARCHIVE spelling carry the post-bankruptcy OTC suffix?
+
+    One rule, two directions — ``series_termination.TerminationEvidence`` names
+    this function as the only permitted derivation of ``q_suffix``, because a
+    second spelling of "trailing Q with more than one letter" would drift from
+    the candidate ladder's.
+    """
+    base = vendor_symbol.strip().upper()
+    return base.endswith("Q") and len(base) > 1
+
+
 def resolve_archive_symbol(filing_symbol: str, available: set[str]) -> str | None:
     """First candidate spelling present in ``available``, else ``None``.
 
