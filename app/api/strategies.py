@@ -24,7 +24,7 @@ from app.security.master_key import MasterKeyError, ensure_broker_key_loaded
 from app.security.secrets_crypto import CredentialCryptoConfigError
 from app.security.sessions import SessionRow
 from app.services.account_equity_evidence import load_account_equity_evidence
-from app.services.backtest_run import BACKTEST_UNIVERSE, runnable_strategies
+from app.services.backtest_run import BACKTEST_UNIVERSE, corpus_version_for, runnable_strategies
 from app.services.broker_credentials import (
     CredentialDecryptError,
     CredentialNotFound,
@@ -99,7 +99,7 @@ from app.services.strategy_position_manager import (
     manage_owned_position,
 )
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
-from app.services.strategy_result import CORPUS_VERSION, TOTAL_RETURN_BASIS
+from app.services.strategy_result import TOTAL_RETURN_BASIS
 from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
@@ -1216,7 +1216,7 @@ def _evidence_window_counts(strategies: list[StrategyOverview]) -> tuple[int, in
 
     A missing member is missing evidence, never an exception. With no runnable
     strategies there is no evidence population, so the completed denominator
-    is zero rather than vacuously all eight.
+    is zero rather than vacuously all declared windows.
     """
     statuses = [
         {window.window_id: window.status for window in strategy.evidence_windows}
@@ -1247,7 +1247,7 @@ def _current_identity_pins() -> dict[str, str]:
     """
     return {
         "namespace": "hold_out",
-        "corpus_version": CORPUS_VERSION,
+        "corpus_version": corpus_version_for(BACKTEST_UNIVERSE),
         "cost_model_id": COST_MODEL_ID,
         "sizing_rule": SIZING_RULE_ID,
         "benchmark_rule": BENCHMARK_RULE_ID,
@@ -1340,7 +1340,7 @@ def get_strategy_overview(
     version_values = list(versions.values())
     params = {
         "versions": version_values,
-        "corpus_version": CORPUS_VERSION,
+        "corpus_version": corpus_version_for(BACKTEST_UNIVERSE),
         "cost_model_id": COST_MODEL_ID,
         "sizing_rule": SIZING_RULE_ID,
         "benchmark_rule": BENCHMARK_RULE_ID,

@@ -6,13 +6,12 @@ operator search until a favourable interval appeared and then present that row
 as if it were the declared test.  The registry also gives the monitoring API a
 complete denominator: a missing row is visible as missing evidence.
 
-Only compact aggregate result rows are stored.  Daily bars remain in the
-existing research corpus and indicators/positions are recomputed while a run is
-active, so adding all eight windows costs 128 rows at the current four runnable
-controls (8 windows x 4 strategies x 2 ambiguity x 2 quarantine), not another
-time-series store.  Only S-4 independently resolves best/worst ambiguity; the
-shared non-level measurement for S-1..S-3 is deliberately carried under both
-arm identities to keep the immutable denominator complete.
+The survivorship-free archive is frozen at 2024-09-27. A window beyond that
+date cannot earn the label, so post-capture calendar years are prospective
+shadow evidence, not historical backtest windows. The six windows below end at
+or before that hard bound; keeping the old 2025/2026 windows in this denominator
+would make allocation permanently impossible while describing unavailable data
+as an unfinished job.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from typing import Final, Literal
 
 from app.services.position_builder import Window
 from app.services.strategy_result import EVALUATION_WINDOW_END, HOLDOUT_BOUNDARY
+from app.services.universe_selection import INTRADER_CAPTURE_DATE
 
 RecentEvidenceWindowId = Literal[
     "primary-2022-plus",
@@ -32,8 +32,6 @@ RecentEvidenceWindowId = Literal[
     "year-2022",
     "year-2023",
     "year-2024",
-    "year-2025",
-    "year-2026-ytd",
 ]
 
 
@@ -53,17 +51,36 @@ class RecentEvidenceWindow:
             raise ValueError(
                 f"recent evidence {self.window_id} ends {self.window.end}, after corpus {EVALUATION_WINDOW_END}"
             )
+        if self.window.end > INTRADER_CAPTURE_DATE:
+            raise ValueError(
+                f"recent evidence {self.window_id} ends {self.window.end}, after the survivorship-free "
+                f"archive capture {INTRADER_CAPTURE_DATE}"
+            )
 
 
 _WINDOWS = (
-    RecentEvidenceWindow("primary-2022-plus", "Primary: 2022 onward", Window(date(2022, 1, 1), EVALUATION_WINDOW_END)),
-    RecentEvidenceWindow("rolling-36m", "Rolling 36 months", Window(date(2023, 7, 9), EVALUATION_WINDOW_END)),
-    RecentEvidenceWindow("rolling-24m", "Rolling 24 months", Window(date(2024, 7, 9), EVALUATION_WINDOW_END)),
+    RecentEvidenceWindow(
+        "primary-2022-plus",
+        "Primary: 2022 through archive capture",
+        Window(date(2022, 1, 1), INTRADER_CAPTURE_DATE),
+    ),
+    RecentEvidenceWindow(
+        "rolling-36m",
+        "36 months through archive capture",
+        Window(date(2021, 9, 28), INTRADER_CAPTURE_DATE),
+    ),
+    RecentEvidenceWindow(
+        "rolling-24m",
+        "24 months through archive capture",
+        Window(date(2022, 9, 28), INTRADER_CAPTURE_DATE),
+    ),
     RecentEvidenceWindow("year-2022", "Calendar 2022", Window(date(2022, 1, 1), date(2022, 12, 31))),
     RecentEvidenceWindow("year-2023", "Calendar 2023", Window(date(2023, 1, 1), date(2023, 12, 31))),
-    RecentEvidenceWindow("year-2024", "Calendar 2024", Window(date(2024, 1, 1), date(2024, 12, 31))),
-    RecentEvidenceWindow("year-2025", "Calendar 2025", Window(date(2025, 1, 1), date(2025, 12, 31))),
-    RecentEvidenceWindow("year-2026-ytd", "2026 year to corpus date", Window(date(2026, 1, 1), EVALUATION_WINDOW_END)),
+    RecentEvidenceWindow(
+        "year-2024",
+        "2024 through archive capture",
+        Window(date(2024, 1, 1), INTRADER_CAPTURE_DATE),
+    ),
 )
 
 RECENT_EVIDENCE_WINDOWS: Final = MappingProxyType({item.window_id: item for item in _WINDOWS})

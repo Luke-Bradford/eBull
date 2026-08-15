@@ -38,12 +38,12 @@ The runner computes ATR at signal bar ``t``, fixes the bracket around the
 ``level_based`` entry with no factory remains a named exclusion; it is never
 silently skipped.
 
-⚠ IT READS THE FROZEN RESEARCH CORPUS ONLY. ``load_masked_series`` at
-``CORPUS_VERSION``; ``strategy_signal_scan`` reads live ``price_daily`` through
-``price_masked_bars``. The two sources are deliberately different and their rows
-are not comparable. S-2 is where that could slip — assembling a panel is the one
-place a ``price_daily`` read would look like a convenience rather than a corpus
-change.
+⚠ IT READS THE FROZEN RESEARCH CORPUS ONLY. Its result rows carry
+``corpus_version_for(BACKTEST_UNIVERSE)``; ``strategy_signal_scan`` reads live
+``price_daily`` through ``price_masked_bars``. The two sources are deliberately
+different and their rows are not comparable. S-2 is where that could slip —
+assembling a panel is the one place a ``price_daily`` read would look like a
+convenience rather than a corpus change.
 """
 
 from __future__ import annotations
@@ -257,15 +257,15 @@ def _emit_series_progress(
         )
 
 
-#: The research corpus is survivor-only (#2284) and every row this job writes
-#: inherits that label (#2288). ⚠ It is BOTH the ``Universe`` hashed into
-#: ``StrategyIdentity`` and the ``universe_basis`` stamped on the result, and
-#: they must not drift apart: the identity says what the strategy was told, the
-#: basis says what the gate refuses on.
-BACKTEST_UNIVERSE: Universe = "survivor_only"
+#: #2721 acceptance makes the termination-aware Intrader archive the one
+#: evidence basis used by the backtester, API, scheduler and paper runtime.
+#: This is BOTH the ``Universe`` hashed into ``StrategyIdentity`` and the
+#: ``universe_basis`` stamped on a result. The old survivor corpus remains an
+#: explicit diagnostic arm, never the default capital-evidence identity.
+BACKTEST_UNIVERSE: Universe = "survivorship_free"
 
 
-def _corpus_version_for(universe_basis: Universe) -> str:
+def corpus_version_for(universe_basis: Universe) -> str:
     """The frozen corpus version a result under this universe stamps (#2721).
 
     ``CORPUS_VENDORS``'s own docstring declares *"A SECOND VENDOR MOVES THIS
@@ -2574,8 +2574,9 @@ def build_result(
     rather than a placeholder written — a blank would pass ``NOT NULL`` and
     silently merge two results (the #2286 shape).
     """
-    window = evaluation_window or Window(start=EVALUATION_WINDOW_START, end=EVALUATION_WINDOW_END)
-    corpus_version = _corpus_version_for(universe_basis)
+    default_end = INTRADER_CAPTURE_DATE if universe_basis == "survivorship_free" else EVALUATION_WINDOW_END
+    window = evaluation_window or Window(start=EVALUATION_WINDOW_START, end=default_end)
+    corpus_version = corpus_version_for(universe_basis)
     return StrategyResult(
         identity=ResultIdentity(
             strategy_id=strategy_id,
@@ -2992,7 +2993,7 @@ def run_backtest(
             sizing_rule=SIZING_RULE_ID,
             benchmark_rule=BENCHMARK_RULE_ID,
             cost_model_id=COST_MODEL_ID,
-            corpus_version=_corpus_version_for(universe),
+            corpus_version=corpus_version_for(universe),
             window_start=corpus.window.start,
             window_end=corpus.window.end,
             position_rule_set_version=POSITION_RULE_SET_VERSION,
@@ -3937,6 +3938,7 @@ __all__ = [
     "assert_no_existing_results",
     "build_in_sample_split",
     "build_result",
+    "corpus_version_for",
     "deflate_group",
     "evaluate_arm",
     "load_corpus",

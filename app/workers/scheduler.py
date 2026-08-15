@@ -5528,9 +5528,9 @@ def _open_backtest_progress_writer(
 def strategy_backtest_run(params: Mapping[str, Any]) -> None:
     """Persist criterion 9's arm pairs for every runnable strategy (#2394 §3.2).
 
-    DB-only (no external I/O): reads the FROZEN research corpus through
-    ``research_price_structure_store.load_masked_series`` at ``CORPUS_VERSION``
-    and writes ``strategy_results`` / ``strategy_results_store`` +
+    DB-only (no external I/O): reads the frozen corpus selected by
+    ``backtest_run.BACKTEST_UNIVERSE`` and stamps its matching corpus version;
+    writes ``strategy_results`` / ``strategy_results_store`` +
     ``strategy_holdout_accesses`` through ``result_ledger``. It touches no
     broker path and no live-data path.
 
@@ -5705,7 +5705,12 @@ def _recent_evidence_completion(
     Counting dates alone could mistake stale cost, corpus or rule-set rows for
     current evidence.
     """
-    from app.services.backtest_run import BACKTEST_UNIVERSE, RESULT_SCOPE, runnable_strategies
+    from app.services.backtest_run import (
+        BACKTEST_UNIVERSE,
+        RESULT_SCOPE,
+        corpus_version_for,
+        runnable_strategies,
+    )
     from app.services.cost_model import COST_MODEL_ID
     from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
     from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
@@ -5719,7 +5724,6 @@ def _recent_evidence_completion(
     from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
     from app.services.strategy_result import (
         AMBIGUITY_ARMS,
-        CORPUS_VERSION,
         TOTAL_RETURN_BASIS,
         AmbiguityArm,
         ResultIdentity,
@@ -5745,7 +5749,7 @@ def _recent_evidence_completion(
                             sizing_rule=SIZING_RULE_ID,
                             benchmark_rule=BENCHMARK_RULE_ID,
                             cost_model_id=COST_MODEL_ID,
-                            corpus_version=CORPUS_VERSION,
+                            corpus_version=corpus_version_for(BACKTEST_UNIVERSE),
                             window_start=item.window.start,
                             window_end=item.window.end,
                             position_rule_set_version=POSITION_RULE_SET_VERSION,

@@ -15,6 +15,7 @@ from app.api.strategies import (
     _promotion_refusals,
     get_strategy_overview,
 )
+from app.services.backtest_run import BACKTEST_UNIVERSE, corpus_version_for
 from app.services.cost_model import COST_MODEL_ID
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
@@ -23,7 +24,7 @@ from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERS
 from app.services.result_ledger import store_holdout_result, store_in_sample_result
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
-from app.services.strategy_result import CORPUS_VERSION, LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS
+from app.services.strategy_result import LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.test_result_ledger import build_metrics, build_result
 
@@ -294,7 +295,7 @@ def test_empty_ledgers_still_return_all_manifest_strategies(
     assert [item.strategy_id for item in overview.strategies] == sorted(STRATEGY_MANIFEST)
     assert all(item.scan.status == "never_run" for item in overview.strategies)
     assert all(not item.all_recent_evidence_complete for item in overview.strategies)
-    assert all(len(item.evidence_windows) == 8 for item in overview.strategies)
+    assert all(len(item.evidence_windows) == len(RECENT_EVIDENCE_WINDOWS) for item in overview.strategies)
     assert not overview.automation_readiness.ready
     assert overview.automation_readiness.state == "no_capital_candidates"
     assert overview.automation_readiness.capital_candidate_count == 0
@@ -400,7 +401,7 @@ def test_overview_maps_only_exact_current_holdout_provenance(
         "strategy_version": strategy_version,
         "window_start": window.start,
         "window_end": window.end,
-        "corpus_version": CORPUS_VERSION,
+        "corpus_version": corpus_version_for(BACKTEST_UNIVERSE),
         "cost_model_id": COST_MODEL_ID,
         "sizing_rule": SIZING_RULE_ID,
         "benchmark_rule": BENCHMARK_RULE_ID,
