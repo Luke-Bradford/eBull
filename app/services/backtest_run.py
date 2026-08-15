@@ -1170,19 +1170,17 @@ def _benchmark_book(
     machinery would attribute the machinery's difference to the strategy. It is
     charged the same cost model: one round trip at the entry band's half-spread.
 
-    ⚠ ONE LEG PER INSTRUMENT THE NAMESPACE ACTUALLY EVALUATED, not per corpus
-    series. The row's ``evaluated_instrument_count`` is the namespace's own set
-    (§0: the two namespaces differ by 23.6%), and a benchmark over a wider
-    population would be a comparison against names this row does not claim to
-    have measured.
+    ⚠ ONE LEG PER PRE-MASK OPPORTUNITY NAME, including an unlinked series under
+    its negative in-pass key. The durable child splits linked instrument IDs
+    from unlinked series IDs, while this construction uses their exact union.
+    Membership is fixed before signals, fills, positions or costs.
 
     ⚠ CLIPPED TO ``[lo, hi]``, which is the namespace's axis and not the
-    evaluation window. A leg outside it is dropped; one straddling it opens at
-    the first usable close inside and closes at the last. That is the same
-    "first usable bar in the window to its last" rule the whole-window benchmark
-    applies, with the namespace's axis as the window — the alternative, holding
-    the full-window benchmark against a truncated strategy curve, compares two
-    different spans.
+    enclosing evaluation window. A history straddling it opens at the first
+    usable close inside and closes at the last; reserved capital remains cash
+    before entry and proceeds remain cash after exit. A name with fewer than two
+    usable dates inside the fixed axis is refused rather than dropped, because
+    shrinking the population would make the comparator outcome-dependent.
     """
     book = LegBook()
     one = Decimal(1)
