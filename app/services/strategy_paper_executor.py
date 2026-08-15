@@ -188,12 +188,13 @@ def _existing_result(conn: psycopg.Connection[Any], signal_id: int) -> PaperExec
         cur.execute(
             """
             SELECT d.verdict, d.reason_code, d.amount, t.strategy_trade_id,
-                   o.order_id, o.status, o.broker_order_ref
+                   o.order_id, o.status, o.broker_order_ref, r.last_error_code
             FROM strategy_funding_decisions d
             LEFT JOIN strategy_trades t ON t.funding_decision_id = d.funding_decision_id
             LEFT JOIN strategy_trade_orders sto
               ON sto.strategy_trade_id = t.strategy_trade_id AND sto.purpose = 'entry'
             LEFT JOIN orders o ON o.order_id = sto.order_id
+            LEFT JOIN strategy_order_reconciliation_state r ON r.order_id = o.order_id
             WHERE d.signal_id = %s
             """,
             (signal_id,),
@@ -203,16 +204,20 @@ def _existing_result(conn: psycopg.Connection[Any], signal_id: int) -> PaperExec
         return None
     if row["verdict"] == "rejected":
         verdict: Literal["rejected", "submitted", "submission_uncertain", "broker_rejected"] = "rejected"
+        reason_code = str(row["reason_code"])
     elif row["status"] == "rejected":
         verdict = "broker_rejected"
+        reason_code = str(row["last_error_code"] or "broker_order_rejected")
     elif row["status"] == "submitted" and row["broker_order_ref"] is None:
         verdict = "submission_uncertain"
+        reason_code = "submission_uncertain"
     else:
         verdict = "submitted"
+        reason_code = "broker_accepted"
     return PaperExecutionResult(
         signal_id=signal_id,
         verdict=verdict,
-        reason_code=str(row["reason_code"]),
+        reason_code=reason_code,
         amount=Decimal(str(row["amount"])) if row["amount"] is not None else None,
         strategy_trade_id=int(row["strategy_trade_id"]) if row["strategy_trade_id"] is not None else None,
         order_id=int(row["order_id"]) if row["order_id"] is not None else None,

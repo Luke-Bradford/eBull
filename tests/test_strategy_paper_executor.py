@@ -1588,6 +1588,30 @@ def test_transport_uncertainty_retries_only_the_committed_uuid(
     ).fetchall() == [(_REQUEST_ID,)]
 
 
+def test_live_switch_does_not_resubmit_an_uncertain_demo_order(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    broker = _broker()
+    broker.place_demo_strategy_order.side_effect = BrokerOrderSubmissionUncertain("timeout")
+    monkeypatch.setattr("app.services.strategy_order_reconciliation.uuid4", lambda: _REQUEST_ID)
+
+    first = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+    assert first.verdict == "submission_uncertain"
+    conn.execute("UPDATE runtime_config SET enable_live_trading=true WHERE id=true")
+    conn.commit()
+    broker.reset_mock()
+
+    second = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert second == first
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.lookup_order.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+
+
 def test_uncertain_harness_submission_is_looked_up_without_resubmission(
     ebull_test_conn: psycopg.Connection[Any],
     monkeypatch: pytest.MonkeyPatch,
