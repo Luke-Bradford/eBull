@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -42,6 +42,7 @@ _KEYS = (
     ("worst_case", "admitted"),
     ("worst_case", "masked"),
 )
+_RUNNER_HEAD = "a" * 40
 _COMMON_MONTHS = tuple(date(2010 + offset // 12, offset % 12 + 1, 1) for offset in range(120))
 _DECISION_DATES = (date(2020, 1, 2), date(2020, 2, 3))
 _AXIS = (*_COMMON_MONTHS, *_DECISION_DATES)
@@ -118,6 +119,7 @@ def _preparation(conn: psycopg.Connection[tuple]) -> MT1InSamplePreparation:
         mt1_source_strategy_version="mt1-source-v1",
         s8_source_strategy_version="s8-source-v1",
         corpus_version="corpus-v1",
+        runner_source_head=_RUNNER_HEAD,
     )
 
 
@@ -143,6 +145,7 @@ def _refusal(preparation: MT1InSamplePreparation) -> MT1InSampleStructuralRefusa
         mt1_source_strategy_version=preparation.mt1_source_strategy_version,
         s8_source_strategy_version=preparation.s8_source_strategy_version,
         corpus_version=preparation.corpus_version,
+        runner_source_head=preparation.runner_source_head,
     )
 
 
@@ -154,6 +157,11 @@ def test_complete_structural_fan_commits_before_atomic_result_and_retries_read_b
     assert ebull_test_conn.execute(
         "SELECT count(*) FROM strategy_mt1_structural_cells WHERE structural_attempt_id = %s", (attempt_id,)
     ).fetchone() == (4,)
+    assert ebull_test_conn.execute(
+        "SELECT runner_source_head,structural_evidence_json->>'runner_source_head' "
+        "FROM strategy_mt1_structural_attempts WHERE structural_attempt_id=%s",
+        (attempt_id,),
+    ).fetchone() == (_RUNNER_HEAD, _RUNNER_HEAD)
 
     bundle = _bundle(preparation)
     result_id = store.store_mt1_trial_bundle(ebull_test_conn, structural_attempt_id=attempt_id, bundle=bundle)
@@ -279,6 +287,7 @@ def test_paved_runner_commits_structure_before_evaluating_any_outcome(
             mt1_source_strategy_version="source-mt1-v1",
             s8_source_strategy_version="source-s8-v1",
             corpus_version="corpus-v1",
+            runner_source_head=_RUNNER_HEAD,
         ),
     )
     bundle = cast(MT1HistoricalBundle, object())
@@ -304,7 +313,9 @@ def test_paved_runner_commits_structure_before_evaluating_any_outcome(
     monkeypatch.setattr(store, "store_mt1_trial_bundle", store_result)
     monkeypatch.setattr(store, "MT1InSampleEvaluation", lambda **_kwargs: cast(object, object()))
 
-    result = store.run_and_store_mt1_in_sample_evaluation(cast(object, object()))  # type: ignore[arg-type]
+    result = store.run_and_store_mt1_in_sample_evaluation(  # type: ignore[arg-type]
+        cast(Any, object()), runner_source_head=_RUNNER_HEAD
+    )
 
     assert events == ["structural_commit", "evaluate", "result_commit"]
     assert isinstance(result, store.MT1StoredEvaluation)
@@ -326,7 +337,9 @@ def test_paved_runner_persists_structural_refusal_without_evaluating(
         "evaluate_mt1_prepared_bundle",
         lambda *_args: (_ for _ in ()).throw(AssertionError("outcomes must remain unevaluated")),
     )
-    result = store.run_and_store_mt1_in_sample_evaluation(cast(object, object()))  # type: ignore[arg-type]
+    result = store.run_and_store_mt1_in_sample_evaluation(  # type: ignore[arg-type]
+        cast(Any, object()), runner_source_head=_RUNNER_HEAD
+    )
 
     assert isinstance(result, store.MT1StoredRefusal)
     assert (result.structural_attempt_id, result.detail) == (42, "refused")

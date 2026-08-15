@@ -48,6 +48,7 @@ CREATE TABLE strategy_mt1_structural_attempts (
     metric_axis_end             DATE NOT NULL CHECK (metric_axis_end < DATE '2021-06-29'),
     metric_axis_digest          TEXT NOT NULL CHECK (metric_axis_digest ~ '^[0-9a-f]{64}$'),
     opportunity_set_digest      TEXT NOT NULL CHECK (opportunity_set_digest ~ '^[0-9a-f]{64}$'),
+    runner_source_head          TEXT NOT NULL CHECK (runner_source_head ~ '^[0-9a-f]{40}$'),
     passed                      BOOLEAN NOT NULL,
     refusal_code                TEXT CHECK (refusal_code = 'structural_gate_refused'),
     refusal_detail              TEXT CHECK (

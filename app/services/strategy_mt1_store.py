@@ -132,6 +132,7 @@ def _structural_header_payload(preparation: MT1InSamplePreparation) -> dict[str,
         "mt1_strategy_version": preparation.mt1_strategy_version,
         "opportunity_set_digest": record_sha256(preparation.prepared.opportunity_record),
         "passed": True,
+        "runner_source_head": preparation.runner_source_head,
         "s8_control_strategy_version": preparation.s8_control_strategy_version,
         "s8_source_strategy_version": preparation.s8_source_strategy_version,
         "structural_cell_digests": cell_digests,
@@ -200,10 +201,11 @@ def store_mt1_structural_preparation(conn: psycopg.Connection[Any], preparation:
             trial_register_version, trial_contract_version, book_rule_version,
             evaluator_version, metric_axis_rule_version, metric_axis_dates,
             metric_axis_start, metric_axis_end, metric_axis_digest,
-            opportunity_set_digest, passed, structural_evidence_sha256, structural_evidence_json
+            opportunity_set_digest, runner_source_head, passed,
+            structural_evidence_sha256, structural_evidence_json
         ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, 'survivorship_free', %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s
         ) RETURNING structural_attempt_id
         """,
         (
@@ -227,6 +229,7 @@ def store_mt1_structural_preparation(conn: psycopg.Connection[Any], preparation:
             axis[-1],
             metric_axis_sha256(axis),
             record_sha256(preparation.prepared.opportunity_record),
+            preparation.runner_source_head,
             evidence_sha,
             Jsonb(payload),
         ),
@@ -293,6 +296,7 @@ def store_mt1_structural_refusal(conn: psycopg.Connection[Any], refusal: MT1InSa
         "opportunity_set_digest": record_sha256(refusal.opportunity_record),
         "passed": False,
         "refusal_code": "structural_gate_refused",
+        "runner_source_head": refusal.runner_source_head,
         "s8_control_strategy_version": refusal.s8_control_strategy_version,
         "s8_source_strategy_version": refusal.s8_source_strategy_version,
         "structural_cell_digests": [],
@@ -335,11 +339,11 @@ def store_mt1_structural_refusal(conn: psycopg.Connection[Any], refusal: MT1InSa
             trial_register_version, trial_contract_version, book_rule_version,
             evaluator_version, metric_axis_rule_version, metric_axis_dates,
             metric_axis_start, metric_axis_end, metric_axis_digest,
-            opportunity_set_digest, passed, refusal_code, refusal_detail,
+            opportunity_set_digest, runner_source_head, passed, refusal_code, refusal_detail,
             structural_evidence_sha256, structural_evidence_json
         ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, 'survivorship_free', %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE,
             'structural_gate_refused', %s, %s, %s
         ) RETURNING structural_attempt_id
         """,
@@ -364,6 +368,7 @@ def store_mt1_structural_refusal(conn: psycopg.Connection[Any], refusal: MT1InSa
             axis[-1],
             metric_axis_sha256(axis),
             record_sha256(refusal.opportunity_record),
+            refusal.runner_source_head,
             refusal.detail,
             evidence_sha,
             Jsonb(payload),
@@ -550,11 +555,15 @@ def store_mt1_trial_bundle(
 
 
 def run_and_store_mt1_in_sample_evaluation(
-    conn: psycopg.Connection[Any], *, progress: ProgressCallback | None = None
+    conn: psycopg.Connection[Any], *, runner_source_head: str, progress: ProgressCallback | None = None
 ) -> MT1StoredEvaluation | MT1StoredRefusal:
     """Paved runner: structural commit, outcome calculation, atomic result commit."""
     try:
-        preparation = prepare_mt1_in_sample_evaluation(conn, progress=progress)
+        preparation = prepare_mt1_in_sample_evaluation(
+            conn,
+            runner_source_head=runner_source_head,
+            progress=progress,
+        )
     except MT1InSampleStructuralRefused as exc:
         attempt_id = store_mt1_structural_refusal(conn, exc.evidence)
         return MT1StoredRefusal(structural_attempt_id=attempt_id, detail=exc.evidence.detail)
@@ -573,6 +582,7 @@ def run_and_store_mt1_in_sample_evaluation(
         mt1_source_strategy_version=preparation.mt1_source_strategy_version,
         s8_source_strategy_version=preparation.s8_source_strategy_version,
         corpus_version=preparation.corpus_version,
+        runner_source_head=preparation.runner_source_head,
     )
     return MT1StoredEvaluation(structural_attempt_id, trial_result_id, evaluation)
 
