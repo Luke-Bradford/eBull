@@ -543,7 +543,9 @@ _FIXTURE_YEAR = 2023
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--year", type=int, default=2023)
+    # Default applied after parsing (not here) so that passing BOTH --year and
+    # --years is detectable as the contradiction it is.
+    parser.add_argument("--year", type=int, default=None)
     parser.add_argument(
         "--years",
         type=str,
@@ -564,13 +566,21 @@ def main(argv: list[str] | None = None) -> int:
     if not any((args.harvest, args.reclassify, args.resolve_symbols, args.emit_fixture, args.census)):
         parser.error("pick at least one action")
 
-    years = parse_years(args.years) if args.years else [args.year]
+    if args.year is not None and args.years:
+        parser.error("--year and --years contradict; pass one")
+    if args.years:
+        try:
+            years = parse_years(args.years)
+        except ValueError as exc:
+            parser.error(f"--years: {exc}")
+    else:
+        years = [args.year if args.year is not None else _FIXTURE_YEAR]
     if args.emit_fixture:
         if args.years:
             parser.error("--emit-fixture is single-year; it is an acceptance fixture, not a log")
-        if args.year != _FIXTURE_YEAR and args.fixture_path == _FIXTURE:
+        if years != [_FIXTURE_YEAR] and args.fixture_path == _FIXTURE:
             parser.error(
-                f"--emit-fixture --year {args.year} would overwrite the frozen "
+                f"--emit-fixture --year {years[0]} would overwrite the frozen "
                 f"{_FIXTURE_YEAR} acceptance fixture at {_FIXTURE}; pass an "
                 "explicit --fixture-path"
             )

@@ -36,3 +36,13 @@ def test_emit_fixture_for_another_year_cannot_overwrite_the_frozen_fixture() -> 
 def test_emit_fixture_is_single_year_only() -> None:
     with pytest.raises(SystemExit):
         main(["--emit-fixture", "--years", "2013-2024"])
+
+
+def test_year_and_years_together_are_refused() -> None:
+    with pytest.raises(SystemExit):
+        main(["--census", "--year", "2019", "--years", "2013-2024"])
+
+
+def test_malformed_years_is_an_argparse_error_not_a_traceback() -> None:
+    with pytest.raises(SystemExit):
+        main(["--census", "--years", "20x3-2024"])
