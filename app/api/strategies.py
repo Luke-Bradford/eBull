@@ -119,6 +119,12 @@ _TITLES = {
     "s2-cross-sectional-momentum": "Cross-sectional momentum",
     "s3-mean-reversion-in-trend": "Mean reversion in trend",
     "s4-volatility-compression-breakout": "Volatility compression breakout",
+    "s5-support-bounce": "Support bounce",
+    "s6-resistance-breakout": "Resistance breakout",
+    "s7-trend-pullback": "Trend pullback",
+    "s8-range-mean-reversion": "Range mean reversion",
+    "s9-squeeze-expansion": "Squeeze expansion",
+    "s10-relative-strength-leader": "Relative-strength leader",
 }
 
 _PRESENTATION = {
@@ -137,6 +143,30 @@ _PRESENTATION = {
     "s4-volatility-compression-breakout": (
         "Looks for price breakouts after volatility has contracted.",
         "Up to 40 market days",
+    ),
+    "s5-support-bounce": (
+        "Buys a rejection back above established support in bullish regimes.",
+        "Up to 30 market days",
+    ),
+    "s6-resistance-breakout": (
+        "Buys a volume-confirmed close through established resistance in quiet bull markets.",
+        "Up to 40 market days",
+    ),
+    "s7-trend-pullback": (
+        "Buys RSI recoveries inside established uptrends and exits when the trend weakens.",
+        "Up to 60 market days",
+    ),
+    "s8-range-mean-reversion": (
+        "Buys rebounds from below the lower Bollinger band when ADX indicates a range.",
+        "Up to 15 market days",
+    ),
+    "s9-squeeze-expansion": (
+        "Buys 20-day price breakouts after Bollinger BandWidth reaches a six-month squeeze.",
+        "Up to 40 market days",
+    ),
+    "s10-relative-strength-leader": (
+        "Holds top-decile 63-day leaders above their 50-day average in quiet bull markets.",
+        "Reviewed at each monthly rebalance",
     ),
 }
 
