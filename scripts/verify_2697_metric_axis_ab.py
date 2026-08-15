@@ -499,24 +499,41 @@ def main() -> None:
                                     ),
                                 }
                             )
-                        if legacy is None or current is None:
-                            row.update({"legacy_result": legacy is not None, "current_result": current is not None})
-                        else:
-                            opportunity_count = len(current.universe_record.evaluated_instrument_ids) + len(
-                                current.universe_record.evaluated_series_ids
+                        if current is None:
+                            raise RuntimeError(
+                                f"{strategy_id}/{arm.ambiguity_arm or 'shared'}/{quarantine_arm} has no current "
+                                "fixed-axis result despite a non-empty frozen opportunity population"
                             )
+                        opportunity_count = len(current.universe_record.evaluated_instrument_ids) + len(
+                            current.universe_record.evaluated_series_ids
+                        )
+                        row.update(
+                            {
+                                "current_axis": [
+                                    current.axis_dates[0].isoformat(),
+                                    current.axis_dates[-1].isoformat(),
+                                ],
+                                "current_opportunity_population": opportunity_count,
+                                "current_comparator_population": opportunity_count,
+                                "current": _metric_payload(current.metrics),
+                            }
+                        )
+                        if legacy is None:
+                            row.update(
+                                {
+                                    "legacy_result": False,
+                                    "current_result": True,
+                                    "result_note": (
+                                        "legacy position-selected span is undefined for an all-cash strategy"
+                                    ),
+                                }
+                            )
+                        else:
                             row.update(
                                 {
                                     "legacy_axis": [legacy.dates[0].isoformat(), legacy.dates[-1].isoformat()],
-                                    "current_axis": [
-                                        current.axis_dates[0].isoformat(),
-                                        current.axis_dates[-1].isoformat(),
-                                    ],
                                     "legacy_comparator_population": legacy.comparator_population,
-                                    "current_opportunity_population": opportunity_count,
-                                    "current_comparator_population": opportunity_count,
                                     "legacy": _metric_payload(legacy.metrics),
-                                    "current": _metric_payload(current.metrics),
                                     "delta_current_minus_legacy": _delta(legacy.metrics, current.metrics),
                                 }
                             )
