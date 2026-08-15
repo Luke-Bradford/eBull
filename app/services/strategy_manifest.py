@@ -75,7 +75,7 @@ from typing import Literal, Protocol, get_args
 
 from app.services.indicator_series import BarSeries, Universe
 from app.services.market_regime import RegimeSeries
-from app.services.outcome_resolver import ExitLevels, UnresolvedReason
+from app.services.outcome_resolver import ExitLevels, UnresolvedReason, exit_levels_are_orderable
 from app.services.position_builder import ExitRegime
 from app.services.strategies.s1_time_series_momentum import S1_STRATEGY_ID, s1_identity, s1_signals
 from app.services.strategies.s2_cross_sectional_momentum import (
@@ -621,7 +621,7 @@ def _s9_exit_levels(
         )
     except ValueError, IndexError:
         return "unorderable_exit_levels"
-    if target <= stop:
+    if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
         return "unorderable_exit_levels"
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
@@ -661,11 +661,11 @@ def _s7_exit_levels(
     ⚠ ``take_profit=None`` is the STOP-ONLY bracket ``outcome_resolver``
     documents — rules 2/3/5 of its precedence table are unreachable and the
     target-side close comes from the exit leg or the hold cap instead.
-    ⚠ ``stop <= 0`` replaces the siblings' ``target <= stop`` orderability
-    check: with no target the only unorderable state is a stop at or below
-    zero, which a low-priced high-ATR name genuinely produces (``ExitLevels``
-    itself refuses it, so it must be a typed refusal here, not a raise that
-    aborts the whole batch).
+    ⚠ With no target, orderability still requires ``0 < stop < entry``. A
+    low-priced high-ATR name can produce a non-positive stop, while a gap down
+    can fill at or below the signal-time stop. Both mean the setup was already
+    consumed before entry and become typed refusals rather than exceptions that
+    abort the whole batch.
     """
     try:
         target, stop, max_hold = s7_exit_bracket(
@@ -677,7 +677,7 @@ def _s7_exit_levels(
         # `atr_series`. A narrow except that reads as exhaustive is worse than
         # none (S-5's recorded lesson).
         return "unorderable_exit_levels"
-    if stop <= 0:
+    if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
         return "unorderable_exit_levels"
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
@@ -707,11 +707,11 @@ def _s8_exit_levels(
 ) -> ExitLevels | UnresolvedReason:
     """Adapt S-8's bracket to the outcome reason contract.
 
-    ⚠ ``target <= stop`` is MORE reachable here than for the entry-anchored
-    strategies and is still not a bug. S-8's target is the signal bar's middle
-    band while its stop is anchored to the fill, so a gap up through the band on
-    the open of ``t+1`` inverts them — the rule's thesis was consumed before the
-    position existed, and an unresolved outcome is the truthful record of that.
+    ⚠ S-8's target is the signal bar's middle band while its stop is anchored
+    to the fill. A gap up through the band on the open of ``t+1`` can therefore
+    put the target at or below entry even when target remains above stop. The
+    rule's thesis was consumed before the position existed, and an unresolved
+    outcome is the truthful record of that.
     """
     try:
         target, stop, max_hold = s8_exit_bracket(
@@ -719,7 +719,7 @@ def _s8_exit_levels(
         )
     except ValueError, IndexError:
         return "unorderable_exit_levels"
-    if target <= stop:
+    if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
         return "unorderable_exit_levels"
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
@@ -759,7 +759,7 @@ def _s5_exit_levels(
         # per-bar failure abort the WHOLE outcome batch — a narrow except that
         # reads as exhaustive is worse than no except at all.
         return "unorderable_exit_levels"
-    if target <= stop:
+    if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
         return "unorderable_exit_levels"
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 
@@ -811,11 +811,12 @@ def _s6_exit_levels(
         # inside `atr_series` / `levels_at`. A narrow except that reads as
         # exhaustive is worse than none.
         return "unorderable_exit_levels"
-    if target <= stop:
+    if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
         # Reachable, and not a bug to prevent: the stop is anchored to the LEVEL
         # while the target is anchored to the ENTRY, so a fill far below the
-        # level can invert them. That asymmetry is the rule (see the S-6 module
-        # docstring), so an inverted bracket is a real state to refuse.
+        # level can put the stop at or above entry. That asymmetry is the rule
+        # (see the S-6 module docstring), so an already-triggered bracket is a
+        # real state to refuse.
         return "unorderable_exit_levels"
     return ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=max_hold)
 

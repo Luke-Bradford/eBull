@@ -515,3 +515,16 @@ def resolve_outcome(
         exit_price=exit_open,
         entry_price=entry_price,
     )
+
+
+# Shared by every manifest adapter before constructing ``ExitLevels``.  This
+# lives in the versioned resolver module because orderability is an outcome
+# interpretation rule, not an entry signal rule: changing it moves
+# ``RULE_SET_VERSION`` while preserving the causal signal identity.
+def exit_levels_are_orderable(*, entry_price: Decimal, take_profit: Decimal | None, stop_loss: Decimal) -> bool:
+    """Whether a next-open fill can enter before either exit has triggered."""
+    if not entry_price.is_finite() or entry_price <= 0:
+        return False
+    if not stop_loss.is_finite() or stop_loss <= 0 or stop_loss >= entry_price:
+        return False
+    return take_profit is None or (take_profit.is_finite() and take_profit > entry_price)
