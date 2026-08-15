@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -37,6 +39,7 @@ from app.services.strategy_monitoring import (
     load_owned_pnl,
 )
 from app.services.strategy_position_manager import PositionManagerResult
+from tests.fixtures.ebull_test_db import test_database_url
 
 
 def _instrument(conn: psycopg.Connection[Any], instrument_id: int) -> None:
@@ -1341,6 +1344,75 @@ def test_shared_paper_pool_refuses_activation_while_live_trading_is_enabled(
                 conn,
                 updated_by="test-cleanup",
                 reason="restore runtime flags after live-state refusal proof",
+                enable_auto_trading=(
+                    runtime_before.enable_auto_trading
+                    if current.enable_auto_trading != runtime_before.enable_auto_trading
+                    else None
+                ),
+                enable_live_trading=(
+                    runtime_before.enable_live_trading
+                    if current.enable_live_trading != runtime_before.enable_live_trading
+                    else None
+                ),
+            )
+        conn.commit()
+
+
+def test_paper_enable_waits_for_concurrent_live_update_then_refuses(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    runtime_before = get_runtime_config(conn)
+    if runtime_before.enable_auto_trading or runtime_before.enable_live_trading:
+        update_runtime_config(
+            conn,
+            updated_by="test-precondition",
+            reason="establish live-off concurrency precondition",
+            enable_auto_trading=False if runtime_before.enable_auto_trading else None,
+            enable_live_trading=False if runtime_before.enable_live_trading else None,
+        )
+    conn.commit()
+    monkeypatch.setattr(
+        "app.api.strategies.get_strategy_overview",
+        lambda _conn: SimpleNamespace(automation_readiness=SimpleNamespace(ready=True, blockers=[])),
+    )
+    blocker = psycopg.connect(test_database_url())
+    worker = psycopg.connect(test_database_url())
+    blocker.execute("UPDATE runtime_config SET enable_live_trading=TRUE WHERE id=TRUE")
+    request = StrategyPaperPoolUpdateRequest(
+        enabled=True,
+        capital_limit=Decimal("750"),
+        capital_mode="fixed",
+        risk_profile="balanced",
+        reason="must serialize behind live update",
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(update_strategy_paper_pool, request, _session(), worker)
+            with pytest.raises(FutureTimeoutError):
+                future.result(timeout=0.1)
+            blocker.commit()
+            with pytest.raises(HTTPException) as exc_info:
+                future.result(timeout=5)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == ("paper automation cannot be enabled while system-wide live trading is enabled")
+        assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (0,)
+    finally:
+        blocker.rollback()
+        worker.rollback()
+        blocker.close()
+        worker.close()
+        conn.rollback()
+        current = get_runtime_config(conn)
+        if (
+            current.enable_auto_trading != runtime_before.enable_auto_trading
+            or current.enable_live_trading != runtime_before.enable_live_trading
+        ):
+            update_runtime_config(
+                conn,
+                updated_by="test-cleanup",
+                reason="restore runtime flags after concurrency proof",
                 enable_auto_trading=(
                     runtime_before.enable_auto_trading
                     if current.enable_auto_trading != runtime_before.enable_auto_trading
