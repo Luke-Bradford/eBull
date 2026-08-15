@@ -184,6 +184,24 @@ def test_same_versions_cannot_be_rewritten_with_different_evidence(
     ebull_test_conn.rollback()
 
 
+def test_idempotent_child_match_refuses_digest_strings_that_do_not_authenticate_json() -> None:
+    payload: dict[str, object] = {"canonical": "payload"}
+    digest = store._digest(payload)
+    expected = [("best_case", "admitted", digest, payload)]
+    assert store._stored_cells_match(
+        [("best_case", "admitted", digest, payload)],
+        expected,
+    )
+    assert not store._stored_cells_match(
+        [("best_case", "admitted", digest, {"canonical": "tampered"})],
+        expected,
+    )
+    assert not store._stored_cells_match(
+        [("best_case", "admitted", "0" * 64, payload)],
+        expected,
+    )
+
+
 def test_database_frozen_declaration_term_mismatch_refuses_before_evaluation(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:

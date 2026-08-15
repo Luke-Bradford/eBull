@@ -17,6 +17,7 @@ from app.services.strategy_mt1_trial import TRIAL_CONTRACT_VERSION, TRIAL_EVALUA
 from app.services.strategy_result import METRIC_AXIS_RULE_VERSION, metric_axis_sha256
 from app.services.strategy_result_universe import ResultUniverseRecord, record_sha256
 from app.services.trial_register import TRIAL_REGISTER_VERSION
+from scripts.audit_2769_mt1_invocation import _valid_result_payload
 from scripts.verify_2769_mt1_derivation import verify_persisted_inputs
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -76,3 +77,38 @@ def test_structural_auditor_cannot_query_the_result_tables() -> None:
     assert "certainty_equivalent" not in source
     assert "maximum_drawdown" not in source
     assert "expected_shortfall" not in source
+
+
+def test_invocation_auditor_requires_the_complete_canonical_result_payload() -> None:
+    risk = {
+        "certainty_equivalent": "0.1",
+        "expected_shortfall_5": "-0.1",
+        "maximum_drawdown": "0.1",
+    }
+    months = [date(2010 + offset // 12, offset % 12 + 1, 1).isoformat() for offset in range(120)]
+    payload: dict[str, object] = {
+        "bootstrap_block_length": 12,
+        "bootstrap_resamples": 1000,
+        "bootstrap_seed": 2769,
+        "common_months": months,
+        "evaluator_version": "mt1-evaluator-v1",
+        "excluded_months_by_arm": [0, 0, 0, 0],
+        "historical_statistical_conjuncts_pass": False,
+        "mt1_delta_cer": "0.01",
+        "mt1_delta_interval": {"low": "-0.01", "high": "0.02"},
+        "mt1_drawdown_improved": True,
+        "mt1_expected_shortfall_improved": True,
+        "mt1_lower_bound_positive": False,
+        "mt1_scaled": risk,
+        "mt1_unscaled": risk,
+        "primary_difference_in_differences": "0.01",
+        "primary_interval": {"low": "-0.01", "high": "0.02"},
+        "primary_lower_bound_positive": False,
+        "s8_delta_cer": "0.0",
+        "s8_scaled": risk,
+        "s8_unscaled": risk,
+    }
+    assert _valid_result_payload(payload)
+    assert not _valid_result_payload({**payload, "common_months": months[:-1]})
+    assert not _valid_result_payload({**payload, "mt1_scaled": {**risk, "certainty_equivalent": "NaN"}})
+    assert not _valid_result_payload({**payload, "unexpected": True})

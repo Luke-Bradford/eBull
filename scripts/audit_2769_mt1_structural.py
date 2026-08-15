@@ -6,6 +6,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 
 import psycopg
 import psycopg.rows
@@ -27,6 +28,13 @@ def _digest(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
     ).hexdigest()
+
+
+def _same_number(encoded: object, stored: object) -> bool:
+    try:
+        return isinstance(encoded, str) and Decimal(encoded) == Decimal(str(stored))
+    except InvalidOperation:
+        return False
 
 
 def main() -> int:
@@ -56,6 +64,8 @@ def main() -> int:
                     SELECT ambiguity_arm, quarantine_arm,
                            cardinality(mt1_decision_dates) AS mt1_decision_dates,
                            cardinality(s8_decision_dates) AS s8_decision_dates,
+                           mt1_decision_dates AS _mt1_decision_dates,
+                           s8_decision_dates AS _s8_decision_dates,
                            mt1_annualised_turnover, s8_annualised_turnover,
                            mt1_traded_notional, s8_traded_notional, exposure_reconciled,
                            evidence_sha256, evidence_json
@@ -75,9 +85,60 @@ def main() -> int:
         differences.append("refused_attempt_has_cells")
     if _digest(attempt["structural_evidence_json"]) != attempt["structural_evidence_sha256"]:
         differences.append("structural_header_digest_mismatch")
+    header_payload = attempt["structural_evidence_json"]
+    child_digests = [str(row["evidence_sha256"]) for row in cells]
+    if header_payload.get("structural_cell_digests") != child_digests:
+        differences.append("structural_header_child_digest_chain_mismatch")
+    for field in (
+        "book_rule_version",
+        "corpus_version",
+        "cost_model_id",
+        "evaluator_version",
+        "metric_axis_digest",
+        "metric_axis_rule_version",
+        "opportunity_set_digest",
+        "trial_contract_version",
+        "trial_register_version",
+    ):
+        if header_payload.get(field) != attempt[field]:
+            differences.append(f"structural_header_column_mismatch:{field}")
+    if header_payload.get("passed") is not bool(attempt["passed"]):
+        differences.append("structural_header_column_mismatch:passed")
     for row in cells:
-        if _digest(row["evidence_json"]) != row["evidence_sha256"]:
+        payload = row["evidence_json"]
+        label = f"{row['ambiguity_arm']}:{row['quarantine_arm']}"
+        if _digest(payload) != row["evidence_sha256"]:
             differences.append(f"cell_digest_mismatch:{row['ambiguity_arm']}:{row['quarantine_arm']}")
+        if (
+            payload.get("ambiguity_arm") != row["ambiguity_arm"]
+            or payload.get("quarantine_arm") != row["quarantine_arm"]
+        ):
+            differences.append(f"cell_key_column_mismatch:{label}")
+        mt1_dates = payload.get("mt1_decision_dates")
+        s8_dates = payload.get("s8_decision_dates")
+        stored_mt1_dates = [item.isoformat() for item in row["_mt1_decision_dates"]]
+        stored_s8_dates = [item.isoformat() for item in row["_s8_decision_dates"]]
+        if (
+            not isinstance(mt1_dates, list)
+            or not isinstance(s8_dates, list)
+            or len(mt1_dates) != row["mt1_decision_dates"]
+            or len(s8_dates) != row["s8_decision_dates"]
+            or mt1_dates != stored_mt1_dates
+            or s8_dates != stored_s8_dates
+        ):
+            differences.append(f"cell_clock_column_mismatch:{label}")
+        if payload.get("book_rule_version") != attempt["book_rule_version"]:
+            differences.append(f"cell_book_rule_mismatch:{label}")
+        for field in (
+            "mt1_annualised_turnover",
+            "s8_annualised_turnover",
+            "mt1_traded_notional",
+            "s8_traded_notional",
+        ):
+            if not _same_number(payload.get(field), row[field]):
+                differences.append(f"cell_numeric_column_mismatch:{label}:{field}")
+        if payload.get("exposure_reconciled") is not bool(row["exposure_reconciled"]):
+            differences.append(f"cell_exposure_column_mismatch:{label}")
     output = {
         "differences": sorted(differences),
         "status": "verified" if not differences else "refused",
@@ -86,7 +147,10 @@ def main() -> int:
             for key, value in attempt.items()
             if key != "structural_evidence_json"
         },
-        "structural_cells": [{key: value for key, value in row.items() if key != "evidence_json"} for row in cells],
+        "structural_cells": [
+            {key: value for key, value in row.items() if key != "evidence_json" and not key.startswith("_")}
+            for row in cells
+        ],
     }
     (sys.stdout if not differences else sys.stderr).write(json.dumps(output, sort_keys=True, default=str) + "\n")
     return 0 if not differences else 2

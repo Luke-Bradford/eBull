@@ -61,6 +61,32 @@ def _digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 
+def _stored_cells_match(
+    stored_rows: list[tuple[object, ...]],
+    expected: list[tuple[str, str, str, dict[str, object]]],
+) -> bool:
+    """Require every ordered child digest to authenticate its exact JSON."""
+    if len(stored_rows) != len(expected):
+        return False
+    for row, expected_row in zip(stored_rows, expected, strict=True):
+        if len(row) != 4:
+            return False
+        ambiguity, quarantine, stored_sha, raw_payload = row
+        if not isinstance(raw_payload, dict):
+            return False
+        payload = dict(raw_payload)
+        expected_ambiguity, expected_quarantine, expected_sha, expected_payload = expected_row
+        if (
+            str(ambiguity) != expected_ambiguity
+            or str(quarantine) != expected_quarantine
+            or str(stored_sha) != expected_sha
+            or payload != expected_payload
+            or _digest(payload) != str(stored_sha)
+        ):
+            return False
+    return True
+
+
 def _number(value: float) -> str:
     if not math.isfinite(value):
         raise ValueError("MT-1 evidence contains a non-finite number")
@@ -133,13 +159,13 @@ def _existing_structural_attempt(
         return None
     stored_sha = str(existing[1])
     stored_payload = dict(existing[2])
-    expected_cells = [
-        (cell.ambiguity_arm, cell.quarantine_arm, _digest(_structural_cell_payload(cell)))
-        for cell in preparation.prepared.cells
-    ]
+    expected_cells = []
+    for cell in preparation.prepared.cells:
+        payload = _structural_cell_payload(cell)
+        expected_cells.append((cell.ambiguity_arm, cell.quarantine_arm, _digest(payload), payload))
     stored_cells = conn.execute(
         """
-        SELECT ambiguity_arm, quarantine_arm, evidence_sha256
+        SELECT ambiguity_arm, quarantine_arm, evidence_sha256, evidence_json
           FROM strategy_mt1_structural_cells WHERE structural_attempt_id = %s
          ORDER BY ambiguity_arm, quarantine_arm
         """,
@@ -148,7 +174,7 @@ def _existing_structural_attempt(
     if (
         stored_sha != expected_sha
         or _digest(stored_payload) != stored_sha
-        or [(str(row[0]), str(row[1]), str(row[2])) for row in stored_cells] != expected_cells
+        or not _stored_cells_match(stored_cells, expected_cells)
     ):
         raise MT1EvidenceConflict("the MT-1 strategy versions already own different structural evidence")
     return int(existing[0])
@@ -410,20 +436,20 @@ def store_mt1_trial_bundle(
     if existing is not None:
         stored_cells = conn.execute(
             """
-            SELECT ambiguity_arm, quarantine_arm, evidence_sha256
+            SELECT ambiguity_arm, quarantine_arm, evidence_sha256, evidence_json
               FROM strategy_mt1_trial_result_cells WHERE mt1_trial_result_id = %s
              ORDER BY ambiguity_arm, quarantine_arm
             """,
             (int(existing[0]),),
         ).fetchall()
         expected_cells = [
-            (cell.ambiguity_arm, cell.quarantine_arm, _digest(payload))
+            (cell.ambiguity_arm, cell.quarantine_arm, _digest(payload), payload)
             for cell, payload in zip(bundle.cells, cell_payloads, strict=True)
         ]
         if (
             str(existing[1]) != header_sha
             or _digest(dict(existing[2])) != str(existing[1])
-            or [(str(row[0]), str(row[1]), str(row[2])) for row in stored_cells] != expected_cells
+            or not _stored_cells_match(stored_cells, expected_cells)
         ):
             raise MT1EvidenceConflict("the structural attempt already owns different MT-1 outcome evidence")
         conn.commit()
@@ -503,21 +529,21 @@ def store_mt1_trial_bundle(
     ).fetchone()
     readback_cells = conn.execute(
         """
-        SELECT ambiguity_arm, quarantine_arm, evidence_sha256
+        SELECT ambiguity_arm, quarantine_arm, evidence_sha256, evidence_json
           FROM strategy_mt1_trial_result_cells WHERE mt1_trial_result_id = %s
          ORDER BY ambiguity_arm, quarantine_arm
         """,
         (result_id,),
     ).fetchall()
     expected_cells = [
-        (cell.ambiguity_arm, cell.quarantine_arm, _digest(payload))
+        (cell.ambiguity_arm, cell.quarantine_arm, _digest(payload), payload)
         for cell, payload in zip(bundle.cells, cell_payloads, strict=True)
     ]
     if (
         readback is None
         or str(readback[0]) != header_sha
         or _digest(dict(readback[1])) != header_sha
-        or [(str(row[0]), str(row[1]), str(row[2])) for row in readback_cells] != expected_cells
+        or not _stored_cells_match(readback_cells, expected_cells)
     ):
         raise MT1EvidenceConflict("the committed MT-1 outcome evidence did not read back exactly")
     return result_id
