@@ -127,11 +127,13 @@ Spec: `docs/proposals/ta/2026-08-15-metric-axis-integrity.md`.
    the latest approved green commit.
 3. Record run 98349 as legacy development evidence that is structurally refused
    by `metric_axis_unproven`; do not interpret its performance.
-4. Start a corrected in-sample run only after the merged schema, tests, full
-   derivation verifier and A/B integrity checks—not their performance—pass.
-   Read no results until its atomic invocation audit succeeds.
-5. The MT-1/S-8 declarations were frozen under policy v3 while this known v4
-   change was still in flight. Before either trial accesses an outcome, run the
-   policy-only atomic supersession from merged code. It must pin declaration
-   IDs 8/9 and their v3 digests, attest no outcome exposure, preserve every
-   substantive term, and refuse unless both access/result counts remain zero.
+4. The MT-1/S-8 declarations were frozen under policy v3 while this known v4
+   change was still in flight. Immediately after merge and before either trial
+   accesses an outcome, run the policy-only atomic supersession from merged
+   code. It must pin declaration IDs 8/9 and their v3 digests, attest no outcome
+   exposure, preserve every substantive term, and refuse unless both
+   access/result counts remain zero.
+5. Start a corrected in-sample run only after the merged schema, tests, full
+   A/B integrity check—not its performance—and declaration supersession pass.
+   Read no results until its atomic invocation audit succeeds; then run the
+   source-dependent derivation verifier over those persisted rows.
