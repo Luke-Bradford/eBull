@@ -57,6 +57,7 @@ from app.services.strategy_control_plane import (
     lock_strategy_control,
     mandate_for_profile,
     promote_strategy,
+    validate_paper_promotion_evidence,
 )
 from app.services.strategy_core_eligibility import CoreEligibilityError
 from app.services.strategy_core_mandate import (
@@ -1770,6 +1771,16 @@ def get_strategy_overview(
         fire_rate = fire_rate_by_strategy.get(key, StrategyFireRate())
         pnl = pnl_by_strategy.get(key, StrategyPnl())
         control = control_by_strategy.get(key, StrategyControlState())
+        pinned_evidence_ready = control.pinned_evidence_ready
+        if control.stage in {"paper_enabled", "live_enabled"}:
+            try:
+                validate_paper_promotion_evidence(
+                    conn,
+                    strategy_id=strategy_id,
+                    strategy_version=versions[strategy_id],
+                )
+            except (StrategyControlError, RuntimeError):
+                pinned_evidence_ready = False
         promotion_action = next_promotion_action(control.stage) if entry.purpose == "capital_candidate" else None
         promotion_refusals: list[str] = []
         if promotion_action in {"validate_historical", "start_forward_observation", "approve_paper"}:
@@ -1804,7 +1815,7 @@ def get_strategy_overview(
             allocation_refusals.append("paper_promotion_missing")
         if control.stage in {"paper_enabled", "live_enabled"} and not control.paper_forward_evidence_ready:
             allocation_refusals.append("paper_forward_evidence_missing")
-        if not control.pinned_evidence_ready:
+        if not pinned_evidence_ready:
             allocation_refusals.append("pinned_promotion_evidence_invalid")
         if not control.policy_configured:
             allocation_refusals.append("execution_policy_missing")
