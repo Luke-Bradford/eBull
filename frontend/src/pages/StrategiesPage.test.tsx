@@ -210,6 +210,8 @@ const OVERVIEW: StrategyOverviewResponse = {
     legacy_result_count: 0,
     all_recent_evidence_complete: false,
     stage: null,
+    next_promotion_action: "register_candidate",
+    promotion_refusals: [],
     attribution: {
       fired_entries: 12,
       funded_entries: 0,
@@ -411,6 +413,59 @@ describe("StrategiesPage", () => {
     expect(screen.getAllByText("+1.50%")).toHaveLength(2);
     expect(screen.getByText("Not proven")).toBeInTheDocument();
     expect(screen.getByText("Official account equity starts collecting with the next portfolio sync.")).toBeInTheDocument();
+  });
+
+  it("submits only the server-declared next promotion action with an operator reason", async () => {
+    const advance = vi.spyOn(strategiesApi, "advanceStrategyPromotion").mockResolvedValue({
+      strategy_id: "s1-time-series-momentum",
+      strategy_version: "strategy-registry-v1+abc",
+      stage: "research_candidate",
+      promotion_id: 91,
+      evidence_ref: null,
+      created: true,
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.type(screen.getByLabelText("Operator reason"), "Reviewed preregistered candidate");
+    await userEvent.click(screen.getByRole("button", { name: "Register candidate" }));
+
+    await waitFor(() => expect(advance).toHaveBeenCalledWith("s1-time-series-momentum", {
+      strategy_version: "strategy-registry-v1+abc",
+      action: "register_candidate",
+      reason: "Reviewed preregistered candidate",
+    }));
+  });
+
+  it("requires explicit limits and creates the first paper setup disabled", async () => {
+    const paper = structuredClone(OVERVIEW);
+    paper.strategies[0]!.stage = "paper_enabled";
+    paper.strategies[0]!.next_promotion_action = null;
+    paper.strategies[0]!.promotion_refusals = [];
+    paper.strategies[0]!.allocation_refusals = ["execution_policy_missing"];
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(paper);
+    const setup = vi.spyOn(strategiesApi, "createStrategyPaperSetup").mockResolvedValue({
+      strategy_id: "s1-time-series-momentum",
+      strategy_version: "strategy-registry-v1+abc",
+      deployment_id: 19,
+      deployment_revision: 1,
+      policy_revision: 1,
+      capital_limit: "1",
+      enabled: false,
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText("Research & validation"));
+    await userEvent.click(screen.getByText("Set explicit first paper limits"));
+    for (const input of screen.getAllByRole("spinbutton")) await userEvent.type(input, "1");
+    await userEvent.type(screen.getByLabelText("Operator reason"), "Reviewed every paper limit");
+    await userEvent.click(screen.getByRole("button", { name: "Create disabled paper setup" }));
+
+    await waitFor(() => expect(setup).toHaveBeenCalledWith("s1-time-series-momentum", expect.objectContaining({
+      strategy_version: "strategy-registry-v1+abc",
+      capital_limit: "1",
+      cost_stress_multiplier: "1",
+      reason: "Reviewed every paper limit",
+    })));
+    expect(setup.mock.calls[0]![1]).not.toHaveProperty("enabled");
   });
 
   it("shows the controlled-trial verdict as read-only historical evidence", async () => {

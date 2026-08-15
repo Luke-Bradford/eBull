@@ -29,8 +29,9 @@ from app.providers.broker import (
     BrokerWhatIfCostResponse,
 )
 from app.services.cost_model import COST_MODEL_ID
+from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
-from app.services.result_ledger import store_holdout_result, store_in_sample_result
+from app.services.result_ledger import freeze_preregistration, store_holdout_result, store_in_sample_result
 from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
 from app.services.strategy_control_plane import (
     configure_deployment,
@@ -58,7 +59,7 @@ from app.services.strategy_paper_executor import (
     _effective_capital_bases,
     execute_fired_paper_signal,
 )
-from app.services.strategy_result import METRIC_AXIS_RULE_VERSION, metric_axis_sha256
+from app.services.strategy_result import METRIC_AXIS_RULE_VERSION, STRUCTURAL_REFUSAL_POLICY_VERSION, metric_axis_sha256
 from app.services.strategy_result_universe import (
     ResultUniverseRecord,
     record_sha256,
@@ -81,8 +82,13 @@ _REQUEST_ID = UUID("1c94300c-90aa-4303-9d00-dec376d74efb")
 
 
 def _authorise_forecast_scope(
-    conn: psycopg.Connection[Any], *, setup_version: str, checked_at: datetime = _NOW
-) -> None:
+    conn: psycopg.Connection[Any],
+    *,
+    setup_version: str,
+    checked_at: datetime = _NOW,
+    passed: bool = True,
+    window_start: date | None = None,
+) -> int:
     """Explicit synthetic prospective authority for executor plumbing tests."""
     conn.execute(
         """
@@ -109,7 +115,7 @@ def _authorise_forecast_scope(
             ambiguous_rate,unresolved_rate,pending_rate,passed,reason_codes
         ) VALUES (
             'test-assessment-policy-v1','S-ALLOC','v1',%s,'test-model-v1','test-calibration-v1',%s,'test-exit-v1',%s,%s,
-            %s::date-89,%s::date,'synthetic-' || %s,30,30,10,10,10,0,0,0,0,0.33333333,1,0,0,0,0,true,'[]'::jsonb
+            %s::date,%s::date,'synthetic-' || %s,30,30,10,10,10,0,0,0,0,0.33333333,1,0,0,0,0,%s,'[]'::jsonb
         ) RETURNING assessment_id
         """,
         (
@@ -117,9 +123,10 @@ def _authorise_forecast_scope(
             setup_version,
             FORECAST_OUTCOME_RESOLVER_VERSION,
             QUARANTINE_RULE_SET_VERSION,
-            checked_at,
+            window_start or checked_at.date() - timedelta(days=89),
             checked_at,
             setup_version,
+            passed,
         ),
     ).fetchone()
     assert assessment is not None
@@ -143,6 +150,7 @@ def _authorise_forecast_scope(
             checked_at,
         ),
     )
+    return int(assessment[0])
 
 
 def _seed(
@@ -150,6 +158,9 @@ def _seed(
     *,
     auto: bool = True,
     ticket_sizing_mode: str = "percent",
+    include_forward_evidence: bool = True,
+    assessment_passed: bool = True,
+    assessment_window_start: date | None = None,
 ) -> int:
     if conn.execute("SELECT 1 FROM strategy_paper_pool_events LIMIT 1").fetchone() is None:
         configure_paper_pool(
@@ -252,20 +263,46 @@ def _seed(
         purpose="paper allocation evidence fixture",
     )
     store_result_universe(conn, result_id=result_id, record=universe_record)
+    declaration_id = freeze_preregistration(
+        conn,
+        PreregDeclaration(
+            strategy_id="S-ALLOC",
+            strategy_version="v1",
+            contract_version="synthetic-executor-contract-v1",
+            prereg_purpose="capital_candidate",
+            structural_refusal_policy_version=STRUCTURAL_REFUSAL_POLICY_VERSION,
+            declared_universe_basis="survivorship_free",
+            declared_carry_unmodelled=False,
+            declared_fx_unmodelled=False,
+            expected_structural_refusals=(),
+            forward_shadow=ForwardShadowFloor(
+                min_independent_decision_dates=1,
+                min_calendar_weeks=1,
+                derivation="synthetic executor fixture floor",
+            ),
+            declared_by="test",
+        ),
+    )
     promotion_rows = conn.execute(
         """
         INSERT INTO strategy_promotions (
             strategy_id, strategy_version, from_stage, to_stage, gate_version,
-            evidence_ref, promoted_by, reason
+            evidence_ref, promoted_by, reason, promoted_at
         ) VALUES
-          ('S-ALLOC', 'v1', NULL, 'research_candidate', 'test-v1', NULL, 'test', 'registered'),
-          ('S-ALLOC', 'v1', 'research_candidate', 'historical_validated', 'test-v1', 'e:h', 'test', 'historical'),
-          ('S-ALLOC', 'v1', 'historical_validated', 'forward_observation', 'test-v1', 'e:f', 'test', 'forward'),
-          ('S-ALLOC', 'v1', 'forward_observation', 'paper_enabled', 'test-v1', 'e:p', 'test', 'paper')
+          ('S-ALLOC', 'v1', NULL, 'research_candidate', 'test-v1', NULL,
+           'test', 'registered', %s - interval '102 days'),
+          ('S-ALLOC', 'v1', 'research_candidate', 'historical_validated', 'test-v1', 'e:h',
+           'test', 'historical', %s - interval '101 days'),
+          ('S-ALLOC', 'v1', 'historical_validated', 'forward_observation', 'test-v1', 'e:f',
+           'test', 'forward', %s - interval '100 days'),
+          ('S-ALLOC', 'v1', 'forward_observation', 'paper_enabled', 'test-v1', 'e:p',
+           'test', 'paper', %s - interval '1 day')
         RETURNING promotion_id, to_stage
-        """
+        """,
+        (_NOW, _NOW, _NOW, _NOW),
     ).fetchall()
     historical_id = next(int(row[0]) for row in promotion_rows if row[1] == "historical_validated")
+    paper_id = next(int(row[0]) for row in promotion_rows if row[1] == "paper_enabled")
     conn.execute(
         "INSERT INTO strategy_promotion_results (promotion_id, result_id) VALUES (%s, %s)",
         (historical_id, result_id),
@@ -356,7 +393,22 @@ def _seed(
             cost_model_id=COST_MODEL_ID,
         ),
     )
-    _authorise_forecast_scope(conn, setup_version="test-setup-v1")
+    assessment_id = _authorise_forecast_scope(
+        conn,
+        setup_version="test-setup-v1",
+        passed=assessment_passed,
+        window_start=assessment_window_start,
+    )
+    if include_forward_evidence:
+        conn.execute(
+            """
+            INSERT INTO strategy_promotion_forward_evidence (
+                promotion_id,strategy_id,strategy_version,declaration_id,assessment_id,
+                forward_resolved_signals,forward_decision_dates,forward_elapsed_days,assessed_at
+            ) VALUES (%s,'S-ALLOC','v1',%s,%s,1,1,99,%s)
+            """,
+            (paper_id, declaration_id, assessment_id, _NOW - timedelta(days=1)),
+        )
     persist_ranking_batch(
         conn,
         opportunities=[
@@ -736,6 +788,44 @@ def test_missing_opportunity_forecast_refuses_before_broker_access(
     ).fetchone() == (None, HALT_IDENTITY_RULE_VERSION)
 
 
+def test_missing_paper_forward_evidence_refuses_before_broker_access(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn, include_forward_evidence=False)
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "paper_forward_evidence_missing"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+
+
+def test_paused_strategy_refuses_even_if_deployment_was_left_enabled(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    conn.execute(
+        """
+        INSERT INTO strategy_promotions (
+            strategy_id,strategy_version,from_stage,to_stage,gate_version,
+            evidence_ref,promoted_by,reason,promoted_at
+        ) VALUES ('S-ALLOC','v1','paper_enabled','paused','test-v1',NULL,'test','pause test',%s)
+        """,
+        (_NOW,),
+    )
+    conn.commit()
+    broker = _broker()
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.reason_code == "paper_stage_required"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
+
+
 def test_unbatched_opportunity_refuses_before_broker_access(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
@@ -794,6 +884,7 @@ def test_invalid_opportunity_evidence_refuses_before_broker_access(
         ("calibration_scope", "opportunity_assessment_missing"),
         ("failed", "opportunity_assessment_not_passed"),
         ("stale", "opportunity_assessment_stale"),
+        ("pre_forward", "opportunity_assessment_pre_forward"),
     ],
 )
 def test_prospective_assessment_refuses_before_broker_access(
@@ -802,7 +893,11 @@ def test_prospective_assessment_refuses_before_broker_access(
     reason_code: str,
 ) -> None:
     conn = ebull_test_conn
-    signal_id = _seed(conn)
+    signal_id = _seed(
+        conn,
+        assessment_passed=invalidity != "failed",
+        assessment_window_start=_NOW.date() - timedelta(days=101) if invalidity == "pre_forward" else None,
+    )
     if invalidity == "policy":
         conn.execute("UPDATE strategy_forecast_assessment_policies SET effective_from=%s + interval '1 day'", (_NOW,))
     elif invalidity == "missing":
@@ -819,9 +914,7 @@ def test_prospective_assessment_refuses_before_broker_access(
             """
         )
         conn.execute("UPDATE strategy_forecast_assessment_current SET calibration_id='other-calibration'")
-    elif invalidity == "failed":
-        conn.execute("UPDATE strategy_forecast_assessments SET passed=false")
-    else:
+    elif invalidity == "stale":
         conn.execute("UPDATE strategy_forecast_assessment_current SET checked_at=%s - interval '3 days'", (_NOW,))
     conn.commit()
     broker = _broker()

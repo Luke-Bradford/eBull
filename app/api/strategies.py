@@ -95,6 +95,13 @@ from app.services.strategy_monitoring import (
     realised_pnl_for_keys,
 )
 from app.services.strategy_mt1_read_model import load_mt1_controlled_trial_state
+from app.services.strategy_operator_promotion import (
+    OperatorPromotionRefusal,
+    PromotionAction,
+    advance_strategy_for_operator,
+    load_forward_floor_evidence,
+    next_promotion_action,
+)
 from app.services.strategy_position_manager import (
     StrategyPositionManagerError,
     manage_owned_position,
@@ -322,6 +329,8 @@ class StrategyOverview(BaseModel):
     legacy_result_count: int
     all_recent_evidence_complete: bool
     stage: str | None
+    next_promotion_action: PromotionAction | None
+    promotion_refusals: list[str]
     attribution: StrategyAttributionView
     fire_rate: StrategyFireRateView
     pnl: StrategyPnlView
@@ -852,6 +861,47 @@ class AllocationUpdateResponse(BaseModel):
     revision: int
 
 
+class StrategyInitialPaperSetupRequest(BaseModel):
+    strategy_version: str = Field(min_length=1, max_length=200)
+    capital_limit: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    ticket_sizing_mode: Literal["percent", "fixed"]
+    ticket_value: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    max_ticket_amount: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    stop_loss_pct: Decimal = Field(gt=0, lt=100)
+    take_profit_pct: Decimal = Field(gt=0)
+    max_quote_age_seconds: int = Field(gt=0)
+    max_scan_age_seconds: int = Field(gt=0)
+    max_halt_feed_age_seconds: int = Field(gt=0)
+    max_cost_age_seconds: int = Field(gt=0)
+    max_reconciliation_age_seconds: int = Field(gt=0)
+    max_instrument_exposure_pct: Decimal = Field(gt=0, le=100)
+    max_portfolio_exposure_pct: Decimal = Field(gt=0, le=100)
+    max_drawdown_pct: Decimal = Field(gt=0, lt=100)
+    min_net_expectancy_pct: Decimal
+    cost_stress_multiplier: Decimal = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def valid_ticket_shape(self) -> StrategyInitialPaperSetupRequest:
+        if self.ticket_sizing_mode == "percent" and self.ticket_value > 100:
+            raise ValueError("percent ticket value must be in (0, 100]")
+        if self.ticket_sizing_mode == "fixed" and self.ticket_value > self.max_ticket_amount:
+            raise ValueError("fixed ticket value cannot exceed its hard maximum")
+        if self.max_ticket_amount > self.capital_limit:
+            raise ValueError("hard ticket maximum cannot exceed the strategy capital limit")
+        return self
+
+
+class StrategyInitialPaperSetupResponse(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    deployment_id: int
+    deployment_revision: int
+    policy_revision: int
+    capital_limit: Decimal
+    enabled: Literal[False]
+
+
 class StrategySizingUpdateRequest(BaseModel):
     strategy_version: str = Field(min_length=1, max_length=200)
     ticket_sizing_mode: Literal["percent", "fixed"]
@@ -1012,6 +1062,21 @@ class StrategyLifecycleResponse(BaseModel):
     strategy_version: str
     stage: Literal["paused", "retired"]
     promotion_id: int
+
+
+class StrategyPromotionRequest(BaseModel):
+    strategy_version: str = Field(min_length=1, max_length=200)
+    action: PromotionAction
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class StrategyPromotionResponse(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    stage: str
+    promotion_id: int
+    evidence_ref: str | None
+    created: bool
 
 
 def _live_gate_view(report: LiveGateReport) -> LiveGateResponse:
@@ -1321,6 +1386,7 @@ _LATEST_EVIDENCE_REFRESH_SQL = """
 _CURRENT_FORECAST_ASSESSMENTS_SQL = """
     SELECT p.policy_id,p.max_assessment_age_days,
            c.strategy_id,c.strategy_version,c.checked_at,
+           a.window_start,a.window_end,forward_stage.promoted_at AS forward_started_at,
            a.passed,a.resolved_forecasts,a.target_first_count,a.stop_first_count,a.timeout_count,
            a.normalized_brier_score,a.brier_skill_score,a.max_classwise_calibration_error
     FROM strategy_forecast_assessment_policies p
@@ -1337,6 +1403,10 @@ _CURRENT_FORECAST_ASSESSMENTS_SQL = """
      AND a.exit_policy_version=c.exit_policy_version
      AND a.resolver_version=c.resolver_version
      AND a.input_rule_set_version=c.input_rule_set_version
+    JOIN strategy_promotions forward_stage
+      ON forward_stage.strategy_id=c.strategy_id
+     AND forward_stage.strategy_version=c.strategy_version
+     AND forward_stage.to_stage='forward_observation'
     WHERE p.policy_id = (
         SELECT policy_id FROM strategy_forecast_assessment_policies
         WHERE effective_from <= %(as_of)s
@@ -1612,7 +1682,7 @@ def get_strategy_overview(
                 ("worst_case", "masked"),
                 ("worst_case", "admitted"),
             }
-            arms_complete = arm_keys == expected_arm_keys
+            arms_complete = len(rows) == len(expected_arm_keys) and arm_keys == expected_arm_keys
             ambiguity_complete = all(
                 {(ambiguity, quarantine) for ambiguity in ("best_case", "worst_case")}.issubset(arm_keys)
                 for quarantine in ("masked", "admitted")
@@ -1704,6 +1774,25 @@ def get_strategy_overview(
         fire_rate = fire_rate_by_strategy.get(key, StrategyFireRate())
         pnl = pnl_by_strategy.get(key, StrategyPnl())
         control = control_by_strategy.get(key, StrategyControlState())
+        promotion_action = next_promotion_action(control.stage) if entry.purpose == "capital_candidate" else None
+        promotion_refusals: list[str] = []
+        if promotion_action in {"validate_historical", "start_forward_observation", "approve_paper"}:
+            if not all_complete:
+                promotion_refusals.append("recent_evidence_incomplete")
+            if evidence_refused:
+                promotion_refusals.append("recent_evidence_gate_refused")
+            if evidence_not_positive:
+                promotion_refusals.append("recent_net_expectancy_not_positive")
+        if promotion_action == "approve_paper":
+            try:
+                load_forward_floor_evidence(
+                    conn,
+                    strategy_id=strategy_id,
+                    strategy_version=versions[strategy_id],
+                    now=as_of,
+                )
+            except OperatorPromotionRefusal as exc:
+                promotion_refusals.append(exc.code)
         allocation_refusals: list[str] = []
         if entry.purpose == "harness_validation":
             allocation_refusals.append("harness_validation_only")
@@ -1717,6 +1806,8 @@ def get_strategy_overview(
             allocation_refusals.append("recent_net_expectancy_not_positive")
         if control.stage not in {"paper_enabled", "live_enabled"}:
             allocation_refusals.append("paper_promotion_missing")
+        if control.stage in {"paper_enabled", "live_enabled"} and not control.paper_forward_evidence_ready:
+            allocation_refusals.append("paper_forward_evidence_missing")
         if not control.pinned_evidence_ready:
             allocation_refusals.append("pinned_promotion_evidence_invalid")
         if not control.policy_configured:
@@ -1747,19 +1838,38 @@ def get_strategy_overview(
             current_assessments = assessments_by_strategy[key]
             if assessment_policy_row is None:
                 allocation_refusals.append("prospective_assessment_policy_missing")
+                if promotion_action == "approve_paper":
+                    promotion_refusals.append("prospective_assessment_policy_missing")
             elif not current_assessments:
                 allocation_refusals.append("prospective_assessment_missing")
+                if promotion_action == "approve_paper":
+                    promotion_refusals.append("prospective_assessment_missing")
+            elif len(current_assessments) != 1:
+                allocation_refusals.append("prospective_assessment_ambiguous")
+                if promotion_action == "approve_paper":
+                    promotion_refusals.append("prospective_assessment_ambiguous")
             else:
-                passed_assessments = [row for row in current_assessments if bool(row["passed"])]
-                if not passed_assessments:
+                assessment = current_assessments[0]
+                if cast(date, assessment["window_start"]) <= cast(datetime, assessment["forward_started_at"]).date():
+                    allocation_refusals.append("prospective_assessment_includes_pre_forward_observations")
+                    if promotion_action == "approve_paper":
+                        promotion_refusals.append("prospective_assessment_includes_pre_forward_observations")
+                elif cast(date, assessment["window_end"]) > cast(datetime, assessment["checked_at"]).date():
+                    allocation_refusals.append("prospective_assessment_window_invalid")
+                    if promotion_action == "approve_paper":
+                        promotion_refusals.append("prospective_assessment_window_invalid")
+                elif not bool(assessment["passed"]):
                     allocation_refusals.append("prospective_assessment_not_passed")
-                elif not any(
-                    cast(datetime, row["checked_at"])
-                    >= as_of - timedelta(days=cast(int, row["max_assessment_age_days"]))
-                    and cast(datetime, row["checked_at"]) <= as_of + timedelta(seconds=5)
-                    for row in passed_assessments
+                    if promotion_action == "approve_paper":
+                        promotion_refusals.append("prospective_assessment_not_passed")
+                elif not (
+                    cast(datetime, assessment["checked_at"])
+                    >= as_of - timedelta(days=cast(int, assessment["max_assessment_age_days"]))
+                    and cast(datetime, assessment["checked_at"]) <= as_of + timedelta(seconds=5)
                 ):
                     allocation_refusals.append("prospective_assessment_stale")
+                    if promotion_action == "approve_paper":
+                        promotion_refusals.append("prospective_assessment_stale")
         remaining = max(control.capital_limit - control.reserved_capital, Decimal("0"))
         strategies.append(
             StrategyOverview(
@@ -1778,6 +1888,8 @@ def get_strategy_overview(
                 legacy_result_count=result_counts.get(strategy_id, 0) - sum(len(rows) for rows in exact.values()),
                 all_recent_evidence_complete=all_complete,
                 stage=control.stage,
+                next_promotion_action=promotion_action,
+                promotion_refusals=promotion_refusals,
                 attribution=StrategyAttributionView(**attribution.__dict__),
                 fire_rate=StrategyFireRateView(**fire_rate.__dict__),
                 pnl=StrategyPnlView(
@@ -1841,7 +1953,13 @@ def get_strategy_overview(
     candidate_assessments = [
         row for key, rows in assessments_by_strategy.items() if key in capital_candidate_keys for row in rows
     ]
-    passed_assessments = [row for row in candidate_assessments if bool(row["passed"])]
+    post_forward_assessments = [
+        row
+        for row in candidate_assessments
+        if cast(date, row["window_start"]) > cast(datetime, row["forward_started_at"]).date()
+        and cast(date, row["window_end"]) <= cast(datetime, row["checked_at"]).date()
+    ]
+    passed_assessments = [row for row in post_forward_assessments if bool(row["passed"])]
     fresh_passed_assessments = [
         row
         for row in passed_assessments
@@ -1861,6 +1979,9 @@ def get_strategy_overview(
     elif not candidate_assessments:
         readiness_state = "prospective_evidence_missing"
         readiness_blockers = ["prospective_assessment_missing"]
+    elif not post_forward_assessments:
+        readiness_state = "candidate_evidence_incomplete"
+        readiness_blockers = ["prospective_assessment_includes_pre_forward_observations"]
     elif not passed_assessments:
         readiness_state = "prospective_evidence_failed"
         readiness_blockers = ["prospective_assessment_not_passed"]
@@ -2777,6 +2898,81 @@ def update_core_mandate(
     return _core_mandate_response(mandate)
 
 
+@router.post(
+    "/{strategy_id}/paper-setup",
+    response_model=StrategyInitialPaperSetupResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_strategy_paper_setup(
+    strategy_id: str,
+    body: StrategyInitialPaperSetupRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyInitialPaperSetupResponse:
+    """Create the first disabled paper deployment and explicit risk policy."""
+    _require_current_strategy_version(strategy_id, body.strategy_version)
+    try:
+        with conn.transaction():
+            lock_strategy_control(conn, strategy_id, body.strategy_version)
+            if current_stage(conn, strategy_id, body.strategy_version) != "paper_enabled":
+                raise StrategyControlError("strategy must be paper-approved before initial setup")
+            overview = get_strategy_overview(conn)
+            strategy = next(item for item in overview.strategies if item.strategy_id == strategy_id)
+            if strategy.allocation.policy_configured:
+                raise StrategyControlError("paper execution policy is already configured")
+            refusals = [code for code in strategy.allocation_refusals if code != "execution_policy_missing"]
+            if refusals:
+                raise StrategyControlError(f"paper setup prerequisites failed: {', '.join(refusals)}")
+            pool = load_paper_pool(conn)
+            if pool.capital_limit <= 0:
+                raise StrategyControlError("paper pool capital limit must be configured first")
+            if body.capital_limit > pool.capital_limit:
+                raise StrategyControlError("strategy capital limit cannot exceed the paper pool limit")
+            deployment = configure_deployment(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=body.strategy_version,
+                mode="paper",
+                capital_limit=body.capital_limit,
+                enabled=False,
+                changed_by=session.username,
+                reason=body.reason,
+            )
+            policy = configure_execution_policy(
+                conn,
+                deployment_id=deployment.deployment_id,
+                ticket_sizing_mode=body.ticket_sizing_mode,
+                ticket_fraction=(body.ticket_value / Decimal("100") if body.ticket_sizing_mode == "percent" else None),
+                fixed_ticket_amount=(body.ticket_value if body.ticket_sizing_mode == "fixed" else None),
+                max_ticket_amount=body.max_ticket_amount,
+                stop_loss_pct=body.stop_loss_pct,
+                take_profit_pct=body.take_profit_pct,
+                max_quote_age_seconds=body.max_quote_age_seconds,
+                max_scan_age_seconds=body.max_scan_age_seconds,
+                max_halt_feed_age_seconds=body.max_halt_feed_age_seconds,
+                max_cost_age_seconds=body.max_cost_age_seconds,
+                max_reconciliation_age_seconds=body.max_reconciliation_age_seconds,
+                max_instrument_exposure_pct=body.max_instrument_exposure_pct,
+                max_portfolio_exposure_pct=body.max_portfolio_exposure_pct,
+                max_drawdown_pct=body.max_drawdown_pct,
+                min_net_expectancy_pct=body.min_net_expectancy_pct,
+                cost_stress_multiplier=body.cost_stress_multiplier,
+                changed_by=session.username,
+                reason=body.reason,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return StrategyInitialPaperSetupResponse(
+        strategy_id=strategy_id,
+        strategy_version=body.strategy_version,
+        deployment_id=deployment.deployment_id,
+        deployment_revision=deployment.revision,
+        policy_revision=policy.revision,
+        capital_limit=deployment.capital_limit,
+        enabled=False,
+    )
+
+
 @router.put(
     "/{strategy_id}/allocation",
     response_model=AllocationUpdateResponse,
@@ -3051,6 +3247,37 @@ def attempt_live_promotion(
     except StrategyControlError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return LivePromotionAttemptResponse(assessment_id=assessment_id, report=_live_gate_view(report))
+
+
+@router.post("/{strategy_id}/promotion", response_model=StrategyPromotionResponse)
+def advance_strategy_promotion(
+    strategy_id: str,
+    body: StrategyPromotionRequest,
+    session: SessionRow = Depends(require_session),
+    conn: psycopg.Connection[object] = Depends(get_conn),
+) -> StrategyPromotionResponse:
+    """Advance one server-selected, evidence-bound pre-live stage."""
+    _require_current_strategy_version(strategy_id, body.strategy_version)
+    try:
+        with conn.transaction():
+            result = advance_strategy_for_operator(
+                conn,
+                strategy_id=strategy_id,
+                strategy_version=body.strategy_version,
+                action=body.action,
+                promoted_by=session.username,
+                reason=body.reason,
+            )
+    except StrategyControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return StrategyPromotionResponse(
+        strategy_id=strategy_id,
+        strategy_version=body.strategy_version,
+        stage=result.promotion.to_stage,
+        promotion_id=result.promotion.promotion_id,
+        evidence_ref=result.evidence_ref,
+        created=result.created,
+    )
 
 
 @router.post("/{strategy_id}/lifecycle", response_model=StrategyLifecycleResponse)

@@ -388,6 +388,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
 _TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset(
     {
         "strategy_mt1_structural_attempts",
+        "strategy_forecast_assessments",
+        "strategy_promotions",
         "strategy_preregistration_declarations",
         "strategy_result_universe",
     }

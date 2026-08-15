@@ -293,6 +293,11 @@ def _load_intent(
                    current_assessment.checked_at AS prospective_assessment_checked_at,
                    prospective_assessment.assessment_id AS prospective_assessment_id,
                    prospective_assessment.passed AS prospective_assessment_passed,
+                   prospective_assessment.window_start AS prospective_assessment_window_start,
+                   prospective_assessment.window_end AS prospective_assessment_window_end,
+                   current_stage.to_stage AS current_stage,
+                   paper_approval.forward_started_at,
+                   paper_approval.forward_evidence_ready,
                    ranking.ranking_member_id,ranking.selected AS ranking_selected,
                    ranking_batch.ranking_policy_version,
                    ranking_batch.strategy_paper_pool_event_id AS ranking_pool_event_id
@@ -303,6 +308,29 @@ def _load_intent(
               ON d.strategy_id = s.strategy_id AND d.strategy_version = s.strategy_version
              AND d.mode = 'paper'
             LEFT JOIN strategy_execution_policies p ON p.deployment_id = d.deployment_id
+            LEFT JOIN LATERAL (
+                SELECT promotion.to_stage
+                FROM strategy_promotions promotion
+                WHERE promotion.strategy_id=s.strategy_id
+                  AND promotion.strategy_version=s.strategy_version
+                ORDER BY promotion.promotion_id DESC
+                LIMIT 1
+            ) current_stage ON true
+            LEFT JOIN LATERAL (
+                SELECT forward_promotion.promoted_at AS forward_started_at,
+                       (forward_evidence.promotion_id IS NOT NULL) AS forward_evidence_ready
+                FROM strategy_promotions paper_promotion
+                JOIN strategy_promotions forward_promotion
+                  ON forward_promotion.strategy_id=paper_promotion.strategy_id
+                 AND forward_promotion.strategy_version=paper_promotion.strategy_version
+                 AND forward_promotion.to_stage='forward_observation'
+                LEFT JOIN strategy_promotion_forward_evidence forward_evidence
+                  ON forward_evidence.promotion_id=paper_promotion.promotion_id
+                WHERE paper_promotion.strategy_id=s.strategy_id
+                  AND paper_promotion.strategy_version=s.strategy_version
+                  AND paper_promotion.to_stage='paper_enabled'
+                LIMIT 1
+            ) paper_approval ON true
             LEFT JOIN LATERAL (
                 SELECT strategy_paper_pool_event_id,enabled,capital_limit,capital_mode,risk_profile,
                        max_portfolio_drawdown_pct,max_loss_per_position_pct,
@@ -419,6 +447,8 @@ def _load_intent(
             "portfolio_mandate_incomplete",
         ),
         (bool(row["enabled"]), "paper_deployment_disabled"),
+        (row["current_stage"] in {"paper_enabled", "live_enabled"}, "paper_stage_required"),
+        (bool(row["forward_evidence_ready"]), "paper_forward_evidence_missing"),
         (row["currency"] in SUPPORTED_DEPLOYMENT_CURRENCIES, DEPLOYMENT_CURRENCY_UNSUPPORTED),
         (row["policy_revision"] is not None, "execution_policy_missing"),
         (row["forecast_id"] is not None, "opportunity_forecast_missing"),
@@ -499,6 +529,19 @@ def _load_intent(
         max_seconds=int(row["max_assessment_age_days"]) * 86_400,
     ):
         return None, "opportunity_assessment_stale", True
+    assessment_checked_at = cast(datetime, row["prospective_assessment_checked_at"])
+    assessment_window_start = cast(date | None, row["prospective_assessment_window_start"])
+    assessment_window_end = cast(date | None, row["prospective_assessment_window_end"])
+    forward_started_at = cast(datetime | None, row["forward_started_at"])
+    if (
+        assessment_window_start is None
+        or assessment_window_end is None
+        or forward_started_at is None
+        or assessment_window_start <= forward_started_at.date()
+        or assessment_window_end > assessment_checked_at.date()
+        or assessment_checked_at <= forward_started_at
+    ):
+        return None, "opportunity_assessment_pre_forward", True
     if not _session_is_open(now):
         return None, "market_session_closed", True
     return (

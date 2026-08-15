@@ -10,6 +10,10 @@ import type {
   StrategyPnlHistoryResponse,
   StrategyPositionCloseResponse,
   StrategySizingUpdateResponse,
+  StrategyPromotionAction,
+  StrategyPromotionResponse,
+  StrategyInitialPaperSetupRequest,
+  StrategyInitialPaperSetupResponse,
 } from "@/api/types";
 
 export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
@@ -18,6 +22,26 @@ export function fetchStrategyOverview(): Promise<StrategyOverviewResponse> {
 
 export function requestStrategyEvidenceRefresh(): Promise<StrategyEvidenceRefreshResponse> {
   return apiFetch("/strategies/evidence-refresh", { method: "POST" });
+}
+
+export function advanceStrategyPromotion(
+  strategyId: string,
+  body: { strategy_version: string; action: StrategyPromotionAction; reason: string },
+): Promise<StrategyPromotionResponse> {
+  return apiFetch(`/strategies/${encodeURIComponent(strategyId)}/promotion`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function createStrategyPaperSetup(
+  strategyId: string,
+  body: StrategyInitialPaperSetupRequest,
+): Promise<StrategyInitialPaperSetupResponse> {
+  return apiFetch(`/strategies/${encodeURIComponent(strategyId)}/paper-setup`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export function fetchFiredSignals(cursor: number | null, strategyId?: string): Promise<FiredSignalsResponse> {

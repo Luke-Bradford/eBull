@@ -55,7 +55,7 @@ def _session() -> SessionRow:
     return SessionRow("live-gate-session", uuid4(), "operator", now + timedelta(hours=1), now)
 
 
-def _forward_stage(conn: psycopg.Connection[Any]) -> None:
+def _forward_stage(conn: psycopg.Connection[Any], *, forward_days: int = 38) -> None:
     conn.execute(
         """
         INSERT INTO strategy_promotions (
@@ -66,9 +66,9 @@ def _forward_stage(conn: psycopg.Connection[Any]) -> None:
           (%s,%s,'research_candidate','historical_validated','test-v1',
            'hist','test','history',now()-interval '39 days'),
           (%s,%s,'historical_validated','forward_observation','test-v1',
-           'forward','test','observe',now()-interval '38 days')
+           'forward','test','observe',now()-(%s * interval '1 day'))
         """,
-        (_STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION),
+        (_STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION, _STRATEGY_ID, _VERSION, forward_days),
     )
 
 
@@ -414,15 +414,8 @@ def test_paper_duration_uses_observation_time_not_pre_2000_signal_bar(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:
     conn = ebull_test_conn
-    _forward_stage(conn)
+    _forward_stage(conn, forward_days=5)
     _policy(conn)
-    conn.execute(
-        """
-        UPDATE strategy_promotions SET promoted_at=now()-interval '5 days'
-        WHERE strategy_id=%s AND to_stage='forward_observation'
-        """,
-        (_STRATEGY_ID,),
-    )
     promote_strategy(
         conn,
         strategy_id=_STRATEGY_ID,

@@ -3,7 +3,9 @@ import type { FormEvent } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import {
+  advanceStrategyPromotion,
   closeStrategyOwnedPosition,
+  createStrategyPaperSetup,
   fetchFiredSignals,
   fetchStrategyOverview,
   fetchStrategyOwnedPositions,
@@ -338,6 +340,7 @@ const REFUSAL_LABELS: Record<string, string> = {
   recent_evidence_gate_refused: "Recent evidence failed its promotion gate",
   recent_net_expectancy_not_positive: "Net expectancy is not positive",
   paper_promotion_missing: "No approved deployment exists",
+  paper_forward_evidence_missing: "Paper approval has no durable forward-evidence record",
   pinned_promotion_evidence_invalid: "Pinned evidence is no longer valid",
   execution_policy_missing: "Execution and risk policy is missing",
   universe_basis_not_survivorship_free: "Point-in-time universe is not complete",
@@ -347,8 +350,19 @@ const REFUSAL_LABELS: Record<string, string> = {
   synthetic_control_not_run: "Random-entry control has not passed",
   prospective_assessment_policy_missing: "Prospective forecast acceptance limits are missing",
   prospective_assessment_missing: "No current prospective forecast assessment exists",
+  prospective_assessment_ambiguous: "More than one current prospective assessment scope exists",
+  prospective_assessment_includes_pre_forward_observations: "Prospective evidence includes observations from before forward admission",
+  prospective_assessment_window_invalid: "Prospective assessment window is temporally inconsistent",
   prospective_assessment_not_passed: "Recent forecast probabilities failed validation",
   prospective_assessment_stale: "Prospective forecast validation is stale",
+  preregistration_declaration_missing: "The capital candidate has no frozen preregistration",
+  declaration_digest_mismatch: "The frozen preregistration failed its integrity check",
+  declaration_no_longer_coherent: "The frozen preregistration no longer matches the evidence contract",
+  declaration_not_capital_candidate: "The frozen preregistration is not for a capital candidate",
+  forward_observation_missing: "Forward observation has not started",
+  forward_observation_future_dated: "Forward observation is future-dated",
+  forward_decision_dates_insufficient: "The preregistered forward decision-date floor is not met",
+  forward_calendar_weeks_insufficient: "The preregistered forward calendar-time floor is not met",
   funding_not_reconciled_to_trade: "Funded decision has not reconciled to a strategy trade",
   trade_not_reconciled_to_position: "Strategy trade has not reconciled to a broker position",
   position_ownership_ambiguous: "More than one broker-position ownership record exists",
@@ -1426,13 +1440,131 @@ function EvidenceDetail({ strategy }: { strategy: StrategyOverview }) {
   );
 }
 
-function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
+const PROMOTION_ACTION_LABEL = {
+  register_candidate: "Register candidate",
+  validate_historical: "Approve historical evidence",
+  start_forward_observation: "Start forward observation",
+  approve_paper: "Approve for paper trading",
+} as const;
+
+type PaperSetupValues = {
+  capital_limit: string;
+  ticket_sizing_mode: "percent" | "fixed";
+  ticket_value: string;
+  max_ticket_amount: string;
+  stop_loss_pct: string;
+  take_profit_pct: string;
+  max_quote_age_seconds: string;
+  max_scan_age_seconds: string;
+  max_halt_feed_age_seconds: string;
+  max_cost_age_seconds: string;
+  max_reconciliation_age_seconds: string;
+  max_instrument_exposure_pct: string;
+  max_portfolio_exposure_pct: string;
+  max_drawdown_pct: string;
+  min_net_expectancy_pct: string;
+  cost_stress_multiplier: string;
+  reason: string;
+};
+
+const EMPTY_PAPER_SETUP: PaperSetupValues = {
+  capital_limit: "", ticket_sizing_mode: "percent", ticket_value: "", max_ticket_amount: "",
+  stop_loss_pct: "", take_profit_pct: "", max_quote_age_seconds: "", max_scan_age_seconds: "",
+  max_halt_feed_age_seconds: "", max_cost_age_seconds: "", max_reconciliation_age_seconds: "",
+  max_instrument_exposure_pct: "", max_portfolio_exposure_pct: "", max_drawdown_pct: "",
+  min_net_expectancy_pct: "", cost_stress_multiplier: "", reason: "",
+};
+
+const PAPER_SETUP_FIELDS: { key: Exclude<keyof PaperSetupValues, "ticket_sizing_mode" | "reason">; label: string; step?: string }[] = [
+  { key: "capital_limit", label: "Strategy capital limit (USD)", step: "0.01" },
+  { key: "ticket_value", label: "Per-signal size (% or USD)", step: "0.01" },
+  { key: "max_ticket_amount", label: "Hard ticket maximum (USD)", step: "0.01" },
+  { key: "stop_loss_pct", label: "Stop loss (%)", step: "0.01" },
+  { key: "take_profit_pct", label: "Take profit (%)", step: "0.01" },
+  { key: "max_quote_age_seconds", label: "Maximum quote age (seconds)" },
+  { key: "max_scan_age_seconds", label: "Maximum scan age (seconds)" },
+  { key: "max_halt_feed_age_seconds", label: "Maximum halt-feed age (seconds)" },
+  { key: "max_cost_age_seconds", label: "Maximum cost age (seconds)" },
+  { key: "max_reconciliation_age_seconds", label: "Maximum reconciliation age (seconds)" },
+  { key: "max_instrument_exposure_pct", label: "Maximum instrument exposure (%)", step: "0.01" },
+  { key: "max_portfolio_exposure_pct", label: "Maximum portfolio exposure (%)", step: "0.01" },
+  { key: "max_drawdown_pct", label: "Maximum drawdown (%)", step: "0.01" },
+  { key: "min_net_expectancy_pct", label: "Minimum net expectancy (%)", step: "0.01" },
+  { key: "cost_stress_multiplier", label: "Cost stress multiplier", step: "0.01" },
+];
+
+function InitialPaperSetup({ strategy, onUpdated }: { strategy: StrategyOverview; onUpdated: () => void }) {
+  const [values, setValues] = useState<PaperSetupValues>(EMPTY_PAPER_SETUP);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const complete = Object.entries(values).every(([key, value]) => key === "ticket_sizing_mode" || value.trim());
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (!complete || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await createStrategyPaperSetup(strategy.strategy_id, {
+        strategy_version: strategy.strategy_version,
+        ...values,
+        max_quote_age_seconds: Number(values.max_quote_age_seconds),
+        max_scan_age_seconds: Number(values.max_scan_age_seconds),
+        max_halt_feed_age_seconds: Number(values.max_halt_feed_age_seconds),
+        max_cost_age_seconds: Number(values.max_cost_age_seconds),
+        max_reconciliation_age_seconds: Number(values.max_reconciliation_age_seconds),
+      });
+      onUpdated();
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : "Initial paper limits were not created.");
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <details className="border-t border-slate-200 p-4 dark:border-slate-800">
+      <summary className="cursor-pointer text-xs font-semibold">Set explicit first paper limits</summary>
+      <p className="mt-2 text-xs text-slate-500">Every field is an operator decision. Saving creates a disabled deployment; it does not start trading.</p>
+      <form onSubmit={(event) => void save(event)} className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <label className="text-xs">Sizing method<select value={values.ticket_sizing_mode} onChange={(event) => setValues((current) => ({ ...current, ticket_sizing_mode: event.target.value as "percent" | "fixed" }))} className="mt-1 block min-h-10 w-full border border-slate-300 bg-white px-2 dark:border-slate-700 dark:bg-slate-950"><option value="percent">Percent of sleeve</option><option value="fixed">Fixed USD</option></select></label>
+        {PAPER_SETUP_FIELDS.map((field) => (
+          <label key={field.key} className="text-xs">{field.label}<input type="number" step={field.step ?? "1"} value={values[field.key]} onChange={(event) => setValues((current) => ({ ...current, [field.key]: event.target.value }))} className="mt-1 block min-h-10 w-full border border-slate-300 bg-white px-2 dark:border-slate-700 dark:bg-slate-950" /></label>
+        ))}
+        <label className="text-xs sm:col-span-2 lg:col-span-3">Operator reason<input value={values.reason} maxLength={1000} onChange={(event) => setValues((current) => ({ ...current, reason: event.target.value }))} className="mt-1 block min-h-10 w-full border border-slate-300 bg-white px-2 dark:border-slate-700 dark:bg-slate-950" /></label>
+        <button type="submit" disabled={!complete || saving} className="min-h-10 border border-slate-300 px-3 text-xs font-medium disabled:opacity-40 dark:border-slate-700">{saving ? "Saving explicit limits…" : "Create disabled paper setup"}</button>
+      </form>
+      {error ? <p className="mt-2 text-xs text-red-700 dark:text-red-300">{error}</p> : null}
+    </details>
+  );
+}
+
+function ResearchCandidate({ strategy, onUpdated }: { strategy: StrategyOverview; onUpdated: () => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [reason, setReason] = useState("");
+  const [promoting, setPromoting] = useState(false);
+  const [promotionError, setPromotionError] = useState<string | null>(null);
   const arm = representativeArm(strategy);
   const validation = validationState(strategy);
   const ci = arm && arm.expectancy_ci_low_pct !== null && arm.expectancy_ci_high_pct !== null
     ? `${pctPoints(arm.expectancy_ci_low_pct)} to ${pctPoints(arm.expectancy_ci_high_pct)}`
     : "—";
+  async function promote() {
+    if (!strategy.next_promotion_action || !reason.trim()) return;
+    setPromoting(true);
+    setPromotionError(null);
+    try {
+      await advanceStrategyPromotion(strategy.strategy_id, {
+        strategy_version: strategy.strategy_version,
+        action: strategy.next_promotion_action,
+        reason: reason.trim(),
+      });
+      setReason("");
+      onUpdated();
+    } catch (error) {
+      setPromotionError(error instanceof ApiError ? error.message : "Strategy was not advanced.");
+    } finally {
+      setPromoting(false);
+    }
+  }
   return (
     <article className="border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
       <div className="grid gap-4 p-4 lg:grid-cols-[minmax(16rem,1.5fr)_repeat(3,minmax(7rem,0.7fr))_auto] lg:items-center">
@@ -1449,6 +1581,23 @@ function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
         </button>
       </div>
       {expanded ? <EvidenceDetail strategy={strategy} /> : null}
+      {strategy.next_promotion_action ? (
+        <div className="border-t border-slate-200 p-4 dark:border-slate-800">
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="min-w-64 flex-1 text-xs text-slate-600 dark:text-slate-300">
+              Operator reason
+              <input value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} className="mt-1 block min-h-10 w-full border border-slate-300 bg-white px-2 dark:border-slate-700 dark:bg-slate-950" />
+            </label>
+            <button type="button" onClick={() => void promote()} disabled={promoting || !reason.trim() || strategy.promotion_refusals.length > 0} className="min-h-10 border border-slate-300 px-3 text-xs font-medium disabled:opacity-40 dark:border-slate-700">
+              {promoting ? "Checking evidence…" : PROMOTION_ACTION_LABEL[strategy.next_promotion_action]}
+            </button>
+          </div>
+          {strategy.promotion_refusals.length ? <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">Cannot advance: {strategy.promotion_refusals.map(refusalLabel).join(" · ")}</p> : null}
+          {promotionError ? <p className="mt-2 text-xs text-red-700 dark:text-red-300">{promotionError}</p> : null}
+          <p className="mt-2 text-[10px] text-slate-500">The server selects and pins the complete evidence bundle. This control cannot enable live trading.</p>
+        </div>
+      ) : null}
+      {strategy.stage === "paper_enabled" && strategy.allocation_refusals.includes("execution_policy_missing") ? <InitialPaperSetup strategy={strategy} onUpdated={onUpdated} /> : null}
     </article>
   );
 }
@@ -1737,7 +1886,7 @@ export function StrategiesPage() {
                   ) : null}
                   <div className="space-y-2">
                     {researchCandidates.length
-                      ? researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} />)
+                      ? researchCandidates.map((strategy) => <ResearchCandidate key={strategy.strategy_id} strategy={strategy} onUpdated={overview.refetch} />)
                       : <EmptyState title="No capital candidates" description="The current bounded research programme produced no strategy safe enough to allocate capital." />}
                   </div>
                 </section>

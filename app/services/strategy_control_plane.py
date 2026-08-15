@@ -430,6 +430,7 @@ def promote_strategy(
     evidence_ref: str | None = None,
     result_ids: Sequence[int] = (),
     gate_version: str = GOVERNANCE_GATE_VERSION,
+    replay_result_evidence: bool = False,
 ) -> Promotion:
     """Append one explicit, ordered promotion event.
 
@@ -482,6 +483,8 @@ def promote_strategy(
         raise StrategyControlError("unregistered strategies cannot advance to evidence-backed deployment stages")
     if evidence_ref is not None:
         _require_text(evidence_ref, "evidence_ref")
+    if replay_result_evidence and to_stage != "paper_enabled":
+        raise StrategyControlError("explicit result-evidence replay is reserved for paper approval")
     if len(set(result_ids)) != len(result_ids):
         raise StrategyControlError("result_ids must be unique")
 
@@ -492,7 +495,7 @@ def promote_strategy(
 
     if to_stage in _EXTERNAL_EVIDENCE_STAGES and evidence_ref is None:
         raise StrategyControlError(f"{to_stage} requires an immutable evidence_ref")
-    if to_stage in _RESULT_EVIDENCE_STAGES and not result_ids:
+    if (to_stage in _RESULT_EVIDENCE_STAGES or replay_result_evidence) and not result_ids:
         raise StrategyControlError(f"{to_stage} requires at least one pinned result_id")
 
     if result_ids:
@@ -512,7 +515,7 @@ def promote_strategy(
             raise StrategyControlError(
                 f"result_ids do not belong to {strategy_id}@{strategy_version}: {sorted(missing)}"
             )
-        if to_stage in _RESULT_EVIDENCE_STAGES:
+        if to_stage in _RESULT_EVIDENCE_STAGES or replay_result_evidence:
             # #2639 — criterion 5's two counts, read ONCE for the whole
             # transition. They are scoped to (strategy_id, strategy_version),
             # which is exactly what this call promotes, so they are a property
@@ -815,6 +818,22 @@ def configure_execution_policy(
     """
     for value, field in ((changed_by, "changed_by"), (reason, "reason")):
         _require_text(value, field)
+    numeric_limits = (
+        max_ticket_amount,
+        stop_loss_pct,
+        take_profit_pct,
+        max_instrument_exposure_pct,
+        max_portfolio_exposure_pct,
+        max_drawdown_pct,
+        min_net_expectancy_pct,
+        cost_stress_multiplier,
+    )
+    if ticket_fraction is not None:
+        numeric_limits += (ticket_fraction,)
+    if fixed_ticket_amount is not None:
+        numeric_limits += (fixed_ticket_amount,)
+    if any(not value.is_finite() for value in numeric_limits):
+        raise StrategyControlError("execution-policy numeric limits must be finite")
     if ticket_sizing_mode == "percent":
         if ticket_fraction is None or not (Decimal("0") < ticket_fraction <= Decimal("1")):
             raise StrategyControlError("percent ticket_fraction must be in (0, 1]")
