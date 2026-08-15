@@ -19,25 +19,60 @@ preregistration under the #2599/#2600 gate — they are not implied defaults her
 candidate picked up without writing that prereg first has skipped the fence this document
 exists behind.
 
-## C-1 Volatility-managed overlay on S-10 (evidence-backed sizing, not a new signal)
+## MT-1 Capped volatility-managed long-only relative strength (testable variant, not established alpha)
 
-- **Mechanism/evidence:** Moreira & Muir (*JF* 2017) scale exposure by `c / σ̂²_{t−1}`
-  (previous month's realized variance); Cederburg et al. (*JFE* 2020, 103 strategies) —
-  the replication that killed vol-scaling on most factors — finds it survives on
-  **momentum, profitability and BAB** (`strategy-evidence` §2.4, the authority). S-10 is
-  cross-sectional momentum — inside the surviving set.
+- **Identity correction:** `MT-1` is unique to this market-technician queue. The earlier
+  `C-1` label collided with the separate portfolio-alpha ledger's `C-1` insider-purchase
+  candidate. A trial, declaration, result or UI row must use
+  `mt1-capped-volatility-managed-relative-strength`; it must never reuse S-10's identity,
+  purpose or evidence. S-10 remains a permanent `harness_validation` control.
+- **Mechanism/evidence, with the transfer limit stated:** Moreira & Muir (*JF* 2017)
+  scale exposure by `c / σ̂²_{t−1}` (previous month's realised variance).
+  Cederburg et al. (*JFE* 2020, 103 strategies) find that direct volatility scaling
+  improves all nine momentum portfolios they test, significantly for five. Those tests
+  use zero-cost **long-short factor/anomaly portfolios**. S-10 is a **long-only** ranked
+  leader strategy, so the papers supply a mechanism and prior, not evidence that this
+  implementation is in their surviving set.
 - **Form:** two published constructions exist and are NOT interchangeable — Moreira-Muir
   scale by inverse *variance* (`c/σ̂²_{t−1}`, prior month's realized daily variance);
   Harvey et al. (*JPM* 2018) target *vol* (`target_σ/σ̂`, and find it pays only on
-  equities/credit). Declare ONE ex ante, capped; EWMA λ = 0.94 (RiskMetrics) if a
-  smoother forecast is used.
-- **Turnover check:** overlay adjusts sizes at S-10's existing monthly rebalance only —
-  no new turnover events; passes by construction.
-- **Falsification:** controlled pair vs unscaled S-10 (S-4/S-9 template: identical signal
-  leg, one change); per-regime blocks. Negative control DECLARED NOW, not chosen later:
-  **S-8** (mean reversion — the family Cederburg's replication says vol-scaling does NOT
-  help) runs the same overlay; the prediction is scaled-S-10 improves and scaled-S-8 does
-  not. Both arms enter the trial register together.
+  equities/credit). MT-1 may declare only the Moreira-Muir inverse-variance form. Its
+  preregistration must use Cederburg et al.'s causal real-time normalisation: a 120-month
+  initial training window, expanding thereafter, with `c_t` chosen from completed training
+  months so the unscaled reference and raw inverse-variance reference have equal realised
+  variance. No full-sample normalisation is permitted. The published construction can
+  require substantial leverage: Cederburg et al. report a
+  99th-percentile required position above 400% for each factor and as high as 864% for
+  momentum. eBull forbids leverage, so MT-1 must cap exposure in `[0, 1]` and leave the
+  remainder in zero-return cash. That cap and its fixed normalisation make MT-1 a new
+  by-construction variant; they may not be described as the published rule.
+- **Clock and causality:** compute the previous complete calendar month's realised daily
+  variance of the **unscaled reference portfolio** as `(22/J) × Σ daily_return²`, using
+  only returns known before the current month-end decision. Apply one portfolio-level
+  multiplier to every selected holding. Do not substitute per-name inverse volatility:
+  that changes the cross-sectional signal as well as its aggregate exposure. Fewer than
+  120 usable historical month/lagged-variance pairs, a missing session in the complete
+  calendar history, or non-positive prior-month variance refuses the decision rather than
+  defaulting to 100% exposure. All-cash months remain in the expanding history but cannot
+  serve as a positive lagged-variance divisor.
+- **Turnover check:** the overlay may change target exposure only on S-10's existing
+  month-end decision dates. This creates no extra decision dates, but it can create extra
+  traded notional; therefore turnover does **not** pass by construction and must be
+  measured before any outcome statistic is opened.
+- **Falsification:** run a fresh controlled pair under the new identity: capped-scaled MT-1
+  versus an unscaled reference with the exact same signal, universe, fills, exits, costs,
+  ambiguity/quarantine arms and month-end portfolio clock. No stored S-10 result is a
+  comparator. The negative-control family remains **S-8**, but "the same overlay" means an
+  aggregate S-8 reference book whose exposure is updated on the identical month-end clock;
+  applying a per-trade or signal-date multiplier is a different experiment and refuses the
+  control. The preregistration must freeze the normalisation, minimum prior-month history,
+  zero-variance handling, paired inference and difference-in-differences gate before either
+  outcome is opened. Both evaluated pairs enter the trial register; an unexecuted design
+  does not.
+- **Capital boundary:** MT-1 may be declared `capital_candidate` only after its separate
+  strategy version, survivorship-free universe, carry/FX stamps, forward-shadow floor and
+  complete cost-aware preregistration exist. Until then this entry is a pre-spec and gives
+  no manifest, promotion, forecast, allocator or broker authority.
 
 ## C-2 Spread-ranked admission gate (universe filter attacking the measured cost failure)
 
