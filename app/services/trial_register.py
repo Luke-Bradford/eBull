@@ -118,7 +118,7 @@ from typing import Final
 #: Bumped whenever a trial is added or an entry's meaning changes. ⚠ Stored on
 #: the result row beside the DSR: a deflated Sharpe means nothing without the
 #: trial population it was deflated against, and that population grows.
-TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-12-r5"
+TRIAL_REGISTER_VERSION: Final = "trial-register-2026-08-15-r6"
 
 #: #2600 Gate D-0.1. Every search this register counts happened at or before this
 #: instant; the two durable clocks (``strategy_results_store.created_at`` and
@@ -566,6 +566,32 @@ TRIAL_REGISTER: Final = TrialRegister(
             "sha256 8f4424bea0581ba501d9779b93ff9268c65c6f0c899f1a66962bcb260cce895f. Issues #2614, #2582",
             exactness=TrialExactness.EXACT,
             searches=7,
+        ),
+        # ⚠ DECLARED BEFORE THE FIRST BACKTEST. The four robustness rows
+        # (ambiguity best/worst x quarantine admitted/masked), the eight pinned
+        # recent windows, and the declared regime cohorts are conjunctive
+        # reports of one frozen rule. No winner may be selected from them, so
+        # each strategy is one search under the register's fan-collapse rule.
+        # A later parameter or domain variant is a new entry, even if it keeps
+        # the same human-readable strategy name.
+        *(
+            DeclaredTrial(
+                trial_id=strategy_id,
+                description=f"{label}: first survivorship-free, cost-aware walk-forward and recent-window run.",
+                evidence=(
+                    "docs/proposals/ta/2026-08-14-strategy-set-s5-s10.md §0 and §3; "
+                    "issue #2437 comment 2026-08-14 (queue item 6 staked before evaluation)"
+                ),
+                exactness=TrialExactness.EXACT,
+            )
+            for strategy_id, label in (
+                ("s5-support-bounce", "S-5 support bounce"),
+                ("s6-resistance-breakout", "S-6 resistance breakout"),
+                ("s7-trend-pullback", "S-7 trend pullback"),
+                ("s8-range-mean-reversion", "S-8 range mean reversion"),
+                ("s9-squeeze-expansion", "S-9 squeeze expansion"),
+                ("s10-relative-strength-leader", "S-10 relative-strength leader"),
+            )
         ),
     ),
 )

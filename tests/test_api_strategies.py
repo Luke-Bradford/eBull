@@ -415,7 +415,7 @@ def test_overview_maps_only_exact_current_holdout_provenance(
     assert strategy.legacy_result_count == 3
 
 
-def test_overview_declares_only_level_strategies_forward_resolvable(
+def test_overview_declares_exactly_the_manifest_strategies_with_exit_adapters_as_forward_resolvable(
     ebull_test_conn: psycopg.Connection[tuple],
 ) -> None:
     overview = get_strategy_overview(ebull_test_conn)
@@ -426,4 +426,10 @@ def test_overview_declares_only_level_strategies_forward_resolvable(
         "s2-cross-sectional-momentum": False,
         "s3-mean-reversion-in-trend": False,
         "s4-volatility-compression-breakout": True,
+        "s5-support-bounce": True,
+        "s6-resistance-breakout": True,
+        "s7-trend-pullback": True,
+        "s8-range-mean-reversion": True,
+        "s9-squeeze-expansion": True,
+        "s10-relative-strength-leader": False,
     }

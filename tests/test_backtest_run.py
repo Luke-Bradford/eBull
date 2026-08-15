@@ -57,7 +57,7 @@ from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELL
 from app.services.deflated_sharpe import DSR_MODEL_ID, TradeMoments
 from app.services.equity_curve import BENCHMARK_RULE_ID, SIZING_RULE_ID, LegBook
 from app.services.indicator_series import BarSeries
-from app.services.market_regime import RegimeSeries, unconstrained_regime
+from app.services.market_regime import Regime, RegimeSeries, unconstrained_regime
 from app.services.position_builder import RULE_SET_VERSION as POSITION_RULE_SET_VERSION
 from app.services.position_builder import Position, Window
 from app.services.position_costing import cost_position
@@ -76,6 +76,7 @@ from app.services.research_price_structure_store import (
 )
 from app.services.signal_ledger import LedgerRow
 from app.services.strategy_manifest import STRATEGY_MANIFEST
+from app.services.strategy_regime_evidence import RegimeTradeObservation
 from app.services.strategy_result import (
     AMBIGUITY_ARMS,
     CORPUS_VERSION,
@@ -964,11 +965,15 @@ class TestTotalReturnStrategyLeg:
             books=books,  # type: ignore[arg-type]
             close_sources=Counter(),
             discarded=Counter(),
+            market_regime_by_date={date(2024, 1, 1): Regime.BULL_QUIET},
         )
         book = books["hold_out"]
         assert book.returns[0] > 0.0
         assert book.book.entry_price[0] < float(position.entry_fill_price)
         assert book.book.marks.tolist() == [80.0, 90.0]
+        assert len(book.regime_observations) == 1
+        assert book.regime_observations[0].signal_date == position.entry_signal_bar_date
+        assert book.regime_observations[0].regime is Regime.BULL_QUIET
 
 
 class TestNamespaceAxis:
@@ -1068,6 +1073,14 @@ class TestNamespaceAxis:
         for offset, value in enumerate((20.0, -5.0, 7.5, -2.0)):
             book.returns.append(value)
             book.entry_dates.append(axis[3 + offset])
+            book.regime_observations.append(
+                RegimeTradeObservation(
+                    instrument_key=1,
+                    signal_date=axis[3 + offset],
+                    net_return_pct=value,
+                    regime=Regime.BULL_QUIET,
+                )
+            )
             # #2623 gap 1 — the three axes are positionally parallel and
             # `TradeReturns` refuses a short one, so a hand-built book has to
             # fill this too. Exit one bar after entry; the durations are not

@@ -133,6 +133,18 @@ inherited from §3.5 of the parent catalogue.
   but every rule above is long-only; a short arm is a separate document with its own
   hard-to-borrow cost model.
 
+## §4.1 Declaration before evaluation
+
+The first price-data evaluation of S-5…S-10 is charged to the shared trial register
+before the hold-out is opened: one exact search per frozen strategy. The ambiguity,
+quarantine, pinned recent-window and declared regime reports are jointly required
+robustness views; none may be selected as a winner, so they collapse to one search by
+the register's standing fan rule. Any parameter, cadence or permitted-regime variant
+is a new trial and must be appended before it reads price outcomes.
+
+These six initial results remain `harness_validation`. Registering the searches does
+not relabel them as capital candidates and does not weaken any promotion refusal.
+
 ## §5 Order of work
 
 1. Regime filter + level construction (§1, §2) — shared, and every strategy depends on them.
