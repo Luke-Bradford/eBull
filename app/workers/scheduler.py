@@ -5590,7 +5590,8 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                 "refresh_recent cannot be combined with synthetic_control — the control is a per-arm cohort and "
                 "this path runs every pinned window; ask for one window at a time through evidence_window"
             )
-        evaluation_window = None if evidence_window_id is None else recent_evidence_window(evidence_window_id).window
+        if evidence_window_id is not None:
+            recent_evidence_window(evidence_window_id)
         with connect_job() as conn:
             if refresh_recent:
                 complete, partial = _recent_evidence_completion(conn)
@@ -5622,7 +5623,7 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                             holdout_purpose=_optional_str(params.get("holdout_purpose")),
                             holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
                             trial_register_version=_optional_str(params.get("trial_register_version")),
-                            evaluation_window=item.window,
+                            evidence_window_id=window_id,
                             progress=progress_writer,
                             release_read_locks=True,
                         )
@@ -5689,7 +5690,7 @@ def strategy_backtest_run(params: Mapping[str, Any]) -> None:
                 holdout_purpose=_optional_str(params.get("holdout_purpose")),
                 holdout_accessed_by=_optional_str(params.get("holdout_accessed_by")),
                 trial_register_version=_optional_str(params.get("trial_register_version")),
-                evaluation_window=evaluation_window,
+                evidence_window_id=evidence_window_id,
                 synthetic_control=synthetic_control,
                 release_read_locks=True,
             )
@@ -5709,6 +5710,7 @@ def _recent_evidence_completion(
         BACKTEST_UNIVERSE,
         RESULT_SCOPE,
         corpus_version_for,
+        load_corpus,
         runnable_strategies,
     )
     from app.services.cost_model import COST_MODEL_ID
@@ -5724,15 +5726,21 @@ def _recent_evidence_completion(
     from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
     from app.services.strategy_result import (
         AMBIGUITY_ARMS,
+        METRIC_AXIS_RULE_VERSION,
         TOTAL_RETURN_BASIS,
         AmbiguityArm,
         ResultIdentity,
+        metric_axis_sha256,
     )
     from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION
+    from app.services.strategy_result_universe import record_sha256
 
     runnable, _excluded = runnable_strategies()
     expected: dict[str, set[str]] = {}
     for window_id, item in RECENT_EVIDENCE_WINDOWS.items():
+        corpus = load_corpus(conn, universe_basis=BACKTEST_UNIVERSE, evaluation_window=item.window)
+        axis = corpus.axis
+        opportunity_digest = record_sha256(corpus.opportunity_records["hold_out"])
         versions: set[str] = set()
         for strategy_id in runnable:
             entry = STRATEGY_MANIFEST[strategy_id]
@@ -5758,6 +5766,13 @@ def _recent_evidence_completion(
                             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
                             return_basis=TOTAL_RETURN_BASIS,
                             ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+                            metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+                            metric_axis_dates=axis,
+                            metric_axis_start=axis[0],
+                            metric_axis_end=axis[-1],
+                            metric_axis_digest=metric_axis_sha256(axis),
+                            opportunity_set_digest=opportunity_digest,
+                            evidence_window_id=window_id,
                         ).version
                     )
         expected[window_id] = versions

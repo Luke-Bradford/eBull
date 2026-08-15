@@ -294,7 +294,10 @@ def load_result_universes(conn: psycopg.Connection[Any], result_ids: Sequence[in
 
 
 def universe_promotion_refusals(
-    record: ResultUniverseRecord | None, *, evaluated_instrument_count: int
+    record: ResultUniverseRecord | None,
+    *,
+    evaluated_instrument_count: int,
+    expected_opportunity_digest: str | None = None,
 ) -> tuple[str, ...]:
     """Every universe reason the transition may not promote this result.
 
@@ -312,6 +315,8 @@ def universe_promotion_refusals(
     evaluated_name_count = len(record.evaluated_instrument_ids) + len(record.evaluated_series_ids)
     if evaluated_name_count != evaluated_instrument_count:
         refusals.append("evaluated_universe_count_mismatch")
+    if expected_opportunity_digest is not None and record_sha256(record) != expected_opportunity_digest:
+        refusals.append("metric_axis_unproven")
     # ⚠ Same two clauses, same order, as ``check_promotable`` — an empty
     # evaluated set is refused separately because ``set() - anything`` is empty.
     if evaluated_name_count == 0:

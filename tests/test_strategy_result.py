@@ -44,6 +44,7 @@ from app.services.strategy_result import (
     HOLDOUT_BOUNDARY,
     HOLDOUT_WEIGHTING,
     LEGACY_RETURN_BASIS,
+    METRIC_AXIS_RULE_VERSION,
     PROMOTABLE_UNIVERSE_BASES,
     PROMOTION_REFUSALS,
     RESULT_SET_ID,
@@ -58,6 +59,7 @@ from app.services.strategy_result import (
     deflation_promotion_refusals,
     holdout_count_promotion_refusals,
     is_promotable,
+    metric_axis_sha256,
     namespace_for_bar,
     namespace_for_position,
     namespace_for_signal,
@@ -180,8 +182,17 @@ def _metrics_without_bootstrap(**overrides: object) -> StrategyMetrics:
 
 
 def _result(**overrides: object) -> StrategyResult:
+    axis = (EVALUATION_WINDOW_START, date(2021, 6, 28))
     base: dict[str, object] = {
-        "identity": _identity(),
+        "identity": _identity(
+            namespace="in_sample",
+            metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+            metric_axis_dates=axis,
+            metric_axis_start=axis[0],
+            metric_axis_end=axis[-1],
+            metric_axis_digest=metric_axis_sha256(axis),
+            opportunity_set_digest="a" * 64,
+        ),
         "purpose": "capital_candidate",
         "metrics": _metrics(),
         "universe_basis": "survivor_only",
@@ -551,6 +562,41 @@ class TestResultIdentity:
         """§3.4's two arms are two results, not two views of one."""
         assert _identity(ambiguity_arm="worst_case").version != _identity(ambiguity_arm="best_case").version
 
+    def test_current_identity_hashes_the_interior_axis_and_opportunity_population(self) -> None:
+        first_axis = (date(2022, 1, 1), date(2023, 1, 3), date(2024, 9, 27))
+        second_axis = (date(2022, 1, 1), date(2023, 1, 4), date(2024, 9, 27))
+
+        def current(
+            axis: tuple[date, ...],
+            *,
+            opportunity: str = "a" * 64,
+            window_id: str = "primary-2022-plus",
+        ) -> ResultIdentity:
+            return _identity(
+                return_basis=TOTAL_RETURN_BASIS,
+                ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+                window_start=date(2022, 1, 1),
+                window_end=date(2024, 9, 27),
+                metric_axis_rule_version=METRIC_AXIS_RULE_VERSION,
+                metric_axis_dates=axis,
+                metric_axis_start=axis[0],
+                metric_axis_end=axis[-1],
+                metric_axis_digest=metric_axis_sha256(axis),
+                opportunity_set_digest=opportunity,
+                evidence_window_id=window_id,
+            )
+
+        baseline = current(first_axis)
+        assert baseline.version.startswith("strategy-result-v4+")
+        assert baseline.version != current(second_axis)
+        assert baseline.version != current(first_axis, opportunity="b" * 64)
+        assert baseline.version != current(first_axis, window_id="successor-window")
+
+        with pytest.raises(ValueError, match="opportunity-set digest"):
+            current(first_axis, opportunity="not-a-digest")
+        with pytest.raises(ValueError, match="non-blank evidence-window ID"):
+            current(first_axis, window_id="   ")
+
 
 class TestStrategyResultValidation:
     """The writer-side shape, which RAISES — unlike the gate."""
@@ -694,6 +740,10 @@ class TestPromotionGateClears:
 
 
 class TestPromotionGateRefusals:
+    def test_a_legacy_result_has_unproven_metric_axis(self) -> None:
+        candidate = _clean_candidate(result=_result(identity=_identity(), **_CLEAN_RESULT_FIELDS))
+        assert "metric_axis_unproven" in check_promotable(candidate)
+
     def test_a_harness_control_is_permanently_refused(self) -> None:
         assert (
             check_promotable(

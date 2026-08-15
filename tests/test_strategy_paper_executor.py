@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier, Event
@@ -57,10 +58,13 @@ from app.services.strategy_paper_executor import (
     _effective_capital_bases,
     execute_fired_paper_signal,
 )
+from app.services.strategy_result import METRIC_AXIS_RULE_VERSION, metric_axis_sha256
 from app.services.strategy_result_universe import (
     ResultUniverseRecord,
+    record_sha256,
     store_result_universe,
 )
+from app.services.strategy_statistics import periods_per_year
 from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
@@ -168,7 +172,7 @@ def _seed(
         ) VALUES (2449001, 'TALLOC', 'Allocator test', '2', 'USD', true)
         """
     )
-    metrics = build_metrics(
+    base_metrics = build_metrics(
         **{
             **BOOTSTRAP_BLOCK,
             "expectancy_ci_low_pct": 5.0,
@@ -182,12 +186,36 @@ def _seed(
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
         "fx_unmodelled": False,
-        "metrics": metrics,
         "evaluated_instrument_count": 3,
         "deflated": deflated,
         "trial_count": deflated.declared_trials,
         "deflated_sharpe": Decimal(repr(deflated.deflated_sharpe)),
     }
+    universe_record = ResultUniverseRecord(
+        universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+        evaluated_instrument_ids=frozenset({1, 2, 3}),
+        validated_universe_ids=frozenset({1, 2, 3}),
+    )
+
+    def current_result_fields(axis: tuple[date, ...], *, evidence_window_id: str | None) -> dict[str, object]:
+        return {
+            "metrics": replace(
+                base_metrics,
+                cagr_pct=-100.0,
+                periods_per_year=periods_per_year(axis),
+            ),
+            "metric_axis_rule_version": METRIC_AXIS_RULE_VERSION,
+            "metric_axis_dates": axis,
+            "metric_axis_start": axis[0],
+            "metric_axis_end": axis[-1],
+            "metric_axis_digest": metric_axis_sha256(axis),
+            "opportunity_set_digest": record_sha256(universe_record),
+            "evidence_window_id": evidence_window_id,
+        }
+
+    support_axis = (date(1962, 1, 2), date(2021, 6, 28))
+    support_fields = current_result_fields(support_axis, evidence_window_id=None)
+    support_metrics = cast(Any, support_fields["metrics"])
     # The random-entry cohort is an in-sample falsification.  The withheld row
     # must remain control-free; production derives this exact support rather
     # than spending 1,000 additional looks at holdout outcomes (#2737).
@@ -195,10 +223,11 @@ def _seed(
         conn,
         build_result(
             **shared_result,
+            **support_fields,
             namespace="in_sample",
             purpose="harness_validation",
             synthetic_control=build_control(
-                metrics,
+                support_metrics,
                 mean_return_pct=0.0,
                 mean_return_ci_low_pct=-1.0,
                 mean_return_ci_high_pct=1.0,
@@ -207,18 +236,16 @@ def _seed(
             ),
         ),
     )
-    universe_record = ResultUniverseRecord(
-        universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
-        evaluated_instrument_ids=frozenset({1, 2, 3}),
-        validated_universe_ids=frozenset({1, 2, 3}),
-    )
     store_result_universe(conn, result_id=support_id, record=universe_record)
+    holdout_axis = (date(2022, 1, 1), date(2024, 9, 27))
     result_id = store_holdout_result(
         conn,
         build_result(
             **shared_result,
+            **current_result_fields(holdout_axis, evidence_window_id="primary-2022-plus"),
             namespace="hold_out",
             window_start=date(2022, 1, 1),
+            window_end=date(2024, 9, 27),
             synthetic_control=None,
         ),
         accessed_by="tests/test_strategy_paper_executor.py",

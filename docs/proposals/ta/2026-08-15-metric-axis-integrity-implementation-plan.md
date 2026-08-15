@@ -130,4 +130,3 @@ Spec: `docs/proposals/ta/2026-08-15-metric-axis-integrity.md`.
 4. Start a corrected in-sample run only after the merged schema, tests, full
    derivation verifier and A/B integrity checks—not their performance—pass.
    Read no results until its atomic invocation audit succeeds.
-

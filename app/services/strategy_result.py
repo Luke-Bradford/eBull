@@ -326,6 +326,7 @@ PromotionRefusal = Literal[
     "ev_bucket_ranking_not_monotonic",
     "outcome_contrast_evidence_incomplete",
     "outcome_contrast_population_not_comparable",
+    "metric_axis_unproven",
 ]
 PROMOTION_REFUSALS: frozenset[str] = frozenset(get_args(PromotionRefusal))
 
@@ -424,9 +425,16 @@ def namespace_for_position(entry_fill_bar_date: date, close_bar_date: date | Non
 RESULT_SET_ID = "strategy-result-v1"
 TOTAL_RETURN_RESULT_SET_ID = "strategy-result-v2"
 AMBIGUITY_AWARE_RESULT_SET_ID = "strategy-result-v3"
+AXIS_AWARE_RESULT_SET_ID = "strategy-result-v4"
+METRIC_AXIS_RULE_VERSION: Final = "full-namespace-panel-v1"
 LEGACY_RETURN_BASIS = "raw-close-price-return-v1"
 TOTAL_RETURN_BASIS = "split-dividend-adjusted-wealth-v1"
 RETURN_BASES: Final[frozenset[str]] = frozenset({LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS})
+
+
+def metric_axis_sha256(dates: tuple[date, ...]) -> str:
+    payload = "axis-v1:" + json.dumps([item.isoformat() for item in dates], separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -509,6 +517,54 @@ class ResultIdentity:
     #: unable to carry the matched-control threshold. The legacy default exists
     #: only so old stored hashes can be reconstructed byte-for-byte.
     ambiguity_rule_version: str = LEGACY_AMBIGUITY_RULE_VERSION
+    metric_axis_rule_version: str | None = None
+    metric_axis_dates: tuple[date, ...] | None = None
+    metric_axis_start: date | None = None
+    metric_axis_end: date | None = None
+    metric_axis_digest: str | None = None
+    opportunity_set_digest: str | None = None
+    evidence_window_id: str | None = None
+
+    def __post_init__(self) -> None:
+        axis_fields = (
+            self.metric_axis_rule_version,
+            self.metric_axis_dates,
+            self.metric_axis_start,
+            self.metric_axis_end,
+            self.metric_axis_digest,
+            self.opportunity_set_digest,
+        )
+        present = sum(value is not None for value in axis_fields)
+        if present not in {0, len(axis_fields)}:
+            raise ValueError("metric-axis provenance is all present for current rows or all null for legacy rows")
+        if present == 0:
+            if self.evidence_window_id is not None:
+                raise ValueError("a legacy result identity cannot carry an evidence-window ID")
+            return
+        assert self.metric_axis_dates is not None
+        if self.metric_axis_rule_version != METRIC_AXIS_RULE_VERSION:
+            raise ValueError(f"unknown metric-axis rule {self.metric_axis_rule_version!r}")
+        if len(self.metric_axis_dates) < 2 or any(
+            current <= previous for previous, current in zip(self.metric_axis_dates, self.metric_axis_dates[1:])
+        ):
+            raise ValueError("metric-axis dates must contain at least two strictly increasing dates")
+        if (self.metric_axis_start, self.metric_axis_end) != (
+            self.metric_axis_dates[0],
+            self.metric_axis_dates[-1],
+        ):
+            raise ValueError("metric-axis endpoints do not match the stored tuple")
+        if self.metric_axis_digest != metric_axis_sha256(self.metric_axis_dates):
+            raise ValueError("metric-axis digest does not match the stored tuple")
+        if (
+            self.opportunity_set_digest is None
+            or len(self.opportunity_set_digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.opportunity_set_digest)
+        ):
+            raise ValueError("opportunity-set digest must be a lower-case SHA-256 hex digest")
+        if self.namespace == "in_sample" and self.evidence_window_id is not None:
+            raise ValueError("an in-sample result cannot carry an evidence-window ID")
+        if self.namespace == "hold_out" and not (self.evidence_window_id and self.evidence_window_id.strip()):
+            raise ValueError("a current hold-out result requires a non-blank evidence-window ID")
 
     @property
     def version(self) -> str:
@@ -542,12 +598,27 @@ class ResultIdentity:
             fields["return_basis"] = self.return_basis
         if self.ambiguity_rule_version != LEGACY_AMBIGUITY_RULE_VERSION:
             fields["ambiguity_rule_version"] = self.ambiguity_rule_version
+        if self.metric_axis_rule_version is not None:
+            assert self.metric_axis_dates is not None
+            fields.update(
+                {
+                    "metric_axis_rule_version": self.metric_axis_rule_version,
+                    "metric_axis_dates": [item.isoformat() for item in self.metric_axis_dates],
+                    "metric_axis_start": self.metric_axis_start.isoformat(),  # type: ignore[union-attr]
+                    "metric_axis_end": self.metric_axis_end.isoformat(),  # type: ignore[union-attr]
+                    "metric_axis_digest": self.metric_axis_digest,
+                    "opportunity_set_digest": self.opportunity_set_digest,
+                    "evidence_window_id": self.evidence_window_id,
+                }
+            )
         payload = json.dumps(
             fields,
             sort_keys=True,
             separators=(",", ":"),
         )
-        if self.ambiguity_rule_version != LEGACY_AMBIGUITY_RULE_VERSION:
+        if self.metric_axis_rule_version is not None:
+            prefix = AXIS_AWARE_RESULT_SET_ID
+        elif self.ambiguity_rule_version != LEGACY_AMBIGUITY_RULE_VERSION:
             prefix = AMBIGUITY_AWARE_RESULT_SET_ID
         else:
             prefix = RESULT_SET_ID if self.return_basis == LEGACY_RETURN_BASIS else TOTAL_RETURN_RESULT_SET_ID
@@ -815,7 +886,22 @@ class PromotionCandidate:
 #: no longer carries it. The policy's reachable outcomes changed, so the
 #: version moves: frozen declarations pin this string precisely so a change
 #: like this cannot reinterpret them silently.
-STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v3-survivorship-free-satisfiable"
+STRUCTURAL_REFUSAL_POLICY_VERSION: Final = "structural-refusal-policy-2026-08-15-v4-metric-axis"
+
+
+def metric_axis_promotion_refusals(result: StrategyResult) -> tuple[PromotionRefusal, ...]:
+    """Fail closed unless the result carries the current coherent axis identity."""
+    identity = result.identity
+    if (
+        identity.metric_axis_rule_version != METRIC_AXIS_RULE_VERSION
+        or identity.metric_axis_dates is None
+        or identity.metric_axis_digest != metric_axis_sha256(identity.metric_axis_dates)
+        or identity.metric_axis_start != identity.metric_axis_dates[0]
+        or identity.metric_axis_end != identity.metric_axis_dates[-1]
+        or identity.opportunity_set_digest is None
+    ):
+        return ("metric_axis_unproven",)
+    return ()
 
 
 def structural_promotion_refusals(
@@ -1009,6 +1095,7 @@ def check_promotable(candidate: PromotionCandidate) -> tuple[PromotionRefusal, .
             fx_unmodelled=result.fx_unmodelled,
         )
     )
+    refusals.extend(metric_axis_promotion_refusals(result))
 
     # §6 — "instrument outside the §4.0 validated universe". §4.0's allocation
     # invariant 2 is a universe rule, not only a survivorship one.
@@ -1116,12 +1203,14 @@ CURRENT_RESULT_PROVENANCE: Mapping[str, object] = {
 
 __all__ = [
     "AMBIGUITY_AWARE_RESULT_SET_ID",
+    "AXIS_AWARE_RESULT_SET_ID",
     "AMBIGUITY_ARMS",
     "BENCHMARK_RULE",
     "CORPUS_FROZEN_LAST_BAR",
     "CORPUS_VENDORS",
     "CORPUS_VERSION",
     "LEGACY_RETURN_BASIS",
+    "METRIC_AXIS_RULE_VERSION",
     "RETURN_BASES",
     "TOTAL_RETURN_BASIS",
     "TOTAL_RETURN_RESULT_SET_ID",
@@ -1151,6 +1240,8 @@ __all__ = [
     "deflation_promotion_refusals",
     "holdout_count_promotion_refusals",
     "is_promotable",
+    "metric_axis_promotion_refusals",
+    "metric_axis_sha256",
     "purpose_promotion_refusals",
     "structural_promotion_refusals",
     "synthetic_control_promotion_refusals",

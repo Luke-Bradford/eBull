@@ -145,6 +145,23 @@ class TradeReturns:
 
 
 @dataclass(frozen=True)
+class DatedEquityCurve:
+    """An equity path inseparably bound to the exact metric-date tuple."""
+
+    dates: tuple[date, ...]
+    curve: EquityCurve
+
+    def __post_init__(self) -> None:
+        if len(self.dates) < 2:
+            raise ValueError(f"a dated equity curve needs at least two dates, got {len(self.dates)}")
+        if len(self.curve.equity) != len(self.dates):
+            raise ValueError(f"curve has {len(self.curve.equity)} points against {len(self.dates)} dates")
+        for previous, current in zip(self.dates, self.dates[1:]):
+            if current <= previous:
+                raise ValueError(f"metric dates must be strictly increasing; got {previous} then {current}")
+
+
+@dataclass(frozen=True)
 class StrategyMetrics:
     """Criterion 7's twelve, plus the four counts that make its nulls readable.
 
@@ -350,11 +367,10 @@ def max_drawdown_pct(equity: npt.NDArray[np.float64]) -> float:
 
 
 def compute_metrics(
-    curve: EquityCurve,
+    strategy: DatedEquityCurve,
     *,
-    dates: tuple[date, ...],
     trades: TradeReturns,
-    buy_and_hold: EquityCurve | None,
+    buy_and_hold: DatedEquityCurve | None,
     starting_equity: float = 1.0,
     bootstrap_seed: int | None = None,
 ) -> StrategyMetrics:
@@ -395,9 +411,9 @@ def compute_metrics(
     default would let two runs of "the same" evaluation differ in a number
     nobody chose, or agree by a coincidence nobody recorded.
     """
+    curve = strategy.curve
+    dates = strategy.dates
     equity = curve.equity
-    if len(equity) != len(dates):
-        raise ValueError(f"curve has {len(equity)} points against {len(dates)} dates")
 
     ppy = periods_per_year(dates)
     years = (len(dates) - 1) / ppy
@@ -471,12 +487,12 @@ def compute_metrics(
     turnover = (traded / 2.0 / mean_equity / years) if mean_equity > 0.0 and years > 0.0 else 0.0
 
     if buy_and_hold is not None:
-        if len(buy_and_hold.equity) != len(equity):
+        if buy_and_hold.dates != dates:
             raise ValueError(
-                f"benchmark curve has {len(buy_and_hold.equity)} points against the strategy's {len(equity)} — the "
-                "two must run on the same axis or the comparison is between different windows"
+                "benchmark dates differ from the strategy dates — equal curve lengths do not prove the same "
+                "measurement window"
             )
-        benchmark_return = (float(buy_and_hold.equity[-1]) / starting_equity - 1.0) * 100.0
+        benchmark_return = (float(buy_and_hold.curve.equity[-1]) / starting_equity - 1.0) * 100.0
     else:
         benchmark_return = 0.0
 
@@ -551,6 +567,7 @@ def _hold_percentiles(hold_days: Sequence[int]) -> tuple[float | None, float | N
 __all__ = [
     "DAYS_PER_YEAR",
     "METRIC_SET_ID",
+    "DatedEquityCurve",
     "StrategyMetrics",
     "TradeReturns",
     "compute_metrics",

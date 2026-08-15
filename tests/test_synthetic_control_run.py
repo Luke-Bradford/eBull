@@ -48,7 +48,7 @@ from app.services.position_costing import CostedPosition, cost_positions
 from app.services.random_entry_cohort import COHORT_ROOT_SEED, member_seed, place_entries
 from app.services.signal_ledger import LedgerRow
 from app.services.strategy_result import EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY
-from app.services.strategy_statistics import StrategyMetrics, TradeReturns, compute_metrics
+from app.services.strategy_statistics import DatedEquityCurve, StrategyMetrics, TradeReturns, compute_metrics
 from app.services.synthetic_control_run import (
     CONTROL_NAMESPACE,
     PLACEMENT_SPACE_ID,
@@ -299,8 +299,7 @@ def _sleeve_metrics(*, exits_on_spike: bool) -> StrategyMetrics:
     low, high = min(book.entry_index), max(book.exit_index)
     dates = AXIS[low : high + 1]
     return compute_metrics(
-        build_equity_curve(book.rebased(low), date_count=len(dates)),
-        dates=dates,
+        DatedEquityCurve(dates=dates, curve=build_equity_curve(book.rebased(low), date_count=len(dates))),
         trades=TradeReturns(
             net_return_pct=tuple(returns),
             entry_fill_date=tuple(entry_dates),

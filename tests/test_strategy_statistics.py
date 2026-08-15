@@ -22,11 +22,14 @@ from app.services.equity_curve import EquityCurve
 from app.services.strategy_statistics import (
     DAYS_PER_YEAR,
     METRIC_SET_ID,
+    DatedEquityCurve,
     StrategyMetrics,
     TradeReturns,
-    compute_metrics,
     max_drawdown_pct,
     periods_per_year,
+)
+from app.services.strategy_statistics import (
+    compute_metrics as _compute_metrics,
 )
 
 #: Transcribed from the spec/parent, never imported.
@@ -50,6 +53,20 @@ def _curve(equity: list[float], *, invested: list[float] | None = None, traded: 
         stale_marks=0,
         unrealised_held=0,
     )
+
+
+def compute_metrics(
+    curve: EquityCurve,
+    *,
+    dates: tuple[date, ...],
+    trades: TradeReturns,
+    buy_and_hold: EquityCurve | None,
+    **kwargs: object,
+) -> StrategyMetrics:
+    """Concise fixture adapter; production accepts only axis-bound curves."""
+    strategy = DatedEquityCurve(dates=dates, curve=curve)
+    benchmark = None if buy_and_hold is None else DatedEquityCurve(dates=dates, curve=buy_and_hold)
+    return _compute_metrics(strategy, trades=trades, buy_and_hold=benchmark, **kwargs)  # type: ignore[arg-type]
 
 
 def _trades(
@@ -280,10 +297,19 @@ class TestBuyAndHold:
     def test_a_benchmark_on_a_different_axis_is_refused(self) -> None:
         """⚠ Two curves of different lengths are two different WINDOWS, and
         subtracting them attributes the window difference to the strategy."""
-        with pytest.raises(ValueError, match="the two must run on the same axis"):
+        with pytest.raises(ValueError, match="points against"):
             compute_metrics(
                 _curve([1.0, 1.2]), dates=_dates(2), trades=_trades([]), buy_and_hold=_curve([1.0, 1.1, 1.3])
             )
+
+    def test_equal_length_curves_on_different_dates_are_refused(self) -> None:
+        strategy = DatedEquityCurve(dates=_dates(2), curve=_curve([1.0, 1.2]))
+        benchmark = DatedEquityCurve(
+            dates=_dates(2, start=date(2021, 1, 1)),
+            curve=_curve([1.0, 1.1]),
+        )
+        with pytest.raises(ValueError, match="benchmark dates differ"):
+            _compute_metrics(strategy, trades=_trades([]), buy_and_hold=benchmark)
 
     def test_no_benchmark_reports_zero_on_BOTH_fields_so_the_absence_is_visible(self) -> None:
         """⚠ Not a silent 0% benchmark: ``buy_and_hold_return_pct`` carries the

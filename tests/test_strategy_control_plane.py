@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Any, cast
@@ -58,7 +59,13 @@ from app.services.strategy_promotion_evidence_store import (
     load_promotion_evidences,
     store_promotion_evidence,
 )
-from app.services.strategy_result import EVALUATION_WINDOW_START, HOLDOUT_BOUNDARY, StrategyResult
+from app.services.strategy_result import (
+    EVALUATION_WINDOW_START,
+    HOLDOUT_BOUNDARY,
+    METRIC_AXIS_RULE_VERSION,
+    StrategyResult,
+    metric_axis_sha256,
+)
 from app.services.strategy_result_ambiguity import (
     AMBIGUITY_RULE_VERSION,
     AmbiguityRecord,
@@ -69,8 +76,10 @@ from app.services.strategy_result_ambiguity import (
 from app.services.strategy_result_universe import (
     ResultUniverseRecord,
     load_result_universes,
+    record_sha256,
     store_result_universe,
 )
+from app.services.strategy_statistics import periods_per_year
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
@@ -152,6 +161,18 @@ def _passing_promotion_evidence(*, lower_bound: str = "0.1") -> PromotionEvidenc
     )
 
 
+def _result_universe_record(
+    *,
+    evaluated: frozenset[int] = frozenset({1, 2, 3}),
+    universe: frozenset[int] = frozenset({1, 2, 3, 4, 5}),
+) -> ResultUniverseRecord:
+    return ResultUniverseRecord(
+        universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+        evaluated_instrument_ids=evaluated,
+        validated_universe_ids=universe,
+    )
+
+
 def _universe_record(
     conn: psycopg.Connection[Any],
     result_id: int,
@@ -163,11 +184,7 @@ def _universe_record(
     store_result_universe(
         conn,
         result_id=result_id,
-        record=ResultUniverseRecord(
-            universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
-            evaluated_instrument_ids=evaluated,
-            validated_universe_ids=universe,
-        ),
+        record=_result_universe_record(evaluated=evaluated, universe=universe),
     )
 
 
@@ -237,11 +254,26 @@ def _promotable_row(**overrides: Any) -> StrategyResult:
       COHORT side: ``StrategyResult`` binds the two strategy-side figures to
       ``metrics``.
     """
+    namespace = overrides.get("namespace", "hold_out")
+    opportunity_record = overrides.pop("opportunity_record", _result_universe_record())
+    if namespace == "hold_out":
+        axis = (date(2022, 1, 1), date(2024, 9, 27))
+        overrides.setdefault("window_start", axis[0])
+        overrides.setdefault("window_end", axis[-1])
+        evidence_window_id = "primary-2022-plus"
+    else:
+        axis = (date(2020, 1, 2), date(2021, 6, 28))
+        evidence_window_id = None
     deflated = build_deflated(
         declared_trials=TRIAL_REGISTER.declared_count,
         trial_register_version=TRIAL_REGISTER_VERSION,
     )
-    metrics = build_metrics(profit_factor=1.2, **BOOTSTRAP_BLOCK)
+    metrics = build_metrics(
+        profit_factor=1.2,
+        cagr_pct=-100.0,
+        periods_per_year=periods_per_year(axis),
+        **BOOTSTRAP_BLOCK,
+    )
     base: dict[str, Any] = {
         "metrics": metrics,
         "deflated": deflated,
@@ -254,9 +286,27 @@ def _promotable_row(**overrides: Any) -> StrategyResult:
             cohort_sharpe_threshold=-9.0,
         ),
         "evaluated_instrument_count": 3,
+        "metric_axis_rule_version": METRIC_AXIS_RULE_VERSION,
+        "metric_axis_dates": axis,
+        "metric_axis_start": axis[0],
+        "metric_axis_end": axis[-1],
+        "metric_axis_digest": metric_axis_sha256(axis),
+        "opportunity_set_digest": record_sha256(opportunity_record),
+        "evidence_window_id": evidence_window_id,
         **_PROMOTABLE_STAMPS,
     }
     base.update(overrides)
+    base["metrics"] = replace(
+        base["metrics"],
+        cagr_pct=-100.0,
+        periods_per_year=periods_per_year(axis),
+    )
+    if base.get("synthetic_control") is not None and "metrics" in overrides:
+        base["synthetic_control"] = replace(
+            base["synthetic_control"],
+            strategy_sharpe=base["metrics"].sharpe,
+            strategy_return_pct=base["metrics"].total_return_pct,
+        )
     return build_result(**base)
 
 
@@ -266,6 +316,7 @@ def _promotable_pair(
     strategy_id: str,
     strategy_version: str,
     ambiguity_arm: str = "worst_case",
+    opportunity_record: ResultUniverseRecord | None = None,
     **overrides: Any,
 ) -> int:
     """Store BOTH quarantine arms and return the masked one's ``result_id``.
@@ -290,6 +341,8 @@ def _promotable_pair(
         "ambiguity_arm": ambiguity_arm,
         **overrides,
     }
+    if opportunity_record is not None:
+        shared["opportunity_record"] = opportunity_record
     masked = _promotable_row(quarantine_arm="masked", **shared)
     admitted = _promotable_row(quarantine_arm="admitted", **shared)
     masked_id, _ = store_in_sample_arm_pair(conn, masked, admitted)
@@ -635,12 +688,17 @@ def test_promotion_replays_the_frozen_universe_check(
     # through `_promotable_pair` rather than the single-row `_result_id` above,
     # which exists to isolate the universe refusals.
     _recorded_holdout_evaluation(conn, strategy_id="S-GOV", strategy_version="v1")
+    passing_record = _result_universe_record(
+        evaluated=frozenset({1, 2}),
+        universe=frozenset({1, 2, 3}),
+    )
     passing_id = _promotable_pair(
         conn,
         strategy_id="S-GOV",
         strategy_version="v1",
         ambiguity_arm="best_case",
         evaluated_instrument_count=2,
+        opportunity_record=passing_record,
     )
     store_promotion_evidence(conn, result_id=passing_id, evidence=_passing_promotion_evidence())
     _ambiguity_record(conn, passing_id)
@@ -1588,6 +1646,7 @@ def _holdout_with_control_support(
     holdout_evaluated: frozenset[int] = frozenset({1, 2, 3}),
     support_validated: frozenset[int] = frozenset({1, 2, 3, 4, 5}),
     input_rule_set_version: str | None = None,
+    legacy_support: bool = False,
 ) -> tuple[int, int]:
     """Store one exact in-sample control pair and its control-free holdout pair."""
 
@@ -1624,6 +1683,18 @@ def _holdout_with_control_support(
         metrics=support_metrics,
         synthetic_control=control,
     )
+    if legacy_support:
+        legacy_fields = {
+            "metric_axis_rule_version": None,
+            "metric_axis_dates": None,
+            "metric_axis_start": None,
+            "metric_axis_end": None,
+            "metric_axis_digest": None,
+            "opportunity_set_digest": None,
+            "evidence_window_id": None,
+        }
+        support_masked = replace(support_masked, identity=replace(support_masked.identity, **legacy_fields))
+        support_admitted = replace(support_admitted, identity=replace(support_admitted.identity, **legacy_fields))
     support_id, support_admitted_id = store_in_sample_arm_pair(conn, support_masked, support_admitted)
     _universe_record(conn, support_id, evaluated=support_evaluated, universe=support_validated)
     _universe_record(conn, support_admitted_id, evaluated=support_evaluated, universe=support_validated)
@@ -1677,6 +1748,18 @@ def test_holdout_replay_uses_the_exact_in_sample_control_without_copying_it(
         "SELECT candidate_count,control_result_id FROM strategy_result_control_support WHERE holdout_result_id=%s",
         (holdout_id,),
     ).fetchone() == (1, support_id)
+
+
+def test_a_legacy_in_sample_control_cannot_support_a_current_holdout(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    _, holdout_id = _holdout_with_control_support(ebull_test_conn, legacy_support=True)
+
+    assert ebull_test_conn.execute(
+        "SELECT candidate_count, control_result_id FROM strategy_result_control_support WHERE holdout_result_id=%s",
+        (holdout_id,),
+    ).fetchone() == (0, None)
+    assert "synthetic_control_not_run" in stored_result_promotion_refusals(ebull_test_conn, holdout_id)
 
 
 def test_holdout_ambiguity_replay_uses_exact_in_sample_support_without_cross_namespace_maths(

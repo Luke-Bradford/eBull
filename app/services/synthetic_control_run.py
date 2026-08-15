@@ -113,7 +113,7 @@ import numpy as np
 import numpy.typing as npt
 
 from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND
-from app.services.equity_curve import EquityCurve, LegBook, build_equity_curve
+from app.services.equity_curve import LegBook, build_equity_curve
 from app.services.indicator_series import BarSeries
 from app.services.position_builder import Window
 from app.services.position_costing import CostedPosition
@@ -132,7 +132,7 @@ from app.services.random_entry_cohort import (
 )
 from app.services.signal_ledger import LedgerRow
 from app.services.strategy_result import ResultNamespace, namespace_for_position
-from app.services.strategy_statistics import StrategyMetrics, TradeReturns, compute_metrics
+from app.services.strategy_statistics import DatedEquityCurve, StrategyMetrics, TradeReturns, compute_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -428,20 +428,14 @@ def run_cohort(
     *,
     axis: Sequence[date],
     strategy_metrics: StrategyMetrics,
-    benchmark: EquityCurve | None,
+    benchmark: DatedEquityCurve | None,
     cohort_size: int = SPEC_COHORT_SIZE,
 ) -> CohortResult:
     """Place, price and measure ``cohort_size`` members. Pure; reads no database.
 
-    ⚠⚠ ``axis`` IS THE FULL EVALUATION AXIS AND EACH MEMBER IS TRUNCATED TO ITS
-    OWN SPAN. §5's rule — *"a namespace's equity axis is the evaluation axis
-    truncated to the closed span of that namespace's own positions"* — is
-    applied to a member exactly as ``_measure_namespace`` applies it to the
-    sleeve, because a member IS a sleeve differing only in its entry bars.
-    Forcing every member onto the STRATEGY's span would be wrong in both
-    directions: a member may place a leg before the strategy's earliest entry
-    (which no shared span can hold) and its CAGR would be read off a window it
-    did not trade.
+    ``axis`` is the real strategy's complete fixed namespace tuple. Every member
+    uses it unchanged; random placement may change the path but cannot select a
+    more flattering annualisation interval.
 
     ⚠⚠ ``benchmark`` IS ``None`` ON EVERY REAL CALL AND THAT IS FORCED, not a
     shortcut. ``compute_metrics`` refuses a benchmark whose curve length differs
@@ -488,13 +482,10 @@ def run_cohort(
                 f"cohort member {index} placed {len(book):,} legs against the strategy's {expected:,} matchable "
                 "positions — the permutation is supposed to preserve the count per series"
             )
-        low = min(book.entry_index)
-        high = max(book.exit_index)
-        dates = tuple(axis[low : high + 1])
-        curve = build_equity_curve(book.rebased(low), date_count=len(dates))
+        dates = tuple(axis)
+        curve = build_equity_curve(book, date_count=len(dates))
         metrics = compute_metrics(
-            curve,
-            dates=dates,
+            DatedEquityCurve(dates=dates, curve=curve),
             trades=TradeReturns(
                 net_return_pct=tuple(returns),
                 entry_fill_date=tuple(entry_dates),

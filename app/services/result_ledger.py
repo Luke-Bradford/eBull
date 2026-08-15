@@ -48,6 +48,7 @@ check somebody has to remember to run.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -75,10 +76,11 @@ from app.services.strategy_result import (
     ResultIdentity,
     StrategyResult,
     deflation_promotion_refusals,
+    metric_axis_promotion_refusals,
     purpose_promotion_refusals,
     synthetic_control_promotion_refusals,
 )
-from app.services.strategy_statistics import StrategyMetrics
+from app.services.strategy_statistics import StrategyMetrics, periods_per_year
 from app.services.walk_forward import (
     WALK_FORWARD_MODEL_ID,
     Fold,
@@ -404,6 +406,8 @@ _RESULT_COLUMNS = """
     ambiguity_arm, quarantine_arm, window_start, window_end, purpose, universe_basis, corpus_version,
     cost_model_id, carry_unmodelled, fx_unmodelled, sizing_rule, benchmark_rule, return_basis,
     ambiguity_rule_version,
+    metric_axis_rule_version, metric_axis_dates, metric_axis_start, metric_axis_end,
+    metric_axis_digest, opportunity_set_digest, evidence_window_id,
     position_rule_set_version,
     outcome_rule_set_version, input_rule_set_version, evaluated_instrument_count,
     trial_count, deflated_sharpe,
@@ -429,6 +433,8 @@ _RESULT_VALUES = """
     %(universe_basis)s, %(corpus_version)s,
     %(cost_model_id)s, %(carry_unmodelled)s, %(fx_unmodelled)s, %(sizing_rule)s, %(benchmark_rule)s,
     %(return_basis)s, %(ambiguity_rule_version)s,
+    %(metric_axis_rule_version)s, %(metric_axis_dates)s, %(metric_axis_start)s, %(metric_axis_end)s,
+    %(metric_axis_digest)s, %(opportunity_set_digest)s, %(evidence_window_id)s,
     %(position_rule_set_version)s,
     %(outcome_rule_set_version)s, %(input_rule_set_version)s, %(evaluated_instrument_count)s,
     %(trial_count)s, %(deflated_sharpe)s,
@@ -548,6 +554,7 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
     """One ``StrategyResult`` flattened to ``sql/262`` + ``sql/263``'s columns."""
     identity = result.identity
     metrics = result.metrics
+    _assert_axis_metric_reconciliation(identity, metrics)
     return {
         "strategy_id": identity.strategy_id,
         "strategy_version": identity.strategy_version,
@@ -568,6 +575,13 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         "benchmark_rule": identity.benchmark_rule,
         "return_basis": identity.return_basis,
         "ambiguity_rule_version": identity.ambiguity_rule_version,
+        "metric_axis_rule_version": identity.metric_axis_rule_version,
+        "metric_axis_dates": None if identity.metric_axis_dates is None else list(identity.metric_axis_dates),
+        "metric_axis_start": identity.metric_axis_start,
+        "metric_axis_end": identity.metric_axis_end,
+        "metric_axis_digest": identity.metric_axis_digest,
+        "opportunity_set_digest": identity.opportunity_set_digest,
+        "evidence_window_id": identity.evidence_window_id,
         "position_rule_set_version": identity.position_rule_set_version,
         "outcome_rule_set_version": identity.outcome_rule_set_version,
         "input_rule_set_version": identity.input_rule_set_version,
@@ -624,6 +638,22 @@ def _row_params(result: StrategyResult) -> dict[str, object]:
         # answer so the present and absent branches cannot set different keys.
         **_synthetic_params(result.synthetic_control),
     }
+
+
+def _assert_axis_metric_reconciliation(identity: ResultIdentity, metrics: StrategyMetrics) -> None:
+    """Recompute the annualisation facts from the exact stored tuple."""
+    if identity.metric_axis_dates is None:
+        return
+    expected_ppy = periods_per_year(identity.metric_axis_dates)
+    if not math.isclose(metrics.periods_per_year, expected_ppy, rel_tol=1e-12, abs_tol=1e-12):
+        raise ValueError(
+            f"periods_per_year {metrics.periods_per_year} does not reconcile with metric axis ({expected_ppy})"
+        )
+    years = (len(identity.metric_axis_dates) - 1) / expected_ppy
+    final_multiple = 1.0 + metrics.total_return_pct / 100.0
+    expected_cagr = -100.0 if final_multiple == 0.0 else (final_multiple ** (1.0 / years) - 1.0) * 100.0
+    if not math.isclose(metrics.cagr_pct, expected_cagr, rel_tol=1e-10, abs_tol=1e-10):
+        raise ValueError(f"cagr_pct {metrics.cagr_pct} does not reconcile with total return and metric axis")
 
 
 def _dsr_params(deflated: DeflatedSharpeResult | None) -> dict[str, object]:
@@ -724,6 +754,13 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         benchmark_rule,
         return_basis,
         ambiguity_rule_version,
+        metric_axis_rule_version,
+        metric_axis_dates,
+        metric_axis_start,
+        metric_axis_end,
+        metric_axis_digest,
+        opportunity_set_digest,
+        evidence_window_id,
         position_rule_set_version,
         outcome_rule_set_version,
         input_rule_set_version,
@@ -803,6 +840,13 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
         position_rule_set_version=str(position_rule_set_version),
         outcome_rule_set_version=str(outcome_rule_set_version),
         input_rule_set_version=str(input_rule_set_version),
+        metric_axis_rule_version=None if metric_axis_rule_version is None else str(metric_axis_rule_version),
+        metric_axis_dates=None if metric_axis_dates is None else tuple(metric_axis_dates),  # type: ignore[arg-type]
+        metric_axis_start=metric_axis_start,  # type: ignore[arg-type]
+        metric_axis_end=metric_axis_end,  # type: ignore[arg-type]
+        metric_axis_digest=None if metric_axis_digest is None else str(metric_axis_digest),
+        opportunity_set_digest=None if opportunity_set_digest is None else str(opportunity_set_digest),
+        evidence_window_id=None if evidence_window_id is None else str(evidence_window_id),
     )
     # ⚠ The stored `result_version` is the hash of everything above, so a
     # mismatch means the stored row and the identity it claims have diverged —
@@ -911,6 +955,7 @@ def _result_from_row(row: Sequence[object]) -> StrategyResult:
             f"stored synthetic_control_passed {synthetic_control_passed!r} disagrees with the verdict its own stored "
             f"inputs produce ({control.passed!r}) — the row's thresholds and its flag have diverged"
         )
+    _assert_axis_metric_reconciliation(identity, metrics)
     return StrategyResult(
         identity=identity,
         purpose=purpose,  # type: ignore[arg-type]
@@ -2090,6 +2135,7 @@ def _refusals_for_result(
     # their own frozen records (universe, ambiguity) or reads separately (the
     # structural stamps, the #2505 evidence).
     refusals.extend(purpose_promotion_refusals(result.purpose))
+    refusals.extend(metric_axis_promotion_refusals(result))
     refusals.extend(
         deflation_promotion_refusals(
             deflated_sharpe=result.deflated_sharpe,

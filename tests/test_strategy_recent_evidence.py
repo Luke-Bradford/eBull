@@ -100,7 +100,7 @@ def test_refresh_recent_skips_complete_windows_and_commits_each_missing_window(
     calls: list[object] = []
 
     def run_backtest(_conn: object, **kwargs: object) -> SimpleNamespace:
-        calls.append(kwargs["evaluation_window"])
+        calls.append(kwargs["evidence_window_id"])
         return SimpleNamespace(rows_written=12)
 
     monkeypatch.setattr(scheduler, "_tracked_job", tracked)

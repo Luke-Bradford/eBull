@@ -524,21 +524,21 @@ PROBES: list[tuple[str, Path, str, list[tuple[str, str]], str]] = [
         "test_a_NEGATIVE_final_equity_raises_rather_than_returning_a_COMPLEX_number",
     ),
     (
-        "the benchmark axis-length check removed (two windows subtracted as one)",
+        "the benchmark exact-date check removed (equal-length windows subtracted as one)",
         STATS,
         STATS_TESTS,
         [
             (
-                "        if len(buy_and_hold.equity) != len(equity):\n"
+                "        if buy_and_hold.dates != dates:\n"
                 "            raise ValueError(\n"
-                "                f\"benchmark curve has {len(buy_and_hold.equity)} points against the strategy's "
-                '{len(equity)} — the "\n'
-                '                "two must run on the same axis or the comparison is between different windows"\n'
+                '                "benchmark dates differ from the strategy dates — equal curve lengths do not prove '
+                'the same "\n'
+                '                "measurement window"\n'
                 "            )\n",
                 "",
             )
         ],
-        "test_a_benchmark_on_a_different_axis_is_refused",
+        "test_equal_length_curves_on_different_dates_are_refused",
     ),
 ]
 

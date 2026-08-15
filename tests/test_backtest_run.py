@@ -39,11 +39,13 @@ from app.services.backtest_run import (
     _benchmark_book,
     _check_holdout_pairing,
     _Corpus,  # noqa: PLC2701 - the axis holder the namespace rule reads
+    _dense_price_history,
     _expected_refusals,
     _fills,
     _measure_namespace,
     _NamespaceBook,
-    _namespaces_for_window,
+    _rank_cross_section,
+    _resolve_invocation_window,
     _shifted,
     _signals_for,
     assert_no_existing_results,
@@ -52,6 +54,7 @@ from app.services.backtest_run import (
     deflate_group,
     evaluate_arm,
     evaluate_level_arms,
+    run_backtest,
     runnable_strategies,
 )
 from app.services.cost_model import CARRY_UNMODELLED, COST_MODEL_ID, FX_UNMODELLED, UNKNOWN_NOMINAL_PRICE_BAND
@@ -76,6 +79,7 @@ from app.services.research_price_structure_store import (
     MaskedSeries,
 )
 from app.services.signal_ledger import LedgerRow
+from app.services.strategies.validated_universe import VALIDATED_UNIVERSE_RULE_VERSION
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_regime_evidence import RegimeTradeObservation
 from app.services.strategy_result import (
@@ -88,6 +92,7 @@ from app.services.strategy_result import (
     ResultIdentity,
     StrategyResult,
 )
+from app.services.strategy_result_universe import ResultUniverseRecord
 from app.services.strategy_segmented_evaluation import segmented_member
 from app.services.strategy_statistics import StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER
@@ -178,10 +183,13 @@ def _measurement(
         daily_returns=daily
         if daily is not None
         else {date(2010, 1, 4): 0.1, date(2010, 1, 5): -0.2, date(2010, 1, 6): 0.3},
-        evaluated_instrument_ids=frozenset({1, 2}),
+        universe_record=ResultUniverseRecord(
+            universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+            evaluated_instrument_ids=frozenset({1, 2}),
+            validated_universe_ids=frozenset({1, 2}),
+        ),
         position_count=200,
-        axis_first=date(2010, 1, 4),
-        axis_last=date(2010, 1, 6),
+        axis_dates=(date(2010, 1, 4), date(2010, 1, 5), date(2010, 1, 6)),
     )
 
 
@@ -291,6 +299,13 @@ class TestLevelArmSharedPass:
             pairs=((1, 10),),
             evaluation_start=dates[0],
             evaluation_end=dates[-1],
+            opportunity_records={
+                "hold_out": ResultUniverseRecord(
+                    universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+                    evaluated_instrument_ids=frozenset({1}),
+                    validated_universe_ids=frozenset({1}),
+                )
+            },
         )
         return corpus, MaskedSeries(
             series_id=10,
@@ -314,11 +329,14 @@ class TestLevelArmSharedPass:
         identity = entry.identity(universe="survivor_only", cost_model_id=COST_MODEL_ID)
         calls: list[int] = []
 
-        def load(_conn: object, series_id: int, *, arm: str) -> MaskedSeries:
+        def load(_conn: object, series_id: int) -> dict[str, MaskedSeries]:
             calls.append(series_id)
-            return replace(loaded, arm=arm)  # type: ignore[arg-type]
+            return {
+                "admitted": replace(loaded, arm="admitted"),
+                "masked": replace(loaded, arm="masked"),
+            }
 
-        monkeypatch.setattr(backtest_run, "load_masked_series", load)
+        monkeypatch.setattr(backtest_run, "load_arms", load)
         isolated = tuple(
             evaluate_arm(
                 object(),  # type: ignore[arg-type]
@@ -752,17 +770,66 @@ class TestBuildResult:
 
 class TestRecentWindowNamespace:
     def test_registered_recent_window_is_holdout_only_and_audited(self) -> None:
-        recent = Window(date(2022, 1, 1), EVALUATION_WINDOW_END)
-        assert _namespaces_for_window(holdout_requested=True, evaluation_window=recent) == ("hold_out",)
-        with pytest.raises(ValueError, match="requires an audited access"):
-            _namespaces_for_window(holdout_requested=False, evaluation_window=recent)
-
-    def test_custom_window_cannot_reclassify_pre_boundary_data(self) -> None:
-        with pytest.raises(ValueError, match="on or after the frozen hold-out boundary"):
-            _namespaces_for_window(
-                holdout_requested=True,
-                evaluation_window=Window(date(2020, 1, 1), date(2022, 1, 1)),
+        window, namespaces = _resolve_invocation_window(
+            holdout_requested=True,
+            evidence_window_id="primary-2022-plus",
+            universe="survivorship_free",
+        )
+        assert window == Window(date(2022, 1, 1), date(2024, 9, 27))
+        assert namespaces == ("hold_out",)
+        with pytest.raises(ValueError, match="requires both non-blank audit fields"):
+            _resolve_invocation_window(
+                holdout_requested=False,
+                evidence_window_id="primary-2022-plus",
+                universe="survivorship_free",
             )
+
+    def test_full_history_holdout_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="full-history hold-out"):
+            _resolve_invocation_window(
+                holdout_requested=True,
+                evidence_window_id=None,
+                universe="survivorship_free",
+            )
+
+    def test_in_sample_has_no_registered_window(self) -> None:
+        assert _resolve_invocation_window(
+            holdout_requested=False,
+            evidence_window_id=None,
+            universe="survivorship_free",
+        ) == (None, ("in_sample",))
+
+    def test_unknown_window_refuses(self) -> None:
+        with pytest.raises(ValueError, match="unknown recent evidence window"):
+            _resolve_invocation_window(
+                holdout_requested=True,
+                evidence_window_id="invented",
+                universe="survivorship_free",
+            )
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"holdout_purpose": "audit", "holdout_accessed_by": "operator"},
+            {"evidence_window_id": "primary-2022-plus"},
+            {"holdout_purpose": "audit"},
+            {
+                "holdout_purpose": "audit",
+                "holdout_accessed_by": "operator",
+                "evidence_window_id": "invented",
+            },
+        ],
+    )
+    def test_the_public_entry_point_refuses_invalid_modes_before_a_corpus_read(
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, str]
+    ) -> None:
+        monkeypatch.setattr(
+            backtest_run,
+            "load_corpus",
+            lambda *_args, **_kwargs: pytest.fail("invalid invocation reached the corpus"),
+        )
+        with pytest.raises(ValueError):
+            run_backtest(object(), **kwargs)  # type: ignore[arg-type]
 
 
 class TestPlannedIdentities:
@@ -837,6 +904,45 @@ class TestBenchmarkBook:
         )
         assert len(book) == 1
 
+    def test_admitted_comparator_history_does_not_inherit_a_masked_date_axis(self) -> None:
+        bars = tuple(
+            StructureBar(
+                bar_date=date(2024, 1, day),
+                open=Decimal("10"),
+                high=Decimal("11"),
+                low=Decimal("9"),
+                close=Decimal(str(10 + day)),
+                volume=100,
+            )
+            for day in (1, 2, 3)
+        )
+        admitted = MaskedSeries(
+            series_id=1,
+            bars=bars,
+            wealth_closes=tuple(bar.close for bar in bars),
+            range_masked=0,
+            return_masked=0,
+            range_flagged=1,
+            return_flagged=0,
+            bars_flagged=1,
+            arm="admitted",
+        )
+        masked = replace(
+            admitted,
+            bars=(bars[0], bars[2]),
+            wealth_closes=(bars[0].close, bars[2].close),
+            range_masked=1,
+            arm="masked",
+        )
+        axis_pos = {bar.bar_date: index for index, bar in enumerate(bars)}
+
+        admitted_history = _dense_price_history(admitted, axis_pos=axis_pos, return_basis=TOTAL_RETURN_BASIS)
+        masked_history = _dense_price_history(masked, axis_pos=axis_pos, return_basis=TOTAL_RETURN_BASIS)
+
+        assert admitted_history is not None and masked_history is not None
+        assert admitted_history[2].tolist() == [11.0, 12.0, 13.0]
+        assert math.isnan(masked_history[2][1])
+
     def test_a_leg_is_clipped_to_the_axis_rather_than_dropped(self) -> None:
         book = _benchmark_book(
             instruments=frozenset({1, 2}),
@@ -854,25 +960,25 @@ class TestBenchmarkBook:
         assert book.entry_index[1] == 1
         assert book.exit_index[1] == 3
 
-    def test_an_instrument_wholly_outside_the_axis_contributes_nothing(self) -> None:
-        book = _benchmark_book(
-            instruments=frozenset({1, 2}),
-            raw_closes_by_instrument=self._closes(),
-            wealth_closes_by_instrument=self._closes(),
-            lo=7,
-            hi=9,
-        )
-        assert len(book) == 1
+    def test_an_opportunity_name_wholly_outside_the_axis_is_refused(self) -> None:
+        with pytest.raises(RuntimeError, match="fewer than two axis endpoints"):
+            _benchmark_book(
+                instruments=frozenset({1, 2}),
+                raw_closes_by_instrument=self._closes(),
+                wealth_closes_by_instrument=self._closes(),
+                lo=7,
+                hi=9,
+            )
 
-    def test_a_single_usable_bar_is_not_a_round_trip(self) -> None:
-        book = _benchmark_book(
-            instruments=frozenset({1}),
-            raw_closes_by_instrument={1: (0, array("d", [10.0, math.nan, math.nan]))},
-            wealth_closes_by_instrument={1: (0, array("d", [10.0, math.nan, math.nan]))},
-            lo=0,
-            hi=2,
-        )
-        assert len(book) == 0
+    def test_a_single_usable_bar_is_refused(self) -> None:
+        with pytest.raises(RuntimeError, match="fewer than two usable comparator endpoints"):
+            _benchmark_book(
+                instruments=frozenset({1}),
+                raw_closes_by_instrument={1: (0, array("d", [10.0, math.nan, math.nan]))},
+                wealth_closes_by_instrument={1: (0, array("d", [10.0, math.nan, math.nan]))},
+                lo=0,
+                hi=2,
+            )
 
     def test_the_benchmark_is_charged_the_same_cost_model(self) -> None:
         """A cost-free benchmark would make every strategy look worse by exactly
@@ -901,15 +1007,15 @@ class TestBenchmarkBook:
         assert book.half_spread[0] == float(UNKNOWN_NOMINAL_PRICE_BAND.half_spread)
         assert book.marks.tolist() == [100.0, 120.0]
 
-    def test_non_finite_wealth_observation_excludes_the_benchmark_leg(self) -> None:
-        book = _benchmark_book(
-            instruments=frozenset({1}),
-            raw_closes_by_instrument={1: (0, array("d", [10.0, 11.0, 12.0]))},
-            wealth_closes_by_instrument={1: (0, array("d", [100.0, math.inf, 120.0]))},
-            lo=0,
-            hi=2,
-        )
-        assert book.entry_index == []
+    def test_non_finite_wealth_observation_refuses_the_benchmark(self) -> None:
+        with pytest.raises(RuntimeError, match="invalid wealth"):
+            _benchmark_book(
+                instruments=frozenset({1}),
+                raw_closes_by_instrument={1: (0, array("d", [10.0, 11.0, 12.0]))},
+                wealth_closes_by_instrument={1: (0, array("d", [100.0, math.inf, 120.0]))},
+                lo=0,
+                hi=2,
+            )
 
 
 class TestTotalReturnStrategyLeg:
@@ -974,15 +1080,22 @@ class TestTotalReturnStrategyLeg:
 
 
 class TestNamespaceAxis:
-    """§5 — the axis is measured from the namespace's own positions."""
+    """#2697 — the axis is fixed before the namespace's positions."""
 
     @staticmethod
     def _corpus(axis: tuple[date, ...]) -> _Corpus:
+        record = ResultUniverseRecord(
+            universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+            evaluated_instrument_ids=frozenset({1}),
+            validated_universe_ids=frozenset({1}),
+        )
         return _Corpus(
             universe=(1,),
             axis=axis,
             axis_pos={when: index for index, when in enumerate(axis)},
             pairs=((1, 1),),
+            in_sample_axis=tuple(when for when in axis if when < HOLDOUT_BOUNDARY),
+            opportunity_records={"in_sample": record, "hold_out": record},
         )
 
     def test_an_in_sample_position_closing_on_the_boundary_raises(self) -> None:
@@ -1000,7 +1113,7 @@ class TestNamespaceAxis:
             realised=True,
             marks=[1.0, 1.05, 1.1],
         )
-        with pytest.raises(RuntimeError, match="on or after the frozen boundary"):
+        with pytest.raises(RuntimeError, match="after its fixed metric axis"):
             _measure_namespace(
                 "in_sample",
                 book,
@@ -1038,20 +1151,21 @@ class TestNamespaceAxis:
                 wealth_closes_by_instrument={},
             )
 
-    def test_a_namespace_with_no_positions_measures_nothing(self) -> None:
+    def test_a_namespace_with_no_positions_is_an_all_cash_measurement(self) -> None:
         axis = (date(2021, 6, 25), date(2021, 6, 28))
-        assert (
-            _measure_namespace(
-                "in_sample",
-                _NamespaceBook(),
-                corpus=self._corpus(axis),
-                raw_closes_by_instrument={},
-                wealth_closes_by_instrument={},
-            )
-            is None
+        outcome = _measure_namespace(
+            "in_sample",
+            _NamespaceBook(),
+            corpus=self._corpus(axis),
+            raw_closes_by_instrument={1: (0, array("d", [10.0, 11.0]))},
+            wealth_closes_by_instrument={1: (0, array("d", [10.0, 11.0]))},
         )
+        assert outcome is not None
+        assert outcome.metrics.trade_count == 0
+        assert outcome.metrics.total_return_pct == 0.0
+        assert outcome.metrics.effective_sample_size is None
 
-    def test_the_axis_is_the_span_of_the_namespaces_own_legs(self) -> None:
+    def test_the_axis_keeps_cash_on_both_sides_of_the_namespaces_legs(self) -> None:
         axis = tuple(date(2010, 1, day) for day in range(1, 11))
         book = _NamespaceBook()
         book.instruments.add(1)
@@ -1091,11 +1205,7 @@ class TestNamespaceAxis:
             wealth_closes_by_instrument={1: (3, array("d", [1.0, 1.1, 1.15, 1.2]))},
         )
         assert outcome is not None
-        # ⚠ NOT the corpus start. A strategy's warm-up means its first position
-        # lands well after the first bar, and padding the axis back would dilute
-        # exactly the CAGR the rule exists to protect.
-        assert outcome.axis_first == axis[3]
-        assert outcome.axis_last == axis[6]
+        assert outcome.axis_dates == axis
         assert outcome.metrics.effective_sample_size is not None
 
     def test_a_namespace_whose_bootstrap_cannot_run_refuses_rather_than_storing_a_nominal_n(self) -> None:
@@ -1204,6 +1314,8 @@ class TestAmbiguityMateriality:
             ambiguity_arm="best_case",
             quarantine_arm="masked",
             deflated=None,
+            evaluation_window=Window(date(2022, 1, 1), date(2024, 9, 27)),
+            evidence_window_id="primary-2022-plus",
         )
 
     def test_a_shared_non_level_measurement_proves_zero_gap(self) -> None:
@@ -1528,10 +1640,13 @@ class TestCutSplits:
             metrics=_metrics(),
             moments=TradeMoments(sharpe=0.05, skewness=0.2, kurtosis=4.0, trade_count=len(starts)),
             daily_returns={},
-            evaluated_instrument_ids=frozenset({1}),
+            universe_record=ResultUniverseRecord(
+                universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
+                evaluated_instrument_ids=frozenset({1}),
+                validated_universe_ids=frozenset({1}),
+            ),
             position_count=len(starts),
-            axis_first=date(2010, 1, 1),
-            axis_last=date(2010, 1, 8),
+            axis_dates=TestCutSplits.AXIS,
             label_starts=array("i", starts),
             label_ends=array("i", ends),
         )
@@ -1776,3 +1891,47 @@ class TestSeriesBreakBoundary:
             "not_evaluable",
             "insufficient_warmup",
         )
+
+
+class TestCrossSectionOpportunityPopulation:
+    def test_ranking_never_loads_a_name_outside_the_frozen_opportunity_set(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        axis = (date(2022, 1, 3), date(2022, 1, 4))
+        corpus = _Corpus(
+            universe=(1, 2),
+            axis=axis,
+            axis_pos={when: index for index, when in enumerate(axis)},
+            pairs=((1, 10), (2, 20)),
+        )
+        loaded: list[int] = []
+
+        def load_only_opportunity(_conn: object, series_id: int, *, arm: str) -> MaskedSeries:
+            loaded.append(series_id)
+            if series_id == 20:
+                raise AssertionError("an excluded name reached cross-sectional ranking")
+            return MaskedSeries(
+                series_id=series_id,
+                bars=(),
+                wealth_closes=(),
+                range_masked=0,
+                return_masked=0,
+                range_flagged=0,
+                return_flagged=0,
+                bars_flagged=0,
+                arm=arm,  # type: ignore[arg-type]
+            )
+
+        monkeypatch.setattr(backtest_run, "load_masked_series", load_only_opportunity)
+        outcome = _rank_cross_section(
+            None,  # type: ignore[arg-type]
+            STRATEGY_MANIFEST["s2-cross-sectional-momentum"],
+            corpus=corpus,
+            quarantine_arm="masked",
+            regime_provider=_UniformRegimeProvider(),  # type: ignore[arg-type]
+            opportunity_keys=frozenset({1}),
+        )
+
+        assert loaded == [10]
+        assert outcome.winners == {}

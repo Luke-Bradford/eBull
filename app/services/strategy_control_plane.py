@@ -499,7 +499,7 @@ def promote_strategy(
         rows = conn.execute(
             """
             SELECT result_id, profit_factor, evaluated_instrument_count,
-                   universe_basis, carry_unmodelled, fx_unmodelled
+                   universe_basis, carry_unmodelled, fx_unmodelled, opportunity_set_digest
             FROM strategy_results_store
             WHERE strategy_id = %s AND strategy_version = %s
               AND result_id = ANY(%s)
@@ -532,6 +532,7 @@ def promote_strategy(
             )
             profit_factor_by_result = {int(row[0]): None if row[1] is None else Decimal(str(row[1])) for row in rows}
             evaluated_count_by_result = {int(row[0]): int(row[2]) for row in rows}
+            opportunity_digest_by_result = {int(row[0]): None if row[6] is None else str(row[6]) for row in rows}
             # ⚠ A NULL COST STAMP READS AS *UNMODELLED*, NEVER AS MODELLED.
             # `bool(None)` is False, and False means "carry is modelled" — so the
             # obvious coercion turns an unset stamp into a PASS on the clause it
@@ -574,6 +575,7 @@ def promote_strategy(
                     universe_promotion_refusals(
                         universes.get(result_id),
                         evaluated_instrument_count=evaluated_count_by_result[result_id],
+                        expected_opportunity_digest=opportunity_digest_by_result[result_id],
                     )
                 )
                 # #2625 — the §3.4 ambiguity comparison, re-derived from the

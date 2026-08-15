@@ -41,6 +41,7 @@ from app.services.strategy_result import CORPUS_VERSION
 from app.services.strategy_result_universe import (
     TERMINATION_CENSUS_STRATA,
     ResultUniverseRecord,
+    record_sha256,
     store_termination_census,
 )
 from app.services.universe_selection import (
@@ -213,7 +214,13 @@ class TestWriteBoundary:
             "store_result_universe",
             lambda _conn, *, result_id, record: captured.append(record),
         )
-        outcome = SimpleNamespace(evaluated_instrument_ids=frozenset({7, -42}))
+        record = ResultUniverseRecord(
+            universe_rule_version=backtest_run.UNIVERSE_SELECTION_RULE_VERSION,
+            evaluated_instrument_ids=frozenset({7}),
+            validated_universe_ids=frozenset({7}),
+            evaluated_series_ids=frozenset({42}),
+        )
+        outcome = SimpleNamespace(universe_record=record)
         measurement = SimpleNamespace(
             strategy_id="s-test",
             quarantine_arm="masked",
@@ -226,6 +233,7 @@ class TestWriteBoundary:
             ambiguity_arm="best_case",
             namespace="in_sample",
             version="test-result",
+            opportunity_set_digest=record_sha256(record),
         )
         result = SimpleNamespace(identity=identity, evaluated_instrument_count=2, universe_basis="survivorship_free")
 
@@ -237,14 +245,7 @@ class TestWriteBoundary:
             validated=frozenset({7}),
         )
 
-        assert captured == [
-            ResultUniverseRecord(
-                universe_rule_version=backtest_run.UNIVERSE_SELECTION_RULE_VERSION,
-                evaluated_instrument_ids=frozenset({7}),
-                validated_universe_ids=frozenset({7}),
-                evaluated_series_ids=frozenset({42}),
-            )
-        ]
+        assert captured == [record]
         # These two other persistence paths are aggregate-only by schema: a
         # future scalar instrument id added to either makes this test fail and
         # forces the synthetic-key boundary to be revisited.
