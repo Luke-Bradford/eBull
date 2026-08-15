@@ -206,8 +206,8 @@ def store_result_regime_cohorts(
     cohorts: Sequence[RegimeCohort],
     expected_trade_count: int,
 ) -> None:
-    if not cohorts:
-        raise ValueError("every result with realised trades must store at least one regime cohort")
+    if not cohorts and expected_trade_count != 0:
+        raise ValueError("a result with realised trades must store at least one regime cohort")
     if len({row.regime for row in cohorts}) != len(cohorts):
         raise ValueError("a result cannot store the same regime cohort twice")
     if sum(row.trade_count for row in cohorts) != expected_trade_count:
@@ -219,6 +219,8 @@ def store_result_regime_cohorts(
         raise ValueError(
             f"regime cohort expected trade count {expected_trade_count} does not match parent result {int(parent[0])}"
         )
+    if not cohorts:
+        return
     with conn.cursor() as cursor:
         cursor.executemany(
             """

@@ -3648,10 +3648,6 @@ def _regime_cohorts_for(arms: Sequence[ArmMeasurement], result: StrategyResult) 
         ):
             outcome = measurement.namespaces.get(result.identity.namespace)
             if outcome is not None:
-                if sum(cohort.trade_count for cohort in outcome.regime_cohorts) != result.metrics.trade_count:
-                    raise RuntimeError(
-                        f"{result.identity.version} would store regime cohorts that do not reconcile to its trade count"
-                    )
                 return outcome.regime_cohorts
     raise RuntimeError(f"no measurement matches the stored row {result.identity.version}")
 

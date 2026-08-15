@@ -33,12 +33,23 @@ def _cohorts():
 
 
 def _result(*, trade_count: int = 20):
+    empty_overrides = (
+        {
+            "profit_factor": None,
+            "hold_days_p25": None,
+            "median_hold_days": None,
+            "hold_days_p75": None,
+        }
+        if trade_count == 0
+        else {}
+    )
     return build_result(
         namespace="in_sample",
         metrics=build_metrics(
             trade_count=trade_count,
             losing_trade_count=min(10, trade_count),
             open_trade_count=0,
+            **empty_overrides,
         ),
     )
 
@@ -82,6 +93,20 @@ def test_actual_parent_count_mismatch_refuses_before_insert(ebull_test_conn: psy
             cohorts=_cohorts(),
             expected_trade_count=20,
         )
+    assert ebull_test_conn.execute(
+        "SELECT count(*) FROM strategy_result_regime_cohorts WHERE result_id=%s",
+        (result_id,),
+    ).fetchone() == (0,)
+
+
+def test_zero_trade_parent_stores_no_empty_placeholder_cohort(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    result_id = store_in_sample_result(ebull_test_conn, _result(trade_count=0))
+    store_result_regime_cohorts(
+        ebull_test_conn,
+        result_id=result_id,
+        cohorts=(),
+        expected_trade_count=0,
+    )
     assert ebull_test_conn.execute(
         "SELECT count(*) FROM strategy_result_regime_cohorts WHERE result_id=%s",
         (result_id,),
