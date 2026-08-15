@@ -302,6 +302,34 @@ const FUNDED_SIGNAL: FiredSignal = {
   execution_status: "filled",
   actual_fill_price: "20.10",
   slippage_pct: "0.5",
+  trade_lifecycle: {
+    trade_status: "closed",
+    ownership_count: 1,
+    broker_position_id: 7001,
+    ownership_status: "released",
+    position_claimed_at: "2026-08-09T10:00:00Z",
+    position_released_at: "2026-08-12T10:00:00Z",
+    position_release_reason: "broker_close_observed",
+    latest_operation_type: "close",
+    latest_operation_id: 88,
+    latest_operation_order_id: 99,
+    latest_operation_trigger: "operator_close",
+    latest_operation_status: "applied",
+    latest_operation_created_at: "2026-08-12T09:58:00Z",
+    latest_operation_submitted_at: "2026-08-12T09:59:00Z",
+    latest_operation_resolved_at: "2026-08-12T10:00:00Z",
+    latest_operation_error: null,
+    latest_reconciliation_state: "resolved",
+    latest_reconciliation_broker_status: "closed",
+    latest_reconciliation_attempt_count: 1,
+    latest_reconciliation_updated_at: "2026-08-12T10:00:00Z",
+    latest_reconciliation_error: null,
+    close_event_count: 1,
+    realised_pnl_usd: "8.75",
+    observed_fees_usd: "1.25",
+    close_history_status: "complete",
+    incomplete_reasons: [],
+  },
 };
 
 function approvedOverview(): StrategyOverviewResponse {
@@ -735,6 +763,7 @@ describe("StrategiesPage", () => {
       execution_status: null,
       actual_fill_price: null,
       slippage_pct: null,
+      trade_lifecycle: null,
     };
     vi.mocked(strategiesApi.fetchFiredSignals).mockResolvedValue({
       items: [FUNDED_SIGNAL, rejected],
@@ -746,6 +775,14 @@ describe("StrategiesPage", () => {
     expect(within(section).getByText("Funded")).toBeInTheDocument();
     expect(within(section).getByText("Not funded")).toBeInTheDocument();
     expect(within(section).getByText("Trade #41")).toBeInTheDocument();
+    expect(within(section).getByText("Position #7001 · released")).toBeInTheDocument();
+    expect(within(section).getByText("close · applied")).toBeInTheDocument();
+    expect(within(section).getByText("Operation #88 · order #99")).toBeInTheDocument();
+    expect(within(section).getByText("Reconciliation resolved · broker closed")).toBeInTheDocument();
+    expect(within(section).getByText("operator close")).toBeInTheDocument();
+    expect(within(section).getByText("1 close event")).toBeInTheDocument();
+    expect(within(section).getByText("US$8.75 realised")).toBeInTheDocument();
+    expect(within(section).getByText("US$1.25 fees")).toBeInTheDocument();
     expect(within(section).getByText("No order submitted")).toBeInTheDocument();
     expect(within(section).getByText("No strategy trade")).toBeInTheDocument();
     expect(within(section).getByText("US$100.00 assigned")).toBeInTheDocument();
@@ -755,6 +792,135 @@ describe("StrategiesPage", () => {
     expect(within(section).getByText("+10.00%")).toBeInTheDocument();
     expect(within(section).getByText("Outcome unresolved")).toBeInTheDocument();
     expect(within(section).getByText("paper pool disabled")).toBeInTheDocument();
+  });
+
+  it("surfaces missing and ambiguous broker lifecycle evidence instead of selecting a position", async () => {
+    const missing: FiredSignal = {
+      ...FUNDED_SIGNAL,
+      signal_id: 89,
+      symbol: "MISS",
+      trade_lifecycle: {
+        ...FUNDED_SIGNAL.trade_lifecycle!,
+        trade_status: "closed",
+        close_event_count: 0,
+        realised_pnl_usd: null,
+        observed_fees_usd: null,
+        close_history_status: "incomplete",
+        incomplete_reasons: ["released_position_missing_close_history"],
+      },
+    };
+    const ambiguous: FiredSignal = {
+      ...FUNDED_SIGNAL,
+      signal_id: 88,
+      symbol: "AMB",
+      trade_lifecycle: {
+        ...FUNDED_SIGNAL.trade_lifecycle!,
+        ownership_count: 2,
+        broker_position_id: null,
+        ownership_status: null,
+        position_claimed_at: null,
+        position_released_at: null,
+        position_release_reason: null,
+        latest_operation_type: null,
+        latest_operation_id: null,
+        latest_operation_order_id: null,
+        latest_operation_trigger: null,
+        latest_operation_status: null,
+        latest_operation_created_at: null,
+        latest_operation_submitted_at: null,
+        latest_operation_resolved_at: null,
+        latest_reconciliation_state: null,
+        latest_reconciliation_broker_status: null,
+        latest_reconciliation_attempt_count: null,
+        latest_reconciliation_updated_at: null,
+        latest_reconciliation_error: null,
+        close_event_count: null,
+        realised_pnl_usd: null,
+        observed_fees_usd: null,
+        close_history_status: "unavailable",
+        incomplete_reasons: ["position_ownership_ambiguous"],
+      },
+    };
+    vi.mocked(strategiesApi.fetchFiredSignals).mockResolvedValue({
+      items: [missing, ambiguous],
+      next_cursor: null,
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const section = (await screen.findByText("Generated trade activity")).closest("section")!;
+    expect(within(section).getByText("Close history incomplete")).toBeInTheDocument();
+    expect(within(section).getByText("Released position is missing broker close history")).toBeInTheDocument();
+    expect(within(section).getByText("2 ownership records · ambiguous")).toBeInTheDocument();
+    expect(within(section).getByText("Close history unavailable")).toBeInTheDocument();
+    expect(within(section).getByText("More than one broker-position ownership record exists")).toBeInTheDocument();
+  });
+
+  it("shows a submitted close as closing without presenting realised P&L", async () => {
+    const closing: FiredSignal = {
+      ...FUNDED_SIGNAL,
+      trade_lifecycle: {
+        ...FUNDED_SIGNAL.trade_lifecycle!,
+        trade_status: "closing",
+        ownership_status: "active",
+        position_released_at: null,
+        position_release_reason: null,
+        latest_operation_trigger: "strategy_exit",
+        latest_operation_status: "submitted",
+        latest_operation_resolved_at: null,
+        latest_reconciliation_state: "pending",
+        latest_reconciliation_broker_status: "pending",
+        latest_reconciliation_updated_at: "2026-08-12T09:59:00Z",
+        close_event_count: 0,
+        realised_pnl_usd: null,
+        observed_fees_usd: null,
+        close_history_status: "not_closed",
+      },
+    };
+    vi.mocked(strategiesApi.fetchFiredSignals).mockResolvedValue({ items: [closing], next_cursor: null });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const section = (await screen.findByText("Generated trade activity")).closest("section")!;
+    expect(within(section).getByText("closing")).toBeInTheDocument();
+    expect(within(section).getByText("close · submitted")).toBeInTheDocument();
+    expect(within(section).getByText("strategy exit")).toBeInTheDocument();
+    expect(within(section).getByText("Reconciliation pending · broker pending")).toBeInTheDocument();
+    expect(within(section).getByText("No broker close yet")).toBeInTheDocument();
+    const row = within(section).getByText("ACME").closest("tr")!;
+    expect(within(row).queryByText(/realised/)).not.toBeInTheDocument();
+  });
+
+  it("renders failed and reconciliation-required trades as risk states", async () => {
+    const failed: FiredSignal = {
+      ...FUNDED_SIGNAL,
+      signal_id: 101,
+      symbol: "FAIL",
+      trade_lifecycle: {
+        ...FUNDED_SIGNAL.trade_lifecycle!,
+        trade_status: "failed",
+        incomplete_reasons: [],
+      },
+    };
+    const reconcileRequired: FiredSignal = {
+      ...FUNDED_SIGNAL,
+      signal_id: 100,
+      symbol: "RECON",
+      trade_lifecycle: {
+        ...FUNDED_SIGNAL.trade_lifecycle!,
+        trade_status: "reconcile_required",
+        incomplete_reasons: [],
+      },
+    };
+    vi.mocked(strategiesApi.fetchFiredSignals).mockResolvedValue({
+      items: [failed, reconcileRequired],
+      next_cursor: null,
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const section = (await screen.findByText("Generated trade activity")).closest("section")!;
+    const failedBadge = within(within(section).getByText("FAIL").closest("tr")!).getByText("failed");
+    const reconcileBadge = within(within(section).getByText("RECON").closest("tr")!).getByText("reconcile required");
+    expect(failedBadge.parentElement).toHaveClass("border-red-300");
+    expect(reconcileBadge.parentElement).toHaveClass("border-red-300");
   });
 
   it("loads older generated decisions through the bounded cursor", async () => {
