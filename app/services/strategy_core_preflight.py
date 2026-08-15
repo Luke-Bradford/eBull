@@ -47,10 +47,11 @@ from app.services.strategy_core_submission_gate import (
 )
 from app.services.strategy_halt_identity import INSTRUMENT_HALT_SYMBOL_SQL
 
-#: Frozen with the rule set it stamps.  v1 fixes, BY CONSTRUCTION: the two
+#: Frozen with the rule set it stamps.  v2 fixes, BY CONSTRUCTION: the two
 #: freshness bounds below (their INTERVAL is derived from each producer's cadence,
 #: their POSITION in that interval is a choice -- see the constants), the
-#: ``us_equity`` session allow-list, and the refusal precedence order.
+#: ``us_equity`` session allow-list, the refusal precedence order, and the shared
+#: versioned Nasdaq/eToro halt-symbol identity rule.
 CORE_PREFLIGHT_POLICY_VERSION: Final = "core-preflight-v2"
 
 #: The one session calendar this repo has is US
