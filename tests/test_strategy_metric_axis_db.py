@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any
 
@@ -181,3 +182,19 @@ def test_sql_recent_window_mirror_is_closed(ebull_test_conn: psycopg.Connection[
         "SELECT strategy_evidence_window_is_registered(%s, %s, %s)",
         ("searched", date(2022, 1, 1), date(2024, 9, 27)),
     ).fetchone() == (False,)
+    definition = ebull_test_conn.execute(
+        "SELECT pg_get_functiondef('strategy_evidence_window_is_registered(text,date,date)'::regprocedure)"
+    ).fetchone()
+    assert definition is not None
+    sql_windows = {
+        window_id: (date.fromisoformat(start), date.fromisoformat(end))
+        for window_id, start, end in re.findall(
+            r"WHEN\s+'([^']+)'\s+THEN\s+declared_start\s*=\s*DATE\s+'([^']+)'"
+            r"\s+AND\s+declared_end\s*=\s*DATE\s+'([^']+)'",
+            str(definition[0]),
+        )
+    }
+    python_windows = {
+        window_id: (item.window.start, item.window.end) for window_id, item in RECENT_EVIDENCE_WINDOWS.items()
+    }
+    assert sql_windows == python_windows
