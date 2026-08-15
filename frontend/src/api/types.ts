@@ -2530,12 +2530,60 @@ export interface StrategyOverview {
   legacy_result_count: number;
   all_recent_evidence_complete: boolean;
   stage: string | null;
+  next_promotion_action: StrategyPromotionAction | null;
+  promotion_refusals: string[];
   attribution: StrategyAttribution;
   fire_rate: StrategyFireRate;
   pnl: StrategyPnl;
   allocation: StrategyAllocation;
   allocation_ready: boolean;
   allocation_refusals: string[];
+}
+
+export type StrategyPromotionAction =
+  | "register_candidate"
+  | "validate_historical"
+  | "start_forward_observation"
+  | "approve_paper";
+
+export interface StrategyPromotionResponse {
+  strategy_id: string;
+  strategy_version: string;
+  stage: string;
+  promotion_id: number;
+  evidence_ref: string | null;
+  created: boolean;
+}
+
+export interface StrategyInitialPaperSetupRequest {
+  strategy_version: string;
+  capital_limit: string;
+  ticket_sizing_mode: "percent" | "fixed";
+  ticket_value: string;
+  max_ticket_amount: string;
+  stop_loss_pct: string;
+  take_profit_pct: string;
+  max_quote_age_seconds: number;
+  max_scan_age_seconds: number;
+  max_halt_feed_age_seconds: number;
+  max_cost_age_seconds: number;
+  max_reconciliation_age_seconds: number;
+  max_instrument_exposure_pct: string;
+  max_portfolio_exposure_pct: string;
+  max_drawdown_pct: string;
+  min_net_expectancy_pct: string;
+  cost_stress_multiplier: string;
+  reason: string;
+}
+
+export interface StrategyInitialPaperSetupResponse {
+  strategy_id: string;
+  strategy_version: string;
+  deployment_id: number;
+  deployment_revision: number;
+  policy_revision: number;
+  capital_limit: string;
+  enabled: false;
 }
 
 /** How often the entry rule fires, from the durable census (#2623 gap 2).

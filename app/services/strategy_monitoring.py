@@ -116,6 +116,7 @@ class StrategyPnl:
 class StrategyControlState:
     stage: str | None = None
     pinned_evidence_ready: bool = False
+    paper_forward_evidence_ready: bool = False
     deployment_id: int | None = None
     capital_limit: Decimal = Decimal("0")
     currency: str = "USD"
@@ -629,6 +630,11 @@ _CONTROL_SQL = """
         SELECT strategy_id, strategy_version
         FROM strategy_deployments
         WHERE strategy_version = ANY(%(versions)s) AND mode = 'paper'
+    ), paper_approval AS (
+        SELECT p.strategy_id, p.strategy_version, p.promotion_id
+        FROM strategy_promotions p
+        WHERE p.strategy_version = ANY(%(versions)s)
+          AND p.to_stage = 'paper_enabled'
     ), pinned AS (
         SELECT p.strategy_id, p.strategy_version,
                COUNT(*) AS result_count,
@@ -665,6 +671,7 @@ _CONTROL_SQL = """
     SELECT keys.strategy_id, keys.strategy_version, cs.to_stage,
            COALESCE(pin.result_count, 0) AS result_count,
            COALESCE(pin.qualified_result_count, 0) AS qualified_result_count,
+           (forward_evidence.promotion_id IS NOT NULL) AS paper_forward_evidence_ready,
            d.deployment_id, d.capital_limit, d.currency, d.enabled, d.revision,
            COALESCE(res.amount, 0) AS reserved_capital,
            (pol.deployment_id IS NOT NULL) AS policy_configured,
@@ -673,7 +680,10 @@ _CONTROL_SQL = """
            pol.fixed_ticket_amount, pol.max_ticket_amount
     FROM strategy_keys keys
     LEFT JOIN current_stage cs USING (strategy_id, strategy_version)
+    LEFT JOIN paper_approval paper USING (strategy_id, strategy_version)
     LEFT JOIN pinned pin USING (strategy_id, strategy_version)
+    LEFT JOIN strategy_promotion_forward_evidence forward_evidence
+      ON forward_evidence.promotion_id = paper.promotion_id
     LEFT JOIN strategy_deployments d
       ON d.strategy_id = keys.strategy_id AND d.strategy_version = keys.strategy_version
      AND d.mode = 'paper'
@@ -694,6 +704,7 @@ def load_control_state(
             pinned_evidence_ready=(
                 int(row["result_count"]) > 0 and int(row["qualified_result_count"]) == int(row["result_count"])
             ),
+            paper_forward_evidence_ready=bool(row["paper_forward_evidence_ready"]),
             deployment_id=int(row["deployment_id"]) if row["deployment_id"] is not None else None,
             capital_limit=Decimal(str(row["capital_limit"] or 0)),
             currency=str(row["currency"] or "USD"),
