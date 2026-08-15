@@ -33,7 +33,7 @@ from app.security.sessions import SessionRow
 from app.services.outcome_resolver import RULE_SET_VERSION as OUTCOME_RULE_SET_VERSION
 from app.services.research_price_structure_store import QUARANTINE_RULE_SET_VERSION
 from app.services.runtime_config import get_runtime_config, update_runtime_config
-from app.services.strategy_control_plane import configure_paper_pool
+from app.services.strategy_control_plane import configure_paper_pool, load_paper_pool
 from app.services.strategy_monitoring import (
     load_attribution,
     load_control_state,
@@ -1580,6 +1580,87 @@ def test_shared_paper_pool_refuses_activation_without_a_ready_candidate(
     assert exc_info.value.status_code == 409
     assert "no_capital_candidates" in str(exc_info.value.detail)
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (0,)
+
+
+def test_enabled_paper_pool_refuses_more_authority_while_readiness_is_degraded(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("500"),
+        capital_mode="fixed",
+        risk_profile="cautious",
+        changed_by="test-precondition",
+        reason="establish bounded enabled pool",
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "app.api.strategies.get_strategy_overview",
+        lambda _conn: SimpleNamespace(
+            automation_readiness=SimpleNamespace(ready=False, blockers=["prospective_assessment_stale"])
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_strategy_paper_pool(
+            StrategyPaperPoolUpdateRequest(
+                enabled=True,
+                capital_limit=Decimal("750"),
+                capital_mode="compound",
+                risk_profile="balanced",
+                reason="must not enlarge dormant authority",
+            ),
+            _session(),
+            conn,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "prospective_assessment_stale" in str(exc_info.value.detail)
+    assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
+
+
+def test_enabled_paper_pool_allows_risk_reduction_while_readiness_is_degraded(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    configure_paper_pool(
+        conn,
+        enabled=True,
+        capital_limit=Decimal("750"),
+        capital_mode="compound",
+        risk_profile="balanced",
+        changed_by="test-precondition",
+        reason="establish enabled pool",
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "app.api.strategies.get_strategy_overview",
+        lambda _conn: SimpleNamespace(
+            automation_readiness=SimpleNamespace(ready=False, blockers=["prospective_assessment_stale"]),
+            paper_pool=load_paper_pool(_conn),
+        ),
+    )
+
+    response = update_strategy_paper_pool(
+        StrategyPaperPoolUpdateRequest(
+            enabled=True,
+            capital_limit=Decimal("500"),
+            capital_mode="fixed",
+            risk_profile="cautious",
+            reason="reduce authority while evidence is stale",
+        ),
+        _session(),
+        conn,
+    )
+
+    assert response.enabled
+    assert response.capital_limit == Decimal("500")
+    assert response.capital_mode == "fixed"
+    assert response.mandate.risk_profile == "cautious"
 
 
 def test_evidence_refresh_queues_one_fixed_pinned_request(

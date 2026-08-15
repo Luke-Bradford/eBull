@@ -2588,9 +2588,16 @@ def update_strategy_paper_pool(
                 raise RuntimeConfigCorrupt("runtime_config singleton row missing")
             live_trading_enabled = bool(cast(tuple[object], runtime_row)[0])
             current_pool = load_paper_pool(conn)
-            readiness = get_strategy_overview(conn).automation_readiness if body.enabled else None
-            if body.enabled and not current_pool.enabled and readiness is not None and not readiness.ready:
-                raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
+            risk_authority = {"unconfigured": 0, "cautious": 1, "balanced": 2, "growth": 3}
+            authority_increasing = body.enabled and (
+                not current_pool.enabled
+                or body.capital_limit > current_pool.capital_limit
+                or (current_pool.capital_mode == "fixed" and body.capital_mode == "compound")
+                or risk_authority[body.risk_profile] > risk_authority[current_pool.mandate.risk_profile]
+            )
+            readiness = get_strategy_overview(conn).automation_readiness if authority_increasing else None
+            if authority_increasing and readiness is not None and not readiness.ready:
+                raise StrategyControlError("automation authority cannot be increased: " + ", ".join(readiness.blockers))
             if body.enabled and live_trading_enabled:
                 raise StrategyControlError(
                     "paper automation cannot be enabled while system-wide live trading is enabled"
