@@ -109,12 +109,14 @@ def test_same_instrument_listed_twice_is_not_a_collision() -> None:
 # #2297 — Form 25 delisting-link policy
 # ---------------------------------------------------------------------------
 #
-# The three cases below are the whole policy, and TWO OF THEM ARE REFUSALS.
-# That ratio is the finding: measured on the full 2023 register, `(b)` — the
-# provision where truncating a series is unambiguously right — states a
-# suspension date on 0 of 105 cohort rows, so `no_suspension` is the normal
-# outcome and `write` is the exception. A test suite that only exercised the
-# happy path would describe a guard that does not exist.
+# The three verdicts below are the whole policy. Measured on the full 2023
+# register, `(b)` — the provision where truncating a series is unambiguously
+# right — states a suspension date on 0 of 105 cohort rows, so
+# `no_suspension` is the normal outcome and `write` is the exception. Since
+# #2721 `no_suspension` persists the EVIDENCE (source, provision, filed date)
+# and withholds only `delisting_date`; `conflict` remains a full refusal. A
+# test suite that only exercised the happy path would describe a guard that
+# does not exist.
 
 
 def _match(**overrides: object) -> Form25Match:
@@ -130,6 +132,7 @@ def _match(**overrides: object) -> Form25Match:
         "first_bar": date(1992, 6, 17),
         "last_bar": date(2026, 7, 7),
         "earliest_filed": date(2023, 3, 2),
+        "latest_filed": date(2023, 3, 2),
         "provision_variants": 1,
         "provision": "(a)(3)",
         "suspension_variants": 1,
@@ -149,7 +152,9 @@ def test_stated_suspension_date_is_written() -> None:
 
 def test_absent_suspension_date_is_never_backfilled_from_filed_date() -> None:
     # The filing date is RIGHT THERE on the match and is a different event.
-    # Substituting it is the failure mode sql/249's CHECK pair exists to stop.
+    # Substituting it is the failure mode sql/353's constraints exist to stop:
+    # the writer maps `no_suspension` to an evidence write whose
+    # delisting_date is NULL, never to a date borrowed from the filing.
     match = _match(suspension_date=None)
     assert match.earliest_filed is not None
     assert classify_form25_match(match) == "no_suspension"
@@ -167,6 +172,53 @@ def test_conflict_outranks_the_missing_date_branch() -> None:
     # filing them as ordinary missing dates. Probed by swapping the branches —
     # this assertion fails, the other four still pass.
     assert classify_form25_match(_match(provision_variants=2, suspension_date=None)) == "conflict"
+
+
+def test_series_starting_after_the_filing_is_refused() -> None:
+    # ALPS: Form 25 filed 2023-07-27, series first bar 2025-10-31 — a later
+    # occupant of the ticker (or a post-Ch11 relisting, DBD). The filing
+    # removed a security whose history this demonstrably is not; writing
+    # evidence here marks a live series as delisted.
+    match = _match(first_bar=date(2025, 10, 31), suspension_date=None)
+    assert classify_form25_match(match) == "identity_unverified"
+
+
+def test_series_straddling_two_filings_is_a_conflict_not_an_identity_refusal() -> None:
+    # A relist-then-delist cycle: filings 2015 and 2023, series starts 2018.
+    # The 2023 filing may describe THIS series' security, so this is not
+    # "starts after every filing" — but the aggregate collapses the two
+    # events, so the evidence cannot be attributed without inventing a
+    # precedence order. Refused as ambiguity. Zero such symbols in the 2023
+    # register (no resolved symbol carries two distinct filed dates); the
+    # 2013-2024 expansion is what makes this branch reachable.
+    match = _match(
+        first_bar=date(2018, 1, 5),
+        earliest_filed=date(2015, 3, 2),
+        latest_filed=date(2023, 3, 2),
+        suspension_date=None,
+    )
+    assert classify_form25_match(match) == "conflict"
+
+
+def test_identity_gate_also_blocks_dated_writes() -> None:
+    # The dated writer always had this hole (it wrote unconditionally) and it
+    # never fired — none of 2023's four identity-unverified overlaps states a
+    # suspension date. The gate closes it for both write shapes.
+    assert classify_form25_match(_match(first_bar=date(2025, 10, 31))) == "identity_unverified"
+
+
+def test_conflict_outranks_the_identity_gate() -> None:
+    # Disagreeing filings are a stronger refusal: two events on one ticker is
+    # ambiguity about WHICH filing the bar test should even run against.
+    match = _match(first_bar=date(2025, 10, 31), provision_variants=2)
+    assert classify_form25_match(match) == "conflict"
+
+
+def test_unknown_first_bar_is_not_refused() -> None:
+    # A bar-less series cannot fail a bar test; it stays at the pre-existing
+    # policy (evidence written) rather than being refused on missing data.
+    match = _match(first_bar=None, suspension_date=None)
+    assert classify_form25_match(match) == "no_suspension"
 
 
 def test_provision_does_not_change_the_write_decision() -> None:
