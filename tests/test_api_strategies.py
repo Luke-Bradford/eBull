@@ -451,6 +451,13 @@ def test_empty_ledgers_still_return_all_manifest_strategies(
     assert overview.automation_readiness.resolved_forecasts == 0
     assert overview.account_equity_evidence.status == "unavailable"
     assert overview.account_equity_evidence.days_collected == 0
+    assert len(overview.controlled_trials) == 1
+    controlled = overview.controlled_trials[0]
+    assert controlled.state == "not_run"
+    assert (controlled.holdout_evaluations, controlled.holdout_accesses) == (0, 0)
+    assert controlled.promotion_authority is False
+    assert controlled.paper_activation_reachable is False
+    assert controlled.live_activation_reachable is False
     s4 = next(item for item in overview.strategies if item.strategy_id == "s4-volatility-compression-breakout")
     assert s4.runnable
     assert s4.exclusion_reason is None

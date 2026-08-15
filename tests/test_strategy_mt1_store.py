@@ -13,6 +13,7 @@ import app.services.strategy_mt1_store as store
 from app.services.result_ledger import freeze_preregistration
 from app.services.strategy_mt1_books import BOOK_RULE_VERSION, MT1FourArmBooks
 from app.services.strategy_mt1_preregistration import build_declarations
+from app.services.strategy_mt1_read_model import load_mt1_controlled_trial_state
 from app.services.strategy_mt1_runner import (
     MT1HistoricalBundle,
     MT1InSamplePreparation,
@@ -117,10 +118,10 @@ def _preparation(conn: psycopg.Connection[tuple]) -> MT1InSamplePreparation:
     )
 
 
-def _bundle(preparation: MT1InSamplePreparation) -> MT1HistoricalBundle:
+def _bundle(preparation: MT1InSamplePreparation, *, passed: bool = True) -> MT1HistoricalBundle:
     return MT1HistoricalBundle(
         cells=tuple(
-            MT1RobustnessCell(cell.ambiguity_arm, cell.quarantine_arm, cell.books, _result())
+            MT1RobustnessCell(cell.ambiguity_arm, cell.quarantine_arm, cell.books, _result(passed=passed))
             for cell in preparation.prepared.cells
         ),
         axis_dates=preparation.prepared.axis_dates,
@@ -158,6 +159,13 @@ def test_complete_structural_fan_commits_before_atomic_result_and_retries_read_b
     ).fetchone() == (4,)
     assert store.store_mt1_structural_preparation(ebull_test_conn, preparation) == attempt_id
     assert store.store_mt1_trial_bundle(ebull_test_conn, structural_attempt_id=attempt_id, bundle=bundle) == result_id
+    read_model = load_mt1_controlled_trial_state(ebull_test_conn)
+    assert read_model.state == "historical_conjuncts_passed"
+    assert len(read_model.result_cells) == 4
+    assert (read_model.holdout_evaluations, read_model.holdout_accesses) == (0, 0)
+    assert read_model.promotion_authority is False
+    assert read_model.paper_activation_reachable is False
+    assert read_model.live_activation_reachable is False
 
 
 def test_same_versions_cannot_be_rewritten_with_different_evidence(
@@ -188,6 +196,26 @@ def test_structural_refusal_commits_no_cells_and_is_idempotent(
         (attempt_id,),
     ).fetchone() == (False, "structural_gate_refused", 0)
     assert store.store_mt1_structural_refusal(ebull_test_conn, refusal) == attempt_id
+    read_model = load_mt1_controlled_trial_state(ebull_test_conn)
+    assert read_model.state == "structural_refused"
+    assert read_model.refusal_detail == refusal.detail
+    assert read_model.result_cells == ()
+
+
+def test_failed_all_cell_conjunction_is_terminal_and_operator_visible(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    preparation = _preparation(ebull_test_conn)
+    attempt_id = store.store_mt1_structural_preparation(ebull_test_conn, preparation)
+    store.store_mt1_trial_bundle(
+        ebull_test_conn,
+        structural_attempt_id=attempt_id,
+        bundle=_bundle(preparation, passed=False),
+    )
+    read_model = load_mt1_controlled_trial_state(ebull_test_conn)
+    assert read_model.state == "historical_conjuncts_failed"
+    assert read_model.historical_conjuncts_pass is False
+    assert all(cell.historical_conjuncts_pass is False for cell in read_model.result_cells)
 
 
 def test_paved_runner_commits_structure_before_evaluating_any_outcome(

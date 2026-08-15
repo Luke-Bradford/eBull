@@ -95,6 +95,7 @@ from app.services.strategy_monitoring import (
     load_owned_pnl,
     realised_pnl_for_keys,
 )
+from app.services.strategy_mt1_read_model import load_mt1_controlled_trial_state
 from app.services.strategy_position_manager import (
     StrategyPositionManagerError,
     manage_owned_position,
@@ -538,6 +539,42 @@ class AccountEquityEvidenceView(BaseModel):
     incomplete_reasons: list[str]
 
 
+class ControlledTrialCellView(BaseModel):
+    ambiguity_arm: str
+    quarantine_arm: str
+    historical_conjuncts_pass: bool
+
+
+class ControlledTrialView(BaseModel):
+    trial_id: str
+    strategy_version: str
+    negative_control_id: str
+    negative_control_version: str
+    state: Literal[
+        "not_run",
+        "structural_refused",
+        "structural_passed_outcomes_pending",
+        "historical_conjuncts_failed",
+        "historical_conjuncts_passed",
+        "evidence_inconsistent",
+    ]
+    structural_attempt_id: int | None
+    trial_result_id: int | None
+    structural_assessed_at: datetime | None
+    evaluated_at: datetime | None
+    structural_cells: int
+    result_cells: list[ControlledTrialCellView]
+    historical_conjuncts_pass: bool | None
+    refusal_code: str | None
+    refusal_detail: str | None
+    integrity_refusals: list[str]
+    holdout_evaluations: int
+    holdout_accesses: int
+    promotion_authority: Literal[False]
+    paper_activation_reachable: Literal[False]
+    live_activation_reachable: Literal[False]
+
+
 class StrategyOverviewResponse(BaseModel):
     as_of: datetime
     demo_connection: bool
@@ -553,6 +590,7 @@ class StrategyOverviewResponse(BaseModel):
     automation_readiness: AutomationReadinessView
     account_equity_evidence: AccountEquityEvidenceView
     evidence_refresh: EvidenceRefreshView
+    controlled_trials: list[ControlledTrialView]
     strategies: list[StrategyOverview]
 
 
@@ -1523,6 +1561,7 @@ def get_strategy_overview(
         conn,
         environment=cast(Literal["demo", "real"], settings.etoro_env),
     )
+    controlled_trial = load_mt1_controlled_trial_state(conn)
 
     results_by_strategy: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in result_rows:
@@ -1847,6 +1886,30 @@ def get_strategy_overview(
         demo_connection=settings.etoro_env == "demo",
         execution_enabled=entry_block.auto_trading_enabled,
         live_execution_enabled=entry_block.live_trading_enabled,
+        controlled_trials=[
+            ControlledTrialView(
+                trial_id=controlled_trial.trial_id,
+                strategy_version=controlled_trial.strategy_version,
+                negative_control_id=controlled_trial.negative_control_id,
+                negative_control_version=controlled_trial.negative_control_version,
+                state=controlled_trial.state,
+                structural_attempt_id=controlled_trial.structural_attempt_id,
+                trial_result_id=controlled_trial.trial_result_id,
+                structural_assessed_at=controlled_trial.structural_assessed_at,
+                evaluated_at=controlled_trial.evaluated_at,
+                structural_cells=controlled_trial.structural_cells,
+                result_cells=[ControlledTrialCellView(**cell.__dict__) for cell in controlled_trial.result_cells],
+                historical_conjuncts_pass=controlled_trial.historical_conjuncts_pass,
+                refusal_code=controlled_trial.refusal_code,
+                refusal_detail=controlled_trial.refusal_detail,
+                integrity_refusals=list(controlled_trial.integrity_refusals),
+                holdout_evaluations=controlled_trial.holdout_evaluations,
+                holdout_accesses=controlled_trial.holdout_accesses,
+                promotion_authority=False,
+                paper_activation_reachable=False,
+                live_activation_reachable=False,
+            )
+        ],
         entry_block=StrategyEntryBlockView(
             new_entries_blocked=entry_block.new_entries_blocked,
             global_kill_active=entry_block.global_kill_active,

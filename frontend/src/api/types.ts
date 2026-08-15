@@ -2607,6 +2607,43 @@ export interface StrategyEntryBlock {
   execution_block_reasons: string[];
 }
 
+export interface StrategyControlledTrialCell {
+  ambiguity_arm: "best_case" | "worst_case";
+  quarantine_arm: "masked" | "admitted";
+  historical_conjuncts_pass: boolean;
+}
+
+/** Outcome-minimal controlled research state. It intentionally exposes no
+ * return statistic and carries no paper/live mutation capability. */
+export interface StrategyControlledTrial {
+  trial_id: string;
+  strategy_version: string;
+  negative_control_id: string;
+  negative_control_version: string;
+  state:
+    | "not_run"
+    | "structural_refused"
+    | "structural_passed_outcomes_pending"
+    | "historical_conjuncts_failed"
+    | "historical_conjuncts_passed"
+    | "evidence_inconsistent";
+  structural_attempt_id: number | null;
+  trial_result_id: number | null;
+  structural_assessed_at: string | null;
+  evaluated_at: string | null;
+  structural_cells: number;
+  result_cells: StrategyControlledTrialCell[];
+  historical_conjuncts_pass: boolean | null;
+  refusal_code: string | null;
+  refusal_detail: string | null;
+  integrity_refusals: string[];
+  holdout_evaluations: number;
+  holdout_accesses: number;
+  promotion_authority: false;
+  paper_activation_reachable: false;
+  live_activation_reachable: false;
+}
+
 export interface StrategyOverviewResponse {
   as_of: string;
   demo_connection: boolean;
@@ -2615,6 +2652,7 @@ export interface StrategyOverviewResponse {
   live_strategy_activation_available: false;
   live_strategy_activation_blocker: "live_strategy_broker_contract_not_validated";
   storage_policy: "fired_signals_and_material_mutations_only";
+  controlled_trials: StrategyControlledTrial[];
   entry_block: StrategyEntryBlock;
   paper_pool: StrategyPaperPool;
   automation_readiness: {

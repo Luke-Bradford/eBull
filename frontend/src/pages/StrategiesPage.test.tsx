@@ -58,6 +58,7 @@ const OVERVIEW: StrategyOverviewResponse = {
   live_strategy_activation_available: false,
   live_strategy_activation_blocker: "live_strategy_broker_contract_not_validated",
   storage_policy: "fired_signals_and_material_mutations_only",
+  controlled_trials: [],
   entry_block: {
     new_entries_blocked: false,
     global_kill_active: false,
@@ -410,6 +411,49 @@ describe("StrategiesPage", () => {
     expect(screen.getAllByText("+1.50%")).toHaveLength(2);
     expect(screen.getByText("Not proven")).toBeInTheDocument();
     expect(screen.getByText("Official account equity starts collecting with the next portfolio sync.")).toBeInTheDocument();
+  });
+
+  it("shows the controlled-trial verdict as read-only historical evidence", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
+      controlled_trials: [{
+        trial_id: "mt1-capped-volatility-managed-relative-strength-v1",
+        strategy_version: "mt1-version-v1",
+        negative_control_id: "mt1-s8-capped-volatility-negative-control-v1",
+        negative_control_version: "s8-version-v1",
+        state: "historical_conjuncts_failed",
+        structural_attempt_id: 12,
+        trial_result_id: 13,
+        structural_assessed_at: "2026-08-15T12:00:00Z",
+        evaluated_at: "2026-08-15T12:01:00Z",
+        structural_cells: 4,
+        result_cells: [
+          { ambiguity_arm: "best_case", quarantine_arm: "admitted", historical_conjuncts_pass: true },
+          { ambiguity_arm: "best_case", quarantine_arm: "masked", historical_conjuncts_pass: true },
+          { ambiguity_arm: "worst_case", quarantine_arm: "admitted", historical_conjuncts_pass: false },
+          { ambiguity_arm: "worst_case", quarantine_arm: "masked", historical_conjuncts_pass: true },
+        ],
+        historical_conjuncts_pass: false,
+        refusal_code: null,
+        refusal_detail: null,
+        integrity_refusals: [],
+        holdout_evaluations: 0,
+        holdout_accesses: 0,
+        promotion_authority: false,
+        paper_activation_reachable: false,
+        live_activation_reachable: false,
+      }],
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+
+    const panel = (await screen.findByText("Controlled research trials")).closest("section")!;
+    expect(within(panel).getByText("Read only")).toBeInTheDocument();
+    expect(within(panel).getByText("Historical conjuncts failed")).toBeInTheDocument();
+    expect(within(panel).getAllByText("4/4 cells")).toHaveLength(2);
+    expect(within(panel).getAllByText("Conjuncts failed")).toHaveLength(1);
+    expect(within(panel).getByText(/cannot enable paper or live trading/)).toBeInTheDocument();
+    expect(within(panel).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("shows broker account evidence without presenting it as automated return", async () => {

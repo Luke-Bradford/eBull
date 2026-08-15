@@ -18,6 +18,7 @@ import type {
   FiredSignalsResponse,
   StrategyEvidenceWindow,
   StrategyFireRate,
+  StrategyControlledTrial,
   StrategyOverview,
   StrategyOverviewResponse,
   StrategyOwnedPosition,
@@ -1463,6 +1464,73 @@ function ValidationControl({ strategy }: { strategy: StrategyOverview }) {
   );
 }
 
+const CONTROLLED_TRIAL_STATE: Record<StrategyControlledTrial["state"], string> = {
+  not_run: "Not run",
+  structural_refused: "Structural gate refused",
+  structural_passed_outcomes_pending: "Structure committed; outcomes pending",
+  historical_conjuncts_failed: "Historical conjuncts failed",
+  historical_conjuncts_passed: "Historical conjuncts passed",
+  evidence_inconsistent: "Evidence inconsistent",
+};
+
+function ControlledTrialPanel({ trials }: { trials: StrategyControlledTrial[] }) {
+  return (
+    <section className="border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold">Controlled research trials</h2>
+          <p className="mt-1 max-w-3xl text-xs text-slate-500">
+            Preregistered historical falsification only. These verdicts are not promotion authority and cannot enable paper or live trading.
+          </p>
+        </div>
+        <Badge tone="neutral">Read only</Badge>
+      </div>
+      <div className="mt-4 space-y-4">
+        {trials.map((trial) => {
+          const tone = trial.state === "historical_conjuncts_passed"
+            ? "ok"
+            : trial.state === "not_run" || trial.state === "structural_passed_outcomes_pending"
+              ? "warn"
+              : "risk";
+          return (
+            <article key={`${trial.trial_id}:${trial.strategy_version}`} className="border-t border-slate-200 pt-4 dark:border-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-medium">MT-1 volatility-managed relative strength</h3>
+                  <p className="mt-1 text-xs text-slate-500">Negative control: S-8 range mean reversion</p>
+                </div>
+                <Badge tone={tone}>{CONTROLLED_TRIAL_STATE[trial.state]}</Badge>
+              </div>
+              <dl className="mt-3 grid gap-3 text-xs sm:grid-cols-4">
+                <div><dt className="text-slate-500">Structural fan</dt><dd className="mt-1 font-medium tabular-nums">{trial.structural_cells}/4 cells</dd></div>
+                <div><dt className="text-slate-500">Outcome fan</dt><dd className="mt-1 font-medium tabular-nums">{trial.result_cells.length}/4 cells</dd></div>
+                <div><dt className="text-slate-500">Holdout evaluations</dt><dd className="mt-1 font-medium tabular-nums">{trial.holdout_evaluations}</dd></div>
+                <div><dt className="text-slate-500">Holdout accesses</dt><dd className="mt-1 font-medium tabular-nums">{trial.holdout_accesses}</dd></div>
+              </dl>
+              {trial.result_cells.length ? (
+                <ul className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                  {trial.result_cells.map((cell) => (
+                    <li key={`${cell.ambiguity_arm}:${cell.quarantine_arm}`} className="border border-slate-200 px-3 py-2 dark:border-slate-800">
+                      <span className="block text-slate-500">{cell.ambiguity_arm.replaceAll("_", " ")} · {cell.quarantine_arm}</span>
+                      <strong className={cell.historical_conjuncts_pass ? "text-emerald-700 dark:text-emerald-300" : "text-red-700 dark:text-red-300"}>
+                        {cell.historical_conjuncts_pass ? "Conjuncts passed" : "Conjuncts failed"}
+                      </strong>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {trial.refusal_detail ? <p className="mt-3 text-xs text-red-700 dark:text-red-300">{trial.refusal_detail}</p> : null}
+              {trial.integrity_refusals.length ? (
+                <p className="mt-3 text-xs text-red-700 dark:text-red-300">Integrity refusal: {trial.integrity_refusals.join(", ")}</p>
+              ) : null}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export function StrategiesPage() {
   const overview = useAsync(fetchStrategyOverview, []);
   const pnlHistory = useAsync(fetchStrategyPnlHistory, []);
@@ -1573,6 +1641,8 @@ export function StrategiesPage() {
           ) : activity.data ? (
             <StrategyActivity response={activity.data} strategyTitles={strategyTitles} onRetry={activity.refetch} />
           ) : null}
+
+          {overview.data.controlled_trials.length ? <ControlledTrialPanel trials={overview.data.controlled_trials} /> : null}
 
           {forwardCandidates.length ? <SignalValidation overview={overview.data} strategies={forwardCandidates} /> : null}
 
