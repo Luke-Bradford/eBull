@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+from pathlib import Path
 
 import psycopg
 
@@ -24,9 +26,48 @@ from app.services.strategy_mt1_store import (
     MT1StoredRefusal,
     run_and_store_mt1_in_sample_evaluation,
 )
-from scripts._prereg_freeze_guard import assert_policy_version_merged
+from scripts._prereg_freeze_guard import assert_policy_version_merged, refresh_main_ref
 
 ACKNOWLEDGEMENT = "RUN-2769-PREREGISTERED-IN-SAMPLE"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _git_output(*args: str) -> str | None:
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed executable and internal arguments
+            ["git", *args],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def assert_exact_clean_main_source() -> dict[str, object]:
+    """Refuse immutable evidence unless this exact clean runner is on main."""
+    if not refresh_main_ref():
+        raise SystemExit("refusing MT-1: origin/main could not be refreshed")
+    status = _git_output("status", "--porcelain")
+    head = _git_output("rev-parse", "HEAD")
+    main = _git_output("rev-parse", "origin/main")
+    if status is None or head is None or main is None:
+        raise SystemExit("refusing MT-1: the exact source head could not be established")
+    if status.strip():
+        raise SystemExit("refusing MT-1: the runner worktree is not clean")
+    source_head = head.strip()
+    main_head = main.strip()
+    if source_head != main_head:
+        raise SystemExit(
+            f"refusing MT-1: runner head {source_head} is not exact origin/main {main_head}; merge and update first"
+        )
+    return {
+        "runner_source_clean": True,
+        "runner_source_head": source_head,
+        "runner_source_matches_main": True,
+    }
 
 
 def _progress(event: BacktestProgressEvent) -> None:
@@ -58,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.execute is not None and args.execute != ACKNOWLEDGEMENT:
         parser.error(f"--execute requires the exact acknowledgement {ACKNOWLEDGEMENT!r}")
 
+    source = assert_exact_clean_main_source()
     policy = assert_policy_version_merged()
     with psycopg.connect(settings.database_url) as conn:
         if args.execute is None:
@@ -66,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(
                     {
                         **policy,
+                        **source,
                         "declarations": [
                             {
                                 "declaration_id": item.declaration_id,
@@ -89,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     **policy,
+                    **source,
                     "detail": stored.detail,
                     "outcome": "structural_gate_refused_no_performance_stored",
                     "structural_attempt_id": stored.structural_attempt_id,
@@ -103,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(
             {
                 **policy,
+                **source,
                 "all_four_historical_conjuncts_pass": (stored.evaluation.bundle.historical_statistical_conjuncts_pass),
                 "outcome": "complete_four_cell_result_stored",
                 "structural_attempt_id": stored.structural_attempt_id,
@@ -119,4 +164,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["ACKNOWLEDGEMENT", "main"]
+__all__ = ["ACKNOWLEDGEMENT", "assert_exact_clean_main_source", "main"]
