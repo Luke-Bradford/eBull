@@ -8,7 +8,7 @@ from app.services.position_builder import Window
 from app.services.strategy_statistics import DatedEquityCurve, TradeReturns, compute_metrics
 from app.services.synthetic_control_run import CohortCollector, SeriesPlacement
 from scripts import verify_2697_metric_axis_ab
-from scripts.verify_2697_metric_axis_ab import _legacy_cohort_control, _population_label
+from scripts.verify_2697_metric_axis_ab import _exact_candidate_head, _legacy_cohort_control, _population_label
 
 
 def test_legacy_cohort_ab_arm_runs_the_declared_member_count() -> None:
@@ -58,6 +58,16 @@ def test_a_strategy_subset_can_never_be_labelled_full_population() -> None:
     assert _population_label(limit=None, strategy=None) == "full"
     assert _population_label(limit=None, strategy="s1-time-series-momentum").startswith("smoke-")
     assert _population_label(limit=50, strategy=None).startswith("smoke-")
+
+
+def test_exact_head_refuses_a_dirty_worktree(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Completed:
+        stdout = " M app/services/backtest_run.py\n"
+
+    monkeypatch.setattr(verify_2697_metric_axis_ab.subprocess, "run", lambda *_args, **_kwargs: _Completed())
+
+    with pytest.raises(RuntimeError, match="clean worktree"):
+        _exact_candidate_head()
 
 
 def test_the_legacy_arm_refuses_a_member_that_drops_a_declared_trade(

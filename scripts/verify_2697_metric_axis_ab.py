@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 from multiprocessing import get_context
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -81,6 +83,27 @@ class _LegacyCohortInputs:
 
 
 _LEGACY_WORKER_INPUTS: _LegacyCohortInputs | None = None
+_REPO = Path(__file__).resolve().parents[1]
+
+
+def _exact_candidate_head() -> str:
+    """Bind expensive evidence to one clean, reviewable source tree."""
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=_REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if status.strip():
+        raise RuntimeError("the metric-axis A/B requires a clean worktree so its evidence has one exact source head")
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=_REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _legacy_first_index_last_index_measurement(
@@ -317,6 +340,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="series limit; makes this a smoke, not acceptance")
     parser.add_argument("--strategy", choices=tuple(sorted(STRATEGY_MANIFEST)), default=None)
     args = parser.parse_args()
+    candidate_head = _exact_candidate_head()
 
     def report_progress(event: backtest_run.BacktestProgressEvent) -> None:
         if event.phase != "synthetic_control" or event.series_seen is None or event.series_total is None:
@@ -343,6 +367,12 @@ def main() -> None:
                 f"full-population A/B requires every manifest strategy to be runnable; excluded={excluded}"
             )
         population = _population_label(limit=args.limit, strategy=args.strategy)
+        expected_rows = sum(
+            len(QUARANTINE_ARM_ORDER)
+            * (2 if _regime_for(STRATEGY_MANIFEST[item], corpus.axis).level_based or corpus.termination else 1)
+            for item in runnable
+        )
+        emitted_rows = 0
 
         original_measure = backtest_run._measure_namespace
         original_run_cohort_for = backtest_run._run_cohort_for
@@ -441,6 +471,8 @@ def main() -> None:
                         current = arm.namespaces.get("in_sample")
                         legacy_control, current_control = controls
                         row: dict[str, object] = {
+                            "record_type": "comparison",
+                            "candidate_head": candidate_head,
                             "population": population,
                             "strategy_id": strategy_id,
                             "ambiguity_arm": arm.ambiguity_arm or "shared",
@@ -489,6 +521,22 @@ def main() -> None:
                                 }
                             )
                         print(json.dumps(row, sort_keys=True))
+                        emitted_rows += 1
+            if emitted_rows != expected_rows:
+                raise RuntimeError(f"A/B emitted {emitted_rows} rows; the declared population requires {expected_rows}")
+            print(
+                json.dumps(
+                    {
+                        "record_type": "acceptance_summary",
+                        "candidate_head": candidate_head,
+                        "population": population,
+                        "expected_rows": expected_rows,
+                        "observed_rows": emitted_rows,
+                        "complete": True,
+                    },
+                    sort_keys=True,
+                )
+            )
         finally:
             backtest_run._measure_namespace = original_measure
             backtest_run._run_cohort_for = original_run_cohort_for
