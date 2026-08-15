@@ -1233,6 +1233,8 @@ class TestNamespaceAxis:
         assert outcome.metrics.trade_count == 0
         assert outcome.metrics.total_return_pct == 0.0
         assert outcome.metrics.effective_sample_size is None
+        assert outcome.source_book is not None
+        assert len(outcome.source_book) == 0
 
     def test_the_axis_keeps_cash_on_both_sides_of_the_namespaces_legs(self) -> None:
         axis = tuple(date(2010, 1, day) for day in range(1, 11))
@@ -1276,6 +1278,12 @@ class TestNamespaceAxis:
         assert outcome is not None
         assert outcome.axis_dates == axis
         assert outcome.metrics.effective_sample_size is not None
+        assert outcome.source_book is not None
+        assert outcome.source_book.entry_index == [3]
+        assert outcome.source_book.exit_index == [6]
+        assert outcome.source_book.entry_price == [1.0]
+        assert outcome.source_book.exit_price == [1.2]
+        assert outcome.source_book.marks.tolist() == [1.0, 1.1, 1.15, 1.2]
 
     def test_moving_only_the_first_firing_and_last_exit_cannot_move_axis_identity(self) -> None:
         axis = tuple(date(2010, 1, day) for day in range(1, 11))

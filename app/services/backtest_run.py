@@ -471,6 +471,13 @@ class NamespaceMeasurement:
     universe_record: ResultUniverseRecord
     position_count: int
     axis_dates: tuple[date, ...]
+    #: The exact costed legs that produced ``metrics``, rebased onto
+    #: ``axis_dates``.  The dedicated MT-1 runner consumes this artifact so it
+    #: cannot rebuild fills through a second, drifting strategy path. ``None``
+    #: is retained only for narrow synthetic fixtures constructed outside the
+    #: corpus evaluator; production measurements always carry the book and a
+    #: downstream evidence runner must refuse its absence.
+    source_book: LegBook | None = None
     #: Criterion 5's label windows, on the panel axis — populated for the
     #: ``in_sample`` namespace and EMPTY for ``hold_out``, which has no split.
     #: ⚠ These are the legs that reached the CURVE, so the census describes the
@@ -1682,6 +1689,7 @@ def _measure_namespace(
         universe_record=opportunity,
         position_count=book.positions,
         axis_dates=dates,
+        source_book=shifted,
         label_starts=book.label_starts,
         label_ends=book.label_ends,
         rebalance_costs=curve.rebalance_costs,
