@@ -46,11 +46,13 @@ closed day shown as open).
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 from pandas import Series, Timestamp
 from pandas.tseries.holiday import (
@@ -64,6 +66,15 @@ from pandas.tseries.holiday import (
     USThanksgivingDay,
     nearest_workday,
 )
+
+RULE_SET_ID: Final = "nyse-market-calendar-v1"
+
+
+def _code_hash() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+
+
+RULE_SET_VERSION: Final = f"{RULE_SET_ID}+{_code_hash()}"
 
 
 class _NyseHolidayCalendar(AbstractHolidayCalendar):

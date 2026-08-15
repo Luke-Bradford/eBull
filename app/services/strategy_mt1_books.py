@@ -18,7 +18,14 @@ from typing import Final
 
 import numpy as np
 
-from app.services.equity_curve import EquityCurve, LegBook, build_capped_target_exposure_curve, build_equity_curve
+from app.services.equity_curve import (
+    EQUITY_CURVE_ENGINE_VERSION,
+    EquityCurve,
+    LegBook,
+    build_capped_target_exposure_curve,
+    build_equity_curve,
+)
+from app.services.market_calendar import RULE_SET_VERSION as MARKET_CALENDAR_RULE_VERSION
 from app.services.market_calendar import us_market_status
 from app.services.strategies.s10_relative_strength_leader import s10_rebalance_dates
 from app.services.strategy_mt1_trial import (
@@ -45,7 +52,7 @@ def _code_hash() -> str:
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
 
 
-BOOK_RULE_VERSION: Final = f"{BOOK_RULE_ID}+{_code_hash()}"
+BOOK_RULE_VERSION: Final = f"{BOOK_RULE_ID}+{_code_hash()}+{EQUITY_CURVE_ENGINE_VERSION}+{MARKET_CALENDAR_RULE_VERSION}"
 
 
 class MT1BookConstructionRefused(ValueError):

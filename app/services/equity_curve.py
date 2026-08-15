@@ -59,10 +59,12 @@ recomputed fill could be expressed. The caller resolves them from the ledger.
 
 from __future__ import annotations
 
+import hashlib
 from array import array
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Final
 
 import numpy as np
@@ -97,6 +99,16 @@ import numpy.typing as npt
 #:      ``cash >= 0`` hold by construction rather than by tolerance, and the
 #:      under-investment that leaves is exactly the cost charged.
 SIZING_RULE_ID: Final = "equal_weight_concurrent_v1"
+
+
+def _code_hash() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+
+
+# MT-1 depends on both curve constructors in this module. This source-derived
+# version prevents either engine changing while its four-arm book identity is
+# silently reused; it is intentionally broader than the public sizing-rule ID.
+EQUITY_CURVE_ENGINE_VERSION: Final = f"equity-curve-engine-v1+{_code_hash()}"
 
 #: Research arm for #2430. A new position receives the same causal entry-time
 #: target as v1 (equity divided by the post-entry concurrent count), but every
@@ -861,6 +873,7 @@ def build_buy_and_hold_curve(
 __all__ = [
     "BENCHMARK_RULE_ID",
     "CAPPED_TARGET_EXPOSURE_RULE_ID",
+    "EQUITY_CURVE_ENGINE_VERSION",
     "ENTRY_WEIGHT_DRIFT_RULE_ID",
     "MONTH_END_REBALANCE_RULE_ID",
     "SIZING_RULE_ID",

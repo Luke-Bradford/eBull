@@ -26,6 +26,7 @@ import numpy.typing as npt
 
 TRIAL_ID: Final = "mt1-capped-volatility-managed-relative-strength-v1"
 NEGATIVE_CONTROL_TRIAL_ID: Final = "mt1-s8-capped-volatility-negative-control-v1"
+TRIAL_CONTRACT_VERSION: Final = "mt1-four-arm-controlled-trial-2026-08-15-v1"
 RISK_AVERSION: Final = 5.0
 BLOCK_LENGTH_MONTHS: Final = 12
 BOOTSTRAP_RESAMPLES: Final = 10_000
@@ -324,6 +325,7 @@ __all__ = [
     "MAX_ANNUALISED_TURNOVER",
     "MIN_COMMON_MONTHS",
     "NEGATIVE_CONTROL_TRIAL_ID",
+    "TRIAL_CONTRACT_VERSION",
     "TRIAL_EVALUATOR_VERSION",
     "TRIAL_ID",
     "ArmRiskReport",

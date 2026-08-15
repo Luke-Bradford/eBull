@@ -20,6 +20,7 @@ import pytest
 from app.services.prereg_contract import ForwardShadowFloor, PreregDeclaration
 from app.services.strategy_result import STRUCTURAL_REFUSAL_POLICY_VERSION
 from scripts import _prereg_freeze_guard as guard
+from scripts import freeze_2437_mt1_declarations as mt1_freeze
 from scripts import freeze_2582_schedule13d_declaration as c4_freeze
 from scripts import freeze_2616_precutoff_declarations as precutoff_freeze
 
@@ -119,7 +120,7 @@ def test_digest_payload_is_a_fresh_dict_each_call() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("module", [c4_freeze, precutoff_freeze])
+@pytest.mark.parametrize("module", [c4_freeze, precutoff_freeze, mt1_freeze])
 def test_dry_run_prints_the_policy_version_and_every_digest_field(
     module: object, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -290,7 +291,7 @@ def test_every_freeze_script_calls_the_guard() -> None:
     under another name is not covered — recorded here rather than implied away.
     """
     scripts = sorted((_REPO_ROOT / "scripts").glob("freeze_*.py"))
-    assert len(scripts) == 2, f"a new freeze script appeared: {[p.name for p in scripts]}"
+    assert len(scripts) == 3, f"a new freeze script appeared: {[p.name for p in scripts]}"
     for path in scripts:
         source = path.read_text()
         # ⚠ THE CALL, NOT THE NAME. A bare substring check is satisfied by the
