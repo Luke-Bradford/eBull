@@ -19,6 +19,7 @@ from app.services.pead_feasibility import (
     market_session_dates,
     purged_date_count,
 )
+from app.services.research_artifact import retain_research_artifact
 from app.services.strategy_result import CORPUS_FROZEN_LAST_BAR
 
 PRIOR_TRIAL_ARCHIVE_SHA256 = "126056a91f8d0446bd0f9c04f7db84da7e405d171c541fe72c7aae70d5b6c02b"
@@ -40,8 +41,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    retained = retain_research_artifact(
+        args.archive,
+        resolve_data_dir() / "research-artifacts",
+    )
+
     with psycopg.connect(settings.database_url) as conn:
-        build, loaded = build_archive_source(conn, args.archive)
+        build, loaded = build_archive_source(conn, retained.path)
         expanded = expand_instrument_alternatives(build.triggers, build.instrument_alternatives)
         windows = load_pre_outcome_windows(conn, expanded)
         events, refusals = eligible_events(windows)
@@ -56,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     yearly = Counter(item.year for item in entry_dates)
 
     print("#2493 PEAD feasibility census — entry and pre-entry data only")
+    print(f"retained artifact:             {retained.path}")
     print(f"companyfacts archive SHA-256: {loaded.archive_sha256}")
     source_relation = (
         "exact #2476 archive"

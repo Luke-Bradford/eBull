@@ -24,6 +24,10 @@ PYTHONPATH=. uv run python scripts/verify_2493_pead_feasibility.py
 
 The 2026-08-15 capture used Company Facts SHA-256
 `0c5b0d0b61257f6856f6c30311806d782d45d6d32118280d75bc859d57ad9c20`.
+Its bytes are retained locally at
+`research-artifacts/sha256/0c5b0d0b61257f6856f6c30311806d782d45d6d32118280d75bc859d57ad9c20/companyfacts.zip`
+under the eBull data directory. The verifier now pins a mutable archive by
+hard link and hashes the retained inode before constructing the census.
 That is **not** the #2476 result's declared archive
 `126056a91f8d0446bd0f9c04f7db84da7e405d171c541fe72c7aae70d5b6c02b`.
 The scheduled SEC refresh atomically replaces the mutable cache and no copy of
