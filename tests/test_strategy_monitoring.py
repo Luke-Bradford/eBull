@@ -1188,12 +1188,13 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     # per-test pool event stream. Establish the transition this test asserts
     # when an earlier executor test enabled automation.
     runtime_before = get_runtime_config(conn)
-    if runtime_before.enable_auto_trading:
+    if runtime_before.enable_auto_trading or runtime_before.enable_live_trading:
         update_runtime_config(
             conn,
             updated_by="test-precondition",
-            reason="establish disabled automation precondition",
-            enable_auto_trading=False,
+            reason="establish paper-only automation precondition",
+            enable_auto_trading=False if runtime_before.enable_auto_trading else None,
+            enable_live_trading=False if runtime_before.enable_live_trading else None,
         )
     conn.commit()
     response = update_strategy_paper_pool(
@@ -1230,7 +1231,7 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     ).fetchone() == (True, Decimal("750.000000"), "compound", "allocation-operator", "bounded paper workspace")
     assert conn.execute(
         "SELECT enable_auto_trading,enable_live_trading FROM runtime_config WHERE id=TRUE"
-    ).fetchone() == (True, runtime_before.enable_live_trading)
+    ).fetchone() == (True, False)
     assert conn.execute(
         """
         SELECT old_value,new_value,changed_by,reason
