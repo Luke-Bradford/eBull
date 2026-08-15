@@ -1,8 +1,8 @@
 # MT-1 capped volatility-managed long-only relative strength — preregistration
 
 Date: 2026-08-15  
-Status: design frozen in source before implementation or outcome access; not yet entered in
-`trial_register.py`, not yet frozen in `strategy_preregistration_declarations`, and therefore
+Status: design and both controlled searches frozen in source before outcome access; entered in
+`trial_register.py` r7, not yet frozen in `strategy_preregistration_declarations`, and therefore
 not authorised to open outcomes  
 Parent: #2437  
 Candidate ledger: `2026-08-15-market-technician-derived-candidates.md`
