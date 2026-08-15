@@ -36,6 +36,7 @@ from app.services.strategy_promotion_evidence import (
     RecentYearEvidence,
 )
 from app.services.strategy_result import (
+    AMBIGUITY_AWARE_RESULT_SET_ID,
     BENCHMARK_RULE,
     CORPUS_VERSION,
     EVALUATION_WINDOW_END,
@@ -63,6 +64,7 @@ from app.services.strategy_result import (
     purpose_promotion_refusals,
     synthetic_control_promotion_refusals,
 )
+from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION, LEGACY_AMBIGUITY_RULE_VERSION
 from app.services.strategy_statistics import StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 
@@ -511,6 +513,7 @@ class TestResultIdentity:
             ("outcome_rule_set_version", "outcome-resolver-v1+zzzzzzzzzzzz"),
             ("input_rule_set_version", "price-quarantine-v1+zzzzzzzzzzzz"),
             ("return_basis", TOTAL_RETURN_BASIS),
+            ("ambiguity_rule_version", AMBIGUITY_RULE_VERSION),
         ],
     )
     def test_every_member_moves_the_version(self, field: str, changed: object) -> None:
@@ -524,6 +527,25 @@ class TestResultIdentity:
 
     def test_total_return_results_use_a_new_identity_generation(self) -> None:
         assert _identity(return_basis=TOTAL_RETURN_BASIS).version.startswith(f"{TOTAL_RETURN_RESULT_SET_ID}+")
+
+    def test_the_matched_control_rule_uses_a_new_identity_generation(self) -> None:
+        identity = _identity(return_basis=TOTAL_RETURN_BASIS, ambiguity_rule_version=AMBIGUITY_RULE_VERSION)
+        assert identity.version.startswith(f"{AMBIGUITY_AWARE_RESULT_SET_ID}+")
+        assert (
+            identity.version
+            != _identity(
+                return_basis=TOTAL_RETURN_BASIS,
+                ambiguity_rule_version=LEGACY_AMBIGUITY_RULE_VERSION,
+            ).version
+        )
+
+    def test_a_successor_ambiguity_rule_moves_the_v3_hash(self) -> None:
+        current = _identity(return_basis=TOTAL_RETURN_BASIS, ambiguity_rule_version=AMBIGUITY_RULE_VERSION)
+        successor = _identity(
+            return_basis=TOTAL_RETURN_BASIS,
+            ambiguity_rule_version="ambiguity-verdict-2099-v3",
+        )
+        assert current.version != successor.version
 
     def test_the_ambiguity_arm_moves_it(self) -> None:
         """§3.4's two arms are two results, not two views of one."""
@@ -562,6 +584,7 @@ class TestStrategyResultValidation:
             "sizing_rule",
             "benchmark_rule",
             "return_basis",
+            "ambiguity_rule_version",
             "cost_model_id",
             "corpus_version",
             "position_rule_set_version",

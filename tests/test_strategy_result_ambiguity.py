@@ -9,14 +9,18 @@ not here — a fixture cannot prove what a constraint does.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pytest
 
+from app.services.random_entry_cohort import SyntheticControl
 from app.services.strategy_result_ambiguity import (
     AMBIGUITY_RULE_VERSION,
+    LEGACY_AMBIGUITY_RULE_VERSION,
     AmbiguityRecord,
     ambiguity_promotion_refusals,
     ambiguity_verdict,
+    matched_control_margin,
     record_sha256,
 )
 
@@ -35,6 +39,60 @@ _SHARED = AmbiguityRecord(
     ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
     comparison_basis="shared_measurement",
 )
+
+
+def _control(*, strategy: float, threshold: float) -> SyntheticControl:
+    return SyntheticControl(
+        model_id="permuted-entry-uniform-gap-v1",
+        cohort_size=1000,
+        root_seed=20260808,
+        mean_return_pct=0.0,
+        mean_return_ci_low_pct=-0.1,
+        mean_return_ci_high_pct=0.1,
+        sharpe_percentile=95.0,
+        cohort_sharpe_threshold=threshold,
+        strategy_sharpe=strategy,
+        cohort_return_threshold_pct=1.0,
+        strategy_return_pct=2.0,
+    )
+
+
+class TestMatchedControlMargin:
+    def test_the_weaker_positive_arm_margin_is_the_shared_threshold(self) -> None:
+        best = _control(strategy=0.8, threshold=0.3)
+        worst = _control(strategy=0.6, threshold=0.4)
+        assert matched_control_margin(best, worst, best_case_sharpe=0.8, worst_case_sharpe=0.6) == pytest.approx(0.2)
+
+    @pytest.mark.parametrize("missing", ["best", "worst"])
+    def test_a_missing_control_leaves_the_pair_not_compared(self, missing: str) -> None:
+        best = None if missing == "best" else _control(strategy=0.8, threshold=0.3)
+        worst = None if missing == "worst" else _control(strategy=0.6, threshold=0.4)
+        assert matched_control_margin(best, worst, best_case_sharpe=0.8, worst_case_sharpe=0.6) is None
+
+    @pytest.mark.parametrize("threshold", [0.6, 0.7])
+    def test_a_non_positive_arm_margin_leaves_the_pair_not_compared(self, threshold: float) -> None:
+        best = _control(strategy=0.8, threshold=0.3)
+        worst = _control(strategy=0.6, threshold=threshold)
+        assert matched_control_margin(best, worst, best_case_sharpe=0.8, worst_case_sharpe=0.6) is None
+
+    @pytest.mark.parametrize(
+        ("field", "changed"),
+        [("model_id", "other"), ("cohort_size", 999), ("root_seed", 1), ("sharpe_percentile", 90.0)],
+    )
+    def test_unlike_control_metadata_is_an_integrity_failure(self, field: str, changed: object) -> None:
+        best = _control(strategy=0.8, threshold=0.3)
+        worst = replace(_control(strategy=0.6, threshold=0.4), **{field: changed})
+        with pytest.raises(ValueError, match="ambiguity controls disagree"):
+            matched_control_margin(best, worst, best_case_sharpe=0.8, worst_case_sharpe=0.6)
+
+    def test_a_control_for_another_arm_is_an_integrity_failure(self) -> None:
+        with pytest.raises(ValueError, match="do not describe"):
+            matched_control_margin(
+                _control(strategy=0.7, threshold=0.3),
+                _control(strategy=0.6, threshold=0.4),
+                best_case_sharpe=0.8,
+                worst_case_sharpe=0.6,
+            )
 
 
 class TestRecordValidation:
@@ -229,6 +287,13 @@ class TestRefusals:
             cohort_gap_threshold=0.5,
         )
         assert "ambiguity_rule_unrecognised" in ambiguity_promotion_refusals(stale)
+
+    def test_the_pre_threshold_rule_is_no_longer_replayed_as_current(self) -> None:
+        legacy = AmbiguityRecord(
+            ambiguity_rule_version=LEGACY_AMBIGUITY_RULE_VERSION,
+            comparison_basis="shared_measurement",
+        )
+        assert ambiguity_promotion_refusals(legacy) == ("ambiguity_rule_unrecognised",)
 
     def test_an_unrecognised_version_still_reports_the_verdict_clause(self) -> None:
         # ALL refusals, not the first — the `check_promotable` contract.

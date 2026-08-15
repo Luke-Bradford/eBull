@@ -170,6 +170,7 @@ from app.services.strategy_result_ambiguity import (
     AmbiguityRecord,
     ambiguity_verdict,
     load_result_ambiguity,
+    matched_control_margin,
     store_result_ambiguity,
 )
 from app.services.strategy_result_universe import (
@@ -2595,6 +2596,7 @@ def build_result(
             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
             return_basis=TOTAL_RETURN_BASIS,
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
         ),
         purpose=purpose,
         metrics=outcome.metrics,
@@ -2710,11 +2712,22 @@ def _ambiguity_record_for(
             sharpes[ambiguity] = None
             break
         sharpes[ambiguity] = sharpe
+    best_sharpe = sharpes.get("best_case")
+    worst_sharpe = sharpes.get("worst_case")
+    threshold = None
+    if best_sharpe is not None and worst_sharpe is not None:
+        threshold = matched_control_margin(
+            None if by_arm["best_case"].cohort is None else by_arm["best_case"].cohort.control,
+            None if by_arm["worst_case"].cohort is None else by_arm["worst_case"].cohort.control,
+            best_case_sharpe=best_sharpe,
+            worst_case_sharpe=worst_sharpe,
+        )
     return AmbiguityRecord(
         ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
         comparison_basis="arm_sharpes",
-        best_case_sharpe=sharpes.get("best_case"),
-        worst_case_sharpe=sharpes.get("worst_case"),
+        best_case_sharpe=best_sharpe,
+        worst_case_sharpe=worst_sharpe,
+        cohort_gap_threshold=threshold,
     )
 
 
@@ -3000,6 +3013,7 @@ def run_backtest(
             outcome_rule_set_version=OUTCOME_RULE_SET_VERSION,
             input_rule_set_version=QUARANTINE_RULE_SET_VERSION,
             return_basis=TOTAL_RETURN_BASIS,
+            ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
         )
         for entry_id in runnable
         for namespace in namespaces

@@ -75,6 +75,7 @@ def _row(strategy_id: str, ambiguity: str, quarantine: str, result_id: int) -> d
         outcome_rule_set_version=str(row["outcome_rule_set_version"]),
         input_rule_set_version=str(row["input_rule_set_version"]),
         return_basis=str(row["return_basis"]),
+        ambiguity_rule_version=str(row["ambiguity_rule_version"]),
     ).version
     return row
 

@@ -31,7 +31,7 @@ stay enforced at write time, where the arms exist, and the record makes no
 claim about them.
 
 Source rule: §3.4 fixes the materiality comparison (the arm gap versus the
-random cohort's 95th-percentile gap). The cases §3.4 does not reach — a shared
+strategy's margin above the random cohort's 95th-percentile Sharpe). The cases §3.4 does not reach — a shared
 measurement, and an absent cohort — are fixed by
 ``app.services.backtest_run._ambiguity_material_for``, the settled current
 implementation, and are cited from it rather than re-derived here.
@@ -47,6 +47,12 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 import psycopg
+
+from app.services.strategy_ambiguity_policy import (
+    AMBIGUITY_RULE_VERSION,
+    LEGACY_AMBIGUITY_RULE_VERSION,
+    matched_control_margin,
+)
 
 #: How the run arrived at its comparison.
 #:
@@ -66,12 +72,6 @@ ComparisonBasis = Literal["shared_measurement", "arm_sharpes"]
 #: ``ambiguity_rule_unrecognised``, and the successor decides explicitly whether
 #: to re-admit them. Never a silent re-read under new semantics.
 #:
-#: ⚠ The name records the limitation deliberately: this runner attaches no
-#: random cohort, so ``cohort_gap_threshold`` is NULL on everything it writes
-#: and the verdict is "not compared". When the cohort lands, this constant bumps
-#: and the old records refuse rather than being reinterpreted.
-AMBIGUITY_RULE_VERSION: Final = "ambiguity-verdict-2026-08-13-v1-no-cohort-threshold"
-
 RECOGNISED_AMBIGUITY_RULE_VERSIONS: Final[frozenset[str]] = frozenset({AMBIGUITY_RULE_VERSION})
 
 
@@ -83,8 +83,8 @@ class AmbiguityRecord:
     comparison_basis: ComparisonBasis
     best_case_sharpe: float | None = None
     worst_case_sharpe: float | None = None
-    #: §3.4's random-cohort 95th-percentile gap. ``None`` until a cohort is
-    #: attached, which is why the verdict is ``None`` on every row today.
+    #: §3.4's smaller positive arm margin above its matched random cohort's
+    #: 95th-percentile Sharpe. ``None`` means the pair was not comparable.
     cohort_gap_threshold: float | None = None
 
     def __post_init__(self) -> None:
@@ -282,12 +282,14 @@ def ambiguity_promotion_refusals(record: AmbiguityRecord | None) -> tuple[str, .
 
 __all__ = [
     "AMBIGUITY_RULE_VERSION",
+    "LEGACY_AMBIGUITY_RULE_VERSION",
     "RECOGNISED_AMBIGUITY_RULE_VERSIONS",
     "AmbiguityRecord",
     "ComparisonBasis",
     "ambiguity_promotion_refusals",
     "ambiguity_verdict",
     "load_result_ambiguity",
+    "matched_control_margin",
     "record_sha256",
     "store_result_ambiguity",
 ]
