@@ -38,9 +38,16 @@ def test_contracted_and_indirect_negated_closing_verbs_are_refused() -> None:
         assert _run("fix(#2741): guard links", body).returncode == 1
 
 
+def test_negation_guard_matches_every_supported_closing_separator() -> None:
+    for separator in (" ", ": ", "\t"):
+        body = f"This does not close{separator}#2741. Refs #2741."
+        assert _run("fix(#2741): guard links", body).returncode == 1
+
+
 def test_explicit_non_closing_and_closing_forms_pass() -> None:
     assert _run("fix(#2741): guard links", "Refs #2741.").returncode == 0
     assert _run("fix(#2741): guard links", "Closes #2741.").returncode == 0
+    assert _run("fix(#2741): guard links", "Closes: #2741.").returncode == 0
     assert _run("fix(#2741): guard links", "Nothing unusual. Closes #2741.").returncode == 0
 
 

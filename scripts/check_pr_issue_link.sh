@@ -15,7 +15,7 @@ body_clean=$(printf '%s' "$pr_body" | perl -0pe 's/<!--.*?-->//gs; s/```.*?```//
 # followed on the same line by a closing keyword reference; require an explicit
 # Refs/Part of/Umbrella form instead.
 if printf '%s\n' "$body_clean" | perl -ne '
-  $found = 1 if /(?:^|[^\w])(?:not|never|without|doesn.t|don.t|didn.t|won.t|wouldn.t|shouldn.t|mustn.t|can.t|cannot)(?!\w)[^#\r\n]{0,80}(?:^|[^\w])(?:close[sd]?|closing|fix(?:e[sd]|ing)?|resolve[sd]?|resolving)\s+#\d+/i;
+  $found = 1 if /(?:^|[^\w])(?:not|never|without|doesn.t|don.t|didn.t|won.t|wouldn.t|shouldn.t|mustn.t|can.t|cannot)(?!\w)[^#\r\n]{0,80}(?:^|[^\w])(?:close[sd]?|closing|fix(?:e[sd]|ing)?|resolve[sd]?|resolving)[\s:]+#\d+/i;
   END { exit(!$found) }
 '; then
   echo "::error::PR body contains a negated closing-keyword reference. GitHub ignores negation and may close the issue on merge."
