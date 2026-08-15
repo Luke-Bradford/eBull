@@ -2590,6 +2590,10 @@ def update_strategy_paper_pool(
             if body.enabled and not current_pool.enabled and readiness is not None and not readiness.ready:
                 raise StrategyControlError("automation cannot be enabled: " + ", ".join(readiness.blockers))
             runtime = get_runtime_config(conn)
+            if body.enabled and runtime.enable_live_trading:
+                raise StrategyControlError(
+                    "paper automation cannot be enabled while system-wide live trading is enabled"
+                )
             pool_changed = (
                 current_pool.enabled != body.enabled
                 or current_pool.capital_limit != body.capital_limit

@@ -713,6 +713,19 @@ describe("StrategiesPage", () => {
     expect(screen.getByText("Paper automation can only be enabled while connected to the demo environment.")).toBeInTheDocument();
   });
 
+  it("keeps paper enable disabled while system-wide live trading is enabled", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...approvedOverview(),
+      execution_enabled: false,
+      live_execution_enabled: true,
+      paper_pool: { ...approvedOverview().paper_pool, enabled: false },
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
+    expect(master).toBeDisabled();
+    expect(screen.getByText("Turn off system-wide live trading before enabling paper automation.")).toBeInTheDocument();
+  });
+
   it("shows compact prospective evidence when automation is ready", async () => {
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue(approvedOverview());
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
