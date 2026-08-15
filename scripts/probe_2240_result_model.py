@@ -193,6 +193,17 @@ PROBES: list[tuple[str, Path, list[tuple[str, str]], str]] = [
         "test_an_empty_evaluated_set_is_refused_rather_than_passing_vacuously",
     ),
     (
+        "the holdout evidence-window registry replay removed (an invented label promotes)",
+        MODEL,
+        [
+            (
+                '    if identity.namespace == "hold_out":\n',
+                '    if False and identity.namespace == "hold_out":\n',
+            )
+        ],
+        "test_holdout_axis_requires_the_exact_registered_evidence_window",
+    ),
+    (
         "the §4.0 universe membership check removed",
         MODEL,
         [
