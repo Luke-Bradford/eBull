@@ -6,11 +6,13 @@ from datetime import date
 from decimal import Decimal
 
 import psycopg
+import pytest
 
 from app.api.strategies import (
     _PRESENTATION,
     _TITLES,
     ResultArm,
+    _ambiguity_record_from_result_row,
     _current_versions,
     _promotion_refusals,
     get_strategy_overview,
@@ -25,7 +27,7 @@ from app.services.result_ledger import store_holdout_result, store_in_sample_res
 from app.services.strategy_manifest import STRATEGY_MANIFEST
 from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS
 from app.services.strategy_result import LEGACY_RETURN_BASIS, TOTAL_RETURN_BASIS
-from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION
+from app.services.strategy_result_ambiguity import AMBIGUITY_RULE_VERSION, AmbiguityRecord, record_sha256
 from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.test_result_ledger import build_metrics, build_result
 
@@ -36,6 +38,29 @@ _IMMATERIAL_AMBIGUITY: dict[str, object] = {
     "ambiguity_worst_case_sharpe": None,
     "ambiguity_cohort_gap_threshold": None,
 }
+
+
+def test_operator_ambiguity_payloads_are_hash_verified_when_loaded_from_sql() -> None:
+    record = AmbiguityRecord(
+        ambiguity_rule_version=AMBIGUITY_RULE_VERSION,
+        comparison_basis="arm_sharpes",
+        best_case_sharpe=0.7,
+        worst_case_sharpe=0.4,
+        cohort_gap_threshold=0.5,
+    )
+    row: dict[str, object] = {
+        "support_ambiguity_record_rule_version": record.ambiguity_rule_version,
+        "support_ambiguity_comparison_basis": record.comparison_basis,
+        "support_ambiguity_best_case_sharpe": record.best_case_sharpe,
+        "support_ambiguity_worst_case_sharpe": record.worst_case_sharpe,
+        "support_ambiguity_cohort_gap_threshold": record.cohort_gap_threshold,
+        "support_ambiguity_payload_sha256": record_sha256(record),
+    }
+
+    assert _ambiguity_record_from_result_row(row, prefix="support_") == record
+    row["support_ambiguity_payload_sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="ambiguity payload hash mismatch"):
+        _ambiguity_record_from_result_row(row, prefix="support_")
 
 
 def test_current_versions_cover_the_manifest_including_s4() -> None:
@@ -235,6 +260,56 @@ def test_holdout_display_uses_derived_control_and_not_its_empty_own_columns() ->
         )
         == []
     )
+
+
+def test_holdout_display_composes_the_exact_in_sample_ambiguity_verdict() -> None:
+    row: dict[str, object] = {
+        **_IMMATERIAL_AMBIGUITY,
+        "ambiguity_comparison_basis": "arm_sharpes",
+        "ambiguity_best_case_sharpe": 0.7,
+        "ambiguity_worst_case_sharpe": 0.4,
+        "ambiguity_cohort_gap_threshold": None,
+        "support_ambiguity_record_rule_version": AMBIGUITY_RULE_VERSION,
+        "support_ambiguity_comparison_basis": "arm_sharpes",
+        "support_ambiguity_best_case_sharpe": 0.7,
+        "support_ambiguity_worst_case_sharpe": 0.4,
+        "support_ambiguity_cohort_gap_threshold": 0.5,
+        "namespace": "hold_out",
+        "purpose": "capital_candidate",
+        "universe_basis": "survivorship_free",
+        "carry_unmodelled": False,
+        "fx_unmodelled": False,
+        "evaluated_instrument_count": 3,
+        "deflated_sharpe": 0.8,
+        "trial_count": TRIAL_REGISTER.declared_count,
+        "effective_sample_size": 200,
+        "trial_register_version": TRIAL_REGISTER_VERSION,
+        "synthetic_control_model_id": None,
+        "control_support_candidate_count": 1,
+        "control_synthetic_control_model_id": "random-entry-v1",
+        "control_synthetic_control_mean_return_ci_low_pct": -1,
+        "control_synthetic_control_mean_return_ci_high_pct": 1,
+        "control_sharpe": 0.8,
+        "control_synthetic_control_sharpe_threshold": 0.5,
+    }
+
+    assert (
+        _promotion_refusals(
+            row,
+            ambiguity_complete=True,
+            quarantine_complete=True,
+            accesses_complete=True,
+        )
+        == []
+    )
+
+    row["control_support_candidate_count"] = 0
+    assert _promotion_refusals(
+        row,
+        ambiguity_complete=True,
+        quarantine_complete=True,
+        accesses_complete=True,
+    ) == ["ambiguity_arms_not_compared", "synthetic_control_not_run"]
 
 
 def test_partial_arm_refusals_do_not_claim_the_completed_comparison_is_missing() -> None:

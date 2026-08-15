@@ -20,6 +20,8 @@ from app.services.strategy_result_ambiguity import (
     AmbiguityRecord,
     ambiguity_promotion_refusals,
     ambiguity_verdict,
+    composed_holdout_ambiguity_refusals,
+    exact_ambiguity_support_id,
     matched_control_margin,
     record_sha256,
 )
@@ -307,3 +309,50 @@ class TestRefusals:
             "ambiguity_rule_unrecognised",
             "ambiguity_arms_not_compared",
         }
+
+
+class TestHoldoutComposition:
+    """#2749 — only a measured-but-unjudged holdout may use exact support."""
+
+    def test_exact_immaterial_support_closes_the_uncompared_holdout_clause(self) -> None:
+        assert composed_holdout_ambiguity_refusals(_arms(0.7, 0.4), _arms(0.7, 0.4, 0.5)) == ()
+
+    def test_exact_material_support_blocks_the_holdout(self) -> None:
+        assert composed_holdout_ambiguity_refusals(_arms(0.7, 0.4), _arms(0.7, 0.4, 0.1)) == ("ambiguity_material",)
+
+    def test_missing_support_leaves_the_local_not_compared_refusal(self) -> None:
+        assert composed_holdout_ambiguity_refusals(_arms(0.7, 0.4), None) == ("ambiguity_arms_not_compared",)
+
+    @pytest.mark.parametrize(
+        ("local", "expected"),
+        [
+            (None, ("ambiguity_verdict_unrecorded",)),
+            (_SHARED, ()),
+            (_arms(0.7, 0.4, 0.1), ("ambiguity_material",)),
+        ],
+    )
+    def test_support_cannot_override_an_authoritative_local_state(
+        self,
+        local: AmbiguityRecord | None,
+        expected: tuple[str, ...],
+    ) -> None:
+        favourable = _arms(0.7, 0.4, 0.5)
+        assert composed_holdout_ambiguity_refusals(local, favourable) == expected
+
+    def test_an_unrecognised_support_rule_remains_fail_closed(self) -> None:
+        stale = replace(_arms(0.7, 0.4, 0.5), ambiguity_rule_version="ambiguity-verdict-2099-v9")
+        assert composed_holdout_ambiguity_refusals(_arms(0.7, 0.4), stale) == ("ambiguity_rule_unrecognised",)
+
+    @pytest.mark.parametrize(
+        ("candidate_count", "support_id"),
+        [(0, None), (0, 41), (1, None), (2, None), (2, 41)],
+    )
+    def test_a_favourable_id_cannot_be_selected_without_exactly_one_candidate(
+        self,
+        candidate_count: int,
+        support_id: int | None,
+    ) -> None:
+        assert exact_ambiguity_support_id(candidate_count, support_id) is None
+
+    def test_exactly_one_candidate_and_one_id_is_accepted(self) -> None:
+        assert exact_ambiguity_support_id(1, 41) == 41

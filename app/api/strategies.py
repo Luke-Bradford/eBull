@@ -105,6 +105,8 @@ from app.services.strategy_result_ambiguity import (
     AmbiguityRecord,
     ComparisonBasis,
     ambiguity_promotion_refusals,
+    composed_holdout_ambiguity_refusals,
+    record_sha256,
 )
 from app.services.strategy_wealth import load_strategy_wealth_history
 from app.services.sync_orchestrator.dispatcher import publish_manual_job_request_with_conn
@@ -965,6 +967,45 @@ def _current_versions() -> dict[str, str]:
     }
 
 
+def _ambiguity_record_from_result_row(
+    row: dict[str, object],
+    *,
+    prefix: str = "",
+) -> AmbiguityRecord | None:
+    """Rebuild one API query's frozen ambiguity payload.
+
+    The API query aliases the local and exact-support records into the same
+    field shape. Keeping one constructor prevents the operator surface from
+    interpreting the two records under subtly different null or numeric rules.
+    """
+    rule = row.get(f"{prefix}ambiguity_record_rule_version")
+    if rule is None:
+        return None
+    record = AmbiguityRecord(
+        ambiguity_rule_version=str(rule),
+        comparison_basis=cast(ComparisonBasis, row[f"{prefix}ambiguity_comparison_basis"]),
+        best_case_sharpe=(
+            None
+            if row.get(f"{prefix}ambiguity_best_case_sharpe") is None
+            else float(cast(Decimal, row[f"{prefix}ambiguity_best_case_sharpe"]))
+        ),
+        worst_case_sharpe=(
+            None
+            if row.get(f"{prefix}ambiguity_worst_case_sharpe") is None
+            else float(cast(Decimal, row[f"{prefix}ambiguity_worst_case_sharpe"]))
+        ),
+        cohort_gap_threshold=(
+            None
+            if row.get(f"{prefix}ambiguity_cohort_gap_threshold") is None
+            else float(cast(Decimal, row[f"{prefix}ambiguity_cohort_gap_threshold"]))
+        ),
+    )
+    payload_key = f"{prefix}ambiguity_payload_sha256"
+    if payload_key in row and record_sha256(record) != str(row[payload_key]):
+        raise RuntimeError(f"strategy overview {prefix or 'local '}ambiguity payload hash mismatch")
+    return record
+
+
 def _promotion_refusals(
     row: dict[str, object],
     *,
@@ -1006,34 +1047,22 @@ def _promotion_refusals(
         refusals.append("trial_register_superseded")
     if row["effective_sample_size"] is None:
         refusals.append("effective_sample_size_not_computed")
+    is_holdout = row.get("namespace") == "hold_out"
     if not ambiguity_complete:
         refusals.append("ambiguity_arms_not_compared")
-    elif row.get("ambiguity_record_rule_version") is None:
-        refusals.append("ambiguity_verdict_unrecorded")
     else:
-        record = AmbiguityRecord(
-            ambiguity_rule_version=str(row["ambiguity_record_rule_version"]),
-            comparison_basis=cast(ComparisonBasis, row["ambiguity_comparison_basis"]),
-            best_case_sharpe=(
-                None
-                if row.get("ambiguity_best_case_sharpe") is None
-                else float(cast(Decimal, row["ambiguity_best_case_sharpe"]))
-            ),
-            worst_case_sharpe=(
-                None
-                if row.get("ambiguity_worst_case_sharpe") is None
-                else float(cast(Decimal, row["ambiguity_worst_case_sharpe"]))
-            ),
-            cohort_gap_threshold=(
-                None
-                if row.get("ambiguity_cohort_gap_threshold") is None
-                else float(cast(Decimal, row["ambiguity_cohort_gap_threshold"]))
-            ),
-        )
-        refusals.extend(ambiguity_promotion_refusals(record))
+        local_record = _ambiguity_record_from_result_row(row)
+        if is_holdout:
+            support_record = (
+                _ambiguity_record_from_result_row(row, prefix="support_")
+                if row.get("control_support_candidate_count") == 1
+                else None
+            )
+            refusals.extend(composed_holdout_ambiguity_refusals(local_record, support_record))
+        else:
+            refusals.extend(ambiguity_promotion_refusals(local_record))
     if not quarantine_complete:
         refusals.append("quarantine_arms_not_compared")
-    is_holdout = row.get("namespace") == "hold_out"
     control_prefix = "control_" if is_holdout else ""
     support_is_unique = row.get("control_support_candidate_count") == 1 if is_holdout else True
     if not support_is_unique or row.get(f"{control_prefix}synthetic_control_model_id") is None:
@@ -1068,7 +1097,14 @@ _RESULTS_SQL = """
         ambiguity.comparison_basis AS ambiguity_comparison_basis,
         ambiguity.best_case_sharpe AS ambiguity_best_case_sharpe,
         ambiguity.worst_case_sharpe AS ambiguity_worst_case_sharpe,
-        ambiguity.cohort_gap_threshold AS ambiguity_cohort_gap_threshold
+        ambiguity.cohort_gap_threshold AS ambiguity_cohort_gap_threshold,
+        ambiguity.payload_sha256 AS ambiguity_payload_sha256,
+        support_ambiguity.ambiguity_rule_version AS support_ambiguity_record_rule_version,
+        support_ambiguity.comparison_basis AS support_ambiguity_comparison_basis,
+        support_ambiguity.best_case_sharpe AS support_ambiguity_best_case_sharpe,
+        support_ambiguity.worst_case_sharpe AS support_ambiguity_worst_case_sharpe,
+        support_ambiguity.cohort_gap_threshold AS support_ambiguity_cohort_gap_threshold,
+        support_ambiguity.payload_sha256 AS support_ambiguity_payload_sha256
     FROM strategy_results_store r
     LEFT JOIN (
         SELECT strategy_id, strategy_version,
@@ -1083,6 +1119,8 @@ _RESULTS_SQL = """
       ON control_result.result_id = control_support.control_result_id
     LEFT JOIN strategy_result_ambiguity ambiguity
       ON ambiguity.result_id = r.result_id
+    LEFT JOIN strategy_result_ambiguity support_ambiguity
+      ON support_ambiguity.result_id = control_support.control_result_id
     WHERE r.strategy_version = ANY(%(versions)s)
       AND r.namespace = 'hold_out'
       AND r.corpus_version = %(corpus_version)s
