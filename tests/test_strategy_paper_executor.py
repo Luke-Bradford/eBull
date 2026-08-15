@@ -764,6 +764,41 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
     broker.place_demo_strategy_order.assert_called_once()
 
 
+def test_zero_net_expectancy_refuses_before_demo_submission(
+    ebull_test_conn: psycopg.Connection[Any],
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    broker = _broker()
+    # $1.25 on the $50 risk-bounded ticket, stressed 2x, is exactly 5%;
+    # the frozen conservative gross lower bound is 5%, so net expectancy is zero.
+    broker.get_what_if_costs.return_value = replace(
+        broker.get_what_if_costs.return_value,
+        costs=(
+            replace(
+                broker.get_what_if_costs.return_value.costs[0],
+                value=Decimal("1.25"),
+            ),
+        ),
+    )
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "net_expectancy_not_positive"
+    broker.place_demo_strategy_order.assert_not_called()
+    assert conn.execute(
+        "SELECT verdict,stressed_cost_amount,net_expectancy_pct,cost_basis "
+        "FROM strategy_entry_preflights WHERE signal_id=%s",
+        (signal_id,),
+    ).fetchone() == (
+        "rejected",
+        Decimal("2.500000"),
+        Decimal("0E-8"),
+        COST_BASIS_BROKER_PREFLIGHT_VALUE,
+    )
+
+
 def test_missing_opportunity_forecast_refuses_before_broker_access(
     ebull_test_conn: psycopg.Connection[Any],
 ) -> None:

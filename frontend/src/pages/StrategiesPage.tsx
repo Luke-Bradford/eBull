@@ -339,6 +339,8 @@ const REFUSAL_LABELS: Record<string, string> = {
   recent_evidence_incomplete: "Recent evidence windows are incomplete",
   recent_evidence_gate_refused: "Recent evidence failed its promotion gate",
   recent_net_expectancy_not_positive: "Net expectancy is not positive",
+  net_expectancy_not_positive: "Broker-priced expectancy is not positive after stressed costs",
+  net_expectancy_below_policy: "Broker-priced expectancy is below the configured minimum",
   paper_promotion_missing: "No approved deployment exists",
   paper_forward_evidence_missing: "Paper approval has no durable forward-evidence record",
   pinned_promotion_evidence_invalid: "Pinned evidence is no longer valid",

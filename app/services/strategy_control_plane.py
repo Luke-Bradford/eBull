@@ -865,6 +865,8 @@ def configure_execution_policy(
         raise StrategyControlError("max_portfolio_exposure_pct must be in (0, 100]")
     if not (Decimal("0") < max_drawdown_pct < Decimal("100")):
         raise StrategyControlError("max_drawdown_pct must be in (0, 100)")
+    if min_net_expectancy_pct < 0:
+        raise StrategyControlError("min_net_expectancy_pct must be non-negative")
     if cost_stress_multiplier < 1:
         raise StrategyControlError("cost_stress_multiplier must be at least 1")
 
