@@ -1251,6 +1251,69 @@ class TestNamespaceAxis:
         assert outcome.axis_dates == axis
         assert outcome.metrics.effective_sample_size is not None
 
+    def test_moving_only_the_first_firing_and_last_exit_cannot_move_axis_identity(self) -> None:
+        axis = tuple(date(2010, 1, day) for day in range(1, 11))
+
+        def measure(entry: int, exit_: int) -> NamespaceMeasurement:
+            book = _NamespaceBook()
+            book.instruments.add(1)
+            marks = [1.0 + 0.02 * offset for offset in range(exit_ - entry + 1)]
+            book.add_leg(
+                entry_index=entry,
+                exit_index=exit_,
+                entry_price=marks[0],
+                exit_price=marks[-1],
+                half_spread=0.0,
+                realised=True,
+                marks=marks,
+            )
+            for offset, value in enumerate((4.0, -2.0, 3.0, -1.0)):
+                book.returns.append(value)
+                book.entry_dates.append(axis[1 + offset])
+                book.exit_dates.append(axis[2 + offset])
+                book.regime_observations.append(
+                    RegimeTradeObservation(
+                        instrument_key=1,
+                        signal_date=axis[1 + offset],
+                        net_return_pct=value,
+                        regime=Regime.BULL_QUIET,
+                    )
+                )
+            outcome = _measure_namespace(
+                "in_sample",
+                book,
+                corpus=self._corpus(axis),
+                raw_closes_by_instrument={1: (0, array("d", [10.0 + value for value in range(10)]))},
+                wealth_closes_by_instrument={1: (0, array("d", [10.0 + value for value in range(10)]))},
+            )
+            assert outcome is not None
+            return outcome
+
+        early = measure(2, 7)
+        late = measure(4, 6)
+        early_result = build_result(
+            early,
+            strategy_id="s1-time-series-momentum",
+            strategy_version="strategy-v1+axis",
+            purpose="capital_candidate",
+            ambiguity_arm="worst_case",
+            quarantine_arm="masked",
+            deflated=None,
+        )
+        late_result = build_result(
+            late,
+            strategy_id="s1-time-series-momentum",
+            strategy_version="strategy-v1+axis",
+            purpose="capital_candidate",
+            ambiguity_arm="worst_case",
+            quarantine_arm="masked",
+            deflated=None,
+        )
+
+        assert early.axis_dates == late.axis_dates == axis
+        assert early_result.identity.metric_axis_digest == late_result.identity.metric_axis_digest
+        assert early_result.identity.version == late_result.identity.version
+
     def test_a_namespace_whose_bootstrap_cannot_run_refuses_rather_than_storing_a_nominal_n(self) -> None:
         """Acceptance 7 — every stored row carries a non-null effective sample size.
 
