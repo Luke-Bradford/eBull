@@ -433,30 +433,6 @@ def prepare_mt1_in_sample_evaluation(
     )
 
 
-def run_mt1_in_sample_evaluation(
-    conn: psycopg.Connection[Any],
-    *,
-    runner_source_head: str,
-    progress: ProgressCallback | None = None,
-) -> MT1InSampleEvaluation:
-    """Build and evaluate in memory; durable callers must use the two-phase store."""
-    preparation = prepare_mt1_in_sample_evaluation(
-        conn,
-        runner_source_head=runner_source_head,
-        progress=progress,
-    )
-    return MT1InSampleEvaluation(
-        authorities=preparation.authorities,
-        bundle=evaluate_mt1_prepared_bundle(preparation.prepared),
-        mt1_strategy_version=preparation.mt1_strategy_version,
-        s8_control_strategy_version=preparation.s8_control_strategy_version,
-        mt1_source_strategy_version=preparation.mt1_source_strategy_version,
-        s8_source_strategy_version=preparation.s8_source_strategy_version,
-        corpus_version=preparation.corpus_version,
-        runner_source_head=preparation.runner_source_head,
-    )
-
-
 __all__ = [
     "MT1_SOURCE_STRATEGY_ID",
     "MT1_IN_SAMPLE_WINDOW",
@@ -475,6 +451,5 @@ __all__ = [
     "evaluate_mt1_prepared_bundle",
     "prepare_mt1_in_sample_bundle",
     "prepare_mt1_in_sample_evaluation",
-    "run_mt1_in_sample_evaluation",
     "validate_mt1_preregistrations",
 ]

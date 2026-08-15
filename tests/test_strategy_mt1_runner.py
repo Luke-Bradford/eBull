@@ -295,14 +295,12 @@ def test_paved_run_checks_authority_before_corpus_and_builds_only_the_complete_i
     monkeypatch.setattr(runner.MarketRegimeProvider, "load_research", load_regime)
     monkeypatch.setattr(runner, "evaluate_level_arms", evaluate)
     monkeypatch.setattr(runner, "prepare_mt1_in_sample_bundle", prepare)
-    monkeypatch.setattr(runner, "evaluate_mt1_prepared_bundle", lambda value: cast(runner.MT1HistoricalBundle, value))
-
-    result = runner.run_mt1_in_sample_evaluation(  # type: ignore[arg-type]
+    result = runner.prepare_mt1_in_sample_evaluation(  # type: ignore[arg-type]
         cast(Any, object()), runner_source_head="a" * 40
     )
 
     assert result.authorities == authority
-    assert result.bundle is cast(runner.MT1HistoricalBundle, prepared)
+    assert result.prepared is prepared
     assert events[0] == "authority"
     assert events[1] == (
         "corpus",
@@ -331,7 +329,7 @@ def test_paved_run_loads_no_corpus_when_preregistration_refuses(monkeypatch: pyt
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("corpus must remain sealed")),
     )
     with pytest.raises(runner.MT1RunnerRefused, match="authority refused"):
-        runner.run_mt1_in_sample_evaluation(  # type: ignore[arg-type]
+        runner.prepare_mt1_in_sample_evaluation(  # type: ignore[arg-type]
             cast(Any, object()), runner_source_head="a" * 40
         )
 
@@ -348,4 +346,4 @@ def test_paved_run_refuses_unpinned_source_before_authority_or_corpus(monkeypatc
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("corpus must remain sealed")),
     )
     with pytest.raises(runner.MT1RunnerRefused, match="exact lower-case Git object ID"):
-        runner.run_mt1_in_sample_evaluation(cast(Any, object()), runner_source_head="not-a-git-head")
+        runner.prepare_mt1_in_sample_evaluation(cast(Any, object()), runner_source_head="not-a-git-head")
