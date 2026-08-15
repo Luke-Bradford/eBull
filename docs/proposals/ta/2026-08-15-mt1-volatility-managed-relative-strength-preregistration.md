@@ -2,8 +2,9 @@
 
 Date: 2026-08-15  
 Status: design and both controlled searches frozen in source before outcome access; entered in
-`trial_register.py` r7, not yet frozen in `strategy_preregistration_declarations`, and therefore
-not authorised to open outcomes  
+`trial_register.py` r7; both immutable declarations frozen from merged code on 2026-08-15; no
+holdout evaluation or recorded access yet
+
 Parent: #2437  
 Candidate ledger: `2026-08-15-market-technician-derived-candidates.md`
 
@@ -247,3 +248,19 @@ This document alone authorises nothing. Before outcome access, the implementatio
 Even an evidence pass gives no direct broker authority. Promotion, a calibrated opportunity
 forecast, the mandate-driven batch allocator, broker preflight and bounded paper deployment
 must each pass separately. Live/real-money activation remains hard-false.
+
+## Declaration freeze record
+
+The atomic freeze ran from merged commit `ea18ebc0f7170469476554cf694096d8d5316d6c`
+after its dry run refreshed `origin/main` and matched structural-refusal policy
+`structural-refusal-policy-2026-08-15-v3-survivorship-free-satisfiable`:
+
+- MT-1: `strategy-registry-v1+32970feefa00`, declaration ID `8`, SHA-256
+  `11aeefa42edc47b553a1f90329f4b961e728988b596eab08345f571500f8604a`;
+- S-8 control: `strategy-registry-v1+b83c3e4fc997`, declaration ID `9`, SHA-256
+  `ebdee0b9645a8b070e10bc9dad2c0d8fe57e523285774b513cafa8479efa5334`.
+
+A read-only post-freeze verification reconstructed both declarations from the merged builder,
+matched both stored digests and found one-row declaration chains. It also found zero holdout
+evaluations and zero recorded accesses for both identities. That verification read only counts
+and declaration metadata; it did not query or expose return outcomes.
