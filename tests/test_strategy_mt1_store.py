@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
 from typing import cast
@@ -23,6 +24,8 @@ from app.services.strategy_mt1_runner import (
     MT1PreparedCell,
     MT1PreregistrationAuthority,
     MT1RobustnessCell,
+    MT1RunnerRefused,
+    validate_mt1_preregistrations,
 )
 from app.services.strategy_mt1_trial import (
     ArmRiskReport,
@@ -178,6 +181,33 @@ def test_same_versions_cannot_be_rewritten_with_different_evidence(
     )
     with pytest.raises(store.MT1EvidenceConflict, match="different structural evidence"):
         store.store_mt1_structural_preparation(ebull_test_conn, changed)
+    ebull_test_conn.rollback()
+
+
+def test_database_frozen_declaration_term_mismatch_refuses_before_evaluation(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    mt1, s8 = build_declarations()
+    changed = replace(
+        mt1,
+        forward_shadow=replace(mt1.forward_shadow, min_calendar_weeks=mt1.forward_shadow.min_calendar_weeks + 1),
+    )
+    freeze_preregistration(ebull_test_conn, changed)
+    freeze_preregistration(ebull_test_conn, s8)
+    ebull_test_conn.commit()
+    with pytest.raises(MT1RunnerRefused, match="declaration_terms_changed=forward_shadow"):
+        validate_mt1_preregistrations(ebull_test_conn)
+
+
+def test_database_retry_refuses_a_metric_axis_derivation_drift(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    preparation = _preparation(ebull_test_conn)
+    store.store_mt1_structural_preparation(ebull_test_conn, preparation)
+    changed_axis = (*_COMMON_MONTHS, date(2019, 12, 15), *_DECISION_DATES)
+    drifted = replace(preparation, prepared=replace(preparation.prepared, axis_dates=changed_axis))
+    with pytest.raises(store.MT1EvidenceConflict, match="different structural evidence"):
+        store.store_mt1_structural_preparation(ebull_test_conn, drifted)
     ebull_test_conn.rollback()
 
 

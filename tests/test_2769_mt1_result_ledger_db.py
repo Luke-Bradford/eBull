@@ -161,6 +161,32 @@ def test_passed_structural_attempt_cannot_commit_without_complete_fan(
     with pytest.raises(psycopg.errors.RaiseException, match="requires exactly 4 cells"):
         ebull_test_conn.commit()
     ebull_test_conn.rollback()
+    assert ebull_test_conn.execute("SELECT count(*) FROM strategy_mt1_structural_attempts").fetchone() == (0,)
+
+
+def test_duplicate_structural_fan_cell_is_refused(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    attempt_id = _insert_attempt(ebull_test_conn, passed=True)
+    arms = _FAN[0]
+    for _ in range(2):
+        try:
+            ebull_test_conn.execute(
+                """
+                INSERT INTO strategy_mt1_structural_cells (
+                    structural_attempt_id, ambiguity_arm, quarantine_arm, mt1_decision_dates,
+                    s8_decision_dates, mt1_annualised_turnover, s8_annualised_turnover,
+                    mt1_traded_notional, s8_traded_notional, exposure_reconciled,
+                    evidence_sha256, evidence_json
+                ) VALUES (%s, %s, %s, %s, %s, 1, 1, 100, 100, TRUE, %s, '{}'::jsonb)
+                """,
+                (attempt_id, arms[0], arms[1], _DECISION_DATES, _DECISION_DATES, _SHA),
+            )
+        except psycopg.errors.UniqueViolation:
+            break
+    else:  # pragma: no cover - the primary key must reject the second row
+        raise AssertionError("duplicate fan cell was accepted")
+    ebull_test_conn.rollback()
 
 
 def test_refused_structural_attempt_has_zero_cells_and_cannot_own_results(
@@ -181,6 +207,17 @@ def test_partial_result_fan_cannot_commit(ebull_test_conn: psycopg.Connection[tu
         _insert_result_cell(ebull_test_conn, result_id, arms, passed=False)
     with pytest.raises(psycopg.errors.RaiseException, match="four result cells"):
         ebull_test_conn.commit()
+    ebull_test_conn.rollback()
+    assert ebull_test_conn.execute("SELECT count(*) FROM strategy_mt1_trial_results").fetchone() == (0,)
+
+
+def test_partial_four_arm_result_cell_is_refused(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    attempt_id = _complete_structural_attempt(ebull_test_conn)
+    result_id = _insert_result_header(ebull_test_conn, attempt_id, passed=False)
+    with pytest.raises(psycopg.errors.NotNullViolation):
+        _insert_result_cell(ebull_test_conn, result_id, _FAN[0], passed=False, cer=None)
     ebull_test_conn.rollback()
 
 
