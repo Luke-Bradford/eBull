@@ -296,9 +296,12 @@ def _turnover_audit(
             f"{label} annualised turnover {annualised:.12g} exceeds the frozen 600% ceiling"
         )
     decision_dates = tuple(decision.decision_date for decision in decisions)
+    expected_decision_dates = tuple(
+        when for when in sorted(s10_rebalance_dates(dates)) if when >= decisions[0].decision_date
+    )
     return ScaledBookStructuralAudit(
         decision_dates=decision_dates,
-        expected_decision_dates=decision_dates,
+        expected_decision_dates=expected_decision_dates,
         annualised_turnover=annualised,
         traded_notional=traded_notional,
         exposure_reconciled=True,

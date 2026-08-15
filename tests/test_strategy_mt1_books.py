@@ -46,6 +46,43 @@ def _book(dates: tuple[date, ...], *, altered: dict[date, float] | None = None) 
     return book
 
 
+def _daily_churn_book(dates: tuple[date, ...]) -> LegBook:
+    book = LegBook()
+    for index in range(len(dates)):
+        book.add(
+            entry_index=index,
+            exit_index=index,
+            entry_price=100.0,
+            exit_price=100.1,
+            half_spread=0.0,
+            realised=True,
+            marks=[100.0],
+        )
+    return book
+
+
+def _book_with_inert_closed_mark(dates: tuple[date, ...]) -> LegBook:
+    price = 100.0
+    marks = [price]
+    for index, when in enumerate(dates[1:], start=1):
+        if us_market_status(when) == "closed":
+            marks.append(math.nan)
+        else:
+            price *= 1.0 + 0.0005 + 0.00015 * math.sin(index / 19.0)
+            marks.append(price)
+    book = LegBook()
+    book.add(
+        entry_index=0,
+        exit_index=len(dates) - 1,
+        entry_price=marks[0],
+        exit_price=marks[-1],
+        half_spread=0.0005,
+        realised=True,
+        marks=marks,
+    )
+    return book
+
+
 @pytest.fixture(scope="module")
 def dates() -> tuple[date, ...]:
     return _sessions()
@@ -118,6 +155,18 @@ def test_a_later_zero_variance_month_refuses_instead_of_omitting_a_clock_date(
         )
 
 
+def test_derived_turnover_above_six_times_refuses_before_books_are_returned(
+    dates: tuple[date, ...],
+) -> None:
+    with pytest.raises(MT1BookConstructionRefused, match="annualised turnover .* exceeds the frozen 600%"):
+        build_mt1_four_arm_books(
+            mt1_book=_daily_churn_book(dates),
+            s8_book=_book(dates),
+            dates=dates,
+            expected_first_month=FIRST_MONTH,
+        )
+
+
 def test_portfolio_activity_on_a_closed_union_axis_date_refuses() -> None:
     dates = (date(2020, 1, 5), date(2020, 1, 6))  # Sunday, then Monday.
     book = _book(dates)
@@ -128,6 +177,21 @@ def test_portfolio_activity_on_a_closed_union_axis_date_refuses() -> None:
             dates=dates,
             expected_first_month=date(2020, 1, 1),
         )
+
+
+def test_an_exactly_inert_closed_union_axis_mark_is_allowed(dates: tuple[date, ...]) -> None:
+    contaminant = date(2015, 1, 4)  # Sunday between the Jan 2 and Jan 5 sessions.
+    contaminated_dates = tuple(sorted((*dates, contaminant)))
+    book = _book_with_inert_closed_mark(contaminated_dates)
+
+    built = build_mt1_four_arm_books(
+        mt1_book=book,
+        s8_book=book,
+        dates=contaminated_dates,
+        expected_first_month=FIRST_MONTH,
+    )
+
+    assert built.evaluation_months == tuple(date(2020, month, 1) for month in range(2, 7))
 
 
 def test_a_missing_declared_session_refuses_a_supposedly_complete_month() -> None:
