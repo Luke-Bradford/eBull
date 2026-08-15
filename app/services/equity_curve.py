@@ -115,8 +115,9 @@ MONTH_END_REBALANCE_RULE_ID: Final = "calendar_month_end_equal_weight_v1"
 #: AFTER that bar's mark; consequently the new target affects the following
 #: close-to-close return and cannot consume the decision bar's outcome. Source
 #: entries/exits retain their stored open fills. Overlay and event rebalances
-#: share step 4 below, so simultaneous trades are netted before the existing
-#: holding-specific half-spread is charged.
+#: share one closing step 4 over the post-fill holdings; source fills remain
+#: distinct and every synthetic trade pays the existing holding-specific
+#: half-spread.
 CAPPED_TARGET_EXPOSURE_RULE_ID: Final = "capped_target_exposure_after_decision_close_v1"
 
 #: How criterion 7's buy-and-hold BENCHMARK is composed. ⚠ FROZEN AND HASHED —
@@ -858,8 +859,8 @@ def build_buy_and_hold_curve(
 
 
 __all__ = [
-    "CAPPED_TARGET_EXPOSURE_RULE_ID",
     "BENCHMARK_RULE_ID",
+    "CAPPED_TARGET_EXPOSURE_RULE_ID",
     "ENTRY_WEIGHT_DRIFT_RULE_ID",
     "MONTH_END_REBALANCE_RULE_ID",
     "SIZING_RULE_ID",
