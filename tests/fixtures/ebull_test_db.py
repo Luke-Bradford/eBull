@@ -390,7 +390,9 @@ _TRUNCATE_BEFORE_DELETE: frozenset[str] = frozenset(
         "strategy_mt1_structural_attempts",
         "strategy_forecast_assessments",
         "strategy_promotions",
+        "strategy_promotion_evidence",
         "strategy_preregistration_declarations",
+        "strategy_result_ambiguity",
         "strategy_result_universe",
     }
 )
