@@ -264,3 +264,10 @@ A read-only post-freeze verification reconstructed both declarations from the me
 matched both stored digests and found one-row declaration chains. It also found zero holdout
 evaluations and zero recorded accesses for both identities. That verification read only counts
 and declaration metadata; it did not query or expose return outcomes.
+
+Pre-outcome policy correction: those rows were frozen under v3 while #2697's known v4
+metric-axis policy change was still in flight. The merged-policy guard checked `origin/main`
+correctly but cannot see an open PR. Therefore v4 may not authorise either outcome until the
+repository's policy-only supersession path has atomically replaced both current revisions,
+preserving every trial term and recording the no-exposure attestation. This records the ordering
+mistake rather than treating the v3 rows as current after #2697 merges.
