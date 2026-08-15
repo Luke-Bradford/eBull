@@ -40,6 +40,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services import synthetic_control_run
 from app.services.cost_model import UNKNOWN_NOMINAL_PRICE_BAND
 from app.services.equity_curve import LegBook, build_equity_curve
 from app.services.indicator_series import BarSeries
@@ -501,6 +502,26 @@ class TestTheMatchIsExact:
         assert result.residual.strategy_trade_count == collector.matchable_trade_count
         assert result.control.cohort_size == _TEST_COHORT
         assert result.placement_space_id == PLACEMENT_SPACE_ID
+
+    def test_every_member_is_measured_on_the_complete_fixed_axis(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Random placement may move a member's legs, never its metric dates."""
+        measured_axes: list[tuple[date, ...]] = []
+        real_compute_metrics = synthetic_control_run.compute_metrics
+
+        def capture_axis(curve: DatedEquityCurve, **kwargs: object) -> StrategyMetrics:
+            measured_axes.append(curve.dates)
+            return real_compute_metrics(curve, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(synthetic_control_run, "compute_metrics", capture_axis)
+        run_cohort(
+            _collector(exits_on_spike=True),
+            axis=AXIS,
+            strategy_metrics=_sleeve_metrics(exits_on_spike=True),
+            benchmark=None,
+            cohort_size=2,
+        )
+
+        assert measured_axes == [AXIS, AXIS]
 
     def test_progress_reports_each_completed_member_without_metrics(self) -> None:
         events: list[tuple[int, int]] = []
