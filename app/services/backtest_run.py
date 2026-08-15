@@ -454,12 +454,12 @@ class ExcludedStrategy:
 class NamespaceMeasurement:
     """One ``(strategy, quarantine arm, namespace)`` measurement, before writing.
 
-    ⚠ The equity AXIS here is the namespace's own truncated span (§5) while
-    ``window_start`` / ``window_end`` on the row stay the full evaluation window.
-    ``sql/262`` is explicit that no CHECK ties the two — *"the window is the
-    EVALUATION window and the namespace selects within it"* — and storing the
-    truncated span in the window columns would make two rows over one corpus
-    look like two corpora.
+    ⚠ ``axis_dates`` is the complete fixed namespace axis derived before any
+    strategy pass: the pre-boundary panel tuple for ``in_sample`` or the exact
+    registered evidence-window tuple for ``hold_out``. It is never truncated to
+    the strategy's first/last position. ``window_start`` / ``window_end`` on the
+    eventual row still identify the enclosing evaluation window; the full axis
+    tuple and digest make the actual metric denominator independently auditable.
     """
 
     namespace: ResultNamespace
@@ -1011,10 +1011,11 @@ def _terminate_open_positions(
 class _NamespaceBook:
     """One namespace's legs and trades, accumulated on the FULL evaluation axis.
 
-    ⚠ Absolute axis indices, re-based only at report time. The namespace's own
-    axis (§5) is the closed span of ITS OWN positions, which is not knowable
-    until the corpus pass has finished — so the legs are collected against the
-    one axis every instrument shares and shifted once at the end.
+    ⚠ Legs retain absolute indices on the one panel axis every instrument
+    shares. Metric construction shifts them only by the predeclared namespace
+    axis start; ``first_index`` / ``last_index`` are boundary-audit fields and
+    support the isolated A/B verifier, never selection of the production metric
+    span.
     """
 
     book: LegBook = field(default_factory=LegBook)
