@@ -1040,6 +1040,33 @@ describe("StrategiesPage", () => {
     expect(within(row).queryByText(/realised/)).not.toBeInTheDocument();
   });
 
+  it("labels an ambiguous entry-order reconciliation separately from a position operation", async () => {
+    const ambiguousEntry: FiredSignal = {
+      ...FUNDED_SIGNAL,
+      trade_lifecycle: {
+        ...FUNDED_SIGNAL.trade_lifecycle!,
+        latest_operation_type: null,
+        latest_operation_id: null,
+        latest_operation_order_id: null,
+        latest_operation_trigger: null,
+        latest_operation_status: null,
+        latest_operation_created_at: null,
+        latest_operation_submitted_at: null,
+        latest_operation_resolved_at: null,
+        latest_reconciliation_state: "ambiguous",
+        latest_reconciliation_broker_status: "multiple_matches",
+        latest_reconciliation_error: "multiple_position_executions",
+        incomplete_reasons: ["entry_order_reconciliation_ambiguous"],
+      },
+    };
+    vi.mocked(strategiesApi.fetchFiredSignals).mockResolvedValue({ items: [ambiguousEntry], next_cursor: null });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const section = (await screen.findByText("Generated trade activity")).closest("section")!;
+    expect(within(section).getByText("Entry order has ambiguous broker reconciliation")).toBeInTheDocument();
+    expect(within(section).getByText("Reconciliation ambiguous · broker multiple matches")).toBeInTheDocument();
+  });
+
   it("renders failed and reconciliation-required trades as risk states", async () => {
     const failed: FiredSignal = {
       ...FUNDED_SIGNAL,
