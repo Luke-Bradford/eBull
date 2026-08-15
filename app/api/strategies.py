@@ -2580,6 +2580,8 @@ def update_strategy_paper_pool(
 ) -> StrategyPaperPoolView:
     """Set the shared strategy ceiling and its higher-level automation flag."""
     try:
+        if body.enabled and settings.etoro_env != "demo":
+            raise StrategyControlError("paper automation can only be enabled in the demo environment")
         readiness = get_strategy_overview(conn).automation_readiness if body.enabled else None
         conn.rollback()
         with conn.transaction():

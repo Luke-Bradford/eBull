@@ -1187,7 +1187,8 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     # runtime_config is a deliberately persistent singleton, unlike the
     # per-test pool event stream. Establish the transition this test asserts
     # when an earlier executor test enabled automation.
-    if get_runtime_config(conn).enable_auto_trading:
+    runtime_before = get_runtime_config(conn)
+    if runtime_before.enable_auto_trading:
         update_runtime_config(
             conn,
             updated_by="test-precondition",
@@ -1227,7 +1228,9 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
     assert conn.execute(
         "SELECT enabled,capital_limit,capital_mode,changed_by,reason FROM strategy_paper_pool_events"
     ).fetchone() == (True, Decimal("750.000000"), "compound", "allocation-operator", "bounded paper workspace")
-    assert conn.execute("SELECT enable_auto_trading FROM runtime_config WHERE id=TRUE").fetchone() == (True,)
+    assert conn.execute(
+        "SELECT enable_auto_trading,enable_live_trading FROM runtime_config WHERE id=TRUE"
+    ).fetchone() == (True, runtime_before.enable_live_trading)
     assert conn.execute(
         """
         SELECT old_value,new_value,changed_by,reason
@@ -1253,6 +1256,33 @@ def test_shared_paper_pool_is_one_audited_human_event_and_overview_state(
         )
     assert exc_info.value.status_code == 409
     assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (1,)
+
+
+def test_shared_paper_pool_refuses_activation_outside_demo(
+    ebull_test_conn: psycopg.Connection[tuple],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    runtime_before = get_runtime_config(conn)
+    monkeypatch.setattr("app.api.strategies.settings.etoro_env", "real")
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_strategy_paper_pool(
+            StrategyPaperPoolUpdateRequest(
+                enabled=True,
+                capital_limit=Decimal("750"),
+                capital_mode="fixed",
+                risk_profile="balanced",
+                reason="must remain demo-only",
+            ),
+            _session(),
+            conn,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "paper automation can only be enabled in the demo environment"
+    assert conn.execute("SELECT count(*) FROM strategy_paper_pool_events").fetchone() == (0,)
+    assert get_runtime_config(conn) == runtime_before
 
 
 def test_shared_paper_pool_refuses_activation_without_a_ready_candidate(
