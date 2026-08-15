@@ -68,8 +68,17 @@ synthetic rebalances.
 ## Frozen volatility construction
 
 For each complete calendar month `m`, let `f[m,d]` be the unscaled reference portfolio's
-after-cost daily total return on trading day `d`, including zero-return cash where the
-reference is not fully invested. Let `J[m]` be its count of usable daily returns.
+after-cost daily total return on declared NYSE session `d`, including zero-return cash where
+the reference is not fully invested. Let `J[m]` be its count of usable daily returns. The
+session set comes from `app.services.market_calendar.us_market_status`, not every date in the
+union research-price axis: that axis contains stray weekend rows for roughly 11 instruments,
+and counting those rows would silently alter both `J[m]` and realised variance. A union-axis
+date on which NYSE is closed is tolerated only if the source portfolio is entirely inert;
+any trade, holding-count, invested-capital or equity change on it refuses construction.
+The holdings engine stores binary-float equity. Each simple daily equity ratio is converted
+to the overlay's deterministic decimal arithmetic with `Decimal(str(value))`; the complete
+constructor is source-hashed in its `BOOK_RULE_VERSION`, so changing that bridge moves the
+book identity rather than silently changing the schedule.
 
 The realised variance used by Cederburg et al.'s equation (4) is:
 
@@ -91,7 +100,7 @@ where `f_month[m]` is the compounded unscaled after-cost total return for month 
 training observation exists only when both terms are available before `t`.
 
 Every calendar month from the reference book's first eligible complete month onward remains
-in the input history, with exactly one return for every session on the frozen panel calendar.
+in the input history, with exactly one return for every session on the frozen NYSE calendar.
 This includes an all-cash month whose returns and variance are zero. Because S-10 can be
 intermittently invested whereas the papers' factors are always defined, a zero `v[m-1]`
 cannot divide the next month's return: that pair is unavailable but the calendar month is
@@ -113,6 +122,13 @@ no next-month exposure; it never defaults to 100%. The multiplier is applied onc
 aggregate reference book and uniformly to all selected holdings; residual weight stays in
 zero-return cash. Per-name inverse-volatility weighting is a different strategy and is not
 permitted under this identity.
+
+Pre-outcome session-axis clarification, 2026-08-15: the first draft said "frozen panel
+calendar" while also defining `d` as a trading day. Source inspection before the monthly
+book implementation, trial-register entries or outcome access showed that the union panel
+contains non-session weekend contaminants. This paragraph binds the already-declared
+trading-day meaning to the repository's existing NYSE calendar and records the clarification
+rather than allowing an implementation to choose whichever axis gives a preferred result.
 
 ## Arms and trial accounting
 
