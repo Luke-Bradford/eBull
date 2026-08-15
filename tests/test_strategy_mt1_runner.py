@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
 from typing import cast
@@ -11,6 +12,8 @@ import pytest
 import app.services.strategy_mt1_runner as runner
 from app.services.backtest_run import ArmMeasurement, NamespaceMeasurement
 from app.services.equity_curve import LegBook
+from app.services.result_ledger import FrozenPreregistration, HoldoutAccessCounts
+from app.services.strategy_mt1_preregistration import build_declarations
 from app.services.strategy_result import AmbiguityArm
 from app.services.strategy_result_universe import ResultUniverseRecord
 from app.services.strategy_statistics import StrategyMetrics
@@ -62,6 +65,85 @@ def _measurement(
 
 def _fan(strategy_id: str) -> tuple[ArmMeasurement, ...]:
     return tuple(_measurement(strategy_id, ambiguity, quarantine) for ambiguity, quarantine in _KEYS)
+
+
+def _frozen(index: int, *, declaration=None, digest: str | None = None) -> FrozenPreregistration:
+    current = declaration or build_declarations()[index]
+    return FrozenPreregistration(
+        declaration_id=100 + index,
+        declaration=current,
+        declaration_sha256=current.sha256 if digest is None else digest,
+        chain_declaration_ids=(8 + index, 100 + index),
+        supersedes_declaration_id=8 + index,
+        supersession_reason="structural_refusal_policy_superseded",
+        supersession_attestation="no outcome access",
+    )
+
+
+def test_preregistration_authority_requires_both_current_exact_unexposed_declarations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen = [_frozen(0), _frozen(1)]
+    monkeypatch.setattr(
+        runner,
+        "load_preregistration",
+        lambda _conn, strategy_id, _version: (
+            frozen[0] if strategy_id == frozen[0].declaration.strategy_id else frozen[1]
+        ),
+    )
+    monkeypatch.setattr(runner, "holdout_access_counts", lambda *_args: HoldoutAccessCounts(0, 0))
+
+    authority = runner.validate_mt1_preregistrations(cast(object, object()))  # type: ignore[arg-type]
+
+    assert tuple(item.declaration_id for item in authority) == (100, 101)
+    assert tuple(item.declaration_sha256 for item in authority) == tuple(item.declaration_sha256 for item in frozen)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("missing", "preregistration_missing"),
+        ("digest", "declaration_digest_mismatch"),
+        ("terms", "declaration_terms_changed=forward_shadow"),
+        ("policy", "structural_refusal_policy_superseded"),
+        ("exposed", "holdout_evaluations_already_exist=1"),
+    ),
+)
+def test_preregistration_authority_refuses_every_pre_outcome_boundary_breach(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    declarations = build_declarations()
+    first: FrozenPreregistration | None = _frozen(0)
+    if mutation == "missing":
+        first = None
+    elif mutation == "digest":
+        first = _frozen(0, digest="0" * 64)
+    elif mutation == "terms":
+        changed = replace(
+            declarations[0],
+            forward_shadow=replace(declarations[0].forward_shadow, min_calendar_weeks=158),
+        )
+        first = _frozen(0, declaration=changed)
+    elif mutation == "policy":
+        changed = replace(declarations[0], structural_refusal_policy_version="stale-policy")
+        first = _frozen(0, declaration=changed)
+
+    def load(_conn: object, strategy_id: str, _version: str) -> FrozenPreregistration | None:
+        return first if strategy_id == declarations[0].strategy_id else _frozen(1)
+
+    def counts(_conn: object, strategy_id: str, _version: str) -> HoldoutAccessCounts:
+        return (
+            HoldoutAccessCounts(1, 0)
+            if mutation == "exposed" and strategy_id == declarations[0].strategy_id
+            else HoldoutAccessCounts(0, 0)
+        )
+
+    monkeypatch.setattr(runner, "load_preregistration", load)
+    monkeypatch.setattr(runner, "holdout_access_counts", counts)
+    with pytest.raises(runner.MT1RunnerRefused, match=message):
+        runner.validate_mt1_preregistrations(cast(object, object()))  # type: ignore[arg-type]
 
 
 def test_missing_robustness_cell_refuses_before_any_book_construction(monkeypatch: pytest.MonkeyPatch) -> None:

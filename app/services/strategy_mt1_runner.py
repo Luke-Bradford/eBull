@@ -16,7 +16,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Final
+from typing import Any, Final
+
+import psycopg
 
 from app.services.backtest_run import (
     AMBIGUITY_ARM_ORDER,
@@ -24,8 +26,11 @@ from app.services.backtest_run import (
     ArmMeasurement,
     NamespaceMeasurement,
 )
+from app.services.prereg_contract import changed_supersession_terms, declaration_refusals
 from app.services.research_price_structure_store import QuarantineArm
+from app.services.result_ledger import FrozenPreregistration, holdout_access_counts, load_preregistration
 from app.services.strategy_mt1_books import MT1FourArmBooks, build_mt1_four_arm_books
+from app.services.strategy_mt1_preregistration import build_declarations
 from app.services.strategy_mt1_trial import MT1TrialResult, evaluate_mt1_trial
 from app.services.strategy_result import AmbiguityArm
 from app.services.strategy_result_universe import ResultUniverseRecord
@@ -41,6 +46,14 @@ _EXPECTED_KEYS: Final[tuple[RobustnessKey, ...]] = tuple(
 
 class MT1RunnerRefused(ValueError):
     """The supplied source pass is not the complete frozen MT-1 experiment."""
+
+
+@dataclass(frozen=True)
+class MT1PreregistrationAuthority:
+    strategy_id: str
+    strategy_version: str
+    declaration_id: int
+    declaration_sha256: str
 
 
 @dataclass(frozen=True)
@@ -62,6 +75,47 @@ class MT1HistoricalBundle:
     @property
     def historical_statistical_conjuncts_pass(self) -> bool:
         return all(cell.result.historical_statistical_conjuncts_pass for cell in self.cells)
+
+
+def validate_mt1_preregistrations(
+    conn: psycopg.Connection[Any],
+) -> tuple[MT1PreregistrationAuthority, MT1PreregistrationAuthority]:
+    """Require both current, intact, term-exact declarations before corpus I/O."""
+    authorities: list[MT1PreregistrationAuthority] = []
+    refusals: list[str] = []
+    for expected in build_declarations():
+        frozen: FrozenPreregistration | None = load_preregistration(
+            conn,
+            expected.strategy_id,
+            expected.strategy_version,
+        )
+        if frozen is None:
+            refusals.append(f"{expected.strategy_id}:preregistration_missing")
+            continue
+        if not frozen.digest_intact:
+            refusals.append(f"{expected.strategy_id}:declaration_digest_mismatch")
+        changed = changed_supersession_terms(frozen.declaration, expected)
+        if changed:
+            refusals.append(f"{expected.strategy_id}:declaration_terms_changed={','.join(changed)}")
+        refusals.extend(f"{expected.strategy_id}:{code}" for code in declaration_refusals(frozen.declaration))
+        exposure = holdout_access_counts(conn, expected.strategy_id, expected.strategy_version)
+        if exposure.holdout_evaluations:
+            refusals.append(f"{expected.strategy_id}:holdout_evaluations_already_exist={exposure.holdout_evaluations}")
+        if exposure.recorded_accesses:
+            refusals.append(f"{expected.strategy_id}:holdout_accesses_already_exist={exposure.recorded_accesses}")
+        authorities.append(
+            MT1PreregistrationAuthority(
+                strategy_id=expected.strategy_id,
+                strategy_version=expected.strategy_version,
+                declaration_id=frozen.declaration_id,
+                declaration_sha256=frozen.declaration_sha256,
+            )
+        )
+    if refusals:
+        raise MT1RunnerRefused("MT-1 preregistration authority refused: " + "; ".join(refusals))
+    if len(authorities) != 2:  # pragma: no cover - missing declarations append refusals above
+        raise MT1RunnerRefused("MT-1 preregistration authority is incomplete")
+    return authorities[0], authorities[1]
 
 
 def _source_cells(
@@ -167,7 +221,9 @@ __all__ = [
     "MT1_SOURCE_STRATEGY_ID",
     "S8_SOURCE_STRATEGY_ID",
     "MT1HistoricalBundle",
+    "MT1PreregistrationAuthority",
     "MT1RobustnessCell",
     "MT1RunnerRefused",
     "assemble_mt1_in_sample_bundle",
+    "validate_mt1_preregistrations",
 ]

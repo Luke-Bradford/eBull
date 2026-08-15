@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 
 import pytest
 
@@ -39,6 +40,7 @@ from scripts.freeze_2437_mt1_declarations import (
     build_s8_control_declaration,
     main,
 )
+from scripts.supersede_2437_mt1_declarations import PREDECESSOR_POLICY_VERSION
 
 UNIVERSE = "survivorship_free"
 
@@ -97,6 +99,18 @@ def test_declarations_are_coherent_and_preserve_the_candidate_control_boundary()
         assert declaration.declared_fx_unmodelled is FX_UNMODELLED is False
         assert declaration.expected_structural_refusals == ()
         assert declaration.recomputed_structural_refusals == ()
+
+
+def test_application_contract_reconstructs_the_exact_already_frozen_root_digests() -> None:
+    expected = (
+        "11aeefa42edc47b553a1f90329f4b961e728988b596eab08345f571500f8604a",
+        "ebdee0b9645a8b070e10bc9dad2c0d8fe57e523285774b513cafa8479efa5334",
+    )
+    reconstructed = tuple(
+        replace(declaration, structural_refusal_policy_version=PREDECESSOR_POLICY_VERSION).sha256
+        for declaration in build_declarations()
+    )
+    assert reconstructed == expected
 
 
 def test_forward_shadow_floor_is_rederived_from_the_frozen_power_calculation() -> None:
