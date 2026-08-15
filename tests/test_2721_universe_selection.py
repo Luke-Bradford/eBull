@@ -22,8 +22,8 @@ from app.services import backtest_run
 from app.services.backtest_run import (
     BACKTEST_UNIVERSE,
     STANDING_REFUSALS,
-    _corpus_version_for,
     _terminate_open_positions,
+    corpus_version_for,
     load_corpus,
 )
 from app.services.indicator_series import BarSeries
@@ -177,10 +177,10 @@ class TestWindowBounds:
                 evaluation_window=Window(start=date(2020, 1, 1), end=INTRADER_CAPTURE_DATE.replace(year=2025)),
             )
 
-    def test_the_survivor_default_is_unchanged(self) -> None:
-        assert BACKTEST_UNIVERSE == "survivor_only"
-        assert _corpus_version_for("survivor_only") == CORPUS_VERSION
-        assert _corpus_version_for("survivorship_free") == f"{SURVIVORSHIP_FREE_VENDOR}@2024-09-27"
+    def test_the_accepted_survivorship_free_universe_is_the_default(self) -> None:
+        assert BACKTEST_UNIVERSE == "survivorship_free"
+        assert corpus_version_for("survivor_only") == CORPUS_VERSION
+        assert corpus_version_for("survivorship_free") == f"{SURVIVORSHIP_FREE_VENDOR}@2024-09-27"
 
 
 class TestWriteBoundary:

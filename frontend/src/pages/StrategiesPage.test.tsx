@@ -172,10 +172,10 @@ const OVERVIEW: StrategyOverviewResponse = {
     ],
   },
   evidence_refresh: {
-    frozen_through: "2026-07-08",
+    frozen_through: "2024-09-27",
     completed_windows: 1,
     partial_windows: 0,
-    total_windows: 8,
+    total_windows: 6,
     status: "idle",
     request_id: null,
     requested_at: null,
@@ -581,7 +581,7 @@ describe("StrategiesPage", () => {
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
 
     await userEvent.click(await screen.findByText("Research & validation"));
-    expect(await screen.findByText(/Evidence 1\/8/)).toHaveTextContent("frozen through 08 Jul 2026");
+    expect(await screen.findByText(/Evidence 1\/6/)).toHaveTextContent("frozen through 27 Sept 2024");
     await userEvent.click(screen.getByRole("button", { name: "Refresh evidence" }));
 
     await waitFor(() => expect(refresh).toHaveBeenCalledOnce());

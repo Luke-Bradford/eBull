@@ -49,8 +49,8 @@ function pctPoints(value: string | null): string {
 
 /** The declared id is `primary-2022-plus`, not `primary` (#2624).
  *
- * `app/services/strategy_recent_evidence.py` declares exactly eight ids and
- * `primary` is not among them, so this lookup used to be dead and the function
+ * `app/services/strategy_recent_evidence.py` declares the bounded historical
+ * ids, and `primary` is not among them, so this lookup used to be dead and the function
  * always fell through to "first window with status complete". That is
  * order-dependent: whenever the primary window is `partial` while a calendar-year
  * window is `complete`, the headline "Expected / trade" silently described 2022
@@ -1152,9 +1152,9 @@ function ResearchCandidate({ strategy }: { strategy: StrategyOverview }) {
 
 function ValidationControl({ strategy }: { strategy: StrategyOverview }) {
   const arm = representativeArm(strategy);
-  // ⚠ This — NOT `EvidenceDetail` — is where the four strategies that exist are
-  // rendered, because all of them are `harness_validation` (#2624). Putting the
-  // rotation notice only on the capital-candidate path would have shipped a
+  // ⚠ This — NOT `EvidenceDetail` — is where manifest strategies still marked
+  // `harness_validation` are rendered (#2624). Putting the rotation notice
+  // only on the capital-candidate path would have shipped a
   // payload nothing displays; caught by walking the real page, not by the
   // component tests, whose fixture is a candidate.
   return (

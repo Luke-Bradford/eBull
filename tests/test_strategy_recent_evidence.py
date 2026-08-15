@@ -12,9 +12,15 @@ import pytest
 
 from app.api.strategies import _evidence_window_counts
 from app.services.backtest_run import BacktestProgressEvent
+from app.services.position_builder import Window
 from app.services.processes.param_metadata import MANUAL_TRIGGER_JOB_METADATA
-from app.services.strategy_recent_evidence import RECENT_EVIDENCE_WINDOWS, recent_evidence_window
+from app.services.strategy_recent_evidence import (
+    RECENT_EVIDENCE_WINDOWS,
+    RecentEvidenceWindow,
+    recent_evidence_window,
+)
 from app.services.strategy_result import EVALUATION_WINDOW_END, HOLDOUT_BOUNDARY
+from app.services.universe_selection import INTRADER_CAPTURE_DATE
 from app.workers import scheduler
 
 
@@ -26,18 +32,27 @@ def test_all_required_windows_are_named_and_inside_the_holdout_corpus() -> None:
         "year-2022",
         "year-2023",
         "year-2024",
-        "year-2025",
-        "year-2026-ytd",
     )
     assert all(item.required_for_allocation for item in RECENT_EVIDENCE_WINDOWS.values())
     assert all(item.window.start >= HOLDOUT_BOUNDARY for item in RECENT_EVIDENCE_WINDOWS.values())
     assert all(item.window.end <= EVALUATION_WINDOW_END for item in RECENT_EVIDENCE_WINDOWS.values())
+    assert all(item.window.end <= INTRADER_CAPTURE_DATE for item in RECENT_EVIDENCE_WINDOWS.values())
     assert RECENT_EVIDENCE_WINDOWS["primary-2022-plus"].window.start == date(2022, 1, 1)
+    assert RECENT_EVIDENCE_WINDOWS["primary-2022-plus"].window.end == INTRADER_CAPTURE_DATE
 
 
 def test_raw_or_unknown_window_ids_are_refused() -> None:
     with pytest.raises(ValueError, match="unknown recent evidence window"):
         recent_evidence_window("2025-03-01:2025-04-01")
+
+
+def test_a_post_capture_window_cannot_be_declared_as_survivorship_free_evidence() -> None:
+    with pytest.raises(ValueError, match="after the survivorship-free archive capture"):
+        RecentEvidenceWindow(
+            "year-2024",
+            "invalid post-capture window",
+            Window(date(2024, 1, 1), date(2024, 12, 31)),
+        )
 
 
 def test_manual_job_exposes_ids_but_never_raw_dates() -> None:

@@ -160,7 +160,10 @@ existing one.
 
 `StrategiesPage.tsx:50` — `primaryEvidence()` matches `window.window_id === "primary"`. No such id
 exists: the declared ids are `primary-2022-plus`, `rolling-36m`, `rolling-24m`, `year-2022`,
-`year-2023`, `year-2024`, `year-2025`, `year-2026-ytd`
+`year-2023`, `year-2024`, `year-2025`, `year-2026-ytd`. This was the denominator
+at the time of this document; #2721's activation later removes the post-archive
+2025/2026 members because Intrader is frozen at 2024-09-27 (see
+`2026-08-15-2721-survivorship-free-activation.md`).
 (`app/services/strategy_recent_evidence.py:29`). The first branch is dead, so the function always
 falls through to "first window with `status === "complete"`". That is order-dependent and silently
 picks a **different window** whenever the primary window is `partial` while a calendar-year window

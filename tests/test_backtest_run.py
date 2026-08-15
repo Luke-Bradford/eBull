@@ -90,6 +90,7 @@ from app.services.strategy_result import (
 from app.services.strategy_segmented_evaluation import segmented_member
 from app.services.strategy_statistics import StrategyMetrics
 from app.services.trial_register import TRIAL_REGISTER
+from app.services.universe_selection import INTRADER_CAPTURE_DATE, SURVIVORSHIP_FREE_VENDOR
 from app.services.walk_forward import FOLD_COUNT, WALK_FORWARD_MODEL_ID
 from app.workers.scheduler import _optional_str  # noqa: PLC2701 - the blank-is-absent rule under test
 
@@ -390,7 +391,6 @@ class TestExpectedRefusals:
 
     def test_full_holdout_run_with_a_dsr_leaves_only_the_standing_refusals(self) -> None:
         assert _expected_refusals(holdout_requested=True, deflated=True) == STANDING_REFUSALS | {
-            "universe_basis_not_survivorship_free",
             "synthetic_control_not_run",
         }
 
@@ -409,14 +409,12 @@ class TestExpectedRefusals:
             deflated=True,
             purpose="harness_validation",
         ) == STANDING_REFUSALS | {
-            "universe_basis_not_survivorship_free",
             "harness_validation_only",
             "synthetic_control_not_run",
         }
 
     def test_in_sample_run_adds_holdout_never_evaluated(self) -> None:
         assert _expected_refusals(holdout_requested=False, deflated=True) == STANDING_REFUSALS | {
-            "universe_basis_not_survivorship_free",
             "holdout_never_evaluated",
             "synthetic_control_not_run",
         }
@@ -450,7 +448,6 @@ class TestExpectedRefusals:
         assert _expected_refusals(
             holdout_requested=False, deflated=False, prior_holdout_evaluations=12
         ) == STANDING_REFUSALS | {
-            "universe_basis_not_survivorship_free",
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "synthetic_control_not_run",
@@ -461,7 +458,6 @@ class TestExpectedRefusals:
         DSR at all, and collapsing them would make "which of the two is missing"
         unanswerable."""
         assert _expected_refusals(holdout_requested=True, deflated=False) == STANDING_REFUSALS | {
-            "universe_basis_not_survivorship_free",
             "deflated_sharpe_not_computed",
             "trial_count_undeclared",
             "synthetic_control_not_run",
@@ -651,15 +647,15 @@ class TestBuildResult:
         assert identity.result_scope == "sleeve"
         assert identity.sizing_rule == SIZING_RULE_ID
         assert identity.cost_model_id == COST_MODEL_ID
-        assert identity.corpus_version == CORPUS_VERSION
+        assert identity.corpus_version == f"{SURVIVORSHIP_FREE_VENDOR}@{INTRADER_CAPTURE_DATE.isoformat()}"
         assert identity.window_start == EVALUATION_WINDOW_START
-        assert identity.window_end == EVALUATION_WINDOW_END
+        assert identity.window_end == INTRADER_CAPTURE_DATE
         assert identity.position_rule_set_version == POSITION_RULE_SET_VERSION
         # ⚠⚠ THE QUARANTINE RULE SET, not StrategyIdentity.input_rule_set_versions
         # (indicator-only, and already inside strategy_version — folding it in
         # here would hash it twice).
         assert identity.input_rule_set_version == QUARANTINE_RULE_SET_VERSION
-        assert result.universe_basis == "survivor_only"
+        assert result.universe_basis == "survivorship_free"
         assert result.evaluated_instrument_count == 2
 
     def test_no_dsr_leaves_both_criterion_6_scalars_null(self) -> None:
