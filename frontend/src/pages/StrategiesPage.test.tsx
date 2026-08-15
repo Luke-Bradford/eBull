@@ -651,6 +651,26 @@ describe("StrategiesPage", () => {
     expect(screen.getByRole("checkbox", { name: "Allow new automated entries" })).toBeDisabled();
   });
 
+  it("does not invent an owned position for an enabled strategy whose entry gates later fail", async () => {
+    const approved = approvedOverview();
+    const strategy = approved.strategies[0]!;
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...approved,
+      strategies: [{
+        ...strategy,
+        allocation_ready: false,
+        allocation_refusals: ["prospective_assessment_stale"],
+        allocation: { ...strategy.allocation, enabled: true },
+      }],
+    });
+
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+
+    expect(await screen.findByText("New entries blocked")).toBeInTheDocument();
+    expect(screen.queryByText("Managing existing position")).not.toBeInTheDocument();
+    expect(screen.getByText(/later fails a gate remains visible, but cannot open a new position/)).toBeInTheDocument();
+  });
+
   it("renders harness rules as compact controls without allocation actions", async () => {
     const strategy = OVERVIEW.strategies[0]!;
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({

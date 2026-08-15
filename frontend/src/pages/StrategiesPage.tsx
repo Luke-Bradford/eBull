@@ -1358,7 +1358,7 @@ function ApprovedStrategy({
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-semibold">{strategy.title}</h3>
           <Badge tone={strategy.allocation_ready ? "ok" : "warn"}>
-            {strategy.allocation_ready ? "Approved" : "Managing existing position"}
+            {strategy.allocation_ready ? "Approved" : "New entries blocked"}
           </Badge>
         </div>
         <p className="mt-1 max-w-md text-xs text-slate-500">{strategy.description}</p>
@@ -1820,7 +1820,7 @@ export function StrategiesPage() {
               <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
                 <div>
                   <h2 className="text-sm font-semibold">Approved &amp; managed strategies</h2>
-                  <p className="mt-1 text-xs text-slate-500">Approved strategies may use the shared pot; an invalidated strategy remains visible only while it manages an existing position.</p>
+                  <p className="mt-1 text-xs text-slate-500">Approved strategies may use the shared pot. An enabled strategy that later fails a gate remains visible, but cannot open a new position.</p>
                 </div>
                 <span className="text-xs text-slate-500">{summary.approved} approved</span>
               </div>
