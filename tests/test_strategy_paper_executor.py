@@ -61,6 +61,7 @@ from app.services.strategy_result_universe import (
     ResultUniverseRecord,
     store_result_universe,
 )
+from app.services.trial_register import TRIAL_REGISTER, TRIAL_REGISTER_VERSION
 from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_result_ledger import (
     BOOTSTRAP_BLOCK,
@@ -167,63 +168,74 @@ def _seed(
         ) VALUES (2449001, 'TALLOC', 'Allocator test', '2', 'USD', true)
         """
     )
-    metrics = build_metrics(
+    base_metrics = build_metrics(
         **{
             **BOOTSTRAP_BLOCK,
             "expectancy_ci_low_pct": 5.0,
             "expectancy_ci_high_pct": 6.0,
         }
     )
-    deflated = build_deflated()
+    deflated = build_deflated(
+        declared_trials=TRIAL_REGISTER.declared_count,
+        trial_register_version=TRIAL_REGISTER_VERSION,
+    )
     shared_result = {
         "strategy_id": "S-ALLOC",
         "strategy_version": "v1",
         "universe_basis": "survivorship_free",
         "carry_unmodelled": False,
         "fx_unmodelled": False,
-        "metrics": metrics,
         "evaluated_instrument_count": 3,
         "deflated": deflated,
         "trial_count": deflated.declared_trials,
         "deflated_sharpe": Decimal(repr(deflated.deflated_sharpe)),
     }
-    # The random-entry cohort is an in-sample falsification.  The withheld row
-    # must remain control-free; production derives this exact support rather
-    # than spending 1,000 additional looks at holdout outcomes (#2737).
-    support_id = store_in_sample_result(
-        conn,
-        build_result(
-            **shared_result,
-            namespace="in_sample",
-            purpose="harness_validation",
-            synthetic_control=build_control(
-                metrics,
-                mean_return_pct=0.0,
-                mean_return_ci_low_pct=-1.0,
-                mean_return_ci_high_pct=1.0,
-                cohort_sharpe_threshold=-4.0,
-                cohort_return_threshold_pct=-101.0,
-            ),
-        ),
-    )
     universe_record = ResultUniverseRecord(
         universe_rule_version=VALIDATED_UNIVERSE_RULE_VERSION,
         evaluated_instrument_ids=frozenset({1, 2, 3}),
         validated_universe_ids=frozenset({1, 2, 3}),
     )
-    store_result_universe(conn, result_id=support_id, record=universe_record)
-    result_id = store_holdout_result(
-        conn,
-        build_result(
-            **shared_result,
-            namespace="hold_out",
-            window_start=date(2022, 1, 1),
-            synthetic_control=None,
-        ),
-        accessed_by="tests/test_strategy_paper_executor.py",
-        purpose="paper allocation evidence fixture",
-    )
-    store_result_universe(conn, result_id=result_id, record=universe_record)
+
+    # The random-entry cohort is an in-sample falsification. The withheld row
+    # remains control-free and replays the exact in-sample companion.
+    for quarantine_arm in ("masked", "admitted"):
+        support_id = store_in_sample_result(
+            conn,
+            build_result(
+                **shared_result,
+                metrics=base_metrics,
+                namespace="in_sample",
+                quarantine_arm=quarantine_arm,
+                purpose="harness_validation",
+                synthetic_control=build_control(
+                    base_metrics,
+                    mean_return_pct=0.0,
+                    mean_return_ci_low_pct=-1.0,
+                    mean_return_ci_high_pct=1.0,
+                    cohort_sharpe_threshold=-4.0,
+                    cohort_return_threshold_pct=-101.0,
+                ),
+            ),
+        )
+        store_result_universe(conn, result_id=support_id, record=universe_record)
+    result_ids: list[int] = []
+    for quarantine_arm in ("masked", "admitted"):
+        result_id = store_holdout_result(
+            conn,
+            build_result(
+                **shared_result,
+                metrics=base_metrics,
+                namespace="hold_out",
+                quarantine_arm=quarantine_arm,
+                window_start=date(2022, 1, 1),
+                window_end=date(2024, 9, 27),
+                synthetic_control=None,
+            ),
+            accessed_by="tests/test_strategy_paper_executor.py",
+            purpose="paper allocation evidence fixture",
+        )
+        result_ids.append(result_id)
+        store_result_universe(conn, result_id=result_id, record=universe_record)
     promotion_rows = conn.execute(
         """
         INSERT INTO strategy_promotions (
@@ -238,10 +250,16 @@ def _seed(
         """
     ).fetchall()
     historical_id = next(int(row[0]) for row in promotion_rows if row[1] == "historical_validated")
-    conn.execute(
-        "INSERT INTO strategy_promotion_results (promotion_id, result_id) VALUES (%s, %s)",
-        (historical_id, result_id),
-    )
+    paper_id = next(int(row[0]) for row in promotion_rows if row[1] == "paper_enabled")
+    for result_id in result_ids:
+        conn.execute(
+            "INSERT INTO strategy_promotion_results (promotion_id, result_id) VALUES (%s, %s)",
+            (historical_id, result_id),
+        )
+        conn.execute(
+            "INSERT INTO strategy_promotion_results (promotion_id, result_id) VALUES (%s, %s)",
+            (paper_id, result_id),
+        )
     deployment = configure_deployment(
         conn,
         strategy_id="S-ALLOC",
@@ -638,7 +656,7 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
 
     result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
 
-    assert result.verdict == "submitted"
+    assert result.verdict == "submitted", result
     assert result.amount == Decimal("50.00")  # 30% equity cap - $250 manual/existing exposure
     submitted = broker.place_demo_strategy_order.call_args
     assert submitted.kwargs["request_id"] == _REQUEST_ID
@@ -683,6 +701,25 @@ def test_allocation_counts_manual_risk_and_commits_identity_before_demo_io(
     # Retry is read-only and cannot submit a duplicate.
     assert execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW).order_id == result.order_id
     broker.place_demo_strategy_order.assert_called_once()
+
+
+def test_current_result_policy_supersession_refuses_before_broker_access(
+    ebull_test_conn: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = ebull_test_conn
+    signal_id = _seed(conn)
+    broker = _broker()
+    monkeypatch.setattr("app.services.strategy_result.TRIAL_REGISTER_VERSION", "superseded-after-paper-approval")
+
+    result = execute_fired_paper_signal(conn, broker=broker, signal_id=signal_id, now=_NOW)
+
+    assert result.verdict == "rejected"
+    assert result.reason_code == "pinned_promotion_evidence_invalid"
+    broker.get_account_risk_snapshot.assert_not_called()
+    broker.check_instrument_eligibility.assert_not_called()
+    broker.get_what_if_costs.assert_not_called()
+    broker.place_demo_strategy_order.assert_not_called()
 
 
 def test_missing_opportunity_forecast_refuses_before_broker_access(
