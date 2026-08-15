@@ -151,11 +151,7 @@ def audit_records(records: list[dict[str, Any]], *, candidate_head: str) -> Audi
             ):
                 failures.append(f"{label}: legacy axis endpoints are malformed")
             legacy_population = row.get("legacy_comparator_population")
-            if (
-                not isinstance(legacy_population, int)
-                or isinstance(legacy_population, bool)
-                or legacy_population < 1
-            ):
+            if not isinstance(legacy_population, int) or isinstance(legacy_population, bool) or legacy_population < 1:
                 failures.append(f"{label}: legacy comparator population is not positive")
         if not _valid_metric_payload(row.get("current")):
             failures.append(f"{label}: current metric payload is incomplete or non-finite")
