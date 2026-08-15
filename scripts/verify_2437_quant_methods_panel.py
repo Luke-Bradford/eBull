@@ -83,7 +83,7 @@ def _spearman(a: np.ndarray, b: np.ndarray) -> float:
 
 def main() -> None:
     with psycopg.connect(settings.database_url) as conn:
-        rows = conn.execute(_SQL, {"n": WINDOW + 1}).fetchall()
+        rows = conn.execute(_SQL, {"n": WINDOW}).fetchall()
         quoted_spread = dict(
             conn.execute(
                 "select instrument_id, spread_pct from quotes where bid > 0 and ask > bid and spread_pct is not null"
