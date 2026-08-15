@@ -709,16 +709,52 @@ describe("StrategiesPage", () => {
     })));
   });
 
-  it("does not present automation as enabled while the system-wide guard is off", async () => {
+  it("uses the atomic paper-pool request for the first enable while the system-wide flag is off", async () => {
+    const update = vi.spyOn(strategiesApi, "updateStrategyPaperPool").mockResolvedValue({
+      ...OVERVIEW.paper_pool,
+      enabled: true,
+    });
     vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
       ...approvedOverview(),
+      execution_enabled: false,
+      paper_pool: { ...approvedOverview().paper_pool, enabled: false },
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
+    expect(master).not.toBeChecked();
+    expect(master).not.toBeDisabled();
+    await userEvent.click(master);
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      enabled: true,
+      capital_limit: "1000.000000",
+      risk_profile: "balanced",
+    })));
+  });
+
+  it("keeps first enable disabled when strategy evidence is not ready", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...OVERVIEW,
       execution_enabled: false,
     });
     render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
     const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
     expect(master).not.toBeChecked();
     expect(master).toBeDisabled();
-    expect(screen.getByText("System-wide automatic trading is off. Enable that safety control before allowing new entries.")).toBeInTheDocument();
+    expect(screen.getByText("Automation stays off until at least one strategy passes validation.")).toBeInTheDocument();
+  });
+
+  it("keeps first enable disabled outside the demo environment", async () => {
+    vi.mocked(strategiesApi.fetchStrategyOverview).mockResolvedValue({
+      ...approvedOverview(),
+      demo_connection: false,
+      execution_enabled: false,
+      paper_pool: { ...approvedOverview().paper_pool, enabled: false },
+    });
+    render(<MemoryRouter><StrategiesPage /></MemoryRouter>);
+    const master = await screen.findByRole("checkbox", { name: "Allow new automated entries" });
+    expect(master).toBeDisabled();
+    expect(screen.getByText("Paper automation can only be enabled while connected to the demo environment.")).toBeInTheDocument();
   });
 
   it("shows compact prospective evidence when automation is ready", async () => {

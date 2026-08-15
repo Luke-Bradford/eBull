@@ -1038,7 +1038,12 @@ function AutomationControl({
     || parsed !== Number(pool.capital_limit)
     || capitalMode !== pool.capital_mode
     || riskProfile !== pool.mandate.risk_profile;
-  const canEnable = overview.automation_readiness.ready && overview.execution_enabled && riskProfile !== "unconfigured";
+  // This form owns both the paper-pool switch and the system-wide automatic
+  // trading flag through one atomic endpoint. Requiring execution_enabled here
+  // creates a circular first-enable gate: the flag can never become true
+  // because the control that changes it is disabled. The server independently
+  // rechecks evidence readiness and the demo-only boundary on every enable.
+  const canEnable = overview.automation_readiness.ready && overview.demo_connection && riskProfile !== "unconfigured";
   const selectedMandate = riskProfile === pool.mandate.risk_profile && pool.mandate.configured
     ? pool.mandate
     : pool.available_mandates.find((mandate) => mandate.risk_profile === riskProfile) ?? null;
@@ -1149,8 +1154,8 @@ function AutomationControl({
       </dl>
       {!canEnable ? (
         <p className="mt-4 text-xs text-amber-700 dark:text-amber-300">
-          {!overview.execution_enabled
-            ? "System-wide automatic trading is off. Enable that safety control before allowing new entries."
+          {!overview.demo_connection
+            ? "Paper automation can only be enabled while connected to the demo environment."
             : riskProfile === "unconfigured"
               ? "Choose a risk profile before allowing new entries."
             : "Automation stays off until at least one strategy passes validation."}
