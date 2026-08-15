@@ -166,6 +166,12 @@ export function AdminPage() {
   const backgroundJobs = (jobs.data?.jobs ?? []).filter(
     (j) => !ORCHESTRATOR_OWNED.has(j.name),
   );
+  const executionSlotWaits = (jobs.data?.jobs_process.subsystems ?? []).flatMap((subsystem) =>
+    (subsystem.notes?.execution_slot_waits ?? []).map((wait) => ({
+      ...wait,
+      wait_age_seconds: wait.wait_age_seconds + (subsystem.age_seconds ?? 0),
+    })),
+  );
 
   // ProblemsPanel surfaces failing layers with a drill-through; PR6
   // moves the orchestrator detail behind /admin/processes/orchestrator_full_sync
@@ -257,6 +263,17 @@ export function AdminPage() {
               transaction execution, position monitoring, deferred-rec
               retries, and periodic governance.
             </p>
+            {executionSlotWaits.length > 0 ? (
+              <div className="mb-3 border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200" role="status">
+                <strong>Waiting for execution capacity:</strong>{" "}
+                {executionSlotWaits.map((wait, index) => (
+                  <span key={`${wait.job_name}:${wait.waiting_since}`}>
+                    {index > 0 ? "; " : ""}
+                    {wait.job_name} ({Math.max(0, Math.floor(wait.wait_age_seconds))}s, {wait.lane})
+                  </span>
+                ))}
+              </div>
+            ) : null}
             <JobsTable items={backgroundJobs} rowState={rowState} onRun={handleRun} />
           </>
         )}

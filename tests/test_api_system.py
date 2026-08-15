@@ -846,3 +846,34 @@ def test_derive_overall_status_engine_up_unchanged() -> None:
     # Engine up + everything clean → ok (default arg also engine-up).
     assert _derive_overall_status(layers, jobs, False, set(), jobs_process_down=False) == "ok"
     assert _derive_overall_status(layers, jobs, False, set()) == "ok"
+
+
+def test_jobs_process_health_preserves_execution_slot_wait_notes() -> None:
+    from app.api.system import _build_jobs_process_health
+
+    conn = _mock_conn()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [
+        {
+            "subsystem": "scheduler",
+            "last_beat_at": _NOW - timedelta(seconds=3),
+            "notes": {
+                "execution_slot_wait_count": 1,
+                "execution_slot_waits": [
+                    {
+                        "job_name": "pg_size_sample",
+                        "lane": "general_non_sec",
+                        "waiting_since": (_NOW - timedelta(seconds=12)).isoformat(),
+                        "wait_age_seconds": 9.0,
+                    }
+                ],
+            },
+        }
+    ]
+
+    health = _build_jobs_process_health(conn, _NOW)
+
+    assert health.state == "healthy"
+    assert health.subsystems[0].age_seconds == 3
+    assert health.subsystems[0].notes is not None
+    assert health.subsystems[0].notes["execution_slot_waits"][0]["job_name"] == "pg_size_sample"
