@@ -2784,6 +2784,35 @@ export interface StrategyPositionCloseResponse {
   operation_id: number | null;
 }
 
+export interface StrategyTradeLifecycle {
+  trade_status: "planned" | "submitted" | "open" | "closing" | "closed" | "failed" | "reconcile_required" | null;
+  ownership_count: number;
+  broker_position_id: number | null;
+  ownership_status: "active" | "released" | null;
+  position_claimed_at: string | null;
+  position_released_at: string | null;
+  position_release_reason: string | null;
+  latest_operation_type: "fixed_exit_repair" | "stop_ratchet" | "close" | null;
+  latest_operation_id: number | null;
+  latest_operation_order_id: number | null;
+  latest_operation_trigger: string | null;
+  latest_operation_status: "intent_persisted" | "submitted" | "applied" | "rejected" | "reconcile_required" | null;
+  latest_operation_created_at: string | null;
+  latest_operation_submitted_at: string | null;
+  latest_operation_resolved_at: string | null;
+  latest_operation_error: string | null;
+  latest_reconciliation_state: "unresolved" | "pending" | "resolved" | "rejected" | "not_found" | "ambiguous" | "error" | null;
+  latest_reconciliation_broker_status: string | null;
+  latest_reconciliation_attempt_count: number | null;
+  latest_reconciliation_updated_at: string | null;
+  latest_reconciliation_error: string | null;
+  close_event_count: number | null;
+  realised_pnl_usd: string | null;
+  observed_fees_usd: string | null;
+  close_history_status: "not_applicable" | "not_closed" | "complete" | "incomplete" | "unavailable";
+  incomplete_reasons: string[];
+}
+
 export interface FiredSignal {
   signal_id: number;
   strategy_id: string;
@@ -2808,6 +2837,7 @@ export interface FiredSignal {
   execution_status: string | null;
   actual_fill_price: string | null;
   slippage_pct: string | null;
+  trade_lifecycle: StrategyTradeLifecycle | null;
 }
 
 export interface FiredSignalsResponse {

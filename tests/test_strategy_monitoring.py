@@ -685,6 +685,483 @@ def test_unprocessed_current_entry_is_visible_as_not_funded_with_reason(
     assert signal.funding_status == "rejected"
     assert signal.funding_reason == "not_evaluated_by_allocator"
     assert signal.funded_amount is None
+    assert signal.trade_lifecycle is None
+
+
+def test_fired_signal_exposes_exact_completed_trade_lifecycle(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    instrument_id = 2453005
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-03",
+        fill_price=Decimal("10"),
+    )
+    deployment_id = _deployment(ebull_test_conn, strategy_id, strategy_version)
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=deployment_id,
+        instrument_id=instrument_id,
+    )
+    ownership_row = ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (
+            strategy_trade_id, broker_position_id, status, released_at, release_reason
+        ) VALUES (%s, 7453005, 'released', now(), 'broker_close_observed')
+        RETURNING ownership_id
+        """,
+        (trade_id,),
+    ).fetchone()
+    assert ownership_row is not None
+    ownership_id = ownership_row[0]
+    order_row = ebull_test_conn.execute(
+        """
+        INSERT INTO orders (
+            broker_order_ref, instrument_id, action, order_type, requested_amount,
+            status, execution_origin, strategy_request_id
+        ) VALUES ('99005', %s, 'SELL', 'MARKET', 100, 'filled', 'strategy', %s)
+        RETURNING order_id
+        """,
+        (instrument_id, uuid4()),
+    ).fetchone()
+    assert order_row is not None
+    order_id = order_row[0]
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_trade_orders (strategy_trade_id, order_id, purpose)
+        VALUES (%s, %s, 'exit')
+        """,
+        (trade_id, order_id),
+    )
+    operation_row = ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_operations (
+            ownership_id, order_id, operation_type, trigger_code, request_id,
+            status, broker_order_ref, created_at, submitted_at, resolved_at
+        ) VALUES (%s, %s, 'close', 'operator_close', %s,
+                  'applied', 99005, now() - interval '2 minutes',
+                  now() - interval '1 minute', now())
+        RETURNING position_operation_id
+        """,
+        (ownership_id, order_id, uuid4()),
+    ).fetchone()
+    assert operation_row is not None
+    operation_id = operation_row[0]
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_order_reconciliation_state (
+            order_id, state, last_attempt_at, reconciled_at, attempt_count,
+            broker_status, position_count, updated_at
+        ) VALUES (%s, 'resolved', now(), now(), 1, 'closed', 1, now())
+        """,
+        (order_id,),
+    )
+    ebull_test_conn.execute(
+        "UPDATE strategy_trades SET status='closed', updated_at=now() WHERE strategy_trade_id=%s",
+        (trade_id,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id, etoro_instrument_id, instrument_id, event_kind, side,
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+        ) VALUES (7453005, %s, %s, 'close', 'sell', 10, 11, now(), 1.25, 8.75,
+                  'etoro_history', '{}'::jsonb)
+        """,
+        (instrument_id, instrument_id),
+    )
+
+    response = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+    signal = next(item for item in response.items if item.signal_id == signal_id)
+    lifecycle = signal.trade_lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.trade_status == "closed"
+    assert lifecycle.ownership_count == 1
+    assert lifecycle.broker_position_id == 7453005
+    assert lifecycle.ownership_status == "released"
+    assert lifecycle.latest_operation_type == "close"
+    assert lifecycle.latest_operation_trigger == "operator_close"
+    assert lifecycle.latest_operation_status == "applied"
+    assert lifecycle.latest_operation_id == operation_id
+    assert lifecycle.latest_operation_order_id == order_id
+    assert lifecycle.latest_reconciliation_state == "resolved"
+    assert lifecycle.latest_reconciliation_broker_status == "closed"
+    assert lifecycle.latest_reconciliation_attempt_count == 1
+    assert lifecycle.latest_reconciliation_error is None
+    assert lifecycle.close_event_count == 1
+    assert lifecycle.realised_pnl_usd == Decimal("8.75")
+    assert lifecycle.observed_fees_usd == Decimal("1.25")
+    assert lifecycle.close_history_status == "complete"
+    assert lifecycle.incomplete_reasons == []
+    assert operation_id > 0
+
+
+def test_fired_signal_keeps_open_owned_trade_distinct_from_closed_history(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    instrument_id = 2453006
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-04",
+        fill_price=Decimal("12"),
+    )
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=_deployment(ebull_test_conn, strategy_id, strategy_version),
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        "INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id) VALUES (%s, 7453006)",
+        (trade_id,),
+    )
+
+    response = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+    matching = [item for item in response.items if item.signal_id == signal_id]
+    assert len(matching) == 1
+    lifecycle = matching[0].trade_lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.trade_status == "open"
+    assert lifecycle.ownership_status == "active"
+    assert lifecycle.close_event_count == 0
+    assert lifecycle.realised_pnl_usd is None
+    assert lifecycle.observed_fees_usd is None
+    assert lifecycle.close_history_status == "not_closed"
+    assert lifecycle.incomplete_reasons == []
+
+
+def test_fired_signal_treats_failed_entry_without_position_as_terminal_not_missing(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    instrument_id = 2453011
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-04",
+        fill_price=Decimal("12.50"),
+    )
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=_deployment(ebull_test_conn, strategy_id, strategy_version),
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        "UPDATE strategy_trades SET status='failed' WHERE strategy_trade_id=%s",
+        (trade_id,),
+    )
+
+    response = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+    matching = [item for item in response.items if item.signal_id == signal_id]
+    assert len(matching) == 1
+    lifecycle = matching[0].trade_lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.trade_status == "failed"
+    assert lifecycle.ownership_count == 0
+    assert lifecycle.broker_position_id is None
+    assert lifecycle.close_history_status == "not_applicable"
+    assert lifecycle.incomplete_reasons == []
+
+
+def test_fired_signal_exposes_a_submitted_close_without_claiming_it_completed(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    instrument_id = 2453009
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-04",
+        fill_price=Decimal("13"),
+    )
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=_deployment(ebull_test_conn, strategy_id, strategy_version),
+        instrument_id=instrument_id,
+    )
+    ownership_row = ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (strategy_trade_id, broker_position_id)
+        VALUES (%s, 7453010) RETURNING ownership_id
+        """,
+        (trade_id,),
+    ).fetchone()
+    assert ownership_row is not None
+    ownership_id = ownership_row[0]
+    order_row = ebull_test_conn.execute(
+        """
+        INSERT INTO orders (
+            broker_order_ref, instrument_id, action, order_type, requested_amount,
+            status, execution_origin, strategy_request_id
+        ) VALUES ('99010', %s, 'SELL', 'MARKET', 100, 'pending', 'strategy', %s)
+        RETURNING order_id
+        """,
+        (instrument_id, uuid4()),
+    ).fetchone()
+    assert order_row is not None
+    order_id = order_row[0]
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_operations (
+            ownership_id, order_id, operation_type, trigger_code, request_id,
+            status, broker_order_ref, created_at, submitted_at
+        ) VALUES (%s, %s, 'close', 'strategy_exit', %s,
+                  'submitted', 99010, now() - interval '1 minute', now())
+        """,
+        (ownership_id, order_id, uuid4()),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_order_reconciliation_state (
+            order_id, state, last_attempt_at, attempt_count, broker_status,
+            position_count, updated_at
+        ) VALUES (%s, 'pending', now(), 1, 'pending', 1, now())
+        """,
+        (order_id,),
+    )
+    ebull_test_conn.execute(
+        "UPDATE strategy_trades SET status='closing' WHERE strategy_trade_id=%s",
+        (trade_id,),
+    )
+
+    response = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+    lifecycle = next(item for item in response.items if item.signal_id == signal_id).trade_lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.trade_status == "closing"
+    assert lifecycle.latest_operation_type == "close"
+    assert lifecycle.latest_operation_trigger == "strategy_exit"
+    assert lifecycle.latest_operation_status == "submitted"
+    assert lifecycle.latest_operation_resolved_at is None
+    assert lifecycle.latest_reconciliation_state == "pending"
+    assert lifecycle.latest_reconciliation_broker_status == "pending"
+    assert lifecycle.close_history_status == "not_closed"
+    assert lifecycle.realised_pnl_usd is None
+
+    ebull_test_conn.execute(
+        """
+        UPDATE strategy_order_reconciliation_state
+        SET state='ambiguous', broker_status='multiple_matches',
+            last_error_code='multiple_position_executions', updated_at=now()
+        WHERE order_id=%s
+        """,
+        (order_id,),
+    )
+    retried = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+    ambiguous = next(item for item in retried.items if item.signal_id == signal_id).trade_lifecycle
+    assert ambiguous is not None
+    assert ambiguous.latest_reconciliation_state == "ambiguous"
+    assert ambiguous.latest_reconciliation_error == "multiple_position_executions"
+    assert ambiguous.close_history_status == "not_closed"
+    assert ambiguous.incomplete_reasons == ["position_operation_reconciliation_ambiguous"]
+
+    ebull_test_conn.execute(
+        """
+        UPDATE strategy_order_reconciliation_state
+        SET state='rejected', broker_status='rejected',
+            reconciled_at=now(), last_error_code=NULL, updated_at=now()
+        WHERE order_id=%s
+        """,
+        (order_id,),
+    )
+    rejected_response = get_fired_signals(
+        cursor=None,
+        limit=50,
+        strategy_id=strategy_id,
+        conn=ebull_test_conn,
+    )
+    rejected = next(item for item in rejected_response.items if item.signal_id == signal_id).trade_lifecycle
+    assert rejected is not None
+    assert rejected.latest_reconciliation_state == "rejected"
+    assert rejected.latest_reconciliation_error is None
+    assert rejected.incomplete_reasons == ["position_operation_reconciliation_rejected"]
+
+
+def test_fired_signal_fails_closed_on_released_position_without_close_history(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    instrument_id = 2453007
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-05",
+        fill_price=Decimal("14"),
+    )
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=_deployment(ebull_test_conn, strategy_id, strategy_version),
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (
+            strategy_trade_id, broker_position_id, status, released_at, release_reason
+        ) VALUES (%s, 7453007, 'released', now(), 'position_disappeared')
+        """,
+        (trade_id,),
+    )
+    ebull_test_conn.execute(
+        "UPDATE strategy_trades SET status='closed' WHERE strategy_trade_id=%s",
+        (trade_id,),
+    )
+
+    response = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+    lifecycle = next(item for item in response.items if item.signal_id == signal_id).trade_lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.close_history_status == "incomplete"
+    assert lifecycle.realised_pnl_usd is None
+    assert lifecycle.observed_fees_usd is None
+    assert lifecycle.incomplete_reasons == ["released_position_missing_close_history"]
+
+
+def test_fired_signal_never_returns_a_partial_close_money_pair(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    instrument_id = 2453012
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-05",
+        fill_price=Decimal("15"),
+    )
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=_deployment(ebull_test_conn, strategy_id, strategy_version),
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (
+            strategy_trade_id, broker_position_id, status, released_at, release_reason
+        ) VALUES (%s, 7453012, 'released', now(), 'broker_close_observed')
+        """,
+        (trade_id,),
+    )
+    ebull_test_conn.execute(
+        "UPDATE strategy_trades SET status='closed' WHERE strategy_trade_id=%s",
+        (trade_id,),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id, etoro_instrument_id, instrument_id, event_kind, side,
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+        ) VALUES (7453012, %s, %s, 'close', 'sell', 1, 16, now(), 2, NULL,
+                  'etoro_history', '{}'::jsonb)
+        """,
+        (instrument_id, instrument_id),
+    )
+
+    response = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+    lifecycle = next(item for item in response.items if item.signal_id == signal_id).trade_lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.close_event_count == 1
+    assert lifecycle.close_history_status == "incomplete"
+    assert lifecycle.realised_pnl_usd is None
+    assert lifecycle.observed_fees_usd is None
+    assert lifecycle.incomplete_reasons == ["realised_pnl_missing_from_history"]
+
+
+def test_fired_signal_does_not_choose_between_ambiguous_position_owners(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    strategy_id = "s1-time-series-momentum"
+    strategy_version = _current_versions()[strategy_id]
+    instrument_id = 2453008
+    _instrument(ebull_test_conn, instrument_id)
+    signal_id = _signal(
+        ebull_test_conn,
+        instrument_id=instrument_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_date="2026-08-06",
+        fill_price=Decimal("16"),
+    )
+    trade_id = _funded_trade(
+        ebull_test_conn,
+        signal_id=signal_id,
+        deployment_id=_deployment(ebull_test_conn, strategy_id, strategy_version),
+        instrument_id=instrument_id,
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO strategy_position_ownership (
+            strategy_trade_id, broker_position_id, status, released_at, release_reason
+        ) VALUES
+            (%s, 7453008, 'released', now(), 'first_claim_released'),
+            (%s, 7453009, 'released', now(), 'second_claim_released')
+        """,
+        (trade_id, trade_id),
+    )
+    ebull_test_conn.execute(
+        """
+        INSERT INTO trade_events (
+            position_id, etoro_instrument_id, instrument_id, event_kind, side,
+            units, price, executed_at, fees_usd, realized_pnl_usd, source, raw_payload
+        ) VALUES
+            (7453008, %s, %s, 'close', 'sell', 1, 17, now() - interval '1 minute',
+             1, 4, 'etoro_history', '{}'::jsonb),
+            (7453009, %s, %s, 'close', 'sell', 1, 18, now(),
+             2, 5, 'etoro_history', '{}'::jsonb)
+        """,
+        (instrument_id, instrument_id, instrument_id, instrument_id),
+    )
+
+    response = get_fired_signals(cursor=None, limit=50, strategy_id=strategy_id, conn=ebull_test_conn)
+    matching = [item for item in response.items if item.signal_id == signal_id]
+    assert len(matching) == 1
+    lifecycle = matching[0].trade_lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.ownership_count == 2
+    assert lifecycle.broker_position_id is None
+    assert lifecycle.ownership_status is None
+    assert lifecycle.latest_operation_status is None
+    assert lifecycle.close_history_status == "unavailable"
+    assert lifecycle.close_event_count is None
+    assert lifecycle.realised_pnl_usd is None
+    assert lifecycle.observed_fees_usd is None
+    assert lifecycle.incomplete_reasons == ["position_ownership_ambiguous"]
 
 
 def _session(username: str = "allocation-operator") -> SessionRow:

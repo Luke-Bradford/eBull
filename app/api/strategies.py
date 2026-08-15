@@ -721,6 +721,43 @@ class StrategyPositionCloseResponse(BaseModel):
     operation_id: int | None
 
 
+StrategyTradeStatus = Literal["planned", "submitted", "open", "closing", "closed", "failed", "reconcile_required"]
+StrategyOperationStatus = Literal["intent_persisted", "submitted", "applied", "rejected", "reconcile_required"]
+StrategyReconciliationState = Literal[
+    "unresolved", "pending", "resolved", "rejected", "not_found", "ambiguous", "error"
+]
+StrategyCloseHistoryStatus = Literal["not_applicable", "not_closed", "complete", "incomplete", "unavailable"]
+
+
+class StrategyTradeLifecycle(BaseModel):
+    trade_status: StrategyTradeStatus | None
+    ownership_count: int
+    broker_position_id: int | None
+    ownership_status: Literal["active", "released"] | None
+    position_claimed_at: datetime | None
+    position_released_at: datetime | None
+    position_release_reason: str | None
+    latest_operation_type: Literal["fixed_exit_repair", "stop_ratchet", "close"] | None
+    latest_operation_id: int | None
+    latest_operation_order_id: int | None
+    latest_operation_trigger: str | None
+    latest_operation_status: StrategyOperationStatus | None
+    latest_operation_created_at: datetime | None
+    latest_operation_submitted_at: datetime | None
+    latest_operation_resolved_at: datetime | None
+    latest_operation_error: str | None
+    latest_reconciliation_state: StrategyReconciliationState | None
+    latest_reconciliation_broker_status: str | None
+    latest_reconciliation_attempt_count: int | None
+    latest_reconciliation_updated_at: datetime | None
+    latest_reconciliation_error: str | None
+    close_event_count: int | None
+    realised_pnl_usd: Decimal | None
+    observed_fees_usd: Decimal | None
+    close_history_status: StrategyCloseHistoryStatus
+    incomplete_reasons: list[str]
+
+
 class FiredSignal(BaseModel):
     signal_id: int
     strategy_id: str
@@ -745,6 +782,7 @@ class FiredSignal(BaseModel):
     execution_status: str | None
     actual_fill_price: Decimal | None
     slippage_pct: Decimal | None
+    trade_lifecycle: StrategyTradeLifecycle | None
 
 
 class FiredSignalsResponse(BaseModel):
@@ -1983,6 +2021,40 @@ _FIRED_SIGNALS_SQL = """
         JOIN orders ord ON ord.order_id = sto.order_id
         WHERE sto.purpose = 'entry'
         ORDER BY sto.strategy_trade_id, sto.linked_at DESC, sto.order_id DESC
+    ), ownership_rollup AS (
+        SELECT t.strategy_trade_id,
+               COUNT(own.ownership_id)::integer AS ownership_count,
+               CASE WHEN COUNT(own.ownership_id) = 1 THEN MAX(own.broker_position_id) END
+                   AS broker_position_id,
+               CASE WHEN COUNT(own.ownership_id) = 1 THEN MAX(own.status) END AS ownership_status,
+               CASE WHEN COUNT(own.ownership_id) = 1 THEN MAX(own.claimed_at) END AS claimed_at,
+               CASE WHEN COUNT(own.ownership_id) = 1 THEN MAX(own.released_at) END AS released_at,
+               CASE WHEN COUNT(own.ownership_id) = 1 THEN MAX(own.release_reason) END AS release_reason
+        FROM strategy_trades t
+        LEFT JOIN strategy_position_ownership own ON own.strategy_trade_id = t.strategy_trade_id
+        GROUP BY t.strategy_trade_id
+    ), latest_operation AS (
+        SELECT DISTINCT ON (own.strategy_trade_id)
+               own.strategy_trade_id, op.position_operation_id, op.order_id,
+               op.operation_type, op.trigger_code, op.status,
+               op.created_at, op.submitted_at, op.resolved_at, op.last_error_code
+        FROM strategy_position_ownership own
+        JOIN strategy_position_operations op ON op.ownership_id = own.ownership_id
+        ORDER BY own.strategy_trade_id, op.position_operation_id DESC
+    ), close_history AS (
+        SELECT own.strategy_trade_id,
+               COUNT(event.event_id)::integer AS close_event_count,
+               SUM(event.realized_pnl_usd) AS realised_pnl_usd,
+               SUM(event.fees_usd) AS observed_fees_usd,
+               BOOL_AND(event.realized_pnl_usd IS NOT NULL)
+                   FILTER (WHERE event.event_id IS NOT NULL) AS pnl_complete,
+               BOOL_AND(event.fees_usd IS NOT NULL)
+                   FILTER (WHERE event.event_id IS NOT NULL) AS fees_complete
+        FROM strategy_position_ownership own
+        LEFT JOIN trade_events event
+          ON event.position_id = own.broker_position_id
+         AND event.event_kind = 'close'
+        GROUP BY own.strategy_trade_id
     )
     SELECT
         s.signal_id, s.strategy_id, s.strategy_version, s.instrument_id,
@@ -2006,7 +2078,33 @@ _FIRED_SIGNALS_SQL = """
             ELSE COALESCE(eo.status, t.status)
         END AS execution_status,
         ee.average_price AS actual_fill_price,
-        ((ee.average_price - s.fill_price) / NULLIF(s.fill_price, 0)) * 100 AS slippage_pct
+        ((ee.average_price - s.fill_price) / NULLIF(s.fill_price, 0)) * 100 AS slippage_pct,
+        t.status AS lifecycle_trade_status,
+        COALESCE(ownership.ownership_count, 0) AS lifecycle_ownership_count,
+        ownership.broker_position_id AS lifecycle_broker_position_id,
+        ownership.ownership_status AS lifecycle_ownership_status,
+        ownership.claimed_at AS lifecycle_claimed_at,
+        ownership.released_at AS lifecycle_released_at,
+        ownership.release_reason AS lifecycle_release_reason,
+        operation.operation_type AS lifecycle_operation_type,
+        operation.position_operation_id AS lifecycle_operation_id,
+        operation.order_id AS lifecycle_operation_order_id,
+        operation.trigger_code AS lifecycle_operation_trigger,
+        operation.status AS lifecycle_operation_status,
+        operation.created_at AS lifecycle_operation_created_at,
+        operation.submitted_at AS lifecycle_operation_submitted_at,
+        operation.resolved_at AS lifecycle_operation_resolved_at,
+        operation.last_error_code AS lifecycle_operation_error,
+        reconciliation.state AS lifecycle_reconciliation_state,
+        reconciliation.broker_status AS lifecycle_reconciliation_broker_status,
+        reconciliation.attempt_count AS lifecycle_reconciliation_attempt_count,
+        reconciliation.updated_at AS lifecycle_reconciliation_updated_at,
+        reconciliation.last_error_code AS lifecycle_reconciliation_error,
+        COALESCE(history.close_event_count, 0) AS lifecycle_close_event_count,
+        history.realised_pnl_usd AS lifecycle_realised_pnl_usd,
+        history.observed_fees_usd AS lifecycle_observed_fees_usd,
+        history.pnl_complete AS lifecycle_pnl_complete,
+        history.fees_complete AS lifecycle_fees_complete
     FROM strategy_signals s
     JOIN instruments i ON i.instrument_id = s.instrument_id
     LEFT JOIN strategy_outcomes o
@@ -2017,6 +2115,13 @@ _FIRED_SIGNALS_SQL = """
     LEFT JOIN strategy_trades t ON t.funding_decision_id = fd.funding_decision_id
     LEFT JOIN entry_execution ee ON ee.strategy_trade_id = t.strategy_trade_id
     LEFT JOIN entry_order eo ON eo.strategy_trade_id = t.strategy_trade_id
+    LEFT JOIN ownership_rollup ownership ON ownership.strategy_trade_id = t.strategy_trade_id
+    LEFT JOIN latest_operation operation
+      ON operation.strategy_trade_id = t.strategy_trade_id
+     AND ownership.ownership_count = 1
+    LEFT JOIN strategy_order_reconciliation_state reconciliation
+      ON reconciliation.order_id = operation.order_id
+    LEFT JOIN close_history history ON history.strategy_trade_id = t.strategy_trade_id
     WHERE s.verdict = 'fired'
       AND s.strategy_version = ANY(%(versions)s)
       AND (%(strategy_id)s::text IS NULL OR s.strategy_id = %(strategy_id)s)
@@ -2024,6 +2129,132 @@ _FIRED_SIGNALS_SQL = """
     ORDER BY s.signal_id DESC
     LIMIT %(limit)s
 """
+
+
+def _trade_lifecycle(row: Mapping[str, object]) -> StrategyTradeLifecycle | None:
+    if row["funding_status"] != "funded":
+        return None
+
+    trade_status = cast(str | None, row["lifecycle_trade_status"])
+    ownership_count = int(cast(int, row["lifecycle_ownership_count"]))
+    raw_close_event_count = int(cast(int, row["lifecycle_close_event_count"]))
+    ownership_status = cast(str | None, row["lifecycle_ownership_status"])
+    reasons: list[str] = []
+    history_reasons: list[str] = []
+
+    if row["strategy_trade_id"] is None:
+        reasons.append("funding_not_reconciled_to_trade")
+    elif ownership_count == 0:
+        if trade_status not in {"planned", "submitted", "failed"}:
+            reasons.append("trade_not_reconciled_to_position")
+    elif ownership_count > 1:
+        reasons.append("position_ownership_ambiguous")
+    else:
+        if row["lifecycle_broker_position_id"] is None or ownership_status is None:
+            reasons.append("position_ownership_incomplete")
+        if raw_close_event_count == 0 and ownership_status == "released":
+            history_reasons.append("released_position_missing_close_history")
+        if raw_close_event_count > 0:
+            if row["lifecycle_pnl_complete"] is not True:
+                history_reasons.append("realised_pnl_missing_from_history")
+            if row["lifecycle_fees_complete"] is not True:
+                history_reasons.append("fees_missing_from_history")
+        if trade_status == "closed" and ownership_status == "active":
+            reasons.append("closed_trade_has_active_ownership")
+        if ownership_status == "released" and trade_status not in {"closed", "failed"}:
+            reasons.append("released_ownership_trade_not_closed")
+
+    operation_status = row["lifecycle_operation_status"]
+    reconciliation_state = row["lifecycle_reconciliation_state"]
+    if operation_status == "rejected":
+        reasons.append("position_operation_rejected")
+    elif operation_status == "reconcile_required":
+        reasons.append("position_operation_reconciliation_required")
+    if row["lifecycle_operation_error"] is not None:
+        reasons.append("position_operation_error")
+    if reconciliation_state in {"not_found", "ambiguous", "error", "rejected"}:
+        reasons.append(f"position_operation_reconciliation_{reconciliation_state}")
+    if row["lifecycle_reconciliation_error"] is not None and reconciliation_state not in {
+        "not_found",
+        "ambiguous",
+        "error",
+    }:
+        reasons.append("position_operation_reconciliation_error")
+    reasons.extend(history_reasons)
+
+    if trade_status == "failed" and ownership_count == 0:
+        close_history_status: StrategyCloseHistoryStatus = "not_applicable"
+    elif ownership_count == 0 and trade_status in {"planned", "submitted"}:
+        close_history_status = "not_closed"
+    elif row["strategy_trade_id"] is None or ownership_count != 1:
+        close_history_status = "unavailable"
+    elif history_reasons:
+        close_history_status = "incomplete"
+    elif raw_close_event_count == 0:
+        close_history_status = "not_closed"
+    else:
+        close_history_status = "complete"
+
+    history_complete = (
+        ownership_count == 1
+        and raw_close_event_count > 0
+        and row["lifecycle_pnl_complete"] is True
+        and row["lifecycle_fees_complete"] is True
+    )
+    return StrategyTradeLifecycle(
+        trade_status=cast(StrategyTradeStatus | None, trade_status),
+        ownership_count=ownership_count,
+        broker_position_id=(
+            int(cast(int, row["lifecycle_broker_position_id"]))
+            if ownership_count == 1 and row["lifecycle_broker_position_id"] is not None
+            else None
+        ),
+        ownership_status=cast(Literal["active", "released"] | None, ownership_status),
+        position_claimed_at=cast(datetime | None, row["lifecycle_claimed_at"]),
+        position_released_at=cast(datetime | None, row["lifecycle_released_at"]),
+        position_release_reason=cast(str | None, row["lifecycle_release_reason"]),
+        latest_operation_type=cast(
+            Literal["fixed_exit_repair", "stop_ratchet", "close"] | None,
+            row["lifecycle_operation_type"],
+        ),
+        latest_operation_id=(
+            int(cast(int, row["lifecycle_operation_id"])) if row["lifecycle_operation_id"] is not None else None
+        ),
+        latest_operation_order_id=(
+            int(cast(int, row["lifecycle_operation_order_id"]))
+            if row["lifecycle_operation_order_id"] is not None
+            else None
+        ),
+        latest_operation_trigger=cast(str | None, row["lifecycle_operation_trigger"]),
+        latest_operation_status=cast(StrategyOperationStatus | None, row["lifecycle_operation_status"]),
+        latest_operation_created_at=cast(datetime | None, row["lifecycle_operation_created_at"]),
+        latest_operation_submitted_at=cast(datetime | None, row["lifecycle_operation_submitted_at"]),
+        latest_operation_resolved_at=cast(datetime | None, row["lifecycle_operation_resolved_at"]),
+        latest_operation_error=cast(str | None, row["lifecycle_operation_error"]),
+        latest_reconciliation_state=cast(StrategyReconciliationState | None, row["lifecycle_reconciliation_state"]),
+        latest_reconciliation_broker_status=cast(str | None, row["lifecycle_reconciliation_broker_status"]),
+        latest_reconciliation_attempt_count=(
+            int(cast(int, row["lifecycle_reconciliation_attempt_count"]))
+            if row["lifecycle_reconciliation_attempt_count"] is not None
+            else None
+        ),
+        latest_reconciliation_updated_at=cast(datetime | None, row["lifecycle_reconciliation_updated_at"]),
+        latest_reconciliation_error=cast(str | None, row["lifecycle_reconciliation_error"]),
+        close_event_count=(
+            raw_close_event_count
+            if ownership_count == 1 or (ownership_count == 0 and trade_status in {"planned", "submitted", "failed"})
+            else None
+        ),
+        realised_pnl_usd=(Decimal(str(row["lifecycle_realised_pnl_usd"])) if history_complete else None),
+        observed_fees_usd=(Decimal(str(row["lifecycle_observed_fees_usd"])) if history_complete else None),
+        close_history_status=close_history_status,
+        incomplete_reasons=reasons,
+    )
+
+
+def _fired_signal(row: Mapping[str, object]) -> FiredSignal:
+    base = {key: value for key, value in row.items() if not key.startswith("lifecycle_")}
+    return FiredSignal.model_validate({**base, "trade_lifecycle": _trade_lifecycle(row)})
 
 
 @router.get("/signals", response_model=FiredSignalsResponse)
@@ -2046,7 +2277,7 @@ def get_fired_signals(
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(_FIRED_SIGNALS_SQL, params)
         rows = list(cur.fetchall())
-    items = [FiredSignal(**row) for row in rows]
+    items = [_fired_signal(row) for row in rows]
     return FiredSignalsResponse(items=items, next_cursor=items[-1].signal_id if len(items) == limit else None)
 
 

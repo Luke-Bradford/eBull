@@ -348,6 +348,21 @@ const REFUSAL_LABELS: Record<string, string> = {
   prospective_assessment_missing: "No current prospective forecast assessment exists",
   prospective_assessment_not_passed: "Recent forecast probabilities failed validation",
   prospective_assessment_stale: "Prospective forecast validation is stale",
+  funding_not_reconciled_to_trade: "Funded decision has not reconciled to a strategy trade",
+  trade_not_reconciled_to_position: "Strategy trade has not reconciled to a broker position",
+  position_ownership_ambiguous: "More than one broker-position ownership record exists",
+  position_ownership_incomplete: "Broker-position ownership is incomplete",
+  released_position_missing_close_history: "Released position is missing broker close history",
+  realised_pnl_missing_from_history: "Broker close history is missing realised P&L",
+  fees_missing_from_history: "Broker close history is missing fees",
+  closed_trade_has_active_ownership: "Closed trade still has active broker-position ownership",
+  released_ownership_trade_not_closed: "Released broker-position ownership belongs to a trade not marked closed",
+  position_operation_rejected: "Latest broker-position operation was rejected",
+  position_operation_reconciliation_required: "Latest broker-position operation requires reconciliation",
+  position_operation_error: "Latest broker-position operation recorded an error",
+  position_operation_reconciliation_not_found: "Latest operation was not found at the broker",
+  position_operation_reconciliation_ambiguous: "Latest operation has ambiguous broker reconciliation",
+  position_operation_reconciliation_error: "Latest operation reconciliation failed",
 };
 
 function refusalLabel(refusal: string): string {
@@ -554,6 +569,23 @@ function outcomeLabel(signal: FiredSignal): string {
   return signal.outcome.replaceAll("_", " ");
 }
 
+function lifecycleTone(signal: FiredSignal): "ok" | "neutral" | "warn" | "risk" | "info" {
+  const lifecycle = signal.trade_lifecycle;
+  if (lifecycle === null) return "neutral";
+  if (lifecycle.trade_status === "failed" || lifecycle.trade_status === "reconcile_required") return "risk";
+  if (lifecycle.incomplete_reasons.length > 0) return "risk";
+  if (lifecycle.trade_status === "closed") return "ok";
+  if (lifecycle.trade_status === "closing") return "warn";
+  if (lifecycle.trade_status === "open") return "info";
+  return "neutral";
+}
+
+function lifecycleLabel(signal: FiredSignal): string {
+  const lifecycle = signal.trade_lifecycle;
+  if (lifecycle === null) return signal.funding_status === "funded" ? "Trade unavailable" : "No funded trade";
+  return lifecycle.trade_status?.replaceAll("_", " ") ?? "Trade unavailable";
+}
+
 function StrategyActivity({
   response,
   strategyTitles,
@@ -613,14 +645,16 @@ function StrategyActivity({
       ) : (
         <>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[72rem]">
+            <table className="w-full min-w-[88rem]">
               <thead className="border-t border-slate-200 text-left text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:border-slate-800">
                 <tr>
                   <th className="px-4 py-2">Signal</th>
                   <th className="px-4 py-2">Strategy</th>
                   <th className="px-4 py-2">Allocation</th>
                   <th className="px-4 py-2">Execution</th>
+                  <th className="px-4 py-2">Trade lifecycle</th>
                   <th className="px-4 py-2 text-right">Model / actual fill</th>
+                  <th className="px-4 py-2 text-right">Broker close / P&amp;L</th>
                   <th className="px-4 py-2 text-right">Signal outcome</th>
                 </tr>
               </thead>
@@ -649,10 +683,64 @@ function StrategyActivity({
                         <span className="capitalize">{executionLabel(signal)}</span>
                         <span className="mt-1 block text-slate-500">{signal.strategy_trade_id === null ? "No strategy trade" : `Trade #${signal.strategy_trade_id}`}</span>
                       </td>
+                      <td className="px-4 py-3 text-xs">
+                        <Badge tone={lifecycleTone(signal)}><span className="capitalize">{lifecycleLabel(signal)}</span></Badge>
+                        {signal.trade_lifecycle ? (
+                          <>
+                            <span className="mt-1 block text-slate-500">
+                              {signal.trade_lifecycle.broker_position_id !== null
+                                ? `Position #${signal.trade_lifecycle.broker_position_id} · ${signal.trade_lifecycle.ownership_status}`
+                                : signal.trade_lifecycle.ownership_count > 1
+                                  ? `${signal.trade_lifecycle.ownership_count} ownership records · ambiguous`
+                                  : "Broker position unavailable"}
+                            </span>
+                            {signal.trade_lifecycle.latest_operation_type ? (
+                              <>
+                                <span className="mt-1 block capitalize">
+                                  {signal.trade_lifecycle.latest_operation_type.replaceAll("_", " ")} · {signal.trade_lifecycle.latest_operation_status?.replaceAll("_", " ") ?? "state unavailable"}
+                                </span>
+                                <span className="block text-slate-500">
+                                  {signal.trade_lifecycle.latest_operation_id === null ? "Operation identity unavailable" : `Operation #${signal.trade_lifecycle.latest_operation_id}`}
+                                  {signal.trade_lifecycle.latest_operation_order_id === null ? "" : ` · order #${signal.trade_lifecycle.latest_operation_order_id}`}
+                                </span>
+                              </>
+                            ) : null}
+                            {signal.trade_lifecycle.latest_operation_trigger ? <span className="block text-slate-500">{refusalLabel(signal.trade_lifecycle.latest_operation_trigger)}</span> : null}
+                            {signal.trade_lifecycle.latest_operation_error ? <span className="block text-red-700 dark:text-red-300">{refusalLabel(signal.trade_lifecycle.latest_operation_error)}</span> : null}
+                            {signal.trade_lifecycle.latest_reconciliation_state ? (
+                              <span className="block text-slate-500 capitalize">
+                                Reconciliation {signal.trade_lifecycle.latest_reconciliation_state.replaceAll("_", " ")}
+                                {signal.trade_lifecycle.latest_reconciliation_broker_status ? ` · broker ${signal.trade_lifecycle.latest_reconciliation_broker_status.replaceAll("_", " ")}` : ""}
+                              </span>
+                            ) : null}
+                            {signal.trade_lifecycle.latest_reconciliation_error ? <span className="block text-red-700 dark:text-red-300">{refusalLabel(signal.trade_lifecycle.latest_reconciliation_error)}</span> : null}
+                          </>
+                        ) : null}
+                      </td>
                       <td className="px-4 py-3 text-right text-xs tabular-nums">
                         <span className="block">{money(signal.fill_price)}</span>
                         <span className="text-slate-500">{signal.actual_fill_price === null ? "Actual —" : `${money(signal.actual_fill_price)} actual`}</span>
                         {signal.slippage_pct !== null ? <span className="block text-slate-500">{pctPoints(signal.slippage_pct)} slippage</span> : null}
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs">
+                        {signal.trade_lifecycle === null ? (
+                          <span className="text-slate-500">Not applicable</span>
+                        ) : signal.trade_lifecycle.close_history_status === "not_applicable" ? (
+                          <span className="text-slate-500">No broker position opened</span>
+                        ) : signal.trade_lifecycle.close_history_status === "not_closed" ? (
+                          <span className="text-slate-500">No broker close yet</span>
+                        ) : signal.trade_lifecycle.close_history_status === "complete" ? (
+                          <>
+                            <span className="block">{signal.trade_lifecycle.close_event_count ?? 0} close event{signal.trade_lifecycle.close_event_count === 1 ? "" : "s"}</span>
+                            <span className="mt-1 block font-semibold tabular-nums">{money(signal.trade_lifecycle.realised_pnl_usd)} realised</span>
+                            <span className="block text-slate-500 tabular-nums">{money(signal.trade_lifecycle.observed_fees_usd)} fees</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="block text-red-700 dark:text-red-300">Close history {signal.trade_lifecycle.close_history_status}</span>
+                            <span className="mt-1 block max-w-64 text-slate-500">{signal.trade_lifecycle.incomplete_reasons.map(refusalLabel).join(" · ")}</span>
+                          </>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right text-xs">
                         <span className="block capitalize">{outcomeLabel(signal)}</span>
