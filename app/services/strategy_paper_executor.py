@@ -35,6 +35,7 @@ from app.services.broker_settlement_arms import select_underlying_long_arms
 from app.services.cost_model import COST_MODEL_ID
 from app.services.market_calendar import us_market_status
 from app.services.price_masked_bars import QUARANTINE_RULE_SET_VERSION
+from app.services.result_ledger import holdout_access_counts, stored_result_promotion_refusals_for
 from app.services.runtime_config import RuntimeConfigCorrupt, get_runtime_config
 from app.services.strategy_base_currency import (
     DEPLOYMENT_CURRENCY_UNSUPPORTED,
@@ -61,6 +62,7 @@ from app.services.strategy_order_reconciliation import (
     ensure_strategy_request_id,
     reconcile_strategy_order,
 )
+from app.services.strategy_result import holdout_count_promotion_refusals
 
 _NY = ZoneInfo("America/New_York")
 _CENT = Decimal("0.01")
@@ -430,6 +432,13 @@ def _load_intent(
         row = cur.fetchone()
     if row is None:
         return None, "signal_not_fired_entry", False
+    pinned_refusal = _pinned_result_evidence_refusal(
+        conn,
+        strategy_id=str(row["strategy_id"]),
+        strategy_version=str(row["strategy_version"]),
+    )
+    if pinned_refusal is not None:
+        return None, pinned_refusal, True
     checks = (
         (bool(row["is_tradable"]), "instrument_not_tradable"),
         (row["asset_class"] == "us_equity", "unsupported_market_session"),
@@ -663,6 +672,42 @@ def _persist_rejection(
             ),
         )
     return PaperExecutionResult(signal_id, "rejected", reason_code)
+
+
+def _pinned_result_evidence_refusal(
+    conn: psycopg.Connection[Any],
+    *,
+    strategy_id: str,
+    strategy_version: str,
+) -> str | None:
+    """Replay current result policy over the exact paper-promotion pins."""
+    rows = conn.execute(
+        """
+        SELECT pr.result_id
+        FROM strategy_promotions promotion
+        JOIN strategy_promotion_results pr ON pr.promotion_id=promotion.promotion_id
+        WHERE promotion.strategy_id=%s AND promotion.strategy_version=%s
+          AND promotion.to_stage='paper_enabled'
+        ORDER BY pr.result_id
+        """,
+        (strategy_id, strategy_version),
+    ).fetchall()
+    result_ids = [int(row[0]) for row in rows]
+    if not result_ids:
+        return "pinned_promotion_evidence_invalid"
+    exposure = holdout_access_counts(conn, strategy_id, strategy_version)
+    if holdout_count_promotion_refusals(
+        holdout_evaluations=exposure.holdout_evaluations,
+        recorded_accesses=exposure.recorded_accesses,
+    ):
+        return "pinned_promotion_evidence_invalid"
+    try:
+        refusals = stored_result_promotion_refusals_for(conn, result_ids)
+    except RuntimeError:
+        return "pinned_promotion_evidence_invalid"
+    if any(refusals[result_id] for result_id in result_ids):
+        return "pinned_promotion_evidence_invalid"
+    return None
 
 
 def _eligibility_reason(response: BrokerEligibilityResponse, intent: _Intent, amount: Decimal) -> str | None:
