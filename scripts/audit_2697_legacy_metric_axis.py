@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Outcome-blind structural audit of run 98349 for #2697.
+"""Outcome-blind structural audit of an explicitly named legacy run for #2697.
 
 This script deliberately never selects a performance, trade, comparator,
 bootstrap, deflation, or synthetic-control value. It establishes only that the
@@ -10,6 +10,7 @@ current promotion rule as ``metric_axis_unproven``.
 
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -31,8 +32,13 @@ from scripts.audit_2745_in_sample_run import (
     EXPECTED_KEYS,
     EXPECTED_STRATEGY_VERSIONS,
     EXPECTED_TRIAL_COUNT,
-    RUN_ID,
 )
+
+_EXPECTED_PARAMS: Final = {
+    "synthetic_control": True,
+    "trial_register_version": "trial-register-2026-08-15-r6",
+}
+_EXPECTED_REQUEST_ID: Final = 408
 
 _AXIS_FIELDS: Final = (
     "metric_axis_rule_version",
@@ -54,12 +60,13 @@ class _NoMetricAccess:
 
 @dataclass(frozen=True)
 class StructuralAudit:
+    run_id: int
     failures: tuple[str, ...]
     result_ids: tuple[int, ...]
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "run_id": RUN_ID,
+            "run_id": self.run_id,
             "audit": "metric-axis-legacy-structural-only",
             "performance_fields_read": False,
             "result_ids": list(self.result_ids),
@@ -91,7 +98,7 @@ def _identity(row: dict[str, Any]) -> ResultIdentity:
     )
 
 
-def audit_rows(rows: list[dict[str, Any]]) -> StructuralAudit:
+def audit_rows(rows: list[dict[str, Any]], *, run_id: int) -> StructuralAudit:
     failures: list[str] = []
     keyed: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
@@ -135,6 +142,7 @@ def audit_rows(rows: list[dict[str, Any]]) -> StructuralAudit:
     if extra:
         failures.append(f"unexpected result keys: {extra}")
     return StructuralAudit(
+        run_id=run_id,
         failures=tuple(sorted(set(failures))),
         result_ids=tuple(sorted(int(row["result_id"]) for row in rows)),
     )
@@ -158,27 +166,91 @@ ORDER BY strategy_id, ambiguity_arm, quarantine_arm, result_id
 """
 
 
+def invocation_failures(
+    *,
+    job_name: object,
+    params: object,
+    request_id: object,
+    request: tuple[object, object] | None,
+) -> tuple[str, ...]:
+    """Validate exact run/request provenance without consulting result relations."""
+    failures: list[str] = []
+    if job_name != "strategy_backtest_run":
+        failures.append(f"unexpected job name {job_name!r}")
+    if params != _EXPECTED_PARAMS:
+        failures.append("job params_snapshot is not the exact declared r6 payload")
+    if request_id != _EXPECTED_REQUEST_ID:
+        failures.append(f"linked request {request_id!r} is not exact request {_EXPECTED_REQUEST_ID}")
+    if request is None:
+        failures.append(f"linked request {request_id!r} is missing")
+    else:
+        request_job_name, payload = request
+        if request_job_name != job_name:
+            failures.append("linked request job name differs from run")
+        if payload != {"control": {}, "params": _EXPECTED_PARAMS}:
+            failures.append("linked request is not the exact declared r6 payload")
+    return tuple(failures)
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run-id", type=int, required=True)
+    args = parser.parse_args()
+    if args.run_id <= 0:
+        parser.error("--run-id must be positive")
+
     with psycopg.connect(settings.database_url) as conn:
         job = conn.execute(
-            "SELECT status, started_at, finished_at, row_count, error_msg FROM job_runs WHERE run_id = %s",
-            (RUN_ID,),
+            """SELECT job_name, status, started_at, finished_at, row_count,
+                      error_msg, linked_request_id, params_snapshot
+               FROM job_runs WHERE run_id = %s""",
+            (args.run_id,),
         ).fetchone()
         if job is None:
-            print(json.dumps({"run_id": RUN_ID, "state": "missing"}, sort_keys=True))
+            print(json.dumps({"run_id": args.run_id, "state": "missing"}, sort_keys=True))
             return 2
-        status, started_at, finished_at, job_row_count, error = job
+        job_name, status, started_at, finished_at, job_row_count, error, request_id, params = job
         if status != "success" or finished_at is None:
-            print(json.dumps({"run_id": RUN_ID, "state": status, "error": error}, sort_keys=True, default=str))
+            print(
+                json.dumps(
+                    {"run_id": args.run_id, "state": status, "error": error},
+                    sort_keys=True,
+                    default=str,
+                )
+            )
             return 2
+        request = conn.execute(
+            "SELECT job_name, payload FROM pending_job_requests WHERE request_id = %s",
+            (request_id,),
+        ).fetchone()
+        provenance_failures = invocation_failures(
+            job_name=job_name,
+            params=params,
+            request_id=request_id,
+            request=request,
+        )
+        if provenance_failures:
+            print(
+                json.dumps(
+                    {
+                        "run_id": args.run_id,
+                        "audit": "metric-axis-legacy-structural-only",
+                        "performance_fields_read": False,
+                        "failures": provenance_failures,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 1
         with conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(_RESULT_SQL, {"started_at": started_at, "finished_at": finished_at})
             rows = list(cursor.fetchall())
-        report = audit_rows(rows)
+        report = audit_rows(rows, run_id=args.run_id)
         failures = list(report.failures)
         if job_row_count != len(EXPECTED_KEYS):
             failures.append(f"job row_count {job_row_count!r} != {len(EXPECTED_KEYS)}")
-            report = StructuralAudit(tuple(sorted(set(failures))), report.result_ids)
+            report = StructuralAudit(args.run_id, tuple(sorted(set(failures))), report.result_ids)
         print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
         return 1 if report.failures else 0
 

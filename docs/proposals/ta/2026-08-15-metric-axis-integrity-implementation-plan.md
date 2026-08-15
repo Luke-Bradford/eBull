@@ -124,8 +124,10 @@ Spec: `docs/proposals/ta/2026-08-15-metric-axis-integrity.md`.
 
 ## 6. Gate, review, merge and rerun
 
-1. After worker 98349 releases the database lock/CPU window, run
-   `scripts.audit_2697_legacy_metric_axis` first. It reads identity/provenance
+1. After the legacy worker releases the database lock/CPU window, run
+   `scripts.audit_2697_legacy_metric_axis --run-id <completed-run-id>` first.
+   The run ID is mandatory so a failed/orphaned attempt cannot be silently
+   substituted. It reads invocation identity plus result identity/provenance
    fields only, requires the exact 40-row population, and proves every legacy
    row is refused as `metric_axis_unproven` without consulting a metric. Then
    run focused pure/DB tests, migration smoke, the full in-sample A/B, its
@@ -135,8 +137,9 @@ Spec: `docs/proposals/ta/2026-08-15-metric-axis-integrity.md`.
 2. Self-review, run the required semantic diff review, push, read every CI/bot
    response, resolve each explicitly, re-run affected gates and merge only on
    the latest approved green commit.
-3. Record run 98349 as legacy development evidence that is structurally refused
-   by `metric_axis_unproven`; do not interpret its performance.
+3. Record failed run 98349 and its exact-payload retry separately. Only a
+   successful retry may become legacy development evidence, and it remains
+   structurally refused by `metric_axis_unproven`; do not interpret performance.
 4. The MT-1/S-8 declarations were frozen under policy v3 while this known v4
    change was still in flight. Immediately after merge and before either trial
    accesses an outcome, run the policy-only atomic supersession from merged

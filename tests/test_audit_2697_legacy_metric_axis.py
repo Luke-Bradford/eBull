@@ -4,7 +4,7 @@ from datetime import date
 from typing import Any
 
 from app.services.strategy_result import ResultIdentity
-from scripts.audit_2697_legacy_metric_axis import _AXIS_FIELDS, audit_rows
+from scripts.audit_2697_legacy_metric_axis import _AXIS_FIELDS, audit_rows, invocation_failures
 from scripts.audit_2745_in_sample_run import (
     AMBIGUITY_ARMS,
     EXPECTED_IDENTITY,
@@ -66,7 +66,8 @@ def _complete() -> list[dict[str, Any]]:
 
 
 def test_complete_legacy_population_is_structurally_refused_without_metrics() -> None:
-    report = audit_rows(_complete())
+    report = audit_rows(_complete(), run_id=99585)
+    assert report.run_id == 99585
     assert report.failures == ()
     assert len(report.result_ids) == 40
 
@@ -74,11 +75,62 @@ def test_complete_legacy_population_is_structurally_refused_without_metrics() ->
 def test_one_invented_axis_field_fails_the_structural_audit() -> None:
     rows = _complete()
     rows[0]["metric_axis_rule_version"] = "full-namespace-panel-v1"
-    report = audit_rows(rows)
+    report = audit_rows(rows, run_id=99585)
     assert any("invented metric-axis fields" in failure for failure in report.failures)
 
 
 def test_missing_arm_is_an_integrity_failure() -> None:
-    report = audit_rows(_complete()[:-1])
+    report = audit_rows(_complete()[:-1], run_id=99585)
     assert any("published 39 rows" in failure for failure in report.failures)
     assert any("missing result keys" in failure for failure in report.failures)
+
+
+def test_retry_invocation_requires_exact_run_and_request_payloads() -> None:
+    expected = {
+        "synthetic_control": True,
+        "trial_register_version": "trial-register-2026-08-15-r6",
+    }
+    assert (
+        invocation_failures(
+            job_name="strategy_backtest_run",
+            params=expected,
+            request_id=408,
+            request=("strategy_backtest_run", {"control": {}, "params": expected}),
+        )
+        == ()
+    )
+
+    failures = invocation_failures(
+        job_name="strategy_backtest_run",
+        params={**expected, "synthetic_control": False},
+        request_id=408,
+        request=("strategy_backtest_run", {"control": {}, "params": expected}),
+    )
+    assert failures == ("job params_snapshot is not the exact declared r6 payload",)
+
+
+def test_retry_invocation_refuses_missing_linked_request() -> None:
+    failures = invocation_failures(
+        job_name="strategy_backtest_run",
+        params={
+            "synthetic_control": True,
+            "trial_register_version": "trial-register-2026-08-15-r6",
+        },
+        request_id=408,
+        request=None,
+    )
+    assert failures == ("linked request 408 is missing",)
+
+
+def test_retry_invocation_refuses_a_different_identical_request() -> None:
+    expected = {
+        "synthetic_control": True,
+        "trial_register_version": "trial-register-2026-08-15-r6",
+    }
+    failures = invocation_failures(
+        job_name="strategy_backtest_run",
+        params=expected,
+        request_id=409,
+        request=("strategy_backtest_run", {"control": {}, "params": expected}),
+    )
+    assert failures == ("linked request 409 is not exact request 408",)
