@@ -259,7 +259,11 @@ def _row_refusals(row: dict[str, Any], attached: Attachments) -> list[str]:
         != census["universe_vendor_series_total"]
     ):
         refusals.append("termination_census_not_reconciled")
-    trade_count = int(row["trade_count"])
+    if row["trade_count"] is None:
+        refusals.append("trade_count_missing")
+        trade_count = 0
+    else:
+        trade_count = int(row["trade_count"])
     if attached.regime_trade_count != trade_count:
         refusals.append("regime_cohort_trade_count_mismatch")
     if (trade_count == 0) != (attached.regime_row_count == 0):
@@ -342,7 +346,10 @@ def _load_attachments(conn: psycopg.Connection[tuple[Any, ...]], rows: list[dict
             fold_count=0 if folds is None else len(folds.folds),
             walk_forward_model_id=None if folds is None else folds.model_id,
             universe_refusals=universe_promotion_refusals(
-                universe, evaluated_instrument_count=int(row["evaluated_instrument_count"])
+                universe,
+                evaluated_instrument_count=(
+                    0 if row["evaluated_instrument_count"] is None else int(row["evaluated_instrument_count"])
+                ),
             ),
             ambiguity_verdict=None if ambiguity is None else ambiguity_verdict(ambiguity),
             termination_census=census,

@@ -147,3 +147,26 @@ def test_stored_synthetic_control_verdict_is_recomputed() -> None:
     reasons = report.strategy_refusals[str(target["strategy_id"])]
     assert any(reason.endswith(":synthetic_control_cohort_shows_edge") for reason in reasons)
     assert any(reason.endswith(":synthetic_control_stored_verdict_mismatch") for reason in reasons)
+
+
+def test_missing_counts_are_refusals_not_conversion_crashes() -> None:
+    rows, attached = _complete()
+    target = rows[0]
+    target["evaluated_instrument_count"] = None
+    target["trade_count"] = None
+    result_id = int(target["result_id"])
+    original = attached[result_id]
+    attached[result_id] = Attachments(
+        fold_count=original.fold_count,
+        walk_forward_model_id=original.walk_forward_model_id,
+        universe_refusals=("evaluated_universe_count_mismatch",),
+        ambiguity_verdict=original.ambiguity_verdict,
+        termination_census=original.termination_census,
+        regime_trade_count=original.regime_trade_count,
+        regime_row_count=original.regime_row_count,
+    )
+
+    report = audit_rows(rows, attached)
+    reasons = report.strategy_refusals[str(target["strategy_id"])]
+    assert any(reason.endswith(":no_evaluated_population") for reason in reasons)
+    assert any(reason.endswith(":trade_count_missing") for reason in reasons)
