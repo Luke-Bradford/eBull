@@ -3400,6 +3400,21 @@ def _control_for(measurement: ArmMeasurement, namespace: ResultNamespace) -> Syn
     return measurement.cohort.control
 
 
+def _assert_same_opportunity_population(
+    *,
+    strategy_id: str,
+    ambiguity: AmbiguityArm,
+    namespace: ResultNamespace,
+    masked: NamespaceMeasurement,
+    admitted: NamespaceMeasurement,
+) -> None:
+    """Refuse an arm pair whose supposedly pre-mask population moved."""
+    if masked.universe_record != admitted.universe_record:
+        raise RuntimeError(
+            f"{strategy_id}/{ambiguity}/{namespace} quarantine arms carry different pre-mask opportunity populations"
+        )
+
+
 def _write_rows(
     conn: psycopg.Connection[Any],
     *,
@@ -3465,14 +3480,13 @@ def _write_rows(
                     f"{strategy_id}/{ambiguity} produced {sorted(measured)} rather than both quarantine arms"
                 )
             for namespace in sorted(set(masked_arm.namespaces) & set(admitted_arm.namespaces)):
-                if (
-                    masked_arm.namespaces[namespace].universe_record
-                    != admitted_arm.namespaces[namespace].universe_record
-                ):
-                    raise RuntimeError(
-                        f"{strategy_id}/{ambiguity}/{namespace} quarantine arms carry different pre-mask "
-                        "opportunity populations"
-                    )
+                _assert_same_opportunity_population(
+                    strategy_id=strategy_id,
+                    ambiguity=ambiguity,
+                    namespace=namespace,
+                    masked=masked_arm.namespaces[namespace],
+                    admitted=admitted_arm.namespaces[namespace],
+                )
                 masked = build_result(
                     masked_arm.namespaces[namespace],
                     strategy_id=strategy_id,

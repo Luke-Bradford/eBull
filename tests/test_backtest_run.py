@@ -36,6 +36,7 @@ from app.services.backtest_run import (
     _ambiguity_record_for,
     _assert_ambiguity_contract,
     _assert_every_runnable_produced_rows,
+    _assert_same_opportunity_population,
     _benchmark_book,
     _check_holdout_pairing,
     _Corpus,  # noqa: PLC2701 - the axis holder the namespace rule reads
@@ -259,6 +260,31 @@ class TestArmVocabularyCoverage:
         this pins that the two are not accidentally coupled.
         """
         assert QUARANTINE_ARM_ORDER[0] == "admitted"
+
+    def test_quarantine_arms_cannot_move_the_pre_mask_opportunity_population(self) -> None:
+        masked = _measurement()
+        admitted = replace(
+            masked,
+            universe_record=replace(masked.universe_record, evaluated_instrument_ids=frozenset({1})),
+        )
+
+        with pytest.raises(RuntimeError, match="different pre-mask opportunity populations"):
+            _assert_same_opportunity_population(
+                strategy_id="s1-time-series-momentum",
+                ambiguity="worst_case",
+                namespace="in_sample",
+                masked=masked,
+                admitted=admitted,
+            )
+
+    def test_opportunity_membership_query_has_no_signal_or_arm_dependent_inputs(self) -> None:
+        normalised = " ".join(backtest_run._OPPORTUNITY_SERIES_SQL.lower().split())
+        assert "research_price_daily" in normalised
+        assert "d.close > 0" in normalised
+        assert "d.adj_close > 0" in normalised
+        assert "having count(*) >= 2" in normalised
+        for forbidden in ("signal", "fired", "warmup", "quarantine", "arm"):
+            assert forbidden not in normalised
 
 
 class _UniformRegimeProvider:
