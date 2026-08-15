@@ -31,7 +31,9 @@ from decimal import Decimal
 
 import pytest
 
+from app.services import strategy_manifest
 from app.services.indicator_series import BarSeries
+from app.services.outcome_resolver import exit_levels_are_orderable
 from app.services.strategies.s5_support_bounce import s5_exit_bracket
 from app.services.strategies.s6_resistance_breakout import s6_exit_bracket
 from app.services.strategies.s9_squeeze_expansion import s9_exit_bracket
@@ -98,3 +100,63 @@ def test_index_error_is_reachable(strategy_id: str) -> None:
             entry_price=Decimal("100"),
             universe="survivor_only",
         )
+
+
+@pytest.mark.parametrize(
+    ("strategy_id", "factory_name", "target", "stop", "entry"),
+    [
+        # Measured 2026-08-15: S-5 signal 306648 filled at 48.01 after
+        # gapping through its signal-time 50.2965 stop.
+        ("s5-support-bounce", "s5_exit_bracket", Decimal("55"), Decimal("50.2965"), Decimal("48.01")),
+        ("s6-resistance-breakout", "s6_exit_bracket", Decimal("55"), Decimal("50"), Decimal("48")),
+        # The target can be above the stop yet already below the gap-up entry.
+        ("s8-range-mean-reversion", "s8_exit_bracket", Decimal("99"), Decimal("98"), Decimal("100")),
+        # Stop-only rules owe the same boundary.
+        ("s7-trend-pullback", "s7_exit_bracket", None, Decimal("100"), Decimal("100")),
+        ("s9-squeeze-expansion", "s9_exit_bracket", Decimal("101"), Decimal("100"), Decimal("100")),
+    ],
+)
+def test_a_gap_through_an_exit_is_a_typed_refusal_not_a_batch_abort(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy_id: str,
+    factory_name: str,
+    target: Decimal | None,
+    stop: Decimal,
+    entry: Decimal,
+) -> None:
+    monkeypatch.setattr(strategy_manifest, factory_name, lambda *args, **kwargs: (target, stop, 20))
+    adapter = STRATEGY_MANIFEST[strategy_id].exit_levels
+    assert adapter is not None
+    assert adapter(_series(), signal_index=20, entry_price=entry, universe="survivor_only") == (
+        "unorderable_exit_levels"
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "target", "stop", "expected"),
+    [
+        ("100", "110", "90", True),
+        ("100", None, "90", True),
+        ("100", "100", "90", False),
+        ("100", "110", "100", False),
+        ("100", None, "100", False),
+        ("0", "110", "90", False),
+        ("NaN", "110", "90", False),
+        ("100", "Infinity", "90", False),
+        ("100", "110", "NaN", False),
+    ],
+)
+def test_shared_orderability_boundary(
+    entry: str,
+    target: str | None,
+    stop: str,
+    expected: bool,
+) -> None:
+    assert (
+        exit_levels_are_orderable(
+            entry_price=Decimal(entry),
+            take_profit=None if target is None else Decimal(target),
+            stop_loss=Decimal(stop),
+        )
+        is expected
+    )

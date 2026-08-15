@@ -14,7 +14,7 @@ from decimal import Decimal
 from math import isfinite
 
 from app.services.indicator_series import BarSeries, Universe, atr_series
-from app.services.outcome_resolver import ExitLevels, UnresolvedReason
+from app.services.outcome_resolver import ExitLevels, UnresolvedReason, exit_levels_are_orderable
 from app.services.strategies.s4_volatility_compression_breakout import (
     ATR_PERIOD,
     ATR_STOP_MULTIPLE,
@@ -53,7 +53,7 @@ def s4_exit_levels_batch(
         distance = Decimal(str(value))
         stop = entry_price - Decimal(str(ATR_STOP_MULTIPLE)) * distance
         target = entry_price + Decimal(str(ATR_TARGET_MULTIPLE)) * distance
-        if not target.is_finite() or not stop.is_finite() or stop <= 0 or stop >= entry_price or target <= entry_price:
+        if not exit_levels_are_orderable(entry_price=entry_price, take_profit=target, stop_loss=stop):
             levels.append("unorderable_exit_levels")
             continue
         levels.append(ExitLevels(take_profit=target, stop_loss=stop, max_hold_bars=MAX_HOLD_BARS))
