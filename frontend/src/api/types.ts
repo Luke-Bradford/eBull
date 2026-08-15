@@ -2658,6 +2658,8 @@ export interface StrategyOverviewResponse {
     official_unrealised_pnl: string | null;
     local_eod_currency: string | null;
     local_eod_value: string | null;
+    local_eod_positions_priced: number | null;
+    local_eod_stale_mark_positions: number | null;
     difference: string | null;
     comparable: false;
     incomplete_reasons: string[];

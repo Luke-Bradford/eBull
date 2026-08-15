@@ -48,6 +48,8 @@ class AccountEquityEvidence:
     official_unrealised_pnl: Decimal | None
     local_eod_currency: str | None
     local_eod_value: Decimal | None
+    local_eod_positions_priced: int | None
+    local_eod_stale_mark_positions: int | None
     difference: Decimal | None
     comparable: Literal[False]
     incomplete_reasons: tuple[str, ...]
@@ -198,12 +200,7 @@ def load_account_equity_evidence(
                  OR coalesce(local.positions_no_fx,0) > 0
                  OR coalesce(local.cash_no_fx_currencies,0) > 0 AS local_valuation_incomplete,
                latest.account_currency_id,
-               -- ⚠ `stale_mark_positions` is deliberately NOT projected. The
-               -- verdict comes from `oldest_mark_date` alone (see
-               -- `mark_effectiveness_reasons`), and the count has no API
-               -- consumer yet — it is stored evidence for the reconciliation
-               -- write-up, queryable directly. #2602 item 4.
-               local.oldest_mark_date,local.positions_priced
+               local.oldest_mark_date,local.positions_priced,local.stale_mark_positions
         FROM latest
         LEFT JOIN portfolio_eod_snapshots local ON local.snapshot_date=latest.snapshot_date
         """,
@@ -223,6 +220,8 @@ def load_account_equity_evidence(
             official_unrealised_pnl=None,
             local_eod_currency=None,
             local_eod_value=None,
+            local_eod_positions_priced=None,
+            local_eod_stale_mark_positions=None,
             difference=None,
             comparable=False,
             incomplete_reasons=("official_account_equity_missing",),
@@ -272,6 +271,8 @@ def load_account_equity_evidence(
         official_unrealised_pnl=Decimal(str(row[6])),
         local_eod_currency=local_currency,
         local_eod_value=local_value,
+        local_eod_positions_priced=None if row[13] is None else int(row[13]),
+        local_eod_stale_mark_positions=None if row[14] is None else int(row[14]),
         difference=(
             official_equity - local_value
             if local_value is not None and official_currency is not None and local_currency == official_currency
