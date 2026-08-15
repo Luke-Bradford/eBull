@@ -27,7 +27,7 @@ from app.config import settings
 from app.services.backtest_run import load_corpus
 from app.services.position_builder import Window
 from app.services.strategy_recent_evidence import recent_evidence_window
-from app.services.strategy_result import METRIC_AXIS_RULE_VERSION, metric_axis_sha256
+from app.services.strategy_result import HOLDOUT_BOUNDARY, METRIC_AXIS_RULE_VERSION, metric_axis_sha256
 from app.services.strategy_result_universe import (
     ResultUniverseRecord,
     load_result_universes,
@@ -97,6 +97,33 @@ def _window(row: _StoredProvenance) -> Window | None:
     return registered
 
 
+def _integrity_errors(
+    row: _StoredProvenance,
+    child: ResultUniverseRecord | None,
+) -> list[str]:
+    """Corpus-free checks over immutable provenance and its frozen child."""
+    errors: list[str] = []
+    if row.axis_rule != METRIC_AXIS_RULE_VERSION:
+        errors.append("axis_rule")
+    if len(row.axis_dates) < 2 or any(
+        current <= previous for previous, current in zip(row.axis_dates, row.axis_dates[1:])
+    ):
+        errors.append("axis_shape")
+    if not row.axis_dates or (row.axis_start, row.axis_end) != (row.axis_dates[0], row.axis_dates[-1]):
+        errors.append("axis_endpoints")
+    if row.axis_digest != metric_axis_sha256(row.axis_dates):
+        errors.append("axis_digest")
+    if row.axis_dates and (row.axis_dates[0] < row.window_start or row.axis_dates[-1] > row.window_end):
+        errors.append("axis_window_containment")
+    if row.namespace == "in_sample" and row.axis_dates and row.axis_dates[-1] >= HOLDOUT_BOUNDARY:
+        errors.append("in_sample_boundary")
+    if child is None:
+        errors.append("universe_child_missing")
+    elif row.opportunity_digest != record_sha256(child):
+        errors.append("universe_child_digest")
+    return errors
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--result-id", action="append", type=int, dest="result_ids")
@@ -106,17 +133,18 @@ def main() -> None:
         rows = _stored(conn.execute(_SELECT, {"result_ids": args.result_ids}).fetchall())
         if not rows:
             raise RuntimeError("no current metric-axis result rows found; there is nothing to verify")
+        requested: set[int] = set(args.result_ids or ())
+        found = {row.result_id for row in rows}
+        if requested and found != requested:
+            raise RuntimeError(
+                f"requested result IDs were not all found as current rows: missing={sorted(requested - found)}"
+            )
         universe_children = load_result_universes(conn, [row.result_id for row in rows])
         corpus_cache: dict[tuple[str, date | None, date | None], object] = {}
 
         for row in rows:
-            integrity_errors: list[str] = []
-            if row.axis_rule != METRIC_AXIS_RULE_VERSION:
-                integrity_errors.append("axis_rule")
-            if not row.axis_dates or (row.axis_start, row.axis_end) != (row.axis_dates[0], row.axis_dates[-1]):
-                integrity_errors.append("axis_endpoints")
-            if row.axis_digest != metric_axis_sha256(row.axis_dates):
-                integrity_errors.append("axis_digest")
+            child = universe_children.get(row.result_id)
+            integrity_errors = _integrity_errors(row, child)
 
             window = _window(row)
             cache_key = (
@@ -134,15 +162,12 @@ def main() -> None:
                 corpus_cache[cache_key] = corpus
             source_axis = corpus.in_sample_axis if row.namespace == "in_sample" else corpus.axis  # type: ignore[union-attr]
             source_record: ResultUniverseRecord = corpus.opportunity_records[row.namespace]  # type: ignore[union-attr,index]
-            child = universe_children.get(row.result_id)
             derivation_errors: list[str] = []
             if row.axis_dates != source_axis:
                 derivation_errors.append("source_axis")
             if row.opportunity_digest != record_sha256(source_record):
                 derivation_errors.append("source_opportunity_digest")
-            if child is None:
-                derivation_errors.append("universe_child_missing")
-            elif child != source_record:
+            if child is not None and child != source_record:
                 derivation_errors.append("universe_child_source_mismatch")
 
             print(
