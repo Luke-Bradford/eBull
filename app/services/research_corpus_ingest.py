@@ -1260,10 +1260,10 @@ def link_form25_delistings(
     census = DelistingLinkCensus()
 
     span = conn.execute("SELECT count(*), min(filed_date), max(filed_date) FROM sec_form25_register").fetchone()
-    if span is not None:
-        census.register_filings = int(span[0])
-        census.register_first_filed = span[1]
-        census.register_last_filed = span[2]
+    assert span is not None  # an aggregate always returns one row; typing guard only
+    census.register_filings = int(span[0])
+    census.register_first_filed = span[1]
+    census.register_last_filed = span[2]
 
     # Scoped to the common-equity VIEW, never the raw register: a Form 25 is
     # per-SECURITY, so `sec_form25_register` contains bond and warrant
